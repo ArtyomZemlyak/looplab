@@ -614,8 +614,13 @@ looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
 PART IV cross-run Step 4 (§21.20). Projects `lessons.jsonl` plus persisted D8 `research_claims.jsonl` into a
 **statement-grouped lean claim view** with support/oppose/unverified attempt references. The legacy wire labels
 `supported`/`refuted` mean **support-only/opposition-only evidence**, `mixed` means both kinds of reference,
-and `inconclusive` means insufficient evidence; none is by itself a proposition verdict. New v2 D8 rows preserve `task_id`, direction, run-qualified node
-references, source URLs, and the verifier verdict/method/note; legacy rows without that payload remain
+and `inconclusive` means insufficient evidence; none is by itself a proposition verdict. New v3 D8 rows preserve `task_id`, direction, run-qualified node
+references, source URLs, the verifier verdict/method/note, and a per-run producer-cap receipt. A memo may
+retain at most 256 valid claims; `claims_total` / `claims_retained` / `claims_omitted` and
+`producer_complete` make that lower bound explicit; a non-empty all-invalid source leaves a non-indexed receipt
+sentinel rather than disappearing. A partial or legacy-unknown source keeps retained refs citable but withholds
+both exact one-sided states (`supported`/`refuted`) and steward ratification because an omitted tail may make
+the evidence mixed. Legacy rows without the verifier payload remain
 `unverified` and never become positive support merely because they cited a node. New distilled lessons carry an
 explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
 fact is no longer inverted; legacy rows without the field keep the historical outcome mapping. This is still not

@@ -21,6 +21,17 @@ import {
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+const completeResearchSource = Object.freeze({
+  source_complete: true,
+  producer_receipt_known: true,
+  producer_complete: true,
+  producer_runs: 1,
+  producer_partial_runs: 0,
+  producer_unknown_runs: 0,
+  producer_claims_total: 1,
+  producer_claims_retained: 1,
+  producer_claims_omitted: 0,
+})
 
 const claim = (index = 0) => ({
   claim_uid: `claim-${index}`,
@@ -33,6 +44,7 @@ const claim = (index = 0) => ({
   unverified: [`run-${index}:node-2`],
   scopes: ['task-a'],
   runs: [`run-${index}`],
+  research_source: completeResearchSource,
 })
 
 test('Atlas projection reconciles concurrent totals without trusting malformed text or counts', () => {
@@ -228,6 +240,46 @@ test('Atlas derives evidence balance from sanitized totals instead of payload la
     [1, 1, 'mixed'],
     [0, 0, 'inconclusive'],
   ])
+})
+
+test('Atlas never reconstructs a positive from a partial D8 prefix and renders its warning', async () => {
+  const partial = {
+    source_complete: false,
+    producer_receipt_known: true,
+    producer_complete: false,
+    producer_runs: 1,
+    producer_partial_runs: 1,
+    producer_unknown_runs: 0,
+    producer_claims_total: 257,
+    producer_claims_retained: 256,
+    producer_claims_omitted: 1,
+  }
+  const view = buildResearchAtlasView({}, { research_source: partial, claims: [{
+    ...claim(30), epistemic: 'inconclusive', n_support: 1, research_source: partial,
+  }, {
+    ...claim(31), epistemic: 'inconclusive', n_support: 0, support: [],
+    n_oppose: 1, oppose: ['run-31:node-3'], research_source: partial,
+  }] }, {})
+
+  assert.equal(view.claims[0].epistemic, 'inconclusive')
+  assert.equal(view.claims[1].epistemic, 'inconclusive')
+  assert.equal(view.researchSource.status, 'partial')
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { ResearchSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const markup = renderToStaticMarkup(
+      React.createElement(ResearchSourceNotice, { source: view.researchSource }),
+    )
+    assert.match(markup, /Research-claim source partial/)
+    assert.match(markup, /1 claim\(s\) known omitted/)
+    assert.match(markup, /one-sided state is withheld/)
+  } finally {
+    await vite.close()
+  }
 })
 
 test('Atlas preserves bounded structured contradictions and cannot render them support-only', () => {
@@ -517,7 +569,8 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     const allCurrent = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, conceptSource: { status: 'complete' }, pending: [], retry() {}, busy: false, onBack() {},
+      }, conceptSource: { status: 'complete' }, researchSource: { status: 'complete' },
+      pending: [], retry() {}, busy: false, onBack() {},
     }))
     const currentDom = new JSDOM(allCurrent)
     assert.match(currentDom.window.document.querySelector('h2').textContent, /No cross-run evidence/)
@@ -535,7 +588,8 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     const bounded = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, conceptSource: { status: 'partial' }, pending: [], retry() {}, busy: false, onBack() {},
+      }, conceptSource: { status: 'partial' }, researchSource: { status: 'complete' },
+      pending: [], retry() {}, busy: false, onBack() {},
     }))
     const boundedDom = new JSDOM(bounded)
     assert.match(boundedDom.window.document.querySelector('h2').textContent,
@@ -563,7 +617,8 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     const partial = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: failed, conceptCuration: failed, claimCuration: stale,
-      }, conceptSource: { status: 'complete' }, pending: ['conceptCuration'],
+      }, conceptSource: { status: 'complete' }, researchSource: { status: 'unknown' },
+      pending: ['conceptCuration'],
       retry() {}, busy: false, onBack() {},
     }))
     const partialDom = new JSDOM(partial)

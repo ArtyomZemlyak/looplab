@@ -1247,8 +1247,10 @@ def claims_cmd(
     ``--pack`` renders the hard-capped agent context pack (pinned → ratified → mixed → support-only
     → opposition-only → insufficient; a caveat may replace the weakest non-pinned positive). Pure read of
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
-    from looplab.engine.claims import (build_context_pack, claims_for_memory,
-                                       load_research_claims, render_context_pack)
+    from looplab.engine.claims import (
+        _research_source_summary, build_context_pack, claims_for_memory,
+        load_research_claims, render_context_pack,
+    )
     from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
@@ -1271,6 +1273,7 @@ def claims_cmd(
         raise typer.Exit(1)
     claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                fuzzy=fuzzy, structured=structured)
+    research_source = _research_source_summary(research)
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present — honor the
         # recorded taxonomy governance (aliases/splits), consistent with every other consumer (live-test).
@@ -1286,7 +1289,7 @@ def claims_cmd(
             overview, concept_rows = None, None
         cp = build_context_pack(
             claims, concept_overview=overview, max_claims=top,
-            _concept_rows=concept_rows)
+            _concept_rows=concept_rows, _research_source=research_source)
         typer.echo(orjson.dumps(cp, option=orjson.OPT_INDENT_2).decode() if as_json
                    else (render_context_pack(cp) or "(empty context pack)"))
         return
@@ -1295,6 +1298,11 @@ def claims_cmd(
     if as_json:
         typer.echo(orjson.dumps(claims, option=orjson.OPT_INDENT_2).decode())
         return
+    if isinstance(research_source, dict) and research_source.get("source_complete") is not True:
+        typer.echo(
+            "WARNING: D8 research-claim source is partial/unknown; retained evidence is a lower bound and "
+            "exact one-sided states are withheld."
+        )
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
     _mat = {"operator-ratified": " [RATIFIED]", "operator-rejected": " [REJECTED]", "operator-pinned": " [PINNED]"}
     typer.echo(f"Claim records ({len(claims)} shown{' — mixed-evidence only' if contested_only else ''}): "

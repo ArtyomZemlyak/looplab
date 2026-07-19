@@ -28,7 +28,14 @@ class _Client:
 def _claim(statement, *, epistemic="supported", n_support=2, n_oppose=0, scopes=("t",),
            maturity="machine-proposed"):
     return {"statement": statement, "epistemic": epistemic, "n_support": n_support,
-            "n_oppose": n_oppose, "scopes": list(scopes), "maturity": maturity}
+            "n_oppose": n_oppose, "scopes": list(scopes), "maturity": maturity,
+            "research_source": {
+                "source_complete": True, "producer_receipt_known": True,
+                "producer_complete": True, "producer_runs": 0,
+                "producer_partial_runs": 0, "producer_unknown_runs": 0,
+                "producer_claims_total": 0, "producer_claims_retained": 0,
+                "producer_claims_omitted": 0,
+            }}
 
 
 def test_no_client_is_empty():
@@ -81,6 +88,25 @@ def test_steward_cannot_ratify_unsupported_or_pin_evidence_free_claim():
         {"statement": "refuted", "decision": "ratified"},
     ]))
     assert curation_is_empty(prop)
+
+
+def test_steward_cannot_ratify_partial_or_legacy_unknown_research_source():
+    partial = _claim("retained prefix looks positive")
+    partial["research_source"] = {
+        "source_complete": False, "producer_receipt_known": True,
+        "producer_complete": False, "producer_runs": 1,
+        "producer_partial_runs": 1, "producer_unknown_runs": 0,
+        "producer_claims_total": 257, "producer_claims_retained": 256,
+        "producer_claims_omitted": 1,
+    }
+    legacy = _claim("legacy source looks positive")
+    legacy.pop("research_source")
+    client = _Client([
+        {"statement": partial["statement"], "decision": "ratified"},
+        {"statement": legacy["statement"], "decision": "ratified"},
+    ])
+
+    assert curation_is_empty(propose_claim_curation([partial, legacy], client))
 
 
 def test_decision_does_not_leak_across_same_worded_claims_in_different_scopes():

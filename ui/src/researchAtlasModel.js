@@ -69,6 +69,31 @@ const normalizeConceptSource = atlas => {
   return normalized
 }
 
+const normalizeResearchSource = value => {
+  const receipt = record(value)
+  const boolKeys = ['source_complete', 'producer_receipt_known', 'producer_complete']
+  const intKeys = ['producer_runs', 'producer_partial_runs', 'producer_unknown_runs',
+    'producer_claims_total', 'producer_claims_retained', 'producer_claims_omitted']
+  const boolsValid = boolKeys.every(key => typeof receipt[key] === 'boolean')
+  const counts = Object.fromEntries(intKeys.map(key => [key,
+    Number.isSafeInteger(receipt[key]) && receipt[key] >= 0 ? receipt[key] : -1]))
+  const countsValid = intKeys.every(key => counts[key] >= 0)
+  const known = receipt.producer_receipt_known === true
+  const consistent = boolsValid && countsValid
+    && counts.producer_partial_runs + counts.producer_unknown_runs <= counts.producer_runs
+    && receipt.producer_complete === (known && counts.producer_partial_runs === 0)
+    && receipt.source_complete === receipt.producer_complete
+    && (!known || (counts.producer_claims_total >= counts.producer_claims_retained
+      && counts.producer_claims_omitted
+        === counts.producer_claims_total - counts.producer_claims_retained))
+  if (!consistent) return { status: 'unknown', counts: null }
+  return {
+    status: receipt.source_complete ? 'complete'
+      : counts.producer_partial_runs > 0 ? 'partial' : 'unknown',
+    counts,
+  }
+}
+
 const sourceRevision = (key, value) => {
   const envelope = record(value)
   if (key === 'atlas') {
@@ -210,14 +235,20 @@ const normalizeClaim = value => {
   const contradicts = textList(rawContradicts, ATLAS_RENDER_LIMITS.evidence, 300)
   const nSupport = Math.max(count(row.n_support), support.length)
   const nOppose = Math.max(count(row.n_oppose), oppose.length)
+  const researchSource = normalizeResearchSource(row.research_source)
   // The backend's structured `mixed` state can encode assertion-level counter-evidence that is not
   // counted in n_oppose. Honor it only with supporting evidence, matching the backend rule, while
   // still deriving malformed or contradictory support/refute labels from sanitized counts.
   const mixed = nSupport > 0
     && (contradicts.length > 0 || row.epistemic === 'mixed' || nOppose > 0)
-  const epistemic = mixed
+  const evidenceEpistemic = mixed
     ? 'mixed'
     : (nSupport > 0 ? 'supported' : (nOppose > 0 ? 'refuted' : 'inconclusive'))
+  // CODEX AGENT: retained counts are lower bounds when the D8 producer capped/forgot its denominator.
+  // Never reconstruct either backend-withheld one-sided state merely from visible counts.
+  const epistemic = ['supported', 'refuted'].includes(evidenceEpistemic)
+    && researchSource.status !== 'complete'
+    ? 'inconclusive' : evidenceEpistemic
   return {
     uid: boundedAtlasText(row.claim_uid, 180),
     statement,
@@ -232,6 +263,7 @@ const normalizeClaim = value => {
     oppose,
     unverified,
     contradicts,
+    researchSource,
     scopes: textList(row.scopes, ATLAS_RENDER_LIMITS.evidence),
     runs: textList(row.runs, ATLAS_RENDER_LIMITS.evidence, 160),
   }
@@ -355,6 +387,11 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   return {
     totals,
     conceptSource: normalizeConceptSource(atlas),
+    researchSource: normalizeResearchSource(
+      Object.hasOwn(claimsEnvelope, 'research_source')
+        ? claimsEnvelope.research_source
+        : (Object.hasOwn(atlas, 'research_source')
+          ? atlas.research_source : record(rawClaims[0]).research_source)),
     concepts,
     thin,
     contradictions,

@@ -36,6 +36,10 @@ _MAX_CLAIM_PROJECTION_ITEMS = 64
 _MAX_CONTEXT_CLAIMS = 64
 _MAX_RETRIEVAL_HITS = 64
 _MAX_RETRIEVAL_CORPUS = 4096
+_RESEARCH_CLAIM_VERSION = 3
+_RESEARCH_SOURCE_RECEIPT_VERSION = 1
+_MAX_RESEARCH_CLAIMS_PER_RUN = 256
+_MAX_RESEARCH_SOURCE_ITEMS = (1 << 31) - 1
 
 
 def _valid_node_source(raw) -> bool:
@@ -60,6 +64,15 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
     """Conservative schema fence for persisted lesson/research evidence rows."""
     if not isinstance(row, dict):
         return False
+    if research and row.get("record_kind") == "source_receipt":
+        run_id, task_id, direction = row.get("run_id"), row.get("task_id"), row.get("direction")
+        return (
+            row.get("v") == _RESEARCH_CLAIM_VERSION
+            and isinstance(run_id, str) and bool(run_id) and len(run_id) <= _MAX_SOURCE_ID
+            and (task_id is None or isinstance(task_id, str) and len(task_id) <= _MAX_SOURCE_ID)
+            and (direction is None or direction in ("", "min", "max"))
+            and _research_source_receipt(row) is not None
+        )
     statement = row.get("statement")
     if not isinstance(statement, str) or not statement.strip() or len(statement) > _MAX_SOURCE_STATEMENT:
         return False
@@ -171,6 +184,123 @@ def _research_verification(row: dict) -> tuple[str, str, str]:
     return verdict, method, note
 
 
+def _research_source_receipt(row: dict) -> Optional[dict]:
+    """Validate one v3 producer-cap receipt; legacy/malformed rows have unknown source coverage."""
+    if type(row.get("v")) is not int or row.get("v") != _RESEARCH_CLAIM_VERSION:
+        return None
+    raw = row.get("source_receipt")
+    if not isinstance(raw, dict) or raw.get("v") != _RESEARCH_SOURCE_RECEIPT_VERSION:
+        return None
+    total, retained, omitted = (
+        raw.get("claims_total"), raw.get("claims_retained"), raw.get("claims_omitted"))
+    complete = raw.get("producer_complete")
+    if (type(total) is not int or type(retained) is not int or type(omitted) is not int
+            or type(complete) is not bool
+            or not 0 <= total <= _MAX_RESEARCH_SOURCE_ITEMS
+            or not 0 <= retained <= _MAX_RESEARCH_CLAIMS_PER_RUN
+            or total < retained or omitted != total - retained
+            or complete != (omitted == 0)):
+        return None
+    return {
+        "v": _RESEARCH_SOURCE_RECEIPT_VERSION,
+        "claims_total": total,
+        "claims_retained": retained,
+        "claims_omitted": omitted,
+        "producer_complete": complete,
+    }
+
+
+def _research_source_summary(rows) -> dict:
+    """Aggregate per-run D8 producer receipts without treating a retained prefix as a full source.
+
+    Unversioned rows supplied directly to the pure API are an explicit caller snapshot. Persisted
+    unversioned rows are tagged ``v=0`` by ``load_research_claims`` and therefore remain UNKNOWN, just like
+    durable v1/v2 rows whose former writer did not record its input cardinality.
+    """
+    source = [row for row in (rows if isinstance(rows, (list, tuple)) else [])
+              if isinstance(row, dict)]
+    groups: dict[str, list[dict]] = {}
+    for row in source:
+        run_id = _identity_text(row.get("run_id"), _MAX_SOURCE_ID)
+        groups.setdefault(run_id or "<unknown-run>", []).append(row)
+
+    partial = unknown = known_total = known_omitted = 0
+    for members in groups.values():
+        claim_members = [row for row in members if row.get("record_kind") != "source_receipt"]
+        # Direct pure-function callers already control the complete list they pass. Durable readers add a
+        # version discriminator before this point, so absence cannot accidentally upgrade a legacy file.
+        if all("v" not in row for row in members):
+            known_total += len(claim_members)
+            continue
+        receipts = [_research_source_receipt(row) for row in members]
+        if any(receipt is None for receipt in receipts):
+            unknown += 1
+            continue
+        first = receipts[0]
+        if (any(receipt != first for receipt in receipts[1:])
+                or first["claims_retained"] != len(claim_members)):
+            unknown += 1
+            continue
+        known_total += first["claims_total"]
+        known_omitted += first["claims_omitted"]
+        partial += int(first["producer_complete"] is not True)
+
+    receipt_known = unknown == 0
+    producer_complete = receipt_known and partial == 0
+    return {
+        # CODEX AGENT: this field is the policy gate consumed by claim verdicts/stewards. The producer-
+        # prefixed fields intentionally leave an additive seam for store read-health (`quarantined_rows`,
+        # `read_complete`): overall source completeness can later become their conjunction without changing
+        # what this receipt says about the memo producer's 256-row cap.
+        "source_complete": producer_complete,
+        "producer_receipt_known": receipt_known,
+        "producer_complete": producer_complete,
+        "producer_runs": len(groups),
+        "producer_partial_runs": partial,
+        "producer_unknown_runs": unknown,
+        "producer_claims_total": known_total,
+        "producer_claims_retained": sum(
+            row.get("record_kind") != "source_receipt" for row in source),
+        "producer_claims_omitted": known_omitted,
+    }
+
+
+def _safe_research_source_summary(raw) -> Optional[dict]:
+    """Bound and validate a projected aggregate receipt before forwarding it to another boundary."""
+    if not isinstance(raw, dict):
+        return None
+    bool_keys = ("source_complete", "producer_receipt_known", "producer_complete")
+    int_keys = (
+        "producer_runs", "producer_partial_runs", "producer_unknown_runs",
+        "producer_claims_total", "producer_claims_retained", "producer_claims_omitted",
+    )
+    if any(type(raw.get(key)) is not bool for key in bool_keys):
+        return None
+    if any(type(raw.get(key)) is not int or not 0 <= raw[key] <= _MAX_RESEARCH_SOURCE_ITEMS
+           for key in int_keys):
+        return None
+    out = {key: raw[key] for key in (*bool_keys, *int_keys)}
+    known = out["producer_receipt_known"]
+    consistent = (
+        out["producer_partial_runs"] + out["producer_unknown_runs"] <= out["producer_runs"]
+        and out["producer_complete"] == (known and out["producer_partial_runs"] == 0)
+        and out["source_complete"] == out["producer_complete"]
+        and (not known or (
+            out["producer_claims_total"] >= out["producer_claims_retained"]
+            and out["producer_claims_omitted"]
+            == out["producer_claims_total"] - out["producer_claims_retained"]))
+    )
+    return out if consistent else None
+
+
+def _source_guarded_epistemic(support, oppose, research_source: dict) -> str:
+    state = _epistemic(support, oppose)
+    # A missing D8 tail may contain a supported opposite-polarity assertion. Preserve the retained refs, but
+    # do not emit either one-sided state from a lower-bound prefix (CODEX AGENT).
+    return ("inconclusive" if state in ("supported", "refuted")
+            and research_source["source_complete"] is not True else state)
+
+
 def _metric_identity(row: dict) -> str:
     """Best available metric *name* for structured identity (never a numeric score)."""
     for key in ("metric_name", "metric_key", "objective_metric", "metric"):
@@ -206,7 +336,7 @@ def claim_evidence_digest(claim: dict) -> str:
     """
     fields = (
         "claim_uid", "statement", "scope", "metric", "polarity", "epistemic", "support", "oppose",
-        "unverified", "runs", "scopes", "sources", "verification", "contradicts",
+        "unverified", "runs", "scopes", "sources", "verification", "contradicts", "research_source",
     )
     payload = {key: claim.get(key) for key in fields}
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -257,6 +387,11 @@ def _bounded_claim_projection(row: dict) -> dict:
         out["decision"] = safe_decision
     else:
         out["decision"] = None
+    research_source = _safe_research_source_summary(row.get("research_source"))
+    if research_source is None:
+        out.pop("research_source", None)
+    else:
+        out["research_source"] = research_source
     if omitted:
         # CODEX AGENT: per-field omission metadata is part of the projection contract; a hard nested cap
         # must never silently turn "64 shown of 3,000" into "there are 64".
@@ -524,11 +659,13 @@ def _string_list(raw, *, maximum: int, item_maximum: int) -> list[str]:
 def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
                            direction: str = "") -> int:
     """Upsert (by run_id) a run's D8 research claims into `research_claims.jsonl`. Each row:
-    {run_id, task_id, statement, node_ids, urls}. Append-with-replace so a re-run doesn't double-count.
-    Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
+    {run_id, task_id, statement, node_ids, urls, source_receipt}. Append-with-replace so a re-run doesn't
+    double-count. Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
     from pathlib import Path
 
-    from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient, write_jsonl_atomic
+    from looplab.events.eventstore import (
+        _interprocess_lock, replace_jsonl_rows_atomic_preserving_quarantine,
+    )
     if not memory_dir:
         return 0
     rid = _identity_text(run_id, 500)
@@ -539,49 +676,73 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     if direction not in ("min", "max"):
         direction = ""
     source = claims if isinstance(claims, (list, tuple)) else []
-    for c in source[:256]:
+    source_total = len(source) + int(claims is not None and not isinstance(claims, (list, tuple)))
+    # CODEX AGENT: select the first bounded set of VALID claims rather than slicing the raw list first. A
+    # malformed prefix must not hide a valid opposition row later in the memo, and every skipped/capped input
+    # remains visible in the repeated per-run receipt below.
+    for c in source:
+        if len(rows) >= _MAX_RESEARCH_CLAIMS_PER_RUN:
+            break
         stmt = _claim_text(c.get("statement") if isinstance(c, dict) else "", 4000)
         if not stmt:
             continue
         verdict, method, note = _research_verification(c)
-        rows.append({"v": 2, "run_id": rid, "task_id": _identity_text(task_id, 500),
-                     "direction": direction,
-                     "statement": stmt,
-                     "metric": _metric_identity(c),
-                     "node_ids": _node_ids(c.get("node_ids"))[:64],
-                     "urls": _string_list(c.get("urls"), maximum=32, item_maximum=2000),
-                     "verification": {"verdict": verdict, "method": method, "note": note}})
+        rows.append({"v": _RESEARCH_CLAIM_VERSION, "record_kind": "claim", "run_id": rid,
+                     "task_id": _identity_text(task_id, 500),
+                      "direction": direction,
+                      "statement": stmt,
+                      "metric": _metric_identity(c),
+                      "node_ids": _node_ids(c.get("node_ids"))[:64],
+                      "urls": _string_list(c.get("urls"), maximum=32, item_maximum=2000),
+                      "verification": {"verdict": verdict, "method": method, "note": note}})
+    claim_count = len(rows)
+    receipt = {
+        "v": _RESEARCH_SOURCE_RECEIPT_VERSION,
+        "claims_total": source_total,
+        "claims_retained": claim_count,
+        "claims_omitted": source_total - claim_count,
+        "producer_complete": source_total == claim_count,
+    }
+    for row in rows:
+        row["source_receipt"] = receipt
+    if source_total > 0 and claim_count == 0:
+        # A non-empty memo whose every claim failed validation still needs durable negative evidence about
+        # its missing source. This sentinel participates in completeness only; assessment/index loops ignore
+        # it because it has no statement (CODEX AGENT).
+        rows.append({
+            "v": _RESEARCH_CLAIM_VERSION,
+            "record_kind": "source_receipt",
+            "run_id": rid,
+            "task_id": _identity_text(task_id, 500),
+            "direction": direction,
+            "source_receipt": receipt,
+        })
     path = Path(memory_dir) / "research_claims.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     # Hold the same interprocess lock the case/capsule/decision sidecar stores use — and RE-READ inside it —
-    # so two runs sharing memory_dir don't clobber each other's D8 claims in this whole-file read-modify-write
-    # (write_jsonl_atomic is crash-atomic, NOT concurrency-safe; last-writer-wins would silently drop the
-    # loser's claims and under-count `contested`) (CODEX). This closes the unlocked read-modify-replace the
-    # review flagged: two finalizers reading E then replacing with E+r1 / E+r2 would erase each other.
+    # so concurrent runs survive. Raw-line preservation additionally keeps unreadable/future records visible
+    # to store-health readers instead of laundering quarantine into an apparently complete file.
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-        existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
-        existing = _valid_claim_source_rows(existing, research=True)
-        kept = [r for r in existing if _identity_text(r.get("run_id"), 500) != rid]
-        safe_kept = []
-        for row in kept:
-            verdict, method, note = _research_verification(row)
-            safe_kept.append({
-                "v": 2,
-                "run_id": _identity_text(row.get("run_id"), 500),
-                "task_id": _identity_text(row.get("task_id"), 500),
-                "direction": row.get("direction") if row.get("direction") in ("min", "max") else "",
-                "statement": _claim_text(row.get("statement"), 4000),
-                "metric": _metric_identity(row),
-                "node_ids": _node_ids(row.get("node_ids"))[:64],
-                "urls": _string_list(row.get("urls"), maximum=32, item_maximum=2000),
-                "verification": {"verdict": verdict, "method": method, "note": note},
-            })
-        write_jsonl_atomic(path, safe_kept + rows, dumps=json.dumps)
-    return len(rows)
+        replace_jsonl_rows_atomic_preserving_quarantine(
+            path,
+            rows,
+            # CODEX AGENT: only a fully understood current-schema sibling is an upsert target. A future,
+            # legacy, or malformed row with the same apparent run_id is quarantine evidence, not permission
+            # to erase bytes and falsely restore source_complete=true.
+            replace_if=lambda row: (
+                row.get("v") == _RESEARCH_CLAIM_VERSION
+                and _valid_claim_source_row(row, research=True)
+                and _research_source_receipt(row) is not None
+                and _identity_text(row.get("run_id"), _MAX_SOURCE_ID) == rid
+            ),
+            loads=json.loads,
+            dumps=json.dumps,
+        )
+    return claim_count
 
 
 def load_research_claims(memory_dir) -> list[dict]:
-    """The persisted cross-run D8 research claims (statement + run-qualified node evidence). [] when none."""
+    """Persisted D8 claims plus any non-indexed all-invalid-source receipt sentinel. [] when none."""
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -589,9 +750,14 @@ def load_research_claims(memory_dir) -> list[dict]:
         return []
     path = Path(memory_dir) / "research_claims.jsonl"
     rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
-    return [sanitize_cross_run_projection(
-                row, max_chars=32_000, max_items=64, max_total_items=256)
-            for row in _valid_claim_source_rows(rows, research=True)]
+    projected = []
+    for row in _valid_claim_source_rows(rows, research=True):
+        durable = dict(row)
+        # Missing version in a persisted file is not the direct pure-API snapshot compatibility case.
+        durable.setdefault("v", 0)
+        projected.append(sanitize_cross_run_projection(
+            durable, max_chars=32_000, max_items=64, max_total_items=256))
+    return projected
 
 
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
@@ -719,8 +885,11 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
         unverified = sorted({r for m in members for r in m.get("unverified", [])})
         rep = max(members, key=lambda m: (m["n_support"] + m["n_oppose"], m["statement"]))
         mat = members[0].get("maturity", "machine-proposed")
+        research_source = (_safe_research_source_summary(members[0].get("research_source"))
+                           or _research_source_summary([]))
         out.append({
-            "statement": rep["statement"], "epistemic": _epistemic(sup, opp), "maturity": mat,
+            "statement": rep["statement"],
+            "epistemic": _source_guarded_epistemic(sup, opp, research_source), "maturity": mat,
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
             "unverified": unverified, "n_unverified": len(unverified),
             "runs": sorted({r for m in members for r in m["runs"]}),
@@ -729,6 +898,7 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
             "verification": sorted({v for m in members for v in m.get("verification", [])}),
             "decision": members[0].get("decision"),
             "merged_from": sorted(m["statement"] for m in members),
+            "research_source": research_source,
         })
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
     return out
@@ -742,6 +912,7 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
     from looplab.engine.claim_key import claim_signature, claim_uid
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
+    research_source = _research_source_summary(research_claims)
     decisions = decisions if isinstance(decisions, dict) else {}
     groups: dict[str, dict] = {}
 
@@ -868,7 +1039,8 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
             "statement": rep,
             # a polarity contradiction is the strongest contested signal -> mixed even if this side's own
             # evidence is one-directional (that is exactly what the structured key makes reachable).
-            "epistemic": "mixed" if contradicts and sup else _epistemic(sup, opp),
+            "epistemic": ("mixed" if contradicts and sup
+                           else _source_guarded_epistemic(sup, opp, research_source)),
             "maturity": item["maturity"],
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
             "unverified": unverified, "n_unverified": len(unverified),
@@ -877,9 +1049,11 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
             "claim_uid": g["uid"], "scope": g["scope"], "polarity": g["polarity"],
             "metric": g["metric"],
             "decision": item["decision"], "contradicts": contradicts,
+            "research_source": research_source,
         }
         digest_row = {**row,
-                      "epistemic": "mixed" if raw_contradicts and sup else _epistemic(sup, opp),
+                      "epistemic": ("mixed" if raw_contradicts and sup
+                                     else _source_guarded_epistemic(sup, opp, research_source)),
                       "contradicts": raw_contradicts}
         row["evidence_digest"] = claim_evidence_digest(digest_row)
         decision_digest = str((item["decision"] or {}).get("evidence_digest") or "")
@@ -906,6 +1080,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     lean `fuzzy` path (structured wins)."""
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
+    research_source = _research_source_summary(research_claims)
     decisions = decisions if isinstance(decisions, dict) else {}
     if structured:
         rows = _structured_assessments(lessons, research_claims, decisions)
@@ -996,7 +1171,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
                 d, max_chars=16_000, max_items=64, max_total_items=256)
         out.append({
             "statement": g["statement"],
-            "epistemic": _epistemic(sup, opp),
+            "epistemic": _source_guarded_epistemic(sup, opp, research_source),
             "maturity": _dec.get((d or {}).get("decision"), "machine-proposed"),
             "support": sup, "oppose": opp,
             "n_support": len(sup), "n_oppose": len(opp),
@@ -1004,6 +1179,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
             "runs": sorted(g["runs"]), "scopes": sorted(g["scopes"]),
             "sources": sorted(g["sources"]), "verification": sorted(g["verification"]),
             "decision": d,
+            "research_source": research_source,
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
@@ -1018,9 +1194,36 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
 _CAVEAT_STATES = ("mixed", "refuted", "inconclusive")
 
 
+def _claim_research_source_summary(claims) -> Optional[dict]:
+    """Return one coherent aggregate receipt carried by all rows in an assessment snapshot."""
+    rows = [row for row in (claims if isinstance(claims, (list, tuple)) else [])
+            if isinstance(row, dict)]
+    explicit = [_safe_research_source_summary(row.get("research_source")) for row in rows
+                if "research_source" in row]
+    if not explicit:
+        return None
+    first = explicit[0]
+    if first is not None and len(explicit) == len(rows) and all(item == first for item in explicit[1:]):
+        return first
+    # A mixed/malformed snapshot is lower-bound evidence. Keep known counts for diagnosis, but fail the
+    # completeness gate so no pack or steward can infer an exact positive from incompatible rows.
+    base = first or _research_source_summary([])
+    unknown = max(1, base["producer_unknown_runs"])
+    runs = max(base["producer_runs"], unknown + base["producer_partial_runs"])
+    return {
+        **base,
+        "source_complete": False,
+        "producer_receipt_known": False,
+        "producer_complete": False,
+        "producer_runs": runs,
+        "producer_unknown_runs": unknown,
+    }
+
+
 def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] = None,
                        max_claims: int = 5,
-                       _concept_rows: Optional[list[dict]] = None) -> dict:
+                       _concept_rows: Optional[list[dict]] = None,
+                       _research_source: Optional[dict] = None) -> dict:
     """Assemble a CLAIM-COUNT-bounded cross-run context pack from claim assessments (+ an optional concept
     overview) for a proposing agent (§21.20.5, Step 5). ("Claim-count", not token/byte: the pack caps the
     number of claims + per-claim field lengths; a true serialized-token envelope is the CR2b TODO — see the
@@ -1096,6 +1299,20 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         "n_pinned_omitted": max(0, len(pinned) - sum(
             1 for c in picked if c.get("maturity") == "operator-pinned")),
     }
+    research_source = (_safe_research_source_summary(_research_source)
+                       if _research_source is not None
+                       else _claim_research_source_summary(claims))
+    if _research_source is not None and research_source is None:
+        research_source = {
+            **_research_source_summary([]),
+            "source_complete": False,
+            "producer_receipt_known": False,
+            "producer_complete": False,
+            "producer_runs": 1,
+            "producer_unknown_runs": 1,
+        }
+    if research_source is not None:
+        pack["research_source"] = research_source
     if concept_overview:
         from looplab.engine.memory import concept_profit_tendencies
         # CODEX AGENT: callers that own the retained capsule snapshot may supply its private pre-cap rows.
@@ -1192,7 +1409,7 @@ _INTENTS = ("failed", "contested", "worked", "explore")
 # Document ids are a stable identity for the same searchable statement/concept.  The corpus digest has a
 # separate schema because it also commits to aggregate source receipts that do not belong in every doc id.
 _RETRIEVAL_DOCUMENT_VERSION = 2
-_RETRIEVAL_CORPUS_VERSION = 5
+_RETRIEVAL_CORPUS_VERSION = 6
 _INTENT_SCORE_BONUS = 0.001
 _CAVEAT_SCORE_RATIO = 0.50
 _CAVEAT_QUERY_COVERAGE = 0.10
@@ -1225,11 +1442,11 @@ def _retrieval_doc(kind: str, text: str, meta: dict) -> tuple[str, str, dict]:
     return kind, str(text or ""), {**meta, "stable_id": stable_id}
 
 
-def _retrieval_corpus_digest(docs, *, concept_source: dict) -> str:
+def _retrieval_corpus_digest(docs, *, concept_source: dict, research_source: dict) -> str:
     canonical = [{"kind": kind, "text": text, "meta": meta}
                  for kind, text, meta in sorted(docs, key=lambda d: d[2]["stable_id"])]
     envelope = {"v": _RETRIEVAL_CORPUS_VERSION, "docs": canonical,
-                "concept_source": concept_source}
+                "concept_source": concept_source, "research_source": research_source}
     return _json_digest(envelope, length=20)
 
 
@@ -1293,6 +1510,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         capsules = _filter_capsule_rows(
             capsules, lambda r: str(r.get("task_id") or "") == wanted)
         research = [r for r in research if str(r.get("task_id") or "") == wanted]
+    research = _valid_claim_source_rows(research, research=True)
+    research_source = _research_source_summary(research)
     claims = [c for c in claim_assessments(lessons, research_claims=research,
                                            decisions=load_claim_decisions(memory_dir), structured=structured)
               if c.get("maturity") != "operator-rejected"]
@@ -1354,13 +1573,15 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     for c in claims:
         evidence_digest = _json_digest({"support": c.get("support", []), "oppose": c.get("oppose", []),
                                         "unverified": c.get("unverified", []),
-                                        "sources": c.get("sources", [])})
+                                        "sources": c.get("sources", []),
+                                        "research_source": c.get("research_source")})
         docs.append(_retrieval_doc("claim", c["statement"], {
             "epistemic": c["epistemic"], "n_support": c["n_support"],
             "n_oppose": c["n_oppose"], "n_unverified": c.get("n_unverified", 0),
             "contradicts": _string_list(c.get("contradicts"), maximum=4, item_maximum=300),
             "maturity": c.get("maturity"), "claim_uid": c.get("claim_uid", ""),
             "metric": c.get("metric", ""), "scopes": c.get("scopes", []),
+            "research_source": c.get("research_source", research_source),
             "decision_revision": (c.get("decision") or {}).get("revision"),
             "governance_digest": _json_digest(c.get("decision") or {}),
             "evidence_digest": evidence_digest}))
@@ -1386,8 +1607,10 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         "claims_indexed": claims_indexed,
         "claims_omitted": len(claims) - claims_indexed,
     }
-    corpus_digest = _retrieval_corpus_digest(docs, concept_source=concept_source)
-    retrieval_source = {**concept_source, **projection_receipt}
+    corpus_digest = _retrieval_corpus_digest(
+        docs, concept_source=concept_source, research_source=research_source)
+    indexed_source = {**concept_source, **projection_receipt}
+    retrieval_source = {**indexed_source, "research_source": research_source}
     # The AGENT may pass an explicit `intent` (it knows why it is searching — genuinely agentic); otherwise
     # classify deterministically from the query text. An unknown value falls back to classification.
     intent = intent if intent in _INTENTS else _classify_intent(query)
@@ -1409,7 +1632,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                "vector_channel": "hash_embed(64-bucket bag-of-words; lexical proxy, not semantic)",
                "corpus_digest": corpus_digest,
                "retrieval_digest": _retrieval_corpus_digest(
-                   indexed_docs, concept_source=retrieval_source), "truncated": truncated,
+                   indexed_docs, concept_source=indexed_source,
+                   research_source=research_source), "truncated": truncated,
                "preselection": "query-overlap+one-per-source/v1",
                "contradiction_quota": round(base_quota, 3),
                "effective_quota": round(q, 3), "caveat_target": target,
@@ -1500,6 +1724,8 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # outward contradictions/context projections are capped below.
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
                                structured=structured, bounded=False)
+    research_source = _research_source_summary(
+        _valid_claim_source_rows(research_claims, research=True))
     # A contradiction the operator REJECTED is no longer live, consistent with build_context_pack and
     # cross_run_claims. Pin priority applies inside the embedded context pack; this human-facing contested
     # summary remains evidence-ordered and independently capped.
@@ -1536,6 +1762,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
             "source_malformed_rows", "source_invalid_capsule_rows",
             "source_duplicate_run_rows",
         )},
+        "research_source": research_source,
         "explored": explored,                               # what's been tried (concept × runs)
         "explored_total": len(full_concept_rows),
         "explored_omitted": len(full_concept_rows) - len(explored),
@@ -1547,7 +1774,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
         "contradictions_omitted": len(contested) - len(contradictions),
         "context_pack": build_context_pack(
             claims, concept_overview=pack_overview, max_claims=max_items,
-            _concept_rows=full_concept_rows),
+            _concept_rows=full_concept_rows, _research_source=research_source),
     }
     return sanitize_cross_run_projection(
         payload, max_chars=128_000_000, max_items=128, max_total_items=100_000)
@@ -1565,7 +1792,7 @@ def render_context_pack(pack: dict) -> str:
     Deterministic; retains mixed evidence so the agent sees counter-arguments, not only positives.
     All memory-derived text is sanitized (control chars/newlines stripped) — quoted DATA, not instructions
     (mega-review prompt-injection hardening)."""
-    if not pack.get("claims") and not pack.get("coverage"):
+    if not pack.get("claims") and not pack.get("coverage") and not pack.get("research_source"):
         return ""
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
     lines = [f"Cross-run evidence ({pack.get('n_claims_total', 0)} claim records, "
@@ -1574,6 +1801,15 @@ def render_context_pack(pack: dict) -> str:
         lines.append(
             f"  WARNING: {int(pack['n_pinned_omitted'])} operator-pinned claim(s) omitted by the "
             "hard context limit; consult the full claims ledger.")
+    research_source = _safe_research_source_summary(pack.get("research_source"))
+    if research_source is not None and research_source["source_complete"] is not True:
+        lines.append(
+            "  WARNING: D8 research-claim source is PARTIAL/UNKNOWN "
+            f"({research_source['producer_partial_runs']} capped run(s); "
+            f"{research_source['producer_claims_omitted']} claim(s) known omitted"
+            + (f"; {research_source['producer_unknown_runs']} legacy/malformed run receipt(s)"
+               if research_source["producer_unknown_runs"] else "")
+            + "); retained evidence is a lower bound and exact one-sided states are withheld.")
     for c in pack.get("claims", []):
         statement = _safe_text(c.get("statement"), 120)
         contradicts = "; ".join(

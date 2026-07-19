@@ -401,6 +401,170 @@ def test_record_and_load_research_claims_upsert(tmp_path):
                            claims=[{"statement": "doc2query helps", "node_ids": [7]}])
     rows = load_research_claims(str(tmp_path))
     assert len(rows) == 1 and rows[0]["run_id"] == "r1" and rows[0]["node_ids"] == [7]
+    assert rows[0]["v"] == 3
+    assert rows[0]["source_receipt"] == {
+        "v": 1, "claims_total": 1, "claims_retained": 1,
+        "claims_omitted": 0, "producer_complete": True,
+    }
+
+
+def test_research_claim_upsert_preserves_malformed_future_and_invalid_same_run_rows(tmp_path):
+    import orjson
+    from looplab.engine.claims import record_research_claims
+
+    current = {
+        "statement": "current claim", "node_ids": [1],
+        "verification": {"verdict": "supported"},
+    }
+    record_research_claims(tmp_path, run_id="same", task_id="t", claims=[current])
+    record_research_claims(tmp_path, run_id="sibling", task_id="t", claims=[{
+        "statement": "sibling claim", "node_ids": [2],
+    }])
+    path = tmp_path / "research_claims.jsonl"
+    malformed = b'{"v":3,"run_id":"same",BROKEN\n'
+    future = {
+        "v": 99, "run_id": "same", "task_id": "t", "statement": "future claim",
+        "node_ids": [9], "future_contract": {"must": "survive"},
+    }
+    invalid_current = {
+        "v": 3, "run_id": "same", "task_id": "t", "statement": "invalid receipt",
+        "node_ids": [8], "source_receipt": {
+            "v": 1, "claims_total": 1, "claims_retained": 1,
+            "claims_omitted": 0, "producer_complete": False,
+        },
+    }
+    path.write_bytes(path.read_bytes() + malformed + orjson.dumps(future) + b"\n"
+                     + orjson.dumps(invalid_current) + b"\n")
+
+    record_research_claims(tmp_path, run_id="same", task_id="t", claims=[{
+        **current, "node_ids": [7],
+    }])
+
+    raw = path.read_bytes()
+    assert malformed in raw
+    decoded = []
+    for line in raw.split(b"\n"):
+        try:
+            decoded.append(orjson.loads(line))
+        except orjson.JSONDecodeError:
+            pass
+    same = [row for row in decoded if row.get("run_id") == "same"]
+    assert any(row.get("v") == 99 and row.get("future_contract") == {"must": "survive"}
+               for row in same)
+    assert invalid_current in same
+    current_rows = [row for row in same
+                    if row.get("v") == 3 and row.get("source_receipt", {}).get("producer_complete") is True]
+    assert len(current_rows) == 1 and current_rows[0]["node_ids"] == [7]
+    assert any(row.get("run_id") == "sibling" for row in decoded)
+
+
+def test_nonempty_all_invalid_d8_source_persists_receipt_sentinel_without_indexing_claim(tmp_path):
+    from looplab.engine.claims import (
+        claim_assessments, load_research_claims, portfolio_atlas,
+        record_research_claims, render_context_pack,
+    )
+
+    assert record_research_claims(
+        tmp_path, run_id="invalid-only", task_id="t",
+        claims=[None, {"statement": ""}]) == 0
+    rows = load_research_claims(tmp_path)
+    assert rows == [{
+        "v": 3,
+        "record_kind": "source_receipt",
+        "run_id": "invalid-only",
+        "task_id": "t",
+        "direction": "",
+        "source_receipt": {
+            "v": 1, "claims_total": 2, "claims_retained": 0,
+            "claims_omitted": 2, "producer_complete": False,
+        },
+    }]
+
+    claims = claim_assessments([
+        _lesson("lesson support", "supported", [1])
+    ], research_claims=rows)
+    assert len(claims) == 1 and claims[0]["statement"] == "lesson support"
+    assert claims[0]["epistemic"] == "inconclusive"
+    assert claims[0]["research_source"]["producer_claims_retained"] == 0
+    assert claims[0]["research_source"]["producer_claims_omitted"] == 2
+    refuted = claim_assessments([
+        _lesson("lesson opposition", "refuted", [2])
+    ], research_claims=rows)[0]
+    assert refuted["oppose"] == ["r1:2"] and refuted["epistemic"] == "inconclusive"
+
+    atlas = portfolio_atlas([], [], research_claims=rows)
+    assert atlas["n_claims"] == 0
+    assert atlas["research_source"]["source_complete"] is False
+    assert atlas["context_pack"]["claims"] == []
+    assert "2 claim(s) known omitted" in render_context_pack(atlas["context_pack"])
+
+
+def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unknown(tmp_path):
+    from looplab.engine.claims import (
+        build_context_pack, claim_assessments, load_research_claims,
+        record_research_claims, render_context_pack,
+    )
+
+    positive = {
+        "statement": "dropout improves generalization", "node_ids": [1],
+        "verification": {"verdict": "supported", "method": "llm"},
+    }
+    fillers = [{
+        "statement": f"bounded filler claim {index}", "node_ids": [index + 2],
+        "verification": {"verdict": "supported", "method": "llm"},
+    } for index in range(255)]
+    omitted_opposite = {
+        "statement": "dropout never improves generalization", "node_ids": [999],
+        "verification": {"verdict": "supported", "method": "llm"},
+    }
+
+    assert record_research_claims(
+        tmp_path, run_id="r-cap", task_id="t",
+        claims=[positive, *fillers, omitted_opposite]) == 256
+    retained = load_research_claims(tmp_path)
+    assert len(retained) == 256
+    assert all(row["source_receipt"] == {
+        "v": 1, "claims_total": 257, "claims_retained": 256,
+        "claims_omitted": 1, "producer_complete": False,
+    } for row in retained)
+    assert omitted_opposite["statement"] not in {row["statement"] for row in retained}
+
+    claims = claim_assessments([], research_claims=retained, structured=True)
+    target = next(row for row in claims if row["statement"] == positive["statement"])
+    assert target["support"] == ["r-cap:1"]
+    assert target["epistemic"] == "inconclusive"
+    assert target["research_source"] == {
+        "source_complete": False,
+        "producer_receipt_known": True,
+        "producer_complete": False,
+        "producer_runs": 1,
+        "producer_partial_runs": 1,
+        "producer_unknown_runs": 0,
+        "producer_claims_total": 257,
+        "producer_claims_retained": 256,
+        "producer_claims_omitted": 1,
+    }
+    rendered = render_context_pack(build_context_pack([target]))
+    assert "D8 research-claim source is PARTIAL/UNKNOWN" in rendered
+    assert "exact one-sided states are withheld" in rendered
+
+
+def test_legacy_persisted_d8_source_is_unknown_and_fails_positive_closed(tmp_path):
+    import orjson
+    from looplab.engine.claims import claims_for_memory, load_research_claims
+
+    (tmp_path / "research_claims.jsonl").write_bytes(orjson.dumps({
+        "v": 2, "run_id": "legacy", "task_id": "t", "statement": "legacy support",
+        "node_ids": [4], "urls": [],
+        "verification": {"verdict": "supported", "method": "llm"},
+    }) + b"\n")
+
+    loaded = load_research_claims(tmp_path)
+    claim = claims_for_memory(tmp_path, research_claims=loaded, structured=True)[0]
+    assert claim["support"] == ["legacy:4"]
+    assert claim["epistemic"] == "inconclusive"
+    assert claim["research_source"]["producer_receipt_known"] is False
+    assert claim["research_source"]["producer_unknown_runs"] == 1
 
 
 def test_d8_claim_contests_a_lesson_verdict(tmp_path):

@@ -309,6 +309,11 @@ interpret the home Map, primary concept axis grouping, per-run Concepts table, o
 concept/evidence UI specified in
 [the UI/UX review](../18-ui-ux-review-2026-07-11.md).
 
+The preview validates concept-source and D8 research-claim producer receipts independently. A missing,
+malformed, legacy, or capped D8 denominator produces a visible **Research-claim source partial/unknown**
+notice. The client does not reconstruct either one-sided state from retained support/opposition counts when the
+server withheld it for an incomplete source; retained references remain visible as a lower bound.
+
 Those two curation endpoints can contain legacy finalize v1 rows, action-ID-keyed on-demand HTTP v1 rows,
 source-keyed diagnostic v2 rows without an input digest, and semantic finalize v2 rows. The preview normalizes
 only recent concept/claim proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse

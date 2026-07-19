@@ -172,10 +172,18 @@ def build_router(srv) -> APIRouter:
                limit: int = Query(80, ge=1, le=200),
                offset: int = Query(0, ge=0, le=1_000_000)):
         """Scope/polarity-safe claims with stable IDs and bounded offset pagination."""
-        from looplab.engine.claims import claims_for_memory, claim_governance_revision
+        from looplab.engine.claims import (
+            _research_source_summary, _valid_claim_source_rows, claims_for_memory,
+            claim_governance_revision, load_research_claims,
+        )
 
         memory_dir = _memory_dir()
-        rows = claims_for_memory(memory_dir, scope_task=scope_task, structured=True)
+        research = _valid_claim_source_rows(load_research_claims(memory_dir), research=True)
+        if scope_task:
+            research = [row for row in research if str(row.get("task_id") or "") == scope_task]
+        rows = claims_for_memory(
+            memory_dir, research_claims=research, scope_task=scope_task, structured=True)
+        research_source = _research_source_summary(research)
         if contested:
             rows = [row for row in rows if row.get("epistemic") == "mixed"]
         total = len(rows)
@@ -188,6 +196,7 @@ def build_router(srv) -> APIRouter:
             "limit": limit,
             "scope_task": cross_run_text(
                 scope_task, max_chars=500, single_line=True, entropy=False),
+            "research_source": research_source,
             "revision": claim_governance_revision(memory_dir),
         }
 

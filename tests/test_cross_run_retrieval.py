@@ -199,7 +199,7 @@ def test_receipt_digest_tracks_metadata_but_document_id_stays_stable():
         _lesson("stable claim improves recall", evidence=(1,), run_id="r1")])
     second = cross_run_retrieve("", "stable claim", k=2, capsules=[], lessons=[
         _lesson("stable claim improves recall", evidence=(9,), run_id="r2")])
-    assert first["receipt"]["corpus_digest_version"] == 5
+    assert first["receipt"]["corpus_digest_version"] == 6
     assert first["receipt"]["corpus_digest"] != second["receipt"]["corpus_digest"]
     assert first["results"][0]["stable_id"] == second["results"][0]["stable_id"]
 

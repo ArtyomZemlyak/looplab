@@ -84,14 +84,30 @@ export function ConceptSourceNotice({ source }) {
   </div>
 }
 
+export function ResearchSourceNotice({ source }) {
+  if (source.status === 'complete') return null
+  const counts = source.counts
+  const partial = source.status === 'partial'
+  return <div className="notice resource-warning atlas-degraded" role="status">
+    <b>Research-claim source {partial ? 'partial.' : 'unknown.'}</b>
+    <span>{counts
+      ? `${counts.producer_claims_omitted} claim(s) known omitted across ${counts.producer_partial_runs} capped run(s); ${counts.producer_unknown_runs} run receipt(s) unknown.`
+      : 'Receipt missing/invalid.'} Retained evidence is a lower bound; one-sided state is withheld.</span>
+  </div>
+}
+
 export function AtlasEmptyState({ sourceStates, conceptSource,
+  researchSource = { status: 'unknown', counts: null },
   pending = [], retry, busy, onBack }) {
   const pendingSources = new Set(pending)
   const allLoaded = pending.length === 0
     && Object.values(sourceStates).every(source => source.state === 'current')
   const atlasState = conceptSource.status === 'complete' ? 'Empty'
     : conceptSource.status === 'partial' ? 'Partial' : 'Unknown'
+  const claimState = researchSource.status === 'complete' ? 'Empty'
+    : researchSource.status === 'partial' ? 'Partial' : 'Unknown'
   const completeEmpty = allLoaded && conceptSource.status === 'complete'
+    && researchSource.status === 'complete'
   return <section className="atlas-empty" aria-labelledby="atlas-empty-title" role="status">
     <div className="atlas-empty-copy">
       <p className="atlas-eyebrow">Source readiness</p>
@@ -113,7 +129,7 @@ export function AtlasEmptyState({ sourceStates, conceptSource,
         const state = sourceStates[key]?.state || 'failed'
         const loading = pendingSources.has(key)
         const status = loading ? 'Loading' : state === 'current'
-          ? key === 'atlas' ? atlasState : 'Empty'
+          ? key === 'atlas' ? atlasState : key === 'claims' ? claimState : 'Empty'
           : state === 'retained-stale' ? 'Stale' : 'Unavailable'
         const retryable = !loading && state !== 'current'
         return <li key={key}
@@ -315,6 +331,7 @@ export default function ResearchAtlas({ onBack }) {
           </div>}
 
           <ConceptSourceNotice source={view.conceptSource} />
+          <ResearchSourceNotice source={view.researchSource} />
 
           <section className="atlas-summary" aria-label="Portfolio summary">
             {[
@@ -328,6 +345,7 @@ export default function ResearchAtlas({ onBack }) {
           </section>
 
           {view.empty && <AtlasEmptyState sourceStates={sourceStates} conceptSource={view.conceptSource}
+            researchSource={view.researchSource}
             pending={resource.pending}
             retry={retry} busy={busy} onBack={onBack} />}
 
