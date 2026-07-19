@@ -20,7 +20,8 @@
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
 | **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics); **Phase 2 implemented** (§21.16: 2a Strategist concept-pivot, 2b D3 graded-novelty gate + D7 capability-expansion directive, 2c calibrated foresight verifier — live steering, opt-in) |
-| **Last verified** | 2026-07-12 (historical core baseline); 2026-07-18 (Part III-B/IV and cross-run/UI reconciliation) |
+| **Part III-C addendum** | 2026-07-19 — agentic-OS & evolutionary autoresearch cohort: SCION (2607.03863), NVIDIA NeMo autoresearch, CORAL (2604.01658), GigaEvo (2511.17592) (§§23–28) |
+| **Last verified** | 2026-07-12 (historical core baseline); 2026-07-18 (Part III-B/IV and cross-run/UI reconciliation); 2026-07-19 (Part III-C agentic-OS/evolutionary cohort) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
 [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9,
@@ -45,6 +46,11 @@ AgenticDataBench/DataSciBench benchmark pair, ResearchStudio-Idea, and Claude Sc
 taxonomy, seed-time asset ingestion, a graded novelty/critic layer, a capability-expansion operator; §21,
 D1–D7), keeping the Part III gates. Part IV's D5 taxonomy and Part III-B's §16 skill-coverage taxonomy are
 two views of one substrate; D3's failed-direction re-examination pairs with §17's distance-from-seed signal.
+**Part III-C** (added 2026-07-19) applies the same gated treatment to an agentic-OS & evolutionary autoresearch
+cohort — SCION (a scientific agentic OS), NVIDIA's NeMo RL agent-skills autoresearch, CORAL (multi-agent
+evolution) and GigaEvo (LLM×evolution) — and finds most mechanisms already shipped (`tools/skills.py`,
+`search/archive.py` MAP-Elites, `EvolutionaryPolicy`, `search/foresight.py`), isolating a handful of gated
+deltas (§§23–28).
 
 **Method and evidence discipline.** The revision combines a fresh code/doc cross-check, direct inspection
 of the current state/event/security/execution seams, commit-by-commit review of the 23-commit remediation
@@ -70,7 +76,9 @@ plan. Part III — §8 Frameworks/Libs KB · §9 NapMem · §10 SciResearcher ·
 §12 LLM-as-a-Verifier · §13 composition and recommendation · §14 verification and sources. **Part III-B (added
 2026-07-14)** — §15 EvoDS · §16 DS-agent benchmarks (AgenticDataBench/DataSciBench) · §17 ResearchStudio-Idea ·
 §18 Claude Science · §19 cohort composition · §20 addendum sources. **Part IV (added 2026-07-14)** — §21 the
-`rubertlite` narrowing case and the hypothesis/theme taxonomy (D1–D7).
+`rubertlite` narrowing case and the hypothesis/theme taxonomy (D1–D7). **Part III-C (added 2026-07-19)** — §23
+SCION · §24 NVIDIA NeMo autoresearch · §25 CORAL · §26 GigaEvo · §27 cohort composition & recommendation · §28
+addendum sources.
 
 ---
 
@@ -4505,3 +4513,290 @@ proof. Exact browser and publication boundaries are recorded in
 [doc 21's post-Round-25 ledger](21-full-functionality-review-2026-07-13.md#post-round-25-integration-ledger-pending-final-commit-2026-07-18).
 Detailed UI wording and acceptance are in
 [doc 18 §37](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18).
+
+---
+
+## PART III-C — JULY-19 ADDENDUM: AGENTIC-OS & EVOLUTIONARY AUTORESEARCH COHORT (2026-07-19)
+
+*Added 2026-07-19 · Normative for: the §§23–28 feature hypotheses only · Extends (does not supersede) Part III
+§§8–14 and Part III-B §§15–20 · Companion: §13 composition, §14 evidence discipline, §21 hypothesis/theme
+taxonomy.*
+
+This addendum applies the same code-level, **gated-hypothesis** treatment as Part III/III-B to a four-item
+cohort the requester asked to evaluate for LoopLab synergy: **SCION** (a *scientific agentic operating system*),
+**NVIDIA's NeMo RL agent-skills autoresearch** workflow, **CORAL** (autonomous multi-agent evolution), and
+**GigaEvo** (an open-source LLM×evolution framework). Each item is a hypothesis with prerequisites and an
+evaluation gate, not a commitment to enable a flag or import a framework; **nothing here outranks R0–R4 or flips
+a default.** The cross-cutting finding is that this cohort **validates the LoopLab architecture more than it
+extends it** — the "skill / profile / shared-memory" abstraction it centers on recurs in three of the four and
+already ships in-tree (`tools/skills.py` ADR-9; `engine/memory.py` M4; `search/archive.py` MAP-Elites;
+`EvolutionaryPolicy`; `search/foresight.py`), isolating a small set of genuinely new, gated deltas.
+
+**Evidence status (read first).** **SCION (§23) is primary-source verified** — the requester supplied the
+author PDF (`arXiv:2607.03863v2`, 26 pp.), which was read in full; its results remain **author-reported** and
+its domain is **natural science (materials/chem/bio), not ML-engineering**, so transfer to LoopLab's loop is an
+inference. The other three (§§24–26) are **web/abstract-level**: from this environment `arxiv.org` (`/abs`
+`/pdf` `/html`), `export.arxiv.org`, and every mirror tried (alphaXiv, papers.cool, ar5iv, huggingface.co/papers,
+`*.github.io`, takara) returned **HTTP 403** — the org egress policy allows only the web-search channel, and both
+`WebFetch` and `curl` are blocked — so their accounts come from web-search snippets plus the NVIDIA blog summary
+and are unverified against primary sources or the repos. Every **LoopLab** code claim below was traced to the
+current repository (file:line inline) and re-checked. Statements keep the doc's three-way classification —
+**code-confirmed**, **externally-evidenced**, **recommendation/inference**.
+
+**TL;DR verdict (addendum).**
+
+| Item | Verdict | Synergy | Effort | Mode |
+|---|---|---|---|---|
+| **§23 · SCION** (agentic scientific OS) | **Architectural mirror, not import — it ships no code (system paper).** Most of its `Plan∘Generate∘Execute∘Verify∘MemoryUpdate` maps 1:1 onto our node lifecycle. New-to-us: a compiled **REP** plan artifact and a **sparse-reward densification** trick; the rest reinforces §8/§9/§15. | High *validation* value; the inverse-search framing is a clean vocabulary for the engine we already run. Natural-science domain = the "beyond-ML" option contract doc 13 §2 already parks. | **M** (REP) / **S** (densification) | offline/analysis; live gated |
+| **§24 · NVIDIA NeMo autoresearch** | **Adopt the skill *content* pattern (mechanism already ships); the RL/NeMo-Gym adapter + GPU tier + provisioning is the real, large vertical** — the intent behind the `nvidia-rl-autoresearch` branch. | Skills = `tools/skills.py` today; session-memory/ledger = `engine/memory.py`+`costs.py` (we're ahead). RL/GPU vertical is a genuine gap. Author-reported case (Qwen3-VL-2B 25→96.9%). | **S** skills / **L** RL adapter | skills ungated; adapter R1–R4-gated |
+| **§25 · CORAL** (multi-agent evolution) | **Pattern donor, not import — its async model conflicts with engine invariant #1.** Most primitives exist (`foresight.py`, `hybrid_merge.py`, `skills.py`, `SiblingRunTools`). New-to-us: the **heartbeat** reflect/externalize discipline. | Closest match to `search/`+memory+foresight; "validate-locally-then-evaluate" = foresight (already shipped, §21.16 2c). | **S–M** (heartbeat) | live-steering gated |
+| **§26 · GigaEvo** (LLM×evolution) | **Component reference for `search/`, not replacement — LoopLab is a superset (full loop, trust gates, replay).** MAP-Elites (`archive.py`) and population variation (`EvolutionaryPolicy`) already ship. New-to-us: **multi-island + migration** (+ optional complexity QD axis). | Most directly *code-borrowable* of the cohort; FusionBrainLab/Giga ecosystem. | **S–M** | opt-in policy, off by default |
+
+### 23. SCION — agentic scientific operating system (primary-source verified)
+
+**What it is** ([arXiv:2607.03863v2](https://arxiv.org/abs/2607.03863), *Rethinking Scientific Discovery in the
+Agentic Era*, Zheng/Wang/…/Qiu, Shanghai Innovation Institute / Fudan / East China Normal Univ., 7 Jul 2026 —
+**the author PDF was supplied by the requester and read in full**, so this account is **primary-source verified**,
+not abstract-level; the transfer to LoopLab's ML-engineering loop is still an inference). SCION frames scientific
+research itself as an *executable, auditable, reusable* process run by a **Science Agent acting as a
+"Meta-Harness"** — an orchestration layer above tools, models, sub-agents, artifacts and memory. Five mechanisms:
+
+1. **Research Execution Plan (REP)** — high-level intent is *compiled* into a structured plan of staged
+   objectives, dependencies, **verification checkpoints**, tool requirements, expected artifacts and **fallback
+   conditions**.
+2. **Hierarchical multi-agent runtime on one kernel + profiles.** Each agent is a profile
+   `P_a = ⟨id, kind, scope, tool-profile, skill-profile, memory-profile, policy⟩`; roles are `project-main`
+   (a deliberately *clean* coordinator session), `sci`, `idea`, `reading`, `exec`, `lark`. The coordinator routes
+   `π(a | s_t, o_t, m_t)` and enforces **context hygiene** — noisy exploration/failed traces stay inside
+   specialists and return only normalized summaries.
+3. **Context construction as a runtime primitive** — an agent receives an assembled slice
+   `Identity ∪ Objective ∪ Environment ∪ Tools ∪ Skills ∪ Memory` (selective exposure is *also* a
+   governance/credential boundary).
+4. **Layered epistemic memory L1/L2/L3** (session / durable user+project / artifact+audit) with rolling
+   summarization and promotion of stable facts, over typed scopes (session, agent-private-working, user-profile,
+   project, shared-runtime, artifact, audit).
+5. **Governed delegation + long-horizon recovery** — each delegation carries target/rationale/provenance and an
+   execution horizon (instant/short/long); critic checkpoints and anomaly interception trigger rollback /
+   branch-termination / re-route.
+
+It formalizes discovery as **target-conditioned inverse search**
+`X* = f⁻¹_SA(Y*) ≈ MemoryUpdate ∘ Verify ∘ Execute ∘ Generate ∘ Plan`, and under a hidden target as **batch
+active search** under a finite query budget (graded property feedback densifies a sparse binary reward). Results
+(author-reported): beats AI-Scientist-v2, EvoScientist, InternAgent, AutoResearchClaw, DR-Claw, ScienceClaw and
+ARIS on scientific reading (CMPhysBench SEED 44.10 / acc 35.58%), idea novelty (61–100% pairwise win), molecule
+generation and antibody screening.
+
+**Relation to LoopLab — the closest architectural sibling in this cohort; most mechanisms already have a LoopLab
+analog (code-confirmed).** SCION reads as an OS-level restatement of LoopLab's own loop, with a few genuinely
+new-to-us ideas and several that only *reinforce* already-flagged lanes:
+
+- **`f⁻¹_SA ≈ MemoryUpdate ∘ Verify ∘ Execute ∘ Generate ∘ Plan` maps 1:1 onto our node lifecycle** — Plan =
+  Genesis (`engine/genesis.py::_TaskPlan`) + proposal cues (`engine/proposal_cues.py`); Generate =
+  Researcher/Developer (`agents/roles.py`); Execute = sandbox (`runtime/sandbox.py`); Verify = evaluator +
+  `trust/` (`trust/verify.py`, `trust/verifier.py`, the gate suite); MemoryUpdate = lessons + event log
+  (`engine/memory.py`, `events.jsonl`). The verifier-mediated inverse-search framing
+  (`X* ∈ argmin_X ℒ(f(X),Y*)`, `𝒱(f(X),Y*)`) is a clean vocabulary for what the engine already does —
+  **no new mechanism, an observability/naming gain.**
+- **REP is the one first-class artifact we lack (recommendation).** `_TaskPlan` is a *one-shot* genesis emission
+  ("just the inline task … Genesis only decides *what* to solve", `engine/genesis.py:111-116`), not a living
+  staged plan with checkpoints and fallback conditions governing the whole run; the hypothesis board
+  (`RunState.hypotheses`, consolidated in `engine/research_cadence.py:200`) and proposal cues are per-step, not a
+  compiled campaign plan. A persistent REP-style plan object gated on a domain event is a **recommendation** that
+  composes with the §21 taxonomy and §13 composition rather than standing alone.
+- **Profile-driven kernel generalizes ADR-7 + `skills.py` + memory profiles (recommendation, refactor-shaped).**
+  We already have pluggable role backends (ADR-7; `agents/roles.py`, `agents/cli_agent.py`), a skill library
+  (`tools/skills.py`) and cross-run memory (`engine/memory.py`); SCION's `P_a = ⟨tool, skill, memory, policy⟩`
+  over one kernel unifies those three — an **architecture option, not a feature to enable.**
+- **Layered memory L1/L2/L3 reinforces §9 (NapMem) and §8; it does not add to them.** `engine/memory.py` already
+  distinguishes episodic vs durable capsules (schema-versioned at `:586`, quarantine-guarded at `:712`) and M4
+  episodic→procedural skill distillation (`:442`); SCION's typed L1/L2/L3 + scopes is a coarser precedent for the
+  §9 memory-pyramid hypothesis — **measure per §9's gate, don't re-propose.**
+- **Governed delegation with horizons ≈ our event-gated background tasks; critic/anomaly interception ≈ `trust/`
+  + `crash_repair` + `confirm_phase`.** LoopLab's delegation is *replay-safe* (gated on domain events;
+  `events/types.py::BACKGROUND_APPENDABLE`, engine invariant #1) — arguably stronger than SCION's, which has no
+  event-log/replay invariant. Its instant/short/long horizon taxonomy is a labeling nicety.
+- **The one importable numeric trick: graded-feedback-densifies-sparse-reward** for budget-constrained eval under
+  a thresholded/binary verifier — a reward-shaping idea for `trust/`+eval when positives are rare, adjacent to
+  the §16 DataSciBench TFC-grader work.
+
+**Verdict: synergy / architectural mirror — no code to import (system paper).** New-to-us and worth a gate:
+**(a) a compiled REP plan artifact** (recommendation; composes with §21/§13; R2-ish), **(b) sparse-reward
+densification** (S; offline; pairs with §16). Everything else already exists or reinforces §8/§9/§15. Its
+natural-science domain is the same "expand beyond ML" option contract doc 13 §2 (S1-NexusAgent) already parks.
+**Mode: offline/analysis; nothing here flips a default or outranks R0–R4.**
+
+### 24. NVIDIA NeMo autoresearch — coding-agent RL research with agent "skills"
+
+**What it is** (NVIDIA Technical Blog, *How to Run an Autoresearch Workflow with RL Agent Skills and NVIDIA
+NeMo*; companion repo `github.com/NVIDIA/skills`; **web/blog-level — blog and any arXiv companion 403 from this
+environment**). A general coding agent (Codex/GPT-5.5) drives an end-to-end RL research loop on **NeMo RL + NeMo
+Gym** on **Brev GPU instances**, kept in bounds by three markdown **agent skills**: **Brev-etiquette**
+(machine/GPU/disk hygiene), **session-memory** (state/decision persistence across sessions), **autoresearch**
+(baseline profiling → hypothesis branching → launch experiments → analyze metrics → ledgered campaign). Case
+study (author-reported): the agent *authored a new NeMo-Gym visual-counting environment from scratch* and lifted
+Qwen3-VL-2B-Instruct from **25.0% → 96.9%** on a 64-example held-out split (SFT — a prior autoresearch session
+had found GRPO didn't help, so cross-session memory carried the decision). The human sets goals and final calls;
+the agent does the routine.
+
+**Relation to LoopLab — same product class; the "skills" scaffold already exists in-tree, the RL/GPU vertical
+does not (code-confirmed).**
+
+- **Agent skills ≈ our `tools/skills.py` + `tools/agents_md.py` (ADR-9 / ADR-8).** `Skill`/`SkillLibrary`/
+  `SkillTools` already parse markdown name/description/body with progressive disclosure (`tools/skills.py:16-59`);
+  `agents_md.py` already scaffolds an external coding agent. NVIDIA's skill *set*
+  (etiquette/session-memory/autoresearch) is content over the same mechanism we ship — an **authoring exercise,
+  not a build.** The `autoresearch` skill in particular is our entire engine loop compressed into a prompt.
+- **session-memory ≈ `engine/memory.py` + `events.jsonl`** (episodic cross-run memory + a replayable log) — we
+  are strictly ahead of a markdown diary. **autoresearch ledger ≈ `engine/costs.py`** (durable usage/cost
+  ledger + outbox) plus the event log.
+- **RL/GPU vertical is the real gap (recommendation, large).** Adapters are
+  classification/regression/timeseries/dataset/repo/mlebench/toy — **no RL/NeMo adapter** (`adapters/`). We are
+  GPU-*aware* (`core/hardware.py::detect_gpu`, `task_runtime_caps`; the `gpu_info` tool
+  `adapters/repo_developer.py:78`; a torch/GPU capability brief `adapters/tasks.py:39`; CUDA/distributed-hang
+  handling `runtime/sandbox.py:119,473,596`; `accelerate` in `runtime/deps.py:78`), so "Brev-etiquette" GPU
+  hygiene is *partly* present — but there is no RL-training `TaskAdapter`, no cloud-GPU provisioning, and no
+  NeMo/NeMo-Gym integration. This is the vertical the working branch name (`nvidia-rl-autoresearch`) points at.
+- **`cli_agent` already makes LoopLab "work with Codex/Claude Code"** (ADR-7, `agents/cli_agent.py`) — the reverse
+  integration (LoopLab's engine packaged as an `autoresearch`-style skill consumable by an external harness) is a
+  low-effort option.
+
+**Verdict: synergy — adopt the skill-*content* pattern (S; already-shipped mechanism); the RL/NeMo-Gym adapter +
+GPU sandbox tier + provisioning is a large, R1–R4-gated vertical** (`adapters/tasks.py` `_KINDS` + a GPU
+`runtime/` tier), aligned with the branch's intent but subordinate to R0–R4. **Mode: skills offline/ungated;
+adapter live-gated.**
+
+### 25. CORAL — autonomous multi-agent evolution (open-ended discovery)
+
+**What it is** ([arXiv:2604.01658](https://arxiv.org/abs/2604.01658), *CORAL: Towards Autonomous Multi-Agent
+Evolution for Open-Ended Discovery*, Human-Agent-Society; repo `github.com/Human-Agent-Society/CORAL`;
+**web/abstract-level — arXiv 403 here**). Long-running LLM agents explore/reflect/collaborate via a **shared
+persistent memory ("skills library")**, run **asynchronously** with implicit coordination through that memory,
+and are punctuated by a **heartbeat** that periodically interrupts an agent to reflect, clean up context, and
+externalize discoveries (an anti-local-optima, anti-context-fixation device). Framed against fixed evolutionary
+search: where **FunSearch hard-codes selection** and **AlphaEvolve calls the evaluator after every proposal**, a
+CORAL agent *decides what to read* and *may validate locally first, calling the external evaluator only when
+confident*. Author-reported SOTA on 10/11 math/algorithmic/systems tasks, 3–10× higher improvement rate at fewer
+evaluations. Works with Claude Code / Codex / Cursor.
+
+**Relation to LoopLab — the closest match to our `search/` + memory + foresight; most primitives already exist
+(code-confirmed).**
+
+- **"Agent decides what to read / when to call the evaluator" ≈ `search/foresight.py` (already shipped).**
+  FOREAGENT-adapted predict-then-verify (arXiv:2601.05930) uses the LLM as an implicit world model to rank
+  candidates *without executing* and verify only the top pick (`search/foresight.py`, `ForesightPanelResearcher`,
+  `search/best_of_n.py::rank`) — exactly CORAL's "validate locally, evaluate only when confident," and it is
+  calibrated (§21.16 2c foresight verifier). Parity/ahead on this axis.
+- **Shared persistent "skills library" ≈ `tools/skills.py` + `engine/memory.py` (M4 episodic→procedural) +
+  `SiblingRunTools` live cross-run reads (doc 13 §7) + the hypothesis board (`RunState.hypotheses`).** CORAL's
+  "agent decides what to read" also matches `search/hybrid_merge.py` (grep+BM25+vector RRF + **agent-decided
+  merge**).
+- **Async multi-agent ≈ `parallel_build` (Variant-1) + the concurrent-research task
+  (`events/types.py::BACKGROUND_APPENDABLE`).** Ours is deliberately more constrained (single-writer/replay,
+  engine invariant #1); CORAL trades that for looser async coordination — a model we would *not* import wholesale
+  (it breaks replay), though our append-only event log is a stronger substrate for the same "shared memory" idea.
+- **Heartbeat is the one new-to-us discipline (recommendation).** We have cadences (`engine/research_cadence.py`,
+  `engine/strategy.py`, the Strategist `agents/strategist.py`, `lessons_every`/`lessons_refresh_every` from M6)
+  but not a *forced reflect → clean-context → externalize-discoveries* interrupt aimed specifically at
+  context-fixation. This is a cadence-shaped idea over existing seams, overlapping §9 (context) and §15 (EvoDS
+  adaptive context) — **measure against those, don't add a parallel mechanism.**
+
+**Verdict: synergy — pattern donor, not import; CORAL ships code but its async model conflicts with engine
+invariant #1.** New-to-us and gated: the **heartbeat reflect/externalize discipline** (S–M; composes with
+§9/§15/M6). Everything else is at parity (foresight, hybrid_merge, skills, SiblingRunTools). **Mode: live-steering
+gated (any cadence that touches proposals); analysis otherwise.**
+
+### 26. GigaEvo — open-source LLM×evolution framework (AlphaEvolve-style)
+
+**What it is** ([arXiv:2511.17592](https://arxiv.org/abs/2511.17592), *GigaEvo: An Open Source Optimization
+Framework Powered by LLMs and Evolution Algorithms*, FusionBrainLab; repo `github.com/FusionBrainLab/gigaevo-core`;
+**web/abstract-level — arXiv 403 here**). An extensible "AlphaEvolve-by-motifs" with four components: a **Redis**
+unit store (UUID, source, lifecycle state, metrics, lineage); an **async DAG execution engine** (asyncio stages:
+execution, validation, complexity analysis, LLM inference); an **evolution engine implementing MAP-Elites**
+(programs → behavior-space cells, single- and **multi-island with periodic migration**); and a **LangGraph
+mutation operator** with insight generation and bidirectional lineage. Validated on the AlphaEvolve combinatorial
+problems (Heilbronn triangle, circle packing, kissing numbers). It is a *narrow, pure* evolutionary-optimization
+engine — not an ML-research loop.
+
+**Relation to LoopLab — the machinery mostly exists in `search/`; the one concrete delta is islands+migration
+(code-confirmed).**
+
+- **MAP-Elites QD already ships.** `search/archive.py` is a "Diversity archive (I22, quality-diversity)" that
+  buckets evaluated solutions into **niches** by discretized params and keeps the best per niche — MAP-Elites by
+  another name (`search/archive.py:1-45`).
+- **Population evolution already ships.** `EvolutionaryPolicy` (`search/policy.py:308`, opt-in via the
+  `"evolutionary"` registry, `policy.py:619,645`) maintains a population and each generation either **crossovers
+  two elites (merge)** or **mutates a rotating/weighted elite** — GigaEvo's variation operators by another name.
+- **Insight-generation + lineage ≈ M6 comparative lessons + the event-log DAG.** Credit-assigned
+  winner-vs-loser lesson distillation (`engine/memory.py`; doc 13 §8) is our "insight generation"; node parentage
+  in `events.jsonl` is bidirectional lineage.
+- **Async DAG eval stages ≈ `engine/eval_stages.py` + `engine/eval_dispatch.py` + `runtime/`.** GigaEvo's
+  *complexity-analysis* stage as an explicit QD/behavior axis is a small, well-scoped borrow.
+- **Multi-island + periodic migration is the genuine gap (recommendation, S–M).** Our QD archive +
+  `EvolutionaryPolicy` is single-population; an island model with migration is a bounded addition to
+  `search/policy.py` / `search/archive.py`. (Redis vs `events.jsonl` is a design choice, not a gap — ours is
+  replayable.)
+- **Ecosystem note:** GigaEvo is FusionBrainLab (Giga/Sber), open-source — the most directly *code-borrowable* of
+  the cohort, and if "GigaEvo" in the request reflects an internal interest, `gigaevo-core` is the concrete
+  reference/contribution target.
+
+**Verdict: synergy — component reference for `search/`, not replacement; LoopLab is a superset (full research
+loop, trust gates, replay).** New-to-us and gated: **multi-island + migration** (S–M, `search/policy.py` /
+`search/archive.py`; live-steering gated as any search-policy change is); optional **complexity QD axis** (S).
+**Mode: opt-in policy, off by default.**
+
+### 27. How the July-19 cohort composes with §§8–22 + consolidated recommendation
+
+Cross-cutting signal: **the "skill / profile / shared-memory" abstraction recurs in three of the four** (NVIDIA
+agent skills, CORAL skills-library, SCION skill-profile `𝒮_a`) — and LoopLab already ships its core
+(`tools/skills.py`, ADR-9; `engine/memory.py` M4). The cohort validates the architecture more than it extends it;
+the genuinely new, gated items are few:
+
+| # | Item | Source | Nearest existing lane / seam | New-to-us? | Effort | Mode / gate |
+|---|------|--------|------------------------------|-----------|--------|-------------|
+| 1 | Compiled **REP** plan artifact (staged objectives, checkpoints, fallback) | SCION | `engine/genesis.py::_TaskPlan` + hypothesis board (`research_cadence.py:200`) + §21/§13 | Yes (partial) | M | recommendation; composes with §21; R2-ish |
+| 2 | **RL/NeMo-Gym TaskAdapter + GPU sandbox tier + provisioning** | NVIDIA | `adapters/tasks.py` `_KINDS`, `runtime/` tiers, `core/hardware.py` | Yes | L | live adapter, R1–R4-gated (branch intent) |
+| 3 | **Heartbeat** reflect→clean-context→externalize cadence | CORAL | `engine/research_cadence.py`, Strategist, §9/§15/M6 | Yes | S–M | live-steering gated |
+| 4 | **Multi-island + migration** (+ optional complexity QD axis) | GigaEvo | `search/policy.py` `EvolutionaryPolicy`, `search/archive.py` | Yes | S–M | opt-in policy, off by default |
+| 5 | **Sparse-reward densification** (graded feedback under a binary verifier) | SCION | `trust/` + eval, §16 TFC grader | Yes | S | offline; pairs with §16 |
+| 6 | **Profile-driven agent kernel** (`P_a` = tool/skill/memory/policy) | SCION | ADR-7 backends + `tools/skills.py` + `engine/memory.py` | Refactor | M | architecture option, not a flag |
+| 7 | **Skill-*content* pack** (etiquette/session-memory/autoresearch) + LoopLab-as-skill packaging | NVIDIA | `tools/skills.py`, `tools/agents_md.py`, `agents/cli_agent.py` | Authoring | S | offline/ungated |
+
+**At parity already (no action — listed to prevent re-proposal):** CORAL "decide-when-to-evaluate" =
+`search/foresight.py`; CORAL/SCION "agent decides what to read" = `search/hybrid_merge.py` RRF + agent-decided
+merge; MAP-Elites = `search/archive.py`; population variation = `EvolutionaryPolicy`; insight/lineage = M6
+comparative lessons + event-log DAG; session-memory / skills-library = `tools/skills.py` + `engine/memory.py`
+(M4) + `SiblingRunTools`; verifier `𝒱` = `trust/verify.py` / `trust/verifier.py`; finite-budget accounting =
+`engine/costs.py`.
+
+**Bottom line.** Nothing in this cohort is "simply better" than LoopLab as a whole, and nothing here outranks
+R0–R4 or flips a default. **SCION is the architectural mirror** (it validates the event-sourced verifier engine
+and supplies the REP + inverse-search vocabulary); **NVIDIA is the most *actionable*** (the RL/NeMo vertical the
+working branch targets); **CORAL and GigaEvo are pattern/component donors** for cadence and `search/`. All seven
+items map onto pre-existing seams; the two with standalone weight are #2 (RL vertical, large, branch-aligned) and
+#1 (REP artifact, composes with §21).
+
+### 28. Addendum evidence status and sources (2026-07-19)
+
+**Evidence discipline.** SCION (§23) is **primary-source verified** — the requester supplied the author PDF
+(`2607.03863v2`, 26 pp.), read in full; its results remain **author-reported** and its domain is natural science,
+so LoopLab transfer is inference. NVIDIA autoresearch (§24), CORAL (§25) and GigaEvo (§26) are
+**web/abstract-level**: `arxiv.org` (`/abs` `/pdf` `/html`), `export.arxiv.org`, and every mirror tried (alphaXiv,
+papers.cool, ar5iv, huggingface.co/papers, `*.github.io`, takara) returned **HTTP 403** from this environment
+(org egress allows only the web-search channel; both `WebFetch` and `curl` are blocked), so their accounts come
+from web-search snippets and the NVIDIA blog summary and are unverified against the primary sources or the repos.
+Every **LoopLab** code claim was traced to the current repository (file:line inline) and re-checked. Repos named
+for later first-hand inspection (not added to this session): `Human-Agent-Society/CORAL`,
+`FusionBrainLab/gigaevo-core`, `NVIDIA/skills`.
+
+**Sources.**
+
+- SCION — arXiv:2607.03863v2, *Rethinking Scientific Discovery in the Agentic Era* (Shanghai Innovation Institute
+  / Fudan / ECNU). Author PDF (requester-supplied).
+- NVIDIA — developer.nvidia.com blog *How to Run an Autoresearch Workflow with RL Agent Skills and NVIDIA NeMo*;
+  `github.com/NVIDIA/skills`.
+- CORAL — arXiv:2604.01658; `github.com/Human-Agent-Society/CORAL`.
+- GigaEvo — arXiv:2511.17592; `github.com/FusionBrainLab/gigaevo-core`.
+- LoopLab code — as cited inline (`tools/skills.py`, `tools/agents_md.py`, `engine/memory.py`,
+  `search/archive.py`, `search/policy.py`, `search/foresight.py`, `search/hybrid_merge.py`, `engine/genesis.py`,
+  `engine/proposal_cues.py`, `engine/research_cadence.py`, `engine/costs.py`, `trust/*`, `adapters/*`,
+  `runtime/sandbox.py`, `core/hardware.py`, `agents/roles.py`, `agents/cli_agent.py`).
