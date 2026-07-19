@@ -216,6 +216,8 @@ def test_capsule_validation_quarantines_poisoned_identity_and_completeness_rows(
     }
     legacy_v2 = {key: value for key, value in good.items() if key not in metadata}
     assert _valid_capsule_record(legacy_v2)  # retained observations remain valid; projections mark unknown
+    missing_direction = {key: value for key, value in good.items() if key != "direction"}
+    assert not _valid_capsule_record(missing_direction)
     assert not _valid_capsule_record({**good, "concepts": ["good/a", "bad!"]})
     assert not _valid_capsule_record({**good, "concept_outcomes": {"outside/c": 1.0}})
     assert not _valid_capsule_record({**good, "concept_signs": {"outside/c": 1}})

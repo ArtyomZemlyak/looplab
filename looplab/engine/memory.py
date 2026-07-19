@@ -740,7 +740,10 @@ def _valid_capsule_record(capsule) -> bool:
             or capsule.get("concept_evidence") != NODE_CONCEPT_PROVENANCE_CLASSIFIER
             or not isinstance(run_id, str) or not run_id or len(run_id) > _MAX_CAPSULE_ID_CHARS
             or not isinstance(task_id, str) or len(task_id) > _MAX_CAPSULE_ID_CHARS
-            or capsule.get("direction", "min") not in ("min", "max")
+            # CODEX AGENT: every v2 producer wrote an explicit direction.  Treat a missing field as
+            # quarantine evidence instead of silently inventing ``min`` and potentially reversing the
+            # meaning of retained outcomes/rank signs in unbound portfolio projections.
+            or capsule.get("direction") not in ("min", "max")
             or not _finite_metric(capsule.get("best_metric"))
             or not isinstance(fingerprint, list) or len(fingerprint) > _MAX_CAPSULE_FINGERPRINT
             or not isinstance(concepts, list) or len(concepts) > _MAX_CAPSULE_CONCEPTS
