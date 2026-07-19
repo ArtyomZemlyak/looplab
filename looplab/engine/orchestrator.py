@@ -488,6 +488,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # survives process restarts in the same append-only source of truth as the run itself.
         bind_cost_accountants(self)
         self._write_lock = anyio.Lock()
+        # Node-id reservation lock (Variant-1 parallel build): serialises the CHEAP build prefix (fold ->
+        # id=max(nodes)+1 -> parent-check -> node_building append) so PARALLEL `_create_node` threads get
+        # DISTINCT monotonic ids. A threading.Lock (not the anyio _write_lock) because parallel builds run
+        # in worker THREADS (anyio.to_thread). Uncontended on the serial path -> byte-identical.
+        self._id_lock = threading.Lock()
         # Tracing (I14): nested, correlated spans -> spans.jsonl (files-as-truth), bridged to
         # OpenTelemetry when the SDK is configured. Diagnostics only; never drives state.
         self.tracer = Tracer(JsonlSpanExporter(self.run_dir / "spans.jsonl"),
@@ -1677,37 +1682,67 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_triage_crash` / `_repair_error_context` / `_prepare_env` live in
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
+    def _reserve_node_build(self, action: dict):
+        """Variant-1 atomic build reservation. Under `_id_lock`: fold -> id=max(nodes)+1 -> parent
+        lifecycle check -> append `node_building`. Returns (state, node_id, kind, parents, parent_generations)
+        or None to SKIP (bad/aborted/tombstoned parent, or a generation mismatch — a reset already won).
+        Because the `node_building` append (the id's commit to the log) happens inside the lock, two
+        PARALLEL builds can never allocate the same id. Byte-identical on the serial path (lock uncontended,
+        same events in the same order). The verbatim body moved out of `_create_node` — no logic change."""
+        with self._id_lock:
+            events = self.store.read_all()
+            state = fold(events)
+            # Id = 1 + the max of every id EVER reserved: created nodes (`state.nodes`) AND still-building
+            # reservations (a `node_building` folds to the transient `st.building` marker, NOT `st.nodes`,
+            # so a plain `max(state.nodes)+1` would hand every concurrent build the same id). Scanning the
+            # `node_building` events makes it replay-deterministic (ids follow the append order in the log)
+            # and monotonic; a failed reservation just leaves a harmless id gap. Serial path unchanged:
+            # with no concurrent build, the newest node_building is always the just-created node's own.
+            _max_building = max((e.data.get("node_id", -1) for e in events
+                                 if e.type == EV_NODE_BUILDING and isinstance(e.data.get("node_id"), int)),
+                                default=-1)
+            node_id = max(max(state.nodes, default=-1), _max_building) + 1  # monotonic, unique
+            kind = action["kind"]
+            _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
+                         else ([action["parent_id"]] if action.get("parent_id") is not None else []))
+            # Snapshot the exact parent lifecycles used below before any slow Researcher/Developer work.
+            # A forced fork may also carry the generation the operator inspected; reject it before build
+            # if reset already won the race. The same snapshot is embedded in node_created so replay makes
+            # the final check atomically against event order (closing the check->append TOCTOU gap).
+            raw_expected = action.get("parent_generations")
+            if raw_expected is not None and not isinstance(raw_expected, dict):
+                return None
+            parent_generations: dict[str, int] = {}
+            for pid in _bparents:
+                parent = state.nodes.get(pid)
+                if parent is None or parent.tombstoned or pid in state.aborted_nodes:
+                    return None
+                if raw_expected is not None:
+                    expected = raw_expected.get(str(pid), raw_expected.get(pid))
+                    if isinstance(expected, bool):
+                        return None
+                    try:
+                        expected = int(expected)
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+                    if expected != parent.attempt:
+                        return None
+                parent_generations[str(pid)] = parent.attempt
+            if raw_expected is not None and len(raw_expected) != len(parent_generations):
+                return None
+            # Announce the node the INSTANT we reserve it — before the Researcher/Developer run — so the UI
+            # shows it (and streams its live agent-trace) immediately. Transient marker (folds to
+            # st.building, NOT st.nodes), so node-id allocation + resume are untouched; node_created
+            # supersedes it. Appended INSIDE the lock so the id is committed atomically.
+            self.store.append(EV_NODE_BUILDING,
+                              {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
+            return state, node_id, kind, _bparents, parent_generations
+
     def _create_node(self, action: dict) -> None:
-        state = fold(self.store.read_all())
-        node_id = max(state.nodes, default=-1) + 1  # monotonic across the whole run -> unique
-        kind = action["kind"]
-        _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
-                     else ([action["parent_id"]] if action.get("parent_id") is not None else []))
-        # Snapshot the exact parent lifecycles used below before any slow Researcher/Developer work.
-        # A forced fork may also carry the generation the operator inspected; reject it before build
-        # if reset already won the race. The same snapshot is embedded in node_created so replay makes
-        # the final check atomically against event order (closing the check->append TOCTOU gap).
-        raw_expected = action.get("parent_generations")
-        if raw_expected is not None and not isinstance(raw_expected, dict):
+        reserved = self._reserve_node_build(action)
+        if reserved is None:
             return
-        parent_generations: dict[str, int] = {}
-        for pid in _bparents:
-            parent = state.nodes.get(pid)
-            if parent is None or parent.tombstoned or pid in state.aborted_nodes:
-                return
-            if raw_expected is not None:
-                expected = raw_expected.get(str(pid), raw_expected.get(pid))
-                if isinstance(expected, bool):
-                    return
-                try:
-                    expected = int(expected)
-                except (TypeError, ValueError, OverflowError):
-                    return
-                if expected != parent.attempt:
-                    return
-            parent_generations[str(pid)] = parent.attempt
-        if raw_expected is not None and len(raw_expected) != len(parent_generations):
-            return
+        state, node_id, kind, _bparents, parent_generations = reserved
         # Phase-handoff ledger for THIS node build: propose → stages → plan → implement each distill
         # their transcript into a brief the next phase reads (see agents.agent.run_phase), so later
         # phases trust what earlier ones explored instead of re-reading the repo. Node-scoped (fresh
@@ -1715,12 +1750,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         from looplab.agents.agent import handoff_scope
         with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind), \
                 handoff_scope(enabled=self._phase_handoff_summary):
-            # Announce the node the INSTANT we start building it — before the Researcher/Developer run —
-            # so the UI shows it (and streams its live agent-trace) immediately, not only after the
-            # minutes-long dev session ends with node_created. Transient marker (folds to st.building,
-            # NOT st.nodes), so node-id allocation + resume are untouched; node_created supersedes it.
-            self.store.append(EV_NODE_BUILDING,
-                              {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
+            # node_building was appended inside _reserve_node_build (under _id_lock) — the id is committed
+            # to the log atomically, so a PARALLEL build (parallel_build>1) can never pick the same id.
             if kind == "draft":
                 self._set_complexity_hint(state, None)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):

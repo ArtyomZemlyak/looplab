@@ -366,6 +366,34 @@ def test_budget_aware_hint_includes_remaining(tmp_path):
     assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):
+    # Variant-1 Phase 0: the atomic build reservation must give CONCURRENT builds distinct, monotonic
+    # ids (and one node_building each) so parallel_build>1 can never collide on max(nodes)+1.
+    import threading
+    from looplab.events.types import EV_NODE_BUILDING
+    eng = _engine(tmp_path / "reserve")
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    ids: list = []
+    ids_lock = threading.Lock()
+    barrier = threading.Barrier(4)
+
+    def _reserve():
+        barrier.wait()                       # maximise the race window
+        r = eng._reserve_node_build({"kind": "draft"})
+        with ids_lock:
+            ids.append(r[1] if r else None)
+
+    threads = [threading.Thread(target=_reserve) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(ids) == [0, 1, 2, 3]       # four DISTINCT monotonic ids, no collision
+    builds = [e for e in eng.store.read_all() if e.type == EV_NODE_BUILDING]
+    assert sorted(e.data["node_id"] for e in builds) == [0, 1, 2, 3]   # one node_building per id
+
+
 def test_gpu_pool_auto_max_parallel_and_distinct_pinning(tmp_path, monkeypatch):
     # max_parallel=0 -> AUTO = one experiment per DETECTED GPU; and _acquire_gpu hands out DISTINCT GPUs
     # to concurrent evals (so parallel nodes don't collide on cuda:0), returning them to the pool. This is
