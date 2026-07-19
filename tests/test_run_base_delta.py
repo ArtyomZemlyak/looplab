@@ -111,6 +111,14 @@ def test_delta_prefix_without_run_base_fails_closed_and_late_base_recovers():
     assert prefix.run_base_concept_receipt == missing
     assert prefix.node_concepts == {0: [], 1: []}
     assert prefix.node_concept_materialization_receipts == {0: missing, 1: missing}
+    assert node_concept_delta(prefix, 0) == {
+        "parent_ids": [],
+        "added": [],
+        "removed": [],
+        "inherited": [],
+        "unavailable": True,
+        "reasons": ["delta_dependency_missing_run_base"],
+    }
 
     cursor.extend([late_base])
     recovered = cursor.snapshot()
@@ -224,6 +232,11 @@ def test_active_delta_cycle_fails_closed_independently_of_event_order():
             1: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
             2: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
         }
+        for nid in state.nodes:
+            projected = node_concept_delta(state, nid)
+            assert projected["unavailable"] is True
+            assert projected["reasons"] == ["delta_dependency_cycle"]
+            assert projected["added"] == projected["removed"] == projected["inherited"] == []
         restored = type(state).model_validate_json(state.model_dump_json())
         assert (restored.node_concept_materialization_receipts
                 == state.node_concept_materialization_receipts)

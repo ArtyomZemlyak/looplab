@@ -548,7 +548,7 @@ historical prefixes retain them and remain non-authoritative.
 
 `ConceptFrame.completeness.reasons` distinguishes safe, bounded cap receipts (for example
 `membership_cap`) from corruption-class receipts such as `concept_mode_unsupported`,
-`delta_dependency_cycle`, `delta_dependency_missing_parent`,
+`delta_dependency_cycle`, `delta_dependency_missing_run_base`, `delta_dependency_missing_parent`,
 `delta_dependency_unknown_parent_membership`, `invalid_concept_materialization_receipt`,
 `invalid_consolidation_map`, invalid membership input, `invalid_concept_id`, `rename_cycle`, and
 `rename_hop_cap`. Cap receipts expose a deterministic safe subset; corruption receipts mean that missing
@@ -556,6 +556,14 @@ membership cannot be interpreted as absence. These are read receipts over durabl
 the same frame does not repair them. Inspect **Lab → Events** and **Authoring** to identify the broken
 delta/consolidation source, then use a supported operator re-tag where appropriate or fork and replay a
 corrected run. Preserve the event log as the audit source; do not hand-edit a derived projection/cache.
+
+The per-node `node_concept_delta` read model and the Researcher-facing concept tools preserve the same
+distinction. Exact results retain their original `{parent_ids, added, removed, inherited}` shape; an
+incomplete result adds `partial=true` or `unavailable=true` plus ordered `reasons`. Unavailable membership
+infers no delta, while partial output is explicitly labelled as a retained projection. Aggregate
+tree/membership tools combine receipts only for current nodes, so they neither claim exact absence during
+an unresolved materialization nor let a receipt belonging only to a tombstoned/aborted node poison the
+live view.
 
 Full or materialized memberships fold into `RunState.node_concepts` at/after `node_created`
 (deterministic, offline — no tagging cadence required), and the strategist cadence may later

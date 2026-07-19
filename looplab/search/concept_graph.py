@@ -979,7 +979,8 @@ def node_concept_delta(state, node_id) -> dict:
     cannot masquerade as an honest empty set. A legacy full root
     inherits nothing; a Part-V delta-authored root inherits `run_base_concepts`. Returns
     {parent_ids, added, removed, inherited}
-    with sorted canonical-id lists. Never raises (a non-dict store soft-fails to empty, like the siblings)."""
+    with sorted canonical-id lists plus additive `partial` / `unavailable` and `reasons` receipt fields
+    whenever the comparison is not exact. Never raises (malformed state fails closed)."""
     from looplab.search.concept_projection import current_concept_projection
 
     nodes = getattr(state, "nodes", None)

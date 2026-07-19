@@ -377,6 +377,72 @@ def test_missing_or_untrusted_membership_provenance_is_partial_and_forbids_delta
     assert "PARTIAL" in rendered and "safe/parent" in rendered
 
 
+def test_missing_base_and_partial_receipts_reach_all_concept_tools():
+    from looplab.search.concept_graph import node_concept_delta
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                status=NodeStatus.evaluated),
+        1: Node(id=1, parent_ids=[2], operator="improve",
+                idea=Idea(operator="improve", params={}), status=NodeStatus.evaluated),
+        2: Node(id=2, operator="draft", idea=Idea(operator="draft", params={}),
+                status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {0: [], 1: ["known/base", "known/retained"], 2: ["known/base"]}
+    _mark_concepts_exact(st)
+    st.node_concept_materialization_receipts = {
+        0: {"status": "unavailable", "reasons": ["delta_dependency_missing_run_base"]},
+        1: {"status": "partial", "reasons": ["concepts_per_node_cap"]},
+    }
+
+    unavailable = node_concept_delta(st, 0)
+    assert unavailable["unavailable"] is True
+    assert unavailable["reasons"] == ["delta_dependency_missing_run_base"]
+    assert unavailable["added"] == unavailable["removed"] == unavailable["inherited"] == []
+    partial = node_concept_delta(st, 1)
+    assert partial["partial"] is True and partial["reasons"] == ["concepts_per_node_cap"]
+    assert partial["added"] == ["known/retained"] and partial["inherited"] == ["known/base"]
+
+    tools = RunTools()
+    tools.bind_state(st)
+    node = tools.execute("node_concepts", {"node_id": 0})
+    delta = tools.execute("node_concept_delta", {"node_id": 0})
+    assert "UNAVAILABLE" in node and "known-empty" in node
+    assert "UNAVAILABLE" in delta and "no empty delta inferred" in delta
+    retained = tools.execute("node_concepts", {"node_id": 1})
+    retained_delta = tools.execute("node_concept_delta", {"node_id": 1})
+    assert "PARTIAL" in retained and "known/retained" in retained
+    assert "PARTIAL" in retained_delta and "+added: known/retained" in retained_delta
+
+    tree = tools.execute("read_concept_tree", {})
+    absent = tools.execute("concept_nodes", {"concept": "unknown/missing"})
+    assert "PARTIAL" in tree and "available strict subset" in tree
+    assert "NOT a complete zero" in absent
+    assert "delta_dependency_missing_run_base" in tree and "concepts_per_node_cap" in tree
+
+
+def test_deleted_missing_base_receipt_does_not_poison_current_concept_tools():
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                status=NodeStatus.evaluated, tombstoned=True),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft", params={}),
+                status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {0: [], 1: []}
+    _mark_concepts_exact(st)
+    st.node_concept_materialization_receipts = {
+        0: {"status": "unavailable", "reasons": ["delta_dependency_missing_run_base"]}}
+    tools = RunTools()
+    tools.bind_state(st)
+
+    tree = tools.execute("read_concept_tree", {})
+    nodes = tools.execute("concept_nodes", {"concept": "known/x"})
+    assert "no concepts tagged yet" in tree and "UNAVAILABLE" not in tree
+    assert "no experiments tagged" in nodes and "complete zero" not in nodes
+
+
 def test_concept_nodes_reports_omitted_experiments():
     st = RunState(goal="g", direction="max")
     st.nodes = {
