@@ -27,13 +27,29 @@ export function crossRunPriorNarration(data) {
   const first = runs[0]
   const v2 = data?.v === 2
   const source = record(data?.concept_source) ? data.concept_source : null
+  const storeReceiptKeys = ['source_rows_total', 'source_rows_quarantined',
+    'source_malformed_rows', 'source_invalid_capsule_rows', 'source_duplicate_run_rows']
+  const storeReceiptFields = source
+    ? ['source_store_complete', ...storeReceiptKeys].filter(key => Object.hasOwn(source, key)).length
+    : 0
+  const hasStoreReceipt = storeReceiptFields > 0
+  // CODEX AGENT: the additive store-health receipt is optional for historical v2 events, but atomic for
+  // new events. Never let a partial/malformed extension launder quarantined rows into exact evidence.
+  const storeKnown = !hasStoreReceipt || (storeReceiptFields === storeReceiptKeys.length + 1
+    && bool(source.source_store_complete) && storeReceiptKeys.every(key => count(source[key]))
+    && source.source_rows_quarantined <= source.source_rows_total
+    && source.source_rows_quarantined === source.source_malformed_rows
+      + source.source_invalid_capsule_rows + source.source_duplicate_run_rows
+    && source.source_store_complete === (source.source_rows_quarantined === 0))
   const sourceKnown = v2 && source && bool(source.source_complete)
     && ['partial_capsules', 'source_unknown_capsules', 'source_concepts_omitted',
       'source_outcomes_omitted'].every(key => count(source[key]))
     && source.source_unknown_capsules <= source.partial_capsules
     && (source.partial_capsules > 0
       || source.source_concepts_omitted + source.source_outcomes_omitted === 0)
-    && source.source_complete === (source.partial_capsules === 0)
+    && storeKnown
+    && source.source_complete === (source.partial_capsules === 0
+      && (!hasStoreReceipt || source.source_store_complete))
   const listKnown = v2 && canonicalMatched
     && count(data?.prior_runs_total) && count(data?.prior_runs_omitted)
     && rawRuns.length > 0 && rawRuns.length <= 8 && data.prior_runs_total > 0
@@ -75,8 +91,14 @@ export function crossRunPriorNarration(data) {
   const outcome = matchedOutcome ? `; closest run matched outcome ${concept}=${fmt(matchedOutcome.outcome)}`
     : runBest !== null ? `; closest run best ${fmt(runBest)}` : ''
   let warning = receiptsKnown ? '' : ' · evidence completeness unknown'
-  if (receiptsKnown && !source.source_complete) warning = source.source_unknown_capsules
-    ? ' · PARTIAL source (some capsule receipts unknown)' : ' · PARTIAL source'
+  if (receiptsKnown && !source.source_complete) {
+    const reasons = []
+    if (source.source_unknown_capsules) reasons.push('some capsule receipts unknown')
+    if (hasStoreReceipt && source.source_rows_quarantined) {
+      reasons.push(`${source.source_rows_quarantined} durable row${source.source_rows_quarantined === 1 ? '' : 's'} quarantined`)
+    }
+    warning = ` · PARTIAL source${reasons.length ? ` (${reasons.join('; ')})` : ''}`
+  }
   if (receiptsKnown && !data.prior_runs_complete) warning += ' · PARTIAL run list'
   return `cross-run prior${matched.length ? ': ' + matched.slice(0, 3).join(', ') : ''} — ${history}${outcome}${warning}`
 }

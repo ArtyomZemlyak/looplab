@@ -93,11 +93,27 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     }))
     assert.match(partial, /PARTIAL source \(some capsule receipts unknown\)/)
 
+    const quarantined = eventNarration(prior({
+      concept_source: {
+        ...completeSource, source_complete: false, source_store_complete: false,
+        source_rows_total: 2, source_rows_quarantined: 1, source_malformed_rows: 1,
+        source_invalid_capsule_rows: 0, source_duplicate_run_rows: 0,
+      },
+    }))
+    assert.match(quarantined, /PARTIAL source \(1 durable row quarantined\)/)
+    assert.doesNotMatch(quarantined, /completeness unknown/)
+
     for (const corrupt of [
       { matched_concepts: ['loss/target', ' loss/target'] },
       { concept_source: { ...completeSource, source_concepts_omitted: 1 } },
       { concept_source: { ...completeSource, source_complete: false,
         source_concepts_omitted: 1 } },
+      { concept_source: { ...completeSource, source_store_complete: false } },
+      { concept_source: {
+        ...completeSource, source_complete: false, source_store_complete: false,
+        source_rows_total: 1, source_rows_quarantined: 1, source_malformed_rows: 0,
+        source_invalid_capsule_rows: 0, source_duplicate_run_rows: 0,
+      } },
       { prior_runs_total: Number.MAX_SAFE_INTEGER + 1 },
       { prior_runs: [{
         run_id: 'old', run_best_metric: 0.9, matched_concepts: ['loss/target'],
