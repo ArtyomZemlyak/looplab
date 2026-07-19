@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIAGRAM = ROOT / "docs" / "infographic" / "agent-architecture.html"
+ONE_PAGER = ROOT / "docs" / "infographic" / "architecture-one-pager.svg"
 
 
 def test_part_iv_v_flows_are_present_in_architecture_infographic():
@@ -21,3 +22,11 @@ def test_part_iv_v_flows_are_present_in_architecture_infographic():
     missing = [label for label, token in required.items() if token not in text]
     assert not missing, f"Part IV/V flows missing from architecture infographic: {missing}"
     assert "diagram does not show" not in text
+
+
+def test_research_claim_one_pager_names_current_receipts_and_defaults():
+    text = ONE_PAGER.read_text(encoding="utf-8")
+    assert "v3 scoped evidence + receipts" in text
+    assert "product flag ON · library default OFF" in text
+    assert "v2 scoped evidence store" not in text
+    assert "reads opt-in" not in text
