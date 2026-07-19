@@ -727,7 +727,10 @@ overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step
 observations** (concept × returned runs), concepts **observed in one returned run** (not an untried or
 underexplored gap), and **mixed-evidence claim records** (both support and opposition references, not a
 proposition-level contradiction verdict). The compatibility payload still uses the historical
-`explored`/`thin_coverage`/`contradictions` keys. It reads the
+`explored`/`thin_coverage`/`contradictions` keys. Each collection has an exact retained-snapshot
+`*_total` / `*_omitted` receipt computed before its independent display cap; single-run observations and
+rank tendencies are derived from the full canonical retained concept set rather than the overview's top 512.
+The separate top-level `concept_source` receipt says whether the underlying capsules were complete. It reads the
 available `lessons.jsonl`, `concept_capsules.jsonl`, persisted `research_claims.jsonl`,
 `claim_decisions.jsonl`, `concept_aliases.jsonl` and `concept_splits.jsonl` sidecars; active contradictions exclude operator-rejected
 claims, while top-level raw claim totals may still include them.
@@ -745,7 +748,7 @@ looplab atlas MEMORY_DIR [--max-items 8] [--json]
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding any of lessons, capsules or D8 research claims, plus optional decision and concept-governance sidecars |
 | `--max-items N` | `8` | Cap per compatibility section (concept observations / mixed-evidence / observed in one run) |
-| `--json` | off | Emit the capped lean Atlas-summary payload as JSON |
+| `--json` | off | Emit the capped lean Atlas-summary payload with per-section total/omission and capsule-source receipts as JSON |
 
 ---
 

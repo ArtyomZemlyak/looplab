@@ -55,6 +55,48 @@ def test_thin_coverage_is_single_run_concepts_not_false_never_tried():
     assert "hard-neg" not in atlas["thin_coverage"]       # explored twice -> not thin
 
 
+def test_atlas_derived_sections_use_full_rows_before_overview_cap():
+    popular = [f"popular/c{index:03d}" for index in range(512)]
+    caps = []
+    for group in range(2):
+        concepts = popular[group * 256:(group + 1) * 256]
+        for repeat in range(3):
+            caps.append(_cap(f"popular-{group}-{repeat}", concepts, {}))
+    for repeat in range(2):
+        caps.append(_cap(
+            f"tendency-{repeat}", ["zz/target", "zz/baseline"],
+            {"zz/target": 0.9, "zz/baseline": 0.1},
+        ))
+    caps.append(_cap("thin", ["zz/thin"], {}))
+
+    atlas = portfolio_atlas([], caps)
+
+    # All 512 popular rows outrank these rows in the public overview. Atlas must derive its independent
+    # sections from the full internal retained set before applying its own max_items display envelope.
+    assert atlas["n_concepts"] == atlas["explored_total"] == 515
+    assert len(atlas["explored"]) == 8 and atlas["explored_omitted"] == 507
+    assert atlas["thin_coverage"] == ["zz/thin"]
+    assert atlas["thin_coverage_total"] == 1 and atlas["thin_coverage_omitted"] == 0
+    assert "zz/target (n=2)" in atlas["context_pack"]["coverage"]["helps"]
+    assert "zz/baseline (n=2)" in atlas["context_pack"]["coverage"]["hurts"]
+
+
+def test_atlas_every_outward_section_has_exact_omission_receipts():
+    caps = [_cap("r1", ["alpha", "beta"], {})]
+    lessons = [
+        _lesson("alpha helps", "supported", [1], run_id="r1"),
+        _lesson("alpha helps", "refuted", [2], run_id="r2"),
+        _lesson("beta helps", "supported", [3], run_id="r1"),
+        _lesson("beta helps", "refuted", [4], run_id="r2"),
+    ]
+
+    atlas = portfolio_atlas(lessons, caps, max_items=1)
+
+    assert (atlas["explored_total"], atlas["explored_omitted"]) == (2, 1)
+    assert (atlas["thin_coverage_total"], atlas["thin_coverage_omitted"]) == (2, 1)
+    assert (atlas["contradictions_total"], atlas["contradictions_omitted"]) == (2, 1)
+
+
 def test_atlas_n_runs_counts_lesson_runs_and_stays_internally_consistent():
     # A lesson-only / legacy memory (no opt-in concept capsules) must NOT report zero runs: n_runs unions
     # the runs cited by lessons. And the top-level count must AGREE with the embedded context_pack coverage
@@ -71,6 +113,10 @@ def test_atlas_empty_is_well_formed():
     atlas = portfolio_atlas([], [])
     assert atlas["n_runs"] == 0 and atlas["explored"] == [] and atlas["contradictions"] == []
     assert atlas["thin_coverage"] == [] and atlas["context_pack"]["claims"] == []
+    assert atlas["explored_total"] == atlas["thin_coverage_total"] == 0
+    assert atlas["contradictions_total"] == 0
+    assert atlas["explored_omitted"] == atlas["thin_coverage_omitted"] == 0
+    assert atlas["contradictions_omitted"] == 0
     assert atlas["concept_source"] == {
         "source_complete": True, "partial_capsules": 0, "source_unknown_capsules": 0,
         "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
@@ -107,6 +153,19 @@ def test_cli_atlas_prints_sections(tmp_path):
     assert "hard-neg" in res.stdout and "Observed in one returned run" in res.stdout
     assert "quantization" in res.stdout and "not an untried-gap claim" in res.stdout
     assert "Mixed-evidence claim records" in res.stdout and "mnr helps" in res.stdout
+
+
+def test_cli_atlas_discloses_each_bounded_section(tmp_path):
+    ConceptCapsuleStore = __import__(
+        "looplab.engine.memory", fromlist=["ConceptCapsuleStore"]).ConceptCapsuleStore
+    ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl").add(
+        _cap("r1", ["alpha", "beta"], {}))
+
+    res = CliRunner().invoke(app, ["atlas", str(tmp_path), "--max-items", "1"])
+
+    assert res.exit_code == 0
+    assert ("Bounded projection omitted: 1 concept observation(s), "
+            "1 single-run observation(s), 0 mixed-evidence record(s).") in res.stdout
 
 
 def test_cli_atlas_warns_that_legacy_capsule_counts_are_lower_bounds(tmp_path):

@@ -1205,6 +1205,16 @@ def atlas_cmd(
         typer.echo("Mixed-evidence claim records (support and opposition references):")
         for c in atlas["contradictions"]:
             typer.echo(f"  ⚖ [{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")
+    projection_omitted = (
+        int(atlas.get("explored_omitted", 0) or 0),
+        int(atlas.get("thin_coverage_omitted", 0) or 0),
+        int(atlas.get("contradictions_omitted", 0) or 0),
+    )
+    if any(projection_omitted):
+        typer.echo("Bounded projection omitted: "
+                   f"{projection_omitted[0]} concept observation(s), "
+                   f"{projection_omitted[1]} single-run observation(s), "
+                   f"{projection_omitted[2]} mixed-evidence record(s).")
 
 
 @app.command(name="claims")

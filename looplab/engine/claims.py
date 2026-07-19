@@ -1448,11 +1448,12 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     The legacy ``thin_coverage`` field means only "observed in one returned run". It is not a gap or coverage
     assertion: a true CoverageFrame (§20.6, unknown-vs-zero) needs a frozen scope, eligible denominator and
     health contract, which remain deferred full-CR3a work."""
-    from looplab.engine.memory import _valid_capsule_record, portfolio_concept_overview
+    from looplab.engine.memory import _portfolio_concept_overview_data, _valid_capsule_record
     max_items = max(1, min(int(max_items), 100))             # route/CLI-independent hard envelope
     source_capsules = capsules if isinstance(capsules, (list, tuple)) else []
     capsules = [capsule for capsule in source_capsules if _valid_capsule_record(capsule)]
-    overview = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
+    overview, full_concept_rows = _portfolio_concept_overview_data(
+        capsules, aliases=aliases, splits=splits)
     # Keep the complete internal sets for exact run totals and the governance evidence digest. Only the
     # outward contradictions/context projections are capped below.
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
@@ -1461,7 +1462,10 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # cross_run_claims. Pin priority applies inside the embedded context pack; this human-facing contested
     # summary remains evidence-ordered and independently capped.
     contested = [c for c in claims if c["epistemic"] == "mixed" and c.get("maturity") != "operator-rejected"]
-    thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
+    # CODEX AGENT: Atlas is independently bounded. Derive single-run observations and rank tendencies from
+    # every canonical retained row BEFORE its outward cap; the old overview-capped path silently returned
+    # `thin_coverage=[]` once 512 more-frequent concepts occupied the entire overview projection.
+    thin = [e["concept"] for e in full_concept_rows if e["n_runs"] == 1]
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy
     # memory (no opt-in capsules) is not reported as zero runs (CODEX). The authoritative scoped corpus
     # join (cross_run_index) is the full-CR TODO; this at least unions what the two memory stores know.
@@ -1473,7 +1477,10 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # capsule + lesson-cited runs), so one atlas payload never reports two different run counts — otherwise a
     # lesson-only memory says n_runs>0 at the top but coverage.n_runs==0, the very "zero runs" artifact the
     # union set out to fix (CODEX).
-    pack_overview = {**overview, "n_runs": n_runs}
+    pack_overview = {**overview, "n_runs": n_runs, "concepts": full_concept_rows}
+    explored = full_concept_rows[:max_items]
+    thin_coverage = thin[:max_items]
+    contradictions = [_bounded_claim_projection(row) for row in contested[:max_items]]
     payload = {
         "n_runs": n_runs, "n_concepts": overview["n_concepts"],
         "n_claims": len(claims), "n_contested": len(contested),
@@ -1484,9 +1491,15 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
             "source_complete", "partial_capsules", "source_unknown_capsules",
             "source_concepts_omitted", "source_outcomes_omitted",
         )},
-        "explored": overview["concepts"][:max_items],        # what's been tried (concept × runs)
-        "thin_coverage": thin[:max_items],                   # legacy key: observed in one returned run
-        "contradictions": [_bounded_claim_projection(row) for row in contested[:max_items]],
+        "explored": explored,                               # what's been tried (concept × runs)
+        "explored_total": len(full_concept_rows),
+        "explored_omitted": len(full_concept_rows) - len(explored),
+        "thin_coverage": thin_coverage,                     # legacy key: observed in one returned run
+        "thin_coverage_total": len(thin),
+        "thin_coverage_omitted": len(thin) - len(thin_coverage),
+        "contradictions": contradictions,
+        "contradictions_total": len(contested),
+        "contradictions_omitted": len(contested) - len(contradictions),
         "context_pack": build_context_pack(claims, concept_overview=pack_overview, max_claims=max_items),
     }
     return sanitize_cross_run_projection(

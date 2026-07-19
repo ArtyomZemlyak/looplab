@@ -20,6 +20,14 @@ const count = (value, fallback = 0) => {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
+const thinProjectionTotal = (atlas, included, fallback) => {
+  const total = atlas.thin_coverage_total
+  // A malformed/missing additive receipt cannot inflate the new thin-observation omission badge.
+  // Equality to the difference of two safe non-negative integers also proves `omitted` is one.
+  return Number.isSafeInteger(total) && total >= included
+    && atlas.thin_coverage_omitted === total - included ? total : fallback
+}
+
 const normalizeConceptSource = atlas => {
   const receipt = record(Object.hasOwn(atlas, 'concept_source')
     ? atlas.concept_source : record(atlas.context_pack).coverage)
@@ -294,6 +302,8 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   const contradictions = contradictionRows.map(normalizeClaim).filter(Boolean)
   const claims = claimRows.map(normalizeClaim).filter(Boolean)
   const curation = curationRows.map(normalizeCuration).filter(Boolean)
+  const thinTotal = thinProjectionTotal(atlas, rawThin.length,
+    rawThin.length > ATLAS_RENDER_LIMITS.thin ? rawThin.length : thin.length)
   const invalidRows = {
     concepts: conceptRows.length - concepts.length,
     thin: thinRows.length - thin.length,
@@ -329,7 +339,8 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
     invalidRows,
     hiddenConcepts: Math.max(0, totals.concepts - concepts.length,
       rawConcepts.length - ATLAS_RENDER_LIMITS.concepts),
-    hiddenThin: Math.max(0, rawThin.length - ATLAS_RENDER_LIMITS.thin),
+    hiddenThin: Math.max(0, thinTotal - thin.length,
+      rawThin.length - ATLAS_RENDER_LIMITS.thin),
     hiddenContradictions: Math.max(0, totals.contested - contradictions.length,
       rawContradictions.length - ATLAS_RENDER_LIMITS.contradictions),
     hiddenClaims: Math.max(0, totals.claims - claims.length,

@@ -3936,7 +3936,9 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   `portfolio_atlas` (`engine/claims.py`) composes the Step 3-5 read-models into one payload — *explored*
   (concept × #runs), *thin_coverage* (single-run concepts — a lean gap proxy, deliberately NOT a false
   "never tried" which needs a coverage frame), *contradictions* (`mixed` claims), and the bounded context
-  pack. Pure read; surfaced by `looplab atlas MEMORY_DIR [--json]`. Tests: 6. **TODO to reach full CR3a:**
+  pack. Derived thin/tendency fields now aggregate the full canonical retained set before their own display
+  caps; every outward section carries exact total/omission counts, separately from capsule-source completeness.
+  Pure read; surfaced by `looplab atlas MEMORY_DIR [--json]`. Tests: 6. **TODO to reach full CR3a:**
   the true concept×scope `CoverageFrame` matrix with the unknown/stale/partial state grammar; the four
   coordinated Atlas UI views (Landscape/Findings/Evidence/Changes) on a snapshot-consistent shell (§21.20.7),
   server-filtered/cursor-paged; the coverage-counts-reproduce-raw-evidence gate. The HTTP surface now exposes

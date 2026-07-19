@@ -190,6 +190,17 @@ def test_atlas_rank_tendency_uses_full_overview_not_explored_display_cap(tmp_pat
     assert "RANK BETTER" in out and "axis/z-hidden" in out
 
 
+def test_atlas_tool_discloses_each_bounded_projection_section(tmp_path):
+    _seed(tmp_path, capsules=[
+        _cap("r1", [f"axis/c{index:02d}" for index in range(10)], {}),
+    ])
+
+    out = CrossRunTools(tmp_path).execute("cross_run_atlas", {})
+
+    assert ("Bounded Atlas projection omitted: 2 concept observation(s), "
+            "2 single-run observation(s), 0 mixed-evidence record(s).") in out
+
+
 def test_concept_map_tool_renders_global_graph(tmp_path):
     # PART V Phase 4/5: the global cross-run concept map — most-explored concepts + cross-run co-occurrences.
     _seed(tmp_path, capsules=[

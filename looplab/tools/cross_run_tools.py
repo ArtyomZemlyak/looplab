@@ -485,6 +485,16 @@ class CrossRunTools:
                 lines.append("Mixed-evidence claim records: "
                              + "; ".join(f"UNTRUSTED_MEMORY={_safe_text(c.get('statement'), 160)!r}"
                                          for c in atlas["contradictions"][:4]))
+            projection_omitted = (
+                int(atlas.get("explored_omitted", 0) or 0),
+                int(atlas.get("thin_coverage_omitted", 0) or 0),
+                int(atlas.get("contradictions_omitted", 0) or 0),
+            )
+            if any(projection_omitted):
+                lines.append("Bounded Atlas projection omitted: "
+                             f"{projection_omitted[0]} concept observation(s), "
+                             f"{projection_omitted[1]} single-run observation(s), "
+                             f"{projection_omitted[2]} mixed-evidence record(s).")
             return "\n".join(lines)
 
         if name == "cross_run_concept_map":

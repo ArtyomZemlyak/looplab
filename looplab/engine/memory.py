@@ -991,6 +991,17 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     `aliases` (from `load_concept_aliases`, CR1a) canonicalizes concept slugs at read time: merged aliases
     collapse to one concept and purged concepts drop; `splits` (from `load_concept_splits`) re-tags a coarse
     concept per that run's OWN sibling concepts. The raw per-run tags are untouched (non-destructive)."""
+    return _portfolio_concept_overview_data(
+        capsules, aliases=aliases, splits=splits)[0]
+
+
+def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[dict] = None,
+                                     splits: Optional[dict] = None) -> tuple[dict, list[dict]]:
+    """Build the public bounded overview and its full internal concept rows from one exact snapshot.
+
+    The second value is for bounded derived read-models that must aggregate before their own display cap;
+    it is deliberately private so callers cannot accidentally expose an unbounded portfolio response.
+    """
     from looplab.engine.concept_registry import canonicalize_concept, canonicalize_concepts
 
     valid_capsules = _dedup_valid_capsules(capsules)
@@ -1078,7 +1089,7 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
         result["concepts_omitted"] = len(concepts) - len(result["concepts"])
     if len(cards) > len(result["runs"]):
         result["run_cards_omitted"] = len(cards) - len(result["runs"])
-    return result
+    return result, concepts
 
 
 _MAX_GRAPH_CONCEPTS = 512

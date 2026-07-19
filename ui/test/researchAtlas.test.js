@@ -98,6 +98,42 @@ test('Atlas concept-source receipts fail closed and preserve explicit partial bo
   }
 })
 
+test('Atlas projection consumes only internally consistent backend omission receipts', () => {
+  const view = buildResearchAtlasView({
+    n_concepts: 10,
+    n_contested: 5,
+    explored: [{ concept: 'visible', n_runs: 1, runs: [] }],
+    explored_total: 10,
+    explored_omitted: 9,
+    thin_coverage: ['visible'],
+    thin_coverage_total: 7,
+    thin_coverage_omitted: 6,
+    contradictions: [claim(1)],
+    contradictions_total: 5,
+    contradictions_omitted: 4,
+  }, {}, {})
+
+  assert.equal(view.totals.concepts, 10)
+  assert.equal(view.totals.contested, 5)
+  assert.equal(view.hiddenConcepts, 9)
+  assert.equal(view.hiddenThin, 6)
+  assert.equal(view.hiddenContradictions, 4)
+
+  const malformed = buildResearchAtlasView({
+    n_concepts: 2,
+    explored: [{ concept: 'visible', n_runs: 1, runs: [] }],
+    explored_total: 1_000_000,
+    explored_omitted: 0,
+    thin_coverage: ['visible'],
+    thin_coverage_total: 1_000_000,
+    thin_coverage_omitted: 0,
+    contradictions: [],
+  }, {}, {})
+  assert.equal(malformed.totals.concepts, 2)
+  assert.equal(malformed.hiddenConcepts, 1)
+  assert.equal(malformed.hiddenThin, 0)
+})
+
 test('Atlas suppresses context-free raw metrics and never renders a bare optimization direction', async () => {
   const view = buildResearchAtlasView({ explored: [
     { concept: 'legacy row', runs: [
@@ -271,6 +307,7 @@ test('Atlas projection applies hard caps before React receives portfolio collect
   assert.equal(view.contradictions.length, ATLAS_RENDER_LIMITS.contradictions)
   assert.equal(view.curation.length, ATLAS_RENDER_LIMITS.curation)
   assert.equal(view.hiddenConcepts, 3)
+  assert.equal(view.hiddenThin, 3)
   assert.equal(view.hiddenContradictions, 2)
   assert.equal(view.hiddenClaims, 4)
   assert.equal(view.hiddenCuration, 7)
