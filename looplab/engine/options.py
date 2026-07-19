@@ -54,6 +54,10 @@ class EngineOptions:
     train_monitor_interval_s: float = 600.0   # base tick cadence (s); effective cadence adapts to the budget
     train_monitor_kill: bool = False     # Phase 3: let the monitor tree-kill a 'broken' training early
     train_monitor_kill_confidence: float = 0.8   # min verdict confidence to act on a 'broken' kill
+    asha_live: bool = False              # ASHA live-curve rank watchdog (advisory); off = today
+    asha_live_kill: bool = False         # opt-in: tree-kill a persistently-underperforming node early
+    asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)
+    asha_live_min_siblings: int = 3      # min finished peers before it ranks at all
     timeout: float = 30.0
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
     confirm_top_k: int = 0

@@ -40,6 +40,7 @@ EXPECTED = {
     # bare-library EngineOptions so a direct `Engine(...)` in a test does no unasked LLM work. The early
     # KILL (`train_monitor_kill`) stays OFF on BOTH sides — it is an opt-in intervention, not a default.
     "train_monitor": (True, False),
+    "asha_live": (True, False),
     "unified_agent": (True, False),
     # Part IV/V machinery now ships ON in the product surface (Settings) while the bare-library
     # EngineOptions stays lean, so a toy `Engine(...)` in a test doesn't fire concept/cross-run

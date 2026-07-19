@@ -41,6 +41,9 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.equal(eventNarration({ type: 'train_monitor_alert', data: {
       node_id: 3, status: 'broken', reason: 'loss diverged', confidence: 0.9,
     } }), 'training monitor: #3 looks broken — loss diverged (90% conf)')
+    assert.equal(eventNarration({ type: 'asha_rank', data: {
+      node_id: 3, intermediate: 0.42, quantile: 0.5, population: 4,
+    } }), 'ASHA: #3 intermediate 0.42 ranks below the 50% bar of 4 finished siblings')
     assert.equal(eventNarration({ type: 'future_event', data: {
       text: 'params.x was undefined at eval',
     } }), '{"text":"params.x was undefined at eval"}')

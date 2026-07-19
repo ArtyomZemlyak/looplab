@@ -40,6 +40,10 @@ ATTR_BY_FIELD = {
     "train_monitor_interval_s": "_train_monitor_interval_s",
     "train_monitor_kill": "_train_monitor_kill",
     "train_monitor_kill_confidence": "_train_monitor_kill_confidence",
+    "asha_live": "_asha_live",
+    "asha_live_kill": "_asha_live_kill",
+    "asha_live_quantile": "_asha_live_quantile",
+    "asha_live_min_siblings": "_asha_live_min_siblings",
     "timeout": "timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
     "confirm_top_k": "confirm_top_k",
@@ -253,6 +257,10 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # Training monitor ships ON in Settings (advisory); pass it through so the explicit-kwarg engine
         # matches from_settings (else old=library-default False vs new=True).
         train_monitor=settings.train_monitor,
+        asha_live=settings.asha_live,
+        asha_live_kill=settings.asha_live_kill,
+        asha_live_quantile=settings.asha_live_quantile,
+        asha_live_min_siblings=settings.asha_live_min_siblings,
     )
 
     # (b) the NEW single-bundle style.

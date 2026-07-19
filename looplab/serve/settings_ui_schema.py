@@ -22,9 +22,9 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 148
-SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = 175
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "35da0fffccaca0f3467891f0ce2df039b36deefae0b6fc09f4af63e88fe5d05a"
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 152
+SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = 179
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "66e2949226c379324d081b69ad8604807033e7b9575d60bb7c2df4843d937bd3"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

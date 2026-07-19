@@ -146,16 +146,11 @@ def active_training_log(workdir) -> Optional[Path]:
         return None
 
 
-def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
-                       max_lines: int = 40, max_chars: int = 4000) -> str:
-    """Read only the LAST `max_read_bytes` of the active stage log and digest it. Bounded read (seek to
-    the tail) so a multi-GB training log never loads into memory; a torn leading line is dropped by the
-    utf-8 'replace' decode + the digest keeping only whole trailing lines. '' when there is no log yet.
-
-    REVIEW NOTE (accepted, not fixed): this bounded seek-to-tail pattern (stat size → seek → read) also
-    appears inline in `serve/routers/runs.py::_tail` and `events/eventstore.py::_disk_last_seq`. Each copy
-    differs in its line-boundary handling (and there is no existing shared helper — `sandbox._clamp_tail_bytes`
-    clamps an in-memory STRING, not a file), so a 3-call-site extraction is deferred as not worth the churn."""
+def read_training_tail_raw(workdir, *, max_read_bytes: int = 131_072) -> str:
+    """The RAW (un-digested) utf-8 tail of the active stage log — the last `max_read_bytes`. Bounded
+    seek-to-tail read so a multi-GB log never loads into memory; a torn leading line is dropped by the
+    'replace' decode. '' when there is no log yet. Used by the ASHA watchdog, which feeds it to the
+    eval's own metric reader (digesting first would collapse the very metric lines it must parse)."""
     path = active_training_log(workdir)
     if path is None:
         return ""
@@ -167,8 +162,22 @@ def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
             raw = fh.read()
     except OSError:
         return ""
-    return training_log_digest(raw.decode("utf-8", "replace"),
-                               max_lines=max_lines, max_chars=max_chars)
+    return raw.decode("utf-8", "replace")
+
+
+def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
+                       max_lines: int = 40, max_chars: int = 4000) -> str:
+    """Read only the LAST `max_read_bytes` of the active stage log and digest it (collapse tqdm
+    re-renders, keep the recent trajectory). '' when there is no log yet.
+
+    REVIEW NOTE (accepted, not fixed): this bounded seek-to-tail pattern (stat size → seek → read) also
+    appears inline in `serve/routers/runs.py::_tail` and `events/eventstore.py::_disk_last_seq`. Each copy
+    differs in its line-boundary handling (and there is no existing shared helper — `sandbox._clamp_tail_bytes`
+    clamps an in-memory STRING, not a file), so a 3-call-site extraction is deferred as not worth the churn."""
+    raw = read_training_tail_raw(workdir, max_read_bytes=max_read_bytes)
+    if not raw:
+        return ""
+    return training_log_digest(raw, max_lines=max_lines, max_chars=max_chars)
 
 
 class TrainingMonitorMixin:

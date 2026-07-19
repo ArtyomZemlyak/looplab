@@ -213,6 +213,13 @@ class EvaluateMixin:
                             f" Experiment: {_rationale}" if _rationale else "")
                         _tg.start_soon(self._monitor_training, node_id, generation, workdir, cancel,
                                        _mon_ctx, kill_signal)
+                    # ASHA live-curve rank watchdog (off by default): a sibling task that reads the live
+                    # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
+                    # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
+                    if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):
+                        _mspec = self._eval_spec.get("metric") or {}
+                        _tg.start_soon(self._monitor_asha, node_id, generation, workdir, cancel,
+                                       _mspec, state.direction, kill_signal)
                     # Pin this eval to a distinct GPU when running in parallel, so concurrent nodes use
                     # separate GPUs (CUDA_VISIBLE_DEVICES remaps the agent's cuda:0 onto the reserved
                     # device — transparent to the config). Unpinned (eval_env=None) on a single-experiment
@@ -250,16 +257,19 @@ class EvaluateMixin:
                             "reason": "aborted", "eval_seconds": total_eval})
                         self._maybe_crash()
                     return
-                if kill_signal.get("kill") and not ok:       # the training monitor tree-killed a broken run
-                    # ONE terminal event; reason='monitor_broken' so the fold/failure-reflection knows WHY.
-                    # The LLM verdict already ran live (its EV_TRAIN_MONITOR_ALERT is the advisory record);
-                    # replay reconstructs the node from this terminal and never re-invokes the monitor.
+                if kill_signal.get("kill") and not ok:       # a live watchdog tree-killed the run early
+                    # ONE terminal event; the watchdog names the reason so the fold/failure-reflection
+                    # knows WHY: the training monitor leaves it default ('monitor_broken'), the ASHA
+                    # watchdog sets terminal_reason='asha_underperforming'. The advisory record
+                    # (EV_TRAIN_MONITOR_ALERT / EV_ASHA_RANK) already ran live; replay reconstructs the
+                    # node from this terminal and never re-invokes the watchdog.
+                    _kreason = str(kill_signal.get("terminal_reason") or "monitor_broken")
                     async with self._write_lock:
                         self.store.append(EV_NODE_FAILED, {
                             "node_id": node_id, "generation": generation,
-                            "error": ("training monitor stopped a broken run early: "
+                            "error": ("live watchdog stopped the run early: "
                                       + str(kill_signal.get("reason", ""))[:400]),
-                            "reason": "monitor_broken", "eval_seconds": total_eval})
+                            "reason": _kreason, "eval_seconds": total_eval})
                         self._maybe_crash()
                     return
                 if ok:

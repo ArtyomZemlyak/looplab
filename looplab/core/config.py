@@ -213,6 +213,24 @@ class Settings(BaseSettings):
     # fails normally (reason='monitor_broken'), so replay reconstructs it from that one terminal event.
     train_monitor_kill: bool = False
     train_monitor_kill_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
+    # the objective metric off the live log (reusing the eval's OWN metric reader) and RANKS it against the
+    # FINAL metrics of completed siblings — a node already worse than the `_quantile` of finished peers is
+    # unlikely to catch up (successive-halving on the live curve). Advisory in the product surface (records
+    # a fold-ignored `asha_rank` diagnostic + trace span); the library default is OFF (off == today). Needs
+    # the command-eval path (a live log to read) + enough finished siblings to rank against.
+    asha_live: bool = True
+    # Opt-in INTERVENTION (separate from the advisory signal): let the watchdog tree-kill a node whose
+    # intermediate metric stays below the bar past a short grace window. Off by default — it only SURFACES
+    # the rank unless this is on. A kill fails the node normally (reason='asha_underperforming').
+    asha_live_kill: bool = False
+    # The bar sits at `asha_live_quantile` along a WORST->BEST ordering of the finished siblings' finals:
+    # 0.5 = the median (a node worse than the median peer flags); a SMALLER value is more conservative —
+    # it lowers the bar toward the WORST finished peer, so only a node worse than nearly all peers flags
+    # (0.0 = worse than the worst). `min_siblings` is the floor of finished peers required before it ranks
+    # at all, so it never acts on too little evidence.
+    asha_live_quantile: float = Field(default=0.5, ge=0.0, le=1.0)
+    asha_live_min_siblings: int = Field(default=3, ge=1)
     timeout: float = Field(default=30.0, gt=0)
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).
