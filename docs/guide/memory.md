@@ -103,9 +103,10 @@ additive: read health refines overall D8 completeness without redefining what th
 ### Operator-governance ledger health
 
 `concept_aliases.jsonl`, `concept_splits.jsonl`, and `claim_decisions.jsonl` are policy, not
-best-effort memory. The `concept_curation_log.jsonl` and `claim_curation_log.jsonl` sidecars are also
-authority for paid steward idempotency: skipping a durable begin/outcome could charge the same action
-again. A skipped row could otherwise be a merge, purge, split, clear, rejection, or pin and would
+best-effort memory. The `concept_curation_log.jsonl`, `claim_curation_log.jsonl`, and
+`task_facets_curation_log.jsonl` sidecars are also authority for paid steward idempotency: skipping a
+durable begin/outcome could charge the same concept, claim, or task-facets decision again. A skipped
+row could otherwise be a merge, purge, split, clear, rejection, or pin and would
 change canonical identity or which claims reach a live run. Readers therefore require every physical
 row to be newline-terminated JSON object data with a known schema/action, valid bounded fields, unique
 `action_id`, and consistent writer-owned revisions. Invalid JSON, a non-object row, torn tail,

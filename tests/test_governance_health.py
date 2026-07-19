@@ -23,6 +23,7 @@ from looplab.engine.concept_steward import concept_curation_snapshot
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
     cross_run_governance_snapshot,
+    read_curation_rows,
 )
 from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
 from looplab.tools.concept_tools import ConceptGovernanceTools
@@ -70,6 +71,53 @@ def test_duplicate_json_member_cannot_select_an_ambiguous_governance_action(tmp_
         load_concept_aliases(tmp_path)
 
     assert exc.value.reason == "malformed_json"
+
+
+def _task_facets_curation_row(**overrides):
+    row = {
+        "v": 2,
+        "curation_key": "facets:v2:" + "a" * 64,
+        "source_key": "source:v1:" + "b" * 64,
+        "run_id": "run-a",
+        "task_id": "task-a",
+        "finish_seq": 7,
+        "input_digest": "c" * 64,
+        "input_schema": "finalize-task-facets/v1",
+        "model": "model-a",
+        "parser": "tool-call-v1",
+        "outcome": "already-governed",
+        "auto": False,
+        "auto_requested": True,
+        "proposals": {"task_id": "task-a", "facets": {"domain": "retrieval"}},
+        "receipt": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_task_facets_paid_history_accepts_known_finalize_schema(tmp_path):
+    path = tmp_path / "task_facets_curation_log.jsonl"
+    expected = _task_facets_curation_row()
+    _write_rows(path, [expected])
+
+    assert read_curation_rows(path) == [expected]
+
+
+@pytest.mark.parametrize(("tail", "reason"), [
+    ({"v": 999}, "unsupported_schema"),
+    ({"v": 2, "outcome": "future-auto-apply"}, "invalid_record"),
+])
+def test_task_facets_paid_history_fails_closed_after_a_valid_terminal(
+        tmp_path, tail, reason):
+    path = tmp_path / "task_facets_curation_log.jsonl"
+    _write_rows(path, [_task_facets_curation_row(), tail])
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        read_curation_rows(path)
+
+    assert exc.value.ledger == "task_facets_curation"
+    assert exc.value.reason == reason
+    assert exc.value.public_receipt()["complete"] is False
 
 
 @pytest.mark.parametrize(("filename", "row", "reader", "reason"), [
