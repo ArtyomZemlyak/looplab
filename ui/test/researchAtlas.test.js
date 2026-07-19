@@ -499,6 +499,48 @@ test('malformed fulfilled Atlas envelopes are rejected and retain last-good sour
   assert.equal(states.claims.loadedAt, 'before')
 })
 
+test('curation source health is atomic, bounded, and retains legacy envelopes', () => {
+  const entry = { run_id: 'run-1', outcome: 'proposed' }
+  const healthy = {
+    v: 1, status: 'complete', complete: true, entries: [entry], n: 1, limit: 20,
+  }
+  assert.equal(isValidAtlasSourceEnvelope('conceptCuration', healthy), true)
+  assert.equal(isValidAtlasSourceEnvelope('claimCuration', { entries: [entry] }), true)
+  assert.equal(isValidAtlasSourceEnvelope('claimCuration', {
+    entries: [entry], n: 5, limit: 20, legacy_extra: true,
+  }), true)
+
+  for (const envelope of [
+    { ...healthy, entries: [null] },
+    { ...healthy, entries: [[]] },
+    { ...healthy, status: 'unavailable', complete: false },
+    { ...healthy, v: '1' },
+    { ...healthy, n: '1' },
+    { ...healthy, n: 0 },
+    { ...healthy, limit: 0 },
+    { ...healthy, limit: 201 },
+    { ...healthy, entries: [entry, entry], n: 2, limit: 1 },
+    { entries: [], v: 1 },
+    { entries: [], status: 'complete' },
+    { entries: [], complete: true },
+    { entries: [entry], n: 0 },
+    { entries: [entry], limit: '20' },
+  ]) {
+    assert.equal(isValidAtlasSourceEnvelope('conceptCuration', envelope), false)
+  }
+
+  const previous = { conceptCuration: healthy }
+  const malformed = { ...healthy, complete: false }
+  const successful = isValidAtlasSourceEnvelope('conceptCuration', malformed)
+    ? { conceptCuration: malformed } : {}
+  const merged = mergeResearchAtlasPayload(previous, successful)
+  const before = reconcileAtlasSourceStatuses({}, previous, 'before')
+  const after = reconcileAtlasSourceStatuses(before, successful, 'after', ['conceptCuration'])
+  assert.equal(merged.conceptCuration, healthy)
+  assert.equal(after.conceptCuration.state, 'retained-stale')
+  assert.equal(after.conceptCuration.loadedAt, 'before')
+})
+
 test('Atlas source provenance distinguishes current, retained-stale, and failed slices', () => {
   const first = reconcileAtlasSourceStatuses({}, {
     claims: { revision: 7, claims: [claim(1)] },

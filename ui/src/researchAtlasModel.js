@@ -162,7 +162,24 @@ export function isValidAtlasSourceEnvelope(key, value) {
       && Array.isArray(value.contradictions)
   }
   if (key === 'claims') return Array.isArray(value.claims)
-  if (key === 'conceptCuration' || key === 'claimCuration') return Array.isArray(value.entries)
+  if (key === 'conceptCuration' || key === 'claimCuration') {
+    if (!Array.isArray(value.entries)
+      || !value.entries.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry))) {
+      return false
+    }
+    const has = field => Object.hasOwn(value, field)
+    const healthFields = ['v', 'status', 'complete']
+    const hasHealth = healthFields.some(has)
+    // CODEX AGENT: the v1 extension is atomic. A fulfilled but partial/contradictory health envelope
+    // must retain the last-good slice just like a 503; otherwise a torn ledger looks current and empty.
+    if (hasHealth && !(healthFields.every(has)
+      && value.v === 1 && value.status === 'complete' && value.complete === true
+      && has('n') && has('limit'))) return false
+    if (has('n') && (!Number.isSafeInteger(value.n) || value.n < value.entries.length)) return false
+    if (has('limit') && (!Number.isSafeInteger(value.limit)
+      || value.limit < 1 || value.limit > 200 || value.entries.length > value.limit)) return false
+    return true
+  }
   return false
 }
 
