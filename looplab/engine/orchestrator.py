@@ -1068,6 +1068,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # IMPLEMENTS them per-developer, so we never pay N independent research rolls that
                         # collide. If the researcher can't diversify to the full width, build only as many
                         # nodes as we got distinct ideas — the loop re-plans the rest next iteration.
+                        # RE-FOLD before each chunk (review finding #6): a batch WIDER than the fan-out is
+                        # built in multiple chunks; earlier chunks' nodes are now in the log, so re-folding
+                        # lets THIS chunk's vs-history novelty gate see them and not re-propose their ideas
+                        # (the serial path gets this for free — each node lands before the next proposes).
+                        if _i:
+                            state = fold(self.store.read_all())
                         _ideas = self._propose_batch(state, len(_chunk))
                         if not _ideas:
                             continue
@@ -1095,11 +1101,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                         _chunk, _reserved, _pb_pairs, _ideas, _telem):
                                     if _res is None:
                                         continue
-                                    # If a sibling in THIS chunk already crashed and tripped the
-                                    # developer_crash circuit-breaker, don't start more builds — tighten
-                                    # the "PAUSE on the FIRST developer_crash" guarantee under concurrency.
-                                    if self._create_paused:
-                                        break
                                     # _create_node_guarded: an UNEXPECTED exception in one build becomes a
                                     # node_failed terminal for its already-reserved id (node_building was
                                     # appended up front) instead of tearing down the task group and killing
@@ -1107,6 +1108,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     _tg.start_soon(anyio.to_thread.run_sync,
                                                    functools.partial(self._create_node_guarded,
                                                                   _a, _pair, _res, _idea, _tel))
+                        # Circuit breaker under concurrency: `start_soon` does not yield, so no worker runs
+                        # until the task group JOINS above — the pause flag can only be observed HERE, after
+                        # the whole chunk finishes. So a developer/build crash pauses after AT MOST this one
+                        # chunk (bounded by the fan-out width), not mid-chunk; stop before the next chunk.
                         if self._create_paused:
                             break
                     continue
@@ -1851,7 +1856,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             value = int(value)
         except (TypeError, ValueError):
             return 1
-        return max(1, self.max_parallel) if value == 0 else max(1, value)
+        # Clamp to the config `le=64` ceiling on BOTH branches: AUTO resolves to max_parallel (config
+        # `le=1024`), which must not silently exceed the parallel_build cap the config author set (nor
+        # eagerly instantiate >64 wired role pairs); the operator budget-override path is otherwise
+        # unvalidated. The explicit Settings/Strategist paths are already bounded 0..64.
+        resolved = self.max_parallel if value == 0 else value
+        return min(64, max(1, resolved))
 
     def _build_role_pairs(self, n: int) -> list:
         """Up to `n` (researcher, developer) pairs for a parallel build batch: the primary (self's roles)
@@ -2095,15 +2105,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return
             latest = fold(self.store.read_all())
             node = latest.nodes.get(node_id)
-            # Emit a terminal only if this id has none yet (node_created without a terminal, or a bare
-            # node_building). If _create_node already wrote node_created+node_failed, or node_evaluated,
-            # the one-terminal invariant is satisfied and a second append would be a no-op anyway.
-            if node is None or node.status not in (NodeStatus.evaluated, NodeStatus.failed):
+            # Synthesise a terminal ONLY when this id has no node_created yet (a bare node_building whose
+            # build raised before landing). A node that ALREADY has node_created carries real generated
+            # code and is `pending` — the exception then came from the post-creation audit emitters
+            # (audit-only); leave it for the evaluator. Marking a built, code-carrying node `failed` here
+            # would silently discard a good build (review finding #2). If _create_node already wrote a
+            # terminal (developer-crash sentinel, or node_evaluated), likewise nothing to do.
+            if node is None:
                 try:
                     self.store.append(EV_NODE_FAILED, {
                         "node_id": node_id, "generation": 0,
                         "error": f"(build error: {exc})", "reason": "build_crash",
                         "eval_seconds": 0.0})
+                    # An EXCEPTION out of a build (not the graceful "(developer error: …)" sentinel) is a
+                    # HARD fault — an LLM client that RAISES on a 401/outage, or a real bug in implement().
+                    # The serial path crashes the run on such a raise; under concurrency we can't crash
+                    # (it would kill sibling builds), so mirror the developer_crash circuit-breaker: PAUSE
+                    # so the batch loop stops after this chunk instead of burning the node budget on
+                    # repeated build_crash nodes (review finding #3). A plain resume continues once fixed.
+                    self.store.append(EV_PAUSE, {
+                        "node_id": node_id, "generation": 0,
+                        "reason": "auto-paused: a node build raised (LLM unreachable or a hard error, "
+                                  "unresolved within the build) — resume once it's fixed"})
+                    self._create_paused = True
                 except Exception:  # noqa: BLE001 — best-effort terminal; never re-raise into the group
                     pass
 
@@ -2160,7 +2184,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "node_id": node.id, "generation": generation,
                     "error": "node lifecycle changed while rebuilding", "reason": "superseded",
                     "eval_seconds": 0.0})
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             self._emit_node_created(
                 node_id=node.id, parent_ids=parents, operator=idea.operator,
@@ -2172,7 +2196,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             landed = fold(self.store.read_all()).nodes.get(node.id)
             if (landed is None or landed.attempt != generation or landed.rerun_from is not None
                     or landed.code != code):
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             if isinstance(code, str) and code.startswith("(developer error:"):
                 self.store.append(EV_NODE_FAILED, {
@@ -2270,7 +2294,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "node_id": node_id, "generation": 0,
                     "error": "parent lifecycle changed while building", "reason": "superseded",
                     "eval_seconds": 0.0})
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             self._emit_node_created(
                 node_id=node_id,
@@ -2294,7 +2318,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 origin=req.get("origin") if isinstance(req.get("origin"), dict) else None,
             )
             if node_id not in fold(self.store.read_all()).nodes:
-                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the
             # "(developer error: …)" sentinel as its code (an LLM 401/timeout/hard error). Without

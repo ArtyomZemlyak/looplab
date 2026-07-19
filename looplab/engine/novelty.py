@@ -259,11 +259,20 @@ class NoveltyGateMixin:
         rationale is a constant like 'random seed point') have no meaningful text identity and are
         NEVER text-deduped here (their diversity lives in the numeric params, which the normal novelty
         gate already handles), so batch diversity for LLM ideas never collapses distinct toy seeds."""
-        t = self._idea_text(idea).strip().lower()
+        raw = self._idea_text(idea)
+        t = raw.strip().lower()
         if len(t) < 20:
             return False
+        # Semantic parity with the serial draft path (review finding #7): when a run actually uses the
+        # novelty gate, two batch siblings that are embedding-near but textually DISTINCT are still
+        # duplicates (the serial path would catch the second against the first, already in history).
+        # Guarded on the novelty mode so toy/off runs stay text-only + byte-identical; best-effort, so an
+        # embedder hiccup silently degrades to text dedup. The new idea's vector is embedded at most once.
+        _semantic = getattr(self, "_novelty_mode", "off") not in (None, "off")
+        _vec = None
         for other in chosen:
-            ot = self._idea_text(other).strip().lower()
+            ot_raw = self._idea_text(other)
+            ot = ot_raw.strip().lower()
             if len(ot) < 20:
                 continue
             if t == ot:
@@ -276,6 +285,15 @@ class NoveltyGateMixin:
                 lo, hi = sorted((len(t), len(ot)))
                 if hi <= lo * 1.25:
                     return True
+            if _semantic:
+                try:
+                    from looplab.tools.vectorstore import _cosine
+                    if _vec is None:
+                        _vec = self._embedder(raw)
+                    if _cosine(_vec, self._idea_vec(ot_raw)) >= self._novelty_semantic_threshold:
+                        return True
+                except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
+                    pass
         return False
 
     def _propose_batch(self, state: RunState, n: int) -> list:

@@ -411,6 +411,54 @@ def test_parallel_build_replays_deterministically_and_records_fanout(tmp_path):
         assert 0 < attrs.get("built", 0) <= attrs["fan"]
 
 
+def test_create_node_guarded_pauses_on_a_hard_build_raise(tmp_path):
+    # Review #3: an UNEXPECTED build exception (not the graceful "(developer error:)" sentinel)
+    # synthesises a build_crash terminal for the reserved id AND trips the developer-crash circuit
+    # breaker — the parallel path can't crash the run like serial does, so it must PAUSE instead of
+    # burning the node budget on repeated build_crash nodes.
+    from looplab.events.types import EV_NODE_FAILED, EV_PAUSE
+    eng = _engine(tmp_path / "guard-raise")
+    eng._create_paused = False
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    reserved = eng._reserve_node_build({"kind": "draft"})
+    nid = reserved[1]
+    eng._create_node = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("llm 401 hard fault"))
+    eng._create_node_guarded({"kind": "draft"}, None, reserved)
+    evs = eng.store.read_all()
+    # A build_crash terminal is appended for the reserved id; the fold treats a terminal on a bare
+    # node_building as a no-op that just clears st.building — so no phantom node and no id reuse.
+    fails = [e for e in evs if e.type == EV_NODE_FAILED and e.data["node_id"] == nid]
+    assert fails and fails[-1].data["reason"] == "build_crash"
+    assert nid not in fold(evs).nodes                          # no phantom node from a bare-building fail
+    assert any(e.type == EV_PAUSE for e in evs)                # circuit-breaker paused the run
+    assert eng._create_paused is True
+
+
+def test_create_node_guarded_keeps_a_built_node_when_a_post_creation_emit_raises(tmp_path):
+    # Review #2: if _create_node raises AFTER node_created is committed (an audit-emitter fault), the
+    # node already carries real code and is `pending` — the guard must NOT mark it failed (that would
+    # silently discard a good build) and must NOT pause (an audit fault is not a hard crash).
+    from looplab.core.models import durable_idea_payload
+    eng = _engine(tmp_path / "guard-emit")
+    eng._create_paused = False
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    reserved = eng._reserve_node_build({"kind": "draft"})
+    nid = reserved[1]
+
+    def _create_then_emit_raise(action, roles=None, reserved=None, **k):
+        eng._emit_node_created(
+            node_id=nid, parent_ids=[], operator="draft",
+            idea=durable_idea_payload(Idea(operator="draft", params={}, rationale="ok")),
+            code="print(1)", files={}, deleted=[])
+        raise RuntimeError("post-creation emitter boom")
+
+    eng._create_node = _create_then_emit_raise
+    eng._create_node_guarded({"kind": "draft"}, None, reserved)
+    st = fold(eng.store.read_all())
+    assert st.nodes[nid].status is NodeStatus.pending          # kept — a built, code-carrying node
+    assert eng._create_paused is False                          # audit fault is not a hard crash
+
+
 def test_stamp_novelty_hint_targets_the_passed_researcher(tmp_path):
     # Variant-1 Phase 1 (review HIGH): the per-build researcher (a pool member) must receive its OWN
     # novelty hint/stance — never the shared self.researcher — or a concurrent draft build clobbers
