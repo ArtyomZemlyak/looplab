@@ -397,10 +397,24 @@ class _StageHealthMonitor:
     config and no Developer effort (the built-in half of the hybrid guard; the Developer is separately
     asked to add a fail-fast finite-loss assert). Deliberately STRICT (needs `threshold` such records) so
     an incidental `nan` token in a path/message can't trip it. Record-buffered: accepts both newline logs
-    and carriage-return progress bars, never double-counting a chunk boundary."""
+    and carriage-return progress bars, never double-counting a chunk boundary.
+
+    The count is CONSECUTIVE, not cumulative: a metric record reporting a *finite* loss/grad_norm resets
+    it to zero, so the monitor fires only on SUSTAINED non-finiteness (loss goes nan and stays nan — real
+    divergence) rather than on the same number of records scattered across a whole run. Mixed-precision
+    (fp16/AMP) training legitimately logs a handful of `grad_norm: inf` steps while the loss scaler warms
+    up and then recovers; a cumulative count would let those isolated overflows accumulate to the
+    threshold over a multi-hour run and discard a healthy, metric-producing result. Resetting on the very
+    next finite metric keeps such runs alive while still catching a model that can no longer learn."""
     _PAT = re.compile(
         r"(loss|grad_norm|grad[ _]norm)['\"]?\s*[:=]\s*[\[]?\s*"
         r"(nan|[-+]?inf(?:inity)?)\b", re.IGNORECASE)
+    # A metric record whose value IS a finite number (any of the same loss/grad_norm keys). Its presence
+    # means training recovered on this step, so it clears the consecutive non-finite streak. `_PAT` is
+    # checked first, so a line that reports BOTH a finite and a non-finite metric counts as non-finite.
+    _FINITE = re.compile(
+        r"(loss|grad_norm|grad[ _]norm)['\"]?\s*[:=]\s*[\[]?\s*"
+        r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?\b", re.IGNORECASE)
     _BREAK = re.compile(r"[\r\n]")
 
     def __init__(self, threshold: int = 5):
@@ -408,23 +422,30 @@ class _StageHealthMonitor:
         self.hits = 0
         self._buf = ""
 
+    def _observe(self, ln: str) -> None:
+        # Non-finite wins over finite on the same line; a purely-finite metric record resets the streak;
+        # a line with no recognizable metric leaves the streak untouched (most output is neither).
+        if self._PAT.search(ln):
+            self.hits += 1
+        elif self._FINITE.search(ln):
+            self.hits = 0
+
     def feed(self, text: str) -> bool:
-        """Accept a streamed chunk; return True once divergence is CONFIRMED (>= threshold non-finite
-        loss/grad lines). Idempotent-safe to call after firing."""
+        """Accept a streamed chunk; return True once divergence is CONFIRMED (>= threshold CONSECUTIVE
+        non-finite loss/grad records). Idempotent-safe to call after firing."""
         self._buf += text
         *lines, self._buf = self._BREAK.split(self._buf)  # keep the trailing partial record for next chunk
         if len(self._buf) > 8192:                    # bound a pathological no-newline stream
             self._buf = self._buf[-8192:]
         for ln in lines:
-            if self._PAT.search(ln):
-                self.hits += 1
+            self._observe(ln)
         return self.hits >= self.threshold
 
     def finish(self) -> bool:
         """Observe the final unterminated record at EOF. Safe to call more than once."""
         final, self._buf = self._buf, ""
-        if final and self._PAT.search(final):
-            self.hits += 1
+        if final:
+            self._observe(final)
         return self.hits >= self.threshold
 
 
@@ -573,8 +594,10 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     err = b"".join(bufs["err"]).decode("utf-8", "replace")
     if diverged.is_set():
         err += marker
-        # A short process can exit before the 250 ms parent poll observes `diverged`. Its zero status
-        # does not make repeated non-finite training telemetry healthy; fail closed after the drain.
+        # A short process can exit before the 250 ms parent poll observes `diverged`. Under the monitor's
+        # CONSECUTIVE semantics, a set flag means the run's final metric records were an unbroken non-finite
+        # streak (it ended diverged, not merely overflowed once early), so its zero status does not make the
+        # result healthy; fail closed after the drain.
         if rc == 0:
             rc = -1
     return rc, out, err, timed_out

@@ -317,10 +317,19 @@ class CrossRunTools:
         }
         return eligible, unknown, receipt
 
-    def _scoped_capsules(self) -> list[dict]:
-        from looplab.engine.memory import ConceptCapsuleStore
+    def _all_capsules(self) -> list[dict]:
+        """Every stored capsule, de-duplicated to ONE row per run id — the SAME contract the Atlas/advisory
+        read-models get through `portfolio_concept_overview` (which calls `_dedup_valid_capsules`). The store
+        upserts by run_id so its own file is unique, but a memory dir assembled from CONCATENATED shards
+        (multiple machines' portfolio memory — the reason cross-run memory exists) can carry the same run
+        twice; the agent-facing tools must collapse those too, or they double-count a run in similar_runs /
+        find_concept_slugs / concept_card. Sharing one dedup helper keeps every capsule consumer consistent."""
+        from looplab.engine.memory import ConceptCapsuleStore, _dedup_valid_capsules
         p = self.dir / "concept_capsules.jsonl"
-        caps = ConceptCapsuleStore(p).all() if p.exists() else []
+        return _dedup_valid_capsules(ConceptCapsuleStore(p).all()) if p.exists() else []
+
+    def _scoped_capsules(self) -> list[dict]:
+        caps = self._all_capsules()
         eligible, _unknown, receipt = self._partition_capsules(caps)
         self._capsule_scope_receipt = receipt
         return eligible
@@ -750,15 +759,14 @@ class CrossRunTools:
             #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
             from looplab.engine.concept_registry import (canonicalize_concepts,
                                                          concept_governance_snapshot)
-            from looplab.engine.memory import ConceptCapsuleStore, _capsule_source_summary
+            from looplab.engine.memory import _capsule_source_summary
 
             # CODEX AGENT: identity, cross-run visibility, and display trust are one boundary. Resolve every
             # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
             # run "cross", while the explicitly requested global tier remains the broader synergy surface.
             taxonomy = concept_governance_snapshot(self.dir)
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
-            p = self.dir / "concept_capsules.jsonl"
-            caps = ConceptCapsuleStore(p).all() if p.exists() else []
+            caps = self._all_capsules()
             prior_caps = [cap for cap in caps
                           if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
             source_summary = _capsule_source_summary(prior_caps)
@@ -946,14 +954,13 @@ class CrossRunTools:
             from looplab.engine.concept_registry import (canonicalize_concepts,
                                                          concept_governance_snapshot,
                                                          normalize_key, resolve_slug)
-            from looplab.engine.memory import (ConceptCapsuleStore, _capsule_source_summary,
+            from looplab.engine.memory import (_capsule_source_summary,
                                                concept_profit_tendencies, portfolio_concept_graph,
                                                portfolio_concept_overview)
 
             taxonomy = concept_governance_snapshot(self.dir)
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
-            p = self.dir / "concept_capsules.jsonl"
-            caps = ConceptCapsuleStore(p).all() if p.exists() else []
+            caps = self._all_capsules()
             prior_caps = [c for c in caps
                           if not self._run_id or str(c.get("run_id") or "") != self._run_id]
             source_summary = _capsule_source_summary(prior_caps)

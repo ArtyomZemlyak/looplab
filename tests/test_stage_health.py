@@ -33,6 +33,37 @@ def test_monitor_no_false_positive_on_healthy_or_incidental_nan():
     assert m.hits == 0                                          # 'nan' inside a word / healthy loss never trips
 
 
+def test_monitor_resets_streak_on_a_finite_metric():
+    # A mixed-precision run legitimately logs a few `grad_norm: inf` steps while the loss scaler warms up
+    # and then recovers. The count is CONSECUTIVE: a finite metric clears the streak, so scattered benign
+    # overflows never accumulate to the threshold over a long run and discard a healthy result.
+    m = _StageHealthMonitor(threshold=3)
+    for _ in range(50):
+        assert not m.feed("grad_norm: inf\n")      # overflow this step...
+        assert not m.feed("grad_norm: 1.4\n")      # ...recovered next step -> streak cleared
+    assert m.hits == 0
+    # A genuinely SUSTAINED non-finite streak still fires: no finite metric to reset it.
+    assert not m.feed("loss: nan\n")
+    assert not m.feed("loss: nan\n")
+    assert m.feed("loss: nan\n")
+
+
+def test_run_argv_keeps_healthy_amp_run_with_early_overflows(tmp_path):
+    # An AMP run that overflows several times early (interleaved with finite grad_norms) then trains fine
+    # and prints a metric must NOT be tree-killed or have its clean exit rewritten to a failure.
+    prog = ("import sys\n"
+            "for i in range(8):\n"
+            "    print('grad_norm: inf'); print('grad_norm: 2.0'); sys.stdout.flush()\n"
+            "for i in range(5):\n"
+            "    print(\"{'loss': %.3f, 'grad_norm': 1.0}\" % (0.5 - i * 0.05)); sys.stdout.flush()\n"
+            "print('RECALL@100: 0.87')\n")
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, "-c", prog], str(tmp_path), timeout=30, health_check=True)
+    assert rc == 0 and not timed_out
+    assert "RECALL@100: 0.87" in out
+    assert "DIVERGED" not in err
+
+
 def test_monitor_handles_chunk_split_across_boundary():
     m = _StageHealthMonitor(threshold=1)
     m.feed("{'loss': 0.0, 'grad_no")                            # line split mid-token across chunks

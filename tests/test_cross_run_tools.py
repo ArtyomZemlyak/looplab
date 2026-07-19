@@ -611,6 +611,29 @@ def test_similar_runs_ranks_by_shared_concepts_and_excludes_self(tmp_path):
     assert "receipt scope=bound_task_family direction=max eligible_capsules=3" in out
 
 
+def test_duplicate_run_id_shards_are_not_double_counted(tmp_path):
+    # A memory dir assembled from CONCATENATED shards (multi-machine portfolio memory) can carry the same
+    # run_id twice. The store upserts, so we write the file directly to reproduce it. The agent-facing tools
+    # must collapse duplicates to ONE run just like the Atlas/advisory read-models do — else counts inflate.
+    from types import SimpleNamespace
+    dup = _cap_scoped("rA", "t", ["loss/contrastive", "regularization/r-drop"], ["kind:dataset"])
+    other = _cap_scoped("rB", "t", ["loss/contrastive"], ["kind:dataset"])
+    # Two byte-identical shards of rA + one rB, written raw (bypassing the store's upsert-by-run_id).
+    (tmp_path / "concept_capsules.jsonl").write_bytes(
+        b"\n".join(orjson.dumps(c) for c in (dup, dup, other)) + b"\n")
+
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(run_id="me", task_id="t", goal="g", direction="max",
+                                 node_concepts={0: ["loss/contrastive", "regularization/r-drop"]}))
+    out = t.execute("similar_runs", {})
+    # rA is de-duplicated: it appears once, and the eligible count is 2 distinct runs, not 3 shards.
+    assert out.count("'rA'") == 1
+    assert "eligible_capsules=2" in out
+    # concept_card counts rA once for the shared concept, not twice.
+    card = t.execute("concept_card", {"slug": "loss/contrastive"})
+    assert card.count("'rA'") == 1
+
+
 def test_similar_runs_handles_no_concepts_and_no_overlap(tmp_path):
     from types import SimpleNamespace
     _seed(tmp_path, capsules=[_cap_scoped("rA", "t", ["loss/x"], ["kind:dataset"])])

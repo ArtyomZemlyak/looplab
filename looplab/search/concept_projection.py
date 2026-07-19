@@ -89,16 +89,41 @@ def _rename_projection(raw: Any) -> tuple[dict[str, Optional[str]], set[str]]:
         return {}, set()
     if not isinstance(raw, dict):
         return {}, {"invalid_consolidation_map"}
-    if _core_normalized_renames is not None:
-        projected = dict(_core_normalized_renames(raw))
-    else:
-        projected: dict[str, Optional[str]] = {}
-        for source, target in raw.items():
-            source_id, target_id = _normalized_id(source), _normalized_id(target)
-            if source_id is not None:
-                projected[source_id] = target_id
-
     reasons: set[str] = set()
+    if _core_normalized_renames is not None:
+        normalized = _core_normalized_renames(raw)
+        # Use the helper's OWN corruption signals, not a len() heuristic. A benign consolidation where two
+        # raw spellings normalize to the SAME source id (e.g. 'reg dropout' and 'reg-dropout') collapses
+        # the map BY DESIGN — the helper resolves such duplicate spellings deterministically and does not
+        # flag them. Only a source/target that fails to canonicalize (`endpoint_problem`) or a non-dict map
+        # (`problem`) is genuine identity corruption. The old `len(projected) != len(raw)` check treated
+        # every legitimate merge as corruption, poisoning global_reasons run-wide so every node_concept_delta
+        # returned unavailable and delta_safe was False for the whole run.
+        if getattr(normalized, "problem", None) is not None or getattr(normalized, "endpoint_problem", False):
+            reasons.add("invalid_consolidation_map")
+        projected = dict(normalized)
+    else:
+        # Fallback (standalone base commit, no core owner): mirror the core helper's semantics — gather the
+        # valid targets per normalized source, resolve duplicates deterministically (min), and flag only a
+        # source or target that could not be canonicalized. Two sources that COLLAPSE are not corruption.
+        candidates: dict[str, set[str]] = {}
+        invalid_sources: set[str] = set()
+        for source, target in raw.items():
+            source_id = _normalized_id(source)
+            if source_id is None:
+                reasons.add("invalid_consolidation_map")   # unnormalizable source -> dropped -> corrupt
+                continue
+            target_id = _normalized_id(target)
+            if target_id is None:
+                reasons.add("invalid_consolidation_map")   # unnormalizable target -> poison this source
+                invalid_sources.add(source_id)
+            else:
+                candidates.setdefault(source_id, set()).add(target_id)
+        projected: dict[str, Optional[str]] = {}
+        for source_id in candidates.keys() | invalid_sources:
+            targets = candidates.get(source_id)
+            projected[source_id] = min(targets) if targets else None
+
     if any(target is None for target in projected.values()):
         reasons.add("invalid_consolidation_map")
     # Rename corruption is global identity corruption even when a particular selected parent does not
@@ -107,9 +132,6 @@ def _rename_projection(raw: Any) -> tuple[dict[str, Optional[str]], set[str]]:
         _resolved, problem = canonical_recorded_concept(source, projected)
         if problem:
             reasons.add(problem)
-    # A malformed source may be omitted by the normalized map, so compare only as a structural signal.
-    if len(projected) != len(raw):
-        reasons.add("invalid_consolidation_map")
     return projected, reasons
 
 
@@ -176,8 +198,18 @@ class CurrentConceptProjection:
         return "unavailable", ("membership_unavailable",)
 
 
+# Reasons that mean classification is simply PENDING (the data will still arrive), NOT that the concept
+# store is corrupt. When these are the ONLY reasons, an all-pending run (0 available nodes) is PARTIAL, not
+# "unavailable" — the latter would conflate a fresh, still-classifying run with a genuinely broken store.
+_PENDING_REASONS = frozenset({"membership_not_recorded"})
+
+
 def _status(reasons: set[str], available_count: int, *, fatal: bool = False) -> ProjectionStatus:
-    if fatal or (reasons and available_count == 0):
+    if fatal:
+        return "unavailable"
+    # Genuine corruption with nothing usable left is unavailable; pending-only reasons never are (a run
+    # whose nodes are still being classified is incomplete, not broken).
+    if (reasons - _PENDING_REASONS) and available_count == 0:
         return "unavailable"
     return "partial" if reasons else "complete"
 

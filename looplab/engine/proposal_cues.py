@@ -23,6 +23,36 @@ class ProposalCuesMixin:
     """The engine's proposal-cue cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
 
+    def _experiment_time_budget(self):
+        """The operative per-experiment wall-clock CEILING (seconds) a training must finish within,
+        resolved the SAME way the eval dispatcher resolves it — NOT the config `timeout` (default 30s,
+        the solution.py path; config.py:195 states 'RepoTasks use their per-profile timeout'). For a repo
+        task with an ACTIVATED eval_spec the ceiling is the LARGEST profile/base timeout
+        `command_eval.build_command` could apply (a node runs under whichever profile it selects, so the
+        largest is the real ceiling a training must fit); when no eval_spec is active the solution.py
+        `self.timeout` genuinely stands (eval_dispatch's else-branch). Returns None when no finite, positive
+        budget is knowable, so the cue degrades to generic wording instead of surfacing a wrong number.
+
+        Fixes the pre-fix cue, which read `self.timeout` unconditionally and printed '~30s (~0.0h)' for a
+        multi-hour repo training whose real per-profile budget was 600s-18000s — the exact opposite of what
+        the same cue then tells the Researcher to size against."""
+        from looplab.runtime.sandbox import finite_timeout
+        es = getattr(self, "_eval_spec", None) or {}
+        if es:
+            vals = []
+            base = es.get("timeout")
+            if base is not None:
+                vals.append(base)
+            for prof in (es.get("profiles") or {}).values():
+                if isinstance(prof, dict) and "timeout" in prof:
+                    vals.append(prof["timeout"])
+            if not vals:                    # eval_spec active but no explicit budget -> build_command's default
+                vals.append(600.0)
+            cand = max((finite_timeout(v, 0.0) for v in vals), default=0.0)
+        else:
+            cand = self.timeout if isinstance(self.timeout, (int, float)) else 0.0
+        return cand if isinstance(cand, (int, float)) and math.isfinite(cand) and cand > 0 else None
+
     def _set_complexity_hint(self, state: RunState, parent) -> None:
         """Inject the engine-computed proposal cues into the next prompt: A0d (breadth-keyed
         complexity) + A5 (remaining eval budget). No-op unless the respective knob is on; harmless on
@@ -55,12 +85,21 @@ class ProposalCuesMixin:
                             if isinstance(getattr(n, "eval_seconds", None), (int, float))
                             and n.eval_seconds and n.eval_seconds > 0),
                            key=lambda n: n.id, reverse=True)[:3]
-            calib = "; ".join(
-                f"node {n.id}: {n.eval_seconds / 60:.0f} min"
-                + (" — FAILED/killed" if n.status is NodeStatus.failed else " (completed)")
-                for n in timed)
-            limit = (self.timeout if isinstance(self.timeout, (int, float))
-                     and math.isfinite(self.timeout) and self.timeout > 0 else None)
+
+            def _outcome(n) -> str:
+                # A completed node's time is a real fit measurement; a TIMED-OUT node hit the ceiling (the
+                # one signal to size smaller); a node that failed for another reason (crash/oom/setup) ran
+                # that long then died for a NON-time reason, so labelling it "killed" would misteach the
+                # Researcher to shrink a training that actually crashed. Use the fold's own error_reason.
+                if n.status is not NodeStatus.failed:
+                    return " (completed)"
+                reason = getattr(n, "error_reason", None)
+                if reason == "timeout":
+                    return " — TIMED OUT (exceeded budget)"
+                return f" — failed ({reason})" if reason else " — failed"
+
+            calib = "; ".join(f"node {n.id}: {n.eval_seconds / 60:.0f} min" + _outcome(n) for n in timed)
+            limit = self._experiment_time_budget()
             limit_txt = (f"each experiment (train+eval) must finish within ~{limit:.0f}s "
                          f"(~{limit / 3600.0:.1f}h)" if limit else
                          "each experiment runs under a fixed wall-clock budget")

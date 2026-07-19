@@ -372,17 +372,32 @@ def test_experiment_time_budget_cue_surfaces_limit_and_calibration(tmp_path):
     # time out with no metric. Fires for repo tasks (self._repo_spec truthy) with a finite timeout.
     eng = _engine(tmp_path / "tb")
     eng._repo_spec = {"editables": []}          # make it look like a repo task
-    eng.timeout = 18000.0                        # ~5h per-experiment budget
+    eng.timeout = 18000.0                        # solution.py budget; operative only when no eval_spec is active
     st = RunState(direction="max")
     st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0}),
-                       metric=None, status=NodeStatus.failed, eval_seconds=5400.0)     # killed at 90 min
+                       metric=None, status=NodeStatus.failed, eval_seconds=5400.0,
+                       error_reason="timeout")                                          # hit the ceiling at 90 min
     st.nodes[1] = Node(id=1, operator="draft", idea=Idea(operator="draft", params={"x": 2.0}),
                        metric=0.7, status=NodeStatus.evaluated, eval_seconds=3480.0)   # completed in 58 min
+    st.nodes[2] = Node(id=2, operator="draft", idea=Idea(operator="draft", params={"x": 3.0}),
+                       metric=None, status=NodeStatus.failed, eval_seconds=600.0,
+                       error_reason="crash")                                            # died at 10 min, NOT a time-kill
     eng._set_complexity_hint(st, None)
     hint = getattr(eng.researcher, "_complexity_hint", "")
+    # No eval_spec is active, so the solution.py `self.timeout` (5h) genuinely stands.
     assert "Experiment TIME BUDGET" in hint and "~5.0h" in hint
     assert "ESTIMATE the wall-clock" in hint and "probe" in hint
-    assert "node 1: 58 min (completed)" in hint and "node 0: 90 min — FAILED/killed" in hint
+    # A timeout is labelled distinctly from a crash — a crash must NOT be mistaught as a size-me-down time-kill.
+    assert "node 1: 58 min (completed)" in hint
+    assert "node 0: 90 min — TIMED OUT (exceeded budget)" in hint
+    assert "node 2: 10 min — failed (crash)" in hint
+    # An ACTIVATED eval_spec drives the ceiling — NOT self.timeout (30s solution.py default would print
+    # "~0.0h"). This is the T1 fix: RepoTasks run under their per-profile timeout (config.py:195).
+    eng.timeout = 30.0
+    eng._eval_spec = {"timeout": 600.0, "profiles": {"full": {"timeout": 18000.0}}}
+    eng._set_complexity_hint(st, None)
+    hint = getattr(eng.researcher, "_complexity_hint", "")
+    assert "Experiment TIME BUDGET" in hint and "~5.0h" in hint and "~30s" not in hint
     # not a repo task -> the cue stays silent (no false alarm on toy/dataset runs without a repo)
     eng._repo_spec = {}
     eng._set_complexity_hint(st, None)

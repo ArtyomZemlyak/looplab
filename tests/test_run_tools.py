@@ -282,6 +282,46 @@ def test_node_concept_delta_distinguishes_pending_classification_from_empty_tags
     assert "untagged" not in classified_empty
 
 
+def test_benign_consolidation_merge_is_not_flagged_as_corruption():
+    # Two raw spellings of the SAME source ('reg dropout' and 'reg-dropout') both canonicalize to one id.
+    # That is a legitimate merge, NOT identity corruption: it must not poison global_reasons (which would
+    # make every node_concept_delta unavailable and delta_safe False run-wide).
+    from looplab.search.concept_projection import current_concept_projection
+
+    st = RunState(goal="g", direction="max", run_base_concepts=["reg/dropout"])
+    st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                        status=NodeStatus.evaluated)}
+    st.node_concepts = {0: ["reg/dropout"]}
+    _mark_concepts_exact(st)
+    st.concept_consolidation = {"reg dropout": "reg/dropout", "reg-dropout": "reg/dropout"}
+
+    projection = current_concept_projection(st)
+    assert "invalid_consolidation_map" not in projection.global_reasons
+    assert projection.node_status(0) == ("complete", ())
+    # A genuinely malformed target still fails closed.
+    st.concept_consolidation = {"reg/dropout": "!!!"}
+    assert "invalid_consolidation_map" in current_concept_projection(st).global_reasons
+
+
+def test_all_pending_run_is_partial_not_unavailable():
+    # A fresh run whose only issue is that memberships have not been recorded yet is PENDING, not corrupt.
+    # The aggregate status must be "partial" (data still arriving), never "unavailable" (broken store).
+    from looplab.search.concept_projection import current_concept_projection
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                        status=NodeStatus.evaluated)}
+    st.node_concepts = {}                                   # nothing classified yet -> 0 available nodes
+
+    projection = current_concept_projection(st)
+    assert projection.available_nodes == frozenset()
+    assert projection.reasons == ("membership_not_recorded",)
+    assert projection.status == "partial"                  # NOT "unavailable"
+    # A real corruption reason with nothing usable still collapses to unavailable.
+    st.node_concept_materialization_receipts = "not-a-dict"
+    assert current_concept_projection(st).status == "unavailable"
+
+
 def test_concept_tools_share_strict_receipt_and_current_lifecycle_projection():
     from looplab.search.concept_projection import (concept_inheritance_context,
                                                     current_concept_projection)
