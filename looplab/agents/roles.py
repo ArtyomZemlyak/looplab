@@ -57,14 +57,23 @@ _SWEEP_OFFER = ("Optionally, when a hyperparameter is cheap to vary and the task
 # P6: the per-experiment `eval_timeout` ask, shared by both researchers. Scoped HONESTLY: the
 # engine consumes `idea.eval_timeout` only on the sandbox (script-solution) eval branch;
 # repo/command-eval stages take their timeouts from the stage manifest / the task's cmd spec.
+# The repo/command clause used to stop at "leave it null there", which wrongly read as "the
+# time limit is not your concern" — repo agents then configured trainings that could not finish
+# in the budget and were killed with no metric. It now states the limit is a HARD budget the
+# experiment must be SIZED to fit (the live number + prior-node timings arrive via the engine's
+# TIME-BUDGET proposal cue, engine/proposal_cues.py).
 _EVAL_TIMEOUT_GUIDANCE = (
     "If THIS experiment is genuinely compute-heavy and needs more wall-clock than a "
     "light model — a neural network (CNN/RNN/transformer), a large ensemble, many CV "
     "folds/seeds, or a big grid — set `eval_timeout` to a realistic per-run budget in "
     "SECONDS (e.g. 300-1800). Leave it null for ordinary/light experiments so they use "
-    "the run default. (`eval_timeout` applies to script-solution tasks run in the sandbox; "
-    "on repo/command tasks the per-stage timeouts come from the stage manifest / the "
-    "task's cmd, so leave it null there.) ")
+    "the run default. (`eval_timeout` sets the budget for script-solution tasks run in the "
+    "sandbox; on repo/command tasks the per-stage limit instead comes from the stage manifest / "
+    "the task's cmd — leave `eval_timeout` null there. But that per-stage limit is a HARD "
+    "wall-clock budget: an experiment that does not finish within it is KILLED with NO metric, "
+    "so SIZE the experiment to FIT — estimate total training steps x per-step time and prefer "
+    "fewer epochs, a subsample, or a short probe run to measure per-step cost first; a smaller "
+    "experiment that COMPLETES beats a bigger one that gets killed.) ")
 # P14: the schema requires `operator` but the engine's policy overwrites it unconditionally
 # (orchestrator's node-creation sites) — say so, in BOTH researcher prompts, so the model
 # doesn't strategize around a dead field.
