@@ -739,7 +739,7 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
   const onSave = async () => {
     if (invalidCount) {
       focusFirstInvalid()
-      onToast('Fix invalid numeric settings before saving')
+      onToast('Fix invalid settings before saving')
       return
     }
     const submittedForm = form

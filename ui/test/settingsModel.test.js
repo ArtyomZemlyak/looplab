@@ -94,6 +94,28 @@ test('numeric settings distinguish invalid input from a deliberate blank clear',
     { valid: true, value: null, error: '' })
 })
 
+test('validation catches a blanked REQUIRED non-numeric field, not just int/float', () => {
+  // A blank required enum/text under a run-config edit (allowClear:false) must be flagged. Before the fix
+  // settingsValidationErrors only checked int/float, so the field silently coerced to INVALID_SETTING_VALUE
+  // and JSON.stringify dropped it from the payload — a silent data loss under a "saved" toast.
+  assert.equal(FIELD_BY_KEY.policy.type, 'enum')
+  assert.notEqual(FIELD_BY_KEY.policy.nullable, true)                        // policy is required
+  // A valid value has no error; blanking it under allowClear:false does (checked per-key, since a partial
+  // form leaves other required fields blank too — the real editor always carries the full field set).
+  assert.equal(
+    settingsValidationErrors({ policy: 'mcts' }, SETTINGS_SCHEMA, { allowClear: false }).policy, undefined)
+  assert.match(
+    settingsValidationErrors({ policy: '' }, SETTINGS_SCHEMA, { allowClear: false }).policy, /required/i)
+  // fromForm would indeed have produced the payload-dropping symbol for that blank.
+  assert.equal(coerce(FIELD_BY_KEY.policy, '', { allowClear: false }), INVALID_SETTING_VALUE)
+  // Clearing a GLOBAL override (allowClear defaults true) stays valid — no false error on that path.
+  assert.equal(settingsValidationErrors({ policy: '' }, SETTINGS_SCHEMA).policy, undefined)
+  // A genuinely nullable field left blank is still allowed even under allowClear:false.
+  assert.equal(
+    settingsValidationErrors({ memory_dir: '' }, SETTINGS_SCHEMA, { allowClear: false }).memory_dir,
+    undefined)
+})
+
 test('accepted save records rebase without erasing edits made after submit', () => {
   const submitted = { max_nodes: '08', policy: 'greedy', removed: 'old', roles: ['boss'] }
   const current = { ...submitted, policy: 'mcts', roles: ['boss', 'strategist'], localOnly: true }

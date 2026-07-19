@@ -214,7 +214,12 @@ export function coerce(field, raw, options = {}) {
 export function settingsValidationErrors(form, schema, options = {}) {
   const errors = {}
   for (const [key, field] of Object.entries(fieldsFor(schema))) {
-    if (field.type !== 'int' && field.type !== 'float') continue
+    // Secrets are write-only (skipped by fromForm, sent through their own endpoint); a blank secret is the
+    // normal "leave unchanged" state, never an error. EVERY other type is validated — not just int/float —
+    // so a blanked REQUIRED text/enum/list surfaces its error instead of silently coercing to the
+    // INVALID_SETTING_VALUE symbol, which fromForm keeps and JSON.stringify then DROPS from the request
+    // body: the field vanished but the save still reported success (a silent data loss).
+    if (field.type === 'secret') continue
     const result = parseSettingValue(field, form?.[key], options)
     if (!result.valid) errors[key] = result.error
   }
@@ -256,7 +261,7 @@ export function fromForm(form, schema, options = {}) {
 export function settingsSavePayload(form, agentControl, baselineForm, baselineAgentControl, schema) {
   const validationErrors = settingsValidationErrors(form || {}, schema)
   if (Object.keys(validationErrors).length) {
-    const error = new Error('Fix invalid numeric settings before saving.')
+    const error = new Error('Fix invalid settings before saving.')
     error.code = 'invalid_settings_form'
     error.validationErrors = validationErrors
     throw error

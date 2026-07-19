@@ -12,7 +12,7 @@ const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 test('versioned SVG sprite preserves every OpIcon glyph and the unknown-name fallback', async () => {
   const [source, sprite] = await Promise.all([
     readFile(new URL('../src/icons.jsx', import.meta.url), 'utf8'),
-    readFile(new URL('../public/looplab-icons-v1.svg', import.meta.url), 'utf8'),
+    readFile(new URL('../src/looplab-icons-v1.svg', import.meta.url), 'utf8'),
   ])
   const declared = source.match(/'flag trending[^']+'/)?.[0].slice(1, -1).split(' ') || []
   const document = new JSDOM(sprite, { contentType: 'image/svg+xml' }).window.document
@@ -35,10 +35,12 @@ test('versioned SVG sprite preserves every OpIcon glyph and the unknown-name fal
       name: 'bell', size: 22, className: 'probe',
     }))
     const fallback = renderToStaticMarkup(React.createElement(OpIcon, { name: 'not-a-glyph' }))
-    assert.match(known, /href="\.\/looplab-icons-v1\.svg#bell"/)
+    // Same-document fragment refs (not an external-document href) — the WebKit/Safari-safe form.
+    assert.match(known, /href="#bell"/)
+    assert.doesNotMatch(known, /\.svg#/)
     assert.match(known, /width="22"[^>]*height="22"/)
     assert.match(known, /aria-hidden="true"[^>]*focusable="false"/)
-    assert.match(fallback, /href="\.\/looplab-icons-v1\.svg#dot"/)
+    assert.match(fallback, /href="#dot"/)
   } finally {
     await vite.close()
   }

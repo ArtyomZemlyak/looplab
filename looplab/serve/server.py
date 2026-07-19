@@ -699,14 +699,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # to preserve its fragment bearer.
             return _review_index_response(trailing_slash=True)
 
-        @app.get("/looplab-icons-v1.svg")
-        def icon_sprite():
-            """The stable, explicitly versioned external glyph sprite is immutable like hashed assets."""
-            path = dist / "looplab-icons-v1.svg"
-            if not path.is_file():
-                return JSONResponse({"detail": "icon sprite is unavailable"}, status_code=404,
-                                    headers={"Cache-Control": "no-store"})
-            return FileResponse(str(path), headers={"Cache-Control": _IMMUTABLE_ASSET_CACHE})
+        # (The glyph sprite is no longer served as an external asset: WebKit/Safari refuses to resolve an
+        # external-document `<use href="sprite.svg#id">`, so the UI now bundles the sprite and injects it
+        # into the document, referencing same-document `#id` fragments. There is nothing left to serve.)
 
         @app.get("/{path:path}")
         def spa(path: str, request: Request):
