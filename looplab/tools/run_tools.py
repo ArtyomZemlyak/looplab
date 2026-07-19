@@ -65,7 +65,8 @@ class RunTools:
         return [
             fn_spec("list_experiments",
                 "List experiments tried so far (the search DAG). Use to see what's been done before "
-                "proposing. `sort`: best|worst|recent.",
+                "proposing. `sort`: best|worst|recent. The optional theme filter uses the current "
+                "receipt-aware concept-axis projection and explicitly qualifies incomplete results.",
                 {"sort": {"type": "string", "enum": ["best", "worst", "recent"]},
                  "limit": {"type": "integer"},
                  "theme": {"type": "string", "description": "filter to one theme slug (optional)"}}),
@@ -96,7 +97,8 @@ class RunTools:
                  "params": {"type": "object", "description": "param dict to compare instead of a node"},
                  "k": {"type": "integer"}}),
             fn_spec("list_themes",
-                "List the experiment themes explored so far with counts and best metric per theme.",
+                "List current experiment concept axes with counts and best metric. Incomplete "
+                "materialization is explicitly qualified; legacy themes remain bounded hints.",
                 {}),
             fn_spec("read_concept_tree",
                 "Read THIS run's CONCEPT hierarchy — the axis/slug concepts the experiments touch, as an "
@@ -175,21 +177,37 @@ class RunTools:
         sort = (args.get("sort") or "best").lower()
         limit = int(args.get("limit") or 10)
         theme = args.get("theme")
+        projection = self._concept_projection(st)
+        # CODEX AGENT: append-only audit rows are not current experiments. Use the shared lifecycle
+        # boundary even for `recent`, whose raw state.nodes traversal used to resurrect tombstones and
+        # aborted work that every other current concept surface had already removed.
+        active_nodes = projection.active_nodes
         if sort == "recent":
-            nodes = sorted(st.nodes.values(), key=lambda n: n.id, reverse=True)
+            nodes = sorted(
+                (node for node in st.nodes.values() if node.id in active_nodes),
+                key=lambda n: n.id, reverse=True,
+            )
         else:
-            nodes = digest.top_nodes(st, len(st.nodes), worst=(sort == "worst"))
+            nodes = [node for node in digest.top_nodes(
+                st, len(st.nodes), worst=(sort == "worst")) if node.id in active_nodes]
         if theme:
-            # Filter on the MULTI-membership concept axes (digest.node_axes over folded node_concepts) — the
-            # EXACT vocabulary list_themes advertises (`_themes` -> theme_rollup -> node_axes). Phase 6a: a node
-            # tagged on a non-first axis (e.g. 'data' as its 2nd concept) is still returned for theme="data";
-            # a single node_theme filter would silently return nothing for an axis list_themes just listed.
-            nodes = [n for n in nodes if theme in digest.node_axes(st, n)]
+            # CODEX AGENT: filter on the SAME receipt-aware multi-axis projection `_themes` advertises.
+            # Unavailable nodes contribute no inferred authored fallback; absent legacy rows may retain a
+            # compatibility hint, but the response remains explicitly non-authoritative.
+            axes_by_node = self._current_theme_axes(st, projection)
+            nodes = [node for node in nodes if theme in axes_by_node.get(node.id, ())]
         nodes = nodes[:limit]
         if not nodes:
+            if theme and projection.status != "complete":
+                return (f"({self._projection_note(projection)}; no retained current experiments "
+                        f"match theme={theme}; this is NOT a complete zero)")
             return "(no matching experiments)"
         head = f"{len(nodes)} experiment(s), sort={sort}" + (f", theme={theme}" if theme else "")
-        return head + ":\n" + "\n".join(self._line(n) for n in nodes)
+        rendered = head + ":\n" + "\n".join(self._line(n) for n in nodes)
+        if theme and projection.status != "complete":
+            return (f"{self._projection_note(projection)}; retained current theme matches only:\n"
+                    f"{rendered}")
+        return rendered
 
     def _read(self, st: RunState, nid: int, trials_arg=None) -> str:
         n = st.nodes.get(nid)
@@ -320,13 +338,62 @@ class RunTools:
             f"dist={d:.3f}  {self._line(n)}" for d, n in scored[:k])
 
     def _themes(self, st: RunState) -> str:
-        roll = digest.theme_rollup(st)
+        projection = self._concept_projection(st)
+        roll = self._current_theme_rollup(st, projection)
         if not roll:
+            if projection.status != "complete":
+                return (f"({self._projection_note(projection)}; no retained current theme assignments; "
+                        "this is NOT proof that no themes are assigned)")
             return "(no themes assigned yet)"
-        return "\n".join(
+        rendered = "\n".join(
             f"{t}: {d['count']} experiment(s)" +
             (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
             for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
+        if projection.status != "complete":
+            return (f"{self._projection_note(projection)}; showing retained current theme hints "
+                    "(legacy fallback only where membership is unrecorded):\n" + rendered)
+        return rendered
+
+    @staticmethod
+    def _current_theme_axes(st: RunState, projection) -> dict[int, set[str]]:
+        """Current coarse axes, retaining legacy hints only for genuinely absent folded rows."""
+        axes_by_node: dict[int, set[str]] = {}
+        for node_id in projection.active_nodes:
+            if node_id in projection.memberships:
+                axes = {
+                    concept_id.split("/", 1)[0]
+                    for concept_id in projection.memberships[node_id]
+                    if concept_id
+                }
+            elif node_id in projection.absent_nodes:
+                node = st.nodes.get(node_id)
+                axes = digest.node_axes(st, node) if node is not None else set()
+            else:
+                # CODEX AGENT: a receipt-unavailable membership is unknown, not a license to revive
+                # frozen authored concepts as if they were the node's current classification.
+                axes = set()
+            if axes:
+                axes_by_node[node_id] = axes
+        return axes_by_node
+
+    @classmethod
+    def _current_theme_rollup(cls, st: RunState, projection) -> dict[str, dict]:
+        """Receipt/lifecycle-aware equivalent of the legacy digest theme rollup."""
+        better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
+        out: dict[str, dict] = {}
+        axes_by_node = cls._current_theme_axes(st, projection)
+        for node_id in sorted(projection.active_nodes):
+            node = st.nodes.get(node_id)
+            if node is None:
+                continue
+            metric = digest.node_metric(node)
+            for axis in sorted(axes_by_node.get(node_id, ())):
+                entry = out.setdefault(axis, {"count": 0, "best_metric": None})
+                entry["count"] += 1
+                if (metric is not None
+                        and (entry["best_metric"] is None or better(metric, entry["best_metric"]))):
+                    entry["best_metric"] = metric
+        return out
 
     @staticmethod
     def _concept_projection(st: RunState):

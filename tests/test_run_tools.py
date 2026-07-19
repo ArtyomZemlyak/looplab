@@ -370,6 +370,11 @@ def test_concept_tools_share_strict_receipt_and_current_lifecycle_projection():
     assert "#4: (no concepts tagged)" == tools.execute("node_concepts", {"node_id": 4})
     assert "#1" in tools.execute("concept_nodes", {"concept": "safe/current"})
     assert "#2" not in tools.execute("concept_nodes", {"concept": "secret/tombstoned"})
+    themes = tools.execute("list_themes", {})
+    assert "PARTIAL" in themes and "safe" in themes
+    assert "tombstoned" not in themes and "aborted" not in themes
+    no_secret = tools.execute("list_experiments", {"theme": "secret"})
+    assert "PARTIAL" in no_secret and "NOT a complete zero" in no_secret
     assert "UNAVAILABLE" in tools.execute("node_concept_delta", {"node_id": 0})
     delta_spec = next(spec["function"]["description"] for spec in tools.specs()
                       if spec["function"]["name"] == "node_concept_delta")
@@ -483,6 +488,54 @@ def test_deleted_missing_base_receipt_does_not_poison_current_concept_tools():
     nodes = tools.execute("concept_nodes", {"concept": "known/x"})
     assert "no concepts tagged yet" in tree and "UNAVAILABLE" not in tree
     assert "no experiments tagged" in nodes and "complete zero" not in nodes
+
+
+def test_theme_tools_do_not_infer_exact_absence_or_revive_unavailable_authored_theme():
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft",
+                idea=Idea(operator="draft", theme="stale-authored", params={}),
+                status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {0: ["stale-authored/current"]}
+    _mark_concepts_exact(st)
+    st.node_concept_materialization_receipts = {
+        0: {"status": "unavailable", "reasons": ["delta_dependency_missing_run_base"]}}
+    tools = RunTools()
+    tools.bind_state(st)
+
+    themes = tools.execute("list_themes", {})
+    filtered = tools.execute("list_experiments", {"theme": "stale-authored"})
+
+    assert "UNAVAILABLE" in themes and "NOT proof" in themes
+    assert "stale-authored:" not in themes
+    assert "UNAVAILABLE" in filtered and "NOT a complete zero" in filtered
+    assert "#0" not in filtered and "no matching experiments" not in filtered
+
+
+def test_theme_and_recent_tools_share_current_node_lifecycle():
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=0.9,
+                status=NodeStatus.evaluated, tombstoned=True),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=0.8,
+                status=NodeStatus.evaluated),
+        2: Node(id=2, operator="draft", idea=Idea(operator="draft"), metric=0.7,
+                status=NodeStatus.evaluated),
+    }
+    st.aborted_nodes = [1]
+    st.node_concepts = {0: ["deleted/a"], 1: ["aborted/a"], 2: ["live/a"]}
+    _mark_concepts_exact(st)
+    tools = RunTools()
+    tools.bind_state(st)
+
+    themes = tools.execute("list_themes", {})
+    recent = tools.execute("list_experiments", {"sort": "recent"})
+
+    assert "live:" in themes and "deleted:" not in themes and "aborted:" not in themes
+    assert "#2" in recent and "#0" not in recent and "#1" not in recent
+    assert "no matching experiments" in tools.execute(
+        "list_experiments", {"theme": "deleted"})
 
 
 def test_partial_child_delta_never_infers_removal_from_an_omitted_membership():

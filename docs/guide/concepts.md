@@ -565,7 +565,10 @@ infers no delta. A partial child keeps only retained `added`/`inherited` lower b
 prove that an inherited concept was removed. Aggregate
 tree/membership tools combine receipts only for current nodes, so they neither claim exact absence during
 an unresolved materialization nor let a receipt belonging only to a tombstoned/aborted node poison the
-live view.
+live view. `list_themes` and `list_experiments(theme=...)` cross that same receipt/lifecycle boundary:
+unavailable memberships never revive frozen authored concepts, retained partial or legacy matches are labelled
+as hints rather than exact results, and an incomplete no-match is not reported as a complete zero. The unfiltered
+`list_experiments(sort="recent")` also excludes tombstoned and aborted audit rows.
 
 Full or materialized memberships fold into `RunState.node_concepts` at/after `node_created`
 (deterministic, offline — no tagging cadence required), and the strategist cadence may later
