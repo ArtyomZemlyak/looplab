@@ -74,13 +74,16 @@ def run_start_pinned_settings(state) -> dict:
 # always wins (see `_apply_profile`). Most engine intelligence lives behind individual flags. The
 # PART IV/V cross-run + concept-graph machinery (concept_pivot, graded_novelty, cross_run_concepts /
 # _advisory / _structured_claims / _curation / _read_tools, fingerprint_universal, foresight_verify)
-# now ships ON in the product `Settings` default — it is audit/advisory/proposal-only (never rejects
-# or changes best-metric selection) so it is safe to run by default on real tasks, per the owner's
-# decision to actually use the built-and-tested features. The bare-library `EngineOptions` default
-# stays lean (see tests/test_options_divergence.py — product side is the aggressive one) so a toy
-# `Engine(...)` in a test doesn't fire cross-run LLM work unasked. The trust/confirm/ablate QUALITY
+# now ships ON in the product `Settings` default. That is an explicit experimental product choice,
+# not a claim that a frozen A/B or workload-wide cost/quality gate has cleared: the bundle can steer
+# prompts and candidate generation, change graded-novelty admission / pre-execution choices, and add
+# paid LLM work when its client and memory prerequisites are present. The bare-library `EngineOptions`
+# default stays lean (see tests/test_options_divergence.py — product side is the aggressive one) so a
+# toy `Engine(...)` in a test doesn't fire cross-run LLM work unasked. The trust/confirm/ablate QUALITY
 # bundle still ships OFF and is turned on by `thorough`. Every value here is reachable by hand — the
 # profile is a convenience, never a hidden mode.
+# CODEX AGENT: keep this rationale behavioral and evidence-based; do not relabel read-only storage
+# access or proposal-only governance as a no-op for agent behavior, cost, or proposal admission.
 #
 # `thorough` deliberately touches only QUALITY/TRUST machinery, not spend: it does NOT raise
 # max_nodes / max_parallel (those are cost knobs the user owns). It enables multi-seed confirmation
@@ -568,7 +571,8 @@ class Settings(BaseSettings):
     # uncovered regions ("0 coverage in {negatives/external-mining, distillation} — go there") instead
     # of the vague "broaden". ON by default in the product Settings (ce4a379), EngineOptions off: it
     # only enriches an already-mode-gated explore hint, never forces exploration, and no-ops for a task
-    # with no curated concept skeleton. Audit + prompt-cue only; never touches selection. See search/concept_graph.py.
+    # with no curated concept skeleton. The snapshot is auditable, but its prompt cue can change future
+    # candidate generation; it does not directly rewrite best-metric selection. See search/concept_graph.py.
     # DESIGN NOTE (2026-07-17 critique): now ON unconditionally, but a toy / non-ML task yields EMPTY concept
     # tags while still paying the per-node LLM concept cost (~10 calls/node with the full Part IV/V bundle).
     # Consider AUTO-QUIESCING: if the heuristic tagger returns empty for the first N nodes (no concept signal),
@@ -626,10 +630,11 @@ class Settings(BaseSettings):
     # PART IV cross-run Step 5 advisory (§21.20.5). Fold the bounded cross-run CONTEXT PACK — evidence-
     # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —
     # into the Researcher's proposal prompt, exactly like the E4 cross-run prior note. Advisory ONLY: it is
-    # prompt-grounding, never touches node selection (§21.7). Reads `memory_dir` (lessons.jsonl +
-    # concept_capsules.jsonl); "" when empty. ON by default in the product Settings (ce4a379 — the audit-only
-    # Step 2 flipped to a live prompt cue after the frozen A/B cleared it); the bare-library EngineOptions
-    # default stays off (engine/options.py, frozen in test_options_divergence). See engine/proposal_cues.py.
+    # prompt-grounding: it can change the Researcher's later candidates, but does not directly rewrite
+    # best-metric selection (§21.7). Reads `memory_dir` (lessons.jsonl + concept_capsules.jsonl); "" when
+    # empty. ON by explicit experimental product choice; no frozen A/B validation is claimed. The
+    # bare-library EngineOptions default stays off (engine/options.py, frozen in
+    # test_options_divergence). See engine/proposal_cues.py.
     cross_run_advisory: bool = True
     # PART IV cross-run §21.20.13 (full CR of the lean fuzzy claim merge). Switch the claim read-model to the
     # SCOPE+POLARITY-safe STRUCTURED claim key (engine/claim_key.py): claims from different tasks never
@@ -644,9 +649,9 @@ class Settings(BaseSettings):
     # PROPOSE a curation — merge duplicate slugs / split conflated ones / purge noise. Proposals are LOGGED to
     # `concept_curation_log.jsonl` for operator ratification (via the serve/CLI governance surface); the LLM
     # never mutates fold state. Portfolio-scoped, decoupled from the run's terminal state (never blocks/
-    # retries finalize). ON by default in the product Settings (ce4a379 — proposal-only, so safe to default on);
-    # needs `memory_dir` + an LLM backend. The bare-library EngineOptions default stays off (engine/options.py).
-    # See engine/lessons.py.
+    # retries finalize). Proposal-only describes its governance authority, not its runtime cost: with
+    # `memory_dir` and an LLM backend it can add paid finalize calls. ON by explicit experimental product
+    # choice; the bare-library EngineOptions default stays off (engine/options.py). See engine/lessons.py.
     cross_run_curation: bool = True
     # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
@@ -921,10 +926,11 @@ class Settings(BaseSettings):
     # PART V §22 — read-only CROSS-RUN KNOWLEDGE tool for the reasoning roles (Researcher, Strategist,
     # deep-research, and a Developer-scoped variant). Adds `cross_run_prior_attempts` / `cross_run_claims`
     # / `cross_run_atlas` over the §21.20 read-models (concept overview + claim assessments + atlas), read
-    # from `memory_dir` (lessons.jsonl + concept_capsules.jsonl). ADVISORY ONLY — an agent may cite what it
-    # finds but never mutates cross-run truth (facts are engine-written, verdicts operator-ratified, §22.4).
-    # ON by default in the product Settings (ce4a379), EngineOptions off; the cross-run stores only
-    # exist once the Part-IV features have run.
+    # from `memory_dir` (lessons.jsonl + concept_capsules.jsonl). Read-only is a storage-authority
+    # boundary, not a behavioral no-op: retrieved content can steer later proposals, and a tool-using
+    # reasoning loop can consume additional model calls. The tools never mutate cross-run truth (facts
+    # are engine-written, verdicts operator-ratified, §22.4) or directly select a winner. ON by explicit
+    # experimental product choice, EngineOptions off; stores only exist once Part-IV features have run.
     cross_run_read_tools: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
