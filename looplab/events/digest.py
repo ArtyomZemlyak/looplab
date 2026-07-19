@@ -299,6 +299,68 @@ def trust_reflection(state: RunState, max_shown: int = 2) -> str:
             "answers/labels or fit on validation/test data.")
 
 
+def watchdog_reflection(events, max_shown: int = 2) -> str:
+    """Signal-delivery (§1): surface the most recent LIVE-WATCHDOG observations — training-health
+    verdicts (`EV_TRAIN_MONITOR_ALERT`) and ASHA intermediate-rank flags (`EV_ASHA_RANK`) — to the NEXT
+    proposal, so the Researcher reacts to a configuration whose TRAINING was already observed to be
+    unhealthy or underperforming instead of re-deriving it. These are DIAGNOSTIC (fold-ignored) events,
+    so they never reach `state`; this reads them straight off the raw event rows (the caller passes
+    `store.read_all()`), keeps only the LATEST observation per node so a chatty log can't flood the
+    prompt, and bounds to the most-recent `max_shown` nodes. Complements `_failure_reflection` (which
+    surfaces the TERMINAL reason of a killed/failed node): with the default config both watchdog kills
+    are OFF, so the flagged node usually runs to completion and its live curve would otherwise be lost.
+    Advisory wording (the watchdogs are heuristics). "" when there's nothing to say — so the prompt is
+    byte-identical when off or quiet. Pure; extracted here so `tests/test_signal_delivery.py` exercises
+    it directly."""
+    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
+    mon: dict = {}
+    asha: dict = {}
+    for e in events or ():
+        etype = getattr(e, "type", None)
+        if etype not in (EV_TRAIN_MONITOR_ALERT, EV_ASHA_RANK):
+            continue
+        d = getattr(e, "data", None) or {}
+        nid = d.get("node_id")
+        if nid is None:
+            continue
+        # Events arrive in append (seq) order, so a later row for the same node overwrites an earlier
+        # one — the LATEST verdict/rank per node wins with no explicit seq compare.
+        (mon if etype == EV_TRAIN_MONITOR_ALERT else asha)[nid] = d
+    node_ids = sorted(set(mon) | set(asha), reverse=True)[:max_shown]      # most-recent nodes first
+    lines = []
+    for nid in node_ids:
+        parts = []
+        m = mon.get(nid)
+        if m:
+            status = str(m.get("status") or "flagged")
+            reason = " ".join(str(m.get("reason") or "").split())[:120]    # reason is redacted at source
+            conf = m.get("confidence")
+            seg = f"training flagged {status}"
+            if reason:
+                seg += f" ({reason})"
+            if isinstance(conf, (int, float)) and not isinstance(conf, bool):
+                seg += f" [confidence {conf:.0%}]"
+            parts.append(seg)
+        a = asha.get(nid)
+        if a:
+            val, q, pop = a.get("intermediate"), a.get("quantile"), a.get("population")
+            seg = "intermediate metric"
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                seg += f" {val:.4g}"
+            seg += " ranked below"
+            if isinstance(q, (int, float)) and not isinstance(q, bool):
+                seg += f" the {q:.0%} bar of"
+            seg += (f" {pop} finished sibling(s)" if isinstance(pop, int) and not isinstance(pop, bool)
+                    else " finished siblings")
+            parts.append(seg)
+        if parts:
+            lines.append(f"node {nid}: " + "; ".join(parts))
+    if not lines:
+        return ""
+    return ("\nLive-watchdog signals — a recent experiment's training was observed to be weak; avoid "
+            "re-proposing the same configuration: " + "; ".join(lines) + ".")
+
+
 def auto_char_cap(state: RunState) -> int:
     """M5: scale the digest budget with the run instead of one flat cap — a 100-node MLE-bench
     run carries far more decision-relevant state than an 8-node toy run. Bounded so a huge run

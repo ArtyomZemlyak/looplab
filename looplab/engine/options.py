@@ -92,6 +92,7 @@ class EngineOptions:
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt
+    watchdog_reflection: bool = False    # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
     deep_repair: bool = False            # C3: structured failure-taxonomy repair context
     localize_faults: bool = False        # C1: surface fault-localized files for repo tasks
     feature_engineering: bool = False    # I1: CV-gated feature-engineering directive

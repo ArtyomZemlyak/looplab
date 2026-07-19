@@ -26,6 +26,22 @@ def _probe_trust_flags():
     return trust_reflection(st), "data_leakage:fit_on_test"
 
 
+def _probe_watchdog_signals():
+    # DIAGNOSTIC events (fold-ignored) rendered straight off raw rows — not from RunState.
+    from looplab.core.models import Event
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
+    events = [
+        Event(seq=1, ts=0.0, type=EV_TRAIN_MONITOR_ALERT,
+              data={"node_id": 4, "generation": 0, "status": "broken",
+                    "reason": "loss diverged to NaN", "confidence": 0.9}),
+        Event(seq=2, ts=0.0, type=EV_ASHA_RANK,
+              data={"node_id": 5, "generation": 0, "intermediate": 0.3,
+                    "quantile": 0.5, "population": 4, "direction": "max"}),
+    ]
+    return watchdog_reflection(events), "loss diverged to NaN"
+
+
 def _probe_triage_rationale():
     from looplab.events.digest import _node_line
     n = Node(id=3, operator="debug", idea=Idea(operator="debug", params={}),
@@ -79,6 +95,7 @@ def _probe_run_states():
 
 _PROBES = {
     "trust_flags": _probe_trust_flags,
+    "watchdog_signals": _probe_watchdog_signals,
     "triage_rationale": _probe_triage_rationale,
     "foresight_calibration": _probe_foresight_calibration,
     "deep_research_memo": _probe_deep_research_memo,
@@ -170,6 +187,47 @@ def test_foresight_scoreboard_counts_a_crashed_pick_as_a_miss():
                        idea=Idea(operator="improve", params={}), status=NodeStatus.pending)
     st.foresight_selected.append({"node_id": 3, "confidence": 0.8})
     assert "last 2 predict-before-execute" in foresight_scoreboard(st)
+
+
+def _wd_event(seq, etype, **data):
+    from looplab.core.models import Event
+    return Event(seq=seq, ts=0.0, type=etype, data=data)
+
+
+def test_watchdog_reflection_empty_and_irrelevant_events_render_nothing():
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_NODE_EVALUATED
+    assert watchdog_reflection([]) == ""                                  # nothing to say
+    assert watchdog_reflection([_wd_event(1, EV_NODE_EVALUATED, node_id=1, metric=0.5)]) == ""  # wrong type
+
+
+def test_watchdog_reflection_keeps_latest_per_node_and_combines_both_signals():
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
+    events = [
+        _wd_event(1, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=0, status="watch",
+                  reason="loss plateaued early", confidence=0.4),
+        _wd_event(2, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=0, status="broken",
+                  reason="loss diverged", confidence=0.85),          # later -> supersedes the watch above
+        _wd_event(3, EV_ASHA_RANK, node_id=2, generation=0, intermediate=0.31,
+                  quantile=0.5, population=4, direction="max"),
+    ]
+    out = watchdog_reflection(events)
+    assert "node 2:" in out
+    assert "broken" in out and "loss diverged" in out                 # latest verdict wins
+    assert "loss plateaued early" not in out                          # the superseded earlier tick is dropped
+    assert "intermediate metric 0.31 ranked below" in out             # both signals combined on one line
+    assert "50% bar of 4 finished sibling(s)" in out
+
+
+def test_watchdog_reflection_bounds_to_most_recent_nodes():
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_ASHA_RANK
+    events = [_wd_event(i, EV_ASHA_RANK, node_id=i, generation=0, intermediate=0.1 * i,
+                        quantile=0.5, population=3, direction="max") for i in range(1, 6)]
+    out = watchdog_reflection(events, max_shown=2)
+    assert "node 5:" in out and "node 4:" in out                      # the two most recent nodes...
+    assert "node 3:" not in out and "node 1:" not in out              # ...older ones are bounded out
 
 
 def test_trust_reflection_names_a_hardcoded_metric_flag():

@@ -104,7 +104,7 @@ built-and-tested machinery on in one word — multi-seed confirmation (`confirm_
 `confirm_seeds=3`), the reward-hack / leakage / critic monitors **plus**
 `trust_gate=gate` (a flagged win can no longer be selected as best), ablation-driven refinement
 (`ablate_every=3`), the adaptive operator bandit (`operator_bandit`), and the proposal cues
-(`complexity_cue`, `budget_aware`, `failure_reflection`).
+(`complexity_cue`, `budget_aware`, `failure_reflection`, `watchdog_reflection`).
 
 A profile is **config-first**: it only fills fields you did *not* set yourself, so any explicit
 knob — in the file, on the CLI (`--set`), or via `LOOPLAB_*` — always wins. It deliberately touches
@@ -250,6 +250,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `dep_install_timeout` | `LOOPLAB_DEP_INSTALL_TIMEOUT` | `900.0` | Per-package install budget (seconds) |
 | `localize_faults` | `LOOPLAB_LOCALIZE_FAULTS` | `false` | Rank the source files most relevant to a failure (repo tasks) |
 | `failure_reflection` | `LOOPLAB_FAILURE_REFLECTION` | `true` | Feed recent failed branches back into the proposal prompt (LATS-style); selective — only when recent failures exist |
+| `watchdog_reflection` | `LOOPLAB_WATCHDOG_REFLECTION` | `true` | Feed recent **live-watchdog** observations (train-monitor health verdicts + ASHA intermediate-rank flags) into the proposal prompt, so the proposer avoids re-proposing a configuration already seen training weakly; selective (only when a recent flag exists). Complements `failure_reflection` — surfaces the advisory flags on nodes that ran to completion (fold-ignored diagnostics the failure reflection never sees) |
 | `debug_depth` | `LOOPLAB_DEBUG_DEPTH` | `2` | T10: how many error-feedback repairs a failing lineage gets before it is abandoned |
 | `inline_repair_stuck_repeat` | `LOOPLAB_INLINE_REPAIR_STUCK_REPEAT` | `4` | Identical inline-repair failures in a row that count as "stuck" and stop the in-place retry loop |
 | `inline_repair_retrain_cap` | `LOOPLAB_INLINE_REPAIR_RETRAIN_CAP` | `2` | Max FULL multi-stage re-runs (re-trains) the inline-repair loop may do before abandoning to the inter-node debug operator. A late-stage fix (e.g. a broken `score` script that didn't touch `train`) reuses the completed train checkpoint and re-runs only from the failed stage — cheap, not counted. The reuse check is **fail-closed**: a full, counted re-train is forced not only when the repair changes earlier-stage code, but whenever reuse can't be *proven* safe — the repair deleted any file, changed a non-`.py` file (config/data inputs are invisible to import reachability), the eval runs under a non-default `cmd.cwd`, an earlier stage is opaque (`python -m`, a shell wrapper), or the failed stage is missing from the post-repair pipeline. Exception: a FIRST-stage failure (no completed earlier-stage work exists to discard) is an ordinary retry bounded by `inline_repair_attempts` + the anti-stuck guard, never this cap. 0 = unlimited (legacy). Bounds cost since the anti-stuck guard is error-signature-, not cost-based |

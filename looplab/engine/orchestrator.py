@@ -242,6 +242,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         complexity_cue = _opt("complexity_cue")
         budget_aware = _opt("budget_aware")
         failure_reflection = _opt("failure_reflection")
+        watchdog_reflection = _opt("watchdog_reflection")
         deep_repair = _opt("deep_repair")
         localize_faults = _opt("localize_faults")
         feature_engineering = _opt("feature_engineering")
@@ -353,6 +354,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
         self._budget_aware = budget_aware
         self._failure_reflection = failure_reflection
+        self._watchdog_reflection = watchdog_reflection
         self._deep_repair = deep_repair
         # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
         self._inline_repair = inline_repair

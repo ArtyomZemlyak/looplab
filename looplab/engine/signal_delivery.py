@@ -63,6 +63,17 @@ SIGNALS: tuple[SignalRoute, ...] = (
         consumer="Researcher (via _set_complexity_hint -> _complexity_hint)",
         call_sites=(("looplab/engine/proposal_cues.py", "trust_reflection(state)"),)),  # _set_complexity_hint: ProposalCuesMixin
     SignalRoute(
+        name="watchdog_signals",
+        produced_by="engine/train_monitor.py + asha_monitor.py (EV_TRAIN_MONITOR_ALERT / EV_ASHA_RANK)",
+        # NOT folded: these are DIAGNOSTIC events (fold-ignored, splice-neutral by construction), so the
+        # render helper reads them straight off store.read_all() rather than from RunState — the one route
+        # here that legitimately skips the L1 fold link (the signal is delivered without being folded).
+        folded_into="DIAGNOSTIC (fold-ignored) — read from store.read_all(), never on RunState",
+        channel="push",
+        inject="looplab.events.digest:watchdog_reflection",
+        consumer="Researcher (via _set_complexity_hint -> _complexity_hint)",
+        call_sites=(("looplab/engine/proposal_cues.py", "watchdog_reflection(self.store.read_all())"),)),  # ProposalCuesMixin, gated on _watchdog_reflection
+    SignalRoute(
         name="triage_rationale",
         produced_by="engine/crash_repair.py _triage_crash (LLM crash-triage verdict)",
         folded_into="Node.triage_rationale",

@@ -35,6 +35,7 @@ EXPECTED = {
     "merge_mode": ("auto", "mean"),
     "reflection_priors": (True, False),
     "report_every": (3, 0),
+    "watchdog_reflection": (True, False),
     # Training-log monitor: ON in the product surface (advisory observer of the live training log; never
     # touches node selection or replay, no-ops without an LLM client / on the solution.py path), OFF in the
     # bare-library EngineOptions so a direct `Engine(...)` in a test does no unasked LLM work. The early

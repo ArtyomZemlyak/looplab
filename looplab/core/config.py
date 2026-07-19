@@ -87,7 +87,8 @@ def run_start_pinned_settings(state) -> dict:
 # (demote seed-lucky leaders), the novelty gate (stop re-evaluating duplicates), the reward-hack /
 # leakage / critic monitors AND flips them from advisory to *gating* (`trust_gate="gate"` — a
 # flagged win can no longer be selected as best), ablation-driven refinement, and the prompt cues
-# (complexity / budget / failure-reflection). Effect is large; marginal cost is a few extra evals.
+# (complexity / budget / failure-reflection / watchdog-reflection). Effect is large; marginal cost is a
+# few extra evals.
 PROFILES: dict[str, dict] = {
     "default": {},   # explicit no-op alias for "ship-as-is" (== omitting profile)
     "fast":    {},   # today's lean defaults, named for symmetry with `thorough`
@@ -107,6 +108,7 @@ PROFILES: dict[str, dict] = {
         "complexity_cue": True,
         "budget_aware": True,
         "failure_reflection": True,
+        "watchdog_reflection": True,   # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
         "reflection_priors": True,     # no-op unless memory_dir is set (cross-run priors)
     },
 }
@@ -296,6 +298,12 @@ class Settings(BaseSettings):
     # default: it is SELECTIVE by construction (injects only when recent failures exist — the
     # evidenced form of reflection; reflecting at every step shows no gains, arXiv:2506.12928).
     failure_reflection: bool = True
+    # Feed the LIVE-WATCHDOG observations (train-monitor health verdicts + ASHA intermediate-rank flags)
+    # of recent experiments back into the proposal prompt, so the Researcher avoids re-proposing a config
+    # whose TRAINING was already observed to be weak — even when the watchdog kills are off (default) and
+    # the node ran to completion (those diagnostics are fold-ignored, so failure_reflection never sees
+    # them). ON by default and SELECTIVE like failure_reflection (injects only when a recent flag exists).
+    watchdog_reflection: bool = True
     # C3 deep test-driven repair: hand the Developer the failure taxonomy + a structured "reproduce
     # then fix" directive on debug, not just the raw stderr tail. ON by default (product surface); the
     # conservative library default in EngineOptions stays off, per that module's contract.

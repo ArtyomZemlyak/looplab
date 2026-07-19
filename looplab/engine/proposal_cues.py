@@ -128,6 +128,14 @@ class ProposalCuesMixin:
                     return tr or (n.error or "")[:60]
                 summ = "; ".join(f"node {n.id} ({n.error_reason}): {_why(n)}" for n in fails)
                 hint += f"\nReflection — recent failures to avoid repeating: {summ}."
+        # Signal-delivery (§1): surface the live-watchdog observations (train-monitor health verdicts +
+        # ASHA intermediate-rank flags) so the next proposal reacts to a config whose TRAINING was seen
+        # to be weak — even when the watchdog kills are OFF (the default) and the node ran to completion,
+        # so its live curve would otherwise be lost (those diagnostics are fold-ignored, invisible to
+        # the failure-reflection above). Reads the raw event rows (bounded/deduped inside the helper).
+        if self._watchdog_reflection:
+            from looplab.events.digest import watchdog_reflection
+            hint += watchdog_reflection(self.store.read_all())
         # Signal-delivery (§1): surface a recently trust-FLAGGED node so the next proposal reacts to
         # it (trust flags otherwise only bar a WIN — the agent never learns and keeps re-deriving the
         # flagged approach). Pure rendering lives in digest.trust_reflection so a test can exercise it.
