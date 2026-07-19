@@ -366,6 +366,22 @@ def test_budget_aware_hint_includes_remaining(tmp_path):
     assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_parallel_build_runs_seeds_concurrently_with_distinct_ids(tmp_path):
+    # Variant-1 Phase 1: parallel_build>1 + a role_factory builds independent seed drafts CONCURRENTLY,
+    # each on its OWN pooled (researcher, developer) pair, yet every node still gets a distinct id and
+    # reaches a terminal — the whole toy run completes exactly as the serial path would.
+    task = ToyTask.load(TASK_FILE)
+    eng = _engine(tmp_path / "pb-run")
+    eng.parallel_build = 2                 # fan out draft builds 2-wide
+    eng.role_factory = task.build_roles    # fresh toy (researcher, developer) pairs for the pool
+    state = anyio.run(eng.run)
+    assert state.finished
+    ids = [n.id for n in state.nodes.values()]
+    assert len(ids) == len(set(ids)) and len(ids) >= 3       # >= n_seeds nodes, all DISTINCT ids
+    assert all(n.status in (NodeStatus.evaluated, NodeStatus.failed) for n in state.nodes.values())
+    assert eng._role_pool and len(eng._role_pool) == 1       # pool built one extra pair (primary + 1)
+
+
 def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):
     # Variant-1 Phase 0: the atomic build reservation must give CONCURRENT builds distinct, monotonic
     # ids (and one node_building each) so parallel_build>1 can never collide on max(nodes)+1.

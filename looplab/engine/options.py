@@ -49,6 +49,7 @@ class EngineOptions:
     there remain the authoritative documentation for each knob's semantics.
     """
     max_parallel: int = 1                # single experiment at a time; > 1 = backlog parallel seam
+    parallel_build: int = 1              # Variant-1: build (research+code) N nodes concurrently (1 = serial)
     train_monitor: bool = False          # per-eval live training-log observer (off = today)
     train_monitor_interval_s: float = 600.0   # base tick cadence (s); effective cadence adapts to the budget
     train_monitor_kill: bool = False     # Phase 3: let the monitor tree-kill a 'broken' training early

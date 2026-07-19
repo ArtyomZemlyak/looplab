@@ -191,6 +191,10 @@ class Settings(BaseSettings):
     # one experiment per DETECTED GPU (orchestrator resolves 0 -> GPU count, clamped to >=1) — the
     # "let the box decide" autonomy knob the Strategist can also set.
     max_parallel: int = Field(default=1, ge=0, le=1024)
+    # Variant-1 parallel BUILD: research + code up to N independent (seed/explore) nodes CONCURRENTLY,
+    # each on its own pooled (researcher, developer) pair + GPU-pinned eval. 1 = serial (today). Needs a
+    # role_factory wired into the engine (the CLI/launcher passes one); without it the engine clamps to 1.
+    parallel_build: int = Field(default=1, ge=1, le=64)
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
     # surface (Settings) — advisory-only, never touches node selection or replay, and only fires on the

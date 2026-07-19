@@ -341,6 +341,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         deep_researcher=deep_researcher,
         report_writer=report_writer,
         developer_factory=dev_factory,
+        # Variant-1 parallel BUILD: a factory of FRESH wired (researcher, developer) pairs so
+        # `parallel_build>1` can research+code several independent seeds concurrently without clobbering
+        # role state. None-safe: make_roles rebuilds the same wiring; unused when parallel_build == 1.
+        role_factory=(lambda: make_roles(task, settings, run_dir)),
         proxy_scorer=proxy_scorer,
         embedder=_make_embedder(settings),
         # Memora synergy: harmonic recall over the cross-run lessons tier (same abstractor Memora

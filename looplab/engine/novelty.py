@@ -166,7 +166,7 @@ class NoveltyGateMixin:
             return best_n, best_s
         return None, best_s
 
-    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
+    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None) -> Idea:
         """novelty_mode="llm": an LLM (not an embedding/param-distance heuristic) judges whether the
         proposed idea near-duplicates an already-tried experiment — READING the real experiments via
         tools when unsure — and, if it does and a `repropose` callable is given, asks the Researcher once
@@ -226,10 +226,10 @@ class NoveltyGateMixin:
             hint = (f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
                     f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
                     "(another approach, component or direction), not a rewording.")
-            idea = self._repropose_with_feedback(repropose, hint, idea)
+            idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
         return idea
 
-    def _repropose_with_feedback(self, repropose, hint: str, idea: Idea) -> Idea:
+    def _repropose_with_feedback(self, repropose, hint: str, idea: Idea, researcher=None) -> Idea:
         """One informed re-propose with the duplicate surfaced as a TRANSIENT `_novelty_feedback`
         directive (shared by the LLM and semantic gates — the set/try/finally-restore discipline
         must stay identical in both). `BudgetExceeded` re-raises (the hard budget stop must end the
@@ -238,8 +238,9 @@ class NoveltyGateMixin:
         "you are duplicating #N" directive leaks into EVERY later proposal in the run — including
         drafts in unrelated regions — permanently mis-steering the researcher away from a direction
         the operator never banned."""
-        prev = getattr(self.researcher, "_novelty_feedback", "")
-        setattr(self.researcher, "_novelty_feedback", hint)
+        _r = researcher if researcher is not None else self.researcher   # Variant-1: this build's researcher
+        prev = getattr(_r, "_novelty_feedback", "")
+        setattr(_r, "_novelty_feedback", hint)
         try:
             idea2 = repropose()
             if idea2 is not None:
@@ -249,7 +250,7 @@ class NoveltyGateMixin:
         except Exception:  # noqa: BLE001 — a repropose failure keeps the original idea
             pass
         finally:
-            setattr(self.researcher, "_novelty_feedback", prev)
+            setattr(_r, "_novelty_feedback", prev)
         return idea
 
     def _graded_novelty_precheck(self, state: RunState, idea: Idea):
@@ -570,7 +571,7 @@ class NoveltyGateMixin:
         except Exception:  # noqa: BLE001 — audit only, never block proposing
             return
 
-    def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
+    def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None) -> Idea:
         """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
         Two layers:
         (1) SEMANTIC (T5, ShinkaEvolve `novelty rejection before evaluation`): if the idea TEXT is a
@@ -602,7 +603,7 @@ class NoveltyGateMixin:
         # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/
         # distance heuristic), then re-proposes if it's a dup.
         if mode == "llm":
-            return self._llm_novelty_gate(state, idea, repropose)
+            return self._llm_novelty_gate(state, idea, repropose, researcher=researcher)
         # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty stance
         # is "explore" (the stance can engage a cheap soft dedup + one informed re-propose even when the
         # mode is otherwise off). "off" without explore leaves this a no-op — the Researcher's own
@@ -629,7 +630,7 @@ class NoveltyGateMixin:
                             f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
                             "Propose something MEANINGFULLY DIFFERENT (another approach, "
                             "component or direction), not a rewording.")
-                    idea = self._repropose_with_feedback(repropose, hint, idea)
+                    idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
 
         params = numeric_params(idea.params)
         if not params:

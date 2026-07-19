@@ -53,10 +53,13 @@ class ProposalCuesMixin:
             cand = self.timeout if isinstance(self.timeout, (int, float)) else 0.0
         return cand if isinstance(cand, (int, float)) and math.isfinite(cand) and cand > 0 else None
 
-    def _set_complexity_hint(self, state: RunState, parent) -> None:
+    def _set_complexity_hint(self, state: RunState, parent, researcher=None) -> None:
         """Inject the engine-computed proposal cues into the next prompt: A0d (breadth-keyed
         complexity) + A5 (remaining eval budget). No-op unless the respective knob is on; harmless on
-        Toy roles. Both flow via the single `_complexity_hint` attribute both Researchers read."""
+        Toy roles. Both flow via the single `_complexity_hint` attribute both Researchers read.
+        `researcher` (Variant-1): stamp the cues onto THIS build's own researcher instance (a pool member)
+        instead of the shared `self.researcher`, so concurrent builds don't clobber each other's hints."""
+        _r = researcher if researcher is not None else self.researcher
         hint = ""
         if self._complexity_cue:
             nc = (sum(1 for n in state.nodes.values() if parent.id in n.parent_ids)
@@ -189,7 +192,7 @@ class ProposalCuesMixin:
                      "To DECODE a slug (what it is + where it ranked within comparable prior runs) call "
                      "concept_card('<slug>').")
         try:
-            setattr(self.researcher, "_complexity_hint", hint)
+            setattr(_r, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001
             pass
         # A7 `prefer_sweep`: nudge — never force — the Researcher toward an intra-node sweep when the
@@ -199,7 +202,7 @@ class ProposalCuesMixin:
                       "consider a SWEEP (set `space` to a small grid) so many configs share one "
                       "data load." if self._prefer_sweep else "")
         try:
-            setattr(self.researcher, "_sweep_hint", sweep_hint)
+            setattr(_r, "_sweep_hint", sweep_hint)
         except Exception:  # noqa: BLE001
             pass
         self._stamp_novelty_hint(state, self._novelty_stance)

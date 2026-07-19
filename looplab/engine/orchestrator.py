@@ -150,6 +150,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         deep_researcher=None,       # Optional[DeepResearcher]; None => Deep-Research stage off
         report_writer=None,         # Optional[ReportWriter]; None => agent report off (deterministic only)
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
+        role_factory=None,          # Variant-1: Optional[Callable[[], (Researcher, Developer)]] building a
+        #                             FRESH wired role pair for a parallel build worker (None => no pool =>
+        #                             parallel_build clamps to 1). Typically `lambda: make_roles(task, settings)`.
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
         dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
         # D1 holdout-gated promotion (B6): reserve a fraction of host-held labels as a FINAL
@@ -307,6 +310,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
         self._developer_name = "default"
+        # Variant-1 parallel BUILD: a pool of fresh (researcher, developer) pairs so N drafts research +
+        # code CONCURRENTLY without clobbering each other's role state (developer.last_files, researcher
+        # hints). `_parallel_build` (EngineOptions, default 1) is the fan-out; the pool is built lazily on
+        # the first parallel batch and clamped to what `role_factory` can supply (None => stays serial).
+        self.role_factory = role_factory
+        self.parallel_build = max(1, _opt("parallel_build"))
+        self._role_pool: Optional[list] = None
         # A0b/T8: "auto" resolves by Developer capability — code recombination is the verified
         # strongest merge (removing it costs ~9 pp), so it is the default wherever the Developer
         # actually GENERATES code (LLM/agent backends declare `is_code_generating`); templated/toy
@@ -1025,6 +1035,37 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         break
                     continue
                 self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
+                # Variant-1 parallel BUILD: seed/explore DRAFTS are independent, so build (research + code)
+                # up to `parallel_build` at once, each on its OWN pooled (researcher, developer) pair + its
+                # own pre-reserved id (reserved serially under _id_lock, then fanned out in a task-group of
+                # worker threads). Non-draft creates (improve/merge/debug depend on a parent's result and
+                # use role helpers not yet pool-threaded) and the no-pool config fall through to the serial
+                # loop below — byte-identical to before.
+                _pb_pairs = (self._build_role_pairs(min(self.parallel_build, len(creates)))
+                             if (self.parallel_build > 1 and len(creates) > 1
+                                 and all(a.get("kind") == "draft" for a in creates)) else None)
+                if _pb_pairs and len(_pb_pairs) > 1:
+                    _fan = len(_pb_pairs)
+                    for _i in range(0, len(creates), _fan):
+                        _chunk = creates[_i:_i + _fan]
+                        for _a in _chunk:               # surface the audit events for each, as the serial path does
+                            if "_scores" in _a:
+                                self.store.append(EV_POLICY_DECISION,
+                                                  {"scores": _a["_scores"], "chosen": _a.get("_chosen"),
+                                                   "reason": _a.get("_reason")})
+                            if _a.get("_rung") is not None:
+                                self.store.append(EV_RUNG_PROMOTED,
+                                                  {"rung": _a["_rung"], "survivors": _a.get("_promoted", [])})
+                        _reserved = [self._reserve_node_build(_a) for _a in _chunk]   # serial -> distinct ids
+                        async with anyio.create_task_group() as _tg:
+                            for _a, _res, _pair in zip(_chunk, _reserved, _pb_pairs):
+                                if _res is None:
+                                    continue
+                                _tg.start_soon(anyio.to_thread.run_sync,
+                                               functools.partial(self._create_node, _a, _pair, _res))
+                        if self._create_paused:
+                            break
+                    continue
                 for a in creates:
                     if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
                         self.store.append(EV_POLICY_DECISION,
@@ -1749,11 +1790,38 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                               {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
             return state, node_id, kind, _bparents, parent_generations
 
-    def _create_node(self, action: dict) -> None:
-        reserved = self._reserve_node_build(action)
+    def _build_role_pairs(self, n: int) -> list:
+        """Up to `n` (researcher, developer) pairs for a parallel build batch: the primary (self's roles)
+        plus fresh WIRED pairs from `role_factory`, cached in `self._role_pool` and reused across batches
+        (each pair's per-build state — developer.last_files, researcher hints — is captured at node_created
+        before the next batch reuses it, so reuse is safe). `role_factory` None or `n<=1` -> just the
+        primary pair, and the caller stays serial. Fresh pairs are what isolate per-build role state so
+        concurrent drafts don't clobber each other."""
+        if n <= 1 or self.role_factory is None:
+            return [(self.researcher, self.developer)]
+        if self._role_pool is None:
+            self._role_pool = []
+        while len(self._role_pool) < n - 1:
+            try:
+                pair = self.role_factory()
+            except Exception:  # noqa: BLE001 — a factory failure just caps fan-out, never crashes the run
+                break
+            if not (isinstance(pair, tuple) and len(pair) == 2):
+                break
+            self._role_pool.append(pair)
+        return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
+
+    def _create_node(self, action: dict, roles=None, reserved=None) -> None:
+        # Variant-1 parallel build: `roles` is a per-build (researcher, developer) pair from the pool
+        # (isolated per-build state so concurrent drafts don't clobber each other's hints/last_files);
+        # `reserved` is a pre-reserved (state, id, kind, parents, parent_generations) tuple (the parallel
+        # path reserves ids up front, serially, then fans out). Both default to the serial behaviour.
+        if reserved is None:
+            reserved = self._reserve_node_build(action)
         if reserved is None:
             return
         state, node_id, kind, _bparents, parent_generations = reserved
+        researcher, developer = roles if roles is not None else (self.researcher, self.developer)
         # Phase-handoff ledger for THIS node build: propose → stages → plan → implement each distill
         # their transcript into a brief the next phase reads (see agents.agent.run_phase), so later
         # phases trust what earlier ones explored instead of re-reading the repo. Node-scoped (fresh
@@ -1764,16 +1832,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # node_building was appended inside _reserve_node_build (under _id_lock) — the id is committed
             # to the log atomically, so a PARALLEL build (parallel_build>1) can never pick the same id.
             if kind == "draft":
-                self._set_complexity_hint(state, None)   # A0d breadth-keyed complexity cue
+                self._set_complexity_hint(state, None, researcher=researcher)   # A0d complexity cue
                 with self.tracer.span("propose"):
-                    idea = self.researcher.propose(state, None)
+                    idea = researcher.propose(state, None)
                 # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
                 idea = self._apply_novelty_gate(
-                    state, idea, repropose=lambda: self.researcher.propose(state, None))
+                    state, idea, repropose=lambda: researcher.propose(state, None),
+                    researcher=researcher)
                 idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
-                    code = self.developer.implement(self._directed_idea(idea, state))
+                    code = developer.implement(self._directed_idea(idea, state))
             elif kind == "merge":
                 parents = list(action["parent_ids"])
                 # A0b: real ensembling (code recombination) when configured/Strategist-selected;
@@ -1884,8 +1953,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 operator=idea.operator,
                 idea=durable_idea_payload(idea),
                 code=code,
-                files=getattr(self.developer, "last_files", {}) or {},
-                deleted=getattr(self.developer, "last_deleted", []) or [],
+                files=getattr(developer, "last_files", {}) or {},         # per-build developer (pool-safe)
+                deleted=getattr(developer, "last_deleted", []) or [],
                 research_origin=research_origin,
                 cross_run_receipt=getattr(self, "_cross_run_advisory_receipt", {}),
                 **({"parent_generations": parent_generations} if parent_generations else {}),
