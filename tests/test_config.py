@@ -11,10 +11,11 @@ from looplab.core.config import Settings
 
 def test_config_lower_bounds():
     from pydantic import ValidationError
-    for bad in ({"max_parallel": 0}, {"max_nodes": 0}, {"n_seeds": 0}, {"timeout": 0}):
+    for bad in ({"max_nodes": 0}, {"n_seeds": 0}, {"timeout": 0}, {"max_parallel": -1}):
         with pytest.raises(ValidationError):
             Settings(**bad)
-    assert Settings().max_parallel == 1  # default still valid
+    assert Settings().max_parallel == 1        # default still valid
+    assert Settings(max_parallel=0).max_parallel == 0   # 0 is now VALID = AUTO (engine resolves to GPU count)
 
 
 def test_config_upper_bounds_reject_resource_exhaustion():

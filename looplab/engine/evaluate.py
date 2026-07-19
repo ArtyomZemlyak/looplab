@@ -13,6 +13,7 @@ Invariant #2 lives in this file: exactly ONE terminal event per node, emitted at
 attempt loop. Trust scans (reward-hack / code-leakage / critic) stay lazy, method-local imports."""
 from __future__ import annotations
 
+import os
 import time
 from typing import Optional
 
@@ -39,6 +40,24 @@ class EvaluateMixin:
         fallback mid-measurement, corrupting impact numbers, and (b) multiply expensive
         external-agent calls by len(params) per ablation (ADR-7 cost rule)."""
         return getattr(self.developer, "inner", self.developer)
+
+    def _acquire_gpu(self) -> Optional[int]:
+        """Reserve a free GPU ordinal for ONE concurrent eval, so parallel experiments land on DISTINCT
+        GPUs (pinned via CUDA_VISIBLE_DEVICES) instead of colliding on cuda:0. Only when running in
+        parallel (max_parallel>1) AND GPUs were detected — a single-experiment run is left unpinned (uses
+        the box as-is). Never blocks: an empty pool (max_parallel>GPU count) just means this eval isn't
+        pinned and shares a GPU. See engine/orchestrator.py::_detect_gpu_ids + the `_free_gpus` pool."""
+        if self.max_parallel <= 1 or not getattr(self, "_gpu_ids", None):
+            return None
+        with self._gpu_lock:
+            return self._free_gpus.pop(0) if self._free_gpus else None
+
+    def _release_gpu(self, gpu_id: Optional[int]) -> None:
+        if gpu_id is None:
+            return
+        with self._gpu_lock:
+            if gpu_id not in self._free_gpus:
+                self._free_gpus.append(gpu_id)
 
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
@@ -178,9 +197,19 @@ class EvaluateMixin:
                                 cancel.set()
                                 return
                     _tg.start_soon(_watch)
-                    res = await anyio.to_thread.run_sync(
-                        self._run_eval, node, str(workdir), None, None, cancel, next_start
-                    )
+                    # Pin this eval to a distinct GPU when running in parallel, so concurrent nodes use
+                    # separate GPUs (CUDA_VISIBLE_DEVICES remaps the agent's cuda:0 onto the reserved
+                    # device — transparent to the config). Unpinned (eval_env=None) on a single-experiment
+                    # run. Released in `finally` so a repair re-eval / crash can't leak a GPU from the pool.
+                    _gpu = self._acquire_gpu()
+                    eval_env = ({**os.environ, "CUDA_VISIBLE_DEVICES": str(_gpu)}
+                                if _gpu is not None else None)
+                    try:
+                        res = await anyio.to_thread.run_sync(
+                            self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
+                        )
+                    finally:
+                        self._release_gpu(_gpu)
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)

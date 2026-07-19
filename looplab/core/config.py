@@ -178,18 +178,19 @@ class Settings(BaseSettings):
     # fills fields the user did NOT set — every knob it touches stays individually overridable.
     profile: str = "default"
 
-    # Bounds (review C/⚪): `max_parallel=0` silently stalls the loop; a non-positive node/seed
-    # budget or timeout is never valid. Upper bounds are equally load-bearing — the UI /start path
-    # writes these straight into the engine's env, and an unbounded `max_parallel` (e.g. 100000 from
-    # a crafted preflight) would fan out that many sandboxes → resource exhaustion. Reject at config
-    # time, not mid-run. Ceilings are generous (far above any real run); tests top out near 50.
+    # Bounds (review C/⚪): a non-positive node/seed budget or timeout is never valid. Upper bounds are
+    # equally load-bearing — the UI /start path writes these straight into the engine's env, and an
+    # unbounded `max_parallel` (e.g. 100000 from a crafted preflight) would fan out that many sandboxes →
+    # resource exhaustion. Reject at config time, not mid-run. Ceilings are generous; tests top out near 50.
     n_seeds: int = Field(default=3, ge=1, le=1024)
     max_nodes: int = Field(default=8, ge=1, le=1_000_000)
-    # Concurrent evaluation is a backlog seam. The base/primary mode is a single
-    # experiment at a time (deterministic, one eval process running) — important for
-    # RepoTask where an eval is a real training run with its own resources/trackers.
-    # Set > 1 to opt into the parallel fan-out (the task-group path).
-    max_parallel: int = Field(default=1, ge=1, le=1024)
+    # Concurrent evaluation is a backlog seam. The base/primary mode is a single experiment at a time
+    # (deterministic, one eval process running) — important for RepoTask where an eval is a real training
+    # run with its own resources/trackers. Set > 1 to opt into the parallel fan-out (the task-group path),
+    # where each concurrent eval is pinned to a distinct GPU. `max_parallel=0` means AUTO: the engine runs
+    # one experiment per DETECTED GPU (orchestrator resolves 0 -> GPU count, clamped to >=1) — the
+    # "let the box decide" autonomy knob the Strategist can also set.
+    max_parallel: int = Field(default=1, ge=0, le=1024)
     timeout: float = Field(default=30.0, gt=0)
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).

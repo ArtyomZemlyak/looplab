@@ -366,6 +366,24 @@ def test_budget_aware_hint_includes_remaining(tmp_path):
     assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_gpu_pool_auto_max_parallel_and_distinct_pinning(tmp_path, monkeypatch):
+    # max_parallel=0 -> AUTO = one experiment per DETECTED GPU; and _acquire_gpu hands out DISTINCT GPUs
+    # to concurrent evals (so parallel nodes don't collide on cuda:0), returning them to the pool. This is
+    # what makes the Strategist's parallelism knob actually use a multi-GPU box instead of 1/N.
+    monkeypatch.setattr("looplab.engine.orchestrator._detect_gpu_ids", lambda: [0, 1])
+    eng = _engine(tmp_path / "gpu-auto", max_parallel=0)
+    assert eng.max_parallel == 2                   # AUTO resolved to the 2 detected GPUs
+    a = eng._acquire_gpu()
+    b = eng._acquire_gpu()
+    assert {a, b} == {0, 1} and a != b             # two concurrent evals -> two DISTINCT GPUs
+    assert eng._acquire_gpu() is None              # pool drained -> unpinned (shares), never blocks
+    eng._release_gpu(a)
+    assert eng._acquire_gpu() == a                 # a released GPU is reusable
+    # single-experiment mode never pins (uses the box as-is, backward-compatible)
+    eng1 = _engine(tmp_path / "gpu-single", max_parallel=1)
+    assert eng1._acquire_gpu() is None
+
+
 def test_experiment_time_budget_cue_surfaces_limit_and_calibration(tmp_path):
     # The Researcher must SEE the per-experiment wall-clock limit and prior nodes' MEASURED eval time
     # (fit vs killed) so it sizes epochs to fit — the fix for repeatedly configuring trainings that

@@ -130,7 +130,8 @@ def test_validate_strategy_whitelists_resource_budgets():
     assert out["timeout"] == 120.0 and out["max_parallel"] == 3
     # bad shapes dropped
     assert "timeout" not in (validate_strategy({"timeout": -5}, ctx) or {})
-    assert "max_parallel" not in (validate_strategy({"max_parallel": 0}, ctx) or {})
+    assert "max_parallel" not in (validate_strategy({"max_parallel": -1}, ctx) or {})      # negative dropped
+    assert validate_strategy({"max_parallel": 0}, ctx)["max_parallel"] == 0   # 0 = AUTO (per-GPU), allowed
     assert "max_parallel" not in (validate_strategy({"max_parallel": True}, ctx) or {})   # bool != int budget
 
 

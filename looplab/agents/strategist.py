@@ -211,14 +211,14 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     ns = strat.get("novelty_stance")
     if ns in NOVELTY_STANCES:
         out["novelty_stance"] = ns
-    # Resource budgets (bounds match config: timeout>0, max_parallel>=1). Whitelisted here for shape;
+    # Resource budgets (bounds match config: timeout>0, max_parallel>=0). Whitelisted here for shape;
     # the engine's _apply_strategy applies them ONLY if the governance matrix grants the strategist.
     tmo = strat.get("timeout")
     if isinstance(tmo, (int, float)) and not isinstance(tmo, bool) and tmo > 0:
         out["timeout"] = float(tmo)
     mp = strat.get("max_parallel")
-    if isinstance(mp, int) and not isinstance(mp, bool) and mp >= 1:
-        out["max_parallel"] = mp
+    if isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0:
+        out["max_parallel"] = mp   # 0 = AUTO (one experiment per detected GPU), resolved in _apply_strategy
     if isinstance(strat.get("request_research"), bool) and strat["request_research"]:
         out["request_research"] = True   # ask the engine to run the Deep-Research stage
     if not out:

@@ -14,6 +14,7 @@ import functools
 import hashlib
 import os
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -94,6 +95,34 @@ from looplab.engine.options import _UNSET  # noqa: F401
 # tracked data/generated file, where buffering the whole patch would spike run-start memory (a latent
 # OOM) and a truncated "did-it-change" signal is enough. Module-level so an operator/test can retune.
 _DIFF_DIGEST_CAP = 8 * 1024 * 1024
+
+
+def _detect_gpu_ids() -> list[int]:
+    """Best-effort list of usable GPU ordinals for the per-eval GPU pinning + `max_parallel=0` AUTO
+    (evaluate.py). Honors an existing `CUDA_VISIBLE_DEVICES` (respect an operator/scheduler that already
+    fenced the box), else asks torch, else `nvidia-smi -L`. Returns [] when there is no GPU (CPU box /
+    detection unavailable) — the caller then simply never pins and AUTO collapses to 1. Never raises."""
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is not None:
+        ids = [t.strip() for t in cvd.split(",") if t.strip() != ""]
+        # Ordinals INSIDE this fenced view are 0..n-1 regardless of the physical ids named in the var.
+        return list(range(len(ids)))
+    try:
+        import torch  # optional
+        n = int(torch.cuda.device_count())
+        if n > 0:
+            return list(range(n))
+    except Exception:  # noqa: BLE001 — torch missing / driver error -> fall through
+        pass
+    try:
+        import subprocess
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            n = sum(1 for line in out.stdout.splitlines() if line.strip().startswith("GPU "))
+            return list(range(n))
+    except Exception:  # noqa: BLE001
+        pass
+    return []
 
 
 # The confirm phase (engine/confirm_phase.py) and ablation (engine/ablation.py) clusters are
@@ -389,7 +418,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.unified_agent = unified_agent
         self.agent_drives_actions = unified_agent and agent_drives_actions
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
-        self.max_parallel = max_parallel
+        # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
+        # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
+        # parallelize, each concurrent eval is pinned to a DISTINCT GPU via CUDA_VISIBLE_DEVICES (see
+        # evaluate.py::_evaluate); `max_parallel=0` means AUTO — run one experiment per detected GPU.
+        self._gpu_ids: list[int] = _detect_gpu_ids()
+        if max_parallel == 0:                            # AUTO: the agent/operator lets the box decide
+            max_parallel = max(1, len(self._gpu_ids))
+        self.max_parallel = max(1, int(max_parallel))
+        self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
+        self._gpu_lock = threading.Lock()
         self.timeout = timeout
         self.sweep_timeout_mult = max(1.0, sweep_timeout_mult)
         self.crash_after = crash_after
@@ -1243,7 +1281,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 pass
         if "max_parallel" in _bo:
             try:
-                self.max_parallel = max(1, int(_bo["max_parallel"]))
+                _mp = int(_bo["max_parallel"])
+                # 0 = AUTO (one experiment per detected GPU), same as the launch-time setting — so the
+                # Strategist can hand parallelism back to "let the box decide", not just pick a fixed N.
+                self.max_parallel = max(1, len(self._gpu_ids)) if _mp == 0 else max(1, _mp)
             except (TypeError, ValueError):
                 pass
         return max_s, max_es
