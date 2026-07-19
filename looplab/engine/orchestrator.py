@@ -231,6 +231,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concurrent_research_repeat = _opt("concurrent_research_repeat")
         concurrent_research_interval_s = _opt("concurrent_research_interval_s")
         concurrent_research_max_calls = _opt("concurrent_research_max_calls")
+        concurrent_consolidate = _opt("concurrent_consolidate")
         report_every = _opt("report_every")
         merge_mode = _opt("merge_mode")
         complexity_cue = _opt("complexity_cue")
@@ -316,6 +317,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._concurrent_research_repeat = bool(concurrent_research_repeat)
         self._concurrent_research_interval_s = max(1.0, float(concurrent_research_interval_s or 1800.0))
         self._concurrent_research_max_calls = max(0, int(concurrent_research_max_calls or 0))
+        # Overlap the hypothesis-board consolidation with the eval too (dedup the board the repeated
+        # research keeps filling). Off in the library default (== today); product turns it on.
+        self._concurrent_consolidate = bool(concurrent_consolidate)
         self.report_writer = report_writer
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
@@ -1652,15 +1656,32 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         while True:
             await anyio.sleep(next_sleep)    # only cancellation (evals joined) unwinds the loop from here
             try:
-                if cap > 0 and calls >= cap:
-                    return                   # per-window LLM budget spent; the health monitor still runs
                 # Re-fold each tick (invariant #4): pick up sibling evals that finished + fresh hints.
-                # abandon_on_cancel=True on BOTH reads: when the evals join and this loop is cancelled,
+                # abandon_on_cancel=True on the reads: when the evals join and this loop is cancelled,
                 # node dispatch must NOT wait for an in-flight multi-turn research LLM call (an endpoint
                 # timeout+retry could be minutes) — the same latency fix train_monitor uses. The
-                # abandoned thread finishes in the background; its (now-moot) memo is discarded.
+                # abandoned thread finishes in the background; its (now-moot) result is discarded.
                 snap = await anyio.to_thread.run_sync(
                     lambda: fold(self.store.read_all()), abandon_on_cancel=True)
+                # Overlap the hypothesis-board CONSOLIDATION too (Phase 2): repeated research keeps
+                # ADDING near-duplicate directions as open hypotheses, so dedup/merge them on the same
+                # loop instead of only between nodes. `_maybe_merge_hypotheses` self-gates (open board
+                # >= 4 AND grown >= 2 since its last pass) so it no-ops until there is something to
+                # merge, and appends only EV_HYPOTHESIS_MERGED (BACKGROUND_APPENDABLE — proven
+                # selection-neutral). NOT abandon_on_cancel — this is REQUIRED for safety, not style:
+                # an abandoned merge worker could append EV_HYPOTHESIS_MERGED (and set _last_hyp_merge_n)
+                # AFTER _dispatch_evals returns, concurrently with the main task's serial merge, which
+                # is exactly the race the "background joined before _run_cadences" argument rules out.
+                # So eval-join WAITS for an in-flight consolidate — one hybrid-retrieval + one
+                # merge-decision LLM call, bounded by the endpoint timeout (comparable to the record
+                # thread, not shorter). The self-gate keeps this rare: a converged tick whose board did
+                # not grow no-ops fast. Runs before the research cap so a capped-out window still keeps
+                # the board tidy. No-op when off / no reflect client / board small.
+                if getattr(self, "_concurrent_consolidate", False):
+                    await anyio.to_thread.run_sync(
+                        functools.partial(self._maybe_merge_hypotheses, snap))
+                if cap > 0 and calls >= cap:
+                    return                   # research LLM budget spent; the health monitor still runs
                 memo = await anyio.to_thread.run_sync(
                     functools.partial(self._compute_deep_research, snap, trig, trace=False),
                     abandon_on_cancel=True)

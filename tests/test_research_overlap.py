@@ -162,6 +162,26 @@ def test_repeat_memos_are_excluded_from_the_serial_cadence_gates():
     assert Engine._already_researched_at(state, 5) is False       # repeat memos at 5 are invisible
 
 
+def test_loop_consolidates_the_board_each_tick_when_enabled():
+    # Phase 2: with concurrent_consolidate on, the loop dedups the hypothesis board every tick
+    # (self-gated inside _maybe_merge_hypotheses). Here we just prove it is INVOKED on the loop.
+    merges = {"n": 0}
+    stub = _LoopStub([_memo("A"), _memo("B")], cap=2)
+    stub._concurrent_consolidate = True
+    stub._maybe_merge_hypotheses = lambda state: merges.__setitem__("n", merges["n"] + 1)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert merges["n"] >= 2                       # ran on the active ticks, before the research cap
+
+
+def test_loop_does_not_consolidate_when_disabled():
+    # Default (flag absent/False): the board consolidation is NOT invoked from the loop (== today).
+    merges = {"n": 0}
+    stub = _LoopStub([_memo("A"), _memo("B")], cap=2)
+    stub._maybe_merge_hypotheses = lambda state: merges.__setitem__("n", merges["n"] + 1)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert merges["n"] == 0                       # getattr(_concurrent_consolidate, False) gate holds
+
+
 def test_loop_without_initial_trigger_waits_a_full_cadence_first():
     # No due trigger -> the first tick sleeps a full cadence; a "short eval" cancels before it fires.
     stub = _LoopStub([_memo("A")], cap=0, cadence=0.2)

@@ -205,7 +205,15 @@ class ResearchCadenceMixin:
         blocks the loop. Cadence: only when the open board has grown to >=4 and by >=2 since the last
         pass, so it doesn't re-run every node or thrash. Replay-safe — the engine only WRITES the
         decision here; on replay the fold reapplies the recorded merges with no model call, and a
-        re-run finds already-merged aliases gone (converges)."""
+        re-run finds already-merged aliases gone (converges).
+
+        Phase 2: ALSO invoked from the concurrent eval-window background loop
+        (`orchestrator._research_overlap_loop`, gated on `concurrent_consolidate`) so the board the
+        repeated research keeps filling is deduped DURING a long eval, not only between nodes. That is
+        safe because the sole append here, `EV_HYPOTHESIS_MERGED`, is in `BACKGROUND_APPENDABLE`
+        (asserted below; proven selection-neutral by `tests/test_background_appendable.py`), and the
+        background loop is cancelled before the main task runs the serial pass — so the two never race
+        on `_last_hyp_merge_n`."""
         if not self._track_hypotheses:
             return state
         client = self._reflect_client()
@@ -238,6 +246,7 @@ class ResearchCadenceMixin:
                     if len(g["members"]) < 2:
                         continue
                     ids = [open_hyps[i].id for i in g["members"]]
+                    assert EV_HYPOTHESIS_MERGED in BACKGROUND_APPENDABLE   # concurrent-consolidate safe
                     self.store.append(EV_HYPOTHESIS_MERGED, {
                         "canonical": ids[0], "aliases": ids[1:], "statement": g["merged"],
                         "at_node": len(state.nodes)})

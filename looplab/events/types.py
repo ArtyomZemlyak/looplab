@@ -270,10 +270,13 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 # appends to the `hypotheses_added` board list — same class: board order is transient advice,
 # selection is untouched.) `research_cadence._record_deep_research` gates its three domain records;
 # EV_LLM_USAGE can additionally arrive through the durable accountant sink while that background
-# role is calling its client. The splice test below proves every member remains selection-neutral
-# regardless of thread-dependent position.
+# role is calling its client. EV_HYPOTHESIS_MERGED joins the set for the concurrent hypothesis-board
+# CONSOLIDATION overlap (`_maybe_merge_hypotheses` run from the eval-window background loop): its fold
+# handler only appends to the `hypotheses_merged` board list — same transient-advice class as
+# hypothesis_added, and the board (open/merged questions) never enters node selection. The splice
+# test below proves every member remains selection-neutral regardless of thread-dependent position.
 BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
-    EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
+    EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE, EV_HYPOTHESIS_MERGED,
 })
 
 # Event types the fold DELIBERATELY does not handle — diagnostic / sidecar records that exist for the

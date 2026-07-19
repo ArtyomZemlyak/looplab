@@ -82,6 +82,7 @@ class EngineOptions:
     concurrent_research_repeat: bool = False   # one-shot overlap (== today); product re-runs on a cadence
     concurrent_research_interval_s: float = 1800.0   # base repeat cadence (s); floors the budget-derived pace
     concurrent_research_max_calls: int = 40     # per-eval-window repeated-research LLM backstop (0 = no cap)
+    concurrent_consolidate: bool = False        # consolidate the hypothesis board on the eval-window bg loop (off = today)
     report_every: int = 0                # regenerate the run report every N created nodes (0 = manual only)
     merge_mode: str = "mean"             # A0b: "mean" | "ensemble" ("auto" resolves in Engine.__init__)
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
