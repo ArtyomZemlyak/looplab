@@ -1099,6 +1099,10 @@ def cross_run_digest_cmd(
     typer.echo(f"Cross-run digest: {dg['n_axes']} axis-cluster(s), {dg['n_concepts']} concept(s)")
     if dg.get("source_complete") is not True:
         typer.echo("  WARNING: capsule source is partial; digest describes returned observations only")
+    if dg.get("axes_omitted") or dg.get("concepts_omitted"):
+        typer.echo("  NOTE: bounded digest omitted "
+                   f"{dg.get('axes_omitted', 0)} axis-cluster(s) and "
+                   f"{dg.get('concepts_omitted', 0)} concept label(s); use --json for receipts")
     for a in dg["axes"]:
         typer.echo(f"  {a['n_concepts']:2d} concept(s) / {a['n_runs']:2d} run(s)  {a['axis']}/  "
                    f"[{', '.join(c.split('/', 1)[-1] for c in a['concepts'][:5])}]")

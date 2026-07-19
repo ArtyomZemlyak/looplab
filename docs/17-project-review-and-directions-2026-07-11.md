@@ -3945,7 +3945,9 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   cursor/filter query contract and therefore does not close full CR3a; the full matrix/proof screen is deferred.
 - **Step 7 — CR3b/CR3c, both gated. LEAN INSPECTOR/ALIAS SLICES LANDED.** `portfolio_digest` /
   `cross-run-digest` group concepts **one level** by the text before the first slash and return axis/concept/run
-  counts. This is data-only, not wired into prompts and not recursive/community hierarchy; the original gate
+  counts. Exact retained-snapshot totals are computed before bounded display lists; axis/concept omission
+  counters and a separate capsule-source completeness receipt make both truncation layers explicit. This is
+  data-only, not wired into prompts and not recursive/community hierarchy; the original gate
   (≥5 pp grounded-answer gain **or** ≥30% token reduction at equal quality) still blocks richer summaries.
   Local concept CLI and typed owner HTTP actions append alias/purge/split/clear overlays; the owner path now
   has revision CAS, action-id idempotency, server-derived actor/time and explicit clear actions. There is still

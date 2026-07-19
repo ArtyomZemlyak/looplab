@@ -551,9 +551,12 @@ looplab concept-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 12] [-
 ## `cross-run-digest`
 
 PART IV Step 7. Builds a deterministic **one-level axis-prefix rollup**: each concept is grouped by the text
-before its first `/`, with concept/run counts. Despite the historical “recursive digest” name, the current
-payload is not a hierarchy/tree and has no scope, snapshot, completeness, proof or eligible-outcome contract.
-It is inspector data only and is not injected into prompts.
+before its first `/`, with concept/run counts. Counts are computed from the full validated, de-duplicated
+retained capsule snapshot before display limits. `n_axes`, `n_concepts`, and each axis's `n_runs` /
+`n_concepts` are exact for that snapshot; `axes_omitted`, top-level `concepts_omitted`, and per-axis
+`concepts_omitted` disclose bounded payload lists. The separate `source_*` receipt says whether the capsules
+themselves were complete. Despite the historical “recursive digest” name, this is not a hierarchy/tree and
+has no proof or eligible-outcome contract. It is inspector data only and is not injected into prompts.
 
 ```bash
 looplab cross-run-digest MEMORY_DIR [--json]
@@ -562,7 +565,7 @@ looplab cross-run-digest MEMORY_DIR [--json]
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` and optional alias/split overlays |
-| `--json` | off | Emit `{n_axes, n_concepts, axes[]}` instead of the compact text rollup |
+| `--json` | off | Emit bounded axes plus exact totals, omission counters, and the capsule-source receipt instead of the compact text rollup |
 
 ---
 

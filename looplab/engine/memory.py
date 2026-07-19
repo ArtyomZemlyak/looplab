@@ -1084,6 +1084,8 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
 _MAX_GRAPH_CONCEPTS = 512
 _MAX_GRAPH_EDGES = 2_048
 _MAX_GRAPH_PER_CONCEPT_CONCEPTS = 256   # cap a single run's concept set before the O(k^2) pairing
+_MAX_DIGEST_AXES = 512
+_MAX_DIGEST_CONCEPTS_PER_AXIS = 64
 
 
 def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = None,
@@ -1172,23 +1174,47 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
     semantic hierarchy. Per the §21.20.11 hierarchy gate it ships as inspector data only; it is not wired
     into prompts until a versioned taxonomy proves its value on the benchmark corpus.
     """
-    ov = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
+    from looplab.engine.concept_registry import canonicalize_concepts
+
+    valid_capsules = _dedup_valid_capsules(capsules)
     clusters: dict[str, dict] = {}
-    for e in ov["concepts"]:
-        # This is an unenforced display convention, not a hierarchy: every unprefixed concept lands in one
-        # bucket and changing a display slug can move it. Do not infer semantic ancestry from ``/``.
-        axis = e["concept"].split("/", 1)[0] if "/" in e["concept"] else "(ungrouped)"
-        cl = clusters.setdefault(axis, {"axis": axis, "concepts": [], "_runs": set()})
-        cl["concepts"].append(e["concept"])
-        cl["_runs"].update(r["run_id"] for r in e["runs"])
-    axes = [{"axis": c["axis"], "n_concepts": len(c["concepts"]), "n_runs": len(c["_runs"]),
-             "concepts": sorted(c["concepts"])} for c in clusters.values()]
+    for capsule in valid_capsules:
+        run_id = capsule["run_id"]
+        for concept in canonicalize_concepts(
+                capsule.get("concepts") or [], aliases=aliases, splits=splits):
+            # This is an unenforced display convention, not a hierarchy: every unprefixed concept lands in
+            # one bucket and changing a display slug can move it. Do not infer semantic ancestry from ``/``.
+            axis = concept.split("/", 1)[0] if "/" in concept else "(ungrouped)"
+            cl = clusters.setdefault(axis, {"axis": axis, "_concepts": set(), "_runs": set()})
+            cl["_concepts"].add(concept)
+            cl["_runs"].add(run_id)
+
+    # CODEX AGENT: compute exact axis/concept/run totals from the full validated, de-duplicated retained
+    # snapshot BEFORE bounding display collections. Building on `portfolio_concept_overview` silently capped
+    # each axis at 64 run ids and the whole digest at 512 concepts while presenting both counts as exact.
+    axes = []
+    for cluster in clusters.values():
+        concepts = sorted(cluster["_concepts"])
+        retained = concepts[:_MAX_DIGEST_CONCEPTS_PER_AXIS]
+        axes.append({
+            "axis": cluster["axis"],
+            "n_concepts": len(concepts),
+            "n_runs": len(cluster["_runs"]),
+            "concepts": retained,
+            "concepts_omitted": len(concepts) - len(retained),
+        })
     axes.sort(key=lambda c: (-c["n_concepts"], -c["n_runs"], c["axis"]))
-    return {"n_axes": len(axes), "n_concepts": ov["n_concepts"], "axes": axes,
-            **{key: ov[key] for key in (
-                "source_complete", "partial_capsules", "source_unknown_capsules",
-                "source_concepts_omitted", "source_outcomes_omitted",
-            )}}
+    retained_axes = axes[:_MAX_DIGEST_AXES]
+    n_concepts = sum(len(cluster["_concepts"]) for cluster in clusters.values())
+    retained_concepts = sum(len(axis["concepts"]) for axis in retained_axes)
+    return {
+        "n_axes": len(axes),
+        "n_concepts": n_concepts,
+        "axes": retained_axes,
+        "axes_omitted": len(axes) - len(retained_axes),
+        "concepts_omitted": n_concepts - retained_concepts,
+        **_capsule_source_summary(valid_capsules),
+    }
 
 
 class CaseLibrary:
