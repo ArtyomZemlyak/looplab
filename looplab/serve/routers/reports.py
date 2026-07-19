@@ -2880,6 +2880,15 @@ def build_router(srv) -> APIRouter:
                 # Keep the strict running claim as a no-rebill fence. Once JobRegistry becomes done,
                 # reconciliation turns it into an explicit indeterminate state; its volatile payload
                 # is neither returned as authoritative nor consumed as if it were durable.
+                #
+                # But when compute ITSELF refused to publish because the durable store was swapped or
+                # otherwise unavailable, that same unavailability is why the terminal cannot be
+                # written here — no external side effect occurred and nothing was billed. Surface the
+                # honest storage conflict (restore durable storage and reconcile the same UUID) rather
+                # than an indeterminate outcome that would nudge the operator toward abandoning a UUID
+                # that never billed. The running claim is still retained for later reconciliation.
+                if public_result.get("code") == _SCOPE_STORAGE_ERROR["code"]:
+                    return public_result
                 return _indeterminate_response()
             return public_result
 
