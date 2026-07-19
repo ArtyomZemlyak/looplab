@@ -97,6 +97,37 @@ const normalizeResearchSource = value => {
   }
 }
 
+const unknownResearchSource = () => ({ status: 'unknown', counts: null })
+const sameResearchSource = (left, right) => {
+  if (left.status !== right.status) return false
+  if (left.counts === null || right.counts === null) return left.counts === right.counts
+  return Object.keys(left.counts).every(key => left.counts[key] === right.counts[key])
+    && Object.keys(right.counts).every(key => left.counts[key] === right.counts[key])
+}
+
+const sectionResearchSource = (envelope, rows, hasRows = rows.length > 0) => {
+  const hasEnvelope = Object.hasOwn(envelope, 'research_source')
+  const source = normalizeResearchSource(hasEnvelope
+    ? envelope.research_source : record(rows[0]).research_source)
+  // CODEX AGENT: every row and its endpoint envelope describe one frozen D8 denominator. A single
+  // mismatching/missing row receipt makes the whole visible section unknown; otherwise a forged card could
+  // restore `supported` underneath a partial top-level warning.
+  const coherent = rows.every(row => sameResearchSource(
+    normalizeResearchSource(record(row).research_source), source))
+  return {
+    present: hasEnvelope || hasRows,
+    source: coherent ? source : unknownResearchSource(),
+  }
+}
+
+const combinedResearchSource = (...sections) => {
+  const visible = sections.filter(section => section.present)
+  if (visible.length === 0) return unknownResearchSource()
+  const first = visible[0].source
+  return visible.every(section => sameResearchSource(section.source, first))
+    ? first : unknownResearchSource()
+}
+
 const sourceRevision = (key, value) => {
   const envelope = record(value)
   if (key === 'atlas') {
@@ -221,7 +252,7 @@ const normalizeConcept = value => {
   }
 }
 
-const normalizeClaim = value => {
+const normalizeClaim = (value, sectionSource = unknownResearchSource()) => {
   const row = record(value)
   const statement = boundedAtlasText(row.statement, 500)
   if (!statement) return null
@@ -238,7 +269,9 @@ const normalizeClaim = value => {
   const contradicts = textList(rawContradicts, ATLAS_RENDER_LIMITS.evidence, 300)
   const nSupport = Math.max(count(row.n_support), support.length)
   const nOppose = Math.max(count(row.n_oppose), oppose.length)
-  const researchSource = normalizeResearchSource(row.research_source)
+  const rowSource = normalizeResearchSource(row.research_source)
+  const researchSource = sameResearchSource(rowSource, sectionSource)
+    ? rowSource : unknownResearchSource()
   // The backend's structured `mixed` state can encode assertion-level counter-evidence that is not
   // counted in n_oppose. Honor it only with supporting evidence, matching the backend rule, while
   // still deriving malformed or contradictory support/refute labels from sanitized counts.
@@ -356,10 +389,19 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   const contradictionRows = take(rawContradictions, ATLAS_RENDER_LIMITS.contradictions)
   const claimRows = take(rawClaims, ATLAS_RENDER_LIMITS.claims)
   const curationRows = take(rawCuration, ATLAS_RENDER_LIMITS.curation)
+  // Receipt coherence is needed only for rows that can cross the render boundary. Keep the validation
+  // work under the same hard caps as normalization even when a hostile response contains millions of rows.
+  const atlasResearch = sectionResearchSource(
+    atlas, contradictionRows, rawContradictions.length > 0)
+  const claimsResearch = sectionResearchSource(
+    claimsEnvelope, claimRows, rawClaims.length > 0)
+  const researchSource = combinedResearchSource(atlasResearch, claimsResearch)
   const concepts = conceptRows.map(normalizeConcept).filter(Boolean)
   const thin = textList(thinRows, ATLAS_RENDER_LIMITS.thin, 220)
-  const contradictions = contradictionRows.map(normalizeClaim).filter(Boolean)
-  const claims = claimRows.map(normalizeClaim).filter(Boolean)
+  const contradictions = contradictionRows
+    .map(row => normalizeClaim(row, atlasResearch.source)).filter(Boolean)
+  const claims = claimRows
+    .map(row => normalizeClaim(row, claimsResearch.source)).filter(Boolean)
   const curation = curationRows.map(normalizeCuration).filter(Boolean)
   const thinTotal = thinProjectionTotal(atlas, rawThin.length,
     rawThin.length > ATLAS_RENDER_LIMITS.thin ? rawThin.length : thin.length)
@@ -390,11 +432,7 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   return {
     totals,
     conceptSource: normalizeConceptSource(atlas),
-    researchSource: normalizeResearchSource(
-      Object.hasOwn(claimsEnvelope, 'research_source')
-        ? claimsEnvelope.research_source
-        : (Object.hasOwn(atlas, 'research_source')
-          ? atlas.research_source : record(rawClaims[0]).research_source)),
+    researchSource,
     concepts,
     thin,
     contradictions,
