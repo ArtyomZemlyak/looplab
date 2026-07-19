@@ -382,6 +382,35 @@ def test_parallel_build_runs_seeds_concurrently_with_distinct_ids(tmp_path):
     assert eng._role_pool and len(eng._role_pool) == 1       # pool built one extra pair (primary + 1)
 
 
+def test_parallel_build_replays_deterministically_and_records_fanout(tmp_path):
+    # Variant-1 Phase 4 (verification): a 2-wide parallel-build run replays to the SAME folded node set
+    # (each node with exactly one terminal, contiguous monotonic ids), and the fan-out is recorded in
+    # the trace as a cost guardrail (per-batch built <= fan <= parallel_build).
+    import json as _j
+    task = ToyTask.load(TASK_FILE)
+    run_dir = tmp_path / "pb-replay"
+    eng = _engine(run_dir)
+    eng.parallel_build = 2
+    eng.role_factory = task.build_roles
+    state = anyio.run(eng.run)
+    assert state.finished
+
+    replayed = fold(eng.store.read_all())                            # deterministic re-fold of the log
+    assert set(replayed.nodes) == set(state.nodes)
+    ids = sorted(replayed.nodes)
+    assert ids == list(range(len(ids))) and len(ids) >= 3            # contiguous, monotonic, no dup/gap
+    assert all(n.status in (NodeStatus.evaluated, NodeStatus.failed)  # exactly one terminal per node
+               for n in replayed.nodes.values())
+
+    spans = [_j.loads(ln) for ln in (run_dir / "spans.jsonl").read_text().splitlines() if ln.strip()]
+    fanouts = [s for s in spans if s.get("name") == "parallel_build_batch"]
+    assert fanouts, "parallel-build fan-out span was not recorded"
+    for s in fanouts:                                                # cost guardrail: never exceed the fan
+        attrs = s.get("attributes", {})
+        assert 0 < attrs.get("fan", 0) <= 2
+        assert 0 < attrs.get("built", 0) <= attrs["fan"]
+
+
 def test_stamp_novelty_hint_targets_the_passed_researcher(tmp_path):
     # Variant-1 Phase 1 (review HIGH): the per-build researcher (a pool member) must receive its OWN
     # novelty hint/stance — never the shared self.researcher — or a concurrent draft build clobbers

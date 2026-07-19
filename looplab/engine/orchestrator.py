@@ -1084,22 +1084,28 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 self.store.append(EV_RUNG_PROMOTED,
                                                   {"rung": _a["_rung"], "survivors": _a.get("_promoted", [])})
                         _reserved = [self._reserve_node_build(_a) for _a in _chunk]   # serial -> distinct ids
-                        async with anyio.create_task_group() as _tg:
-                            for _a, _res, _pair, _idea, _tel in zip(
-                                    _chunk, _reserved, _pb_pairs, _ideas, _telem):
-                                if _res is None:
-                                    continue
-                                # If a sibling in THIS chunk already crashed and tripped the
-                                # developer_crash circuit-breaker, don't start more builds — tighten the
-                                # "PAUSE on the FIRST developer_crash" guarantee under concurrency.
-                                if self._create_paused:
-                                    break
-                                # _create_node_guarded: an UNEXPECTED exception in one build becomes a
-                                # node_failed terminal for its already-reserved id (node_building was
-                                # appended up front) instead of tearing down the task group and killing
-                                # the whole run — the rest of the concurrent batch still finishes.
-                                _tg.start_soon(anyio.to_thread.run_sync,
-                                               functools.partial(self._create_node_guarded,
+                        # Cost guardrail (Phase 4): surface the concurrent build fan-out width in the
+                        # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
+                        # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
+                        # the configured fan-out — this span makes the actual per-batch cost observable.
+                        with self.tracer.span("parallel_build_batch", fan=_fan, built=len(_chunk),
+                                              parallel_build=self.parallel_build):
+                            async with anyio.create_task_group() as _tg:
+                                for _a, _res, _pair, _idea, _tel in zip(
+                                        _chunk, _reserved, _pb_pairs, _ideas, _telem):
+                                    if _res is None:
+                                        continue
+                                    # If a sibling in THIS chunk already crashed and tripped the
+                                    # developer_crash circuit-breaker, don't start more builds — tighten
+                                    # the "PAUSE on the FIRST developer_crash" guarantee under concurrency.
+                                    if self._create_paused:
+                                        break
+                                    # _create_node_guarded: an UNEXPECTED exception in one build becomes a
+                                    # node_failed terminal for its already-reserved id (node_building was
+                                    # appended up front) instead of tearing down the task group and killing
+                                    # the whole run — the rest of the concurrent batch still finishes.
+                                    _tg.start_soon(anyio.to_thread.run_sync,
+                                                   functools.partial(self._create_node_guarded,
                                                                   _a, _pair, _res, _idea, _tel))
                         if self._create_paused:
                             break
