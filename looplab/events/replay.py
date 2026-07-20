@@ -2872,6 +2872,73 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
         n.generalization_gap = (n.metric - robust) if st.direction == "max" else (robust - n.metric)
 
 
+def _record_setter_ids(nodes: dict[int, Node], direction: str) -> set[int]:
+    """The run-global set of node ids that ADVANCED the run's SOTA — sticky evidence.
+
+    Pure helper (Layer 1a) extracted VERBATIM from `_derive_hypotheses` so `_derive_cards` reuses the
+    identical logic. A node counts if it is evaluated/feasible/non-tombstoned and, in creation order,
+    either ESTABLISHES the first SOTA or BEATS the standing record; the flag STAYS set even after a
+    later node overtakes it (so a draft-backed hypothesis/card does not flip supported->tested the
+    moment something beats it — computing "is the CURRENT best" made it a board bug). Never mutates
+    `nodes`."""
+    better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
+    setters: set[int] = set()
+    running: float | None = None
+    for n in sorted(nodes.values(), key=lambda x: x.id):
+        if (n.status is NodeStatus.evaluated and n.feasible and n.metric is not None
+                and not n.tombstoned):              # §6.3: a deleted node must not set the board's SOTA
+            if running is None or better(n.metric, running):
+                setters.add(n.id)                   # first node ESTABLISHES the SOTA, or a later node
+                running = n.metric                  # BEATS the standing record — either is a real advance
+    return setters
+
+
+def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direction: str,
+                      record_setters: set[int], is_abandoned: bool,
+                      ) -> tuple[float | None, str, bool]:
+    """Compute (best_delta, status, supported) for one hypothesis/card from its evidence nodes.
+
+    Pure, VALUES-returning helper (Layer 1a) extracted VERBATIM from `_derive_hypotheses` so a card's
+    verdict is byte-identical to the hash-joined hypothesis wherever their evidence sets coincide. NEVER
+    stamps onto Node/Hypothesis/Card — it only reads. `record_setters` is `_record_setter_ids(...)`;
+    `is_abandoned` is the caller's "id in <abandoned set>" check. Supported if an experiment IMPROVED
+    over its parent (or set a run record); tested if evaluated without improvement; testing while
+    evidence still runs; open with no (usable) evidence; abandoned overrides all."""
+    better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
+    ev = [nodes[i] for i in evidence_ids if i in nodes and not nodes[i].tombstoned]
+    evaluated = [n for n in ev if n.status is NodeStatus.evaluated and n.feasible
+                 and n.metric is not None]
+    supported = False
+    best_delta: float | None = None
+    for n in evaluated:
+        # parent metric = the best feasible-evaluated parent's metric (direction-aware)
+        pmetrics = [nodes[p].metric for p in n.parent_ids
+                    if p in nodes and nodes[p].metric is not None
+                    and nodes[p].feasible]
+        base = (max(pmetrics) if direction == "max" else min(pmetrics)) if pmetrics else None
+        if base is not None:
+            delta = (n.metric - base) if direction == "max" else (base - n.metric)
+            best_delta = delta if best_delta is None else max(best_delta, delta)
+            if better(n.metric, base):
+                supported = True
+        if n.id in record_setters:                 # a draft/node that advanced the run's SOTA (sticky —
+            supported = True                       # stays supported even after a later node overtakes it)
+    pending = [n for n in ev if n.status is NodeStatus.pending]
+    if is_abandoned:
+        status = "abandoned"
+    elif not ev:
+        status = "open"
+    elif supported:
+        status = "supported"                       # at least one experiment improved — verdict stands
+    elif pending:
+        status = "testing"                         # still inconclusive: evidence running
+    elif not evaluated:
+        status = "open"                            # all evidence failed/infeasible — no verdict
+    else:
+        status = "tested"                          # all evidence evaluated, none improved
+    return best_delta, status, supported
+
+
 def _derive_hypotheses(st: RunState) -> None:
     """Build the hypothesis ledger from the folded state (P1). DERIVED, not stored: every node whose
     `idea.hypothesis` is set contributes a hypothesis (id = slug of the statement) with itself as
@@ -2879,7 +2946,6 @@ def _derive_hypotheses(st: RunState) -> None:
     evidence outcomes — supported if an experiment IMPROVED over its parent (or became the run best),
     tested if evaluated without improvement, testing while still running, open with no evidence.
     Audit-only: nothing here is read by best-selection."""
-    better = (lambda a, b: a > b) if st.direction == "max" else (lambda a, b: a < b)
     hyps: dict[str, Hypothesis] = {}
 
     # 1) explicitly-added hypotheses (human / deep-research) — may start with no evidence.
@@ -2969,53 +3035,16 @@ def _derive_hypotheses(st: RunState) -> None:
         hyps = folded
 
     # A node "supported" its hypothesis by ADVANCING the run's SOTA — and a record it set STAYS a support
-    # even after a later node overtakes it. Computing "is the CURRENT best" (a moving target) instead made
-    # a draft-backed hypothesis flip supported→tested the moment something beat it (read as a board bug).
-    # So mark record-SETTERS once, in creation order, and treat that as sticky evidence below.
-    _record_setters: set[int] = set()
-    _running: float | None = None
-    for _n in sorted(st.nodes.values(), key=lambda x: x.id):
-        if (_n.status is NodeStatus.evaluated and _n.feasible and _n.metric is not None
-                and not _n.tombstoned):             # §6.3: a deleted node must not set the board's SOTA
-            if _running is None or better(_n.metric, _running):
-                _record_setters.add(_n.id)          # first node ESTABLISHES the SOTA, or a later node
-                _running = _n.metric                # BEATS the standing record — either is a real advance
-                #                                     that stays supported even after being overtaken
+    # even after a later node overtakes it (extracted to `_record_setter_ids`, Layer 1a, reused by
+    # `_derive_cards` so a card sees the identical sticky-support set).
+    _record_setters = _record_setter_ids(st.nodes, st.direction)
 
-    # 3) compute a verdict per hypothesis from its evidence nodes.
+    # 3) compute a verdict per hypothesis from its evidence nodes — the pure `_evidence_verdict` helper
+    #    (Layer 1a) returns VALUES; `_derive_cards` reuses it so a card's verdict is byte-identical to the
+    #    hash-joined hypothesis wherever their evidence coincides. Never mutates the evidence nodes.
     for h in hyps.values():
-        ev = [st.nodes[i] for i in h.evidence if i in st.nodes and not st.nodes[i].tombstoned]
-        evaluated = [n for n in ev if n.status is NodeStatus.evaluated and n.feasible
-                     and n.metric is not None]
-        supported = False
-        best_delta: float | None = None
-        for n in evaluated:
-            # parent metric = the best feasible-evaluated parent's metric (direction-aware)
-            pmetrics = [st.nodes[p].metric for p in n.parent_ids
-                        if p in st.nodes and st.nodes[p].metric is not None
-                        and st.nodes[p].feasible]
-            base = (max(pmetrics) if st.direction == "max" else min(pmetrics)) if pmetrics else None
-            if base is not None:
-                delta = (n.metric - base) if st.direction == "max" else (base - n.metric)
-                best_delta = delta if best_delta is None else max(best_delta, delta)
-                if better(n.metric, base):
-                    supported = True
-            if n.id in _record_setters:            # a draft/node that advanced the run's SOTA (sticky —
-                supported = True                   # stays supported even after a later node overtakes it)
-        h.best_delta = best_delta
-        pending = [n for n in ev if n.status is NodeStatus.pending]
-        if h.id in st.hypotheses_abandoned:
-            h.status = "abandoned"
-        elif not ev:
-            h.status = "open"
-        elif supported:
-            h.status = "supported"                 # at least one experiment improved — verdict stands
-        elif pending:
-            h.status = "testing"                   # still inconclusive: evidence running
-        elif not evaluated:
-            h.status = "open"                      # all evidence failed/infeasible — no verdict
-        else:
-            h.status = "tested"                    # all evidence evaluated, none improved
+        h.best_delta, h.status, _ = _evidence_verdict(
+            h.evidence, st.nodes, st.direction, _record_setters, h.id in st.hypotheses_abandoned)
 
     # FOREAGENT board prioritization: stamp each ranked card's `priority` (0-based position in the
     # latest `hypothesis_ranked` order) so the UI kanban sorts open cards by predicted payoff. Derived,
