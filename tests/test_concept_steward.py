@@ -455,3 +455,25 @@ def test_cli_steward_model_override_reaches_the_client(tmp_path, monkeypatch):
                             {"merges": [], "splits": [], "purges": []}))
     r = CliRunner().invoke(app, ["concept-steward", str(tmp_path), "--model", "some-other-model"])
     assert r.exit_code == 0 and seen.get("model") == "some-other-model"   # --model actually applied
+
+
+def test_cli_concept_steward_refuses_poisoned_paid_history_before_client(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    import looplab.cli.inspect_cmds as inspect_cmds
+
+    poisoned = "SECRET_PAID_HISTORY_MUST_NOT_LEAK"
+    (tmp_path / "concept_curation_log.jsonl").write_text(poisoned + "\n", encoding="utf-8")
+    clients = []
+    monkeypatch.setattr(
+        inspect_cmds, "_make_llm_client",
+        lambda _settings: clients.append("created") or object(),
+    )
+
+    result = CliRunner().invoke(app, ["concept-steward", str(tmp_path)])
+
+    assert result.exit_code == 2
+    assert "ledger=concept_curation" in result.output
+    assert clients == []
+    assert poisoned not in result.output and str(tmp_path) not in result.output

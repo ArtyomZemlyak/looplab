@@ -265,3 +265,25 @@ def test_cli_claim_steward(tmp_path, monkeypatch):
     assert "claim-decide" in r2.stdout
     assert calls == ["paid"]
     assert not (tmp_path / "claim_decisions.jsonl").exists()
+
+
+def test_cli_claim_steward_refuses_poisoned_paid_history_before_client(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    import looplab.cli.inspect_cmds as inspect_cmds
+
+    poisoned = "SECRET_PAID_HISTORY_MUST_NOT_LEAK"
+    (tmp_path / "claim_curation_log.jsonl").write_text(poisoned + "\n", encoding="utf-8")
+    clients = []
+    monkeypatch.setattr(
+        inspect_cmds, "_make_llm_client",
+        lambda _settings: clients.append("created") or object(),
+    )
+
+    result = CliRunner().invoke(app, ["claim-steward", str(tmp_path)])
+
+    assert result.exit_code == 2
+    assert "ledger=claim_curation" in result.output
+    assert clients == []
+    assert poisoned not in result.output and str(tmp_path) not in result.output

@@ -937,8 +937,16 @@ def concept_steward_cmd(
     from looplab.core.config import Settings
     from looplab.engine.concept_steward import curation_is_empty, steward_concepts
     from looplab.engine.concept_registry import concept_governance_snapshot
+    from looplab.engine.governance_health import read_curation_rows
     import datetime as _dt
-    _governance_cli_read(lambda: concept_governance_snapshot(str(memory_dir)))
+
+    def _preflight():
+        concept_governance_snapshot(str(memory_dir))
+        # CODEX AGENT: a paid proposal is not allowed to run against an unreadable invocation history.
+        # Validate that history before even constructing a provider client so corruption cannot spend money.
+        read_curation_rows(Path(memory_dir) / "concept_curation_log.jsonl")
+
+    _governance_cli_read(_preflight)
     settings = Settings()
     if model:
         settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
@@ -1094,8 +1102,15 @@ def claim_steward_cmd(
     from looplab.core.config import Settings
     from looplab.engine.claim_steward import curation_is_empty, steward_claims
     from looplab.engine.claims import claim_governance_revision
+    from looplab.engine.governance_health import read_curation_rows
     import datetime as _dt
-    _governance_cli_read(lambda: claim_governance_revision(str(memory_dir)))
+
+    def _preflight():
+        claim_governance_revision(str(memory_dir))
+        # CODEX AGENT: fail before provider construction when the paid-call audit trail is unknown.
+        read_curation_rows(Path(memory_dir) / "claim_curation_log.jsonl")
+
+    _governance_cli_read(_preflight)
     settings = Settings()
     if model:
         settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
