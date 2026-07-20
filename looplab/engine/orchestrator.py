@@ -840,6 +840,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     async def run(self) -> RunState:
         events = self.store.read_all()
         state = fold(events)
+        if self._recover_interrupted_builds(state):
+            # Recovery appends terminal evidence. Re-fold before setup or any policy work so this
+            # invocation cannot resurrect the abandoned marker or reuse its reserved id.
+            events = self.store.read_all()
+            state = fold(events)
         self._ack_commands(events)
         # A hard kill can land after the durable terminal intent (`finalize_step:begun`) but before
         # `run_finished`. Never run setup/search in that gap; finalization restores the exact terminal
@@ -1391,6 +1396,36 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._prior_note_text, self._dev_prior_note_text = \
             self._load_reflection_priors_both(exclude_run_id=_rid)
         return entry_finished
+
+    def _recover_interrupted_builds(self, state: RunState) -> bool:
+        """Terminalize build reservations left in-flight by a dead engine invocation.
+
+        ``node_building`` is intentionally transient in the fold, but its id is a durable reservation.
+        If the process dies before ``node_created``/``node_failed``, replay alone cannot know that no
+        worker still owns it and the UI keeps rendering a live build forever. Entering ``run`` under the
+        run lock is that proof: no prior engine worker can still be authoritative. Append one ordinary
+        failure per surviving marker before setup/search; bare first-build reservations clear without
+        fabricating a Node, while an interrupted in-place rebuild closes its current generation.
+        """
+        markers = getattr(state, "buildings", None) or {}
+        recovered = False
+        for node_id, marker in sorted(markers.items()):
+            node = state.nodes.get(node_id)
+            raw_generation = marker.get("generation") if isinstance(marker, dict) else None
+            generation = (raw_generation if isinstance(raw_generation, int)
+                          and not isinstance(raw_generation, bool) and raw_generation >= 0
+                          else node.attempt if node is not None else 0)
+            # CODEX AGENT: every durable reservation gets a terminal outcome before any new work. Merely
+            # ignoring the transient projection resurrects its breathing card on every subsequent replay.
+            self.store.append(EV_NODE_FAILED, {
+                "node_id": node_id,
+                "generation": generation,
+                "error": "node build was interrupted before it committed",
+                "reason": "build_interrupted",
+                "eval_seconds": 0.0,
+            })
+            recovered = True
+        return recovered
 
     def _apply_control_overrides(self, state: RunState) -> tuple[Optional[float], Optional[float]]:
         # Effective budgets: an operator may raise (or lower) them live via a `budget_extend`
