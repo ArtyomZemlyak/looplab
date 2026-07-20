@@ -465,13 +465,20 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     generation-fenced request/done counter pair (verbatim mirrors of `_on_fork`/`_on_fork_done`).
 
 **F — Defaults & Layer 2 scope:**
-30. Layer 2 scope = additive `eval_parallel`/`llm_parallel` `Optional` fields + AUTO(0) decoupling ONLY;
-    **drop** the property-descriptor rename of `max_parallel`/`parallel_build` (keep them canonical, add
-    the new names as thin read-through resolution in `__init__`). Neither new field is in
-    `RUN_START_PINNED_FIELDS` (re-read live on resume). A Strategist `max_parallel=0` must still yield 1,
-    not GPU-count. Layer 2 alone delivers **no** throughput change (alternation kept) — its value is the
-    cost-control decoupling that L4/L5 make load-bearing. `footprint.timeout` inherits the identical
-    `Settings.agent_control` governance gate as `idea.eval_timeout`, or it smuggles an ungoverned override.
+30. Layer 2 scope (**revised by owner decisions 6 & 7**): additive `eval_parallel`/`llm_parallel` fields +
+    AUTO(0) decoupling, with the **new names canonical everywhere** and `max_parallel`/`parallel_build`
+    demoted to thin back-compat aliases (set-legacy → feeds new; unset → new wins; env vars / snapshots /
+    ~100 `Engine(...)` call sites keep the old names alive — they CANNOT be deleted, CLAUDE.md "never
+    rename fields"). Drop the property-descriptor rename. Neither new field is in `RUN_START_PINNED_FIELDS`
+    (re-read live on resume). A Strategist/operator `*_parallel=0` (or legacy `max_parallel=0`) must still
+    yield 1, not GPU-count. **`llm_parallel` is a multi-lane budget**, not a single build pool — named
+    lanes `build/propose`, `deep_research`, `novelty_dedup`, `enrichment`, each with a dedicated worker
+    allotment; `AUTO` couples the build lane to `eval_parallel` and leaves research unbounded (byte-
+    identical default). The Strategist re-allocates the total + per-lane split on its cadence
+    (`engine/strategy.py`) and steers only the new names. Layer 2 alone still delivers **no** throughput
+    change (alternation kept) — its value is the cost-control decoupling + the lane budget that L4/L5 make
+    load-bearing. Timeout is ONE canonical field (`eval_timeout`) with a **Settings hard ceiling** the
+    agent-declared value is clamped to (decision 3); footprint carries only `gpus`/`mem`.
 
 ### 12.3 Card-schema additions Layer 1 MUST carry now (build 1a/1b right the first time)
 
@@ -509,10 +516,11 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
 
 **1b (enrichment):**
 - `Card.footprint` sub-schema — concrete shape `{gpus:int, gpu_mem_mib:Optional[int],
-  timeout:Optional[float], proposed_by:str, finalized_by:Optional[str], pinned_by:Optional[str]}`;
-  UNSPECIFIED (`None`/`gpus None`) distinct from explicit `gpus=1` (decision 16). Also
-  `Idea.footprint: Optional[dict]=None` (rides `durable_idea_payload` like `eval_profile`).
-  `footprint.timeout` inherits the `agent_control` governance gate.
+  proposed_by:str, finalized_by:Optional[str], pinned_by:Optional[str]}`; UNSPECIFIED (`None`/`gpus None`)
+  distinct from explicit `gpus=1` (decision 16). Also `Idea.footprint: Optional[dict]=None` (rides
+  `durable_idea_payload` like `eval_profile`). **Timeout is NOT on the footprint** (owner decision 3): it
+  stays the single canonical `eval_timeout`, and the agent-declared value is **clamped to a new Settings
+  hard ceiling** (`max_eval_timeout`, `agent_control`-gated) — footprint carries only `gpus`/`mem`.
 - **Reserve `DEVELOPER_OUTPUT_ATTRS` member `last_footprint`** (slot only; L4 wires it). Note every
   delegating wrapper (`ValidatingDeveloper`, best-of-N, the foresight `__getattr__` panel via
   `forward_hints`) must forward it — reserving now avoids registry-guard churn later.
@@ -538,10 +546,10 @@ does not force a rework.
    the freshness gate/crash-recovery; keying the gate on "`idea.card_id` is set" would fire on NORMAL
    card-linked nodes and break default byte-identity. A Layer-1 schema item beyond §0.5 → owned by 1a
    (reserve) + L5 (emit).
-3. **CANCEL of an in-flight eval** on operator/freshness drop — `card_dropped` is NO_SPAWN so it cannot
-   preempt a dispatched build; the GPU burns to its terminal. Reuse `_evaluate`'s `kill_signal`
-   (train_monitor/asha_monitor precedent) → **open for owner** (§12.7), tentatively L5 with L6 recording
-   intent.
+3. **CANCEL of an in-flight eval** on operator/freshness drop → RESOLVED (owner decision 1):
+   **burn-to-terminal by default** (the running eval's result is still valid evidence); active-cancel
+   (reuse `_evaluate`'s `kill_signal`, train_monitor/asha_monitor precedent) is added ONLY for the operator
+   "stop this card NOW" affordance (L5 engine kill + L6 intent), and later if the harness shows real burn.
 4. **Immutable-seed vs editable-display** split (decision 24) — an L6-discovered flaw whose fix lands in
    L1's `_derive_cards`; captured in 1a.
 5. **Scorer-fidelity** (does the L3 scorer reproduce `next_actions` exactly — `merge_every`/`ablate_every`
@@ -549,12 +557,12 @@ does not force a rework.
    must go green before `speculation_depth>0`.
 6. **Producer role-pool isolation** — the producer draws a pooled `(researcher,developer)` pair (L2 owns
    the pool, L5 owns the producer; the contract sits in the seam, decision 5).
-7. **`footprint.timeout` vs `idea.eval_timeout`** governance overlap → open for owner; whichever wins
-   inherits the identical gate.
+7. **`footprint.timeout` vs `idea.eval_timeout`** → RESOLVED (owner decision 3): one canonical
+   `eval_timeout`, clamped to a new Settings hard ceiling (`max_eval_timeout`); footprint carries no timeout.
 8. **confirm/holdout endgame coupling** (L3 empty-condition ⟺ L5 not keeping the queue non-empty past the
    node-budget boundary) → a shared liveness test on the quadratic toy A/B.
-9. **Docker `--gpus` honesty** on GPU-present/no-nvidia-runtime boxes → probe runtime, fall back to
-   unpinned+warn (open for owner, L4).
+9. **Docker `--gpus` honesty** on GPU-present/no-nvidia-runtime boxes → RESOLVED (owner decision 4): probe
+   runtime, **fall back to unpinned + warn** (never REFUSE — preserves today's CPU-fallback), owned by L4.
 
 ### 12.5 Remaining risks (with mitigations)
 
@@ -624,14 +632,19 @@ then **6**.
   excluded/trust-gated evidence (distinct from true-open); tolerate a card whose only node terminated
   `node_failed(reason='superseded')`. *Gate:* advisory only. *Tests:* dropped/merged/gated excluded from
   the actionable set; gated≠EXPLORE-band; `card_dropped` order-tolerance applied LAST.
-- **2.** `Settings`+`EngineOptions` `eval_parallel`/`llm_parallel` `Optional[int]=None`; resolve
-  `_eval_parallel` (None→`max_parallel`, AUTO(0)→`max(1,len(_gpu_ids))`) and `_llm_parallel`
-  (None→`parallel_build`, AUTO(0)→`_eval_parallel`); keep canonical attrs + read-through resolution (no
-  property rename); Strategist grants for both names (raw store, no AUTO re-resolve, `max(1,int)`); docs +
-  settings-UI field count + diagram parallelism boxes. *Gate:* both None → legacy 1/1 byte-identical; not
-  in `RUN_START_PINNED_FIELDS`; zero fold impact. *Tests:* `test_engine_options` identity, golden
-  unchanged, NEW: Strategist/operator `max_parallel=0`→1 (not GPU-count), accessors never raise on a built
-  engine (getter-typo → red, not silently masked to 1).
+- **2.** `Settings`+`EngineOptions` `eval_parallel`/`llm_parallel` `Optional[int]=None` as the **canonical**
+  fields; resolve `_eval_parallel` (None→legacy `max_parallel`, AUTO(0)→`max(1,len(_gpu_ids))`) and
+  `_llm_parallel` (None→legacy `parallel_build`, AUTO(0)→`_eval_parallel` for the build lane). `max_parallel`/
+  `parallel_build` are **thin back-compat aliases only** (set-legacy → feeds new; env vars / snapshots /
+  ~100 `Engine(...)` sites keep them alive — not deletable). `llm_parallel` is a **multi-lane budget**
+  (`build/propose`, `deep_research`, `novelty_dedup`, `enrichment`) — build lane couples to `eval_parallel`
+  at AUTO, research lane defaults unbounded (byte-identical). **Strategist grants target the NEW names only**
+  (raw store, no AUTO re-resolve, `max(1,int)`); the periodic per-lane re-allocation rides `engine/strategy.py`.
+  Docs + settings-UI field count + diagram parallelism boxes. *Gate:* all None → legacy 1/1 byte-identical,
+  research overlap unbounded as today; not in `RUN_START_PINNED_FIELDS`; zero fold impact. *Tests:*
+  `test_engine_options` identity, golden unchanged, NEW: Strategist/operator `*_parallel=0` (and legacy
+  `max_parallel=0`)→1 (not GPU-count), accessors never raise on a built engine (getter-typo → red, not
+  silently masked to 1), NEW: per-lane budget split honored + research-lane default preserves unbounded overlap.
 - **4.** Wire `last_footprint` end-to-end (Developer sets; engine merges onto the Idea at the four
   `_emit_node_created` sites like `last_files`; forward through every wrapper); build `_gpu_mem` from
   `core/hardware.detect_gpus()` joined to `_detect_gpu_ids` (logical↔physical remap under
@@ -646,8 +659,9 @@ then **6**.
   byte-identical; footprint never enters metric/best/`next_actions`/breedable; ordinals never fold.
   *Tests:* over-declared clamps without wedging; unspecified serial multi-GPU stays whole-box; race-free
   admission under concurrent releases; `gpus=0` past a stalled head; docker remap + fallback;
-  `footprint.timeout` gated like `eval_timeout`; `test_role_output_contract` green with all wrappers
-  forwarding; golden unchanged.
+  agent-declared `eval_timeout` clamped to the `max_eval_timeout` Settings ceiling (never exceeds it);
+  Developer scale-up beyond the Researcher proposal allowed but clamped to the pool envelope + cue;
+  `test_role_output_contract` green with all wrappers forwarding; golden unchanged.
 - **3.** `Settings.card_driven_selection=False`; a third arm at orchestrator.py:1006 (explicit if/elif with
   pinned precedence vs `agent_drives_actions` + a both-flags test); `card_next_actions(state,policy,
   max_nodes)` reusing `legal_actions` forced gates in EXACT order (pending→evaluate-all, `debug_action`
@@ -656,8 +670,10 @@ then **6**.
   `next_actions`); greedy=argmax single hot card, population=top-K lane (documented intended flag-on change
   for mcts/asha, or node-granular improve within the lane); open-band lexicographic `(band, exploration_
   key)`; **node-budget denominator excludes tombstoned/gated nodes** (shared fix, pinned here); optional
-  `card_selected` audit as REPLACE-latest folded OR DIAGNOSTIC (never an unbounded per-iteration list);
-  optional `Strategy.card_scoring` (default derive-from-policy). *Gate:* flag off → byte-identical; flag
+  `card_selected` audit as **DIAGNOSTIC** (owner decision 5; promote to REPLACE-latest folded only if the
+  board later needs it — never an unbounded per-iteration list); **`Strategy.card_scoring` is a distinct
+  field the Strategist shapes** (owner decision 7 — explore/exploit stance + weights on novelty/coverage;
+  `validate_strategy` whitelist), not merely derived from the policy. *Gate:* flag off → byte-identical; flag
   recorded in `run_started`; empty-actions contract identical to `next_actions`. *Tests:* liveness (no
   early finish), `debug_action` before any card improve, greedy single-hot-card == serial greedy, mcts/asha
   intended delta, both-flags precedence, dropped/gated never scored, budget excludes tombstoned/gated,
@@ -715,9 +731,12 @@ then **6**.
   speculation on in production.
 - **Scorer-fidelity test gate** (separate from staleness): prove the L3 scorer reproduces `next_actions`
   exactly (merge/ablate cadence, `operator_bandit` UCB) before `speculation_depth>0`.
-- **Unified `llm_parallel` CapacityLimiter** shared by the build fan-out AND `_spawn_research` AND
-  enrichment — folding research (today independent of `max_parallel`) under a limiter can't be byte-
-  identical, so deferred unless behind a knob whose default preserves unbounded overlap.
+- ~~**Unified `llm_parallel` CapacityLimiter**~~ — **PROMOTED to in-scope by owner decision 6.** The
+  build fan-out, `_spawn_research`, `novelty_dedup`, and enrichment share one budgeted, Strategist-
+  allocated limiter with named lanes. Folding research under a limiter can't be byte-identical, so it
+  lands behind a knob whose **default preserves today's unbounded `_spawn_research` overlap** (each lane's
+  AUTO = "unbounded" for research until the Strategist/operator sets a finite split). Built as an
+  extension of L2 (the lane structure) + the Strategist mixin (the periodic re-allocation).
 - **Retiring `HypothesisBoard`/`state.hypotheses`** from the public dump — deferred to a post-L6
   deprecation window; the cards+hypotheses dump duplication is accepted through L1–L6.
 - **Adaptive speculation depth** (keep the ready buffer ≈ `eval_parallel` dynamically) — ship the static
@@ -726,21 +745,52 @@ then **6**.
   generation-fenced counter) and operator "merge these two cards" — deferred; `EV_INJECT_NODE` already
   covers manual node creation.
 
-**Open for the owner (a decision changes the build):**
-1. **Cancel of an in-flight eval** on operator/freshness drop — reuse `_evaluate`'s `kill_signal` (assign
-   to L5, L6 records intent), or accept burn-to-terminal?
-2. **Speculatively code dependency-bearing cards** (improve/merge/debug whose parent might be superseded
-   by an in-flight sibling), or **drafts only** (always safe)? Sets the build-ahead vs freshness-waste
-   tradeoff.
-3. **`footprint.timeout` vs `idea.eval_timeout`** — subsume one into the other, or keep both? Whichever
-   wins inherits the identical `agent_control` gate.
-4. **Over-declaration/over-pin posture** beyond clamp — may a Developer finalize a LARGER footprint than
-   the Researcher proposed (scale a DDP finetune up)? Should the docker untrusted tier REFUSE or fall-
-   back-unpinned+warn when the nvidia runtime is absent?
-5. **`card_selected`/`card_build` audit bucket** — fold-as-REPLACE-latest (like `policy_decision`) vs pure
-   DIAGNOSTIC? Decide by whether the board needs selection/admission decisions in replay.
-6. **AUTO(0) target for `llm_parallel`** — keep the conservative coupling to `eval_parallel`, or an
-   independent target (small const / CPU-count) now that the dimensions are decoupled?
-7. **Strategist steering surface** — steer the NEW names (`eval_parallel`/`llm_parallel`, `card_scoring`)
-   directly, or only the legacy aliases that resolve through? And is `card_scoring` a distinct `Strategy`
-   field or strictly derive-from-policy?
+**Owner decisions — RESOLVED (2026-07-20).** All seven closed; two of them (6, 7) expand the Strategist
+into a **dynamic resource + priority allocator** and are reflected back into the finalized decisions and
+the stage scopes.
+
+1. **Cancel of an in-flight eval** → **burn-to-terminal by default.** A freshness/operator drop marks the
+   card, but an already-dispatched eval runs to its own terminal — its result is still valid evidence, so
+   it is not waste. Active-cancel (reuse `_evaluate`'s `kill_signal`, train_monitor/asha_monitor
+   precedent) is added ONLY for the operator "stop this card NOW" affordance and, later, if the quality
+   harness shows meaningful GPU burn on stale speculations. Owned by L5 (engine kill path) + L6 (operator
+   intent).
+2. **Speculatively code dependency-bearing cards → YES (option B).** The producer pre-builds
+   improve/merge/debug against the current-best parent, not drafts-only, and relies on the freshness gate
+   to drop them if the parent is superseded — so GPUs fill even in the exploit phase. Conservatism stays
+   exactly where the review pinned it: **ASHA speculation capped to depth-0 across rung boundaries**, and
+   merge-card freshness requires **both** parents still in `rank_by_metric[:2]` AND breedable (decision
+   12). Accepts some discarded speculative builds as the cost of no-idle GPUs.
+3. **`footprint.timeout` and `idea.eval_timeout` → ONE canonical field, with a hard Settings ceiling.**
+   Collapse the two into a single per-eval timeout (footprint carries only the resource declaration
+   `gpus`/`mem`; the timeout is the existing `eval_timeout` slot). Add a **Settings hard cap**
+   (`max_eval_timeout` / the existing `agent_control` ceiling) that the agent-declared timeout is
+   **clamped to** — an agent or operator can request a longer eval but can never exceed the run-configured
+   maximum. No second channel, no ungoverned override.
+4. **Over-declaration posture → agreed.** The Developer MAY finalize a LARGER footprint than the Researcher
+   proposed (the Developer actually knows the code — e.g. a DDP finetune), **clamped to the pool envelope**
+   with a cue/log so the scale-up is visible. Docker untrusted tier on a box without the nvidia runtime →
+   **fall back to unpinned + warn** (never REFUSE — that would regress today's working CPU-fallback path).
+5. **`card_selected`/`card_build` audit bucket → DIAGNOSTIC** (fold-ignored) on first ship; promote to a
+   folded REPLACE-latest slot (like `policy_decision`) only if the board later needs "why this card" as
+   durable derived state. Zero replay surface now.
+6. **`llm_parallel` becomes a Strategist-allocated, multi-lane LLM budget** (expands the AUTO decision and
+   L2). Not a single build pool: it is a total LLM-concurrency budget partitioned into **named lanes** —
+   `build/propose`, `deep_research`, `novelty_dedup`, `enrichment` — each with a small dedicated worker
+   allotment so background research / novelty-dedup / consolidation always make progress alongside builds.
+   `AUTO(0)` default still couples the build lane to `eval_parallel` (cost ≈ today); an explicit value or
+   the Strategist overrides it. **The Strategist periodically re-prioritizes** (on its existing cadence,
+   `engine/strategy.py`) both the total budget and the per-lane split — "what to do next and how much LLM
+   goes where." This **promotes the deferred unified-limiter** (see below) from out-of-scope to in-scope,
+   behind a default that preserves today's unbounded `_spawn_research` overlap for byte-identity.
+7. **New names are canonical everywhere; legacy is demoted to a compat shim; the Strategist owns the
+   scoring function.** The Strategist steers the NEW names (`eval_parallel`/`llm_parallel` + its per-lane
+   split) directly, and all new engine/scheduler code keys on them. `card_scoring` is a **distinct
+   `Strategy` field** the Strategist can shape (explore/exploit stance, weights on novelty/coverage) — not
+   merely derived from the policy. *Hard constraint (honest scoping):* `max_parallel`/`parallel_build`
+   **cannot be deleted** — `LOOPLAB_<FIELD>` env vars, config snapshots, and ~100 `Engine(...)` test call
+   sites + golden replay depend on the exact names (CLAUDE.md: "never nest or rename fields"). So "minimum
+   legacy everywhere" is realized as: legacy names survive ONLY as thin back-compat aliases that feed the
+   new canonical fields (set-legacy → writes new; unset → new wins); nothing new is built on them, the
+   Strategist never emits them, and docs/UI present only the new names. Removing them entirely is a
+   separate post-migration deprecation window.
