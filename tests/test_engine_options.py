@@ -36,6 +36,10 @@ def _mk_engine(run_dir, **kw) -> Engine:
 ATTR_BY_FIELD = {
     "max_parallel": "max_parallel",
     "parallel_build": "parallel_build",
+    # Layer-2 canonical parallelism names — None default resolves to the legacy attr, so they land on the
+    # `_eval_parallel`/`_llm_parallel` read-through aliases (which hold the settled runtime value).
+    "eval_parallel": "_eval_parallel",
+    "llm_parallel": "_llm_parallel",
     "train_monitor": "_train_monitor",
     "train_monitor_interval_s": "_train_monitor_interval_s",
     "train_monitor_kill": "_train_monitor_kill",

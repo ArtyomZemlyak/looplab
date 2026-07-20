@@ -187,7 +187,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         def _opt(field: str):
             return knobs[field] if field in knobs else getattr(options, field)
 
-        max_parallel = _opt("max_parallel")
+        # Layer-2 decoupling (docs/23): the CANONICAL `eval_parallel`/`llm_parallel` win over the legacy
+        # `max_parallel`/`parallel_build` when set; None => fall back to the legacy field => byte-identical.
+        _eval_parallel_opt = _opt("eval_parallel")
+        max_parallel = _eval_parallel_opt if _eval_parallel_opt is not None else _opt("max_parallel")
+        _llm_parallel_opt = _opt("llm_parallel")
         train_monitor = _opt("train_monitor")
         train_monitor_interval_s = _opt("train_monitor_interval_s")
         train_monitor_kill = _opt("train_monitor_kill")
@@ -339,7 +343,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # a `parallel_build` above that (le=64) just queues the excess (no deadlock — workers never
         # re-enter the loop), so effective build concurrency silently caps near 40. The value is a raw
         # opt here (0 = AUTO); it is resolved against the settled `self.max_parallel` further down.
-        self._parallel_build_opt = _opt("parallel_build")
+        # Layer-2: the canonical `llm_parallel` wins over the legacy `parallel_build` when set.
+        self._parallel_build_opt = (_llm_parallel_opt if _llm_parallel_opt is not None
+                                    else _opt("parallel_build"))
         self.parallel_build = max(1, self._parallel_build_opt)   # provisional; re-resolved below
         self._role_pool: Optional[list] = None
         # A successful live Developer swap owns every subsequent build worker too. None means the
@@ -475,6 +481,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Now that max_parallel is settled, resolve parallel_build (0 = AUTO = max_parallel), so a build
         # fan-out never exceeds what we can concurrently evaluate.
         self.parallel_build = self._resolve_parallel_build(self._parallel_build_opt)
+        # Layer-2 canonical read-through aliases: new code keys on `_eval_parallel`/`_llm_parallel`, which
+        # point at the settled runtime values (the legacy `max_parallel`/`parallel_build` attrs stay for
+        # the ~100 call sites / evaluate.py / crash_repair that already read them). A Strategist retune of
+        # either axis (strategy._apply_strategy) refreshes both the legacy attr and these aliases.
+        self._eval_parallel = self.max_parallel
+        self._llm_parallel = self.parallel_build
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
         self._gpu_lock = threading.Lock()
         self.timeout = timeout
@@ -1455,6 +1467,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # 0 = AUTO (one experiment per detected GPU), same as the launch-time setting — so the
                 # Strategist can hand parallelism back to "let the box decide", not just pick a fixed N.
                 self.max_parallel = max(1, len(self._gpu_ids)) if _mp == 0 else max(1, _mp)
+                self._eval_parallel = self.max_parallel   # keep the L2 canonical alias in sync (see __init__)
             except (TypeError, ValueError):
                 pass
         if "parallel_build" in _bo:
@@ -1462,6 +1475,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # 0 = AUTO = the resolved max_parallel (build as many seeds as we can concurrently eval);
                 # resolved AFTER max_parallel above so an AUTO build tracks a just-changed AUTO eval width.
                 self.parallel_build = self._resolve_parallel_build(int(_bo["parallel_build"]))
+                self._llm_parallel = self.parallel_build   # keep the L2 canonical alias in sync
             except (TypeError, ValueError):
                 pass
         return max_s, max_es

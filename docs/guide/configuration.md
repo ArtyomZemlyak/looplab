@@ -59,7 +59,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **153 of the 180 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **153 of the 182 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 17 high-frequency keys; search spans all 153 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
@@ -124,6 +124,8 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `max_nodes` | `LOOPLAB_MAX_NODES` | `8` | Candidate (node) budget for the search |
 | `max_parallel` | `LOOPLAB_MAX_PARALLEL` | `1` | Concurrent evaluations. `1` = one experiment at a time (deterministic); raise to fan out |
 | `parallel_build` | `LOOPLAB_PARALLEL_BUILD` | `1` | Concurrent node BUILDS (research + code) for independent seed/explore drafts, each on its own pooled (researcher, developer) pair; a single shared-researcher pass yields the N distinct seed ideas. `1` = serial + fully deterministic (today). `0` = AUTO = the resolved `max_parallel` (build as many seeds as you can concurrently eval). `>1` fans draft builds out across worker threads: the event-log write order (seq/interleave of `node_building`/`node_created`) becomes nondeterministic across re-runs, though the fold stays deterministic and order-tolerant so replay is unaffected. The Strategist may retune it live (governance matrix). Needs a `role_factory` wired into the engine; without it, clamps to `1` |
+| `eval_parallel` | `LOOPLAB_EVAL_PARALLEL` | _(unset)_ | **Canonical** name for concurrent EVALUATIONS (the GPU/experiment consumer), decoupled from LLM concurrency (Kanban re-arch, docs/23 Layer 2). Unset (`None`) falls back to `max_parallel` → byte-identical to today; `0` = AUTO (one experiment per detected GPU). The L4 scheduler bin-packs declared footprints against the GPU inventory as a separate axis. The Strategist steers this (governance matrix); `max_parallel` stays a back-compat alias |
+| `llm_parallel` | `LOOPLAB_LLM_PARALLEL` | _(unset)_ | **Canonical** name for concurrent LLM BUILDS (the producer), decoupled from eval concurrency. Unset (`None`) falls back to `parallel_build`; `0` = AUTO (= resolved `eval_parallel`, build as many seeds as you can eval). Layer 5 turns this into a multi-lane budget the Strategist re-allocates across build/research/novelty-dedup/enrichment; Layer 2 lands only the decoupled knob (no throughput change — the spine still alternates). `parallel_build` stays a back-compat alias |
 | `train_monitor` | `LOOPLAB_TRAIN_MONITOR` | `true` | Per-eval background observer that tails the live training log while a (long) stage runs. Advisory/observability only (no node-selection or replay impact); no-ops without an LLM client or on the solution.py path |
 | `train_monitor_interval_s` | `LOOPLAB_TRAIN_MONITOR_INTERVAL_S` | `600.0` | Base monitor tick cadence in seconds; the effective cadence adapts to the per-experiment budget and can only be tightened by this. No-op unless `train_monitor` is on |
 | `train_monitor_kill` | `LOOPLAB_TRAIN_MONITOR_KILL` | `false` | Opt-in INTERVENTION: let the monitor tree-kill a training it judges `broken` (diverged / silent CPU fallback / not learning) early. The node then fails normally (`reason=monitor_broken`). Off = observe only |

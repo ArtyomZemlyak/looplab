@@ -59,8 +59,12 @@ Strategy = TypedDict(
                                 # downstream (researcher proposal + foresight rank + novelty gate).
                                 # "balanced" == today's behavior; the Strategist owns this dial.
         "timeout": float,       # per-eval wall-clock budget (s) — applied only if the matrix allows it
-        "max_parallel": int,    # concurrent evals — applied only if the matrix allows it
-        "parallel_build": int,  # concurrent node BUILDS (0=AUTO=max_parallel) — applied only if allowed
+        # Layer-2 canonical parallelism names (docs/23) — prefer these; the two legacy names below stay
+        # accepted for back-compat. Applied only if the agent-control matrix allows it.
+        "eval_parallel": int,   # concurrent evals (GPU consumer); 0=AUTO=one per detected GPU
+        "llm_parallel": int,    # concurrent LLM builds (producer); 0=AUTO=resolved eval_parallel
+        "max_parallel": int,    # legacy alias of eval_parallel — applied only if the matrix allows it
+        "parallel_build": int,  # legacy alias of llm_parallel (0=AUTO=max_parallel) — if allowed
         "request_research": bool,  # ask the engine to run the Deep-Research stage before continuing
         "rationale": str,       # human-readable "why" (the UI panel)
         "source": str,          # "rule"|"llm"|"operator"|"config" (provenance, audit)
@@ -217,12 +221,20 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     tmo = strat.get("timeout")
     if isinstance(tmo, (int, float)) and not isinstance(tmo, bool) and tmo > 0:
         out["timeout"] = float(tmo)
+    # Layer-2 canonical parallelism names (docs/23) + their legacy aliases. Bounds match config
+    # (eval_parallel 0..1024, llm_parallel 0..64). 0 = AUTO, resolved in _apply_strategy.
+    ep = strat.get("eval_parallel")
+    if isinstance(ep, int) and not isinstance(ep, bool) and 0 <= ep <= 1024:
+        out["eval_parallel"] = ep
     mp = strat.get("max_parallel")
     if isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0:
-        out["max_parallel"] = mp   # 0 = AUTO (one experiment per detected GPU), resolved in _apply_strategy
+        out["max_parallel"] = mp   # legacy alias of eval_parallel, resolved in _apply_strategy
+    lp = strat.get("llm_parallel")
+    if isinstance(lp, int) and not isinstance(lp, bool) and 0 <= lp <= 64:
+        out["llm_parallel"] = lp
     pb = strat.get("parallel_build")
     if isinstance(pb, int) and not isinstance(pb, bool) and 0 <= pb <= 64:
-        out["parallel_build"] = pb   # 0 = AUTO (= resolved max_parallel), resolved in _apply_strategy
+        out["parallel_build"] = pb   # legacy alias of llm_parallel, resolved in _apply_strategy
     if isinstance(strat.get("request_research"), bool) and strat["request_research"]:
         out["request_research"] = True   # ask the engine to run the Deep-Research stage
     if not out:

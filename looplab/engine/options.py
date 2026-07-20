@@ -50,6 +50,11 @@ class EngineOptions:
     """
     max_parallel: int = 1                # single experiment at a time; > 1 = backlog parallel seam
     parallel_build: int = 1              # Variant-1: build (research+code) N nodes concurrently (1 = serial)
+    # Layer-2 canonical parallelism names (docs/23). None (both) => fall back to the legacy fields above
+    # => byte-identical to today. eval_parallel = concurrent evals (GPU consumer); llm_parallel =
+    # concurrent LLM builds (producer). Same default (None) on BOTH sides -> no options-divergence.
+    eval_parallel: Optional[int] = None
+    llm_parallel: Optional[int] = None
     train_monitor: bool = False          # per-eval live training-log observer (off = today)
     train_monitor_interval_s: float = 600.0   # base tick cadence (s); effective cadence adapts to the budget
     train_monitor_kill: bool = False     # Phase 3: let the monitor tree-kill a 'broken' training early

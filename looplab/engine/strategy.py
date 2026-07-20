@@ -65,7 +65,7 @@ class StrategyCadenceMixin:
         # change to another tracked field).
         return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity",
                                       "novelty_stance", "request_research", "timeout", "max_parallel",
-                                      "parallel_build")}
+                                      "parallel_build", "eval_parallel", "llm_parallel")}
 
     def _available_developers(self) -> list[str]:
         from looplab.agents.cli_agent import PRESETS
@@ -422,19 +422,31 @@ class StrategyCadenceMixin:
                 self.timeout = max(0.1, float(strat["timeout"]))
             except (TypeError, ValueError):
                 pass
-        if "max_parallel" in strat and may("max_parallel"):
-            try:
-                self.max_parallel = max(1, int(strat["max_parallel"]))
-            except (TypeError, ValueError):
-                pass
-        # parallel_build: concurrent node BUILDS. 0 = AUTO -> resolved max_parallel (build exactly as
-        # many seeds as you can concurrently eval). Rebuilt role pool is lazy (_build_role_pairs), so a
-        # mid-run change takes effect on the next draft batch; clamps to 1 without a role_factory.
-        if "parallel_build" in strat and may("parallel_build"):
-            try:
-                self.parallel_build = self._resolve_parallel_build(int(strat["parallel_build"]))
-            except (TypeError, ValueError):
-                pass
+        # Layer-2 (docs/23): the Strategist steers the CANONICAL `eval_parallel`/`llm_parallel`; the
+        # legacy `max_parallel`/`parallel_build` stay accepted for back-compat. Each retune refreshes BOTH
+        # the runtime attr (read by evaluate.py/crash_repair/_dispatch_evals) AND the `_eval_parallel`/
+        # `_llm_parallel` read-through aliases. A Strategist/operator 0 still means AUTO->resolved, never
+        # a hang; the `max(1, ...)` / `_resolve_parallel_build` guards keep it >=1.
+        # Legacy alias FIRST, canonical name LAST, so when a strategy carries BOTH the canonical value
+        # wins (last write) — matching __init__ ("a NEW name, when set, WINS over its legacy alias").
+        for _k in ("max_parallel", "eval_parallel"):
+            if _k in strat and may(_k):
+                try:
+                    self.max_parallel = max(1, int(strat[_k]))
+                    self._eval_parallel = self.max_parallel
+                except (TypeError, ValueError):
+                    pass
+        # llm_parallel / parallel_build: concurrent node BUILDS. 0 = AUTO -> resolved eval concurrency
+        # (build exactly as many seeds as you can concurrently eval). Rebuilt role pool is lazy
+        # (_build_role_pairs), so a mid-run change takes effect on the next draft batch; clamps to 1
+        # without a role_factory. Legacy-first / canonical-last, same precedence rule as the eval axis.
+        for _k in ("parallel_build", "llm_parallel"):
+            if _k in strat and may(_k):
+                try:
+                    self.parallel_build = self._resolve_parallel_build(int(strat[_k]))
+                    self._llm_parallel = self.parallel_build
+                except (TypeError, ValueError):
+                    pass
         # The policy NAME and its `policy_params` are gated INDEPENDENTLY: an operator can pin
         # `policy_params` ALONE (with `policy` locked out of the strategist's grant) and that pin must
         # still take effect — the `_pinned` exemption promises "a human can always change it via the

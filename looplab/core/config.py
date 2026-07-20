@@ -125,6 +125,10 @@ DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
     "timeout": ["researcher", "strategist"],
     "max_parallel": ["strategist"],
     "parallel_build": ["strategist"],
+    # Layer-2 canonical parallelism names (docs/23). The Strategist steers THESE; the legacy names above
+    # stay granted only for back-compat. Same grant surface (strategist-only).
+    "eval_parallel": ["strategist"],
+    "llm_parallel": ["strategist"],
     "max_nodes": ["strategist", "boss"],
     "max_eval_seconds": ["strategist", "boss"],
     "policy": ["strategist"],
@@ -204,6 +208,21 @@ class Settings(BaseSettings):
     # exactly as many seeds as you can concurrently evaluate — "let the box decide", also Strategist-set.
     # Needs a role_factory wired into the engine (the CLI/launcher passes one); without it, clamps to 1.
     parallel_build: int = Field(default=1, ge=0, le=64)
+    # Hypothesis-card Kanban re-architecture (docs/23, Layer 2). Two INDEPENDENT concurrency axes,
+    # decoupled from each other so cost (LLM work) can be tuned separately from throughput (GPU evals).
+    # These are the CANONICAL names going forward; `max_parallel`/`parallel_build` above are kept as thin
+    # back-compat aliases (env vars / snapshots / ~100 Engine(...) call sites depend on the exact names,
+    # so they cannot be renamed — CLAUDE.md). Resolution (orchestrator.__init__): a NEW name, when set,
+    # WINS over its legacy alias; None => fall back to the legacy field => byte-identical to today.
+    #   `eval_parallel`: concurrent EVALS (the GPU/experiment consumer). None -> max_parallel; 0 = AUTO
+    #     (one experiment per detected GPU). This is the eval-concurrency ceiling; the L4 scheduler
+    #     bin-packs declared footprints against the GPU inventory as a SEPARATE, orthogonal axis.
+    #   `llm_parallel`: concurrent LLM BUILDS (the producer). None -> parallel_build; 0 = AUTO (= resolved
+    #     eval_parallel, "build as many seeds as you can eval"). Layer 5 turns this into a multi-lane
+    #     budget the Strategist re-allocates across build/research/novelty-dedup/enrichment; Layer 2 only
+    #     lands the decoupled knob (no throughput change — the spine still alternates build->eval).
+    eval_parallel: int | None = Field(default=None, ge=0, le=1024)
+    llm_parallel: int | None = Field(default=None, ge=0, le=64)
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
     # surface (Settings) — advisory-only, never touches node selection or replay, and only fires on the
