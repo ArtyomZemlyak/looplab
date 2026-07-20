@@ -29,6 +29,9 @@ def test_build_capsule_is_flat_and_deduped():
     assert cap["concepts"] == ["distillation", "hard-neg"]  # sorted, empty dropped
     assert cap["direction"] == "max" and cap["best_metric"] is None
     assert cap["v"] == 2 and cap["concept_evidence"] == "classifier"
+    assert cap["concept_evidence_nodes_total"] == 1
+    assert cap["concept_evidence_nodes_incomplete"] == 0
+    assert cap["concept_evidence_complete"] is True
     assert (cap["fingerprint_total"], cap["fingerprint_omitted"], cap["fingerprint_complete"]) == (2, 0, True)
 
 
@@ -38,6 +41,16 @@ def test_build_capsule_rejects_invalid_direction_instead_of_inverting_evidence(d
         build_concept_capsule(
             run_id="r", fingerprint=["k"], direction=direction,
             concepts=["loss/a", "loss/b"], concept_outcomes={"loss/a": 1.0, "loss/b": 0.0},
+        )
+
+
+@pytest.mark.parametrize("total,incomplete", [(-1, 0), (1, -1), (1, 2), (True, 0), (1, False)])
+def test_build_capsule_rejects_invalid_evidence_node_receipt(total, incomplete):
+    with pytest.raises(ValueError, match="evidence-node receipt"):
+        build_concept_capsule(
+            run_id="r", fingerprint=["k"], direction="max", concepts=["loss/a"],
+            concept_evidence_nodes_total=total,
+            concept_evidence_nodes_incomplete=incomplete,
         )
 
 
@@ -171,6 +184,35 @@ def test_capsule_snapshot_carries_malformed_and_schema_quarantine_health(tmp_pat
     assert overview["source_complete"] is False
     assert overview["source_rows_quarantined"] == 2
     assert {row["concept"] for row in overview["concepts"]} == {"known/one"}
+
+
+def test_pre_receipt_v2_capsule_is_readable_but_membership_source_is_unknown(tmp_path):
+    from looplab.engine.memory import portfolio_concept_overview
+
+    current = _cap("legacy", "dense retrieval", ["known/one"], metric=0.8)
+    for key in (
+        "concept_evidence_nodes_total",
+        "concept_evidence_nodes_incomplete",
+        "concept_evidence_complete",
+    ):
+        current.pop(key)
+    store = ConceptCapsuleStore(tmp_path / "legacy.jsonl")
+    assert store.add(current) is True
+
+    overview = portfolio_concept_overview(store.all())
+    card = overview["runs"][0]
+    assert overview["source_complete"] is False
+    assert overview["partial_capsules"] == overview["source_unknown_capsules"] == 1
+    assert card["source_concept_evidence_nodes_total"] is None
+    assert card["source_concept_evidence_nodes_incomplete"] is None
+    assert card["source_concept_evidence_complete"] is False
+    assert card["source_concepts_complete"] is card["source_outcomes_complete"] is False
+
+
+def test_partial_evidence_receipt_extension_is_quarantined(tmp_path):
+    capsule = _cap("r", "dense retrieval", ["known/one"], metric=0.8)
+    capsule.pop("concept_evidence_complete")
+    assert ConceptCapsuleStore(tmp_path / "partial.jsonl").add(capsule) is False
 
 
 def test_capsule_store_quarantines_pre_provenance_legacy_rows(tmp_path):

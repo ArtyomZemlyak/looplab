@@ -33,7 +33,11 @@ from typing import TYPE_CHECKING
 import orjson
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
-from looplab.core.models import RunState, classifier_verified_node_concepts, latest_lesson_node_count
+from looplab.core.models import (
+    NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+    RunState,
+    latest_lesson_node_count,
+)
 from looplab.engine.lessons_distill import LessonDistillMixin
 # The role constants moved to lessons_priors.py with the prior renderer that filters on them;
 # re-imported so `from looplab.engine.lessons import LESSON_ROLE_*` (tests, cross-run tooling)
@@ -315,8 +319,6 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             return
         try:
             node_concepts = getattr(final, "node_concepts", None) or {}
-            if not node_concepts:
-                return                          # nothing tagged this run -> no capsule (no-op)
             from looplab.engine.memory import build_concept_capsule
             from looplab.events.replay import promotion_eligible_nodes
             direction = final.direction
@@ -331,24 +333,38 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             # matches by exact string. Attempt coverage retains every tagged node, while a durable numeric
             # outcome may come only from the same feasible, live, unflagged pool used for promotion.
             concepts, outcomes = set(), {}
+            provenance = getattr(final, "node_concept_provenance", None) or {}
+            materialization_receipts = (
+                getattr(final, "node_concept_materialization_receipts", None) or {})
+            aborted = set(getattr(final, "aborted_nodes", None) or [])
+            evidence_nodes_total = evidence_nodes_incomplete = 0
             eligible_ids = {node.id for node in promotion_eligible_nodes(final)}
             for nd in final.nodes.values():
+                if nd.id in aborted or getattr(nd, "tombstoned", False):
+                    continue
+                if provenance.get(nd.id) != NODE_CONCEPT_PROVENANCE_CLASSIFIER:
+                    continue
+                evidence_nodes_total += 1
+                evidence_nodes_incomplete += int(nd.id in materialization_receipts)
                 m = getattr(nd, "robust_metric", None)
-                # CODEX AGENT: capsules advise future agents; never promote the proposer's own taxonomy
-                # claims into seemingly independent cross-run evidence.
-                for c in classifier_verified_node_concepts(final, nd.id):
+                # CODEX AGENT: the valid retained subset of a partial classifier result remains positive
+                # evidence, but the producer-level denominator below permanently forbids absence/frequency
+                # inference. Authored/heuristic labels and deleted/aborted attempts never cross this wall.
+                for c in node_concepts.get(nd.id) or []:
                     concepts.add(str(c))
                     if (nd.id in eligible_ids and m is not None
                             and (outcomes.get(c) is None or _better(m, outcomes[c]))):
                         outcomes[str(c)] = m
-            if not concepts:
+            if not concepts and evidence_nodes_incomplete == 0:
                 return
             best = final.best()
             capsule = build_concept_capsule(
                 run_id=final.run_id or final.task_id, task_id=final.task_id, direction=direction,
                 concepts=concepts, fingerprint=self.task_fingerprint(final, best),
                 best_metric=(best.robust_metric if best is not None else None),
-                concept_outcomes=outcomes)
+                concept_outcomes=outcomes,
+                concept_evidence_nodes_total=evidence_nodes_total,
+                concept_evidence_nodes_incomplete=evidence_nodes_incomplete)
         except Exception:  # noqa: BLE001 — BUILD is best-effort: a projection hiccup must never fail a run
             return
         # The WRITE is NOT swallowed (mirrors store_case): a real persistence failure must reach finalize's

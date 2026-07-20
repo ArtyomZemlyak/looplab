@@ -63,6 +63,13 @@ collections: `fingerprint_total` / `fingerprint_omitted` / `fingerprint_complete
 within-run rank signs against the full valid outcome field before retaining the bounded projection. Invalid
 concept IDs and outcome keys are never persisted as evidence and count as omitted input, so their removal cannot
 produce `complete=true`; an invalid direction is rejected instead of being coerced into inverted `min` evidence.
+The writer also persists the classifier-producer denominator
+`concept_evidence_nodes_total` / `concept_evidence_nodes_incomplete` / `concept_evidence_complete` over active
+nodes. Tombstoned and aborted nodes are excluded. Valid labels retained from an incomplete classifier result
+remain positive observations, but both collection `*_complete` flags and every downstream `source_complete`
+receipt stay false. A partial-only run writes an empty lower-bound capsule instead of disappearing as an
+apparently unobserved run. The three producer fields are atomic and strictly validated; an older v2 capsule
+without them remains readable but has an unknown membership denominator and is treated as partial.
 A capped fingerprint, or a legacy v2 row without its fingerprint receipt, remains usable for an exact
 `task_id` but cannot authorize fuzzy related-task transfer. Bound tools and proactive context retain an
 aggregate `scope_complete` / `scope_unknown_capsules` receipt for those excluded rows, so a filtered empty

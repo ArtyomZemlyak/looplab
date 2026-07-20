@@ -437,11 +437,14 @@ looplab cross-run-index RUN_ROOT [--incremental] [--json]
 
 PART IV cross-run Step 3 (§21.20). A portfolio overview over **valid concept capsules present in `MEMORY_DIR`**
 from finalized opt-in runs: which raw concept slugs appear and in which recorded runs, each with its own
-metric-bearing outcome. Each new capsule has bounded-source completeness triplets for concepts and outcomes;
+metric-bearing outcome. Each new capsule has bounded-source completeness triplets for concepts and outcomes,
+plus an active-classifier-node producer receipt. Retained labels from a partial classifier row remain visible,
+but the capsule, overview, run card, graph and digest stay partial; aborted/tombstoned nodes are excluded and a
+partial-only run persists as an empty lower-bound capsule rather than disappearing;
 the text command warns when known items were omitted, and `--json` exposes aggregate plus per-run source
 receipts. The aggregate overview is also independently capped at 512 concept rows: its exact `n_concepts` /
 `concepts_omitted` receipt is present in JSON and text mode explicitly reports a non-zero projection omission.
-Legacy v2 capsules without those fields remain positive observations but have unknown totals and do
+Legacy v2 capsules without collection or producer fields remain positive observations but have unknown totals and do
 not contribute their potentially post-truncation rank signs. Malformed JSON, schema-invalid rows and duplicate
 run identities are quarantined rather than returned; their read-health counts make `source_complete=false`, so
 the text form cannot report an exact absence from a damaged capsule file. Missing, untagged or non-opt-in runs

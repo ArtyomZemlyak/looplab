@@ -658,6 +658,33 @@ def _finite_metric(value) -> bool:
         return False
 
 
+def _capsule_concept_evidence_completeness(
+        capsule: dict,
+) -> Optional[tuple[Optional[int], Optional[int], bool]]:
+    """Read the classifier-membership producer receipt.
+
+    The receipt is additive over capsule v2.  A v2 row written before this receipt remains a valid
+    positive observation, but its membership denominator is unknowable and therefore incomplete.
+    """
+    keys = (
+        "concept_evidence_nodes_total",
+        "concept_evidence_nodes_incomplete",
+        "concept_evidence_complete",
+    )
+    present = [key in capsule for key in keys]
+    if not any(present):
+        return None, None, False
+    if not all(present):
+        return None
+    total, incomplete, complete = (capsule[key] for key in keys)
+    if (type(total) is not int or type(incomplete) is not int or type(complete) is not bool
+            or not 0 <= total <= _MAX_CAPSULE_SOURCE_ITEMS
+            or not 0 <= incomplete <= total
+            or complete != (incomplete == 0)):
+        return None
+    return total, incomplete, complete
+
+
 def _capsule_completeness(
         capsule: dict, stem: str, included: int,
 ) -> Optional[tuple[Optional[int], Optional[int], bool]]:
@@ -674,7 +701,21 @@ def _capsule_completeness(
     if (type(total) is not int or type(omitted) is not int or type(complete) is not bool
             or not 0 <= total <= _MAX_CAPSULE_SOURCE_ITEMS
             or not 0 <= omitted <= _MAX_CAPSULE_SOURCE_ITEMS
-            or total < included or omitted != total - included or complete != (omitted == 0)):
+            or total < included or omitted != total - included):
+        return None
+    if stem in ("concepts", "concept_outcomes"):
+        evidence_meta = _capsule_concept_evidence_completeness(capsule)
+        if evidence_meta is None:
+            return None
+        if evidence_meta[0] is None:
+            # Pre-receipt v2 writers used collection truncation as their only completeness boundary.
+            # Keep those rows readable, but never repeat their optimistic flag downstream.
+            if complete != (omitted == 0):
+                return None
+            complete = False
+        elif complete != (omitted == 0 and evidence_meta[2]):
+            return None
+    elif complete != (omitted == 0):
         return None
     return total, omitted, complete
 
@@ -684,17 +725,21 @@ def _capsule_source_summary(capsules: list[dict]) -> dict:
     capsules = _dedup_valid_capsules(capsules)
     concept_omitted = outcome_omitted = partial = unknown = 0
     for capsule in capsules:
+        evidence_meta = _capsule_concept_evidence_completeness(capsule)
         concept_meta = _capsule_completeness(capsule, "concepts", len(capsule.get("concepts") or []))
         outcome_meta = _capsule_completeness(
             capsule, "concept_outcomes", len(capsule.get("concept_outcomes") or {}))
         # Callers pass validated rows; keep this total if a future caller violates that private contract.
-        if concept_meta is None or outcome_meta is None:
+        if evidence_meta is None or concept_meta is None or outcome_meta is None:
             partial += 1
+            unknown += 1
             continue
         concept_omitted += concept_meta[1] or 0
         outcome_omitted += outcome_meta[1] or 0
-        unknown += int(concept_meta[0] is None or outcome_meta[0] is None)
-        partial += int(not concept_meta[2] or not outcome_meta[2])
+        unknown += int(
+            evidence_meta[0] is None or concept_meta[0] is None or outcome_meta[0] is None)
+        partial += int(
+            not evidence_meta[2] or not concept_meta[2] or not outcome_meta[2])
     store_health = {
         **_EMPTY_CAPSULE_STORE_HEALTH,
         **(getattr(capsules, "source_health", None) or {}),
@@ -777,7 +822,12 @@ def _valid_capsule_record(capsule) -> bool:
     if not all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
                and _finite_metric(value) for key, value in outcomes.items()):
         return False
-    return (_capsule_completeness(capsule, "fingerprint", len(fingerprint)) is not None
+    evidence_meta = _capsule_concept_evidence_completeness(capsule)
+    if (evidence_meta is not None and evidence_meta[0] is not None
+            and (concepts or outcomes) and evidence_meta[0] == 0):
+        return False
+    return (evidence_meta is not None
+            and _capsule_completeness(capsule, "fingerprint", len(fingerprint)) is not None
             and _capsule_completeness(capsule, "concepts", len(concepts)) is not None
             and _capsule_completeness(capsule, "concept_outcomes", len(outcomes)) is not None)
 
@@ -899,7 +949,8 @@ def concept_profit_tendencies(concept_rows, *, limit: Optional[int] = None) -> d
 
 def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
                           concepts, best_metric=None, concept_outcomes: Optional[dict] = None,
-                          task_id: str = "") -> dict:
+                          task_id: str = "", concept_evidence_nodes_total: Optional[int] = None,
+                          concept_evidence_nodes_incomplete: int = 0) -> dict:
     """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
     concepts a run explored (the shipped per-run `node_concepts` tags — no new tagger) and how it went,
     keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
@@ -951,9 +1002,25 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     outcomes_omitted = outcomes_total - len(bounded_outcomes)
     fingerprint_total = len(valid_fingerprint) + invalid_fingerprint
     fingerprint_omitted = fingerprint_total - len(bounded_fingerprint)
+    if concept_evidence_nodes_total is None:
+        # Pure callers provide a complete concept collection rather than a folded RunState. Model that
+        # collection as one evidence unit when non-empty; the engine writer supplies the exact active-node
+        # denominator explicitly.
+        concept_evidence_nodes_total = int(bool(concepts_source))
+    if (type(concept_evidence_nodes_total) is not int
+            or type(concept_evidence_nodes_incomplete) is not int
+            or not 0 <= concept_evidence_nodes_total <= _MAX_CAPSULE_SOURCE_ITEMS
+            or not 0 <= concept_evidence_nodes_incomplete <= concept_evidence_nodes_total):
+        # CODEX AGENT: these counts are the durable denominator for classifier memberships.  Coercion or
+        # clipping here would turn a corrupt producer receipt into permission to infer absent concepts.
+        raise ValueError("concept capsule evidence-node receipt is invalid")
+    concept_evidence_complete = concept_evidence_nodes_incomplete == 0
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+        "concept_evidence_nodes_total": concept_evidence_nodes_total,
+        "concept_evidence_nodes_incomplete": concept_evidence_nodes_incomplete,
+        "concept_evidence_complete": concept_evidence_complete,
         "run_id": str(run_id or ""),
         "task_id": str(task_id or ""),
         "fingerprint": bounded_fingerprint,
@@ -964,12 +1031,12 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         "concepts": bounded_concepts,
         "concepts_total": concepts_total,
         "concepts_omitted": concepts_omitted,
-        "concepts_complete": concepts_omitted == 0,
+        "concepts_complete": concepts_omitted == 0 and concept_evidence_complete,
         "best_metric": best_metric if _finite_metric(best_metric) else None,
         "concept_outcomes": bounded_outcomes,
         "concept_outcomes_total": outcomes_total,
         "concept_outcomes_omitted": outcomes_omitted,
-        "concept_outcomes_complete": outcomes_omitted == 0,
+        "concept_outcomes_complete": outcomes_omitted == 0 and concept_evidence_complete,
         # PART V Phase 1: a direction-normalized RANK-WITHIN-RUN sign per concept (+1 clearly-better-half /
         # 0 neutral / -1 clearly-worse-half vs this run's own field) — additive over v2 (old capsules lack
         # it, readers default {}). Relative rank, not causal profit; the per-node delta is Phase 3.
@@ -1162,15 +1229,22 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
     cards = []
     for c in valid_capsules:
         canonical = canonicalize_concepts(c.get("concepts") or [], aliases=aliases, splits=splits)
+        evidence_meta = _capsule_concept_evidence_completeness(c)
         concept_meta = _capsule_completeness(c, "concepts", len(c.get("concepts") or []))
         outcome_meta = _capsule_completeness(
             c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
-        assert concept_meta is not None and outcome_meta is not None  # validated by _dedup_valid_capsules
+        assert evidence_meta is not None and concept_meta is not None and outcome_meta is not None
         # The overview must apply normalization even with empty governance maps; otherwise
         # `Hard-Neg` and `hard-neg` are one UID in the registry but two portfolio concepts/cards.
         card = {"run_id": str(c.get("run_id") or ""), "n_concepts": len(canonical),
                  "best_metric": c.get("best_metric"), "direction": str(c.get("direction") or "min"),
                  "concepts": canonical[:_MAX_OVERVIEW_CARD_CONCEPTS],
+                 # CODEX AGENT: retained labels are positive observations, not a complete assignment
+                 # denominator.  Preserve the producer receipt on every run card so a mixed/partial run
+                 # cannot be mistaken for an exact concept inventory after aggregation.
+                 "source_concept_evidence_nodes_total": evidence_meta[0],
+                 "source_concept_evidence_nodes_incomplete": evidence_meta[1],
+                 "source_concept_evidence_complete": evidence_meta[2],
                  "source_concepts_total": concept_meta[0],
                  "source_concepts_omitted": concept_meta[1],
                  "source_concepts_complete": concept_meta[2],
@@ -1272,7 +1346,10 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
     # CODEX AGENT: edge generation intentionally runs only over the bounded node projection. Keep that
     # O(N^2) guard, but never present `edges_omitted` as a count of every edge in the full graph: edges that
     # touch a pruned node were not materialized at all and their distinct-pair count is deliberately UNKNOWN.
-    edge_source_complete = pruned_nodes == 0
+    capsule_source = _capsule_source_summary(valid_capsules)
+    # CODEX AGENT: bounding is not the only way an edge can be missing.  A partial classifier membership
+    # can hide an entire node and every incident edge even when the retained graph fits under its node cap.
+    edge_source_complete = pruned_nodes == 0 and capsule_source["source_complete"] is True
     return {
         "n_runs": len(valid_capsules),
         "n_concepts": len(concepts),
@@ -1290,7 +1367,7 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
         # Exact only within `edge_source_scope`: response-cap omissions, not unknown out-of-projection edges.
         "edges_omitted": max(0, edge_candidates - len(edges)),
         "pair_candidates": len(pair_runs),
-        **_capsule_source_summary(valid_capsules),
+        **capsule_source,
     }
 
 

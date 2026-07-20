@@ -718,7 +718,11 @@ class NoveltyGateMixin:
             from pathlib import Path
             from looplab.engine.concept_registry import (canonicalize_concept, canonicalize_concepts,
                                                          load_concept_aliases, load_concept_splits)
-            from looplab.engine.memory import ConceptCapsuleStore, _capsule_completeness
+            from looplab.engine.memory import (
+                ConceptCapsuleStore,
+                _capsule_completeness,
+                _capsule_concept_evidence_completeness,
+            )
             # NOTE (full-CR TODO, §21.20.13 CR2a): this reloads+scans the whole capsule JSONL per proposal;
             # a bounded, versioned, scope-keyed query index replaces it once the retrieval planner lands.
             store = ConceptCapsuleStore(Path(self.memory_dir) / "concept_capsules.jsonl")
@@ -738,13 +742,14 @@ class NoveltyGateMixin:
             canonical_caps = []
             for similarity, capsule in caps:
                 raw = [str(x) for x in (capsule.get("concepts") or []) if str(x)]
+                evidence_meta = _capsule_concept_evidence_completeness(capsule)
                 concept_meta = _capsule_completeness(capsule, "concepts", len(raw))
                 raw_outcomes = capsule.get("concept_outcomes") or {}
                 outcome_meta = _capsule_completeness(
                     capsule, "concept_outcomes",
                     len(raw_outcomes) if isinstance(raw_outcomes, dict) else 0,
                 )
-                if concept_meta is None or outcome_meta is None:
+                if evidence_meta is None or concept_meta is None or outcome_meta is None:
                     continue
                 concepts = canonicalize_concepts(raw, aliases=aliases, splits=splits)
                 outcomes = {}
@@ -768,6 +773,9 @@ class NoveltyGateMixin:
                 # recomputed from the transformed list. Freeze the already-validated raw capsule receipt
                 # before replacing membership with its governed projection.
                 source_receipt = {
+                    "concept_evidence_nodes_total": evidence_meta[0],
+                    "concept_evidence_nodes_incomplete": evidence_meta[1],
+                    "concept_evidence_complete": evidence_meta[2],
                     "concepts_total": concept_meta[0],
                     "concepts_omitted": concept_meta[1],
                     "concepts_complete": concept_meta[2],
@@ -808,6 +816,9 @@ class NoveltyGateMixin:
                 source = c.get("_source_receipt")
                 if not isinstance(source, dict):
                     source = {
+                        "concept_evidence_nodes_total": None,
+                        "concept_evidence_nodes_incomplete": None,
+                        "concept_evidence_complete": False,
                         "concepts_total": None, "concepts_omitted": None,
                         "concepts_complete": False,
                         "concept_outcomes_total": None, "concept_outcomes_omitted": None,
@@ -847,12 +858,15 @@ class NoveltyGateMixin:
             runs.sort(key=lambda r: (-r["similarity"], str(r["run_id"])))   # deterministic, most-similar first
             returned_runs = runs[:8]
             partial = sum(
-                not receipt.get("concepts_complete")
+                not receipt.get("concept_evidence_complete")
+                or not receipt.get("concepts_complete")
                 or not receipt.get("concept_outcomes_complete")
                 for receipt in source_receipts
             )
             unknown = sum(
-                receipt.get("concepts_total") is None
+                receipt.get("concept_evidence_nodes_total") is None
+                or receipt.get("concept_evidence_nodes_incomplete") is None
+                or receipt.get("concepts_total") is None
                 or receipt.get("concept_outcomes_total") is None
                 for receipt in source_receipts
             )

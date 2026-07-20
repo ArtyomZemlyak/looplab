@@ -57,10 +57,16 @@ export function crossRunPriorNarration(data) {
     && bool(data.prior_runs_complete)
     && data.prior_runs_complete === (data.prior_runs_omitted === 0)
     && runs.length === rawRuns.length
+  const evidenceReceiptPart = receipt => count(receipt?.concept_evidence_nodes_total)
+    && count(receipt.concept_evidence_nodes_incomplete)
+    && receipt.concept_evidence_nodes_incomplete <= receipt.concept_evidence_nodes_total
+    && bool(receipt.concept_evidence_complete)
+    && receipt.concept_evidence_complete === (receipt.concept_evidence_nodes_incomplete === 0)
   const receiptPart = (receipt, name) => count(receipt?.[`${name}_total`])
     && count(receipt[`${name}_omitted`]) && receipt[`${name}_omitted`] <= receipt[`${name}_total`]
     && bool(receipt[`${name}_complete`])
-    && receipt[`${name}_complete`] === (receipt[`${name}_omitted`] === 0)
+    && receipt[`${name}_complete`] === (receipt[`${name}_omitted`] === 0
+      && receipt.concept_evidence_complete)
   const runReceiptKnown = run => {
     const concepts = run?.matched_concepts
     const rows = run?.matched_concept_outcomes
@@ -70,7 +76,10 @@ export function crossRunPriorNarration(data) {
           && normalizeConceptId(row.concept) === row.concept && bool(row.outcome_retained))
         || new Set(rows.map(row => row.concept)).size !== rows.length) return false
     const receipt = run.source_receipt
-    return record(receipt) && receiptPart(receipt, 'concepts')
+    // CODEX AGENT: collection bounds alone cannot prove that every active classifier assignment was
+    // materialized. Historical v2 events without the additive producer denominator remain visible but
+    // are explicitly unknown; a known-partial receipt is valid and must not be rejected as malformed.
+    return record(receipt) && evidenceReceiptPart(receipt) && receiptPart(receipt, 'concepts')
       && receiptPart(receipt, 'concept_outcomes') && receipt.concepts_total >= concepts.length
       && receipt.concept_outcomes_total >= rows.filter(row => row.outcome_retained).length
   }

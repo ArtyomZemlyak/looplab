@@ -56,6 +56,8 @@ test('timeline narration stays renderable for malformed and forward-compatible e
       source_concepts_omitted: 0, source_outcomes_omitted: 0,
     }
     const completeRunSource = {
+      concept_evidence_nodes_total: 2, concept_evidence_nodes_incomplete: 0,
+      concept_evidence_complete: true,
       concepts_total: 2, concepts_omitted: 0, concepts_complete: true,
       concept_outcomes_total: 2, concept_outcomes_omitted: 0, concept_outcomes_complete: true,
     }
@@ -92,6 +94,32 @@ test('timeline narration stays renderable for malformed and forward-compatible e
         source_unknown_capsules: 1 },
     }))
     assert.match(partial, /PARTIAL source \(some capsule receipts unknown\)/)
+
+    const knownPartial = eventNarration(prior({
+      concept_source: { ...completeSource, source_complete: false, partial_capsules: 1 },
+      prior_runs: [{
+        ...prior().data.prior_runs[0],
+        source_receipt: {
+          ...completeRunSource, concept_evidence_nodes_incomplete: 1,
+          concept_evidence_complete: false, concepts_complete: false,
+          concept_outcomes_complete: false,
+        },
+      }],
+    }))
+    assert.match(knownPartial, /PARTIAL source/)
+    assert.doesNotMatch(knownPartial, /completeness unknown/)
+
+    const preProducerReceipt = eventNarration(prior({
+      prior_runs: [{
+        ...prior().data.prior_runs[0],
+        source_receipt: {
+          concepts_total: 2, concepts_omitted: 0, concepts_complete: true,
+          concept_outcomes_total: 2, concept_outcomes_omitted: 0,
+          concept_outcomes_complete: true,
+        },
+      }],
+    }))
+    assert.match(preProducerReceipt, /evidence completeness unknown/)
 
     const quarantined = eventNarration(prior({
       concept_source: {

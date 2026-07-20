@@ -221,6 +221,9 @@ def test_capsule_validation_quarantines_poisoned_identity_and_completeness_rows(
     assert not _valid_capsule_record({**good, "concepts": ["good/a", "bad!"]})
     assert not _valid_capsule_record({**good, "concept_outcomes": {"outside/c": 1.0}})
     assert not _valid_capsule_record({**good, "concept_signs": {"outside/c": 1}})
+    assert not _valid_capsule_record({
+        **good, "concept_evidence_nodes_total": 0,
+    })
     assert not _valid_capsule_record({**good, "concepts_total": 3})
     assert not _valid_capsule_record({**legacy_v2, "concepts_total": 2})
     assert not _valid_capsule_record({
@@ -278,8 +281,13 @@ def test_concept_outcomes_use_selection_eligible_nodes_but_keep_attempt_coverage
 
     LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(store.read_all()))
     capsule = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
-    all_concepts = set().union(*map(set, concepts.values()))
-    assert all_concepts <= set(capsule["concepts"])
+    # Deleted/aborted attempts are not part of the current run projection; active flagged/infeasible
+    # attempts remain honest attempted-concept coverage, but cannot contribute numeric outcomes.
+    assert set(capsule["concepts"]) == {
+        "shared", "valid-only", "flagged-only", "infeasible-only",
+    }
+    assert "tombstoned-only" not in capsule["concepts"]
+    assert "aborted-only" not in capsule["concepts"]
     assert capsule["concept_outcomes"] == {"shared": 0.5, "valid-only": 0.5}
 
 
@@ -333,11 +341,12 @@ def test_store_concept_capsule_ignores_offline_heuristic_memberships(tmp_path):
     assert not (mem / "concept_capsules.jsonl").exists()
 
 
-@pytest.mark.parametrize("concepts", [
-    [f"axis/c{i:03d}" for i in range(65)],
-    ["valid/x", "bad!"],
+@pytest.mark.parametrize("concepts, retained", [
+    ([f"axis/c{i:03d}" for i in range(65)], [f"axis/c{i:03d}" for i in range(64)]),
+    (["valid/x", "bad!"], ["valid/x"]),
+    (["bad!"], []),
 ])
-def test_store_concept_capsule_excludes_partial_classifier_membership(tmp_path, concepts):
+def test_store_concept_capsule_persists_partial_classifier_receipt(tmp_path, concepts, retained):
     mem = tmp_path / "mem"
     mem.mkdir()
     s = EventStore(tmp_path / "events.jsonl")
@@ -353,7 +362,55 @@ def test_store_concept_capsule_excludes_partial_classifier_membership(tmp_path, 
     state = fold(s.read_all())
     assert state.node_concept_materialization_receipts[0]["status"] == "partial"
     LessonMemory(_fake_engine(mem)).store_concept_capsule(state)
-    assert not (mem / "concept_capsules.jsonl").exists()
+    capsule = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
+    # A partial-only run must leave a durable lower-bound row even when no valid label survived.
+    assert capsule["concepts"] == retained
+    assert capsule["concept_evidence_nodes_total"] == 1
+    assert capsule["concept_evidence_nodes_incomplete"] == 1
+    assert capsule["concept_evidence_complete"] is False
+    assert capsule["concepts_complete"] is capsule["concept_outcomes_complete"] is False
+
+
+def test_mixed_classifier_membership_stays_partial_through_portfolio_views(tmp_path):
+    from looplab.engine.memory import (
+        portfolio_concept_graph,
+        portfolio_concept_overview,
+        portfolio_digest,
+    )
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {
+        "run_id": "mixed", "task_id": "t", "goal": "g", "direction": "max"})
+    for node_id, concepts in ((0, ["complete/x"]), (1, ["partial/y", "bad!"])):
+        s.append("node_created", {
+            "node_id": node_id, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": node_id}, "rationale": "r"},
+        })
+        s.append("node_evaluated", {"node_id": node_id, "metric": float(node_id + 1)})
+        s.append("node_concepts", {"node_id": node_id, "concepts": concepts, "mode": "llm"})
+
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
+    capsule = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
+    assert capsule["concepts"] == ["complete/x", "partial/y"]
+    assert capsule["concept_evidence_nodes_total"] == 2
+    assert capsule["concept_evidence_nodes_incomplete"] == 1
+    assert capsule["concept_evidence_complete"] is False
+    assert capsule["concepts_complete"] is capsule["concept_outcomes_complete"] is False
+
+    overview = portfolio_concept_overview([capsule])
+    card = overview["runs"][0]
+    assert overview["source_complete"] is False
+    assert overview["partial_capsules"] == 1
+    assert overview["source_unknown_capsules"] == 0
+    assert card["source_concept_evidence_nodes_total"] == 2
+    assert card["source_concept_evidence_nodes_incomplete"] == 1
+    assert card["source_concept_evidence_complete"] is False
+    assert card["source_concepts_complete"] is card["source_outcomes_complete"] is False
+    graph = portfolio_concept_graph([capsule], min_cooccurrence=1)
+    assert graph["source_complete"] is graph["edge_source_complete"] is False
+    assert portfolio_digest([capsule])["source_complete"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -443,6 +500,9 @@ def test_cross_run_prior_surfaces_as_audit_without_changing_grade(tmp_path):
     assert run["matched_concept_outcomes"] == [{
         "concept": _CONCEPT, "outcome_retained": True, "outcome": 0.88}]
     assert run["source_receipt"] == {
+        "concept_evidence_nodes_total": 1,
+        "concept_evidence_nodes_incomplete": 0,
+        "concept_evidence_complete": True,
         "concepts_total": 1,
         "concepts_omitted": 0,
         "concepts_complete": True,
@@ -480,6 +540,39 @@ def test_cross_run_prior_event_carries_store_quarantine_health(tmp_path):
     assert source["source_invalid_capsule_rows"] == 1
 
 
+def test_cross_run_prior_preserves_known_partial_classifier_receipt(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    fp = task_fingerprint("dataset", "max", "dense retrieval", "recall", universal=True)
+    ConceptCapsuleStore(mem / "concept_capsules.jsonl").add(build_concept_capsule(
+        run_id="partial", fingerprint=fp, direction="max", concepts=[_CONCEPT],
+        concept_outcomes={_CONCEPT: 0.5}, concept_evidence_nodes_total=2,
+        concept_evidence_nodes_incomplete=1,
+    ))
+    s = _run_with_cached_concept(tmp_path, _CONCEPT)
+    eng = _GateEngine(s, mem)
+    eng._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])
+
+    idea = Idea(operator="improve", params={"rank": 8.0}, rationale="different implementation")
+    assert eng._graded_novelty_precheck(fold(s.read_all()), idea) is idea
+
+    event = fold(s.read_all()).cross_run_priors[0]
+    assert event["concept_source"]["source_complete"] is False
+    assert event["concept_source"]["partial_capsules"] == 1
+    assert event["concept_source"]["source_unknown_capsules"] == 0
+    assert event["prior_runs"][0]["source_receipt"] == {
+        "concept_evidence_nodes_total": 2,
+        "concept_evidence_nodes_incomplete": 1,
+        "concept_evidence_complete": False,
+        "concepts_total": 1,
+        "concepts_omitted": 0,
+        "concepts_complete": False,
+        "concept_outcomes_total": 1,
+        "concept_outcomes_omitted": 0,
+        "concept_outcomes_complete": False,
+    }
+
+
 def test_cross_run_prior_separates_matched_outcome_from_run_best_and_marks_legacy_partial(tmp_path):
     mem = tmp_path / "mem"
     mem.mkdir()
@@ -507,6 +600,9 @@ def test_cross_run_prior_separates_matched_outcome_from_run_best_and_marks_legac
         "concept": _CONCEPT, "outcome_retained": True, "outcome": 0.1}]
     assert run["outcomes"] == {_CONCEPT: 0.1}   # legacy alias remains concept-scoped, never run-best
     assert run["source_receipt"] == {
+        "concept_evidence_nodes_total": 1,
+        "concept_evidence_nodes_incomplete": 0,
+        "concept_evidence_complete": True,
         "concepts_total": None,
         "concepts_omitted": None,
         "concepts_complete": False,
