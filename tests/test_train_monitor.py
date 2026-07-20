@@ -13,6 +13,7 @@ from looplab.core.models import Event
 from looplab.engine.train_monitor import (
     TrainingMonitorMixin,
     active_training_log,
+    claim_watchdog_kill,
     read_training_tail,
     read_training_tail_raw,
     snapshot_training_logs,
@@ -490,6 +491,25 @@ def test_should_monitor_kill_decision():
     assert kill(None, enabled=True, threshold=0.5) is False
 
 
+def test_watchdog_kill_claim_is_first_writer_wins():
+    signal: dict = {}
+    cancel = threading.Event()
+
+    assert claim_watchdog_kill(
+        signal, cancel, reason="loss became NaN", terminal_reason="monitor_broken",
+        confidence=0.97) is True
+    assert claim_watchdog_kill(
+        signal, cancel, reason="below sibling bar", terminal_reason="asha_underperforming") is False
+
+    assert signal == {
+        "kill": True,
+        "reason": "loss became NaN",
+        "terminal_reason": "monitor_broken",
+        "confidence": 0.97,
+    }
+    assert cancel.is_set()
+
+
 def test_broken_verdict_fires_kill_when_enabled(tmp_path):
     wd = tmp_path / "node_0"
     wd.mkdir()
@@ -500,6 +520,7 @@ def test_broken_verdict_fires_kill_when_enabled(tmp_path):
 
     assert host.kill_signal.get("kill") is True                       # kill decision recorded for _evaluate
     assert "CPU" in host.kill_signal.get("reason", "")
+    assert host.kill_signal.get("terminal_reason") == "monitor_broken"
     assert host.cancel.is_set()                                       # the eval's tree-kill was triggered
     # the advisory alert was still recorded before the kill
     assert any(t == EV_TRAIN_MONITOR_ALERT for (t, _d) in host.store.events)

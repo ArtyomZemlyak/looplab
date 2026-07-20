@@ -126,6 +126,31 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
     return conf >= threshold
 
 
+def claim_watchdog_kill(kill_signal: dict, cancel, *, reason: str, terminal_reason: str,
+                        confidence: Optional[float] = None) -> bool:
+    """Atomically claim the shared per-eval watchdog terminal in the cooperative event loop.
+
+    The training-health and ASHA-rank monitors are sibling tasks and can reach a kill decision on the
+    same tick. Only the first decision may own the persisted failure explanation; a later sibling still
+    exits because the winner has already set ``cancel``. Returns whether this caller won the claim.
+    """
+    # CODEX AGENT: there is deliberately no await between this guard and the one-shot dict update. Both
+    # watchdogs run on the same cooperative event loop, so the first writer owns reason + terminal_reason
+    # as one indivisible decision instead of a later task producing a mixed/overwritten terminal record.
+    if kill_signal.get("kill"):
+        return False
+    payload = {
+        "kill": True,
+        "reason": str(reason),
+        "terminal_reason": str(terminal_reason),
+    }
+    if confidence is not None:
+        payload["confidence"] = confidence
+    kill_signal.update(payload)
+    cancel.set()
+    return True
+
+
 def active_training_log(workdir) -> Optional[Path]:
     """The workdir's most-recently-written `*.log` — a proxy for the live log of whichever stage is running
     NOW (the sandbox writes one `<stage>.log` per stage; during training the train stage's file is the
@@ -458,10 +483,9 @@ class TrainingMonitorMixin:
                         if kill_signal is not None and should_monitor_kill(
                                 verdict, enabled=getattr(self, "_train_monitor_kill", False),
                                 threshold=float(getattr(self, "_train_monitor_kill_confidence", 0.8) or 0.0)):
-                            kill_signal["kill"] = True
-                            kill_signal["reason"] = reason
-                            kill_signal["confidence"] = round(conf, 3)
-                            cancel.set()
+                            claim_watchdog_kill(
+                                kill_signal, cancel, reason=reason, terminal_reason="monitor_broken",
+                                confidence=round(conf, 3))
                             return
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation — must propagate, never be swallowed

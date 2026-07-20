@@ -350,5 +350,37 @@ def test_loop_endpoint_warning_cannot_kill_without_same_resource_or_with_old_att
     assert not [event for event, _data in stub.store.events if event == EV_ASHA_RANK]
 
 
+def test_asha_kill_cannot_overwrite_training_monitor_terminal(tmp_path, monkeypatch):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text(
+        '{"recall": 0.10, "step": 10}\n', encoding="utf-8")
+    claimed = {
+        "kill": True,
+        "reason": "loss became NaN",
+        "terminal_reason": "monitor_broken",
+        "confidence": 0.97,
+    }
+
+    _run_loop(
+        _AshaStub(kill=True, min_siblings=3, cadence=0.01), wd,
+        {"kind": "stdout_json", "key": "recall", "resource_key": "step"},
+        "max", claimed, monkeypatch, finals=[0.8, 0.7, 0.6],
+        tails=[
+            '{"recall": 0.8, "step": 10}\n',
+            '{"recall": 0.7, "step": 10}\n',
+            '{"recall": 0.6, "step": 10}\n',
+        ],
+        window=0.2,
+    )
+
+    assert claimed == {
+        "kill": True,
+        "reason": "loss became NaN",
+        "terminal_reason": "monitor_broken",
+        "confidence": 0.97,
+    }
+
+
 def test_asha_rank_is_diagnostic():
     assert EV_ASHA_RANK in DIAGNOSTIC_EVENTS      # fold-ignored -> splice-neutral by construction

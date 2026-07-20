@@ -231,7 +231,7 @@ class AshaMonitorMixin:
         same declared resource. Exits with the eval; a per-tick hiccup skips only that tick."""
         import anyio
 
-        from looplab.engine.train_monitor import read_training_tail_raw
+        from looplab.engine.train_monitor import claim_watchdog_kill, read_training_tail_raw
         from looplab.events.replay import fold
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK
 
@@ -342,13 +342,15 @@ class AshaMonitorMixin:
                         and getattr(self, "_asha_live_kill", False)):
                     # CODEX AGENT: never promote a finished endpoint into a fake peer at the live
                     # resource. Without explicit same-resource curve evidence this is unreachable.
-                    kill_signal["kill"] = True
-                    kill_signal["reason"] = (
-                        f"intermediate metric {value:.4g} at {sample.resource_key}={sample.resource:g} "
-                        f"is worse than the {quantile:.0%} bar of "
-                        f"{len(comparable_population)} sibling observations at the same resource")
-                    kill_signal["terminal_reason"] = "asha_underperforming"
-                    cancel.set()
+                    claim_watchdog_kill(
+                        kill_signal, cancel,
+                        reason=(
+                            f"intermediate metric {value:.4g} at "
+                            f"{sample.resource_key}={sample.resource:g} is worse than the "
+                            f"{quantile:.0%} bar of {len(comparable_population)} sibling "
+                            "observations at the same resource"
+                        ),
+                        terminal_reason="asha_underperforming")
                     return
             except anyio.get_cancelled_exc_class():
                 raise                           # cooperative cancellation — must propagate
