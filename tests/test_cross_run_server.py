@@ -6,6 +6,8 @@ router — it is the human/UI surface (§22.4).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -683,11 +685,15 @@ def test_known_finalize_and_legacy_curation_rows_remain_complete_paid_history(
     memory.mkdir(parents=True, exist_ok=True)
     path = memory / "claim_curation_log.jsonl"
     digest = "a" * 64
+    source = json.dumps(
+        {"v": 1, "run_id": "r1", "task_id": "t", "finish_seq": 7},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
     rows = [{
         "v": 2, "curation_key": f"claim:v2:{digest}",
-        "source_key": "source:v1:" + "b" * 64,
+        "source_key": "source:v1:" + hashlib.sha256(source).hexdigest(),
         "run_id": "r1", "task_id": "t", "finish_seq": 7,
-        "input_digest": digest, "input_schema": "claim-curation/input-v1",
+        "input_digest": digest, "input_schema": "finalize-claim-curation/v1",
         "model": "m", "parser": "tool_call_once", "outcome": "empty",
         "auto": False, "auto_requested": False,
         "proposals": {"decisions": []}, "receipt": None, "revision": 1,

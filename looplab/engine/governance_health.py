@@ -6,6 +6,7 @@ damaged line would silently turn an unknown policy state into a different, appar
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
@@ -206,6 +207,143 @@ def confirm_governance_durable(path: Path) -> None:
         raise_governance_storage_unavailable(path, exc)
 
 
+_FINALIZE_INPUT_SCHEMAS = {
+    "concept": frozenset((
+        "finalize-concept-curation/v1",
+        "finalize-concept-curation/v2",
+        "finalize-concept-curation/v3",
+    )),
+    "claim": frozenset((
+        "finalize-claim-curation/v1",
+        "finalize-claim-curation/v2",
+        "finalize-claim-curation/v3",
+    )),
+    "facets": frozenset(("finalize-task-facets/v1",)),
+}
+_FINALIZE_DIAGNOSTIC_SCHEMAS = {
+    "concept": "finalize-concept-curation/input-unavailable",
+    "claim": "finalize-claim-curation/input-unavailable",
+    "facets": "finalize-task-facets/input-unavailable",
+}
+_V2_CURATION_FIELDS = frozenset((
+    "v", "curation_key", "source_key", "run_id", "task_id", "finish_seq",
+    "input_digest", "input_schema", "model", "parser", "outcome", "auto",
+    "auto_requested", "proposals", "receipt", "revision", "error_type", "ambiguity",
+))
+_V2_CURATION_REQUIRED_FIELDS = _V2_CURATION_FIELDS - frozenset((
+    "revision", "error_type", "ambiguity",
+))
+
+
+def _semantic_digest(payload: dict) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _curation_source_key(*, run_id: str, task_id: str, finish_seq: int | None) -> str:
+    return "source:v1:" + _semantic_digest({
+        "v": 1, "run_id": run_id, "task_id": task_id, "finish_seq": finish_seq,
+    })
+
+
+def _facets_curation_key(task_id: str) -> str:
+    return "facets:v2:" + _semantic_digest({
+        "v": 2, "kind": "facets", "task_id": task_id,
+    })
+
+
+def _valid_required_text(value, *, maximum: int) -> bool:
+    return (isinstance(value, str) and bool(value) and len(value) <= maximum
+            and all(ord(ch) >= 32 for ch in value))
+
+
+def _validate_v2_curation_row(row: dict, *, kind: str) -> str | None:
+    """Bind a modern finalize receipt to the exact semantic work and durable run source."""
+    fields = set(row)
+    if fields - _V2_CURATION_FIELDS or not _V2_CURATION_REQUIRED_FIELDS.issubset(fields):
+        # In particular, HTTP action ids/begun fields can never acquire finalize terminal semantics.
+        return "invalid_record"
+    if row.get("auto") is not False or not isinstance(row.get("auto_requested"), bool):
+        return "invalid_record"
+    if row.get("receipt") is not None or not isinstance(row.get("proposals"), dict):
+        return "invalid_record"
+
+    run_id, task_id = row.get("run_id"), row.get("task_id")
+    if (not isinstance(run_id, str) or len(run_id) > 500
+            or not isinstance(task_id, str) or len(task_id) > 500):
+        return "invalid_record"
+    finish_seq = row.get("finish_seq")
+    if finish_seq is not None and (
+            isinstance(finish_seq, bool) or not isinstance(finish_seq, int) or finish_seq < 0):
+        return "invalid_record"
+    expected_source = _curation_source_key(
+        run_id=run_id, task_id=task_id, finish_seq=finish_seq)
+    if row.get("source_key") != expected_source:
+        return "invalid_record"
+
+    input_schema = row.get("input_schema")
+    model, parser = row.get("model"), row.get("parser")
+    if (not _valid_required_text(input_schema, maximum=200)
+            or not _valid_required_text(model, maximum=200)
+            or parser != "tool_call_once"):
+        return "invalid_record"
+
+    outcome = row.get("outcome")
+    outcomes = {
+        "unavailable", "empty", "proposed", "error",
+        "prior_attempt_incomplete_not_replayed",
+    }
+    if kind == "facets":
+        outcomes.add("already-governed")
+    if outcome not in outcomes:
+        return "invalid_record"
+    error_type, ambiguity = row.get("error_type"), row.get("ambiguity")
+    if outcome == "error":
+        if not _valid_required_text(error_type, maximum=200) or "ambiguity" in row:
+            return "invalid_record"
+    elif outcome == "prior_attempt_incomplete_not_replayed":
+        if ambiguity != "provider_outcome_unknown" or "error_type" in row:
+            return "invalid_record"
+    elif "error_type" in row or "ambiguity" in row:
+        return "invalid_record"
+
+    curation_key, input_digest = row.get("curation_key"), row.get("input_digest")
+    if not isinstance(curation_key, str) or len(curation_key) > 240:
+        return "invalid_record"
+    diagnostic_key = (
+        f"{kind}:diagnostic:v2:{expected_source.rsplit(':', 1)[-1]}")
+    if curation_key == diagnostic_key:
+        if (input_digest != "" or input_schema != _FINALIZE_DIAGNOSTIC_SCHEMAS[kind]
+                or outcome != "error"):
+            return "invalid_record"
+    else:
+        if (not isinstance(input_digest, str) or len(input_digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in input_digest)
+                or input_schema not in _FINALIZE_INPUT_SCHEMAS[kind]):
+            return "invalid_record"
+        expected_key = (
+            f"{kind}:v2:{input_digest}" if kind in {"concept", "claim"}
+            else _facets_curation_key(task_id))
+        if curation_key != expected_key or (kind == "facets" and not task_id):
+            return "invalid_record"
+
+    proposals = row["proposals"]
+    if kind == "concept":
+        if (set(proposals) != {"merges", "splits", "purges"}
+                or any(not isinstance(proposals[field], list)
+                       for field in ("merges", "splits", "purges"))):
+            return "invalid_record"
+    elif kind == "claim":
+        if set(proposals) != {"decisions"} or not isinstance(proposals["decisions"], list):
+            return "invalid_record"
+    elif (set(proposals) != {"task_id", "facets"}
+          or proposals.get("task_id") != task_id
+          or not isinstance(proposals.get("facets"), dict)):
+        return "invalid_record"
+    return None
+
+
 def _validate_curation_row(row: dict, *, kind: str) -> str | None:
     """Validate every known HTTP and finalize curation receipt schema."""
     action = row.get("action")
@@ -232,29 +370,7 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
     # Modern finalize rows are semantic input-digest receipts, not HTTP action-id receipts. All
     # three paid finalize stewards share this schema; facets additionally has a governed fast path.
     if version == 2 and action is None:
-        for field, maximum in (
-                ("curation_key", 240), ("source_key", 240),
-                ("run_id", 500), ("task_id", 500), ("input_digest", 80),
-                ("input_schema", 300), ("model", 300), ("parser", 160)):
-            if reason := validate_optional_text(row, field, maximum):
-                return reason
-        outcomes = {
-            "unavailable", "empty", "proposed", "error",
-            "prior_attempt_incomplete_not_replayed",
-        }
-        if kind == "facets":
-            outcomes.add("already-governed")
-        if (not row.get("curation_key") or not row.get("source_key")
-                or row.get("outcome") not in outcomes
-                or not isinstance(row.get("auto"), bool)
-                or not isinstance(row.get("auto_requested"), bool)):
-            return "invalid_record"
-        finish_seq = row.get("finish_seq")
-        if finish_seq is not None and (
-                isinstance(finish_seq, bool) or not isinstance(finish_seq, int)
-                or finish_seq < 0):
-            return "invalid_record"
-        return None
+        return _validate_v2_curation_row(row, kind=kind)
 
     # Known pre-v2 finalize rows are run-keyed. Their absence of an HTTP action id means they are
     # audit/proposal history only; they never satisfy a new on-demand paid action-id lookup.
@@ -357,7 +473,25 @@ def read_curation_rows(
 
     beginnings: dict[str, int] = {}
     outcomes: set[str] = set()
+    v2_sequences: dict[str, dict] = {}
     for position, row in enumerate(normalized, start=1):
+        if row.get("v") == 2 and row.get("action") is None:
+            curation_key = row["curation_key"]
+            sequence = v2_sequences.setdefault(
+                curation_key, {"terminal": False, "unavailable_sources": set()})
+            if sequence["terminal"]:
+                # A healthy writer never emits anything after the one terminal outcome for a semantic key.
+                raise GovernanceLedgerUnavailable(
+                    ledger, "revision_collision", line=position)
+            if row["outcome"] == "unavailable":
+                source_key = row["source_key"]
+                if source_key in sequence["unavailable_sources"]:
+                    raise GovernanceLedgerUnavailable(
+                        ledger, "duplicate_action_id", line=position)
+                sequence["unavailable_sources"].add(source_key)
+            else:
+                sequence["terminal"] = True
+
         if row.get("action") not in {
                 "steward-invocation-begun", "steward-invocation"}:
             continue

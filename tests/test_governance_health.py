@@ -1,6 +1,7 @@
 """Fail-closed health contract for Part IV/V operator-governance ledgers."""
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -80,15 +81,13 @@ def test_duplicate_json_member_cannot_select_an_ambiguous_governance_action(tmp_
 def _task_facets_curation_row(**overrides):
     row = {
         "v": 2,
-        "curation_key": "facets:v2:" + "a" * 64,
-        "source_key": "source:v1:" + "b" * 64,
         "run_id": "run-a",
         "task_id": "task-a",
         "finish_seq": 7,
         "input_digest": "c" * 64,
         "input_schema": "finalize-task-facets/v1",
         "model": "model-a",
-        "parser": "tool-call-v1",
+        "parser": "tool_call_once",
         "outcome": "already-governed",
         "auto": False,
         "auto_requested": True,
@@ -96,6 +95,15 @@ def _task_facets_curation_row(**overrides):
         "receipt": None,
     }
     row.update(overrides)
+    encoded_source = json.dumps({
+        "v": 1, "run_id": row["run_id"], "task_id": row["task_id"],
+        "finish_seq": row["finish_seq"],
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    row.setdefault("source_key", "source:v1:" + hashlib.sha256(encoded_source).hexdigest())
+    encoded_key = json.dumps({
+        "v": 2, "kind": "facets", "task_id": row["task_id"],
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    row.setdefault("curation_key", "facets:v2:" + hashlib.sha256(encoded_key).hexdigest())
     return row
 
 
@@ -122,6 +130,71 @@ def test_task_facets_paid_history_fails_closed_after_a_valid_terminal(
     assert exc.value.ledger == "task_facets_curation"
     assert exc.value.reason == reason
     assert exc.value.public_receipt()["complete"] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    {"action_id": ["not-an-http-receipt"]},
+    {"source_key": "source:v1:" + "0" * 64},
+    {"curation_key": "facets:v2:" + "0" * 64},
+    {"input_digest": "not-a-digest"},
+    {"input_schema": "future-or-forged"},
+    {"model": ""},
+    {"parser": "tool_call"},
+    {"auto": True},
+    {"receipt": {"forged": True}},
+])
+def test_v2_curation_semantic_identity_fails_closed(tmp_path, mutation):
+    path = tmp_path / "task_facets_curation_log.jsonl"
+    _write_rows(path, [_task_facets_curation_row(**mutation)])
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        read_curation_rows(path)
+
+    assert exc.value.reason == "invalid_record"
+
+
+def test_v2_curation_accepts_distinct_unavailable_sources_then_one_terminal(tmp_path):
+    path = tmp_path / "task_facets_curation_log.jsonl"
+    rows = [
+        _task_facets_curation_row(
+            run_id="run-a", outcome="unavailable",
+            proposals={"task_id": "task-a", "facets": {}}),
+        _task_facets_curation_row(
+            run_id="run-b", outcome="unavailable",
+            proposals={"task_id": "task-a", "facets": {}}),
+        _task_facets_curation_row(run_id="run-c"),
+    ]
+    _write_rows(path, rows)
+
+    assert read_curation_rows(path) == rows
+
+
+@pytest.mark.parametrize(("rows", "reason"), [
+    ([
+        _task_facets_curation_row(
+            outcome="unavailable", proposals={"task_id": "task-a", "facets": {}}),
+        _task_facets_curation_row(
+            outcome="unavailable", proposals={"task_id": "task-a", "facets": {}}),
+    ], "duplicate_action_id"),
+    ([
+        _task_facets_curation_row(),
+        _task_facets_curation_row(run_id="run-b"),
+    ], "revision_collision"),
+    ([
+        _task_facets_curation_row(),
+        _task_facets_curation_row(
+            run_id="run-b", outcome="unavailable",
+            proposals={"task_id": "task-a", "facets": {}}),
+    ], "revision_collision"),
+])
+def test_v2_curation_rejects_impossible_semantic_sequences(tmp_path, rows, reason):
+    path = tmp_path / "task_facets_curation_log.jsonl"
+    _write_rows(path, rows)
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        read_curation_rows(path)
+
+    assert exc.value.reason == reason
 
 
 @pytest.mark.parametrize(("filename", "row", "reader", "reason"), [
