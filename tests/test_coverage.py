@@ -140,6 +140,17 @@ def test_tombstoned_nodes_do_not_dilute_coverage_denominators(tmp_path):
     assert sig["top_themes"] == [["live", 1]] and sig["dominant_theme_frac"] == 1.0
 
 
+def test_aborted_nodes_do_not_dilute_coverage_or_niches(tmp_path):
+    st = fold(_store(tmp_path, [("old", {"x": 1.0}, 1.0),
+                                ("live", {"x": 2.0}, 2.0)]).read_all())
+    st.aborted_nodes = [0]
+
+    sig = coverage_signal(st)
+
+    assert sig["nodes"] == 1 and sig["themes"] == 1 and sig["niches"] == 1
+    assert sig["top_themes"] == [["live", 1]]
+
+
 def test_signal_is_deterministic(tmp_path):
     st = fold(_store(tmp_path, [("a", {"x": 1.0}, 1.0), ("b", {"x": 2.0}, 2.0)]).read_all())
     assert coverage_signal(st) == coverage_signal(st)

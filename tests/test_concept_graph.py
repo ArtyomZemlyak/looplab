@@ -129,6 +129,23 @@ def test_failed_nodes_still_count_as_experiments(tmp_path):
     assert cov["experiments"] == 2   # a failed experiment is still effort spent in the region
 
 
+def test_current_concept_coverage_excludes_aborted_and_tombstoned_history(tmp_path):
+    st = fold(_store(tmp_path, [
+        ("loss", "decoupled contrastive r-drop", 0.4),
+        ("neg", "external hard negative mining", 0.6),
+        ("distill", "distill from the cross-encoder teacher checkpoint", 0.7),
+    ]).read_all())
+    st.aborted_nodes = [0]
+    st.nodes[1].tombstoned = True
+
+    cov = concept_coverage(st, dense_retrieval_skeleton())
+
+    assert cov["experiments"] == cov["tagged"] == 1
+    assert "distillation/teacher-distill" in cov["concept_touch"]
+    assert "loss/decoupled-contrastive" not in cov["concept_touch"]
+    assert "negatives/external-mining" not in cov["concept_touch"]
+
+
 # --------------------------------------------------------------------------- #
 # Coverage analytics + the uncovered-region alarm
 # --------------------------------------------------------------------------- #

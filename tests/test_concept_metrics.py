@@ -2,7 +2,6 @@
 state; joins each concept's touching experiments to their robust_metric; a multi-membership node's
 metric is NOT divided across its concepts (full metric counts in each). Δ is signed vs the run's
 median baseline so positive = better for the run's direction."""
-from looplab.core.models import RunState
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.search.concept_graph import concept_metrics, graph_from_node_concepts, _median
@@ -101,3 +100,15 @@ def test_replay_stable(tmp_path):
     st, res = _run(tmp_path, [(["b/x"], 0.4), (["a/y"], 0.6)])
     graph, tags = graph_from_node_concepts(st.node_concepts)
     assert concept_metrics(st, graph, tags) == res           # deterministic recompute
+
+
+def test_metrics_exclude_aborted_and_tombstoned_history(tmp_path):
+    st, _ = _run(tmp_path, [(["loss/old"], 0.9), (["loss/deleted"], 0.8), (["data/live"], 0.4)])
+    st.aborted_nodes = [0]
+    st.nodes[1].tombstoned = True
+    graph, tags = graph_from_node_concepts(st.node_concepts)
+
+    res = concept_metrics(st, graph, tags)
+
+    assert res["baseline"] == 0.4
+    assert set(res["rows"]) == {"data/live"}

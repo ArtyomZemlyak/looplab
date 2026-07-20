@@ -74,8 +74,12 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
       recent_dominant_frac - in [0,1], same over the last `recent` idea-nodes (narrowing NOW?)
       top_themes           - [[axis, count], ...] top few, so the LLM can name the concentration
     """
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
+    # CODEX AGENT: breadth is live steering context. Aborted attempts remain in the event audit trail but
+    # cannot dilute current coverage or the recent-window denominator.
     nodes = [n for n in state.nodes.values()
-             if getattr(n, "idea", None) is not None and not getattr(n, "tombstoned", False)]
+             if (getattr(n, "idea", None) is not None and n.id not in aborted
+                 and not getattr(n, "tombstoned", False))]
     if not nodes:
         return {"nodes": 0, "themes": 0, "niches": 0, "operators": 0,
                 "theme_entropy": 0.0, "dominant_theme_frac": 0.0,

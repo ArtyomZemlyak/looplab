@@ -77,6 +77,20 @@ def test_recent_window_concentration(tmp_path):
     assert sig["recent_frac"] == 1.0
 
 
+def test_lock_in_excludes_aborted_and_tombstoned_history(tmp_path):
+    nodes = [(f"loss-{i}", "decoupled contrastive r-drop") for i in range(6)]
+    nodes.append(("data", "data augmentation"))
+    st = fold(_store(tmp_path, nodes).read_all())
+    st.aborted_nodes = list(range(5))
+    st.nodes[5].tombstoned = True
+
+    sig = lock_in_signal(st, dense_retrieval_skeleton(), streak_threshold=5)
+
+    assert sig["experiments"] == sig["tagged"] == 1
+    assert sig["locked_axis"] == "data" and sig["streak"] == 1
+    assert sig["fired"] is False
+
+
 def test_signal_pins_tie_broken_fields(tmp_path):
     # each node touches loss AND regularization (tie); the tie-break must PIN loss (min axis name) — a
     # pinned value catches iteration-order leakage a same-process f(x)==f(x) cannot.

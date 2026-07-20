@@ -36,6 +36,16 @@ def test_archive_keeps_best_per_niche():
     assert by_id == {1, 2}
 
 
+def test_archive_excludes_aborted_evaluated_history():
+    st = RunState(direction="min")
+    st.nodes = {0: _n(0, 0.1, 0.1, 1.0), 1: _n(1, 5.0, 5.0, 2.0)}
+    st.aborted_nodes = [0]
+
+    arch = DiversityArchive(resolution=1.0).build(st)
+
+    assert {node.id for node in arch.values()} == {1}
+
+
 def test_archive_summary_emitted_on_run(tmp_path):
     task = ToyTask.load(TASK)
     r, d = task.build_roles()

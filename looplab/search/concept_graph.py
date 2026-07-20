@@ -363,10 +363,16 @@ def skeleton_for(task_type: str) -> ConceptGraph:
 # --------------------------------------------------------------------------- #
 
 def _experiment_nodes(state: RunState) -> list:
-    """Idea-carrying nodes in id order — the run's experiments, exactly as `coverage.py` counts them
-    (failed nodes included: a failed experiment is still effort spent in a region)."""
-    return sorted((n for n in state.nodes.values() if getattr(n, "idea", None) is not None),
-                  key=lambda n: n.id)
+    """Current idea-carrying nodes in id order (failed live attempts still count as experiments)."""
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
+    # CODEX AGENT: Part-IV signals steer the next action, so append-only audit history must not remain in
+    # the current search projection after an abort or tombstone.
+    return sorted((
+        n for n in state.nodes.values()
+        if (getattr(n, "idea", None) is not None
+            and n.id not in aborted
+            and not getattr(n, "tombstoned", False))
+    ), key=lambda n: n.id)
 
 
 def _node_text(node) -> str:

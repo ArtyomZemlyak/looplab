@@ -21,13 +21,16 @@ class DiversityArchive:
         """niche-key -> best Node in that niche."""
         better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
         elites: dict[tuple, Node] = {}
+        aborted = set(getattr(state, "aborted_nodes", None) or [])
         for n in state.evaluated_nodes():
             # skip constraint-violating (and null-metric) nodes: an infeasible node must not become the
             # recorded niche elite (run-end provenance) or inflate the coverage count. (None<float would
             # also crash the `better` compare.) NOTE: this is the run-end DIVERSITY/AUDIT view, so it
             # deliberately KEEPS trust-gate-flagged-but-feasible nodes (they stay `feasible` for exactly
             # this diversity/audit picture) — unlike the breeding pools, which use breedable_nodes().
-            if n.metric is None or not n.feasible:
+            # CODEX AGENT: evaluated_nodes preserves aborted attempts for audit compatibility; the current
+            # diversity archive must share the selector's lifecycle boundary and exclude them explicitly.
+            if n.id in aborted or n.metric is None or not n.feasible:
                 continue
             niche = self._niche(n.idea.params)
             cur = elites.get(niche)
