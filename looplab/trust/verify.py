@@ -22,15 +22,23 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.advisory_payloads import (
+    MAX_RESEARCH_CLAIMS,
+    MAX_RESEARCH_NODE_REFS,
+    MAX_RESEARCH_URL_REFS,
+    RESEARCH_RECEIPT_VERSION,
+    research_claims_receipt,
+    research_evidence_receipt,
+)
 from looplab.core.fitness import is_usable_metric
 from looplab.core.models import NodeStatus, RunState
 from looplab.trust.redact import redact_persisted_text
-from looplab.trust.source_identity import canonical_source_ref
+from looplab.trust.source_identity import canonical_source_ref, valid_source_identity
 
 
-_MAX_CLAIMS = 64
-_MAX_NODE_REFS = 8
-_MAX_URL_REFS = 4
+_MAX_CLAIMS = MAX_RESEARCH_CLAIMS
+_MAX_NODE_REFS = MAX_RESEARCH_NODE_REFS
+_MAX_URL_REFS = MAX_RESEARCH_URL_REFS
 _MAX_SOURCES = 64
 
 
@@ -85,19 +93,66 @@ def _source_map(sources) -> dict[str, dict[str, str]]:
     return out
 
 
-def _evidence_text(claim: dict, state: RunState,
-                   sources: Optional[dict[str, dict[str, str]]] = None) -> str:
-    """Assemble bounded, redacted evidence as JSON; unmatched URLs are never included."""
+def _derived_evidence_receipt(claim: dict) -> dict:
+    """Compatibility receipt for direct callers that have not passed the writer sanitizer.
+
+    Durable modern memos always carry the canonical receipt.  The public verifier historically accepted
+    raw dictionaries, so a small, well-shaped direct input remains checkable while an oversized or malformed
+    one is explicitly incomplete.
+    """
+    raw_nodes = claim.get("node_ids")
+    raw_urls = claim.get("urls")
+    nodes = raw_nodes if isinstance(raw_nodes, (list, tuple)) else ()
+    urls = raw_urls if isinstance(raw_urls, (list, tuple)) else ()
+    node_total = len(nodes) if isinstance(raw_nodes, (list, tuple)) else int(raw_nodes is not None)
+    url_total = len(urls) if isinstance(raw_urls, (list, tuple)) else int(raw_urls is not None)
+    node_retained = min(node_total, _MAX_NODE_REFS) if isinstance(raw_nodes, (list, tuple)) else 0
+    url_retained = min(url_total, _MAX_URL_REFS) if isinstance(raw_urls, (list, tuple)) else 0
+    return {
+        "v": RESEARCH_RECEIPT_VERSION,
+        "node_refs_total": node_total,
+        "node_refs_retained": node_retained,
+        "node_refs_omitted": node_total - node_retained,
+        "url_refs_total": url_total,
+        "url_refs_retained": url_retained,
+        "url_refs_omitted": url_total - url_retained,
+        "complete": (isinstance(raw_nodes, (list, tuple)) or raw_nodes is None)
+        and (isinstance(raw_urls, (list, tuple)) or raw_urls is None)
+        and node_total == node_retained and url_total == url_retained,
+    }
+
+
+def _evidence_snapshot(claim: dict, state: RunState,
+                       sources: Optional[dict[str, dict[str, str]]] = None) -> tuple[dict, dict]:
+    """Freeze exactly the evidence shown to the verifier and its lifecycle-aware identities."""
+    receipt = research_evidence_receipt(claim) or _derived_evidence_receipt(claim)
     nodes: list[dict] = []
+    node_refs: list[dict[str, int]] = []
+    node_inputs_valid = 0
     raw_nids = claim.get("node_ids") if isinstance(claim, dict) else ()
-    for nid in (raw_nids if isinstance(raw_nids, (list, tuple)) else ())[:_MAX_NODE_REFS]:
+    cited_nids = (raw_nids if isinstance(raw_nids, (list, tuple)) else ())[:_MAX_NODE_REFS]
+    seen_nodes: set[tuple[int, int]] = set()
+    aborted = set(getattr(state, "aborted_nodes", ()))
+    final_nodes = getattr(state, "nodes", {})
+    for nid in cited_nids:
         if type(nid) is not int:
             continue
-        n = state.nodes.get(nid)
-        if n is None:
+        n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
+        # CODEX AGENT: a node id is an ABA-prone slot, not an evidence identity. Only the current,
+        # non-deleted lifecycle may enter the verifier prompt and its promotion receipt.
+        if n is None or n.tombstoned or nid in aborted:
             continue
+        generation = n.attempt
+        if type(generation) is not int or generation < 0:
+            continue
+        node_inputs_valid += 1
+        identity = (nid, generation)
+        if identity in seen_nodes:
+            continue
+        seen_nodes.add(identity)
         row = {
             "node_id": nid,
+            "generation": generation,
             "operator": _clean(n.operator, 120, single_line=True),
             "status": n.status.value,
         }
@@ -112,17 +167,119 @@ def _evidence_text(claim: dict, state: RunState,
             row["params"] = _clean(params, 1_200)
         row["rationale"] = _clean(n.idea.rationale or "", 400)
         nodes.append(row)
+        node_refs.append({"node_id": nid, "generation": generation})
 
     matched_sources: list[dict[str, str]] = []
-    matched_identities: set[str] = set()
+    matched_identities: list[str] = []
     source_lookup = sources or {}
+    seen_sources: set[str] = set()
     for identity, _display_url in _claim_source_refs(claim):
         source = source_lookup.get(identity)
-        if source is not None and identity not in matched_identities:
-            matched_identities.add(identity)
-            matched_sources.append(source)
+        if source is None:
+            continue
+        if identity in seen_sources:
+            continue
+        seen_sources.add(identity)
+        matched_identities.append(identity)
+        matched_sources.append(source)
+
+    complete = bool(
+        receipt["complete"]
+        and node_inputs_valid == receipt["node_refs_retained"]
+    )
+    evidence = {"experiments": nodes, "consulted_sources": matched_sources}
+    identity_receipt = {
+        "v": RESEARCH_RECEIPT_VERSION,
+        "node_refs": node_refs,
+        "url_identities": matched_identities,
+        "complete": complete,
+    }
+    return evidence, identity_receipt
+
+
+def finalize_verified_evidence(claim: dict, verdict_row: dict,
+                               state: RunState) -> tuple[Optional[dict], str]:
+    """Revalidate a verifier evidence identity against the terminal run lifecycle.
+
+    The memo event is an audit snapshot, while reset/tombstone/abort commands can arrive before finalization.
+    A positive cross-run claim therefore needs both the exact evidence the verifier saw and a second current-
+    generation/active-lifecycle check. Legacy rows have no identity receipt and intentionally return unknown.
+    """
+    claim_receipt = research_evidence_receipt(claim)
+    evidence = verdict_row.get("evidence") if isinstance(verdict_row, dict) else None
+    if claim_receipt is None or not isinstance(evidence, dict):
+        return None, "verification evidence identity is unavailable"
+    if (claim_receipt.get("complete") is not True
+            or evidence.get("v") != RESEARCH_RECEIPT_VERSION
+            or evidence.get("complete") is not True):
+        return None, "verification evidence set is incomplete"
+    raw_node_refs = evidence.get("node_refs")
+    raw_url_ids = evidence.get("url_identities")
+    if (not isinstance(raw_node_refs, (list, tuple))
+            or len(raw_node_refs) > _MAX_NODE_REFS
+            or not isinstance(raw_url_ids, (list, tuple))
+            or len(raw_url_ids) > _MAX_URL_REFS):
+        return None, "verification evidence identity is malformed"
+
+    cited_nodes = claim.get("node_ids") if isinstance(claim.get("node_ids"), (list, tuple)) else ()
+    node_refs: list[dict[str, int]] = []
+    node_ids: list[int] = []
+    seen_nodes: set[tuple[int, int]] = set()
+    aborted = set(getattr(state, "aborted_nodes", ()))
+    final_nodes = getattr(state, "nodes", {})
+    for ref in raw_node_refs:
+        if (not isinstance(ref, dict) or type(ref.get("node_id")) is not int
+                or type(ref.get("generation")) is not int):
+            return None, "verification evidence identity is malformed"
+        nid, generation = ref["node_id"], ref["generation"]
+        if nid < 0 or generation < 0 or nid not in cited_nodes:
+            return None, "verification evidence identity does not match the claim"
+        n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
+        # CODEX AGENT: reset is an ABA boundary and delete/abort removes a lifecycle from active
+        # evidence. Never ratify a verdict whose inspected node no longer exists in that exact state.
+        if (n is None or n.attempt != generation or n.tombstoned or nid in aborted):
+            return None, "verification evidence lifecycle is stale"
+        identity = (nid, generation)
+        if identity not in seen_nodes:
+            seen_nodes.add(identity)
+            node_refs.append({"node_id": nid, "generation": generation})
+            node_ids.append(nid)
+
+    claim_urls = claim.get("urls") if isinstance(claim.get("urls"), (list, tuple)) else ()
+    claim_url_ids = (claim.get("url_identities")
+                     if isinstance(claim.get("url_identities"), (list, tuple)) else ())
+    url_lookup = {
+        identity: claim_urls[index]
+        for index, identity in enumerate(claim_url_ids)
+        if index < len(claim_urls) and valid_source_identity(identity)
+        and isinstance(claim_urls[index], str)
+    }
+    url_ids: list[str] = []
+    urls: list[str] = []
+    for identity in raw_url_ids:
+        if not valid_source_identity(identity) or identity not in url_lookup:
+            return None, "verification source identity does not match the claim"
+        if identity not in url_ids:
+            url_ids.append(identity)
+            urls.append(url_lookup[identity])
+
+    if not node_refs and not url_ids:
+        return None, "verification did not inspect usable evidence"
+    return {
+        "node_ids": node_ids,
+        "node_refs": node_refs,
+        "urls": urls,
+        "url_identities": url_ids,
+        "evidence_receipt": claim_receipt,
+    }, ""
+
+
+def _evidence_text(claim: dict, state: RunState,
+                   sources: Optional[dict[str, dict[str, str]]] = None) -> str:
+    """Assemble bounded, redacted evidence as JSON; unmatched URLs are never included."""
+    evidence, _identity_receipt = _evidence_snapshot(claim, state, sources)
     return json.dumps(
-        {"experiments": nodes, "consulted_sources": matched_sources},
+        evidence,
         ensure_ascii=False, separators=(",", ":"), allow_nan=False,
         default=lambda value: _clean(value, 200),
     )
@@ -141,12 +298,12 @@ def _check_claims(claims: list[dict], state: RunState,
                 if type(i) is int][:_MAX_NODE_REFS]
         urls = [u for u in (raw_urls if isinstance(raw_urls, (list, tuple)) else ())[:_MAX_URL_REFS]
                 if isinstance(u, str) and u]
-        identities = [ref[0] for ref in _claim_source_refs(c)]
-        known = [i for i in nids if i in state.nodes]
-        matched = [identity for identity in identities if identity in consulted]
+        _evidence, identity_receipt = _evidence_snapshot(c, state, consulted)
+        known = identity_receipt["node_refs"]
+        matched = identity_receipt["url_identities"]
         if not nids and not urls:
             out.append({"statement": stmt, "verdict": "unsupported",
-                        "note": "no evidence cited"})
+                        "note": "no evidence cited", "evidence": identity_receipt})
             continue
         if not known and not matched:
             if nids and not urls:
@@ -156,9 +313,10 @@ def _check_claims(claims: list[dict], state: RunState,
             else:
                 note = "cited experiments do not exist and source URLs were not consulted"
             out.append({"statement": stmt, "verdict": "unsupported",
-                        "note": note})
+                        "note": note, "evidence": identity_receipt})
             continue
-        out.append({"statement": stmt, "verdict": "cited", "note": ""})
+        out.append({"statement": stmt, "verdict": "cited", "note": "",
+                    "evidence": identity_receipt})
     return out
 
 
@@ -257,11 +415,32 @@ def verify_memo(memo: dict, state: RunState, client=None,
             for k, (i, _c) in enumerate(todo):
                 if k < len(out.verdicts) and out.verdicts[k] in ("supported", "unsupported",
                                                                  "unclear"):
-                    verdicts[i]["verdict"] = out.verdicts[k]
+                    proposed = out.verdicts[k]
+                    # CODEX AGENT: a semantic "supported" applies only to the complete evidence snapshot
+                    # the judge actually saw. A capped, unresolved, deleted, or aborted citation is not
+                    # permission to promote the visible prefix as if the entire citation set were checked.
+                    if proposed == "supported" and verdicts[i]["evidence"]["complete"] is not True:
+                        proposed = "unclear"
+                    verdicts[i]["verdict"] = proposed
                     if k < len(out.notes):
                         verdicts[i]["note"] = _clean(out.notes[k], 200, single_line=True)
+                    if (out.verdicts[k] == "supported"
+                            and verdicts[i]["evidence"]["complete"] is not True):
+                        verdicts[i]["note"] = "evidence set is incomplete or stale"
             method = "llm"
         except Exception:  # noqa: BLE001 — verification degrades, never blocks the memo
             pass
     bad = sum(1 for v in verdicts if v["verdict"] == "unsupported")
-    return {"verdicts": verdicts, "method": method, "unsupported": bad}
+    claim_receipt = research_claims_receipt(memo)
+    if claim_receipt is None:
+        raw_total = len(raw_claims) if isinstance(raw_claims, (list, tuple)) else int(raw_claims is not None)
+        claim_receipt = {
+            "v": RESEARCH_RECEIPT_VERSION,
+            "total": raw_total,
+            "retained": len(claims),
+            "omitted": max(0, raw_total - len(claims)),
+            "complete": isinstance(raw_claims, (list, tuple)) and raw_total == len(claims),
+        }
+    return {"verdicts": verdicts, "method": method, "unsupported": bad,
+            "total_verdicts": claim_receipt["total"],
+            "omitted_verdicts": claim_receipt["total"] - len(verdicts)}

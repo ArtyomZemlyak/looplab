@@ -49,6 +49,7 @@ _MAX_RETRIEVAL_HITS = 64
 _MAX_RETRIEVAL_CORPUS = 4096
 _RESEARCH_CLAIM_VERSION = 3
 _RESEARCH_SOURCE_RECEIPT_VERSION = 1
+_RESEARCH_SOURCE_RECEIPT_V2 = 2
 _MAX_RESEARCH_CLAIMS_PER_RUN = 256
 _MAX_RESEARCH_SOURCE_ITEMS = (1 << 31) - 1
 _CLAIM_READ_HEALTH_VERSION = 1
@@ -58,13 +59,19 @@ _RESEARCH_SOURCE_RECEIPT_ROW_FIELDS = frozenset((
 ))
 _CLAIM_SOURCE_SEMANTIC_FIELDS = (
     "v", "record_kind", "run_id", "task_id", "direction", "statement", "metric",
-    "metric_name", "metric_key", "objective_metric", "node_ids", "urls", "verification",
+    "metric_name", "metric_key", "objective_metric", "node_ids", "node_refs", "urls",
+    "url_identities", "evidence_receipt", "verification",
     "verification_verdict", "verification_method", "verification_note", "source_receipt",
     "outcome", "claim_stance", "evidence", "fingerprint", "source", "role",
 )
 _RESEARCH_VERIFICATION_FIELDS = ("verdict", "method", "note")
 _RESEARCH_SOURCE_RECEIPT_FIELDS = (
     "v", "claims_total", "claims_retained", "claims_omitted", "producer_complete",
+    "claims_receipt_known", "evidence_complete",
+)
+_RESEARCH_EVIDENCE_RECEIPT_FIELDS = (
+    "v", "node_refs_total", "node_refs_retained", "node_refs_omitted",
+    "url_refs_total", "url_refs_retained", "url_refs_omitted", "complete",
 )
 _CLAIM_SOURCE_ROW_MAX_CHARS = 640_000
 _CLAIM_SOURCE_ROW_MAX_TOTAL_ITEMS = 1_024
@@ -184,11 +191,18 @@ def _claim_source_semantic_projection(row: dict) -> dict:
     nested_fields = {
         "verification": _RESEARCH_VERIFICATION_FIELDS,
         "source_receipt": _RESEARCH_SOURCE_RECEIPT_FIELDS,
+        "evidence_receipt": _RESEARCH_EVIDENCE_RECEIPT_FIELDS,
     }
     for field, keys in nested_fields.items():
         raw = out.get(field)
         if isinstance(raw, dict):
             out[field] = {key: raw[key] for key in keys if key in raw}
+    raw_refs = out.get("node_refs")
+    if isinstance(raw_refs, (list, tuple)):
+        out["node_refs"] = [
+            {key: ref[key] for key in ("node_id", "generation") if key in ref}
+            for ref in raw_refs if isinstance(ref, dict)
+        ]
     return out
 
 
@@ -286,6 +300,52 @@ def _indexable_research_claim(row) -> bool:
         row.get("v") != _RESEARCH_CLAIM_VERSION or kind == "claim")
 
 
+def _valid_research_node_refs(raw, node_ids) -> bool:
+    if raw is None:
+        return True
+    if not isinstance(raw, list) or len(raw) > 8:
+        return False
+    cited = set(node_ids) if isinstance(node_ids, list) else set()
+    return all(
+        isinstance(ref, dict) and set(ref) == {"node_id", "generation"}
+        and type(ref.get("node_id")) is int and ref["node_id"] >= 0
+        and type(ref.get("generation")) is int and ref["generation"] >= 0
+        and ref["node_id"] in cited
+        for ref in raw
+    )
+
+
+def _valid_research_url_identities(raw, urls) -> bool:
+    if raw is None:
+        return True
+    from looplab.trust.source_identity import valid_source_identity
+    return (isinstance(raw, list) and len(raw) <= 4 and len(raw) <= len(urls)
+            and all(valid_source_identity(identity) for identity in raw))
+
+
+def _valid_research_evidence_receipt(raw) -> bool:
+    if raw is None:
+        return True
+    if not isinstance(raw, dict) or set(raw) != set(_RESEARCH_EVIDENCE_RECEIPT_FIELDS):
+        return False
+    if raw.get("v") != 1 or type(raw.get("complete")) is not bool:
+        return False
+    values = [raw.get(key) for key in _RESEARCH_EVIDENCE_RECEIPT_FIELDS[1:-1]]
+    if any(type(value) is not int or not 0 <= value <= _MAX_RESEARCH_SOURCE_ITEMS
+           for value in values):
+        return False
+    return (
+        raw["node_refs_total"] >= raw["node_refs_retained"]
+        and raw["node_refs_retained"] <= 8
+        and raw["node_refs_omitted"] == raw["node_refs_total"] - raw["node_refs_retained"]
+        and raw["url_refs_total"] >= raw["url_refs_retained"]
+        and raw["url_refs_retained"] <= 4
+        and raw["url_refs_omitted"] == raw["url_refs_total"] - raw["url_refs_retained"]
+        and raw["complete"] == (
+            raw["node_refs_omitted"] == 0 and raw["url_refs_omitted"] == 0)
+    )
+
+
 def _valid_claim_source_row(row, *, research: bool) -> bool:
     """Conservative schema fence for persisted lesson/research evidence rows."""
     if not isinstance(row, dict):
@@ -321,8 +381,11 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
                     or len(row["metric"]) > 200
                     or not isinstance(row.get("node_ids"), list)
                     or any(type(node_id) is not int for node_id in row["node_ids"])
+                    or not _valid_research_node_refs(row.get("node_refs"), row["node_ids"])
                     or not isinstance(row.get("urls"), list)
                     or any(not isinstance(url, str) or len(url) > 2000 for url in row["urls"])
+                    or not _valid_research_url_identities(row.get("url_identities"), row["urls"])
+                    or not _valid_research_evidence_receipt(row.get("evidence_receipt"))
                     or not isinstance(row.get("verification"), dict)
                     or row["verification"].get("verdict") not in _RESEARCH_VERDICTS
                     or not isinstance(row["verification"].get("method"), str)
@@ -468,7 +531,9 @@ def _research_source_receipt(row: dict) -> Optional[dict]:
     if type(row.get("v")) is not int or row.get("v") != _RESEARCH_CLAIM_VERSION:
         return None
     raw = row.get("source_receipt")
-    if not isinstance(raw, dict) or raw.get("v") != _RESEARCH_SOURCE_RECEIPT_VERSION:
+    if (not isinstance(raw, dict)
+            or raw.get("v") not in (_RESEARCH_SOURCE_RECEIPT_VERSION,
+                                    _RESEARCH_SOURCE_RECEIPT_V2)):
         return None
     total, retained, omitted = (
         raw.get("claims_total"), raw.get("claims_retained"), raw.get("claims_omitted"))
@@ -477,15 +542,31 @@ def _research_source_receipt(row: dict) -> Optional[dict]:
             or type(complete) is not bool
             or not 0 <= total <= _MAX_RESEARCH_SOURCE_ITEMS
             or not 0 <= retained <= _MAX_RESEARCH_CLAIMS_PER_RUN
-            or total < retained or omitted != total - retained
-            or complete != (omitted == 0)):
+            or total < retained or omitted != total - retained):
+        return None
+    if raw["v"] == _RESEARCH_SOURCE_RECEIPT_VERSION:
+        if complete != (omitted == 0):
+            return None
+        return {
+            "v": _RESEARCH_SOURCE_RECEIPT_VERSION,
+            "claims_total": total,
+            "claims_retained": retained,
+            "claims_omitted": omitted,
+            "producer_complete": complete,
+        }
+    claims_known = raw.get("claims_receipt_known")
+    evidence_complete = raw.get("evidence_complete")
+    if (type(claims_known) is not bool or type(evidence_complete) is not bool
+            or complete != (claims_known and evidence_complete and omitted == 0)):
         return None
     return {
-        "v": _RESEARCH_SOURCE_RECEIPT_VERSION,
+        "v": _RESEARCH_SOURCE_RECEIPT_V2,
         "claims_total": total,
         "claims_retained": retained,
         "claims_omitted": omitted,
         "producer_complete": complete,
+        "claims_receipt_known": claims_known,
+        "evidence_complete": evidence_complete,
     }
 
 
@@ -1225,7 +1306,9 @@ def _string_list(raw, *, maximum: int, item_maximum: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
-                           direction: str) -> int:
+                           direction: str, claims_total: Optional[int] = None,
+                           claims_receipt_known: Optional[bool] = None,
+                           evidence_complete: Optional[bool] = None) -> int:
     """Upsert (by run_id) a run's D8 research claims into `research_claims.jsonl`. Each row:
     {run_id, task_id, statement, node_ids, urls, source_receipt}. Append-with-replace so a re-run doesn't
     double-count. Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
@@ -1246,7 +1329,17 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
         # scope and indistinguishable from a malformed writer, so refuse before replacing any prior rows.
         return 0
     source = claims if isinstance(claims, (list, tuple)) else []
-    source_total = len(source) + int(claims is not None and not isinstance(claims, (list, tuple)))
+    derived_total = len(source) + int(claims is not None and not isinstance(claims, (list, tuple)))
+    modern_receipt = any(value is not None for value in (
+        claims_total, claims_receipt_known, evidence_complete))
+    if modern_receipt:
+        if (type(claims_total) is not int or not derived_total <= claims_total <= _MAX_RESEARCH_SOURCE_ITEMS
+                or type(claims_receipt_known) is not bool
+                or type(evidence_complete) is not bool):
+            return 0
+        source_total = claims_total
+    else:
+        source_total = derived_total
     # CODEX AGENT: select the first bounded set of VALID claims rather than slicing the raw list first. A
     # malformed prefix must not hide a valid opposition row later in the memo, and every skipped/capped input
     # remains visible in the repeated per-run receipt below.
@@ -1257,22 +1350,50 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
         if not stmt:
             continue
         verdict, method, note = _research_verification(c)
-        rows.append({"v": _RESEARCH_CLAIM_VERSION, "record_kind": "claim", "run_id": rid,
-                     "task_id": _identity_text(task_id, 500),
-                      "direction": direction,
-                      "statement": stmt,
-                      "metric": _metric_identity(c),
-                      "node_ids": _node_ids(c.get("node_ids"))[:64],
-                      "urls": _string_list(c.get("urls"), maximum=32, item_maximum=2000),
-                      "verification": {"verdict": verdict, "method": method, "note": note}})
+        node_ids = _node_ids(c.get("node_ids"))[:64]
+        urls = _string_list(c.get("urls"), maximum=32, item_maximum=2000)
+        row = {"v": _RESEARCH_CLAIM_VERSION, "record_kind": "claim", "run_id": rid,
+               "task_id": _identity_text(task_id, 500),
+               "direction": direction,
+               "statement": stmt,
+               "metric": _metric_identity(c),
+               "node_ids": node_ids,
+               "urls": urls,
+               "verification": {"verdict": verdict, "method": method, "note": note}}
+        raw_refs = c.get("node_refs")
+        if _valid_research_node_refs(raw_refs, node_ids) and raw_refs is not None:
+            row["node_refs"] = [
+                {"node_id": ref["node_id"], "generation": ref["generation"]}
+                for ref in raw_refs
+            ]
+        raw_url_ids = c.get("url_identities")
+        if _valid_research_url_identities(raw_url_ids, urls) and raw_url_ids is not None:
+            row["url_identities"] = list(raw_url_ids)
+        raw_evidence_receipt = c.get("evidence_receipt")
+        if _valid_research_evidence_receipt(raw_evidence_receipt) and raw_evidence_receipt is not None:
+            row["evidence_receipt"] = {
+                key: raw_evidence_receipt[key] for key in _RESEARCH_EVIDENCE_RECEIPT_FIELDS}
+        rows.append(row)
     claim_count = len(rows)
-    receipt = {
-        "v": _RESEARCH_SOURCE_RECEIPT_VERSION,
-        "claims_total": source_total,
-        "claims_retained": claim_count,
-        "claims_omitted": source_total - claim_count,
-        "producer_complete": source_total == claim_count,
-    }
+    if modern_receipt:
+        receipt = {
+            "v": _RESEARCH_SOURCE_RECEIPT_V2,
+            "claims_total": source_total,
+            "claims_retained": claim_count,
+            "claims_omitted": source_total - claim_count,
+            "claims_receipt_known": claims_receipt_known,
+            "evidence_complete": evidence_complete,
+            "producer_complete": bool(
+                claims_receipt_known and evidence_complete and source_total == claim_count),
+        }
+    else:
+        receipt = {
+            "v": _RESEARCH_SOURCE_RECEIPT_VERSION,
+            "claims_total": source_total,
+            "claims_retained": claim_count,
+            "claims_omitted": source_total - claim_count,
+            "producer_complete": source_total == claim_count,
+        }
     for row in rows:
         row["source_receipt"] = receipt
     if claim_count == 0:

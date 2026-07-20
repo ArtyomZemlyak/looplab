@@ -1079,6 +1079,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             return
         try:
             claims = []
+            claims_total = 0
+            claims_receipt_known = True
+            evidence_complete = True
             raw_research = getattr(final, "research", None)
             if raw_research is None:
                 return
@@ -1094,6 +1097,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 if type(memo) is not dict:
                     d8_source_observed = True
                     claims.append(None)
+                    claims_total += 1
+                    claims_receipt_known = False
                     continue
                 # Old pre-D8 memos legitimately have no `claims` key. Once the field is present, however,
                 # only the declared list/tuple shape can prove its cardinality. Any scalar/container mismatch
@@ -1104,7 +1109,16 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 raw_claims = memo.get("claims")
                 if type(raw_claims) not in (list, tuple):
                     claims.append(None)
+                    claims_total += 1
+                    claims_receipt_known = False
                     continue
+                from looplab.core.advisory_payloads import research_claims_receipt
+                memo_receipt = research_claims_receipt(memo)
+                if memo_receipt is None:
+                    claims_total += len(raw_claims)
+                    claims_receipt_known = False
+                else:
+                    claims_total += memo_receipt["total"]
                 verification = memo.get("verification")
                 verification = verification if type(verification) is dict else {}
                 verdicts = verification.get("verdicts")
@@ -1136,14 +1150,28 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                         note_value = v.get("note")
                         note = (note_value[:400] if same and isinstance(note_value, str)
                                 else "verification alignment mismatch")
+                        verified_evidence = None
+                        if verdict == "supported":
+                            from looplab.trust.verify import finalize_verified_evidence
+                            verified_evidence, stale_reason = finalize_verified_evidence(c, v, final)
+                            if verified_evidence is None:
+                                # CODEX AGENT: an old bare node id, a capped evidence set, or a lifecycle
+                                # changed after verification is audit history, never durable positive support.
+                                verdict = "unverified"
+                                note = stale_reason
+                                evidence_complete = False
                         # Forward only the fields the D8 writer understands. Unknown model output remains
                         # untrusted run-local data and cannot hitch a ride into durable cross-run memory.
                         prepared = {
                             "statement": statement,
-                            "node_ids": c.get("node_ids"),
-                            "urls": c.get("urls"),
+                            "node_ids": (verified_evidence["node_ids"]
+                                         if verified_evidence is not None else c.get("node_ids")),
+                            "urls": (verified_evidence["urls"]
+                                     if verified_evidence is not None else c.get("urls")),
                             "verification": {"verdict": verdict, "method": method, "note": note},
                         }
+                        if verified_evidence is not None:
+                            prepared.update(verified_evidence)
                         for key in ("metric_name", "metric_key", "objective_metric", "metric", "fingerprint"):
                             if key in c:
                                 prepared[key] = c.get(key)
@@ -1157,4 +1185,6 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         from looplab.engine.claims import record_research_claims
         record_research_claims(self._e.memory_dir, run_id=final.run_id or final.task_id,
                                task_id=final.task_id, claims=claims,
-                               direction=final.direction)
+                               direction=final.direction, claims_total=claims_total,
+                               claims_receipt_known=claims_receipt_known,
+                               evidence_complete=evidence_complete)

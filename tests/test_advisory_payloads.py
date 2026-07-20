@@ -70,6 +70,44 @@ def test_memo_sanitizer_ignores_inconsistent_verifier_omission_metadata():
     assert projected["omitted_verdicts"] == 0
 
 
+def test_memo_sanitizer_records_claim_and_evidence_omissions_idempotently():
+    claims = [{
+        "statement": f"claim-{index}",
+        "node_ids": list(range(9)),
+        "urls": [f"https://example.test/{item}" for item in range(5)],
+    } for index in range(65)]
+
+    written = sanitize_research_memo_payload({"claims": claims})
+    replayed = sanitize_research_memo_payload(written)
+
+    for projected in (written, replayed):
+        assert len(projected["claims"]) == 64
+        assert projected["claims_receipt"] == {
+            "v": 1, "total": 65, "retained": 64, "omitted": 1, "complete": False,
+        }
+        claim = projected["claims"][0]
+        assert claim["node_ids"] == list(range(8))
+        assert len(claim["urls"]) == len(claim["url_identities"]) == 4
+        assert claim["evidence_receipt"] == {
+            "v": 1,
+            "node_refs_total": 9, "node_refs_retained": 8, "node_refs_omitted": 1,
+            "url_refs_total": 5, "url_refs_retained": 4, "url_refs_omitted": 1,
+            "complete": False,
+        }
+
+
+def test_memo_sanitizer_rejects_negative_or_understated_omission_receipts():
+    projected = sanitize_research_memo_payload({
+        "claims": [{"statement": "visible"}],
+        "claims_receipt": {
+            "v": 1, "total": 0, "retained": 1, "omitted": -1, "complete": False,
+        },
+    })
+    assert projected["claims_receipt"] == {
+        "v": 1, "total": 1, "retained": 1, "omitted": 0, "complete": True,
+    }
+
+
 def test_report_sanitizer_reserves_shared_budget_for_caveats():
     clean = sanitize_report_payload({
         "what_worked": ["w" * 5_000 for _ in range(32)],

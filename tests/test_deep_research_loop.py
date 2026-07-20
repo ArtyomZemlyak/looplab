@@ -89,7 +89,17 @@ def test_tool_then_stall_then_nudge_then_emit_message_parity():
     source_ref = canonical_source_ref("http://a")
     assert memo.claims == [{"statement": "c", "node_ids": [1],
                             "urls": [claim_ref.display_url],
-                            "url_identities": [claim_ref.identity]}]
+                            "url_identities": [claim_ref.identity],
+                            "evidence_receipt": {
+                                "v": 1,
+                                "node_refs_total": 1, "node_refs_retained": 1,
+                                "node_refs_omitted": 0,
+                                "url_refs_total": 1, "url_refs_retained": 1,
+                                "url_refs_omitted": 0, "complete": True,
+                            }}]
+    assert memo.claims_receipt == {
+        "v": 1, "total": 1, "retained": 1, "omitted": 0, "complete": True,
+    }
     assert memo.trigger == "cadence" and memo.at_node == 0
     # sources ledger: same (title, url, snippet) shape with the same [:200] snippet truncation
     assert memo.sources == [{"title": "search(ridge)", "url": source_ref.display_url,
@@ -260,8 +270,8 @@ def test_durable_memo_writer_sanitizes_before_verify_and_resanitizes_output(monk
         reasoning="r" * 100_000,
         sources=[{"title": f"token={secret}\x00", "url": "https://u:p@example.test",
                   "snippet": f"api_key={secret}"}],
-        claims=[{"statement": f"password={secret}", "node_ids": [],
-                 "urls": ["https://u:p@example.test"]}],
+        claims=[{"statement": f"password={secret}-{index}", "node_ids": [],
+                 "urls": ["https://u:p@example.test"]} for index in range(65)],
         recommended_directions=[f"password={secret}\x1b[31mDIRECTION"],
         at_node=3,
         trigger="cadence",
@@ -292,6 +302,10 @@ def test_durable_memo_writer_sanitizes_before_verify_and_resanitizes_output(monk
     assert "***" in rendered and "DIRECTION" in rendered
     assert [event_type for event_type, _ in eng.store.events] == [
         "research_completed", "hint", "hypothesis_added"]
+    assert observed["memo"]["claims_receipt"]["total"] == 65
+    assert eng.store.events[0][1]["memo"]["claims_receipt"] == {
+        "v": 1, "total": 65, "retained": 64, "omitted": 1, "complete": False,
+    }
     assert len(json.dumps(eng.store.events[0][1]["memo"])) < 70_000
 
 

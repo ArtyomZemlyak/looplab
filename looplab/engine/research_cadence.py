@@ -133,7 +133,12 @@ class ResearchCadenceMixin:
         # Verify the same canonical, redacted payload that can be persisted. Otherwise a custom
         # researcher can expose secrets/prompt controls to the verifier and receive a verdict over
         # evidence that is later truncated into a materially different durable memo.
-        memo_d = sanitize_research_memo_payload(memo.model_dump(mode="json"))
+        memo_payload = memo.model_dump(mode="json")
+        # CODEX AGENT: ResearchMemo excludes the receipt from generic dumps for replay compatibility;
+        # this durable writer must explicitly carry the original pre-cap denominator across sanitizers.
+        if getattr(memo, "claims_receipt", None) is not None:
+            memo_payload["claims_receipt"] = memo.claims_receipt
+        memo_d = sanitize_research_memo_payload(memo_payload)
         # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
         # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).
         # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a

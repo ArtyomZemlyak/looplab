@@ -199,6 +199,7 @@ class DeepResearcher:
         memo.reasoning = clean["reasoning"]
         memo.findings = clean["findings"]
         memo.claims = clean["claims"]                  # D8 evidence ledger
+        memo.claims_receipt = clean["claims_receipt"]  # authoritative pre-cap denominator
         memo.recommended_directions = clean["recommended_directions"]
         memo.sources = clean["sources"]
         return memo

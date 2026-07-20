@@ -10,16 +10,98 @@ import itertools
 import math
 
 from looplab.trust.redact import is_secret_key_name, redact_persisted_text
-from looplab.trust.source_identity import canonical_source_ref
+from looplab.trust.source_identity import canonical_source_ref, valid_source_identity
 
 
 MAX_RESEARCH_SOURCES = 64
+MAX_RESEARCH_CLAIMS = 64
+MAX_RESEARCH_NODE_REFS = 8
+MAX_RESEARCH_URL_REFS = 4
+RESEARCH_RECEIPT_VERSION = 1
 _MAX_ADVISORY_TEXT = 64_000
 _MAX_TREE_ITEMS = 512
 _MAX_VERIFICATION_TEXT = 24_000
 _MAX_VERIFICATION_VERDICTS = 64
 _MAX_ADVISORY_COUNT = (1 << 63) - 1
 _VERDICTS = frozenset({"supported", "unsupported", "unclear", "cited"})
+
+
+def _bounded_source(value) -> tuple[tuple | list, int, bool]:
+    """Return a bounded-contract source plus its observable cardinality.
+
+    A wrong-shaped non-null value is one opaque omitted item, not an authoritative empty list.  This
+    distinction is what lets a second sanitizer/finalizer fail closed instead of laundering malformed
+    model output into a complete zero-row receipt.
+    """
+    if isinstance(value, (list, tuple)):
+        return value, len(value), True
+    return (), int(value is not None), value is None
+
+
+def _count_receipt(raw, *, total: int, retained: int, prefix: str = "") -> dict:
+    """Build an idempotent total/omission receipt, preserving a prior canonical denominator."""
+    total_key = f"{prefix}total"
+    retained_key = f"{prefix}retained"
+    omitted_key = f"{prefix}omitted"
+    declared_total = raw.get(total_key) if isinstance(raw, dict) else None
+    declared_retained = raw.get(retained_key) if isinstance(raw, dict) else None
+    declared_omitted = raw.get(omitted_key) if isinstance(raw, dict) else None
+    declared_complete = raw.get("complete") if isinstance(raw, dict) else None
+    canonical = (
+        raw.get("v") == RESEARCH_RECEIPT_VERSION
+        and type(declared_total) is int and 0 <= declared_total <= _MAX_ADVISORY_COUNT
+        and type(declared_retained) is int and 0 <= declared_retained <= declared_total
+        and declared_retained == total
+        and type(declared_omitted) is int and 0 <= declared_omitted <= declared_total
+        and declared_omitted == declared_total - total
+        and type(declared_complete) is bool
+        and declared_complete == (declared_omitted == 0)
+    ) if isinstance(raw, dict) else False
+    source_total = declared_total if canonical else total
+    omitted = max(0, source_total - retained)
+    return {
+        "v": RESEARCH_RECEIPT_VERSION,
+        total_key: source_total,
+        retained_key: retained,
+        omitted_key: omitted,
+        "complete": omitted == 0,
+    }
+
+
+def research_claims_receipt(payload) -> dict | None:
+    """Return a canonical memo claim receipt, or ``None`` for legacy/malformed metadata."""
+    if not isinstance(payload, dict):
+        return None
+    claims, current_total, shape_known = _bounded_source(payload.get("claims"))
+    raw = payload.get("claims_receipt")
+    receipt = _count_receipt(raw, total=current_total, retained=len(claims))
+    if not shape_known or raw != receipt:
+        return None
+    return receipt
+
+
+def research_evidence_receipt(claim) -> dict | None:
+    """Return a canonical per-claim evidence receipt, or ``None`` for a legacy claim."""
+    if not isinstance(claim, dict):
+        return None
+    nodes, node_total, node_shape_known = _bounded_source(claim.get("node_ids"))
+    urls, url_total, url_shape_known = _bounded_source(claim.get("urls"))
+    raw = claim.get("evidence_receipt")
+    if not isinstance(raw, dict) or raw.get("v") != RESEARCH_RECEIPT_VERSION:
+        return None
+    node_receipt = _count_receipt(
+        raw, total=node_total, retained=len(nodes), prefix="node_refs_")
+    url_receipt = _count_receipt(
+        raw, total=url_total, retained=len(urls), prefix="url_refs_")
+    expected = {
+        "v": RESEARCH_RECEIPT_VERSION,
+        **{key: value for key, value in node_receipt.items() if key not in ("v", "complete")},
+        **{key: value for key, value in url_receipt.items() if key not in ("v", "complete")},
+        "complete": node_receipt["complete"] and url_receipt["complete"],
+    }
+    if not node_shape_known or not url_shape_known or raw != expected:
+        return None
+    return expected
 
 
 def _text(value, cap: int, budget: list[int], *, single_line: bool = False) -> str:
@@ -130,7 +212,30 @@ def _verification(value, budget: list[int], items: list[int]):
                      single_line=True)
         statement = _text(row.get("statement", ""), min(1_600, row_budget[0]), row_budget)
         budget[0] -= allowance - row_budget[0]
-        verdicts.append({"statement": statement, "verdict": verdict, "note": note})
+        raw_evidence = row.get("evidence")
+        evidence = {"v": RESEARCH_RECEIPT_VERSION, "node_refs": [],
+                    "url_identities": [], "complete": False}
+        if isinstance(raw_evidence, dict) and raw_evidence.get("v") == RESEARCH_RECEIPT_VERSION:
+            raw_nodes = raw_evidence.get("node_refs")
+            raw_urls = raw_evidence.get("url_identities")
+            if isinstance(raw_nodes, (list, tuple)) and isinstance(raw_urls, (list, tuple)):
+                for ref in raw_nodes[:MAX_RESEARCH_NODE_REFS]:
+                    if (isinstance(ref, dict) and type(ref.get("node_id")) is int
+                            and ref["node_id"] >= 0 and type(ref.get("generation")) is int
+                            and ref["generation"] >= 0):
+                        evidence["node_refs"].append({
+                            "node_id": ref["node_id"], "generation": ref["generation"]})
+                evidence["url_identities"] = [
+                    identity for identity in raw_urls[:MAX_RESEARCH_URL_REFS]
+                    if valid_source_identity(identity)
+                ]
+                evidence["complete"] = bool(
+                    raw_evidence.get("complete") is True
+                    and len(evidence["node_refs"]) == len(raw_nodes)
+                    and len(evidence["url_identities"]) == len(raw_urls)
+                )
+        verdicts.append({"statement": statement, "verdict": verdict, "note": note,
+                         "evidence": evidence})
 
     return {
         "verdicts": verdicts,
@@ -145,7 +250,7 @@ def _verification(value, budget: list[int], items: list[int]):
     }
 
 
-def sanitize_research_memo_payload(payload) -> dict:
+def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dict:
     """Canonicalize a model-, tool-, or legacy-event research memo."""
     src = payload if isinstance(payload, dict) else {}
     budget = [_MAX_ADVISORY_TEXT]
@@ -171,26 +276,52 @@ def sanitize_research_memo_payload(payload) -> dict:
         out["verification"] = _verification(
             src["verification"], verification_budget, verification_items)
         budget[0] -= allowance - verification_budget[0]
-    for claim in _items(src.get("claims"), 64):
+    raw_claims, claims_total, claims_shape_known = _bounded_source(src.get("claims"))
+    for claim in itertools.islice(raw_claims, MAX_RESEARCH_CLAIMS):
         if not isinstance(claim, dict):
             continue
         statement = _text(claim.get("statement", ""), 1_600, budget)
-        raw_urls = list(_items(claim.get("urls"), 16))
-        raw_identities = list(_items(claim.get("url_identities"), 16))
+        raw_nodes, node_total, node_shape_known = _bounded_source(claim.get("node_ids"))
+        raw_urls_source, url_total, url_shape_known = _bounded_source(claim.get("urls"))
+        raw_urls = list(itertools.islice(raw_urls_source, MAX_RESEARCH_URL_REFS))
+        raw_identities = list(_items(claim.get("url_identities"), MAX_RESEARCH_URL_REFS))
         urls = []
         url_identities = []
         for index, value in enumerate(raw_urls):
             persisted = raw_identities[index] if index < len(raw_identities) else None
             display, identity = _source_url(value, persisted, budget)
-            urls.append(display)
-            url_identities.append(identity)
-        out["claims"].append({
+            if display and identity:
+                urls.append(display)
+                url_identities.append(identity)
+        node_ids = [n for n in itertools.islice(raw_nodes, MAX_RESEARCH_NODE_REFS)
+                    if type(n) is int and 0 <= n <= (1 << 63) - 1]
+        prior_evidence = claim.get("evidence_receipt")
+        node_receipt = _count_receipt(
+            prior_evidence, total=node_total, retained=len(node_ids), prefix="node_refs_")
+        url_receipt = _count_receipt(
+            prior_evidence, total=url_total, retained=len(urls), prefix="url_refs_")
+        evidence_receipt = {
+            "v": RESEARCH_RECEIPT_VERSION,
+            **{key: value for key, value in node_receipt.items() if key not in ("v", "complete")},
+            **{key: value for key, value in url_receipt.items() if key not in ("v", "complete")},
+            "complete": (node_shape_known and url_shape_known
+                         and node_receipt["complete"] and url_receipt["complete"]),
+        }
+        projected_claim = {
             "statement": statement,
-            "node_ids": [n for n in _items(claim.get("node_ids"), 64)
-                         if type(n) is int and 0 <= n <= (1 << 63) - 1],
+            "node_ids": node_ids,
             "urls": urls,
             "url_identities": url_identities,
-        })
+        }
+        if add_receipts or "evidence_receipt" in claim:
+            projected_claim["evidence_receipt"] = evidence_receipt
+        out["claims"].append(projected_claim)
+    claims_receipt = _count_receipt(
+        src.get("claims_receipt"), total=claims_total, retained=len(out["claims"]))
+    if not claims_shape_known:
+        claims_receipt["complete"] = False
+    if add_receipts or "claims_receipt" in src:
+        out["claims_receipt"] = claims_receipt
     for source in _items(src.get("sources"), MAX_RESEARCH_SOURCES):
         if not isinstance(source, dict):
             continue

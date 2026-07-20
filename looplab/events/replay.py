@@ -2512,7 +2512,9 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # Deep-Research memo (audit-only sidecar; NEVER touches nodes/best). `served_manual`
     # advances the manual-request gate so a resume never re-runs a served request.
     from looplab.core.advisory_payloads import sanitize_research_memo_payload
-    st.research.append(sanitize_research_memo_payload(d.get("memo") or d))
+    # CODEX AGENT: old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
+    # instead of manufacturing a complete receipt from an already-truncated legacy projection.
+    st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
     if d.get("served_manual"):
         st.research_served += 1
 

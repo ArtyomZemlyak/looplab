@@ -336,6 +336,32 @@ def test_url_reference_cap_matches_evidence_prompt_cap():
     assert out[0]["verdict"] == "unsupported"
 
 
+def test_omitted_ninth_node_cannot_upgrade_the_inspected_prefix(monkeypatch):
+    from looplab.core.advisory_payloads import sanitize_research_memo_payload
+
+    memo = sanitize_research_memo_payload({
+        "claims": [{"statement": "the tail node proves the claim", "node_ids": list(range(9))}],
+    })
+    state = _state([_node(index, metric=float(index)) for index in range(9)])
+
+    class _FakeVerdict:
+        verdicts = ["supported"]
+        notes = ["looks supported"]
+
+    import looplab.agents.agent as agent_mod
+    monkeypatch.setattr(agent_mod, "agentic_struct", lambda *_a, **_k: _FakeVerdict())
+    out = verify_memo(memo, state, client=object())
+
+    assert out["verdicts"][0]["verdict"] == "unclear"
+    assert out["verdicts"][0]["note"] == "evidence set is incomplete or stale"
+    assert out["verdicts"][0]["evidence"] == {
+        "v": 1,
+        "node_refs": [{"node_id": index, "generation": 0} for index in range(8)],
+        "url_identities": [],
+        "complete": False,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # verify_memo (deterministic path, no client)
 # --------------------------------------------------------------------------- #
