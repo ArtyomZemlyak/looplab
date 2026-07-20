@@ -86,6 +86,13 @@
   "budget_overrides": {},
   "building": null,
   "buildings": {},
+  "card_operator_edits": {},
+  "card_priority_pins": {},
+  "card_resource_pins": {},
+  "cards": {},
+  "cards_added": [],
+  "cards_dropped": [],
+  "cards_merged": [],
   "champion": null,
   "comments_revision": -1,
   "concept_consolidation": {},
@@ -301,6 +308,7 @@
       "holdout_metric": null,
       "id": 0,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -351,6 +359,7 @@
       "holdout_metric": null,
       "id": 1,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -401,6 +410,7 @@
       "holdout_metric": null,
       "id": 2,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -454,6 +464,7 @@
       "holdout_metric": null,
       "id": 3,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -509,6 +520,7 @@
       "holdout_metric": null,
       "id": 4,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -561,6 +573,7 @@
       "holdout_metric": null,
       "id": 5,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -616,6 +629,7 @@
       "holdout_metric": null,
       "id": 6,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -672,6 +686,7 @@
       "holdout_metric": null,
       "id": 7,
       "idea": {
+        "card_id": null,
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],

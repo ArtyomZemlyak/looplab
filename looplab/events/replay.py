@@ -30,7 +30,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      node_concept_event_provenance,
-                     Event, Hypothesis, Idea, Node, NodeStatus,
+                     Card, Event, Hypothesis, Idea, Node, NodeStatus,
                      RunState, Trial, hypothesis_id, normalize_extra_metrics, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
@@ -41,6 +41,7 @@ from looplab.events.types import (
     EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
+    EV_CARD_ADDED, EV_CARD_DROPPED, EV_CARD_MERGED,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
@@ -2044,6 +2045,25 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
         except Exception:
             pass
 
+def _on_card_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Hypothesis-card Kanban (docs/23, Layer 1a): a thin card registration (id + immutable statement +
+    # source). Collected here; evidence/verdict/status are DERIVED post-loop in `_derive_cards`. A card
+    # with neither an id nor a statement is meaningless — skip it (mirrors hypothesis_added's guard).
+    if d.get("id") or d.get("statement"):
+        st.cards_added.append(d)
+
+def _on_card_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Engine-written agentic merge — fold alias cards into a canonical. Collected here, APPLIED
+    # deterministically in `_derive_cards` (no LLM in the fold), order-tolerant, back-compat on old logs.
+    if d.get("canonical") and d.get("aliases"):
+        st.cards_merged.append(d)
+
+def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Engine/operator drop of a card: {id, reason, dropped_by}. Lifecycle override applied in
+    # `_derive_cards` (the card stays visible with status='dropped', like an abandoned hypothesis).
+    if d.get("id"):
+        st.cards_dropped.append(d)
+
 def _on_hypothesis_updated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Carries a status override (human/agent drops — or reopens — a line of inquiry).
     # Last write wins: "deleted" removes the card entirely (sticky); "abandoned" adds the
@@ -2655,6 +2675,9 @@ _HANDLERS = {
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,
     EV_HYPOTHESIS_UPDATED: _on_hypothesis_updated,
+    EV_CARD_ADDED: _on_card_added,
+    EV_CARD_MERGED: _on_card_merged,
+    EV_CARD_DROPPED: _on_card_dropped,
     EV_PROXY_SCORED: _on_proxy_scored,
     EV_BEST_CONFIRMED: _on_best_confirmed,
     EV_RUN_FINISHED: _on_run_finished,
@@ -2718,6 +2741,7 @@ def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
     _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)
 
     _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
+    _derive_cards(st)        # docs/23 Layer 1a: the card ledger (mirrors hypotheses); advisory, after best
     return st
 
 
@@ -3056,3 +3080,187 @@ def _derive_hypotheses(st: RunState) -> None:
             h.priority = rank_i
 
     st.hypotheses = {k: v for k, v in hyps.items() if k not in st.hypotheses_deleted}
+
+
+def _derive_cards(st: RunState) -> None:
+    """Build the CARD ledger (Kanban re-architecture, docs/23 Layer 1a). DERIVED, order-tolerant,
+    ADVISORY — never read by best-selection, exactly like `_derive_hypotheses`, which it MIRRORS. A card
+    is the rich superset of a hypothesis: seeded from `card_added` events and from every node whose
+    `idea.hypothesis` is set (linked by `idea.card_id` when present, else the statement hash — the same
+    fallback join `_derive_hypotheses` uses), it accretes the substance on Idea/Node. The `verdict`
+    (supported/tested/...) is computed by the SHARED `_evidence_verdict` helper so it is byte-identical
+    to the hash-joined hypothesis; a separate lifecycle `status` lane (proposed/running/gated/evaluated/
+    dropped) is derived from node outcomes. Enrichment fields stay at their defaults in Layer 1a (Layer
+    1b populates them). Internal order MIRRORS `_derive_hypotheses` EXACTLY (docs/23 decision 20):
+    seed+link -> merge-union -> record-setters once -> shared verdict helper -> drop overrides ->
+    operator-overlay (reserved, empty in L1) -> status."""
+    cards: dict[str, Card] = {}
+
+    # 1) explicitly-added cards — may start with no evidence. Coerce defensively (engine/control events
+    #    arrive verbatim; one malformed entry must not brick every fold). Until the engine mints `card_*`
+    #    events (a later increment), Layer 1a MIRRORS `_derive_hypotheses` by ALSO seeding from the
+    #    engine-populated `hypotheses_added` (deep-research/human directions), so a node-less hypothesis
+    #    still becomes a card and `st.cards` stays a faithful shadow of `st.hypotheses`. `card_*` first so
+    #    a real card_added (explicit id/source) wins the id over its hypothesis twin (dedup = first wins).
+    for d in list(st.cards_added) + list(st.hypotheses_added):
+        try:
+            stmt = str(d.get("statement", "")).strip()
+            cid = str(d.get("id") or (hypothesis_id(stmt) if stmt else "")).strip()
+            if not cid or cid in cards:
+                continue
+            try:
+                at_node = int(d.get("at_node", 0) or 0)
+            except (TypeError, ValueError):
+                at_node = 0
+            cards[cid] = Card(id=cid, statement=stmt, seed_statement=stmt,
+                              source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
+                              rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node)
+        except Exception:  # noqa: BLE001 — one bad record must not brick the fold
+            continue
+
+    # 2) derive/link from nodes that state a hypothesis (evidence = the node). Link by `idea.card_id`
+    #    (Layer-1a stable id) when present, else the statement hash (legacy/derived fallback), mirroring
+    #    `_derive_hypotheses`. `sorted(st.nodes)` keeps evidence order == the hypothesis shadow's.
+    for nid in sorted(st.nodes):
+        n = st.nodes[nid]
+        if n.idea is None:
+            continue
+        stmt = (n.idea.hypothesis or "").strip()
+        cid = (n.idea.card_id or "").strip() or (hypothesis_id(stmt) if stmt else "")
+        if not cid:
+            continue
+        c = cards.get(cid)
+        if c is None:
+            c = Card(id=cid, statement=stmt, seed_statement=stmt, source="researcher",
+                     rationale=(n.idea.rationale or "")[:400], created_at_node=n.id,
+                     operator=n.idea.operator, params=dict(n.idea.params or {}),
+                     space={k: list(v) for k, v in (n.idea.space or {}).items()},
+                     eval_profile=n.idea.eval_profile, concept_tags=list(n.idea.concepts or []),
+                     parent_id=(n.parent_ids[0] if n.parent_ids else None),
+                     parent_ids=list(n.parent_ids or []))
+            cards[cid] = c
+        if n.id not in c.evidence:
+            c.evidence.append(n.id)
+
+    # 2b) apply `card_merged` events (fold each ALIAS card's evidence into its CANONICAL) — fully
+    #     DETERMINISTIC (no LLM; the decision was recorded by the engine), order-tolerant, cycle-safe.
+    #     Mirrors `_derive_hypotheses` 2b exactly, reusing the same `_canon` alias-chain resolution.
+    alias: dict[str, str] = {}
+    merged_stmt: dict[str, str] = {}
+    for d in list(st.cards_merged) + list(st.hypotheses_merged):   # mirror the hypothesis board in L1a
+        try:
+            canon = str(d.get("canonical") or "").strip()
+            if not canon:
+                continue
+            s = str(d.get("statement", "")).strip()
+            if s:
+                merged_stmt[canon] = s
+            for a in (d.get("aliases") or []):
+                a = str(a).strip()
+                if a and a != canon:
+                    alias[a] = canon
+        except Exception:  # noqa: BLE001 — one bad merge record must not brick the fold
+            continue
+
+    def _canon(x: str) -> str:                      # resolve alias chains a->b->c, cycle-safe
+        seen: set[str] = set()
+        while x in alias and x not in seen:
+            seen.add(x)
+            x = alias[x]
+        return x
+
+    if alias:
+        folded: dict[str, Card] = {}
+        for cid in list(cards):
+            tid = _canon(cid)
+            tgt = folded.get(tid)
+            if tgt is None:
+                base = cards.get(tid, cards[cid])   # seed from the canonical row if it exists, else this
+                tgt = base.model_copy(deep=True)
+                tgt.id = tid
+                if tid in merged_stmt:
+                    tgt.statement = merged_stmt[tid]    # canonical DISPLAY statement; seed stays the join key
+                tgt.evidence = list(base.evidence)
+                tgt.aliases = list(base.aliases)
+                folded[tid] = tgt
+            if cid != tid and cid not in tgt.aliases:
+                tgt.aliases.append(cid)             # record which ids were folded into this canonical
+            for ev in cards[cid].evidence:
+                if ev not in tgt.evidence:
+                    tgt.evidence.append(ev)
+        for tgt in folded.values():
+            tgt.evidence.sort()
+            tgt.aliases.sort()
+        cards = folded
+
+    # 3) record-setters (sticky SOTA advancers) — the SAME pure helper the hypotheses use, so a card's
+    #    verdict is byte-identical to its hash-joined hypothesis.
+    _record_setters = _record_setter_ids(st.nodes, st.direction)
+
+    # 4) verdict per card via the SHARED helper (open/testing/supported/tested/abandoned). `is_abandoned`
+    #    mirrors the hypothesis: a shadow card keyed by the hypothesis id inherits the abandoned override.
+    for c in cards.values():
+        c.best_delta, c.verdict, _ = _evidence_verdict(
+            c.evidence, st.nodes, st.direction, _record_setters, c.id in st.hypotheses_abandoned)
+
+    # 5) apply `card_dropped` overrides (engine/operator). The card STAYS visible (like an abandoned
+    #    hypothesis) — the lifecycle `status` below reads this to show the 'dropped' lane. Last write wins.
+    dropped: dict[str, dict] = {}
+    for d in st.cards_dropped:
+        cid = str(d.get("id") or "").strip()
+        if cid:
+            dropped[cid] = d
+    for cid, d in dropped.items():
+        c = cards.get(cid)
+        if c is not None:
+            reason = str(d.get("reason", "") or "")[:400]
+            c.dropped_reason = reason or None
+            c.dropped_by = str(d.get("dropped_by") or d.get("by") or "engine")
+
+    # 6) lifecycle `status` lane (frozen vocab; DISTINCT from the verdict). Dropped/merged-away wins;
+    #    else a pending node -> running; else evidence all trust-gated/breed-excluded/infeasible -> gated;
+    #    else terminal evidence -> evaluated; no evidence -> proposed. (building/coded lanes need the
+    #    node_building.card_id link minted in a later increment — not populated in Layer 1a.)
+    for cid, c in cards.items():
+        if cid in dropped or c.merged_into:
+            c.status = "dropped"
+            continue
+        ev_nodes = [st.nodes[i] for i in c.evidence if i in st.nodes and not st.nodes[i].tombstoned]
+        if not ev_nodes:
+            c.status = "proposed"
+        elif any(n.status is NodeStatus.pending for n in ev_nodes):
+            c.status = "running"
+        elif all((n.id in st.breed_excluded) or (not n.feasible) for n in ev_nodes):
+            c.status = "gated"
+        else:
+            c.status = "evaluated"
+
+    # 7) operator-override overlay — RESERVED FINAL PHASE (docs/23 decision 27: the operator wins
+    #    regardless of event arrival order). The maps are empty until Layer 6 fills them, so this is a
+    #    no-op in Layer 1; reserving it here means Layer 6 needs no `_derive_cards` rewrite. `card_edited`
+    #    overlays the DISPLAY statement only — the join key stays `seed_statement` (docs/23 decision 24).
+    for cid, edit in (st.card_operator_edits or {}).items():
+        c = cards.get(cid)
+        if c is not None and isinstance(edit, dict) and edit.get("statement"):
+            c.statement = str(edit["statement"])
+    for cid, pri in (st.card_priority_pins or {}).items():
+        c = cards.get(cid)
+        if c is not None:
+            try:
+                c.priority = int(pri)
+            except (TypeError, ValueError):
+                pass
+    for cid, pin in (st.card_resource_pins or {}).items():
+        c = cards.get(cid)
+        if c is not None and isinstance(pin, dict):
+            fp = dict(c.footprint or {})
+            for k in ("gpus", "gpu_mem_mib"):
+                if k in pin:
+                    fp[k] = pin[k]
+            fp["pinned_by"] = "operator"
+            c.footprint = fp
+
+    # A hypothesis DELETED by the operator (hypothesis_updated status=deleted) is removed from the board
+    # entirely; the shadow card must vanish with it (mirrors `_derive_hypotheses`' final filter). Until a
+    # card-native delete exists, reuse `hypotheses_deleted`; card ids == hypothesis ids in Layer 1a.
+    st.cards = {k: v for k, v in cards.items() if k not in st.hypotheses_deleted}

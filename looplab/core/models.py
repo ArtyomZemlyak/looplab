@@ -223,6 +223,13 @@ class Idea(BaseModel):
     # fold derives/links a Hypothesis (id = slug of the statement) and tracks it to a verdict from the
     # node's outcome. Flows through the event log on the Idea automatically; None => today's behavior.
     hypothesis: Optional[str] = None
+    # Hypothesis-card Kanban re-architecture (docs/23, Layer 1a): the STABLE card id this experiment
+    # belongs to. When set, `_derive_cards` links this node's evidence to the card by id (robust to
+    # statement paraphrase); when None (legacy logs / not-yet-minted), it falls back to the statement
+    # hash exactly like `_derive_hypotheses`. Additive + nullable, so it rides `durable_idea_payload` ->
+    # node_created -> Idea(**d["idea"]) for free and old logs fold identically. Layer 1a leaves this None
+    # (the engine mints it in a later increment); it is audit-only until Layer 3 reads the card queue.
+    card_id: Optional[str] = None
 
     @property
     def is_sweep(self) -> bool:
@@ -573,6 +580,68 @@ class Hypothesis(BaseModel):
     # event; None when unranked (no predictor run, or the card isn't open). Audit/UI only — the kanban
     # sorts open cards by it; never read by best-selection.
     priority: Optional[int] = None
+
+
+class Card(BaseModel):
+    """A first-class hypothesis CARD — the durable, rich unit the Kanban re-architecture is built on
+    (docs/23). It is the SUPERSET of the thin `Hypothesis`: it accretes the substance that lives on
+    Idea/Node (operator, params, footprint, concepts, novelty verdict, cross-run prior, steering
+    context) until a card is ready to run. Layer 1: DERIVED each fold by `_derive_cards` (which MIRRORS
+    `_derive_hypotheses`) and ADVISORY — never read by best-selection, exactly like the hypothesis board
+    today. The `verdict` (open/testing/supported/tested/abandoned) is computed by the SHARED
+    `_evidence_verdict` helper so it is byte-identical to the hash-joined hypothesis; the lifecycle
+    `status` lane is separate. Enrichment fields below the divider are RESERVED here so later layers do
+    not rework the model — they stay at their defaults until Layer 1b populates them."""
+    id: str                                             # engine-minted `card-{k}` (later) or statement hash
+    statement: str                                      # the DISPLAY statement (operator-editable in L6)
+    # The IMMUTABLE seed statement captured at card_added — the stable statement-hash JOIN key, held
+    # separate from `statement` so an operator paraphrase (L6 card_edited) overlays DISPLAY only and never
+    # un-links the card's hash-joined evidence. Defaults to `statement` for derived/legacy cards.
+    seed_statement: str = ""
+    source: str = "researcher"          # researcher | operator | engine | foresight | novelty | freshness
+    rationale: str = ""
+    created_at_node: int = 0
+    # Lifecycle lane (DERIVED; frozen UI-contract vocabulary, kept OPEN so Layer 5 can add
+    # speculating/built-awaiting-commit without a model rework): proposed (no node yet) | building
+    # (node_building in flight) | coded (pending node with code) | running (pending eval) | evaluated
+    # (>=1 terminal) | gated (only trust-gated / breed-excluded evidence) | dropped (card_dropped/merged).
+    status: str = "proposed"
+    # Research verdict (DERIVED via the shared `_evidence_verdict` helper — byte-identical to the
+    # hash-joined hypothesis): open | testing | supported | tested | abandoned.
+    verdict: str = "open"
+    evidence: list[int] = Field(default_factory=list)   # node ids that tested it (== node_ids)
+    best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
+    # Identity / lineage.
+    merged_into: Optional[str] = None                   # canonical id if this card was merged away
+    aliases: list[str] = Field(default_factory=list)    # ids folded INTO this canonical card
+    dropped_reason: Optional[str] = None
+    dropped_by: Optional[str] = None                    # operator | engine | freshness | novelty
+    # Prospective parent anchor — the Layer-5 freshness gate re-derives improve/merge legality for a
+    # not-yet-built card against state.best()/rank_by_metric[:2]/breedable_nodes().
+    parent_id: Optional[int] = None
+    parent_ids: list[int] = Field(default_factory=list)
+    # Staleness fence: the best_node_id / event seq the card was scored against (Layer-5 freshness gate).
+    scored_against: Optional[int] = None
+    # The idea block (what to run) — populated from the linked node's Idea in Layer 1a.
+    operator: Optional[str] = None                      # draft | improve | merge | debug
+    params: dict[str, float] = Field(default_factory=dict)
+    space: dict[str, list[float]] = Field(default_factory=dict)
+    eval_profile: Optional[str] = None
+    concept_tags: list[str] = Field(default_factory=list)
+    # Board prioritization (foresight) — stamped from card_ranked in Layer 1b; audit/UI only.
+    priority: Optional[int] = None
+    foresight_rank: Optional[int] = None
+    confidence: Optional[float] = None
+    # --- Layer 1b enrichment (RESERVED; populated in 1b — defaults keep Layer 1a a pure hypotheses shadow).
+    # Ref-shaped ONLY (docs/23 decision 23): no verbatim source/captured-output on the card.
+    footprint: Optional[dict] = None                    # {gpus, gpu_mem_mib, proposed_by, finalized_by, pinned_by}
+    novelty_verdict: Optional[dict] = None              # {grade, level, near_node, recommendation}
+    cross_run_prior: Optional[dict] = None              # {matched_concepts, prior_run_ids/outcomes} (refs)
+    research_origin: Optional[str] = None               # memo id ref
+    lesson_refs: list[str] = Field(default_factory=list)
+    claim_refs: list[str] = Field(default_factory=list)
+    steering_context: list[dict] = Field(default_factory=list)  # compact STRUCTURED cues (no verbatim capture)
+    provenance_tier: Optional[str] = None
 
 
 class ResearchMemo(BaseModel):
@@ -1016,6 +1085,22 @@ class RunState(BaseModel):
     # `_derive_hypotheses` stamps each open card's `priority` from `order`; the UI kanban sorts by it
     # and shows `reason` as the "why this order" analysis trace. None until the predictor first runs.
     hypothesis_ranking: Optional[dict] = None
+    # Hypothesis-card Kanban re-architecture (docs/23, Layer 1a). The CARD ledger — DERIVED each fold by
+    # `_derive_cards` (mirrors `hypotheses`), ADVISORY, never read by best-selection. Keyed by card id.
+    cards: dict[str, Card] = Field(default_factory=dict)
+    # Folded inputs for `_derive_cards` (mirror the `hypotheses_*` lists). `cards_added`: thin card_added
+    # records; `cards_merged`: alias->canonical merges (applied deterministically, no LLM); `cards_dropped`:
+    # engine/operator drops carrying {id, reason, dropped_by}.
+    cards_added: list[dict] = Field(default_factory=list)
+    cards_merged: list[dict] = Field(default_factory=list)
+    cards_dropped: list[dict] = Field(default_factory=list)
+    # Operator-override maps — RESERVED in Layer 1a, filled by Layer 6 control events. `_derive_cards`
+    # overlays them in a FIXED LAST phase so the operator always wins regardless of event arrival order
+    # (docs/23 decision 27). Empty {} in Layer 1 -> the overlay is a no-op; reserving them now means Layer
+    # 6 needs no `_derive_cards` rewrite. Keyed by card id.
+    card_priority_pins: dict[str, int] = Field(default_factory=dict)
+    card_operator_edits: dict[str, dict] = Field(default_factory=dict)
+    card_resource_pins: dict[str, dict] = Field(default_factory=dict)
     # Agent-authored run report (conclusion-first; audit-only sidecar — NEVER read by best-selection).
     # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
     # UI renders the deterministic analysis from the node set and layers this narrative on top.
