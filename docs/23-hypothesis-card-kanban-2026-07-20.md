@@ -32,6 +32,71 @@ Owner decisions locked: card accretes fields until ready (readiness is *derived*
 footprint = an accreted resource field — **Researcher proposes it, Developer finalizes from code**;
 speculation depth = enough to keep GPUs utilized, freshness gate on; **stable `card_id` immediately**.
 
+## 0.5. Design-review resolutions (2026-07-20) — AUTHORITATIVE
+
+Two adversarial design reviews (replay-safety + completeness) found real defects; **this section
+supersedes any flagged claim in §3–§8 below.** Resolutions:
+
+**Split Layer 1 into three shippable increments** (was one over-large layer):
+
+- **1a — structural mirror.** `Card` model + `Idea.card_id` + a `_derive_cards` that ONLY mirrors
+  `_derive_hypotheses` (seed from `card_added`; link nodes by `card_id` else statement-hash) + golden
+  regen. `st.cards` is a byte-for-byte shadow of `st.hypotheses` where they overlap; old logs fold
+  identically. Smallest surface — the risky fold refactor + golden diff land alone. No signal landing
+  beyond what hypotheses already carry.
+- **1b — additive signal landing.** `card_enriched` + land the non-contentious classes one at a time
+  (steering-context snapshot; `cross_run_prior`/novelty verdict as card fields; deep-research memo ref;
+  researcher-proposed footprint).
+- **1c — dropped/rejected + node-less intra-batch dup.** Isolated behind its own review (identity
+  question below).
+
+**`card_id` — monotonic, main-task-only, atomic (resolves the load-bearing defect).** A monotonic
+`card-{k}` id CANNOT be background-appendable (a bg mint races on `max+1`; the splice test cannot catch
+a write-time id race — it only proves fold-order tolerance of an already-written event). Decision:
+engine-minted monotonic, **main-task-only**, reserved+appended **atomically under the shared
+`_id_lock`**, ceiling `1 + max(card_added ids in log)` — exactly like node ids. `card_added` is **thin**
+(id + statement + source + steering snapshot, all available at proposal) and appended **immediately at
+mint**; heavy enrichment defers to `card_enriched`. NEVER mint → slow work → append (TOCTOU). Resume is
+deterministic (counter = max-over-log + 1). All Layer-1 card events are main-task-written; background
+enrichment (Layer 5) will reserve ids up front under the lock.
+
+**`card_id` on `Idea` ONLY (not `Node`).** It flows through `node_created` for free
+(`durable_idea_payload` + replay `Idea(**d["idea"])`). `_derive_cards` links via `idea.card_id`. Never
+add `Node.card_id`; never back-fill it in a post-pass (that is a node mutation).
+
+**`card_id` DEFERS the hash join, does not solve it.** The creation-time "same hypothesis?" lookup
+stays by `hypothesis_id` in Layer 1 — a paraphrase still mints a new card. `card_id` only stabilizes
+RE-reads (evidence relinks by id once assigned). Researcher emitting an existing id is a later layer.
+(Downgrades §4/§7.7 wording.)
+
+**Novelty verdict = ANNOTATION on the running node's card, NOT a `card_dropped` (fixes §7.1).** The
+premise "a rejected proposal becomes no node" is false: `_apply_novelty_gate` always yields a node
+(repropose / keep-dup / numeric-nudge), and the `novelty_rejected` prospective id is the SAME id that
+node receives — a `card_dropped` for it would collide. So the verdict lands as a card field
+(`novelty_verdict`), sourced from the already-folded `novelty_events`/`novelty_grades`. The one truly
+node-less case (`_intra_batch_dup`, emits no event) is deferred to 1c.
+
+**`_derive_cards` determinism — pinned.** Iterate `sorted(st.nodes)`; extract `_derive_hypotheses`'
+evidence/verdict logic as a PURE helper returning values (never stamping onto Node/Hypothesis); reuse
+its exact tombstoned/aborted/feasible filters; canonicalize merges cycle-safe (reuse `_canon`) and
+apply `card_dropped`/deleted LAST; `card_enriched` last-write is by event **seq** (valid because all
+card events are main-task-written). Runs inside `_finalize_fold` AFTER `_select_best` (no selection
+leak) on the FoldCursor deep-copy (no suffix leak).
+
+**Footprint (layer split).** Researcher-proposed footprint rides the `Idea` (like `eval_profile`) — in
+1b. Developer-finalize needs a new registry-guarded `DEVELOPER_OUTPUT_ATTRS` member and is wired with
+its actual USE (bin-packing) in Layer 4 — NOT in Layer 1.
+
+**Layer 1 is durable CAPTURE, not delivery.** Captured signals reach the next proposal / UI only in
+Layers 3/6. Expect no steering/behavior change from Layer 1.
+
+**Golden regen is broad.** `model_dump` gains `card_id: null` on every nested `Idea` plus `cards: {}` —
+additive but touches every node; state it in the commit.
+
+**Producers to add to the §7 map:** operator `pending_hints`; the numeric E1 nudge (a modified idea
+that RUNS — annotate its node's card, not a drop); the surrogate k-NN K→1 pick (discards as homeless as
+foresight's). Land or explicitly defer each.
+
 ## 1. Invariants Layer 1 must satisfy (the hard rules, from map D)
 
 1. `fold` stays pure/deterministic/order-tolerant — no I/O, no LLM, no wall-clock in any card handler
