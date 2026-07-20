@@ -24,6 +24,7 @@ from typing import Optional
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
     confirm_governance_durable,
+    observed_path_missing,
     read_governance_rows,
     raise_governance_storage_unavailable,
     validate_action_ids,
@@ -228,9 +229,7 @@ def _load_claim_source_path(path, *, research: bool) -> _ClaimSourceRows:
     from looplab.events.eventstore import read_jsonl_lenient_with_health
     p = Path(path)
     rows, raw_health = read_jsonl_lenient_with_health(
-        p, loads=json.loads, dicts_only=True) if p.exists() else ([], {
-            "source_lines": 0, "malformed_lines": 0, "invalid_shape_lines": 0,
-        })
+        p, loads=json.loads, dicts_only=True)
     valid = [row for row in rows if _valid_claim_source_row(row, research=research)]
     malformed = int(raw_health.get("malformed_lines", 0) or 0)
     invalid = int(raw_health.get("invalid_shape_lines", 0) or 0) + len(rows) - len(valid)
@@ -1166,8 +1165,6 @@ def load_claim_decisions(memory_dir) -> dict:
     if not memory_dir:
         return {}
     path = Path(memory_dir) / "claim_decisions.jsonl"
-    if not path.exists():
-        return {}
     from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
     out: dict = {}
     rows = _read_claim_decision_rows(path)
@@ -1365,7 +1362,7 @@ def locked_claim_evidence_snapshot(memory_dir, *, structured: bool = True):
     @contextmanager
     def _snapshot():
         base = Path(memory_dir)
-        if not base.exists():
+        if observed_path_missing(base):
             governance = _empty_governance_snapshot()
             lessons = load_claim_lessons(base)
             research = load_research_claims(base)

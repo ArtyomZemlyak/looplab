@@ -43,6 +43,11 @@ def _governance_cli_read(project):
         return project()
     except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
         _governance_cli_error(exc)
+    except OSError:
+        # CODEX AGENT: an unreadable source is unknown, never an empty portfolio. Keep the OS path and
+        # platform parser text out of CLI output while preserving argument/validation ValueErrors.
+        _governance_cli_error(
+            GovernanceLedgerUnavailable("cross_run_sources", "storage_unreadable"))
 
 
 def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *,

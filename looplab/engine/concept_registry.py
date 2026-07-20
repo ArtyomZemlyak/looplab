@@ -38,6 +38,7 @@ from typing import Optional
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
     confirm_governance_durable,
+    observed_path_missing,
     read_governance_rows,
     raise_governance_storage_unavailable,
     validate_action_ids,
@@ -351,8 +352,6 @@ def load_concept_aliases(memory_dir) -> dict:
     if not memory_dir:
         return {}
     path = Path(memory_dir) / "concept_aliases.jsonl"
-    if not path.exists():
-        return {}
     out: dict = {}
     for line_number, r in enumerate(_read_alias_rows(path), start=1):
         src = normalize_key(r.get("from"))
@@ -602,8 +601,6 @@ def load_concept_splits(memory_dir) -> dict:
     if not memory_dir:
         return {}
     path = Path(memory_dir) / "concept_splits.jsonl"
-    if not path.exists():
-        return {}
     out: dict = {}
     for r in _read_split_rows(path):
         src = normalize_key(r.get("from"))
@@ -810,7 +807,7 @@ def concept_governance_snapshot(memory_dir) -> dict:
     # A directory that did not exist at this observation point is a coherent empty snapshot. Do not make
     # a read create the governance lock's parent; a writer racing immediately afterwards advances the
     # revisions and makes the eventual assistant append fail CAS.
-    if not Path(memory_dir).exists():
+    if observed_path_missing(Path(memory_dir)):
         return empty
     with _concept_governance_transaction(memory_dir):
         return {

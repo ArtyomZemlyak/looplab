@@ -5,6 +5,7 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 from threading import Event
 
 import pytest
@@ -14,6 +15,7 @@ from looplab.cli import app
 from looplab.engine.claims import (
     atlas_for_memory,
     cross_run_retrieve,
+    load_claim_lessons,
     load_claim_decisions,
     record_claim_decision,
 )
@@ -66,6 +68,61 @@ def test_physical_governance_damage_is_unavailable_not_an_empty_policy(
 
     assert exc.value.reason == reason
     assert str(tmp_path) not in str(exc.value)
+
+
+def test_permission_error_cannot_be_laundered_into_missing_governance():
+    secret = "C:/private/operator-policy.jsonl"
+
+    class _SuppressedExistsPath:
+        def exists(self):
+            return False
+
+        def read_bytes(self):
+            raise PermissionError(secret)
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        from looplab.engine.governance_health import read_governance_rows
+        read_governance_rows(
+            _SuppressedExistsPath(), ledger="claim_decisions", validate=lambda _row: None)
+
+    assert exc.value.reason == "storage_unreadable"
+    assert secret not in str(exc.value)
+
+
+def test_permission_error_cannot_be_laundered_into_missing_evidence(tmp_path, monkeypatch):
+    target = tmp_path / "lessons.jsonl"
+    secret = "C:/private/evidence.jsonl"
+    original_read_bytes = Path.read_bytes
+
+    def denied(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError(secret)
+        return original_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+
+    with pytest.raises(PermissionError, match="private"):
+        load_claim_lessons(tmp_path)
+
+
+@pytest.mark.parametrize("project", [
+    lambda base: project_governed_sources(base, lambda governance: governance),
+    concept_governance_snapshot,
+])
+def test_permission_error_cannot_be_laundered_into_missing_memory_dir(
+        tmp_path, monkeypatch, project):
+    secret = "C:/private/cross-run-memory"
+    original_stat = Path.stat
+
+    def denied(self, *args, **kwargs):
+        if self == tmp_path:
+            raise PermissionError(secret)
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+
+    with pytest.raises(PermissionError, match="private"):
+        project(tmp_path)
 
 
 def test_duplicate_json_member_cannot_select_an_ambiguous_governance_action(tmp_path):
@@ -575,3 +632,20 @@ def test_corrupt_claim_policy_reaches_claims_cli_without_leaking_content(tmp_pat
     assert cli.exit_code == 2
     assert "ledger=claim_decisions" in cli.output
     assert poisoned not in cli.output and str(tmp_path) not in cli.output
+
+
+def test_cli_unreadable_cross_run_source_is_bounded_exit_two(tmp_path, monkeypatch):
+    import looplab.engine.claims as claims_module
+
+    secret = f"permission denied: {tmp_path / 'private-lessons.jsonl'}"
+    monkeypatch.setattr(
+        claims_module, "cross_run_retrieve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError(secret)),
+    )
+
+    cli = CliRunner().invoke(app, ["cross-run-search", str(tmp_path), "query"])
+
+    assert cli.exit_code == 2
+    assert "ledger=cross_run_sources" in cli.output
+    assert "reason=storage_unreadable" in cli.output
+    assert secret not in cli.output and str(tmp_path) not in cli.output

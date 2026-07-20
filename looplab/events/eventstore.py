@@ -156,7 +156,12 @@ def read_jsonl_lenient_with_health(path: str | os.PathLike, *, loads=orjson.load
     p = Path(path)
     out: list = []
     source_lines = malformed_lines = invalid_shape_lines = 0
-    if not p.exists():
+    try:
+        # CODEX AGENT: one binary snapshot both preserves invalid UTF-8 as a quarantinable row and keeps
+        # non-absence OSErrors visible to the caller. A preflight exists()/second read would introduce a
+        # TOCTOU window and could launder an unreadable store into an exact empty source.
+        raw_file = p.read_bytes()
+    except FileNotFoundError:
         return out, {
             "read_complete": True,
             "source_lines": 0,
@@ -165,7 +170,6 @@ def read_jsonl_lenient_with_health(path: str | os.PathLike, *, loads=orjson.load
             "malformed_lines": 0,
             "invalid_shape_lines": 0,
         }
-    raw_file = p.read_bytes()
     # Split only on the JSONL record delimiter. ``bytes.splitlines`` would also split bare CR, form-feed,
     # vertical-tab and other bytes that are part of one poisoned record. Drop only the synthetic element
     # after a terminal LF so ``keep_bad`` remains identical to ``str.splitlines`` for blank records.

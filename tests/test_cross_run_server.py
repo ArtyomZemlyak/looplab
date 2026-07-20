@@ -94,11 +94,36 @@ def test_claim_source_io_unavailable_is_redacted_stable_503(
     response = TestClient(make_app(tmp_path)).get(endpoint)
 
     assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
     assert response.json()["detail"] == {
         "code": "cross_run_evidence_unavailable",
         "message": "cross-run evidence cannot be read as one coherent snapshot",
     }
     assert secret_path not in response.text
+
+
+@pytest.mark.parametrize(("endpoint", "target"), [
+    ("/api/cross-run/claims", "looplab.engine.claims.claims_for_memory"),
+    ("/api/cross-run/atlas", "looplab.engine.claims.atlas_for_memory"),
+])
+def test_evidence_storage_oserror_is_stable_no_store_503(
+        tmp_path, monkeypatch, endpoint, target):
+    memory = _seed_memory()
+    secret = f"permission denied: {memory / 'private-source.jsonl'}"
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError(secret)
+
+    monkeypatch.setattr(target, denied)
+    response = TestClient(make_app(tmp_path)).get(endpoint)
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["detail"] == {
+        "code": "cross_run_evidence_unavailable",
+        "message": "cross-run evidence cannot be read as one coherent snapshot",
+    }
+    assert secret not in response.text and str(memory) not in response.text
 
 
 @pytest.mark.parametrize("endpoint", ["/api/cross-run/claims", "/api/cross-run/atlas"])

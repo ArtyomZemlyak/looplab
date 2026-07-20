@@ -17,7 +17,8 @@ _ProjectionT = TypeVar("_ProjectionT")
 
 _PUBLIC_LEDGERS = frozenset((
     "concept_aliases", "concept_splits", "claim_decisions", "concept_governance",
-    "concept_capsules", "concept_curation", "claim_curation", "task_facets_curation",
+    "concept_capsules", "cross_run_sources", "concept_curation", "claim_curation",
+    "task_facets_curation",
 ))
 _PUBLIC_REASONS = frozenset((
     "storage_unreadable", "torn_tail", "blank_row", "malformed_json", "non_object",
@@ -78,10 +79,10 @@ def read_governance_rows(
     because their omission changes last-write-wins meaning.  The exception deliberately exposes
     only a stable reason class, never raw bytes.
     """
-    if not path.exists():
-        return []
     try:
         raw_file = path.read_bytes()
+    except FileNotFoundError:
+        return []
     except OSError as exc:
         raise GovernanceLedgerUnavailable(ledger, "storage_unreadable") from exc
     if not raw_file:
@@ -349,6 +350,15 @@ def _validate_v2_curation_row(row: dict, *, kind: str) -> str | None:
           or not isinstance(proposals.get("facets"), dict)):
         return "invalid_record"
     return None
+
+
+def observed_path_missing(path: Path) -> bool:
+    """Return true only for a confirmed missing path; every other storage error remains visible."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    return False
 
 
 def _validate_curation_row(row: dict, *, kind: str) -> str | None:
@@ -619,7 +629,7 @@ def project_governed_sources(
         return project(_empty_governance_snapshot())
     base = Path(memory_dir)
     # Linearize an absent store at this observation point without creating lock artifacts on a read.
-    if not base.exists():
+    if observed_path_missing(base):
         return project(_empty_governance_snapshot())
 
     from looplab.engine.concept_registry import _concept_governance_transaction

@@ -169,7 +169,7 @@ def build_router(srv) -> APIRouter:
             return project()
         except GovernanceLedgerUnavailable as exc:
             _raise_governance_error(exc)
-        except EventStoreLockError as exc:
+        except (EventStoreLockError, OSError) as exc:
             _raise_evidence_read_error(exc)
 
     @router.get("/api/cross-run/atlas")
