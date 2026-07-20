@@ -165,19 +165,38 @@ def read_jsonl_lenient_with_health(path: str | os.PathLike, *, loads=orjson.load
             "malformed_lines": 0,
             "invalid_shape_lines": 0,
         }
-    for line in p.read_text(encoding="utf-8", errors=errors).splitlines():
+    raw_file = p.read_bytes()
+    # Split only on the JSONL record delimiter. ``bytes.splitlines`` would also split bare CR, form-feed,
+    # vertical-tab and other bytes that are part of one poisoned record. Drop only the synthetic element
+    # after a terminal LF so ``keep_bad`` remains identical to ``str.splitlines`` for blank records.
+    raw_lines = raw_file.split(b"\n") if raw_file else []
+    if raw_file.endswith(b"\n"):
+        raw_lines.pop()
+    for raw in raw_lines:
         rec = None
-        nonblank = bool(line.strip())
+        try:
+            line = raw.decode("utf-8", errors=errors)
+            # A CR in CRLF is the line terminator, while a bare/mid-record CR above deliberately remains
+            # data. JSON parsers accept trailing whitespace, but removing exactly this one byte also keeps
+            # blank-line/keep_bad behavior byte-compatible with the former ``read_text().splitlines()``.
+            if line.endswith("\r"):
+                line = line[:-1]
+        except UnicodeDecodeError:
+            line = None
+        nonblank = bool(line.strip()) if line is not None else bool(raw.strip())
         if nonblank:
             source_lines += 1
-            try:
-                v = loads(line)
-                if not dicts_only or isinstance(v, dict):
-                    rec = v
-                else:
-                    invalid_shape_lines += 1
-            except Exception:  # noqa: BLE001 — any unparseable line is damage to step over
+            if line is None:
                 malformed_lines += 1
+            else:
+                try:
+                    v = loads(line)
+                    if not dicts_only or isinstance(v, dict):
+                        rec = v
+                    else:
+                        invalid_shape_lines += 1
+                except Exception:  # noqa: BLE001 — any unparseable line is damage to step over
+                    malformed_lines += 1
         if rec is not None:
             out.append(rec)
         else:

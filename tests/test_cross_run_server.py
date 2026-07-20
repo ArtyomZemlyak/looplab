@@ -77,6 +77,54 @@ def test_claim_snapshot_lock_unavailable_is_stable_503_not_false_empty(
     }
 
 
+@pytest.mark.parametrize("endpoint", ["/api/cross-run/claims", "/api/cross-run/atlas"])
+def test_claim_source_io_unavailable_is_redacted_stable_503(
+        tmp_path, monkeypatch, endpoint):
+    import looplab.engine.claims as claims_module
+
+    _seed_memory()
+    secret_path = "C:/secret/operator/portfolio/lessons.jsonl"
+    monkeypatch.setattr(
+        claims_module, "load_claim_lessons",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError(secret_path)),
+    )
+
+    response = TestClient(make_app(tmp_path)).get(endpoint)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "cross_run_evidence_unavailable",
+        "message": "cross-run evidence cannot be read as one coherent snapshot",
+    }
+    assert secret_path not in response.text
+
+
+@pytest.mark.parametrize("endpoint", ["/api/cross-run/claims", "/api/cross-run/atlas"])
+def test_invalid_utf8_source_row_is_partial_200_and_does_not_hide_valid_tail(
+        tmp_path, endpoint):
+    md = _seed_memory("valid tail claim")
+    path = md / "lessons.jsonl"
+    path.write_bytes(b"\xff\n" + path.read_bytes())
+
+    response = TestClient(make_app(tmp_path)).get(endpoint)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["claim_source"]["source_complete"] is False
+    assert payload["claim_source"]["lessons"] == {
+        "read_complete": False,
+        "rows_total": 2,
+        "rows_retained": 1,
+        "rows_quarantined": 1,
+        "malformed_rows": 1,
+        "invalid_rows": 0,
+    }
+    if endpoint.endswith("/claims"):
+        assert any(row["statement"] == "valid tail claim" for row in payload["claims"])
+    else:
+        assert payload["n_claims"] == 1
+
+
 def _claim_action(client, *, decision="rejected", action_id="claim-action-1", note=""):
     snapshot = client.get("/api/cross-run/claims").json()
     claim = snapshot["claims"][0]

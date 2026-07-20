@@ -150,7 +150,7 @@ def build_router(srv) -> APIRouter:
         """Map a failed required snapshot lock to stable read semantics, never a truthful empty view."""
         from looplab.events.eventstore import EventStoreLockError
 
-        if isinstance(exc, EventStoreLockError):
+        if isinstance(exc, (EventStoreLockError, OSError)):
             raise HTTPException(503, detail={
                 "code": "cross_run_evidence_unavailable",
                 "message": "cross-run evidence cannot be read as one coherent snapshot",

@@ -7,7 +7,11 @@ import orjson
 import pytest
 
 from looplab.engine.lessons import LessonMemory
-from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
+from looplab.events.eventstore import (
+    _interprocess_lock,
+    read_jsonl_lenient,
+    read_jsonl_lenient_with_health,
+)
 
 
 def _lesson(statement: str, run_id: str) -> dict:
@@ -77,9 +81,46 @@ def test_bounded_integer_string_node_source_remains_legacy_compatible(tmp_path):
     assert claims.claim_source["source_complete"] is True
 
 
+def test_lenient_health_quarantines_invalid_utf8_and_keeps_later_rows(tmp_path):
+    path = tmp_path / "mixed.jsonl"
+    # CRLF is one ordinary delimiter; a blank physical row remains a keep_bad placeholder; a UTF-8 BOM is
+    # valid text but invalid JSON under the existing str-parser contract; an undecodable byte is malformed;
+    # and neither poison may hide the valid tail.
+    path.write_bytes(
+        b'{"first":1}\r\n'
+        b'\xff\n'
+        b'\n'
+        b'\xef\xbb\xbf{"bom":true}\n'
+        b'{"last":2}\n'
+    )
+
+    rows, health = read_jsonl_lenient_with_health(
+        path, keep_bad=True, loads=orjson.loads)
+
+    assert rows == [{"first": 1}, None, None, None, {"last": 2}]
+    assert health == {
+        "read_complete": False,
+        "source_lines": 4,
+        "accepted_rows": 2,
+        "invalid_lines": 2,
+        "malformed_lines": 2,
+        "invalid_shape_lines": 0,
+    }
+
+
+def test_lenient_health_splits_only_on_lf_not_bare_control_bytes(tmp_path):
+    path = tmp_path / "bare-cr.jsonl"
+    path.write_bytes(b'{"one":1}\r{"two":2}\n{"tail":3}')
+
+    rows, health = read_jsonl_lenient_with_health(path, keep_bad=True)
+
+    assert rows == [None, {"tail": 3}]
+    assert health["source_lines"] == 2 and health["malformed_lines"] == 1
+
+
 def test_lesson_consolidate_and_compact_preserve_quarantine_bytes(tmp_path):
     path = tmp_path / "lessons.jsonl"
-    malformed = b"{not-json"
+    malformed = b"\xff{not-json"
     future = orjson.dumps({
         "v": 99, "record_kind": "future-lesson", "statement": "future contract",
     })
