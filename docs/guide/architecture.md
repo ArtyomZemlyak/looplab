@@ -45,7 +45,9 @@ Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene 
     child). The **hypothesis board** is *derived on every fold* — beliefs are deduped (exact hash +
     an agentic paraphrase merge), prioritized (foresight), and tracked to a verdict. The base
     cross-run memory paths and reflection priors are **on by default** (`~/.looplab/memory` +
-    `~/.looplab/knowledge`); Part-IV concept, advisory and structured-claim reads remain opt-in.
+    `~/.looplab/knowledge`). Product `Settings` also enable the Part-IV concept, advisory and
+    structured-claim reads by default; only callers that construct bare `EngineOptions` directly
+    retain the lower-level opt-in defaults.
     A run with an eligible best result can write a case and reflection artifacts, while only a
     supported improving hypothesis can seed an auto-skill. Later matching runs may retrieve the
     applicable records. A model-authored meta-note is an explanatory hypothesis over recorded

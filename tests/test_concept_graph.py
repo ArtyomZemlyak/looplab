@@ -631,6 +631,21 @@ def test_hypothesis_concepts_at_vocab_folds_and_staleness_works_on_str_ids(tmp_p
     assert "h0" in stale and "h2" in stale and "h1" not in stale
 
 
+def test_hypothesis_concepts_last_write_clears_stale_vocabulary_receipt(tmp_path):
+    """A last-write-wins tag update must not inherit an older vocabulary-version receipt."""
+    from looplab.events.eventstore import EventStore
+
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("hypothesis_concepts", {"hyp_id": "h1", "concepts": ["loss/x"], "at_vocab": 30})
+    s.append("hypothesis_concepts", {"hyp_id": "h1", "concepts": ["reg/y"]})
+
+    st = fold(s.read_all())
+
+    assert st.hypothesis_concepts == {"h1": ["reg/y"]}
+    assert "h1" not in st.hypothesis_concepts_at_vocab
+
+
 def test_tag_text_llm_shared_tagger(tmp_path):
     """The shared agentic single-text tagger: pins to KNOWN ids (grow=False), respects an empty verdict,
     recovers via tag_text on all-unknown / no client. `tag_idea_llm` now delegates to it."""

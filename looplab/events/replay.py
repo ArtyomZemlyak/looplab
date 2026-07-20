@@ -1819,6 +1819,10 @@ def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") ->
     av = d.get("at_vocab")   # B1-ext: staleness reference (absent on pre-B1 events -> 0/oldest)
     if isinstance(av, int) and not isinstance(av, bool) and av >= 0:   # bool is an int subclass — reject
         st.hypothesis_concepts_at_vocab[str(hid)] = av
+    else:
+        # CODEX AGENT: concepts and their vocabulary receipt are one LWW value. An older receipt would
+        # make newly-derived tags look fresh and incorrectly suppress their next retag cadence.
+        st.hypothesis_concepts_at_vocab.pop(str(hid), None)
 
 def _on_concept_consolidation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D5 B3 (§21.18): ACCUMULATE the consolidation rename map so decisions stay fixed across
