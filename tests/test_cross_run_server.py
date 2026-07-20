@@ -164,6 +164,52 @@ def test_operator_http_write_cannot_append_over_unhealthy_concept_ledger(tmp_pat
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize(("kind", "sync_name", "ledger"), [
+    ("concept", "strict_fsync", "concept_aliases"),
+    ("claim", "strict_fsync_parent", "claim_decisions"),
+])
+def test_policy_http_never_acknowledges_unconfirmed_durability(
+        tmp_path, monkeypatch, kind, sync_name, ledger):
+    import looplab.core.atomicio as atomicio_module
+
+    memory = _seed_memory()
+    client = TestClient(make_app(tmp_path), raise_server_exceptions=False)
+    if kind == "concept":
+        endpoint = "/api/cross-run/concept-merge"
+        path = memory / "concept_aliases.jsonl"
+        body = {
+            "from_concept": "hn", "to_concept": "hard-neg",
+            "expected_revision": 0, "expected_governance_revision": 0,
+            "action_id": "durability-concept",
+        }
+    else:
+        endpoint = "/api/cross-run/claim-decide"
+        path = memory / "claim_decisions.jsonl"
+        body = _claim_action(client, action_id="durability-claim")
+
+    monkeypatch.setattr(
+        atomicio_module, sync_name,
+        lambda _value: (_ for _ in ()).throw(OSError("private storage detail")),
+    )
+    response = client.post(endpoint, json=body)
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["detail"] == {
+        "v": 1, "status": "unavailable", "complete": False,
+        "code": "governance_ledger_unavailable",
+        "ledger": ledger, "reason": "storage_unreadable",
+    }
+    assert "private storage detail" not in response.text
+    before_retry = path.read_bytes()
+
+    # The first attempt may have reached the page cache before sync failed. Same-action retry
+    # re-syncs that exact receipt and fails closed again; it never appends a second revision.
+    retry = client.post(endpoint, json=body)
+    assert retry.status_code == 503
+    assert path.read_bytes() == before_retry
+
+
 def _claim_action(client, *, decision="rejected", action_id="claim-action-1", note=""):
     snapshot = client.get("/api/cross-run/claims").json()
     claim = snapshot["claims"][0]
@@ -760,7 +806,13 @@ def test_steward_does_not_start_paid_call_without_durable_begin_claim(tmp_path, 
         "/api/cross-run/concept-steward", params={"action_id": "no-durable-claim"},
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["detail"] == {
+        "v": 1, "status": "unavailable", "complete": False,
+        "code": "governance_ledger_unavailable",
+        "ledger": "concept_curation", "reason": "storage_unreadable",
+    }
     assert calls == []
 
 

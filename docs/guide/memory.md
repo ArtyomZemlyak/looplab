@@ -124,6 +124,15 @@ repair: stop writers, preserve a byte-for-byte backup, and restore or explicitly
 offline after identifying the damaged operator action. `looplab repair-log` is for run
 `events.jsonl`, not these governance sidecars.
 
+Revision-labelled Atlas, retrieval, and owner claim projections use one lock hierarchy:
+concept-global policy, then claim decisions, then the participating evidence files in sorted path
+order. The response payload is built before those locks are released, so its evidence and policy
+revision are one snapshot rather than a hybrid of adjacent writes. Operator alias, split, and claim
+decision writes also require confirmed file sync (plus first-create directory publication) before
+success is acknowledged. A sync/capability failure returns the same content-free `503`/no-store health
+boundary. An idempotent retry re-syncs the existing receipt before returning it; it does not append a
+second revision merely because the first acknowledgement failed.
+
 The broader Part-IV design specifies the production **cross-run research index** and UI **Research Atlas**.
 Its core distinction is:
 

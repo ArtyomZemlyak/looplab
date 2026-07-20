@@ -37,7 +37,9 @@ from typing import Optional
 
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
+    confirm_governance_durable,
     read_governance_rows,
+    raise_governance_storage_unavailable,
     validate_action_ids,
     validate_local_revisions,
     validate_optional_text,
@@ -245,7 +247,8 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
         return _append_governance(path, rec, validate=_validate_locked,
                                   expected_revision=expected_revision,
                                   governance_memory_dir=memory_dir,
-                                  expected_governance_revision=expected_governance_revision)
+                                  expected_governance_revision=expected_governance_revision,
+                                  require_durable=True)
 
 
 def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
@@ -282,6 +285,7 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
             path, rec, validate=_validate_clear, expected_revision=expected_revision,
             governance_memory_dir=memory_dir,
             expected_governance_revision=expected_governance_revision,
+            require_durable=True,
         )
 
 
@@ -508,7 +512,8 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
         return _append_governance(path, rec, validate=_validate_targets,
                                   expected_revision=expected_revision,
                                   governance_memory_dir=memory_dir,
-                                  expected_governance_revision=expected_governance_revision)
+                                  expected_governance_revision=expected_governance_revision,
+                                  require_durable=True)
 
 
 def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
@@ -540,6 +545,7 @@ def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", 
             path, rec, validate=_validate_clear, expected_revision=expected_revision,
             governance_memory_dir=memory_dir,
             expected_governance_revision=expected_governance_revision,
+            require_durable=True,
         )
 
 
@@ -882,6 +888,10 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
                 # Resolve idempotency before CAS/validation. A transport retry carrying the original stale
                 # revision must return its first durable receipt, never append again or fail with a conflict.
                 if _idempotency_payload(existing) == _idempotency_payload(rec):
+                    if require_durable:
+                        # The first response may have failed during fsync after bytes reached the page
+                        # cache. A retry must re-confirm both contents and publication before returning 200.
+                        confirm_governance_durable(path)
                     return dict(existing)
                 raise ConceptGovernanceIdempotencyConflict(path, action_id)
         governance_revision = None
@@ -926,10 +936,15 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
                     # operator ledgers were rejected by _ledger_revision before reaching this branch.
                     separator = "\n"
         line = separator + json.dumps(rec) + "\n"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            (strict_fsync if require_durable else best_effort_fsync)(f.fileno())
-        if require_durable and created:
-            strict_fsync_parent(path)
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                (strict_fsync if require_durable else best_effort_fsync)(f.fileno())
+            if require_durable and created:
+                strict_fsync_parent(path)
+        except (OSError, TimeoutError, RuntimeError) as exc:
+            if require_durable:
+                raise_governance_storage_unavailable(path, exc)
+            raise
     return rec

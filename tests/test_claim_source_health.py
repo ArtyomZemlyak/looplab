@@ -196,7 +196,7 @@ def test_claim_decision_holds_both_evidence_locks_through_fsync(tmp_path, monkey
         fsync_observations.append(set(active))
 
     monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", _tracked_lock)
-    monkeypatch.setattr("looplab.core.atomicio.best_effort_fsync", _observe_fsync)
+    monkeypatch.setattr("looplab.core.atomicio.strict_fsync", _observe_fsync)
 
     def _validate(snapshot):
         nonlocal mutation_thread

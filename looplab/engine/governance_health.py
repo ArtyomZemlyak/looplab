@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
+from typing import TypeVar
+
+_ProjectionT = TypeVar("_ProjectionT")
 
 _PUBLIC_LEDGERS = frozenset((
     "concept_aliases", "concept_splits", "claim_decisions", "concept_governance",
@@ -163,6 +167,12 @@ _CURATION_LEDGER_SCOPES = {
     "claim_curation_log.jsonl": ("claim", "claim_curation"),
     "task_facets_curation_log.jsonl": ("facets", "task_facets_curation"),
 }
+_GOVERNANCE_LEDGER_FILES = {
+    "concept_aliases.jsonl": "concept_aliases",
+    "concept_splits.jsonl": "concept_splits",
+    "claim_decisions.jsonl": "claim_decisions",
+    **{name: ledger for name, (_kind, ledger) in _CURATION_LEDGER_SCOPES.items()},
+}
 
 
 def curation_ledger_scope(log_name: str) -> tuple[str, str]:
@@ -171,6 +181,29 @@ def curation_ledger_scope(log_name: str) -> tuple[str, str]:
         return _CURATION_LEDGER_SCOPES[log_name]
     except KeyError as exc:
         raise ValueError("unknown curation ledger") from exc
+
+
+def raise_governance_storage_unavailable(path: Path, exc: BaseException):
+    """Map a known governance storage failure to the content-free public health contract."""
+    ledger = _GOVERNANCE_LEDGER_FILES.get(path.name)
+    if ledger is None:
+        raise exc
+    raise GovernanceLedgerUnavailable(ledger, "storage_unreadable") from exc
+
+
+def confirm_governance_durable(path: Path) -> None:
+    """Strictly sync an existing governance receipt before acknowledging an idempotent retry."""
+    from looplab.core.atomicio import strict_fsync, strict_fsync_parent
+
+    try:
+        # Append mode supplies a write-capable descriptor on Windows without changing file bytes.
+        with path.open("ab") as handle:
+            strict_fsync(handle.fileno())
+        # Always repeat the directory sync: a prior first-create attempt may have synced contents
+        # but failed before durably publishing the directory entry.
+        strict_fsync_parent(path)
+    except (OSError, TimeoutError, RuntimeError) as exc:
+        raise_governance_storage_unavailable(path, exc)
 
 
 def _validate_curation_row(row: dict, *, kind: str) -> str | None:
@@ -353,24 +386,15 @@ def read_curation_rows(
 
 def claim_governance_snapshot(memory_dir) -> dict:
     """Freeze the claim-decision projection and its CAS revision under the writer lock."""
-    empty = {"decisions": {}, "revision": 0, "status": "complete", "complete": True}
-    if not memory_dir:
-        return empty
-    base = Path(memory_dir)
-    if not base.exists():
-        return empty
-
-    from looplab.engine.claims import claim_governance_revision, load_claim_decisions
-    from looplab.events.eventstore import _interprocess_lock
-
-    path = base / "claim_decisions.jsonl"
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-        return {
-            "decisions": load_claim_decisions(base),
-            "revision": claim_governance_revision(base),
+    return project_governed_sources(
+        memory_dir,
+        lambda governance: {
+            "decisions": governance["decisions"],
+            "revision": governance["claim_revision"],
             "status": "complete",
             "complete": True,
-        }
+        },
+    )
 
 
 def cross_run_governance_snapshot(memory_dir) -> dict:
@@ -381,39 +405,93 @@ def cross_run_governance_snapshot(memory_dir) -> dict:
     acquisition path. Atlas/retrieval can now label exactly the policy they projected rather than
     reading maps first and attaching newer revisions later.
     """
-    empty = {
+    return project_governed_sources(
+        memory_dir, lambda governance: governance, include_concepts=True)
+
+
+_GOVERNED_SOURCE_NAMES = frozenset((
+    "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl",
+))
+
+
+def _empty_governance_snapshot() -> dict:
+    return {
         "aliases": {}, "splits": {}, "decisions": {},
         "alias_revision": 0, "split_revision": 0,
         "concept_governance_revision": 0, "claim_revision": 0,
         "status": "complete", "complete": True,
     }
-    if not memory_dir:
-        return empty
-    base = Path(memory_dir)
-    if not base.exists():
-        return empty
 
+
+def _read_governance_locked(base: Path, *, include_concepts: bool) -> dict:
+    """Read policy maps and matching revisions; the caller owns the required locks."""
     from looplab.engine.claims import claim_governance_revision, load_claim_decisions
+
+    snapshot = _empty_governance_snapshot()
+    snapshot["decisions"] = load_claim_decisions(base)
+    snapshot["claim_revision"] = claim_governance_revision(base)
+    if not include_concepts:
+        return snapshot
+
     from looplab.engine.concept_registry import (
-        _concept_governance_transaction,
         concept_governance_global_revision,
         concept_governance_revision,
         load_concept_aliases,
         load_concept_splits,
     )
+
+    snapshot.update({
+        "aliases": load_concept_aliases(base),
+        "splits": load_concept_splits(base),
+        "alias_revision": concept_governance_revision(base, "aliases"),
+        "split_revision": concept_governance_revision(base, "splits"),
+        "concept_governance_revision": concept_governance_global_revision(base),
+    })
+    return snapshot
+
+
+def project_governed_sources(
+        memory_dir, project: Callable[[dict], _ProjectionT], *,
+        include_concepts: bool = False, source_names=(),
+        claim_locked: bool = False) -> _ProjectionT:
+    """Project policy and mutable evidence at one canonical lock point.
+
+    Lock order is concept-global (when requested), then claim decisions, then source files sorted
+    by absolute path. The callback executes before any lock is released, so its payload and the
+    attached governance revisions describe one linearizable snapshot. A claim writer that already
+    owns ``claim_decisions.jsonl.lock`` may pass ``claim_locked=True``; acquiring concept governance
+    from that position is rejected because it would invert the global order.
+    """
+    if claim_locked and include_concepts:
+        raise ValueError("claim-locked projection cannot acquire concept governance")
+    requested = tuple(source_names or ())
+    if (any(not isinstance(name, str) or name not in _GOVERNED_SOURCE_NAMES
+            for name in requested)):
+        raise ValueError("unknown governed source")
+    if not memory_dir:
+        return project(_empty_governance_snapshot())
+    base = Path(memory_dir)
+    # Linearize an absent store at this observation point without creating lock artifacts on a read.
+    if not base.exists():
+        return project(_empty_governance_snapshot())
+
+    from looplab.engine.concept_registry import _concept_governance_transaction
     from looplab.events.eventstore import _interprocess_lock
 
+    concept_guard = (_concept_governance_transaction(base)
+                     if include_concepts else nullcontext())
     claim_path = base / "claim_decisions.jsonl"
-    with _concept_governance_transaction(base):
-        with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
-            return {
-                "aliases": load_concept_aliases(base),
-                "splits": load_concept_splits(base),
-                "decisions": load_claim_decisions(base),
-                "alias_revision": concept_governance_revision(base, "aliases"),
-                "split_revision": concept_governance_revision(base, "splits"),
-                "concept_governance_revision": concept_governance_global_revision(base),
-                "claim_revision": claim_governance_revision(base),
-                "status": "complete",
-                "complete": True,
-            }
+    claim_guard = (nullcontext() if claim_locked else _interprocess_lock(
+        Path(str(claim_path) + ".lock"), required=True))
+    sources = sorted({base / name for name in requested}, key=lambda path: str(path))
+    with concept_guard:
+        with claim_guard:
+            with ExitStack() as source_stack:
+                for source in sources:
+                    source_stack.enter_context(_interprocess_lock(
+                        Path(str(source) + ".lock"), required=True))
+                governance = _read_governance_locked(
+                    base, include_concepts=include_concepts)
+                # CODEX AGENT: the callback, not just its input reads, remains inside the locks.
+                # Otherwise a writer can land after payload construction but before its revision label.
+                return project(governance)

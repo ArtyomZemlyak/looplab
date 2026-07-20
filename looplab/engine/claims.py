@@ -23,7 +23,9 @@ from typing import Optional
 
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
+    confirm_governance_durable,
     read_governance_rows,
+    raise_governance_storage_unavailable,
     validate_action_ids,
     validate_local_revisions,
     validate_optional_text,
@@ -1051,7 +1053,7 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         rec["action_id"] = aid
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    from looplab.core.atomicio import best_effort_fsync
+    from looplab.core.atomicio import strict_fsync, strict_fsync_parent
     from looplab.events.eventstore import _interprocess_lock
     # Idempotency lookup, revision CAS, allocation and append are one critical section. A
     # pre-lock check lets two UI writers both accept revision N and silently create divergent policy.
@@ -1061,11 +1063,13 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         # quarantine behind a fresh, apparently healthy revision.
         rows = _read_claim_decision_rows(path)
         logical = _logical_decision_rows(rows)
+        created = not path.exists()
         if aid:
             existing = next((r for r in logical
                              if _identity_text(r.get("action_id"), _MAX_DECISION_ACTION_ID) == aid), None)
             if existing is not None:
                 if _decision_payload(existing) == _decision_payload(rec):
+                    confirm_governance_durable(path)
                     return sanitize_cross_run_projection(
                         existing, max_chars=16_000, max_items=64, max_total_items=256)
                 raise ClaimDecisionIdempotencyConflict(
@@ -1077,31 +1081,43 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                 raise ValueError("expected_revision must be a non-negative integer")
             if expected_revision != current:
                 raise ClaimDecisionConflict(expected_revision, current)
-        from contextlib import nullcontext
-        evidence_context = (
-            locked_claim_evidence_snapshot(memory_dir, structured=True)
-            if validate_evidence is not None else nullcontext(None)
-        )
-        # CODEX AGENT: the evidence locks remain held through validation AND durable decision append. A
-        # lesson/research rewrite cannot slip between evidence_digest comparison and governance commit.
-        with evidence_context as evidence_snapshot:
+        def _persist(governance=None):
             if validate is not None:
                 validate()
             if validate_evidence is not None:
+                lessons_snapshot = load_claim_lessons(memory_dir)
+                research_snapshot = load_research_claims(memory_dir)
+                evidence_snapshot = claim_assessments(
+                    lessons_snapshot, research_claims=research_snapshot,
+                    decisions=governance["decisions"], structured=True)
+                evidence_snapshot.lessons_snapshot = lessons_snapshot
+                evidence_snapshot.research_claims_snapshot = research_snapshot
+                evidence_snapshot.decisions_snapshot = governance["decisions"]
                 validate_evidence(evidence_snapshot)
             stored = {**rec, "revision": current + 1}
-            separator = ""
-            if path.exists() and path.stat().st_size:
-                with open(path, "rb") as existing:
-                    existing.seek(-1, 2)
-                    if existing.read(1) not in (b"\n", b"\r"):
-                        # Preserve the torn forensic fragment but isolate the acknowledged valid row.
-                        separator = "\n"
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(separator + json.dumps(stored) + "\n")
-                f.flush()
-                best_effort_fsync(f.fileno())
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(stored) + "\n")
+                    f.flush()
+                    strict_fsync(f.fileno())
+                if created:
+                    strict_fsync_parent(path)
+            except (OSError, TimeoutError, RuntimeError) as exc:
+                raise_governance_storage_unavailable(path, exc)
             return stored
+
+        if validate_evidence is None:
+            return _persist()
+
+        # CODEX AGENT: claim policy is already locked. Acquire evidence only after it, then keep every
+        # lock through digest validation and the durable append. This is the same global order used by
+        # read projections and prevents a lesson/research rewrite from slipping under the operator CAS.
+        from looplab.engine.governance_health import project_governed_sources
+        return project_governed_sources(
+            memory_dir, _persist,
+            source_names=("lessons.jsonl", "research_claims.jsonl"),
+            claim_locked=True,
+        )
 
 
 def _global_key(legacy_key: str) -> str:
@@ -1326,32 +1342,47 @@ def locked_claim_evidence_snapshot(memory_dir, *, structured: bool = True):
 
     This is intentionally separate from ordinary read projections: governance needs lessons.jsonl and
     research_claims.jsonl to stay unchanged from evidence-digest validation through decision append.
+    Lock order matches ``project_governed_sources``: claim policy, then evidence paths.
     """
     from contextlib import ExitStack, contextmanager
     from pathlib import Path
 
+    from looplab.engine.governance_health import _empty_governance_snapshot, _read_governance_locked
     from looplab.events.eventstore import _interprocess_lock
 
     @contextmanager
     def _snapshot():
         base = Path(memory_dir)
-        paths = sorted(
-            (base / "lessons.jsonl", base / "research_claims.jsonl"), key=lambda p: str(p))
-        with ExitStack() as stack:
-            for source_path in paths:
-                stack.enter_context(_interprocess_lock(
-                    Path(str(source_path) + ".lock"), required=True))
+        if not base.exists():
+            governance = _empty_governance_snapshot()
             lessons = load_claim_lessons(base)
             research = load_research_claims(base)
-            # The decision overlay is read while record_claim_decision owns its ledger lock. Its maturity
-            # does not enter evidence_digest, but is required for scope/global-clear target diagnostics.
-            decisions = load_claim_decisions(base)
             assessments = claim_assessments(
-                lessons, research_claims=research, decisions=decisions, structured=structured)
+                lessons, research_claims=research,
+                decisions=governance["decisions"], structured=structured)
             assessments.lessons_snapshot = lessons
             assessments.research_claims_snapshot = research
-            assessments.decisions_snapshot = decisions
+            assessments.decisions_snapshot = governance["decisions"]
             yield assessments
+            return
+        paths = sorted(
+            (base / "lessons.jsonl", base / "research_claims.jsonl"), key=lambda p: str(p))
+        claim_path = base / "claim_decisions.jsonl"
+        with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
+            with ExitStack() as stack:
+                for source_path in paths:
+                    stack.enter_context(_interprocess_lock(
+                        Path(str(source_path) + ".lock"), required=True))
+                governance = _read_governance_locked(base, include_concepts=False)
+                lessons = load_claim_lessons(base)
+                research = load_research_claims(base)
+                assessments = claim_assessments(
+                    lessons, research_claims=research,
+                    decisions=governance["decisions"], structured=structured)
+                assessments.lessons_snapshot = lessons
+                assessments.research_claims_snapshot = research
+                assessments.decisions_snapshot = governance["decisions"]
+                yield assessments
 
     return _snapshot()
 
@@ -1383,7 +1414,7 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
 
 def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims=None,
                      decisions=None, scope_task: str = "", max_items: int = 8,
-                     structured: bool = False) -> dict:
+                     structured: bool = False, _governance: Optional[dict] = None) -> dict:
     """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
     claims + operator decisions + concept aliases + splits. One call so every atlas surface is consistent.
     `structured` keeps the claim projection consistent with the researcher advisory; `scope_task` filters
@@ -1391,9 +1422,27 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     claims/contradictions (mega-review)."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import cross_run_governance_snapshot
+    from looplab.engine.governance_health import project_governed_sources
     from looplab.engine.memory import (ConceptCapsuleStore, _dedup_valid_capsules,
                                        _filter_capsule_rows)
+    if _governance is None:
+        source_names = []
+        if lessons is None:
+            source_names.append("lessons.jsonl")
+        if research_claims is None:
+            source_names.append("research_claims.jsonl")
+        if capsules is None:
+            source_names.append("concept_capsules.jsonl")
+        return project_governed_sources(
+            memory_dir,
+            lambda governance: atlas_for_memory(
+                memory_dir, lessons=lessons, capsules=capsules,
+                research_claims=research_claims, decisions=decisions,
+                scope_task=scope_task, max_items=max_items, structured=structured,
+                _governance=governance,
+            ),
+            include_concepts=True, source_names=source_names,
+        )
     base = Path(memory_dir) if memory_dir else None
     if lessons is None:
         lessons = load_claim_lessons(memory_dir)
@@ -1415,7 +1464,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
             capsules, lambda r: str(r.get("task_id") or "") == wanted)
         research = _filter_claim_source_rows(
             research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
-    governance = cross_run_governance_snapshot(memory_dir)
+    governance = _governance
     atlas = portfolio_atlas(
         lessons, capsules, max_items=max_items,
         decisions=(governance["decisions"] if decisions is None else decisions),
@@ -2134,7 +2183,8 @@ def _preselect_retrieval_docs(docs, query: str, limit: int):
 def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
                        research_claims=None, scope_task: str = "", contradiction_quota: float = 0.34,
                        max_corpus: int = 2000, structured: bool = False, intent: Optional[str] = None,
-                       scope_receipt: Optional[dict] = None) -> dict:
+                       scope_receipt: Optional[dict] = None,
+                       _governance: Optional[dict] = None) -> dict:
     """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
     (epistemic state / operator maturity) + concepts (#runs) — over the shipped `HybridRetriever`
     (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), then shape the ranked recall with:
@@ -2153,9 +2203,28 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     Operator-rejected claims never enter the corpus. Advisory; pure w.r.t. the passed/loaded stores."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import cross_run_governance_snapshot
+    from looplab.engine.governance_health import project_governed_sources
     from looplab.engine.memory import (ConceptCapsuleStore, _filter_capsule_rows,
                                        _portfolio_concept_overview_data)
+    if _governance is None:
+        source_names = []
+        if lessons is None:
+            source_names.append("lessons.jsonl")
+        if research_claims is None:
+            source_names.append("research_claims.jsonl")
+        if capsules is None:
+            source_names.append("concept_capsules.jsonl")
+        return project_governed_sources(
+            memory_dir,
+            lambda governance: cross_run_retrieve(
+                memory_dir, query, k=k, lessons=lessons, capsules=capsules,
+                research_claims=research_claims, scope_task=scope_task,
+                contradiction_quota=contradiction_quota, max_corpus=max_corpus,
+                structured=structured, intent=intent, scope_receipt=scope_receipt,
+                _governance=governance,
+            ),
+            include_concepts=True, source_names=source_names,
+        )
     base = Path(memory_dir) if memory_dir else None
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
@@ -2175,7 +2244,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
     research = _valid_claim_source_rows(research, research=True)
     research_source = _research_source_summary(research)
-    governance = cross_run_governance_snapshot(memory_dir)
+    governance = _governance
     claims = _filter_claim_assessments(
         claim_assessments(lessons, research_claims=research,
                           decisions=governance["decisions"], structured=structured),

@@ -160,21 +160,29 @@ def build_router(srv) -> APIRouter:
         except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
             _raise_governance_error(exc)
 
+    def _read_governed_evidence(project):
+        """Keep policy corruption and unavailable evidence snapshots as distinct safe contracts."""
+        from looplab.engine.governance_health import GovernanceLedgerUnavailable
+        from looplab.events.eventstore import EventStoreLockError
+
+        try:
+            return project()
+        except GovernanceLedgerUnavailable as exc:
+            _raise_governance_error(exc)
+        except EventStoreLockError as exc:
+            _raise_evidence_read_error(exc)
+
     @router.get("/api/cross-run/atlas")
     def atlas(limit: int = Query(24, ge=1, le=100),
               scope_task: str = Query("", max_length=500)):
         """Live structured Research Atlas projection, bounded per section."""
-        from looplab.engine.claims import atlas_for_memory, locked_claim_evidence_snapshot
+        from looplab.engine.claims import atlas_for_memory
+        from looplab.engine.governance_health import project_governed_sources
 
         memory_dir = _memory_dir()
-        def _project():
-            with locked_claim_evidence_snapshot(memory_dir, structured=True) as evidence:
-                # Atlas freezes the policy maps and their matching revisions itself. Keep the evidence
-                # locks through that projection so no lesson/research rewrite can create a mixed view.
-                payload = atlas_for_memory(
-                    memory_dir, lessons=evidence.lessons_snapshot,
-                    research_claims=evidence.research_claims_snapshot,
-                    scope_task=scope_task, max_items=limit, structured=True)
+        def _project(governance):
+            payload = atlas_for_memory(memory_dir, scope_task=scope_task, max_items=limit,
+                                       structured=True, _governance=governance)
             payload.update({
                 "projection": "live",
                 "scope_task": cross_run_text(
@@ -184,7 +192,11 @@ def build_router(srv) -> APIRouter:
             })
             return payload
 
-        payload = _read_governance(_project)
+        payload = _read_governed_evidence(lambda: project_governed_sources(
+            memory_dir, _project, include_concepts=True,
+            source_names=(
+                "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
+        ))
         return sanitize_cross_run_projection(
             payload, max_chars=128_000_000, max_items=256,
             max_total_items=500_000)
@@ -198,25 +210,25 @@ def build_router(srv) -> APIRouter:
         from looplab.engine.claims import (
             _filter_claim_assessments, _safe_claim_source_summary,
             _safe_research_source_summary, claims_for_memory,
-            locked_claim_evidence_snapshot,
         )
-        from looplab.engine.governance_health import claim_governance_snapshot
+        from looplab.engine.governance_health import project_governed_sources
 
         memory_dir = _memory_dir()
-        def _project():
-            with locked_claim_evidence_snapshot(memory_dir, structured=True) as evidence:
-                governance = claim_governance_snapshot(memory_dir)
-                rows = claims_for_memory(
-                    memory_dir, lessons=evidence.lessons_snapshot,
-                    research_claims=evidence.research_claims_snapshot,
-                    decisions=governance["decisions"], scope_task=scope_task, structured=True,
-                )
-                return rows, governance
+        def _project(governance):
+            rows = claims_for_memory(
+                memory_dir, scope_task=scope_task,
+                structured=True, decisions=governance["decisions"])
+            research_source = _safe_research_source_summary(
+                getattr(rows, "research_source", None)) or {}
+            claim_source = _safe_claim_source_summary(
+                getattr(rows, "claim_source", None)) or {}
+            return rows, research_source, claim_source, governance["claim_revision"]
 
-        rows, governance = _read_governance(_project)
-        research_source = _safe_research_source_summary(
-            getattr(rows, "research_source", None)) or {}
-        claim_source = _safe_claim_source_summary(getattr(rows, "claim_source", None)) or {}
+        rows, research_source, claim_source, revision = _read_governed_evidence(
+            lambda: project_governed_sources(
+                memory_dir, _project,
+                source_names=("lessons.jsonl", "research_claims.jsonl"),
+            ))
         if contested:
             rows = _filter_claim_assessments(
                 rows, lambda row: row.get("epistemic") == "mixed")
@@ -232,7 +244,7 @@ def build_router(srv) -> APIRouter:
                 scope_task, max_chars=500, single_line=True, entropy=False),
             "research_source": research_source,
             "claim_source": claim_source,
-            "revision": governance["revision"],
+            "revision": revision,
         }
 
     @router.post("/api/cross-run/claim-decide")

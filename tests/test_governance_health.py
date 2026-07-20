@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import Event
 
 import pytest
 from typer.testing import CliRunner
@@ -23,6 +26,7 @@ from looplab.engine.concept_steward import concept_curation_snapshot
 from looplab.engine.governance_health import (
     GovernanceLedgerUnavailable,
     cross_run_governance_snapshot,
+    project_governed_sources,
     read_curation_rows,
 )
 from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
@@ -224,6 +228,114 @@ def test_combined_snapshot_binds_all_policy_maps_to_matching_revisions(tmp_path)
         tmp_path, "recall", lessons=[], capsules=[], research_claims=[])
     assert retrieval["receipt"]["governance_complete"] is True
     assert retrieval["receipt"]["claim_governance_revision"] == 1
+
+
+def test_governed_source_projection_uses_one_canonical_lock_order(tmp_path, monkeypatch):
+    import looplab.events.eventstore as eventstore_module
+
+    entered: list[str] = []
+    active: list[str] = []
+
+    @contextmanager
+    def observed_lock(path, *, required=False):
+        assert required is True
+        name = path.name
+        entered.append(name)
+        active.append(name)
+        try:
+            yield
+        finally:
+            assert active.pop() == name
+
+    monkeypatch.setattr(eventstore_module, "_interprocess_lock", observed_lock)
+
+    def project(governance):
+        assert active == [
+            "concept_governance.lock",
+            "claim_decisions.jsonl.lock",
+            "concept_capsules.jsonl.lock",
+            "lessons.jsonl.lock",
+            "research_claims.jsonl.lock",
+        ]
+        return governance
+
+    snapshot = project_governed_sources(
+        tmp_path, project, include_concepts=True,
+        # Deliberately unsorted: the transaction owns deterministic source ordering.
+        source_names=(
+            "research_claims.jsonl", "lessons.jsonl", "concept_capsules.jsonl"),
+    )
+
+    assert entered == [
+        "concept_governance.lock", "claim_decisions.jsonl.lock",
+        "concept_capsules.jsonl.lock", "lessons.jsonl.lock",
+        "research_claims.jsonl.lock",
+    ]
+    assert snapshot["claim_revision"] == snapshot["concept_governance_revision"] == 0
+
+
+def test_governed_source_projection_fences_policy_and_evidence_writers(tmp_path):
+    from looplab.events.eventstore import _interprocess_lock
+
+    lessons_path = tmp_path / "lessons.jsonl"
+    lessons_path.write_text(json.dumps({
+        "statement": "old evidence", "outcome": "supported", "evidence": [1],
+        "run_id": "r1", "task_id": "t",
+    }) + "\n", encoding="utf-8")
+    original_lessons = lessons_path.read_bytes()
+    entered, release = Event(), Event()
+    policy_started, policy_done = Event(), Event()
+    evidence_started, evidence_done = Event(), Event()
+
+    def project(governance):
+        rows = [json.loads(line) for line in lessons_path.read_text().splitlines()]
+        entered.set()
+        assert release.wait(5)
+        return {"revision": governance["claim_revision"], "lessons": rows}
+
+    def write_policy():
+        policy_started.set()
+        record_claim_decision(
+            tmp_path, statement="new policy", decision="pinned",
+            expected_revision=0, action_id="concurrent-policy")
+        policy_done.set()
+
+    def write_evidence():
+        evidence_started.set()
+        with _interprocess_lock(
+                tmp_path / "lessons.jsonl.lock", required=True):
+            with lessons_path.open("ab") as handle:
+                handle.write(json.dumps({
+                    "statement": "new evidence", "outcome": "supported",
+                    "evidence": [2], "run_id": "r2", "task_id": "t",
+                }).encode("utf-8") + b"\n")
+        evidence_done.set()
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        snapshot_future = executor.submit(
+            project_governed_sources, tmp_path, project,
+            source_names=("lessons.jsonl",))
+        assert entered.wait(5)
+        policy_future = executor.submit(write_policy)
+        evidence_future = executor.submit(write_evidence)
+        assert policy_started.wait(5) and evidence_started.wait(5)
+        assert not policy_done.wait(0.1)
+        assert not evidence_done.wait(0.1)
+        assert lessons_path.read_bytes() == original_lessons
+        assert not (tmp_path / "claim_decisions.jsonl").exists()
+        release.set()
+        snapshot = snapshot_future.result(timeout=5)
+        policy_future.result(timeout=5)
+        evidence_future.result(timeout=5)
+
+    assert snapshot == {
+        "revision": 0,
+        "lessons": [{
+            "statement": "old evidence", "outcome": "supported", "evidence": [1],
+            "run_id": "r1", "task_id": "t",
+        }],
+    }
+    assert policy_done.is_set() and evidence_done.is_set()
 
 
 def test_idempotent_alias_retry_still_refuses_an_unhealthy_sibling_ledger(tmp_path):
