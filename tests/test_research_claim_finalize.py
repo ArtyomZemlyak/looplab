@@ -98,7 +98,7 @@ def test_finalize_malformed_outer_research_shape_is_not_walked_as_memos(tmp_path
     assert rows[0]["source_receipt"]["claims_retained"] == 0
 
 
-def test_finalize_explicit_empty_d8_snapshot_clears_stale_same_run_rows(tmp_path):
+def test_finalize_explicit_empty_d8_snapshot_replaces_stale_rows_with_zero_receipt(tmp_path):
     for index, research in enumerate(([], [{"claims": []}])):
         memory = tmp_path / str(index)
         record_research_claims(
@@ -109,7 +109,20 @@ def test_finalize_explicit_empty_d8_snapshot_clears_stale_same_run_rows(tmp_path
             direction="max",
         )
 
-        assert _finalize_claims(memory, research) == []
+        rows = _finalize_claims(memory, research)
+        # CODEX AGENT: an authoritative zero is durable evidence, not the absence of a D8 producer.
+        # Finalize must clear stale claims while retaining the zero-row denominator used by fail-closed
+        # claim-source projections.
+        assert len(rows) == 1
+        assert rows[0]["record_kind"] == "source_receipt"
+        assert "statement" not in rows[0]
+        assert rows[0]["source_receipt"] == {
+            "v": 1,
+            "claims_total": 0,
+            "claims_retained": 0,
+            "claims_omitted": 0,
+            "producer_complete": True,
+        }
 
 
 def test_finalize_absent_or_legacy_d8_source_does_not_erase_existing_rows(tmp_path):
