@@ -25,7 +25,6 @@ Fragility is contained by construction:
 """
 from __future__ import annotations
 
-from statistics import median
 from typing import Optional
 
 # A kill never fires until the node has been flagged underperforming on this many CONSECUTIVE acting

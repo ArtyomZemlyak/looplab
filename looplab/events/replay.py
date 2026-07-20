@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import Iterable
+from typing import Iterable, Optional
 
 from looplab.core.concepts import (
     CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,

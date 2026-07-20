@@ -6,7 +6,6 @@ none of this touches folded selection or replay."""
 import types
 
 import anyio
-import pytest
 
 from looplab.engine.orchestrator import Engine
 from looplab.engine.research_cadence import research_memo_sig
