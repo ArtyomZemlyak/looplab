@@ -10,6 +10,9 @@ const EMPTY_TOTAL = Object.freeze({ raw: 0, gzip: 0 })
 const entry = Object.freeze({ entry: true })
 const source = src => Object.freeze({ src })
 const named = name => Object.freeze({ name })
+// # CODEX AGENT: Assistant + Attention share one owner-only lazy boundary and always mount together.
+// Measure that real boundary once; public/review reachability must exclude the same canonical root.
+const ownerChrome = source('src/OwnerChrome.jsx')
 
 // These are target budgets for the split graph, not a waiver for eager code. The route/panel lazy
 // boundaries have landed; the checker deliberately stays red whenever a working build exceeds a
@@ -36,14 +39,14 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'owner List route',
       // RunList becomes a named facade when its lazy MapView imports shared list utilities. Vite
       // intentionally omits `src` on that facade, while preserving the stable Rollup chunk name.
-      roots: [entry, named('RunList'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx')],
+      roots: [entry, named('RunList'), ownerChrome],
       limits: { js: { gzip: 210 * KIB }, css: { gzip: 35 * KIB } },
     },
     {
       name: 'owner Atlas preview route',
       roots: [
         entry, source('src/ResearchAtlas.jsx'),
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        ownerChrome,
       ],
       limits: { js: { gzip: 210 * KIB }, css: { gzip: 35 * KIB } },
     },
@@ -52,7 +55,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       roots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/Dock.jsx'),
         source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        ownerChrome,
       ],
       limits: { js: { gzip: 260 * KIB }, css: { gzip: 35 * KIB } },
     },
@@ -67,7 +70,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // closure so the capability cannot become an excuse for growth in the initial shell.
       roots: [
         entry, named('RunView'), source('src/ConceptView.jsx'),
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        ownerChrome,
       ],
       limits: { js: { gzip: 165 * KIB }, css: { gzip: 35 * KIB } },
     },
@@ -79,7 +82,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       baselineRoots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/Dock.jsx'),
         source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        ownerChrome,
       ],
       limits: { js: { gzip: 60 * KIB } },
     },
@@ -91,7 +94,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       baselineRoots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/Dock.jsx'),
         source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        ownerChrome,
       ],
       limits: { js: { gzip: 20 * KIB } },
     },
@@ -125,7 +128,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
   forbidden: [
     {
       name: 'List defers graph and panel code',
-      roots: [entry, named('RunList'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx')],
+      roots: [entry, named('RunList'), ownerChrome],
       targets: [named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx')],
       requireTargets: true,
     },
@@ -133,7 +136,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Settings defers graph and panel code',
       // Settings.jsx and its shared schema/form are one manual group; Rolldown omits `src` from the
       // grouped dynamic entry, so use its stable chunk name rather than weakening this proof.
-      roots: [entry, named('settings-support'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx')],
+      roots: [entry, named('settings-support'), ownerChrome],
       targets: [named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx')],
       requireTargets: true,
     },
@@ -141,7 +144,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Atlas preview defers graph and panel code',
       roots: [
         entry, source('src/ResearchAtlas.jsx'),
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        ownerChrome,
       ],
       targets: [
         named('RunView'), named('vendor-flow'), source('src/Dock.jsx'),
@@ -153,7 +156,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'public Shared Assistant excludes owner and graph code',
       roots: [entry, source('src/SharedAssistant.jsx')],
       targets: [
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'), source('src/Dock.jsx'),
+        ownerChrome, source('src/Dock.jsx'),
         named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx'),
       ],
       requireTargets: true,
@@ -162,7 +165,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'invalid review shell excludes the run and owner plane',
       roots: [entry],
       targets: [
-        named('RunView'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        named('RunView'), ownerChrome,
         source('src/Dock.jsx'),
       ],
       requireTargets: true,
@@ -174,7 +177,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
         source('src/Inspector.jsx'), source('src/Report.jsx'), source('src/CollabPanel.jsx'),
       ],
       targets: [
-        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        ownerChrome,
         source('src/Dock.jsx'), source('src/panels.jsx'),
       ],
       requireTargets: true,

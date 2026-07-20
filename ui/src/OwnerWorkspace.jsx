@@ -1,8 +1,11 @@
 import React, { lazy } from 'react'
 import LazyBoundary from './LazyBoundary.jsx'
 
-const AssistantBar = lazy(() => import('./AssistantBar.jsx'))
-const AttentionCenter = lazy(() => import('./AttentionCenter.jsx'))
+// Native module loading deduplicates the shared specifier; React.lazy retains each named view.
+const lazyOwner = name => lazy(() => import('./OwnerChrome.jsx')
+  .then(module => ({ default: module[name] })))
+const AssistantBar = lazyOwner('AssistantBar')
+const AttentionCenter = lazyOwner('AttentionCenter')
 
 /**
  * Stable owner-plane shell. Route content changes in the first slot; Assistant and Attention keep

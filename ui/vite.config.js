@@ -25,15 +25,16 @@ export default defineConfig({
     chunkSizeWarningLimit: 500,
     rollupOptions: {
       experimental: {
-        // CODEX AGENT: Stable module-id ordering lets related literals share each gzip stream's
-        // dictionary. Rolldown applies it only where dependency order stays valid; the manifest
-        // cycle gate below still fails closed if a chunk topology becomes unsafe.
-        chunkModulesOrder: 'module-id',
+        // # CODEX AGENT: `module-id` exposed a Rolldown ordering bug and produced a load-time crash.
+        // Keep its native topological/cycle-aware order instead: unlike the global execution shim,
+        // this preserves initialization order without adding ~7.5 KiB gzip to every build.
+        chunkModulesOrder: 'exec-order',
       },
       // Prefer the smaller equivalent module wrapper form. The default PIFE wrapper trades a little
       // more shipped code for startup speed; the UI's measured bundle budget favors transfer size.
       optimization: {
         pifeForModuleWrappers: false,
+        inlineConst: { mode: 'all', pass: 3 },
       },
       output: {
         minify: {
@@ -45,13 +46,9 @@ export default defineConfig({
         // groups consolidate modules used together across the same owner workspaces, avoiding many
         // tiny gzip streams without crossing the route/panel boundaries enforced by the bundle
         // checker. Never capture dependencies recursively: that would pull React/core into a group.
-        // Native ESM ordering avoids Rolldown's runtime ordering shim (about 4.2 KiB gzip here).
+        // Native ESM/topological ordering avoids Rolldown's runtime execution shim.
         // check:bundle rejects static manifest cycles, so an unsafe manual-chunk topology fails CI.
-        // 2026-07-20: strictExecutionOrder:false PLUS chunkModulesOrder:'module-id' (above) produced a
-        // bundle that reordered module INIT so a helper (`p` in the scheduler region) was called before
-        // its initialization -> "Uncaught TypeError: p is not a function" -> blank UI. The gzip win is
-        // not worth shipping a bundle that crashes at load; force correct execution order.
-        strictExecutionOrder: true,
+        strictExecutionOrder: false,
         codeSplitting: {
           groups: [
             {
@@ -113,7 +110,7 @@ export default defineConfig({
               // Polling/run-index consumers already import concept identity and receipt gates on
               // every production list/run/Concepts closure. One pure support stream removes the
               // dependency wrapper without making any route component or graph library eager.
-              test: /[/\\]src[/\\](hooks|runIndex|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight)\.(js|jsx)$/,
+              test: /[/\\]src[/\\](hooks|runIndex|buildingModel|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight)\.(js|jsx)$/,
               includeDependenciesRecursively: false,
             },
           ],

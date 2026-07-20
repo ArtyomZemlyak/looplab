@@ -15,6 +15,7 @@ import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
 import { tracePartial, traceUnavailable } from './traceProjection.js'
 import { crossRunPriorNarration } from './crossRunPrior.js'
+import { buildingGenerations, buildingMarkers } from './buildingModel.js'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -308,11 +309,7 @@ function collectThinking(trace, nid) {
 // limit toward the server ceiling so a user can page back through history on demand instead of just
 // reading a dead "projection is partial" notice. TRACE_LIMIT_MAX matches the /trace/tail server cap.
 const TRACE_LIMIT_DEFAULT = 40
-const TRACE_LIMIT_STEP = 80
 const TRACE_LIMIT_MAX = 400
-// Node-trace "load more spans": default per-node span cap + the on-demand ceiling (mirror the server's
-// TRACE_NODE_SPAN_CAP / TRACE_NODE_SPAN_CAP_MAX). 0 = ask for the default; the button raises it.
-const NODE_TRACE_CAP = 512
 const NODE_TRACE_CAP_MAX = 4096
 
 function LiveTrace({ runId, generation, active }) {
@@ -321,9 +318,8 @@ function LiveTrace({ runId, generation, active }) {
   const [open, setOpen] = useState(false)
   const [limit, setLimit] = useState(TRACE_LIMIT_DEFAULT)
   const bodyRef = useRef(null)
-  // stick: follow the newest span while the user is parked at the bottom; released when they scroll up
-  // to read history. preserve: when "load earlier" grows the feed UPWARD, hold the viewport on the same
-  // rows instead of letting follow-newest jump to the bottom.
+  // # CODEX AGENT: Keep one scalar bottom offset while paging upward. Storing both height and top
+  // duplicated the same invariant and made this hot owner-route code larger than its bundle budget.
   const stickRef = useRef(true)
   const preserveRef = useRef(null)
   // A new run/generation resets the paging window so a long prior scope doesn't over-fetch here.
@@ -337,40 +333,27 @@ function LiveTrace({ runId, generation, active }) {
     .catch(() => { if (alive()) setTailState({
       scope, items: [], projection: { unavailable: true }, loaded: true,
     }) }),
-    3000, [runId, generation, active, open, limit], { enabled: active && open })
+    3000, [scope, active, open, limit], { enabled: active && open })
   const current = tailState.scope === scope ? tailState : { items: [], projection: {}, loaded: false }
   const tail = current.items
   const unavailable = traceUnavailable(current.projection)
   const partial = tracePartial(current.projection)
-  const omitted = Number(current.projection?.omitted_spans) || 0
   const canLoadEarlier = partial && limit < TRACE_LIMIT_MAX
   const loadEarlier = () => {
     const el = bodyRef.current
-    preserveRef.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null
-    setLimit(l => Math.min(l + TRACE_LIMIT_STEP, TRACE_LIMIT_MAX))
-  }
-  const onScroll = () => {
-    const el = bodyRef.current
-    if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8
+    preserveRef.current = el ? el.scrollHeight - el.scrollTop : null
+    setLimit(value => Math.min(value * 2, TRACE_LIMIT_MAX))
   }
   // A "load earlier" button at the TOP of the feed (replaces the dead partial notice); a terminal note
   // only when partial but the server ceiling is reached (older spans live in the node's full trace).
-  const loadEarlierBtn = (
-    <button type="button" className="lt-loadmore disclosure-button" onClick={loadEarlier}>
-      ↑ load earlier spans{omitted > 0 ? ` (${omitted}+ earlier)` : ''}
-    </button>
-  )
-  const maxedNote = (
-    <div className="lt-note" role="status">
-      Showing the most recent {tail.length || limit} observations — older history is in the node's full trace.
-    </div>
-  )
-  const partialControl = canLoadEarlier ? loadEarlierBtn : partial ? maxedNote : null
+  const partialControl = !partial ? null : canLoadEarlier
+    ? <button type="button" className="lt-loadmore disclosure-button" onClick={loadEarlier}>↑ load earlier spans</button>
+    : <div className="lt-note" role="status">Earlier history is in the node's full trace.</div>
   useLayoutEffect(() => {
     const el = bodyRef.current
     if (!el || !open) return
-    if (preserveRef.current) {            // just loaded earlier: keep the viewport on the same rows
-      el.scrollTop = el.scrollHeight - preserveRef.current.height + preserveRef.current.top
+    if (preserveRef.current != null) {    // just loaded earlier: keep the viewport on the same rows
+      el.scrollTop = el.scrollHeight - preserveRef.current
       preserveRef.current = null
     } else if (stickRef.current) {        // parked at the bottom: follow the newest span
       el.scrollTop = el.scrollHeight
@@ -383,19 +366,18 @@ function LiveTrace({ runId, generation, active }) {
            onClick={() => setOpen(o => !o)} title="stream the agent's thoughts + tool calls">
         <span className="lt-caret">{open ? '▾' : '▸'}</span>trace
       </button>
-      {open && <div className="lt-body" ref={bodyRef} onScroll={onScroll}>
+      {open && <div className="lt-body" ref={bodyRef} onScroll={event => {
+        const el = event.currentTarget
+        stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8
+      }}>
         {!current.loaded
           ? <div className="muted lt-empty" role="status">loading trace…</div>
           : unavailable
           ? <TraceUnavailable label="Trace unavailable; retrying automatically." />
-          : tail.length === 0
-          ? (canLoadEarlier
-             ? loadEarlierBtn
-             : partial
-             ? <div className="lt-note" role="status">No recent observations to show — older history is in the node's full trace.</div>
-             : <div className="muted lt-empty">waiting for the next agent step…</div>)
           : <>{partialControl}
-            {tail.map((it, i) => it.kind === 'generation'
+            {!tail.length && !partial
+              ? <div className="muted lt-empty">waiting for the next agent step…</div>
+              : tail.map((it, i) => it.kind === 'generation'
             ? <div key={it.span_id || i} className="lt-row lt-gen">
                 <span className="lt-ic">🧠</span>
                 <span className="lt-txt">{it.text || <span className="muted">({it.model})</span>}</span>
@@ -442,25 +424,21 @@ function agentStatus(live, log) {
   // `buildings` marker LIST (node_id->marker object) so the single-build label is right even after the
   // last-appended build (the singular `live.building`) finishes but a sibling survives. Fall back to the
   // singular `building` for a serial-build run or an old server that doesn't send `buildings`.
-  const buildMarkers = (live.buildings && typeof live.buildings === 'object')
-    ? Object.values(live.buildings).filter(b => b && b.node_id != null)
-    : (live.building && live.building.node_id != null ? [live.building] : [])
+  const buildMarkers = buildingMarkers(live)
   if (buildMarkers.length > 1) {
-    const ids = buildMarkers.map(b => b.node_id).sort((a, b) => a - b)
-    return `Writing ${buildMarkers.length} experiments in parallel… (#${ids.join(', #')})`
+    return `Writing ${buildMarkers.length} experiments in parallel…`
   }
   if (buildMarkers.length === 1) {
     const op = buildMarkers[0].operator || ''
     const id = buildMarkers[0].node_id
-    return /repair|debug/.test(op) ? `Repairing experiment #${id}…`
-      : /merge/.test(op) ? `Merging into experiment #${id}…`
-      : `Writing experiment #${id}…`
+    const action = /repair|debug/.test(op) ? 'Repairing' : /merge/.test(op) ? 'Merging into' : 'Writing'
+    return `${action} experiment #${id}…`
   }
-  const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending').map(n => n.id)
+  const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending')
   // Surface parallelism: with max_parallel>1 several nodes train at once (each pinned to its own GPU).
   // The strip named only the highest id before, hiding the fan-out — show the count when >1.
-  if (pend.length > 1) return `Running ${pend.length} experiments in parallel… (training #${[...pend].sort((a, b) => a - b).join(', #')})`
-  if (pend.length) return `Running experiment #${Math.max(...pend)}… (training)`
+  if (pend.length > 1) return `Running ${pend.length} experiments in parallel…`
+  if (pend.length) return `Running experiment #${pend[0].id}… (training)`
   // Between experiments: infer from the last MEANINGFUL event (skip the bookkeeping noise above), so the
   // label stays put on "Planning…" instead of blinking every time a coverage/cost event lands.
   let last = null
@@ -680,11 +658,10 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const [nodeTrace, setNodeTrace] = useState(null)
   const [nodeTraceError, setNodeTraceError] = useState(false)
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
-  // "load more spans": 0 = the default server cap; the button raises it toward NODE_TRACE_CAP_MAX so a
-  // heavily-repaired node's full span tree can be paged in on demand (see NodeTrace's onLoadMore).
-  const [nodeTraceLimit, setNodeTraceLimit] = useState(0)
-  const loadMoreNodeTrace = () =>
-    setNodeTraceLimit(l => Math.min((l || NODE_TRACE_CAP) + NODE_TRACE_CAP, NODE_TRACE_CAP_MAX))
+  // # CODEX AGENT: Use the server's documented default explicitly, then double to its bounded ceiling.
+  // This removes the special zero/default request path without changing the first response window.
+  const [nodeTraceLimit, setNodeTraceLimit] = useState(512)
+  const loadMoreNodeTrace = () => setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_CAP_MAX))
   const rawTraceGeneration = Object.hasOwn(e.data || {}, 'generation')
     ? e.data.generation : (e.type === 'node_repaired' ? e.data?.attempt : 0)
   const traceGeneration = Number.isInteger(rawTraceGeneration) && rawTraceGeneration >= 0
@@ -692,11 +669,10 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   // `liveBuilding` is a Map<nodeId, generation> of every concurrent build; this row live-polls its trace
   // only when it IS one of those exact building lifecycles (right node AND right generation).
   const exactBuilding = liveBuilding != null && traceNid != null && traceGeneration != null
-    && liveBuilding.get(traceNid) === traceGeneration
+    && liveBuilding[traceNid] === traceGeneration
   // Clear the error flag only on a SUCCESSFUL load (not eagerly at the start of every poll tick):
   // clearing then re-setting each 4s tick made the error/Retry banner flicker on a persistent failure.
-  const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid,
-      nodeTraceLimit > 0 ? `/trace?limit=${nodeTraceLimit}` : '/trace'))
+  const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid, `/trace?limit=${nodeTraceLimit}`))
     .then(d => { if (alive()) { setNodeTrace(d); setNodeTraceError(false) } })
     .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
   const retryNodeTrace = () => {
@@ -904,22 +880,10 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // once), so each concurrent build's feed row live-polls its own trace — not just the singular
   // last-appended one. `buildings` is a node_id->marker object; fall back to the singular `building`
   // for a serial-build / old server. null when nothing is live-building (keeps the poll disabled).
-  const liveBuilding = useMemo(() => {
-    if (readOnly || !atLiveView || timeline.generation !== expectedGeneration) return null
-    const bag = (live?.buildings && typeof live.buildings === 'object')
-      ? Object.values(live.buildings)
-      : (live?.building ? [live.building] : [])
-    if (!bag.length) return null
-    const map = new Map()
-    for (const b of bag) {
-      if (!b) continue
-      const nodeId = Number(b.node_id)
-      const generation = Object.hasOwn(b, 'generation') ? b.generation : (live.nodes?.[nodeId]?.attempt ?? 0)
-      if (!Number.isInteger(nodeId) || nodeId < 0 || !Number.isInteger(generation) || generation < 0) continue
-      map.set(nodeId, generation)
-    }
-    return map.size ? map : null
-  }, [readOnly, atLiveView, timeline.generation, expectedGeneration, live])
+  // The marker bag is bounded by parallel_build; projecting it directly is cheaper than memo state
+  // and guarantees the generation fence is evaluated on every live render.
+  const liveBuilding = readOnly || !atLiveView || timeline.generation !== expectedGeneration
+    ? null : buildingGenerations(live)
 
   // Scrubber: pointer/key movement is a LOCAL preview. Commit only on pointer-up/key-up/blur so a
   // 50k-event drag cannot queue a series of expensive historical state folds on the server.

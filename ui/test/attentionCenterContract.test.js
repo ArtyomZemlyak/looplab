@@ -31,8 +31,8 @@ test('Attention Center stays on the owner plane and out of review/shared routes'
 
   assert.equal((workspaceSource.match(/<AttentionComponent\b/g) || []).length, 1)
   assert.match(workspaceSource, /<AttentionComponent \/>/)
-  assert.match(workspaceSource, /const AttentionCenter = lazy\(/,
-    'the owner-only poller must remain deferred until the owner workspace mounts')
+  assert.match(workspaceSource, /const lazyOwner[\s\S]*?import\('\.\/OwnerChrome\.jsx'\)[\s\S]*?const AttentionCenter = lazyOwner\('AttentionCenter'\)/,
+    'the owner-only poller must remain behind the shared owner-workspace lazy boundary')
   const reviewReturn = appSource.indexOf("if (route.view === 'review') return")
   const sharedReturn = appSource.indexOf("if (route.view === 'shared') return")
   const ownerGate = appSource.indexOf('<OwnerAuth label={routeLabel}>')

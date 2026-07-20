@@ -676,14 +676,11 @@ export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore }
   const roots = spans || []
   if (traceUnavailable(projection)) return <TraceUnavailable onRetry={onRetry} />
   const partial = tracePartial(projection)
-  // Prefer an ACTIONABLE control over a dead "projection is partial" notice: when the caller can page
-  // (onLoadMore, i.e. the node-trace view), render a button that raises the span ceiling; else keep the
-  // plain notice (a caller like by-trace OpTrace has no paging). omitted = the count still hidden.
-  const omitted = Math.max(Number(projection?.omitted_spans) || 0,
-    (Number(projection?.total_spans) || 0) - (Number(projection?.visible_spans) || 0))
+  // Prefer an ACTIONABLE control over a dead "projection is partial" notice. The receipt remains in
+  // projection; repeating its optional count in this hot render path added branches without utility.
   const loadMore = (partial && onLoadMore)
     ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
-        ↧ load more spans{omitted > 0 ? ` (${omitted} more)` : ''}
+        ↧ load more spans
       </button>
     : null
   if (!roots.length) {

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { withBuilding } from '../src/buildingModel.js'
+import { buildingGenerations, buildingMarkers, withBuilding } from '../src/buildingModel.js'
 
 const baseNodes = { 5: { id: 5, status: 'evaluated' } }
 
@@ -59,4 +59,21 @@ test('skips a malformed marker (no node_id) without throwing', () => {
   const out = withBuilding(state)
   assert.equal(out.nodes[1].status, 'building')          // the valid one still renders
   assert.equal(Object.keys(out.nodes).length, 2)         // base node 5 + node 1 only (the bad one skipped)
+})
+
+test('canonical marker projection validates ids and generations for live trace polling', () => {
+  const state = {
+    nodes: { 2: { attempt: 3 } },
+    building: { node_id: 99, generation: 9 },
+    buildings: {
+      good: { node_id: '2' },
+      explicit: { node_id: 4, generation: 1 },
+      boolean: { node_id: true, generation: 7 },
+      badGeneration: { node_id: 5, generation: -1 },
+      missing: null,
+    },
+  }
+  assert.equal(buildingMarkers(state).length, 3, 'parallel collection is authoritative and structural junk is removed')
+  assert.deepEqual(buildingGenerations(state), { 2: 3, 4: 1 })
+  assert.equal(buildingGenerations({}), null)
 })
