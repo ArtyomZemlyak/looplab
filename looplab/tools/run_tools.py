@@ -391,19 +391,23 @@ class RunTools:
                         "this is NOT proof that no themes are assigned)")
             return "(no themes assigned yet)"
         ordered = sorted(roll.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
-        shown = ordered[:self._MAX_THEME_ITEMS]
-        rendered = "\n".join(
+        visible = [
             f"{t}: {d['count']} experiment(s)" +
             (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
-            for t, d in shown)
-        if len(ordered) > len(shown):
-            # CODEX AGENT: a theme list is advisory but still an evidence projection; name the bounded tail
-            # instead of allowing the outer tool loop to cut it into an apparently exhaustive list.
-            rendered += f"\n… (+{len(ordered) - len(shown)} more theme axis/axes, not shown)"
-        if projection.status != "complete":
-            return (f"{self._projection_note(projection)}; showing retained current theme hints "
-                    "(legacy fallback only where membership is unrecorded):\n" + rendered)
-        return rendered
+            for t, d in ordered[:self._MAX_THEME_ITEMS]]
+        qualifier = (f"{self._projection_note(projection)}; showing retained current theme hints "
+                     "(legacy fallback only where membership is unrecorded):\n"
+                     if projection.status != "complete" else "")
+        while visible:
+            omitted = len(ordered) - len(visible)
+            suffix = (f"\n… (+{omitted} more theme axis/axes, not shown)" if omitted else "")
+            rendered = qualifier + "\n".join(visible) + suffix
+            if len(rendered) <= self.max_chars:
+                return rendered
+            visible.pop()
+        # CODEX AGENT: the tool loop head-clips over-budget strings. Fail explicitly when even one
+        # complete row cannot fit, rather than returning a severed axis that looks authoritative.
+        return qualifier + f"(theme output exceeds the {self.max_chars}-character budget)"
 
     @staticmethod
     def _current_theme_axes(st: RunState, projection) -> dict[int, set[str]]:
@@ -536,14 +540,20 @@ class RunTools:
                 return (f"({self._projection_note(projection)}; no match in the available subset, "
                         "which is NOT a complete zero)")
             return f"(no experiments tagged '{target}')"
-        shown = hits[:60]
-        if len(hits) > len(shown):
-            # CODEX AGENT: the headline reports the full population, so the bounded listing needs an
-            # honest omission receipt; otherwise a Researcher can mistake the first 60 for exhaustive.
-            shown.append(f"… (+{len(hits) - len(shown)} more experiment(s), not shown)")
         prefix = (self._projection_note(projection) + "; available strict subset follows\n"
                   if projection.status == "partial" else "")
-        return prefix + f"{len(hits)} experiment(s) under '{target}':\n" + "\n".join(shown)
+        visible = hits[:60]
+        while visible:
+            omitted = len(hits) - len(visible)
+            suffix = (f"\n… (+{omitted} more experiment(s), not shown)" if omitted else "")
+            rendered = (prefix + f"{len(hits)} experiment(s) under '{target}':\n"
+                        + "\n".join(visible) + suffix)
+            if len(rendered) <= self.max_chars:
+                return rendered
+            visible.pop()
+        # CODEX AGENT: preserve the population truth even when a single bounded experiment line is
+        # wider than this caller's budget; the outer generic truncator must not fabricate a partial row.
+        return prefix + f"(concept membership output exceeds the {self.max_chars}-character budget)"
 
     def _node_concepts_tool(self, st: RunState, nid: int) -> str:
         if not st.nodes.get(nid):

@@ -698,6 +698,34 @@ def test_concept_nodes_reports_omitted_experiments():
     assert "#59" in rendered and "#60" not in rendered
 
 
+def test_theme_and_concept_population_receipts_survive_character_budget():
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        nid: Node(
+            id=nid, operator="draft",
+            idea=Idea(operator="draft", params={"x": float(nid)}),
+            metric=float(nid), status=NodeStatus.evaluated,
+        )
+        for nid in range(70)
+    }
+    st.node_concepts = {
+        nid: [f"axis-{nid:02d}-{'long' * 18}/shared"] for nid in st.nodes
+    }
+    _mark_concepts_exact(st)
+    tools = RunTools(max_chars=420)
+    tools.bind_state(st)
+
+    themes = tools.execute("list_themes", {})
+    assert len(themes) <= tools.max_chars
+    assert "more theme axis/axes, not shown" in themes
+
+    st.node_concepts = {nid: ["loss/shared"] for nid in st.nodes}
+    nodes = tools.execute("concept_nodes", {"concept": "loss/shared"})
+    assert len(nodes) <= tools.max_chars
+    assert nodes.startswith("70 experiment(s)")
+    assert "more experiment(s), not shown" in nodes
+
+
 def test_concept_read_tools_normalize_ids_to_the_frame_vocabulary(tmp_path):
     # REVIEW: the tools must NORMALIZE ids (case/space/slash) the SAME way project_hierarchy + the
     # /concepts frame + the UI do, or the rendered tree's subtree counts collapse to [0] and a query on
