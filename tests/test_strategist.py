@@ -660,6 +660,53 @@ def test_experiment_time_budget_cue_surfaces_limit_and_calibration(tmp_path):
     assert "Experiment TIME BUDGET" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_gpu_pin_cue_surfaces_single_device_constraint_under_parallel_eval(tmp_path, monkeypatch):
+    # Under PARALLEL eval the engine pins each experiment to ONE GPU, so the Researcher must be told to
+    # size every command to a SINGLE device — the fix for the rubertlite-v4 run that failed every node
+    # by copying the repo's `--gpus 2` convention. Fires for repo tasks when pinning is active
+    # (max_parallel>1 + GPUs detected); silent on a serial (unpinned) run or with no GPUs.
+    monkeypatch.setattr("looplab.engine.orchestrator._detect_gpu_ids", lambda: [0, 1])
+    eng = _engine(tmp_path / "gpu-cue", max_parallel=2)
+    eng._repo_spec = {"editables": []}
+    st = RunState(direction="max")
+    eng._set_complexity_hint(st, None)
+    hint = getattr(eng.researcher, "_complexity_hint", "")
+    assert "GPU CONSTRAINT" in hint and "SINGLE GPU" in hint and "--gpus 1" in hint
+    assert "--gpus 2" in hint                      # names the wrong convention it must override
+    # serial run (max_parallel=1) never pins -> no false alarm
+    eng1 = _engine(tmp_path / "gpu-cue-serial", max_parallel=1)
+    eng1._repo_spec = {"editables": []}
+    eng1._set_complexity_hint(st, None)
+    assert "GPU CONSTRAINT" not in getattr(eng1.researcher, "_complexity_hint", "")
+    # parallel but NO GPUs detected -> nothing to pin -> silent
+    monkeypatch.setattr("looplab.engine.orchestrator._detect_gpu_ids", lambda: [])
+    eng2 = _engine(tmp_path / "gpu-cue-nogpu", max_parallel=2)
+    eng2._repo_spec = {"editables": []}
+    eng2._set_complexity_hint(st, None)
+    assert "GPU CONSTRAINT" not in getattr(eng2.researcher, "_complexity_hint", "")
+
+
+def test_repair_context_carries_single_gpu_constraint_under_pinning(tmp_path, monkeypatch):
+    # The repair loop is where the rubertlite-v4 FIX-REGRESSION happened: it fixed `--gpus 2` then
+    # REVERTED it on the next attempt while chasing a later error. Under pinning, every repair prompt
+    # must carry the 1-GPU constraint so the single-device fix STICKS across attempts. Silent serial.
+    monkeypatch.setattr("looplab.engine.orchestrator._detect_gpu_ids", lambda: [0, 1])
+    eng = _engine(tmp_path / "rep-gpu", max_parallel=2)
+    eng._repo_spec = {"editables": []}             # repo task -> command-centric directive applies
+    ctx = eng._repair_error_context("crash", "RuntimeError in pick_multiple_gpus: only 1 GPU")
+    assert "exactly ONE GPU is visible" in ctx and "--gpus 1" in ctx and "KEEP it" in ctx
+    # serial run (unpinned) -> silent
+    eng1 = _engine(tmp_path / "rep-serial", max_parallel=1)
+    eng1._repo_spec = {"editables": []}
+    ctx1 = eng1._repair_error_context("crash", "RuntimeError in pick_multiple_gpus: only 1 GPU")
+    assert "exactly ONE GPU is visible" not in ctx1
+    # parallel + pinned but NOT a repo task (solution.py) -> silent (no CLI command to advise on)
+    eng2 = _engine(tmp_path / "rep-nonrepo", max_parallel=2)
+    eng2._repo_spec = {}
+    ctx2 = eng2._repair_error_context("crash", "RuntimeError in pick_multiple_gpus: only 1 GPU")
+    assert "exactly ONE GPU is visible" not in ctx2
+
+
 def test_run_base_hint_requires_explicit_delta_mode(tmp_path):
     eng = _engine(tmp_path / "concept-mode", concept_run_base=True)
     st = RunState(direction="min", run_base_concepts=["base/x"])

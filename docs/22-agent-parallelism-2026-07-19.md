@@ -29,6 +29,24 @@ The run spine (`engine/orchestrator.py::run`) each iteration:
    given a no-op `CapacityLimiter(1)`). Each concurrent eval is pinned to a distinct GPU
    (`_evaluate::_acquire_gpu` + `orchestrator._detect_gpu_ids`/`_free_gpus`).
 
+   **GPU-pin transparency (2026-07-20 follow-up).** The pin sets a single-index
+   `CUDA_VISIBLE_DEVICES`, so the eval subprocess sees exactly ONE GPU. A command that hardcodes a
+   MULTI-device request (`--gpus 2`, `--gpus 0,1`, `--devices 2`, DDP) then crashes in
+   pytorch-lightning `pick_multiple_gpus` — this is what failed EVERY node of `rubertlite-dr-unified-v4`
+   (the repo README + the PROTECTED eval command both used `--gpus 2`; the repair loop even fixed the
+   train stage then reverted it while chasing a later error). Two universal fixes close this:
+   - **cap at launch** — `command_eval.cap_gpu_flags` reconciles any recognized device flag to a single
+     device inside `run_command_eval::_bound` (the one funnel every stage + the protected score command
+     flow through), gated on a single-index CVD in `env`. It caps by SEMANTICS: a COUNT flag (`--gpus 2`
+     → `1`), an INDEX flag (`--gpu 3` → `0`, since only ordinal 0 is visible), and device lists/ranges
+     (`0,1` / `0-3` → `0`). This makes the pin's "transparent
+     remap to cuda:0" promise TRUE even for the protected command the agent cannot edit. No-op when
+     unpinned (a serial run legitimately has the whole box).
+   - **surface the constraint** — a GPU-pinning cue in `proposal_cues::_set_complexity_hint` (Researcher
+     side) + its twin in `crash_repair::_repair_error_context` (repair side) tell every role "you are
+     pinned to ONE GPU; use `--gpus 1`", so the FIRST draft and every repair size to a single device and
+     the fix STICKS across attempts.
+
 `_create_node` (`orchestrator.py:1680`) is the expensive part and is **fully synchronous**:
 
 - `node_id = max(state.nodes, default=-1) + 1` — id derived from `fold(store.read_all())` **at build

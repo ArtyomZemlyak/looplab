@@ -343,6 +343,84 @@ def expand_params(argv: list, params: Optional[dict]) -> list:
     return out
 
 
+# GPU CLI flags reconciled to a SINGLE device when the eval is pinned to one GPU (see
+# run_command_eval::_bound). Deliberately a TIGHT allowlist of unambiguous device selectors from the
+# DL-training world — capping an unrelated numeric flag would corrupt a command, so anything not
+# clearly a GPU/device selector is left untouched. Split by SEMANTICS, because the same number means
+# different things: a COUNT flag ("how MANY gpus", `--gpus 2`) caps to "1"; an INDEX flag ("WHICH gpu",
+# `--gpu 3`) caps to "0" — under the pin the sole visible ordinal is 0, so a count-style "1" would
+# still be an invalid ordinal and crash. `--gpus` is this run's own flag; the rest cover the common
+# pytorch-lightning / torchrun / DDP spellings so the fix is universal, not per-repo.
+_GPU_COUNT_FLAGS = frozenset({
+    "--gpus", "--num_gpus", "--num-gpus", "--n_gpus", "--n-gpus", "--ngpus",
+    "--num_devices", "--num-devices", "--devices", "--gpu_count", "--gpu-count",
+    "--world_size", "--world-size", "--nproc_per_node", "--nproc-per-node",
+})
+_GPU_INDEX_FLAGS = frozenset({
+    "--gpu", "--gpu_id", "--gpu-id", "--gpu_index", "--gpu-index",
+    "--cuda_device", "--cuda-device", "--device_id", "--device-id",
+})
+_RANGE_RE = re.compile(r"\d+-\d+")   # a device RANGE like "0-3" (distinct from a negative "-1")
+
+
+def _cap_gpu_value(val: str, *, index: bool = False) -> Optional[str]:
+    """Cap ONE gpu-flag value for a command that will run PINNED to a single visible GPU (ordinal 0),
+    or return None to leave it unchanged.
+
+    INDEX flag (`--gpu 3` = WHICH gpu): the only visible ordinal is 0, so ANY positive index / list /
+    range -> "0"; "0", "-1" ("all"/"auto") and non-numeric are left as-is.
+    COUNT flag (`--gpus 2` = HOW MANY): a plain COUNT >1 -> "1"; a device LIST ("0,1") or RANGE ("0-3")
+    is really an index spec -> "0"; a single "0"/"1"/non-numeric is left as-is."""
+    v = (val or "").strip()
+    if not v:
+        return None
+    is_list = "," in v                                     # "0,1" or single-element "3,"
+    is_range = bool(_RANGE_RE.fullmatch(v))                # "0-3" (NOT "-1")
+    if index:
+        if is_list or is_range:
+            return "0"
+        if v.lstrip("+").isdigit():                        # a plain non-negative index
+            return "0" if int(v) != 0 else None
+        return None                                        # "auto" / "-1" / non-numeric
+    if is_list or is_range:                                # count flag carrying an index LIST/RANGE
+        return "0"
+    if v.isdigit():                                        # a plain COUNT (or single index)
+        return "1" if int(v) > 1 else None
+    return None                                            # "auto" / "-1" / non-numeric
+
+
+def cap_gpu_flags(argv: list) -> list:
+    """Return `argv` with any explicit MULTI-GPU request capped to a SINGLE device, for a command that
+    will run PINNED to one GPU (a single-index CUDA_VISIBLE_DEVICES). Handles both `--gpus 2` (flag +
+    separate value token) and `--gpus=2` (=-joined) forms for the tight count/index allowlists, and
+    caps device COUNTS, INDICES, lists and ranges by their flag's semantics (see `_cap_gpu_value`).
+    Pure list[str]->list[str] (mirrors expand_params); unrecognized/ambiguous values pass through
+    unchanged so a non-GPU command is never corrupted. Gated by the pin check in run_command_eval::
+    _bound — this makes the pin's 'transparent remap to cuda:0' promise TRUE even for a command (the
+    editable train stage OR the PROTECTED score command the agent cannot edit) that hardcodes >1 GPU."""
+    out: list = []
+    i, n = 0, len(argv)
+    while i < n:
+        a = argv[i]
+        if isinstance(a, str) and a.startswith("--") and "=" in a:          # `--flag=value` form
+            flag, _, val = a.partition("=")
+            if flag in _GPU_COUNT_FLAGS or flag in _GPU_INDEX_FLAGS:
+                capped = _cap_gpu_value(val, index=flag in _GPU_INDEX_FLAGS)
+                out.append(f"{flag}={capped}" if capped is not None else a)
+                i += 1
+                continue
+        if (isinstance(a, str) and (a in _GPU_COUNT_FLAGS or a in _GPU_INDEX_FLAGS)   # `--flag value`
+                and i + 1 < n and isinstance(argv[i + 1], str)):
+            capped = _cap_gpu_value(argv[i + 1], index=a in _GPU_INDEX_FLAGS)
+            out.append(a)
+            out.append(capped if capped is not None else argv[i + 1])
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
 def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Optional[str]]:
     """Validate a stage list ({name, command:[argv...], timeout?, check?}) into its canonical clean
     form: (clean, None) on success, (None, reason) on the first problem. This is the SINGLE
@@ -615,11 +693,23 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # Windows and would break the command).
     is_docker = bool(getattr(wrap, "_docker", False))
 
+    # GPU-pin reconciliation gate: the engine pins a PARALLEL eval to exactly ONE GPU by setting a
+    # single-index CUDA_VISIBLE_DEVICES in `env` (evaluate.py::_acquire_gpu). When it did, cap any
+    # explicit multi-device request in the command down to one device (below) — the subprocess sees
+    # only 1 GPU, so `--gpus 2`/`--devices 2`/`--gpus 0,1` would otherwise crash (pytorch-lightning
+    # pick_multiple_gpus), including the PROTECTED score command the agent cannot edit. No-op when
+    # unpinned (env None, or CVD names multiple devices — a serial run legitimately has the whole box).
+    _cvd = (env or {}).get("CUDA_VISIBLE_DEVICES")
+    _pinned_one_gpu = bool(_cvd) and "," not in str(_cvd)
+
     def _bound(argv, secs):
-        # Under the docker wrap, self-limit the container with coreutils `timeout` so a runaway
-        # exits from INSIDE (+ --rm cleanup) even if the host kills the `docker run` client —
-        # killing the CLI does not stop the daemon-owned container.
-        return (["timeout", "-k", "5", str(max(1, int(secs)))] + list(argv)) if is_docker else list(argv)
+        # Reconcile multi-GPU flags FIRST (before the docker wrap, so docker's own `--gpus` is
+        # untouched), then apply the docker `timeout` prefix. Under the docker wrap, self-limit the
+        # container with coreutils `timeout` so a runaway exits from INSIDE (+ --rm cleanup) even if
+        # the host kills the `docker run` client — killing the CLI does not stop the daemon-owned
+        # container.
+        argv = cap_gpu_flags(list(argv)) if _pinned_one_gpu else list(argv)
+        return (["timeout", "-k", "5", str(max(1, int(secs)))] + argv) if is_docker else argv
 
     grace = 15.0 if is_docker else 0.0
     if setup:

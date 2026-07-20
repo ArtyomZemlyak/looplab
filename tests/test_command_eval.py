@@ -5,13 +5,72 @@ Regressions consolidated from the code-review rounds (feasibility/NaN round, dee
 /code-review findings)."""
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
 
-from looplab.runtime.command_eval import _drift, _fmt, read_metric, run_command_eval
+from looplab.runtime.command_eval import (_drift, _fmt, cap_gpu_flags, read_metric,
+                                           run_command_eval)
 
 _M = {"kind": "stdout_json", "key": "metric"}
+
+
+# --- GPU-pin reconciliation: cap a hardcoded multi-GPU request to one device when pinned ----------
+def test_cap_gpu_flags_caps_count_and_list_but_leaves_singles_and_unknowns():
+    # A device COUNT >1 -> 1; a device LIST -> the single visible index 0; both `--flag N` and
+    # `--flag=N` forms. A single/already-safe or non-numeric value is untouched, and a flag NOT in the
+    # allowlist (here `--batch_size`) is never rewritten — capping an unrelated number would corrupt it.
+    assert cap_gpu_flags(["train.py", "--gpus", "2"]) == ["train.py", "--gpus", "1"]
+    assert cap_gpu_flags(["train.py", "--gpus=4"]) == ["train.py", "--gpus=1"]
+    assert cap_gpu_flags(["train.py", "--gpus", "0,1"]) == ["train.py", "--gpus", "0"]
+    assert cap_gpu_flags(["train.py", "--devices=0,1,2,3"]) == ["train.py", "--devices=0"]
+    assert cap_gpu_flags(["t.py", "--num_gpus", "8", "--world_size=2"]) == \
+        ["t.py", "--num_gpus", "1", "--world_size=1"]
+    # COUNT flag carrying a device LIST/RANGE (really an index spec) -> the single visible index 0
+    assert cap_gpu_flags(["t.py", "--gpus", "0-3"]) == ["t.py", "--gpus", "0"]        # range
+    assert cap_gpu_flags(["t.py", "--devices", "3,"]) == ["t.py", "--devices", "0"]   # trailing-comma list
+    # INDEX flag (WHICH gpu): only ordinal 0 is visible under the pin, so a count-style "1" would still
+    # crash -> any positive index / list / range -> "0"; index 0 and "-1"/"auto" left alone.
+    assert cap_gpu_flags(["train.py", "--gpu", "3"]) == ["train.py", "--gpu", "0"]
+    assert cap_gpu_flags(["train.py", "--gpu=1"]) == ["train.py", "--gpu=0"]
+    assert cap_gpu_flags(["train.py", "--gpu_id", "2"]) == ["train.py", "--gpu_id", "0"]
+    assert cap_gpu_flags(["train.py", "--gpu", "0"]) == ["train.py", "--gpu", "0"]
+    assert cap_gpu_flags(["train.py", "--gpu", "-1"]) == ["train.py", "--gpu", "-1"]
+    # left alone: already-single, non-numeric, and non-GPU numeric flags
+    assert cap_gpu_flags(["train.py", "--gpus", "1"]) == ["train.py", "--gpus", "1"]
+    assert cap_gpu_flags(["train.py", "--gpus", "auto"]) == ["train.py", "--gpus", "auto"]
+    assert cap_gpu_flags(["train.py", "--gpus", "-1"]) == ["train.py", "--gpus", "-1"]
+    assert cap_gpu_flags(["train.py", "--batch_size", "256"]) == ["train.py", "--batch_size", "256"]
+    # a trailing gpu flag with no value token must not IndexError
+    assert cap_gpu_flags(["train.py", "--gpus"]) == ["train.py", "--gpus"]
+
+
+def _gpus_probe(tmp_path):
+    # A tiny eval whose METRIC is the numeric value it actually received for --gpus, so a run can
+    # observe whether the engine rewrote the command it launched.
+    (tmp_path / "p.py").write_text(
+        'import sys,json; a=sys.argv\n'
+        'g=a[a.index("--gpus")+1] if "--gpus" in a else "0"\n'
+        'print(json.dumps({"metric": float(g)}))\n', encoding="utf-8")
+    return [sys.executable, "p.py", "--gpus", "2"]
+
+
+def test_run_command_eval_caps_multi_gpu_only_when_pinned_to_one_device(tmp_path):
+    # When the engine pinned this eval to ONE gpu (single-index CUDA_VISIBLE_DEVICES in env), the
+    # hardcoded `--gpus 2` is reconciled to `--gpus 1` so the 1-visible-GPU subprocess doesn't crash.
+    cmd = _gpus_probe(tmp_path)
+    pinned = run_command_eval(cmd, str(tmp_path), 60, _M,
+                              env={**os.environ, "CUDA_VISIBLE_DEVICES": "3"})
+    assert pinned.metric == 1.0                         # capped: the subprocess saw --gpus 1
+    # Unpinned (single-experiment run: env is None) leaves the command verbatim — a serial run
+    # legitimately has the whole multi-GPU box, so `--gpus 2` must stand.
+    unpinned = run_command_eval(_gpus_probe(tmp_path), str(tmp_path), 60, _M, env=None)
+    assert unpinned.metric == 2.0
+    # A multi-device CVD (env present but naming >1 device) is NOT a single-GPU pin -> not capped.
+    multi = run_command_eval(_gpus_probe(tmp_path), str(tmp_path), 60, _M,
+                             env={**os.environ, "CUDA_VISIBLE_DEVICES": "0,1"})
+    assert multi.metric == 2.0
 
 
 def test_fmt_non_finite_param_does_not_crash():

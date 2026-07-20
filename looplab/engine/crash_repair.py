@@ -85,6 +85,22 @@ class CrashRepairMixin:
             if chain:
                 chain += "\n\n"
         error = chain + (error or "")
+        # GPU-pin constraint (repair-side twin of the proposal_cues GPU cue): when the engine runs
+        # evals in PARALLEL it pins each to EXACTLY ONE GPU (CUDA_VISIBLE_DEVICES), so a repair MUST
+        # NOT (re-)introduce a multi-device request. The rubertlite-v4 repair loop fixed `--gpus 2`
+        # then REVERTED it on the next attempt while chasing a later error — the fix-regression that
+        # failed EVERY node. Carry the hard constraint into every repair prompt under pinning so the
+        # single-device fix STICKS across attempts. Gated on pinning being active (max_parallel>1 +
+        # GPUs detected) — mirrors evaluate.py::_acquire_gpu — AND on a repo task (`_repo_spec`),
+        # symmetric with the proposal-cue gate: a solution.py eval has no CLI command, so this
+        # command-centric directive would be off-target there. Silent on a serial (unpinned) run.
+        if (getattr(self, "_repo_spec", None) and getattr(self, "max_parallel", 1) > 1
+                and getattr(self, "_gpu_ids", None)):
+            error += ("\n[hardware: exactly ONE GPU is visible — the engine pinned this experiment to a "
+                      "single device for parallel eval. Every training/eval command MUST use `--gpus 1` "
+                      "/ `--devices 1` / `devices=1` (a single device). Do NOT request 2+ GPUs "
+                      "(`--gpus 2`, `--gpus 0,1`, multi-GPU DDP) — it CRASHES on 1 visible GPU. If an "
+                      "earlier attempt already set the device count to 1, KEEP it there.]")
         if reason == "timeout":
             # Don't quote a specific budget here: the wall-clock varies by node kind (a sweep node gets
             # timeout×sweep_timeout_mult; a RepoTask uses its own per-profile timeout), so a hardcoded

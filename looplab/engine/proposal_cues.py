@@ -115,6 +115,30 @@ class ProposalCuesMixin:
                 f"measure it FIRST, then size epochs to fit — a smaller experiment that COMPLETES beats a "
                 f"bigger one that gets killed."
                 + (f" Measured so far — {calib}." if calib else ""))
+        # GPU-PINNING cue (repo tasks under parallel eval): when the engine runs experiments in
+        # PARALLEL it pins each eval to EXACTLY ONE GPU via CUDA_VISIBLE_DEVICES (evaluate.py::
+        # _acquire_gpu), so a training/eval command that explicitly requests MULTIPLE devices
+        # (`--gpus 2`, `--gpus 0,1`, `--devices 2`, DDP / `Trainer(devices=2)`) sees only ONE
+        # visible GPU and CRASHES in pytorch-lightning's parse_gpu_ids/pick_multiple_gpus. Repos
+        # whose README + eval command use `--gpus 2`/`--gpus 4` (the multi-GPU-box convention)
+        # mislead every role into copying it — the rubertlite-v4 run failed EVERY node this way, and
+        # the repair loop kept RE-INTRODUCING `--gpus 2` while chasing later errors (attempt 3 fixed
+        # it, attempt 4 reverted it). Surface the hard constraint so the FIRST draft sizes to a single
+        # device; the repair path carries the SAME constraint via its own twin in
+        # crash_repair.py::_repair_error_context (this `_complexity_hint` reaches the Researcher's
+        # proposal prompt, not Developer.repair). Gated on pinning being ACTIVE (max_parallel>1 + GPUs
+        # detected); silent on a serial run (unpinned — the box's real GPU count stands, so multi-GPU
+        # is legitimately available there).
+        if self._repo_spec and self.max_parallel > 1 and getattr(self, "_gpu_ids", None):
+            hint += (
+                "\nGPU CONSTRAINT — this run evaluates experiments in PARALLEL, so concurrent "
+                "experiments are pinned to distinct SINGLE GPUs (CUDA_VISIBLE_DEVICES). Every "
+                "training/eval command MUST target a SINGLE device: use `--gpus 1` / `--devices 1` / "
+                "`devices=1` (or a single-GPU accelerator) — NOT `--gpus 2`, `--gpus 0,1`, or "
+                "multi-GPU DDP. A multi-device request sees only 1 visible GPU and CRASHES "
+                "(pytorch-lightning parse_gpu_ids/pick_multiple_gpus). If the repo's README or example "
+                "commands show `--gpus 2`/`--gpus 4`, that is the multi-GPU-box convention — OVERRIDE "
+                "it to 1 here.")
         if self._failure_reflection:
             fails = sorted((n for n in state.nodes.values()
                             if n.status is NodeStatus.failed and n.error_reason),
