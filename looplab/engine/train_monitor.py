@@ -72,7 +72,10 @@ def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000
     if not text:
         return ""
     records: list[str] = []
-    for rec in text.split("\n"):
+    # CODEX AGENT: normalize only the platform newline pair. Splitting each Windows `\r\n` record on
+    # bare `\r` first made its final segment empty, silently disabling both watchdogs on Windows;
+    # genuine standalone carriage-return progress redraws remain intact for the collapse below.
+    for rec in text.replace("\r\n", "\n").split("\n"):
         seg = rec.split("\r")[-1].rstrip()   # in-place re-renders: keep the final rendered segment only
         if seg.strip():
             records.append(seg)

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import threading
-from pathlib import Path
 
 import anyio
 
@@ -43,6 +42,15 @@ def test_digest_bounds_lines_and_chars():
 def test_digest_empty_and_whitespace():
     assert training_log_digest("") == ""
     assert training_log_digest("   \n\n \r ") == ""
+
+
+def test_digest_preserves_windows_crlf_records_but_collapses_bare_cr_redraws():
+    raw = "step 1 loss: 0.5\r\nstep 2 loss: 0.4\r\nprogress 10%\rprogress 90%\r\n"
+    assert training_log_digest(raw).splitlines() == [
+        "step 1 loss: 0.5",
+        "step 2 loss: 0.4",
+        "progress 90%",
+    ]
 
 
 # --------------------------------------------------------------------------- log-file selection + tail
