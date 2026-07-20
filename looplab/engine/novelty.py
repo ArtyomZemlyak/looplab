@@ -134,6 +134,41 @@ def _bounded_action_mapping(raw, *, sequence_values: bool) -> dict:
     return {"entries": kept, "entries_omitted": len(rows) - len(kept)}
 
 
+def _canonical_action_number(value) -> tuple[str, float | str]:
+    """Stable equality token for the numeric fields accepted by ``Idea``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "invalid", type(value).__name__
+    if math.isnan(number):
+        return "nonfinite", "nan"
+    if math.isinf(number):
+        return "nonfinite", "inf" if number > 0 else "-inf"
+    return "number", 0.0 if number == 0.0 else number
+
+
+def _canonical_action_identity(idea) -> tuple[tuple, bool]:
+    """Canonical operator/params/space/eval-profile identity and whether it has a concrete axis."""
+    params = getattr(idea, "params", None)
+    params = params if isinstance(params, dict) else {}
+    space = getattr(idea, "space", None)
+    space = space if isinstance(space, dict) else {}
+    profile = getattr(idea, "eval_profile", None)
+    identity = (
+        unicodedata.normalize("NFKC", str(getattr(idea, "operator", "") or "")).strip(),
+        tuple(sorted((str(key), _canonical_action_number(value)) for key, value in params.items())),
+        tuple(sorted(
+            (str(key), tuple(_canonical_action_number(value) for value in values))
+            for key, values in space.items()
+            if isinstance(values, (list, tuple))
+        )),
+        (unicodedata.normalize("NFKC", str(profile)).strip() if profile is not None else None),
+    )
+    # Operator alone is too coarse: repo drafts commonly have no structured knobs and are distinguished
+    # by their implementation claim. Once any action axis exists, structural inequality is authoritative.
+    return identity, bool(params or space or profile is not None)
+
+
 class NoveltyGateMixin:
     """The engine's novelty/dedup gate cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -144,6 +179,18 @@ class NoveltyGateMixin:
         """The semantic identity of a proposal: what it claims to try + why."""
         return " ".join(filter(None, [getattr(idea, "rationale", "") or "",
                                       getattr(idea, "hypothesis", "") or ""])).strip()
+
+    def _prospective_node_id(self, state: RunState, requested=None) -> int:
+        """Resolve the audit identity of the node slot this proposal is trying to fill."""
+        if isinstance(requested, int) and not isinstance(requested, bool) and requested >= 0:
+            return requested
+        ceiling = getattr(self, "_node_id_ceiling", None)
+        if callable(ceiling):
+            try:
+                return ceiling(self.store.read_all(), state)
+            except Exception:  # noqa: BLE001 - audit identity falls back; admission must stay live
+                pass
+        return max(state.nodes, default=-1) + 1
 
     def _idea_prompt_identity(self, idea, *, prose_chars: int) -> str:
         """A bounded claim + action identity for the live LLM novelty adjudicator."""
@@ -232,7 +279,8 @@ class NoveltyGateMixin:
             return best_n, best_s
         return None, best_s
 
-    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None) -> Idea:
+    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None,
+                          prospective_node_id=None) -> Idea:
         """novelty_mode="llm": an LLM (not an embedding/param-distance heuristic) judges whether the
         proposed idea near-duplicates an already-tried experiment — READING the real experiments via
         tools when unsure — and, if it does and a `repropose` callable is given, asks the Researcher once
@@ -305,9 +353,10 @@ class NoveltyGateMixin:
         outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
                    else f"it scored {dup.metric}")
         self.store.append(EV_NOVELTY_REJECTED, {
-            # the PROSPECTIVE id this proposal would get — allocated as max+1, NOT len(): on a gapped
-            # log (a dropped/malformed node_created) len() points at the wrong slot (audit only).
-            "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "llm",
+            # The exact prospective slot supplied by batch admission (or the durable id ceiling on a
+            # serial call); siblings must not collapse onto one audit identity.
+            "node_id": self._prospective_node_id(state, prospective_node_id),
+            "near_node": dup.id, "kind": "llm",
             "reason": str(v.reason)[:200], "stance": self._novelty_stance,
             "action": "reproposed" if callable(repropose) else "kept"})
         if callable(repropose):
@@ -343,14 +392,12 @@ class NoveltyGateMixin:
 
     def _intra_batch_dup(self, idea, chosen: list) -> bool:
         """Variant-1 Phase 2: is `idea` a near-duplicate of one already chosen in THIS proposal batch,
-        by idea TEXT? Mirrors the semantic gate's 20-char floor — param-only ideas (toy backends whose
-        rationale is a constant like 'random seed point') have no meaningful text identity and are
-        NEVER text-deduped here (their diversity lives in the numeric params, which the normal novelty
-        gate already handles), so batch diversity for LLM ideas never collapses distinct toy seeds."""
+        first by canonical action, then (only when neither action has concrete structure) by idea text.
+        This preserves distinct numeric/sweep/profile trials even when their prose is identical while a
+        short rationale can no longer hide an identical executable action."""
+        action, has_action_axis = _canonical_action_identity(idea)
         raw = self._idea_text(idea)
         t = raw.strip().lower()
-        if len(t) < 20:
-            return False
         # Semantic parity with the serial draft path (review finding #7): when a run actually uses the
         # novelty gate, two batch siblings that are embedding-near but textually DISTINCT are still
         # duplicates (the serial path would catch the second against the first, already in history).
@@ -359,12 +406,20 @@ class NoveltyGateMixin:
         _semantic = getattr(self, "_novelty_mode", "off") not in (None, "off")
         _vec = None
         for other in chosen:
+            other_action, other_has_action_axis = _canonical_action_identity(other)
+            # CODEX AGENT: structural action identity outranks prose. Equal params/space/profile are a
+            # duplicate even with one-character rationale; unequal params remain distinct trials even
+            # if a native backend repeats boilerplate rationale across the whole batch.
+            if has_action_axis or other_has_action_axis:
+                if action == other_action:
+                    return True
+                continue
             ot_raw = self._idea_text(other)
             ot = ot_raw.strip().lower()
-            if len(ot) < 20:
-                continue
-            if t == ot:
+            if t and t == ot:
                 return True
+            if len(t) < 20 or len(ot) < 20:
+                continue
             # A pure-substring test would wrongly merge a short idea into a much LONGER distinct one
             # ("use a deeper net" vs "use a deeper net WITH cross-attention"). Only treat containment as
             # a near-duplicate when the two texts are also close in LENGTH (the longer isn't materially
@@ -398,6 +453,9 @@ class NoveltyGateMixin:
         n = max(1, int(n))
         native = getattr(self.researcher, "propose_batch", None)
         ideas: list = []
+        # CODEX AGENT: admission receipts belong to the slot that will actually be reserved. Advancing
+        # by accepted ideas (not raw attempts) keeps retries on one slot and gives batch siblings unique ids.
+        prospective_base = self._prospective_node_id(state)
         if callable(native):
             try:
                 from itertools import islice
@@ -419,6 +477,7 @@ class NoveltyGateMixin:
                         idea,
                         repropose=_native_repropose,
                         researcher=self.researcher,
+                        prospective_node_id=prospective_base + len(ideas),
                     )
                     if idea is not None and not self._intra_batch_dup(idea, ideas):
                         ideas.append(idea)
@@ -453,7 +512,8 @@ class NoveltyGateMixin:
                 # Normal vs-history novelty gate (one informed re-propose on a semantic hit), exactly as
                 # the serial draft path runs it — then drop an intra-batch near-duplicate.
                 idea = self._apply_novelty_gate(
-                    state, idea, repropose=lambda: self.researcher.propose(state, None))
+                    state, idea, repropose=lambda: self.researcher.propose(state, None),
+                    prospective_node_id=prospective_base + len(ideas))
                 if idea is None or self._intra_batch_dup(idea, ideas):
                     continue
                 ideas.append(idea)
@@ -567,7 +627,7 @@ class NoveltyGateMixin:
             and 0.5 < float(agreement) <= 1.0
         )
 
-    def _graded_novelty_precheck(self, state: RunState, idea: Idea):
+    def _graded_novelty_precheck(self, state: RunState, idea: Idea, prospective_node_id=None):
         """PART IV D3 (§21.4, Phase 2b): a concept-graph-aware PRE-gate. When `graded_novelty` is on and
         the task has a curated concept skeleton, grade the proposal over the concept graph BEFORE the flat
         dedup gate runs. Returns the idea UNCHANGED (an allow decision that SHORT-CIRCUITS the flat gate)
@@ -677,7 +737,8 @@ class NoveltyGateMixin:
                 idea_concepts = set()
             matched = idea_concepts & prior_set
             if matched:
-                self._record_cross_run_prior(state, matched, prior_caps)
+                self._record_cross_run_prior(
+                    state, matched, prior_caps, prospective_node_id=prospective_node_id)
         # Level 4 is an ALLOW override; level 5 is only a candidate override until the grounded repeated
         # verifier below ratifies reopening it. Level 0 (novel) and 1/2/3 (dedup) defer.
         if grade.level not in (4, 5):
@@ -717,8 +778,9 @@ class NoveltyGateMixin:
                 state, graph, grade.near_node, client):
             return None
         self.store.append(EV_NOVELTY_GRADED, {
-            # prospective id = max+1, not len() (gap-safe; audit only) — matches the reject events below.
-            "node_id": max(state.nodes, default=-1) + 1, "level": grade.level, "grade": grade.name,
+            # Exact prospective slot (gap-safe, audit only), shared with the reject events below.
+            "node_id": self._prospective_node_id(state, prospective_node_id),
+            "level": grade.level, "grade": grade.name,
             "recommendation": grade.recommendation, "near_node": grade.near_node,
             "shared_concepts": list(grade.shared_concepts), "stance": self._novelty_stance,
             "rationale": str(grade.rationale)[:200]})
@@ -814,7 +876,8 @@ class NoveltyGateMixin:
         except Exception:  # noqa: BLE001 — cross-run read is advisory; a hiccup just yields no priors
             return set(), [], {}, {}
 
-    def _record_cross_run_prior(self, state: RunState, matched: set, prior_caps) -> None:
+    def _record_cross_run_prior(self, state: RunState, matched: set, prior_caps, *,
+                                prospective_node_id=None) -> None:
         """SURFACE (never gate) the cross-run prior: which of the idea's OWN concepts were tried before, in
         which runs, with each matched concept's retained outcome and the explicitly run-level best metric —
         folds into `RunState.cross_run_priors` for the trace/UI. Best-effort; audit-only, so a failure never
@@ -911,7 +974,7 @@ class NoveltyGateMixin:
             }
             self.store.append(EV_CROSS_RUN_PRIOR, {
                 "v": 2,
-                "node_id": max(state.nodes, default=-1) + 1,
+                "node_id": self._prospective_node_id(state, prospective_node_id),
                 "matched_concepts": matched, "prior_runs": returned_runs,
                 "prior_runs_total": len(runs),
                 "prior_runs_omitted": len(runs) - len(returned_runs),
@@ -921,7 +984,8 @@ class NoveltyGateMixin:
         except Exception:  # noqa: BLE001 — audit only, never block proposing
             return
 
-    def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None) -> Idea:
+    def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None,
+                            prospective_node_id=None) -> Idea:
         """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
         Two layers:
         (1) SEMANTIC (T5, ShinkaEvolve `novelty rejection before evaluation`): if the idea TEXT is a
@@ -940,7 +1004,8 @@ class NoveltyGateMixin:
         # same-direction-new-implementation (level 4), or RATIFIES a re-open of a wrongly-abandoned failed
         # direction (level 5) with grounded repeated evidence, it SHORT-CIRCUITS. Every other grade (and the
         # flag being off) falls through UNCHANGED.
-        graded = self._graded_novelty_precheck(state, idea)
+        graded = self._graded_novelty_precheck(
+            state, idea, prospective_node_id=prospective_node_id)
         if graded is not None:
             # The graded pre-gate is a DELIBERATE short-circuit (Phase-2b, behind `_novelty_mode`): only
             # levels 4/5 return here, and only to ADMIT a proposal the flat gate would wrongly reject (a
@@ -954,7 +1019,9 @@ class NoveltyGateMixin:
         # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/
         # distance heuristic), then re-proposes if it's a dup.
         if mode == "llm":
-            return self._llm_novelty_gate(state, idea, repropose, researcher=researcher)
+            return self._llm_novelty_gate(
+                state, idea, repropose, researcher=researcher,
+                prospective_node_id=prospective_node_id)
         # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty stance
         # is "explore" (the stance can engage a cheap soft dedup + one informed re-propose even when the
         # mode is otherwise off). "off" without explore leaves this a no-op — the Researcher's own
@@ -972,8 +1039,9 @@ class NoveltyGateMixin:
                            if dup.status is NodeStatus.failed
                            else f"it scored {dup.metric}")
                 self.store.append(EV_NOVELTY_REJECTED, {
-                    # prospective id = max+1, not len() (gap-safe; audit only) — see the llm gate above.
-                    "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "semantic",
+                    # Exact prospective slot (gap-safe, audit only) — see the LLM gate above.
+                    "node_id": self._prospective_node_id(state, prospective_node_id),
+                    "near_node": dup.id, "kind": "semantic",
                     "similarity": round(sim, 4), "stance": self._novelty_stance,
                     "action": "reproposed" if callable(repropose) else "kept"})
                 if callable(repropose):
@@ -994,7 +1062,7 @@ class NoveltyGateMixin:
                 mind, nearest = d, n.id
         if mind >= self._novelty_epsilon:
             return idea
-        nid = max(state.nodes, default=-1) + 1       # the PROSPECTIVE id (max+1, not len — gap-safe)
+        nid = self._prospective_node_id(state, prospective_node_id)
         rng = _random.Random(nid * 1009 + 7)        # deterministic per node-slot
         nudged = dict(idea.params)
         for k in params:

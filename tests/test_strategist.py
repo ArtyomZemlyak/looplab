@@ -500,10 +500,9 @@ def test_build_telemetry_emitters_read_and_consume_the_passed_roles(tmp_path):
     assert eng.researcher.last_hyp_priority == {"order": [9], "reason": "shared"}        # shared untouched
 
 
-def test_propose_batch_yields_distinct_ideas_and_drops_intra_batch_dup(tmp_path):
-    # Variant-1 Phase 2: the shared-researcher batch pass must return N ideas on DISTINCT axes and
-    # DROP an intra-batch near-duplicate (an LLM idea whose text repeats one already chosen), degrading
-    # to sequential `propose` with an avoidance directive when the backend can't batch natively.
+def test_propose_batch_uses_action_identity_even_for_short_rationales(tmp_path):
+    # Identical executable actions are duplicates even when their rationale is too short for semantic
+    # comparison; conversely different params are distinct trials even if their prose is identical.
     eng = _engine(tmp_path / "batch")
     eng._novelty_mode = "off"                       # isolate the batch diversity logic from the gate
 
@@ -516,14 +515,13 @@ def test_propose_batch_yields_distinct_ideas_and_drops_intra_batch_dup(tmp_path)
             self.calls += 1
             return idea
 
-    a = Idea(operator="draft", params={"x": 1}, rationale="use a deeper residual network architecture")
-    dup = Idea(operator="draft", params={"x": 2}, rationale="use a deeper residual network architecture")
-    b = Idea(operator="draft", params={"x": 3}, rationale="apply aggressive mixup+cutout augmentation")
-    c = Idea(operator="draft", params={"x": 4}, rationale="switch to AdamW with a cosine LR schedule")
+    a = Idea(operator="draft", params={"x": 1}, rationale="try x")
+    dup = Idea(operator="draft", params={"x": 1}, rationale="other")
+    b = Idea(operator="draft", params={"x": 2}, rationale="try x")
+    c = Idea(operator="draft", params={"x": 3}, rationale="last")
     eng.researcher = _SeqResearcher([a, dup, b, c])
     ideas = eng._propose_batch(RunState(), 3)
-    texts = [i.rationale for i in ideas]
-    assert len(ideas) == 3 and len(set(texts)) == 3          # 3 ideas on 3 DISTINCT axes
+    assert [idea.params for idea in ideas] == [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}]
     assert eng.researcher.calls == 4                         # rolled a 4th time to replace the dropped dup
 
 
@@ -576,14 +574,75 @@ def test_propose_batch_uses_a_native_backend_when_present(tmp_path):
     eng.researcher = _BatchResearcher()
     original_gate = eng._apply_novelty_gate
 
-    def _record_gate(state, idea, repropose=None, researcher=None):
-        gated.append((idea.params["x"], callable(repropose), researcher is eng.researcher))
-        return original_gate(state, idea, repropose=repropose, researcher=researcher)
+    def _record_gate(state, idea, repropose=None, researcher=None, prospective_node_id=None):
+        gated.append((idea.params["x"], callable(repropose), researcher is eng.researcher,
+                      prospective_node_id))
+        return original_gate(
+            state, idea, repropose=repropose, researcher=researcher,
+            prospective_node_id=prospective_node_id)
 
     eng._apply_novelty_gate = _record_gate
     ideas = eng._propose_batch(RunState(), 3)
     assert len(ideas) == 3 and len({i.params["x"] for i in ideas}) == 3
-    assert gated == [(0, True, True), (1, True, True), (2, True, True)]
+    assert gated == [(0, True, True, 0), (1, True, True, 1), (2, True, True, 2)]
+
+
+def test_native_batch_drops_same_action_but_accepts_distinct_params(tmp_path):
+    eng = _engine(tmp_path / "batch-native-action")
+    eng._novelty_mode = "off"
+
+    class _BatchResearcher:
+        def propose_batch(self, state, n):
+            return [
+                Idea(operator="draft", params={"x": 1}, rationale="a"),
+                Idea(operator="draft", params={"x": 1}, rationale="b"),
+                Idea(operator="draft", params={"x": 2}, rationale="a"),
+            ][:n]
+
+        def propose(self, state, parent):
+            raise AssertionError("native batch should not fall back")
+
+    eng.researcher = _BatchResearcher()
+    ideas = eng._propose_batch(RunState(), 3)
+    assert [idea.params for idea in ideas] == [{"x": 1.0}, {"x": 2.0}]
+
+
+def test_intra_batch_action_identity_covers_operator_space_and_profile(tmp_path):
+    eng = _engine(tmp_path / "batch-action-axes")
+    base = Idea(operator="draft", params={"b": 2, "a": 1}, space={"lr": [0.1, 0.2]},
+                eval_profile="smoke", rationale="one")
+    reordered = Idea(operator="draft", params={"a": 1, "b": 2}, space={"lr": [0.1, 0.2]},
+                     eval_profile="smoke", rationale="two")
+    assert eng._intra_batch_dup(reordered, [base]) is True
+    assert eng._intra_batch_dup(base.model_copy(update={"operator": "improve"}), [base]) is False
+    assert eng._intra_batch_dup(base.model_copy(update={"space": {"lr": [0.1, 0.3]}}), [base]) is False
+    assert eng._intra_batch_dup(base.model_copy(update={"eval_profile": "full"}), [base]) is False
+
+
+def test_native_batch_novelty_receipts_use_unique_prospective_ids(tmp_path):
+    from looplab.events.types import EV_NOVELTY_REJECTED
+
+    eng = _engine(tmp_path / "batch-native-receipts")
+    eng._novelty_mode = "algo"
+    eng._novelty_semantic = False
+    eng._novelty_epsilon = 10.0
+
+    class _BatchResearcher:
+        def propose_batch(self, state, n):
+            return [Idea(operator="draft", params={"x": value}, rationale="x")
+                    for value in (0.1, 0.2, 0.3)][:n]
+
+        def propose(self, state, parent):
+            raise AssertionError("numeric nudge does not re-propose")
+
+    eng.researcher = _BatchResearcher()
+    st = RunState()
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 0.0}),
+                       metric=1.0, status=NodeStatus.evaluated)
+    ideas = eng._propose_batch(st, 3)
+    receipts = [event for event in eng.store.read_all() if event.type == EV_NOVELTY_REJECTED]
+    assert len(ideas) == 3
+    assert [event.data["node_id"] for event in receipts] == [1, 2, 3]
 
 
 def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):
