@@ -6,7 +6,7 @@ import threading
 import anyio
 
 from looplab.adapters.tasks import normalize_task
-from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
 from looplab.engine.asha_monitor import (
     AshaMonitorMixin, IntermediateSample, asha_underperforming, latest_intermediate,
     latest_intermediate_sample, sibling_final_metrics, sibling_metrics_at_resource,
@@ -134,7 +134,8 @@ class _FakeStore:
         self.events = []
 
     def read_all(self):
-        return []
+        return [Event(seq=index, ts=0.0, type=event_type, data=dict(data))
+                for index, (event_type, data) in enumerate(self.events)]
 
     def append(self, etype, data):
         self.events.append((etype, dict(data)))
@@ -237,6 +238,22 @@ def test_loop_records_recovery_transition_after_underperformance(tmp_path, monke
               finals=[0.80, 0.70, 0.60], window=0.08)
     transitions = [d["underperforming"] for (t, d) in stub.store.events if t == EV_ASHA_RANK]
     assert transitions[:2] == [True, False]
+
+
+def test_resumed_asha_monitor_closes_pre_crash_episode(tmp_path, monkeypatch):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text('{"recall": 0.90}\n', encoding="utf-8")
+    stub = _AshaStub(kill=False, quantile=0.5, min_siblings=3)
+    stub.store.events.append((EV_ASHA_RANK, {
+        "node_id": 0, "generation": 0, "underperforming": True,
+        "intermediate": 0.3, "quantile": 0.5, "population": 3,
+    }))
+    _run_loop(stub, wd, {"kind": "stdout_json", "key": "recall"}, "max", {}, monkeypatch,
+              finals=[0.80, 0.70, 0.60], window=0.08)
+    transitions = [data["underperforming"] for event_type, data in stub.store.events
+                   if event_type == EV_ASHA_RANK]
+    assert transitions == [True, False]
 
 
 def test_loop_stays_quiet_when_on_track_or_too_few_siblings(tmp_path, monkeypatch):

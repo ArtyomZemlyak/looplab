@@ -72,7 +72,8 @@ SIGNALS: tuple[SignalRoute, ...] = (
         channel="push",
         inject="looplab.events.digest:watchdog_reflection",
         consumer="Researcher (via _set_complexity_hint -> _complexity_hint)",
-        call_sites=(("looplab/engine/proposal_cues.py", "watchdog_reflection(self.store.read_all())"),)),  # ProposalCuesMixin, gated on _watchdog_reflection
+        call_sites=(("looplab/engine/proposal_cues.py",
+                     "watchdog_reflection(self.store.read_all(), state=state)"),)),
     SignalRoute(
         name="triage_rationale",
         produced_by="engine/crash_repair.py _triage_crash (LLM crash-triage verdict)",

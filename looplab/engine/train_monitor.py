@@ -376,6 +376,24 @@ class TrainingMonitorMixin:
         last_digest: Optional[str] = None
         healthy_streak = 0
         last_event_status: Optional[str] = None
+        # CODEX AGENT: resume may restart the observer inside the same node generation. Recover its last
+        # durable state so the first healthy verdict can close a pre-crash warning instead of losing it.
+        try:
+            prior_rows = await anyio.to_thread.run_sync(self.store.read_all)
+            for event in reversed(prior_rows):
+                data = getattr(event, "data", None) or {}
+                if (getattr(event, "type", None) == EV_TRAIN_MONITOR_ALERT
+                        and isinstance(data.get("node_id"), int)
+                        and not isinstance(data.get("node_id"), bool)
+                        and data.get("node_id") == node_id
+                        and isinstance(data.get("generation"), int)
+                        and not isinstance(data.get("generation"), bool)
+                        and data.get("generation") == generation):
+                    status = str(data.get("status") or "").strip().lower()
+                    last_event_status = status if status in ("healthy", "watch", "broken") else None
+                    break
+        except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
+            pass
         llm_calls = 0
         while True:
             await anyio.sleep(next_sleep)    # only cancellation (eval finished) unwinds the task, from here

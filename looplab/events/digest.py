@@ -299,7 +299,7 @@ def trust_reflection(state: RunState, max_shown: int = 2) -> str:
             "answers/labels or fit on validation/test data.")
 
 
-def watchdog_reflection(events, max_shown: int = 2) -> str:
+def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = None) -> str:
     """Signal-delivery (§1): surface the most recent LIVE-WATCHDOG observations — training-health
     verdicts (`EV_TRAIN_MONITOR_ALERT`) and ASHA intermediate-rank flags (`EV_ASHA_RANK`) — to the NEXT
     proposal, so the Researcher reacts to a configuration whose TRAINING was already observed to be
@@ -316,7 +316,9 @@ def watchdog_reflection(events, max_shown: int = 2) -> str:
     from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
 
     rows = list(events or ())
-    state = fold(rows)
+    # CODEX AGENT: proposal generation already owns the fold that selected this action. Reuse it instead
+    # of re-folding the complete append-only log on every proposal; standalone readers still self-fold.
+    current_state = state if state is not None else fold(rows)
     mon: dict[tuple[int, int], tuple[dict, int]] = {}
     asha: dict[tuple[int, int], tuple[dict, int]] = {}
     for position, e in enumerate(rows):
@@ -342,9 +344,9 @@ def watchdog_reflection(events, max_shown: int = 2) -> str:
     active: set[tuple[int, int]] = set()
     for key in set(mon) | set(asha):
         nid, generation = key
-        node = state.nodes.get(nid)
+        node = current_state.nodes.get(nid)
         if (node is not None and node.attempt == generation and not node.tombstoned
-                and nid not in state.aborted_nodes):
+                and nid not in current_state.aborted_nodes):
             active.add(key)
     lifecycle_keys = sorted(
         active,

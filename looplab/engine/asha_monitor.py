@@ -243,6 +243,31 @@ class AshaMonitorMixin:
         _ms = getattr(self, "_asha_live_min_siblings", 3)
         min_siblings = max(1, int(_ms)) if isinstance(_ms, (int, float)) and not isinstance(_ms, bool) else 3
         last_flag: Optional[tuple[bool, Optional[bool]]] = None
+        # CODEX AGENT: preserve an open episode across process re-entry; otherwise an initially healthy
+        # resumed curve looks like a first observation and never emits the recovery edge. Modern rows
+        # retain endpoint/resource truth separately; legacy rows safely map their single bit to endpoint.
+        try:
+            prior_rows = await anyio.to_thread.run_sync(self.store.read_all)
+            for event in reversed(prior_rows):
+                data = getattr(event, "data", None) or {}
+                if (getattr(event, "type", None) == EV_ASHA_RANK
+                        and isinstance(data.get("node_id"), int)
+                        and not isinstance(data.get("node_id"), bool)
+                        and data.get("node_id") == node_id
+                        and isinstance(data.get("generation"), int)
+                        and not isinstance(data.get("generation"), bool)
+                        and data.get("generation") == generation):
+                    endpoint = data.get("endpoint_underperforming")
+                    resource = data.get("resource_underperforming")
+                    if (isinstance(endpoint, bool)
+                            and (resource is None or isinstance(resource, bool))):
+                        last_flag = (endpoint, resource)
+                    else:
+                        raw_flag = data.get("underperforming", True)
+                        last_flag = (raw_flag, None) if isinstance(raw_flag, bool) else None
+                    break
+        except Exception:  # noqa: BLE001 - advisory history lookup; the live monitor still proceeds
+            pass
         under_streak = 0
         while True:
             await anyio.sleep(base)

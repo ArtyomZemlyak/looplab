@@ -9,6 +9,7 @@ import threading
 import anyio
 
 from looplab.core.tracing import JsonlSpanExporter, Tracer
+from looplab.core.models import Event
 from looplab.engine.train_monitor import (
     TrainingMonitorMixin,
     active_training_log,
@@ -264,12 +265,17 @@ class _FakeStore:
     def append(self, event_type, data):
         self.events.append((event_type, data))
 
+    def read_all(self):
+        return [Event(seq=index, ts=0.0, type=event_type, data=dict(data))
+                for index, (event_type, data) in enumerate(self.events)]
+
 
 def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None,
-                         kill=False, kill_confidence=0.8):
+                         kill=False, kill_confidence=0.8, prior_events=()):
     tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
     host = _VerdictHost(tracer, developer, interval=0.05, redact=redact,
                         kill=kill, kill_confidence=kill_confidence)
+    host.store.events.extend((event_type, dict(data)) for event_type, data in prior_events)
 
     async def drive():
         async with anyio.create_task_group() as tg:
@@ -333,6 +339,25 @@ def test_healthy_transition_records_explicit_recovery_event(tmp_path):
         tmp_path, workdir=wd, developer=_FakeDeveloper(_RecoveringClient()), hold_s=0.3)
     alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
     assert [event["status"] for event in alerts[:2]] == ["broken", "healthy"]
+
+
+def test_resumed_monitor_closes_pre_crash_alert_in_same_generation(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 8 loss: 0.2\n")
+    client = _FakeClient({"status": "healthy", "reason": "recovered", "confidence": 0.9})
+    host, _spans = _run_verdict_monitor(
+        tmp_path,
+        workdir=wd,
+        developer=_FakeDeveloper(client),
+        prior_events=[(EV_TRAIN_MONITOR_ALERT, {
+            "node_id": 0, "generation": 0, "status": "broken", "reason": "pre-crash",
+            "confidence": 0.9,
+        })],
+    )
+    alerts = [data for event_type, data in host.store.events
+              if event_type == EV_TRAIN_MONITOR_ALERT]
+    assert [event["status"] for event in alerts] == ["broken", "healthy"]
 
 
 def test_unchanged_digest_does_not_re_call_the_llm(tmp_path):

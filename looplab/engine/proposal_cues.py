@@ -161,7 +161,7 @@ class ProposalCuesMixin:
         # the failure-reflection above). Reads the raw event rows (bounded/deduped inside the helper).
         if self._watchdog_reflection:
             from looplab.events.digest import watchdog_reflection
-            hint += watchdog_reflection(self.store.read_all())
+            hint += watchdog_reflection(self.store.read_all(), state=state)
         # Signal-delivery (§1): surface a recently trust-FLAGGED node so the next proposal reacts to
         # it (trust flags otherwise only bar a WIN — the agent never learns and keeps re-deriving the
         # flagged approach). Pure rendering lives in digest.trust_reflection so a test can exercise it.
