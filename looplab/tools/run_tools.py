@@ -50,6 +50,10 @@ class RunTools:
     # exception line lives at the BOTTOM) would be silently cut. Stay under that cap with headroom for
     # the header + section markers, so our own tail-preserving clip is what decides what's dropped.
     _LOG_CHARS = RESULT_CAP - 400
+    _MAX_LIST_ITEMS = 64
+    _MAX_ANALOGOUS_ITEMS = 32
+    _MAX_THEME_ITEMS = 64
+    _MAX_LINE_CHARS = 700
 
     def __init__(self, max_chars: int = 3500):
         self.max_chars = max_chars
@@ -68,7 +72,7 @@ class RunTools:
                 "proposing. `sort`: best|worst|recent. The optional theme filter uses the current "
                 "receipt-aware concept-axis projection and explicitly qualifies incomplete results.",
                 {"sort": {"type": "string", "enum": ["best", "worst", "recent"]},
-                 "limit": {"type": "integer"},
+                 "limit": {"type": "integer", "minimum": 1, "maximum": self._MAX_LIST_ITEMS},
                  "theme": {"type": "string", "description": "filter to one theme slug (optional)"}}),
             fn_spec("read_experiment",
                 "Read one experiment's full detail: params, metric, robustness, rationale, failure "
@@ -95,7 +99,8 @@ class RunTools:
                 "distance — to see how nearby configs performed before committing.",
                 {"node_id": {"type": "integer"},
                  "params": {"type": "object", "description": "param dict to compare instead of a node"},
-                 "k": {"type": "integer"}}),
+                 "k": {"type": "integer", "minimum": 1,
+                        "maximum": self._MAX_ANALOGOUS_ITEMS}}),
             fn_spec("list_themes",
                 "List current experiment concept axes with counts and best metric. Incomplete "
                 "materialization is explicitly qualified; legacy themes remain bounded hints.",
@@ -161,7 +166,15 @@ class RunTools:
             return f"(tool error: {e})"
 
     # --- implementations ----------------------------------------------------
-    def _line(self, n) -> str:
+    @staticmethod
+    def _bounded_count(value, *, default: int, maximum: int) -> int:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            raise ValueError("count must be an integer")
+        return min(max(1, int(value)), maximum)
+
+    def _line(self, n, *, state=None, axes_by_node=None) -> str:
         if n.status is NodeStatus.failed:
             outcome = f"FAILED({n.error_reason or 'error'})"
         else:
@@ -169,15 +182,32 @@ class RunTools:
         # The node's primary CANONICAL axis (folded node_concepts via state, else legacy theme/first authored
         # axis) — the SAME vocabulary list_themes/list_experiments advertise + filter on (node_axes), so the
         # {label} shown here matches the grouping and a concept-authored run isn't shown blank.
-        node_theme = digest.node_theme(n, self.state)
+        current_state = self.state if state is None else state
+        if current_state is not None:
+            if axes_by_node is None:
+                projection = self._concept_projection(current_state)
+                axes_by_node = self._current_theme_axes(current_state, projection)
+            axes = axes_by_node.get(n.id, ())
+            # CODEX AGENT: a line is a current projection too. Do not revive the frozen authored theme when
+            # the folded membership receipt is unavailable, and never borrow a same-numbered node's axis
+            # from whichever sibling state happened to be bound to the reusable reader last.
+            node_theme = sorted(axes)[0] if axes else None
+        else:
+            node_theme = digest.node_theme(n)
         theme = f" {{{node_theme}}}" if node_theme else ""
-        return f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}"
+        line = f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}"
+        return (line if len(line) <= self._MAX_LINE_CHARS else
+                line[:self._MAX_LINE_CHARS].rstrip() + " …(truncated)")
 
     def _list(self, st: RunState, args: dict) -> str:
         sort = (args.get("sort") or "best").lower()
-        limit = int(args.get("limit") or 10)
+        if sort not in {"best", "worst", "recent"}:
+            raise ValueError("sort must be best, worst, or recent")
+        limit = self._bounded_count(
+            args.get("limit"), default=10, maximum=self._MAX_LIST_ITEMS)
         theme = args.get("theme")
         projection = self._concept_projection(st)
+        axes_by_node = self._current_theme_axes(st, projection)
         # CODEX AGENT: append-only audit rows are not current experiments. Use the shared lifecycle
         # boundary even for `recent`, whose raw state.nodes traversal used to resurrect tombstones and
         # aborted work that every other current concept surface had already removed.
@@ -194,20 +224,31 @@ class RunTools:
             # CODEX AGENT: filter on the SAME receipt-aware multi-axis projection `_themes` advertises.
             # Unavailable nodes contribute no inferred authored fallback; absent legacy rows may retain a
             # compatibility hint, but the response remains explicitly non-authoritative.
-            axes_by_node = self._current_theme_axes(st, projection)
             nodes = [node for node in nodes if theme in axes_by_node.get(node.id, ())]
-        nodes = nodes[:limit]
         if not nodes:
             if theme and projection.status != "complete":
                 return (f"({self._projection_note(projection)}; no retained current experiments "
                         f"match theme={theme}; this is NOT a complete zero)")
             return "(no matching experiments)"
-        head = f"{len(nodes)} experiment(s), sort={sort}" + (f", theme={theme}" if theme else "")
-        rendered = head + ":\n" + "\n".join(self._line(n) for n in nodes)
-        if theme and projection.status != "complete":
-            return (f"{self._projection_note(projection)}; retained current theme matches only:\n"
-                    f"{rendered}")
-        return rendered
+        total = len(nodes)
+        selected = nodes[:limit]
+        lines = [self._line(node, state=st, axes_by_node=axes_by_node) for node in selected]
+        qualifier = (f"{self._projection_note(projection)}; retained current theme matches only:\n"
+                     if theme and projection.status != "complete" else "")
+
+        # The schema cap bounds CPU/memory even when a caller bypasses tool validation. Fit the final text
+        # too, and preserve a population receipt instead of relying on the agent loop's silent head cut.
+        visible = list(lines)
+        while visible:
+            head = (f"showing {len(visible)} of {total} experiment(s), sort={sort}"
+                    + (f", theme={theme}" if theme else ""))
+            omitted = total - len(visible)
+            suffix = (f"\n… (+{omitted} more matching experiment(s), not shown)" if omitted else "")
+            rendered = qualifier + head + ":\n" + "\n".join(visible) + suffix
+            if len(rendered) <= self.max_chars:
+                return rendered
+            visible.pop()
+        return qualifier + f"(matching experiment output exceeds the {self.max_chars}-character budget)"
 
     def _read(self, st: RunState, nid: int, trials_arg=None) -> str:
         n = st.nodes.get(nid)
@@ -323,19 +364,23 @@ class RunTools:
             target = st.nodes[exclude].idea.params
         else:
             return "(give a node_id or params to compare)"
+        projection = self._concept_projection(st)
+        axes_by_node = self._current_theme_axes(st, projection)
         scored = []
         for n in st.nodes.values():
-            if n.id == exclude:
+            if n.id == exclude or n.id not in projection.active_nodes:
                 continue
             d = digest.param_distance(target, n.idea.params)
             if d != float("inf"):
                 scored.append((d, n))
         scored.sort(key=lambda t: t[0])
-        k = int(args.get("k") or 3)
+        k = self._bounded_count(
+            args.get("k"), default=3, maximum=self._MAX_ANALOGOUS_ITEMS)
         if not scored:
             return "(no comparable experiments — no shared numeric params)"
         return "nearest by param-distance:\n" + "\n".join(
-            f"dist={d:.3f}  {self._line(n)}" for d, n in scored[:k])
+            f"dist={d:.3f}  {self._line(n, state=st, axes_by_node=axes_by_node)}"
+            for d, n in scored[:k])
 
     def _themes(self, st: RunState) -> str:
         projection = self._concept_projection(st)
@@ -345,10 +390,16 @@ class RunTools:
                 return (f"({self._projection_note(projection)}; no retained current theme assignments; "
                         "this is NOT proof that no themes are assigned)")
             return "(no themes assigned yet)"
+        ordered = sorted(roll.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
+        shown = ordered[:self._MAX_THEME_ITEMS]
         rendered = "\n".join(
             f"{t}: {d['count']} experiment(s)" +
             (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
-            for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
+            for t, d in shown)
+        if len(ordered) > len(shown):
+            # CODEX AGENT: a theme list is advisory but still an evidence projection; name the bounded tail
+            # instead of allowing the outer tool loop to cut it into an apparently exhaustive list.
+            rendered += f"\n… (+{len(ordered) - len(shown)} more theme axis/axes, not shown)"
         if projection.status != "complete":
             return (f"{self._projection_note(projection)}; showing retained current theme hints "
                     "(legacy fallback only where membership is unrecorded):\n" + rendered)
@@ -473,11 +524,13 @@ class RunTools:
         if not target:
             return "(give an axis/slug concept id — see read_concept_tree)"
         nc = {node_id: list(concepts) for node_id, concepts in projection.memberships.items()}
+        theme_axes = self._current_theme_axes(st, projection)
         hits = []
         for nid in sorted(nc):
             if any(c == target or c.startswith(target + "/") for c in nc[nid]):
                 n = st.nodes.get(nid)
-                hits.append(self._line(n) if n else f"#{nid}")
+                hits.append(self._line(
+                    n, state=st, axes_by_node=theme_axes) if n else f"#{nid}")
         if not hits:
             if projection.status == "partial":
                 return (f"({self._projection_note(projection)}; no match in the available subset, "
@@ -625,7 +678,8 @@ class SiblingRunTools:
                 "Find experiments ACROSS sibling runs most similar to a set of params, by parameter "
                 "distance — to see how a nearby config performed elsewhere.",
                 {"params": {"type": "object", "description": "param dict to compare against"},
-                 "k": {"type": "integer"}}, ["params"]),
+                 "k": {"type": "integer", "minimum": 1,
+                        "maximum": RunTools._MAX_ANALOGOUS_ITEMS}}, ["params"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -697,20 +751,29 @@ class SiblingRunTools:
         if not isinstance(target, dict) or not target:
             return "(give a params dict to compare against)"
         scored = []
+        views = {}
         for rid in self._sibling_ids():
             st = self._state(rid)
             if st is None:
                 continue
+            projection = self._reader._concept_projection(st)
+            axes_by_node = self._reader._current_theme_axes(st, projection)
+            views[rid] = (st, axes_by_node)
             for n in st.nodes.values():
+                if n.id not in projection.active_nodes:
+                    continue
                 d = digest.param_distance(target, n.idea.params)
                 if d != float("inf"):
                     scored.append((d, rid, n))
         scored.sort(key=lambda t: t[0])
-        k = int(args.get("k") or 5)
+        k = self._reader._bounded_count(
+            args.get("k"), default=5, maximum=RunTools._MAX_ANALOGOUS_ITEMS)
         if not scored:
             return "(no comparable experiments across siblings — no shared numeric params)"
         return "nearest across sibling runs (by param-distance):\n" + "\n".join(
-            f"dist={d:.3f}  run {rid} {self._reader._line(n)}" for d, rid, n in scored[:k])
+            f"dist={d:.3f}  run {rid} "
+            f"{self._reader._line(n, state=views[rid][0], axes_by_node=views[rid][1])}"
+            for d, rid, n in scored[:k])
 
 
 class AllRunsTools:

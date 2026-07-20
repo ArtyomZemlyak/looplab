@@ -12,7 +12,7 @@ from looplab.core.models import (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
                                  NODE_CONCEPT_PROVENANCE_CLASSIFIER, Idea, Node, NodeStatus,
                                  RunState, Trial)
 from looplab.agents.roles import LLMResearcher
-from looplab.tools.run_tools import DataTools, RunTools
+from looplab.tools.run_tools import DataTools, RunTools, SiblingRunTools
 from looplab.adapters.tasks import make_roles
 from looplab.adapters.toytask import ToyTask
 
@@ -506,21 +506,23 @@ def test_theme_tools_do_not_infer_exact_absence_or_revive_unavailable_authored_t
 
     themes = tools.execute("list_themes", {})
     filtered = tools.execute("list_experiments", {"theme": "stale-authored"})
+    unfiltered = tools.execute("list_experiments", {"sort": "recent"})
 
     assert "UNAVAILABLE" in themes and "NOT proof" in themes
     assert "stale-authored:" not in themes
     assert "UNAVAILABLE" in filtered and "NOT a complete zero" in filtered
     assert "#0" not in filtered and "no matching experiments" not in filtered
+    assert "#0" in unfiltered and "{stale-authored}" not in unfiltered
 
 
 def test_theme_and_recent_tools_share_current_node_lifecycle():
     st = RunState(goal="g", direction="max")
     st.nodes = {
-        0: Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=0.9,
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 0.1}), metric=0.9,
                 status=NodeStatus.evaluated, tombstoned=True),
-        1: Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=0.8,
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft", params={"x": 0.2}), metric=0.8,
                 status=NodeStatus.evaluated),
-        2: Node(id=2, operator="draft", idea=Idea(operator="draft"), metric=0.7,
+        2: Node(id=2, operator="draft", idea=Idea(operator="draft", params={"x": 0.3}), metric=0.7,
                 status=NodeStatus.evaluated),
     }
     st.aborted_nodes = [1]
@@ -534,8 +536,66 @@ def test_theme_and_recent_tools_share_current_node_lifecycle():
 
     assert "live:" in themes and "deleted:" not in themes and "aborted:" not in themes
     assert "#2" in recent and "#0" not in recent and "#1" not in recent
+    analogous = tools.execute("find_analogous", {"params": {"x": 0.0}, "k": 99_999})
+    assert "#2" in analogous and "#0" not in analogous and "#1" not in analogous
     assert "no matching experiments" in tools.execute(
         "list_experiments", {"theme": "deleted"})
+
+
+def test_sibling_analogous_uses_each_runs_current_projection_and_lifecycle(tmp_path):
+    def _state(axis: str, *, tombstone_nearest: bool = False) -> RunState:
+        state = RunState(goal="g", direction="max", task_id="task")
+        state.nodes = {
+            0: Node(id=0, operator="draft",
+                    idea=Idea(operator="draft", theme=f"stale-{axis}", params={"x": 0.2}),
+                    metric=0.5, status=NodeStatus.evaluated),
+            1: Node(id=1, operator="draft",
+                    idea=Idea(operator="draft", theme=f"deleted-{axis}", params={"x": 0.01}),
+                    metric=0.9, status=NodeStatus.evaluated, tombstoned=tombstone_nearest),
+        }
+        state.node_concepts = {0: [f"{axis}/current"], 1: [f"deleted-{axis}/old"]}
+        _mark_concepts_exact(state)
+        return state
+
+    states = {
+        "run-a": _state("alpha", tombstone_nearest=True),
+        "run-b": _state("beta", tombstone_nearest=True),
+    }
+    tools = SiblingRunTools(tmp_path, "self")
+    tools._sibling_ids = lambda: list(states)  # type: ignore[method-assign]
+    tools._state = lambda run_id: states.get(run_id)  # type: ignore[method-assign]
+    # Reproduce the historical reusable-reader hazard: run-b has the same node id but another taxonomy.
+    tools._reader.bind_state(states["run-a"])
+
+    rendered = tools.execute("find_analogous_across_runs", {
+        "params": {"x": 0.0}, "k": 99_999,
+    })
+
+    assert "run run-a #0" in rendered and "{alpha}" in rendered
+    assert "run run-b #0" in rendered and "{beta}" in rendered
+    assert "run run-a #1" not in rendered and "deleted-alpha" not in rendered
+
+
+def test_run_tool_collection_arguments_are_bounded_and_receipted():
+    state = RunState(goal="g", direction="max")
+    state.nodes = {
+        i: Node(id=i, operator="draft", idea=Idea(operator="draft", params={"x": float(i)}),
+                metric=float(i), status=NodeStatus.evaluated)
+        for i in range(80)
+    }
+    tools = RunTools(max_chars=3500)
+    tools.bind_state(state)
+
+    listed = tools.execute("list_experiments", {"sort": "recent", "limit": 999_999})
+    one = tools.execute("list_experiments", {"sort": "recent", "limit": -4})
+
+    assert "showing" in listed and "of 80 experiment(s)" in listed and "not shown" in listed
+    assert len(listed) <= tools.max_chars
+    assert "showing 1 of 80 experiment(s)" in one
+    specs = {spec["function"]["name"]: spec["function"]["parameters"]["properties"]
+             for spec in tools.specs()}
+    assert specs["list_experiments"]["limit"]["maximum"] == RunTools._MAX_LIST_ITEMS
+    assert specs["find_analogous"]["k"]["maximum"] == RunTools._MAX_ANALOGOUS_ITEMS
 
 
 def test_partial_child_delta_never_infers_removal_from_an_omitted_membership():
