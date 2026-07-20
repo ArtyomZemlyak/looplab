@@ -45,6 +45,18 @@ _LESSON_OUTCOMES = frozenset((*_NEGATIVE, "supported", "noted", ""))
 _RESEARCH_SOURCE_RECEIPT_ROW_FIELDS = frozenset((
     "v", "record_kind", "run_id", "task_id", "direction", "source_receipt",
 ))
+_CLAIM_SOURCE_SEMANTIC_FIELDS = (
+    "v", "record_kind", "run_id", "task_id", "direction", "statement", "metric",
+    "metric_name", "metric_key", "objective_metric", "node_ids", "urls", "verification",
+    "verification_verdict", "verification_method", "verification_note", "source_receipt",
+    "outcome", "claim_stance", "evidence", "fingerprint", "source", "role",
+)
+_RESEARCH_VERIFICATION_FIELDS = ("verdict", "method", "note")
+_RESEARCH_SOURCE_RECEIPT_FIELDS = (
+    "v", "claims_total", "claims_retained", "claims_omitted", "producer_complete",
+)
+_CLAIM_SOURCE_ROW_MAX_CHARS = 640_000
+_CLAIM_SOURCE_ROW_MAX_TOTAL_ITEMS = 1_024
 
 
 def _empty_claim_read_segment() -> dict:
@@ -152,21 +164,35 @@ def _filter_claim_source_rows(rows, predicate, *, research: bool) -> _ClaimSourc
         (row for row in source if predicate(row)), read_health=source.read_health)
 
 
+def _claim_source_semantic_projection(row: dict) -> dict:
+    """Exact fields consumed by claim identity, evidence, scope and producer-receipt logic."""
+    out = {key: row[key] for key in _CLAIM_SOURCE_SEMANTIC_FIELDS if key in row}
+    # CODEX AGENT: nested v3 dictionaries are extensible, but their unknown keys must not consume the
+    # sanitizer's item budget and push an authoritative field past the retained prefix. Select exact
+    # contract keys before bounding/redacting, just as the top-level projection does.
+    nested_fields = {
+        "verification": _RESEARCH_VERIFICATION_FIELDS,
+        "source_receipt": _RESEARCH_SOURCE_RECEIPT_FIELDS,
+    }
+    for field, keys in nested_fields.items():
+        raw = out.get(field)
+        if isinstance(raw, dict):
+            out[field] = {key: raw[key] for key in keys if key in raw}
+    return out
+
+
 def _claim_rows_snapshot_digest(rows, *, read_segment: dict) -> str:
     """Content identity for one validated/scoped source snapshot, not merely its row counts."""
     # Hash every row independently so a response/display cap cannot make a same-count rewrite outside its
     # first page invisible. Commit only fields consumed by claim/scope/producer logic; unrelated custom
     # extras must not make governance identity expensive or unstable.
-    semantic_keys = (
-        "v", "record_kind", "run_id", "task_id", "direction", "statement", "metric",
-        "node_ids", "urls", "verification", "source_receipt", "outcome", "claim_stance",
-        "evidence", "fingerprint", "source", "role",
-    )
     row_digests = []
     for row in rows:
-        semantic = {key: row.get(key) for key in semantic_keys if key in row}
+        semantic = _claim_source_semantic_projection(row)
         semantic = sanitize_cross_run_projection(
-            semantic, max_chars=128_000, max_items=256, max_total_items=1_024)
+            semantic, max_chars=_CLAIM_SOURCE_ROW_MAX_CHARS,
+            max_items=_MAX_SOURCE_EVIDENCE,
+            max_total_items=_CLAIM_SOURCE_ROW_MAX_TOTAL_ITEMS)
         encoded = json.dumps(
             semantic, ensure_ascii=False, sort_keys=True, default=str,
             separators=(",", ":"),
@@ -1200,11 +1226,17 @@ def load_research_claims(memory_dir) -> list[dict]:
     rows = _load_claim_source_path(path, research=True)
     projected = []
     for row in rows:
-        durable = dict(row)
+        # Keep every schema-bounded field consumed by claim identity, evidence and source digest while
+        # dropping unrelated legacy extensions before they can exhaust the redaction budget. Outward claim
+        # projections remain capped separately; this internal snapshot must retain an allowed 65th..256th
+        # reference so a tail rewrite changes governance identity instead of disappearing (CODEX AGENT).
+        durable = _claim_source_semantic_projection(row)
         # Missing version in a persisted file is not the direct pure-API snapshot compatibility case.
         durable.setdefault("v", 0)
         projected.append(sanitize_cross_run_projection(
-            durable, max_chars=32_000, max_items=64, max_total_items=256))
+            durable, max_chars=_CLAIM_SOURCE_ROW_MAX_CHARS,
+            max_items=_MAX_SOURCE_EVIDENCE,
+            max_total_items=_CLAIM_SOURCE_ROW_MAX_TOTAL_ITEMS))
     return _ClaimSourceRows(projected, read_health=rows.read_health)
 
 

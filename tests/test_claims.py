@@ -793,6 +793,110 @@ def test_claim_snapshot_digest_is_stable_and_detects_same_count_rewrite(tmp_path
     assert second != first
 
 
+def test_allowed_research_tail_survives_internal_redaction_and_stales_digests(tmp_path):
+    import orjson
+
+    from looplab.engine.claims import claims_for_memory, load_research_claims
+
+    path = tmp_path / "research_claims.jsonl"
+
+    def _wide_row(tail_node: int) -> dict:
+        return {
+            "v": 3,
+            "record_kind": "claim",
+            "run_id": "wide-run",
+            "task_id": "t",
+            "direction": "max",
+            "statement": "wide evidence remains governance-visible",
+            "metric": "recall",
+            "node_ids": [*range(95), tail_node],
+            "urls": [
+                f"https://example.invalid/source/{index}/" + "reference-" * 190
+                for index in range(64)
+            ],
+            "verification": {"verdict": "supported", "method": "test", "note": ""},
+            "source_receipt": {
+                "v": 1, "claims_total": 1, "claims_retained": 1,
+                "claims_omitted": 0, "producer_complete": True,
+            },
+            "fingerprint": [
+                f"scope-{index:03d}-" + "semantic-" * 50 for index in range(256)
+            ],
+        }
+
+    path.write_bytes(orjson.dumps(_wide_row(999_998)) + b"\n")
+    loaded = load_research_claims(tmp_path)
+    assert len(loaded[0]["node_ids"]) == 96 and loaded[0]["node_ids"][-1] == 999_998
+    assert len(loaded[0]["urls"]) == 64 and len(loaded[0]["fingerprint"]) == 256
+    first = claims_for_memory(tmp_path, structured=True)
+    claim = first[0]
+    assert claim["n_support"] == 96 and len(claim["support"]) == 64
+    assert claim["nested_omitted"]["support"] == 32
+    first_source_digest = first.claim_source["snapshot_digest"]
+    first_research_digest = first.research_source["snapshot_digest"]
+    first_evidence_digest = claim["evidence_digest"]
+
+    # Same row/receipt/counts and same outward first 64 refs; only an allowed tail ref changes. Every
+    # internal source/governance identity must still change.
+    path.write_bytes(orjson.dumps(_wide_row(999_999)) + b"\n")
+    second = claims_for_memory(tmp_path, structured=True)
+    assert second[0]["support"] == claim["support"]
+    assert second.claim_source["snapshot_digest"] != first_source_digest
+    assert second.research_source["snapshot_digest"] != first_research_digest
+    assert second[0]["evidence_digest"] != first_evidence_digest
+
+
+def test_nested_extensions_cannot_displace_research_contract_fields(tmp_path):
+    import orjson
+
+    from looplab.engine.claims import claims_for_memory, load_research_claims
+
+    path = tmp_path / "research_claims.jsonl"
+
+    def _extended_row(extension_value: str) -> dict:
+        verification = {
+            **{f"extension_{index}": extension_value for index in range(300)},
+            "verdict": "supported", "method": "test", "note": "checked",
+        }
+        receipt = {
+            **{f"extension_{index}": extension_value for index in range(300)},
+            "v": 1, "claims_total": 1, "claims_retained": 1,
+            "claims_omitted": 0, "producer_complete": True,
+        }
+        return {
+            "v": 3,
+            "record_kind": "claim",
+            "run_id": "extended-run",
+            "task_id": "t",
+            "direction": "max",
+            "statement": "nested contract fields remain authoritative",
+            "metric": "recall",
+            "node_ids": [1],
+            "urls": [],
+            "verification": verification,
+            "source_receipt": receipt,
+        }
+
+    path.write_bytes(orjson.dumps(_extended_row("ignored-a")) + b"\n")
+    loaded = load_research_claims(tmp_path)
+    assert loaded[0]["verification"] == {
+        "verdict": "supported", "method": "test", "note": "checked",
+    }
+    assert loaded[0]["source_receipt"] == {
+        "v": 1, "claims_total": 1, "claims_retained": 1,
+        "claims_omitted": 0, "producer_complete": True,
+    }
+    first = claims_for_memory(tmp_path, structured=True)
+    assert first[0]["epistemic"] == "supported"
+    assert first.research_source["source_complete"] is True
+
+    # Unknown nested extensions are not consumed semantics and therefore do not stale governance.
+    path.write_bytes(orjson.dumps(_extended_row("ignored-b")) + b"\n")
+    second = claims_for_memory(tmp_path, structured=True)
+    assert second.claim_source["snapshot_digest"] == first.claim_source["snapshot_digest"]
+    assert second[0]["evidence_digest"] == first[0]["evidence_digest"]
+
+
 def test_research_source_read_health_extension_is_atomic_and_receipt_invariants_hold():
     from looplab.engine.claims import _research_source_summary, _safe_research_source_summary
 
