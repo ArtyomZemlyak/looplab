@@ -137,7 +137,7 @@ class LessonReconcileMixin:
             return k
 
     @staticmethod
-    def _node_sig(node) -> Optional[str]:
+    def _node_outcome_sig(node) -> Optional[str]:
         """A compact OUTCOME signature for a node — what its terminal looks like right now. A lesson
         grounded in a node is 'in sync' iff its stored sig still equals this. Captures status + the
         metric (ROUNDED, so float jitter never trips a re-derive) or the failure reason. None when the
@@ -146,21 +146,33 @@ class LessonReconcileMixin:
         if node is None:
             return None
         status = getattr(node.status, "value", None) or str(node.status)
-        if status == "pending":
-            return None
         m = getattr(node, "metric", None)
         if m is not None:
             return f"{status}:{round(float(m), 4)}"
         reason = getattr(node, "error_reason", "") or ""
         return f"{status}:{reason}" if reason else status
 
+    @classmethod
+    def _node_sig(cls, node, *, aborted: bool = False) -> Optional[str]:
+        """Bind evidence to the exact node lifecycle, not just its coincidental scalar outcome."""
+        if node is None:
+            return None
+        attempt = getattr(node, "attempt", 0)
+        if type(attempt) is not int:
+            attempt = 0
+        tombstoned = bool(getattr(node, "tombstoned", False))
+        outcome = cls._node_outcome_sig(node) or "missing"
+        return (f"v2:a={attempt}:t={int(tombstoned)}:x={int(bool(aborted))}:"
+                f"{outcome}")
+
     def _evidence_sig_map(self, state: RunState, node_ids) -> dict:
         """{str(node_id) -> current outcome sig} for a lesson's grounding nodes, stamped at write time.
         `reconcile_lessons` recomputes it from the live state and re-derives on any diff. Skips ids with
         no terminal (None) — a lesson isn't grounded in a pending node."""
         out: dict = {}
+        aborted = set(getattr(state, "aborted_nodes", None) or [])
         for nid in node_ids or []:
-            sig = self._node_sig(state.nodes.get(nid))
+            sig = self._node_sig(state.nodes.get(nid), aborted=nid in aborted)
             if sig is not None:
                 out[str(nid)] = sig
         return out
@@ -168,18 +180,41 @@ class LessonReconcileMixin:
     def _lesson_evidence_stale(self, state: RunState, o: dict) -> bool:
         """True iff a lesson's grounding nodes no longer match the OUTCOME SIGNATURE it was distilled
         from — a re-eval FLIPPED something it depends on. Requires the exact `evidence_sig`: a node now
-        pending/absent (sig None) is 'not yet resolved', NOT drift (wait for its re-eval). LEGACY rows
-        (written before sigs) carry NO reliable provenance and are NEVER judged stale — an outcome-only
+        pending/absent or a changed attempt/tombstone/abort state is lifecycle drift. LEGACY rows
+        (written before sigs) carry NO reliable outcome provenance — an outcome-only
         heuristic is unsound here: a lesson's `outcome` is a VERDICT (a comparative 'failed' means the
         change REGRESSED, a reflect '[BAD]' means 'avoid this technique'), NOT the node's crash/eval
         STATUS, so comparing the two mis-fires on legitimate lessons whose nodes are evaluated (observed
         in prod: it retired two valid 'this change regressed' comparative lessons). Legacy rows age out
-        via normal consolidation instead; everything written from here on carries a sig."""
+        via normal consolidation instead; deletion of a cited node is still provable and retires them.
+        Everything written from here on carries an exact lifecycle sig."""
         sig = o.get("evidence_sig")
         if not (isinstance(sig, dict) and sig):
+            aborted = set(getattr(state, "aborted_nodes", None) or [])
+            for raw_nid in o.get("evidence") or []:
+                nid = self._coerce_id(raw_nid)
+                node = state.nodes.get(nid)
+                if node is None or getattr(node, "tombstoned", False) or nid in aborted:
+                    return True
             return False
-        return any((cur := self._node_sig(state.nodes.get(self._coerce_id(k)))) is not None
-                   and cur != v for k, v in sig.items())
+        aborted = set(getattr(state, "aborted_nodes", None) or [])
+        for key, stored in sig.items():
+            nid = self._coerce_id(key)
+            node = state.nodes.get(nid)
+            if node is None:
+                return True
+            current = self._node_sig(node, aborted=nid in aborted)
+            if isinstance(stored, str) and stored.startswith("v2:"):
+                if current != stored:
+                    return True
+                continue
+            # CODEX AGENT: old outcome-only signatures remain compatible on untouched attempt zero. Once
+            # reset/tombstone/abort occurred they cannot prove which realization they described, so stale
+            # guidance fails closed even when the replacement happens to reproduce the same metric.
+            if (getattr(node, "attempt", 0) != 0 or getattr(node, "tombstoned", False)
+                    or nid in aborted or self._node_outcome_sig(node) != stored):
+                return True
+        return False
 
     def reconcile_lessons(self, state: RunState) -> RunState:
         """Memory reconciliation on a CHANGED OUTCOME (the node_reset / re-eval seam). Fold-derived
@@ -191,14 +226,17 @@ class LessonReconcileMixin:
         row is replaced — the 'find the old one by its evidence node id and rewrite it' the design asks
         for). Cheap gate: a hash of the run's {node -> sig}; the file is touched only when a signature
         actually moved and the LLM only when a lesson is genuinely stale. Best-effort — a reconcile
-        failure never fails the run. No-op offline (can't re-derive) or when reflection memory is off."""
+        failure never fails the run. Offline mode still retires proven-stale evidence but cannot replace it;
+        reflection-memory-off remains a no-op."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return state
         # Change-gate: only scan when some node's outcome sig moved since the last look. A node_reset
         # re-eval that alters a metric/status flips the hash; plain forward progress (a new terminal)
         # flips it too — harmless, the scan then finds nothing stale. None on start → the first pass
         # always scans, so a resume/restart verifies the store against the folded state once.
-        sig_items = tuple(sorted((nid, self._node_sig(n)) for nid, n in state.nodes.items()))
+        aborted = set(getattr(state, "aborted_nodes", None) or [])
+        sig_items = tuple(sorted(
+            (nid, self._node_sig(n, aborted=nid in aborted)) for nid, n in state.nodes.items()))
         h = hash(sig_items)
         if h == self._reconcile_sig_hash:
             return state
@@ -211,6 +249,7 @@ class LessonReconcileMixin:
             # hold the slot of every bad line for the index-keyed rewrite to stay aligned.
             rows: list = read_jsonl_lenient(path, keep_bad=True)
         except OSError:
+            self._reconcile_sig_hash = None
             return state
         # Which of THIS run's lessons drifted? Reflect-type (whole-run generalization) vs comparative
         # (per-pair). A comparative row is keyed by its [child, parent] evidence pair.
@@ -223,33 +262,46 @@ class LessonReconcileMixin:
             if not self._lesson_evidence_stale(state, o):
                 continue
             stale_idx.add(idx)
-            if o.get("source") == "comparative" and len(o.get("evidence") or []) == 2:
-                stale_pairs.append(tuple(o["evidence"]))
+            if o.get("source") == "comparative":
+                if len(o.get("evidence") or []) == 2:
+                    stale_pairs.append(tuple(o["evidence"]))
             else:
                 reflect_stale = True
         if not stale_idx:
             return state
-        # Lessons are LLM-only; re-derivation needs the client. Offline → leave the stale rows (a
-        # templated stand-in is exactly what this module refuses to write) and try again when wired.
-        client = self._e._reflect_client()
-        if client is None:
-            self._reconcile_sig_hash = None   # not truly reconciled — re-check once a client appears
-            return state
+        # Re-derivation is optional; retirement is not. A stale lesson must stop steering future runs even
+        # when the model is unavailable or raises. The locked retirement below is the authority boundary.
         try:
-            fp = self._e._task_fingerprint(state, state.best())
-            fresh_reflect = self._e._reflect_lessons(state, state.best(), fp) if reflect_stale else []
+            client = self._e._reflect_client()
+            client_failed = False
+        except Exception:  # noqa: BLE001
+            client = None
+            client_failed = True
+        fresh_reflect: list = []
+        comp: list = []
+        pairs_used: list = []
+        derivation = "failed" if client_failed else ("unavailable" if client is None else "empty")
+        _stale_pairs = {tuple(p) for p in stale_pairs}
+        if client is not None:
+            try:
+                fp = self._e._task_fingerprint(state, state.best())
+                fresh_reflect = self._e._reflect_lessons(
+                    state, state.best(), fp) if reflect_stale else []
+                if stale_pairs and self._e._comparative_lessons_on:
+                    exclude = [p for p in self._e._spent_pairs(state)
+                               if tuple(p) not in _stale_pairs]
+                    comp, pairs_used = self._e._comparative_lessons(state, fp, exclude=exclude)
+                derivation = "rederived" if fresh_reflect or comp else "empty"
+            except Exception:  # noqa: BLE001
+                # CODEX AGENT: model-backed rewriting can fail without keeping superseded evidence active.
+                fresh_reflect, comp, pairs_used = [], [], []
+                derivation = "failed"
+        try:
             # A reflect (whole-run) lesson drifting invalidates the WHOLE reflect batch for this run —
             # the generalization spans all its fed nodes — so replace EVERY reflect row of this run, not
             # just the one that drifted. BUT only when re-derivation actually produced lessons: an
             # empty/failed LLM re-derivation must NOT nuke existing memory (then drop only the drifted).
             drop_all_reflect = reflect_stale and bool(fresh_reflect)
-            _stale_pairs = {tuple(p) for p in stale_pairs}
-            comp: list = []
-            pairs_used: list = []
-            if stale_pairs and self._e._comparative_lessons_on:
-                # Un-spend the drifted pairs so `select_comparison_pairs` can re-pick them, then re-derive.
-                exclude = [p for p in self._e._spent_pairs(state) if tuple(p) not in _stale_pairs]
-                comp, pairs_used = self._e._comparative_lessons(state, fp, exclude=exclude)
             fresh = fresh_reflect + comp
 
             def _is_stale(o) -> bool:
@@ -266,7 +318,8 @@ class LessonReconcileMixin:
                 # falling through to the reflect branch would silently drop a valid non-stale lesson.
                 if o.get("source") == "comparative":
                     ev = o.get("evidence") or []
-                    return len(ev) == 2 and tuple(ev) in _stale_pairs
+                    return ((len(ev) == 2 and tuple(ev) in _stale_pairs)
+                            or self._lesson_evidence_stale(state, o))
                 return drop_all_reflect or self._lesson_evidence_stale(state, o)
 
             # Rewrite UNDER the lock, RE-READING the file INSIDE it: read + drop-stale + append-fresh must
@@ -286,10 +339,11 @@ class LessonReconcileMixin:
                     path, research=False)   # authoritative interpreted rows, inside the lock
                 kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
                 n_retired = len(cur) - len(kept)   # rows ACTUALLY dropped (audit); reflect-sweep included
+                committed_fresh = fresh if n_retired else []
                 # CODEX AGENT: replace only current understood lesson rows. Malformed/future raw records
                 # remain byte-preserved quarantine and continue to make claim-source health incomplete.
                 replace_jsonl_rows_atomic_preserving_quarantine(
-                    path, kept + fresh,
+                    path, kept + committed_fresh,
                     replace_if=lambda row: _valid_claim_source_row(row, research=False),
                 )
                 # The write above COMMITTED the fresh comparative lessons to disk. Consolidate/compact
@@ -301,9 +355,10 @@ class LessonReconcileMixin:
                 # nothing to spend) — code-review.
                 try:
                     prompts, parser = self._merge_prompt_opts()
-                    self._e._consolidate_lessons_file(path, client, self._e._embedder,
-                                                      parser=parser, prompts=prompts)
-                    self._e._compact_lessons(path)
+                    if client is not None and committed_fresh:
+                        self._e._consolidate_lessons_file(path, client, self._e._embedder,
+                                                          parser=parser, prompts=prompts)
+                        self._e._compact_lessons(path)
                 except Exception:  # noqa: BLE001 — best-effort post-processing; ledger recorded below
                     pass
         except Exception:  # noqa: BLE001 — reconciliation is best-effort; never fail the run for it
@@ -313,6 +368,11 @@ class LessonReconcileMixin:
             # flips the hash anyway; this only matters when the failure is the run's last activity.
             self._reconcile_sig_hash = None
             return state
+        if not n_retired:
+            return state
+        fresh = committed_fresh
+        if not fresh:
+            pairs_used = []
         # Ledger consistency: the re-derived pairs are (re-)spent so run-end reflection won't double
         # them — recorded as a lessons_distilled(reconcile) exactly like the mid-run cadence.
         if pairs_used:
@@ -326,6 +386,7 @@ class LessonReconcileMixin:
         self._e.store.append(EV_LESSONS_RECONCILED, {
             "at_node": len(state.nodes), "n_retired": n_retired, "n_added": len(fresh),
             "reflect": reflect_stale, "pairs": [list(p) for p in stale_pairs],
+            "derivation": derivation,
             "lessons": [{"statement": lz.get("statement", ""),
                          "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}

@@ -337,6 +337,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             materialization_receipts = (
                 getattr(final, "node_concept_materialization_receipts", None) or {})
             aborted = set(getattr(final, "aborted_nodes", None) or [])
+            classifier_observed = any(
+                provenance.get(nd.id) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+                for nd in final.nodes.values())
             evidence_nodes_total = evidence_nodes_incomplete = 0
             eligible_ids = {node.id for node in promotion_eligible_nodes(final)}
             for nd in final.nodes.values():
@@ -355,23 +358,33 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                     if (nd.id in eligible_ids and m is not None
                             and (outcomes.get(c) is None or _better(m, outcomes[c]))):
                         outcomes[str(c)] = m
-            if not concepts and evidence_nodes_incomplete == 0:
-                return
+            run_id = final.run_id or final.task_id
+            requires_existing_capsule = (
+                not concepts and evidence_nodes_incomplete == 0 and not classifier_observed)
             best = final.best()
             capsule = build_concept_capsule(
-                run_id=final.run_id or final.task_id, task_id=final.task_id, direction=direction,
+                run_id=run_id, task_id=final.task_id, direction=direction,
                 concepts=concepts, fingerprint=self.task_fingerprint(final, best),
                 best_metric=(best.robust_metric if best is not None else None),
                 concept_outcomes=outcomes,
                 concept_evidence_nodes_total=evidence_nodes_total,
-                concept_evidence_nodes_incomplete=evidence_nodes_incomplete)
+                concept_evidence_nodes_incomplete=evidence_nodes_incomplete,
+                concept_evidence_observed=classifier_observed)
         except Exception:  # noqa: BLE001 — BUILD is best-effort: a projection hiccup must never fail a run
             return
         # The WRITE is NOT swallowed (mirrors store_case): a real persistence failure must reach finalize's
         # retry handshake (which sets complete=False and retries on the next re-entry) rather than being
         # silently lost while `finalization_finished` is committed (CODEX).
         from looplab.engine.memory import ConceptCapsuleStore
-        ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
+        capsule_store = ConceptCapsuleStore(
+            Path(self._e.memory_dir) / "concept_capsules.jsonl")
+        if requires_existing_capsule:
+            # A brand-new never-classified run contributes no capsule. If this run already published
+            # evidence, though, leaving it active would resurrect stale concepts after a reset erased
+            # provenance. Supersede it with an explicitly UNKNOWN empty snapshot, never an exact zero.
+            if not any(c.get("run_id") == run_id for c in capsule_store.all()):
+                return
+        capsule_store.add(capsule)
 
     def _already_curated(self, log_name: str, curation_key: str) -> bool:
         """Whether semantic work has a terminal outcome; unavailable clients do not consume the key."""

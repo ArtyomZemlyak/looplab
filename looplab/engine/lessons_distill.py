@@ -218,7 +218,9 @@ class LessonDistillMixin:
         rev = (final.direction != "min")
         ok = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
                     key=lambda n: n.metric, reverse=rev)[:5]
-        bad = [n for n in final.nodes.values() if n.status is NodeStatus.failed][:3]
+        aborted = set(getattr(final, "aborted_nodes", None) or [])
+        bad = [n for n in final.nodes.values()
+               if n.status is NodeStatus.failed and not n.tombstoned and n.id not in aborted][:3]
         rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}" for n in ok]
         fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
         # PROVENANCE for reconciliation: the concrete nodes this whole-run reflection is grounded in

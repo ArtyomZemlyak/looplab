@@ -303,6 +303,85 @@ def test_store_concept_capsule_noop_without_tags(tmp_path):
     assert not (mem / "concept_capsules.jsonl").exists()   # nothing tagged -> no capsule
 
 
+@pytest.mark.parametrize("transition", ["tombstone", "abort", "classifier_empty"])
+def test_refinalize_upserts_observed_empty_capsule_and_retires_old_concepts(tmp_path, transition):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    events = EventStore(tmp_path / "events.jsonl")
+    events.append("run_started", {
+        "run_id": "same-run", "task_id": "t", "goal": "g", "direction": "max",
+    })
+    events.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "theme": "x"},
+    })
+    events.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    events.append("node_concepts", {
+        "node_id": 0, "concepts": ["loss/old"], "mode": "llm",
+    })
+    memory = LessonMemory(_fake_engine(mem))
+    memory.store_concept_capsule(fold(events.read_all()))
+    assert ConceptCapsuleStore(mem / "concept_capsules.jsonl").prior_concepts(
+        [], task_id="t") == {"loss/old"}
+
+    if transition == "tombstone":
+        events.append("node_tombstoned", {"node_ids": [0]})
+    elif transition == "abort":
+        events.append("node_abort", {"node_id": 0})
+    else:
+        events.append("node_concepts", {"node_id": 0, "concepts": [], "mode": "llm"})
+    memory.store_concept_capsule(fold(events.read_all()))
+
+    store = ConceptCapsuleStore(mem / "concept_capsules.jsonl")
+    assert store.prior_concepts([], task_id="t") == set()
+    assert len(store.all()) == 1
+    capsule = store.all()[0]
+    assert capsule["concepts"] == []
+    assert capsule["concept_evidence_observed"] is True
+    assert capsule["concept_evidence_complete"] is True
+    from looplab.engine.memory import portfolio_concept_overview
+    overview = portfolio_concept_overview(store.all())
+    assert overview["concepts"] == [] and overview["source_complete"] is True
+
+
+def test_refinalize_unknown_snapshot_retires_old_concepts_without_claiming_exact_empty(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    events = EventStore(tmp_path / "events.jsonl")
+    events.append("run_started", {
+        "run_id": "same-run", "task_id": "t", "goal": "g", "direction": "max",
+    })
+    events.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "theme": "x"},
+    })
+    events.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    events.append("node_concepts", {
+        "node_id": 0, "concepts": ["loss/old"], "mode": "llm",
+    })
+    memory = LessonMemory(_fake_engine(mem))
+    classified = fold(events.read_all())
+    memory.store_concept_capsule(classified)
+
+    # Simulate a new proposal lifecycle whose classifier has not run yet. It must supersede old positive
+    # evidence for this run, but the empty projection remains explicitly UNKNOWN rather than exact zero.
+    unknown = classified.model_copy(deep=True)
+    unknown.node_concepts = {}
+    unknown.node_concept_provenance = {}
+    unknown.node_concept_materialization_receipts = {}
+    memory.store_concept_capsule(unknown)
+
+    store = ConceptCapsuleStore(mem / "concept_capsules.jsonl")
+    assert store.prior_concepts([], task_id="t") == set()
+    capsule = store.all()[0]
+    assert capsule["concept_evidence_observed"] is False
+    assert capsule["concept_evidence_complete"] is False
+    from looplab.engine.memory import portfolio_concept_overview
+    overview = portfolio_concept_overview(store.all())
+    assert overview["concepts"] == [] and overview["source_complete"] is False
+    assert overview["source_unknown_capsules"] == 1
+
+
 def test_store_concept_capsule_ignores_researcher_authored_claims(tmp_path):
     mem = tmp_path / "mem"
     mem.mkdir()

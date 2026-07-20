@@ -352,13 +352,17 @@ def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
     pair). Sorted debug-first then by |Δ| then by ids, so the output is stable under replay."""
     from looplab.core.models import NodeStatus
     excl = {tuple(p) for p in (exclude or [])}
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
     pairs: list[dict] = []
     for n in state.nodes.values():
-        if n.metric is None:
+        if n.metric is None or n.tombstoned or n.id in aborted:
             continue
         for pid in n.parent_ids:
             p = state.nodes.get(pid)
-            if p is None or (n.id, pid) in excl:
+            # CODEX AGENT: deleted/aborted attempts are audit history, never live evidence from which a
+            # reusable comparative lesson may be distilled or re-derived.
+            if (p is None or p.tombstoned or pid in aborted
+                    or (n.id, pid) in excl):
                 continue
             if p.metric is not None:
                 delta = _improvement(n.metric, p.metric, state.direction)
@@ -660,7 +664,7 @@ def _finite_metric(value) -> bool:
 
 def _capsule_concept_evidence_completeness(
         capsule: dict,
-) -> Optional[tuple[Optional[int], Optional[int], bool]]:
+) -> Optional[tuple[Optional[int], Optional[int], bool, Optional[bool]]]:
     """Read the classifier-membership producer receipt.
 
     The receipt is additive over capsule v2.  A v2 row written before this receipt remains a valid
@@ -673,16 +677,31 @@ def _capsule_concept_evidence_completeness(
     )
     present = [key in capsule for key in keys]
     if not any(present):
-        return None, None, False
+        return None, None, False, None
     if not all(present):
         return None
     total, incomplete, complete = (capsule[key] for key in keys)
     if (type(total) is not int or type(incomplete) is not int or type(complete) is not bool
             or not 0 <= total <= _MAX_CAPSULE_SOURCE_ITEMS
-            or not 0 <= incomplete <= total
-            or complete != (incomplete == 0)):
+            or not 0 <= incomplete <= total):
         return None
-    return total, incomplete, complete
+    observed = capsule.get("concept_evidence_observed")
+    if "concept_evidence_observed" not in capsule:
+        # Old v2 positive/partial rows remain useful.  An old EMPTY row, however, did not distinguish
+        # "classifier observed zero memberships" from "classifier never ran", so its absence is unknown.
+        observed = True if total > 0 or capsule.get("concepts") or capsule.get("concept_outcomes") else None
+    elif type(observed) is not bool:
+        return None
+    if observed is False:
+        if total != 0 or incomplete != 0 or capsule.get("concepts") or capsule.get("concept_outcomes"):
+            return None
+        if complete is not False:
+            return None
+        return total, incomplete, False, False
+    if complete != (incomplete == 0):
+        return None
+    # A pre-marker empty v2 row is readable but cannot prove authoritative absence.
+    return total, incomplete, complete if observed is True else False, observed
 
 
 def _capsule_completeness(
@@ -713,6 +732,13 @@ def _capsule_completeness(
             if complete != (omitted == 0):
                 return None
             complete = False
+        elif evidence_meta[3] is not True:
+            # CODEX AGENT: an observed-empty marker is what separates a deletion tombstone from an
+            # unknown/never-classified empty projection.  Legacy or explicit unknown empty rows remain
+            # readable, but their optimistic collection flags are never repeated downstream.
+            if complete != (omitted == 0 if evidence_meta[3] is None else False):
+                return None
+            complete = False
         elif complete != (omitted == 0 and evidence_meta[2]):
             return None
     elif complete != (omitted == 0):
@@ -737,7 +763,8 @@ def _capsule_source_summary(capsules: list[dict]) -> dict:
         concept_omitted += concept_meta[1] or 0
         outcome_omitted += outcome_meta[1] or 0
         unknown += int(
-            evidence_meta[0] is None or concept_meta[0] is None or outcome_meta[0] is None)
+            evidence_meta[3] is not True
+            or concept_meta[0] is None or outcome_meta[0] is None)
         partial += int(
             not evidence_meta[2] or not concept_meta[2] or not outcome_meta[2])
     store_health = {
@@ -950,7 +977,8 @@ def concept_profit_tendencies(concept_rows, *, limit: Optional[int] = None) -> d
 def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
                           concepts, best_metric=None, concept_outcomes: Optional[dict] = None,
                           task_id: str = "", concept_evidence_nodes_total: Optional[int] = None,
-                          concept_evidence_nodes_incomplete: int = 0) -> dict:
+                          concept_evidence_nodes_incomplete: int = 0,
+                          concept_evidence_observed: Optional[bool] = None) -> dict:
     """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
     concepts a run explored (the shipped per-run `node_concepts` tags — no new tagger) and how it went,
     keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
@@ -1014,10 +1042,21 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         # CODEX AGENT: these counts are the durable denominator for classifier memberships.  Coercion or
         # clipping here would turn a corrupt producer receipt into permission to infer absent concepts.
         raise ValueError("concept capsule evidence-node receipt is invalid")
-    concept_evidence_complete = concept_evidence_nodes_incomplete == 0
+    if concept_evidence_observed is None:
+        concept_evidence_observed = bool(concepts_source) or concept_evidence_nodes_total > 0
+    if type(concept_evidence_observed) is not bool:
+        raise ValueError("concept capsule observed-evidence receipt is invalid")
+    if (not concept_evidence_observed
+            and (concept_evidence_nodes_total or concepts_source or raw_outcomes)):
+        raise ValueError("unobserved concept evidence cannot carry memberships or outcomes")
+    concept_evidence_complete = (
+        concept_evidence_observed and concept_evidence_nodes_incomplete == 0)
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+        # CODEX AGENT: ``observed=true`` plus empty collections is a same-run tombstone. ``false`` is an
+        # unknown snapshot and must stay partial; this additive bit keeps old positive v2 rows readable.
+        "concept_evidence_observed": concept_evidence_observed,
         "concept_evidence_nodes_total": concept_evidence_nodes_total,
         "concept_evidence_nodes_incomplete": concept_evidence_nodes_incomplete,
         "concept_evidence_complete": concept_evidence_complete,

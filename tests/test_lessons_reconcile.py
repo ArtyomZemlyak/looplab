@@ -8,17 +8,18 @@ moved is retired and re-derived from the corrected state — the "find the old o
 node id and rewrite it" mechanism. Same conclusion → an identical lesson reappears (no-op);
 different → the stale row is replaced.
 
-Corners exercised: the {node->sig} change-gate (no drift → no work, no LLM), pending nodes treated
-as 'not yet resolved' (never premature drift), exact-sig vs legacy-contradiction detection, the
+Corners exercised: the {node->sig} change-gate (no drift → no work, no LLM), attempt/pending/deletion
+lifecycle invalidation, exact-sig vs legacy-contradiction detection, the
 per-pair comparative upsert (+ un-spend / re-spend ledger), the whole-run reflect-batch replace
 (and the guard that an empty LLM re-derivation never nukes existing memory), other runs' lessons
-left untouched, the offline no-op (never writes a template), and replay-safe idempotence.
+left untouched, offline fail-closed retirement (never writes a template), and replay-safe idempotence.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 import orjson
+import pytest
 
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.orchestrator import Engine
@@ -32,10 +33,11 @@ TASK = ROOT / "examples" / "toy_task.json"
 
 
 def _node(nid, metric=None, parent_ids=(), params=None, status=NodeStatus.evaluated,
-          op="improve", code="", error_reason=""):
+          op="improve", code="", error_reason="", attempt=0, tombstoned=False):
     return Node(id=nid, operator=op, parent_ids=list(parent_ids),
                 idea=Idea(operator=op, params=params or {"x": float(nid)}),
-                metric=metric, status=status, code=code, error_reason=error_reason)
+                metric=metric, status=status, code=code, error_reason=error_reason,
+                attempt=attempt, tombstoned=tombstoned)
 
 
 def _state(nodes, direction="min", run_id="run_me", task_id="toy_quadratic",
@@ -80,12 +82,16 @@ def _rows(mem: Path) -> list[dict]:
 # node signature + staleness detection (pure)
 # --------------------------------------------------------------------------- #
 
-def test_node_sig_captures_status_metric_reason_and_pending_is_none(tmp_path):
+def test_node_sig_captures_attempt_lifecycle_status_metric_and_reason(tmp_path):
     eng = _engine(tmp_path)
     sig = eng.lessons._node_sig
-    assert sig(_node(0, metric=0.86618)) == "evaluated:0.8662"          # rounded (float jitter proof)
-    assert sig(_node(1, status=NodeStatus.failed, metric=None, error_reason="oom")) == "failed:oom"
-    assert sig(_node(2, status=NodeStatus.pending, metric=None)) is None  # no terminal to ground on
+    assert sig(_node(0, metric=0.86618)) == "v2:a=0:t=0:x=0:evaluated:0.8662"
+    assert sig(_node(1, status=NodeStatus.failed, metric=None, error_reason="oom", attempt=2)) \
+        == "v2:a=2:t=0:x=0:failed:oom"
+    assert sig(_node(2, status=NodeStatus.pending, metric=None, attempt=1)) \
+        == "v2:a=1:t=0:x=0:pending"
+    assert sig(_node(3, metric=1.0, tombstoned=True), aborted=True) \
+        == "v2:a=0:t=1:x=1:evaluated:1.0"
     assert sig(None) is None
 
 
@@ -99,23 +105,38 @@ def test_evidence_stale_exact_sig(tmp_path):
     assert eng.lessons._lesson_evidence_stale(st, fresh) is True
 
 
-def test_evidence_stale_pending_node_is_not_drift(tmp_path):
-    # A node reset to pending (mid re-eval) has sig None — 'not yet resolved', must NOT trip a
-    # premature re-derive from the transient pending state; drift is judged only once it re-terminals.
+def test_evidence_stale_on_same_metric_new_attempt_tombstone_or_abort(tmp_path):
     eng = _engine(tmp_path)
-    st = _state([_node(1, metric=None, status=NodeStatus.pending), _node(0, metric=9.0)])
-    lz = {"run_id": "run_me", "evidence": [1], "evidence_sig": {"1": "failed:oom"}}
-    assert eng.lessons._lesson_evidence_stale(st, lz) is False
+    recorded = {"run_id": "run_me", "evidence": [1],
+                "evidence_sig": {"1": "v2:a=0:t=0:x=0:evaluated:4.0"}}
+    reset = _state([_node(1, metric=4.0, attempt=1)])
+    deleted = _state([_node(1, metric=4.0, tombstoned=True)])
+    aborted = _state([_node(1, metric=4.0)])
+    aborted.aborted_nodes = [1]
+
+    assert eng.lessons._lesson_evidence_stale(reset, recorded) is True
+    assert eng.lessons._lesson_evidence_stale(deleted, recorded) is True
+    assert eng.lessons._lesson_evidence_stale(aborted, recorded) is True
+
+
+def test_evidence_stale_pending_reset_is_immediate_lifecycle_drift(tmp_path):
+    # CODEX AGENT: leaving old guidance live until a reset re-terminals is unsafe. The attempt boundary
+    # itself proves the old terminal evidence is no longer the current realization.
+    eng = _engine(tmp_path)
+    st = _state([_node(1, metric=None, status=NodeStatus.pending, attempt=1), _node(0, metric=9.0)])
+    lz = {"run_id": "run_me", "evidence": [1],
+          "evidence_sig": {"1": "v2:a=0:t=0:x=0:failed:oom"}}
+    assert eng.lessons._lesson_evidence_stale(st, lz) is True
     st.nodes[1] = _node(1, metric=4.0)                                   # re-eval landed → now judged
     assert eng.lessons._lesson_evidence_stale(st, lz) is True
 
 
-def test_evidence_stale_legacy_no_sig_is_never_stale(tmp_path):
-    # LEGACY rows (no evidence_sig) carry no reliable provenance, so they are NEVER judged stale — an
+def test_evidence_stale_legacy_no_sig_avoids_outcome_guess_but_honors_deletion(tmp_path):
+    # LEGACY rows (no evidence_sig) carry no reliable outcome provenance, so outcome drift is not guessed — an
     # outcome-only heuristic is unsound (a lesson's `outcome` is a VERDICT, not the node's crash/eval
     # STATUS): a comparative 'failed' means "the change regressed", a reflect '[BAD]' means "avoid
     # this", and both routinely sit on EVALUATED nodes. Comparing the two mis-fired in prod (it retired
-    # two valid 'this change regressed' lessons whose nodes were evaluated). So no sig → not stale.
+    # two valid 'this change regressed' lessons whose nodes were evaluated). Deletion remains provable.
     eng = _engine(tmp_path)
     st = _state([_node(5, metric=4.0), _node(7, metric=9.0)])
     for outcome in ("failed", "supported", "bad", "tested"):
@@ -127,6 +148,16 @@ def test_evidence_stale_legacy_no_sig_is_never_stale(tmp_path):
     # a legacy row still becomes reconcilable the moment it's rewritten WITH a sig (exact path)
     assert eng.lessons._lesson_evidence_stale(
         st, {"run_id": "run_me", "evidence": [5], "evidence_sig": {"5": "failed:oom"}}) is True
+
+    # Deletion is independent of the old verdict-vs-status ambiguity: a cited node that is no longer in
+    # the live projection cannot continue supporting even a legacy row.
+    st.nodes[5].tombstoned = True
+    assert eng.lessons._lesson_evidence_stale(
+        st, {"run_id": "run_me", "evidence": [5], "outcome": "supported"}) is True
+    st.nodes[5].tombstoned = False
+    st.aborted_nodes = [5]
+    assert eng.lessons._lesson_evidence_stale(
+        st, {"run_id": "run_me", "evidence": [5], "outcome": "supported"}) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +174,8 @@ def test_reflect_lessons_stamps_evidence_and_sig(tmp_path, monkeypatch):
     assert len(out) == 1
     ev, sig = out[0]["evidence"], out[0]["evidence_sig"]
     assert 1 in ev and 0 in ev and 2 in ev                              # winners + the failure row
-    assert sig["2"] == "failed:oom" and sig["1"] == "evaluated:4.0"     # grounded outcome signatures
+    assert sig["2"] == "v2:a=0:t=0:x=0:failed:oom"
+    assert sig["1"] == "v2:a=0:t=0:x=0:evaluated:4.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -194,7 +226,7 @@ def test_reconcile_comparative_pair_flip_retires_and_rederives(tmp_path, monkeyp
     fresh = [r for r in rows if r.get("source") == "comparative"]
     assert len(fresh) == 1 and "regressed" in fresh[0]["statement"]      # re-derived from corrected state
     assert fresh[0]["outcome"] == "failed" and fresh[0]["claim_stance"] == "support"
-    assert fresh[0]["evidence_sig"]["1"] == "evaluated:6.0"              # re-stamped with the NEW sig
+    assert fresh[0]["evidence_sig"]["1"] == "v2:a=0:t=0:x=0:evaluated:6.0"
     # ledger: the re-derived pair is (re-)spent + an audit event records the reconcile
     final = fold(eng.store.read_all())
     spends = [d for d in final.lessons_distilled if d.get("trigger") == "reconcile"]
@@ -253,7 +285,7 @@ def test_reconcile_idempotent_same_conclusion_is_noop(tmp_path, monkeypatch):
     comp = [r for r in _rows(mem) if r.get("source") == "comparative"]
     assert len(comp) == 1
     assert comp[0]["statement"] == "moving x toward the optimum reduces the loss"  # same lesson stands
-    assert comp[0]["evidence_sig"]["1"] == "evaluated:5.0"              # provenance refreshed
+    assert comp[0]["evidence_sig"]["1"] == "v2:a=0:t=0:x=0:evaluated:5.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -379,9 +411,8 @@ def test_reconcile_preserves_concurrent_append_during_rederivation(tmp_path, mon
     assert "MINE stale" not in stmts        # this run's own stale row was still rewritten
 
 
-def test_reconcile_offline_leaves_store_and_will_retry(tmp_path):
-    # No LLM wired: reconcile must NOT write a templated stand-in — it leaves the stale row and clears
-    # its gate so a later pass (once a client appears) re-checks rather than skipping forever.
+def test_reconcile_offline_retires_stale_without_inventing_replacement(tmp_path):
+    # No model is not permission to keep known-wrong guidance active. Retire it and add no template.
     mem = tmp_path / "mem"
     eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
     assert eng._reflect_client() is None                               # toy backend, no LLM
@@ -389,11 +420,61 @@ def test_reconcile_offline_leaves_store_and_will_retry(tmp_path):
                  "evidence": [1, 0], "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"},
                  "fingerprint": [], "kind": "quadratic"}])
     st = _state([_node(0, metric=9.0), _node(1, metric=6.0, parent_ids=[0])])  # drift, but no client
-    before = (mem / "lessons.jsonl").read_text()
     eng.lessons.reconcile_lessons(st)
-    assert (mem / "lessons.jsonl").read_text() == before               # nothing written offline
-    assert not [e for e in eng.store.read_all() if e.type == "lessons_reconciled"]
-    assert eng.lessons._reconcile_sig_hash is None                     # gate cleared → will re-check
+    assert _rows(mem) == []
+    rec = [e for e in eng.store.read_all() if e.type == "lessons_reconciled"]
+    assert len(rec) == 1 and rec[0].data["n_retired"] == 1
+    assert rec[0].data["n_added"] == 0 and rec[0].data["derivation"] == "unavailable"
+
+
+@pytest.mark.parametrize("lifecycle", ["same_metric_reset", "tombstone", "abort"])
+def test_reconcile_retires_proven_stale_lifecycle_evidence_without_client(tmp_path, lifecycle):
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [{
+        "run_id": "run_me", "source": "comparative", "statement": "old attempt guidance",
+        "outcome": "supported", "evidence": [1, 0],
+        "evidence_sig": {
+            "1": "v2:a=0:t=0:x=0:evaluated:4.0",
+            "0": "v2:a=0:t=0:x=0:evaluated:9.0",
+        },
+        "fingerprint": [], "kind": "quadratic",
+    }])
+    child = _node(1, metric=4.0, parent_ids=[0],
+                  attempt=1 if lifecycle == "same_metric_reset" else 0,
+                  tombstoned=lifecycle == "tombstone")
+    state = _state([_node(0, metric=9.0), child])
+    if lifecycle == "abort":
+        state.aborted_nodes = [1]
+
+    eng.lessons.reconcile_lessons(state)
+
+    assert not any(row.get("statement") == "old attempt guidance" for row in _rows(mem))
+    event = [e for e in eng.store.read_all() if e.type == "lessons_reconciled"][-1]
+    assert event.data["n_retired"] == 1 and event.data["n_added"] == 0
+
+
+def test_reconcile_retires_stale_when_comparative_rewrite_raises(tmp_path, monkeypatch):
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [{
+        "run_id": "run_me", "source": "comparative", "statement": "stale before exception",
+        "outcome": "supported", "evidence": [1, 0],
+        "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"},
+        "fingerprint": [], "kind": "quadratic",
+    }])
+    state = _state([_node(0, metric=9.0), _node(1, metric=6.0, parent_ids=[0])])
+    monkeypatch.setattr(eng, "_reflect_client", lambda: FakeClient("unused"))
+    monkeypatch.setattr(
+        eng, "_comparative_lessons",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+
+    eng.lessons.reconcile_lessons(state)
+
+    assert _rows(mem) == []
+    event = [e for e in eng.store.read_all() if e.type == "lessons_reconciled"][-1]
+    assert event.data["derivation"] == "failed" and event.data["n_retired"] == 1
 
 
 def test_reconcile_survives_malformed_store_rows(tmp_path, monkeypatch):
