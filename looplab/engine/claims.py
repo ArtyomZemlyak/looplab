@@ -981,6 +981,15 @@ class ClaimDecisionIdempotencyConflict(ValueError):
     """An ``action_id`` was reused with a different semantic decision payload."""
 
 
+class ClaimTargetConflict(ValueError):
+    """The operator's observed claim identity/evidence no longer names a writable live target."""
+
+    def __init__(self, code: str, **detail):
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+
 def _validate_claim_decision_row(row: dict) -> str | None:
     """Strict schema fence for rows whose omission changes live claim policy."""
     from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
@@ -1053,7 +1062,7 @@ def _bounded(value, name: str, maximum: int, *, required: bool = False) -> str:
         raise ValueError(f"empty {name}")
     if len(text) > maximum:
         raise ValueError(f"{name} exceeds {maximum} characters")
-    if name in {"scope", "metric", "action_id", "at", "evidence_digest"}:
+    if name in {"scope", "metric", "action_id", "at", "evidence_digest", "claim_uid"}:
         bounded = cross_run_identity_text(text, max_chars=maximum).strip()
     else:
         bounded = cross_run_text(
@@ -1210,6 +1219,72 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
             source_names=("lessons.jsonl", "research_claims.jsonl"),
             claim_locked=True,
         )
+
+
+def record_observed_claim_decision(
+        memory_dir, *, statement: str, claim_uid: str, evidence_digest: str,
+        decision: str, note: str = "", by: str = "operator", at: str = "",
+        scope: str = "", metric: str = "", expected_revision: int,
+        action_id: str) -> dict:
+    """Record a decision only for the exact live claim snapshot an operator reviewed.
+
+    This is the transport-neutral governance entrypoint used by both HTTP and CLI. The content-addressed
+    UID prevents statement/scope retargeting, the evidence digest fences source rewrites, and the ledger
+    revision/action id provide CAS plus lost-response idempotency. All live-target checks execute inside
+    ``record_claim_decision``'s policy-then-evidence lock chain.
+    """
+    from looplab.engine.claim_key import claim_uid as derive_claim_uid
+
+    observed_uid = _bounded(claim_uid, "claim_uid", 80, required=True).strip()
+    observed_digest = _bounded(
+        evidence_digest, "evidence_digest", _MAX_EVIDENCE_DIGEST, required=True).strip()
+    stable_action_id = _bounded(
+        action_id, "action_id", _MAX_DECISION_ACTION_ID, required=True).strip()
+    if expected_revision is None:
+        raise ValueError("expected_revision is required")
+    expected_uid = derive_claim_uid(statement, scope=scope, metric=metric)
+    if observed_uid != expected_uid:
+        raise ClaimTargetConflict(
+            "claim_target_changed", expected_claim_uid=expected_uid)
+
+    def _validate_target(evidence_snapshot) -> None:
+        current_projection = claims_for_memory(
+            memory_dir, lessons=evidence_snapshot.lessons_snapshot,
+            research_claims=evidence_snapshot.research_claims_snapshot,
+            decisions=evidence_snapshot.decisions_snapshot,
+            scope_task=scope, structured=True,
+        )
+        current = next((candidate for candidate in current_projection
+                        if candidate.get("claim_uid") == observed_uid), None)
+        if decision == "clear":
+            decisions = evidence_snapshot.decisions_snapshot
+            if observed_uid in decisions:
+                return
+            active = (current or {}).get("decision") or {}
+            actual_uid = str(active.get("claim_uid") or "")
+            if actual_uid and actual_uid != observed_uid:
+                raise ClaimTargetConflict(
+                    "claim_clear_target_mismatch", claim_uid=actual_uid,
+                    scope=str(active.get("scope") or ""),
+                    metric=str(active.get("metric") or ""),
+                )
+            raise ClaimTargetConflict("claim_decision_missing")
+        if current is None:
+            raise ClaimTargetConflict("claim_target_missing")
+        if current.get("evidence_digest") != observed_digest:
+            raise ClaimTargetConflict(
+                "claim_evidence_changed",
+                current_evidence_digest=current.get("evidence_digest"),
+            )
+
+    # CODEX AGENT: never pre-resolve the target in a CLI/API wrapper. The replay lookup must happen first
+    # for lost-response retries, then CAS + evidence validation + append must remain one locked operation.
+    return record_claim_decision(
+        memory_dir, statement=statement, scope=scope, metric=metric,
+        decision=decision, note=note, by=by, at=at,
+        expected_revision=expected_revision, action_id=stable_action_id,
+        evidence_digest=observed_digest, validate_evidence=_validate_target,
+    )
 
 
 def _global_key(legacy_key: str) -> str:

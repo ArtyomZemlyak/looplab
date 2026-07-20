@@ -159,9 +159,20 @@ def test_cli_task_facets_is_proposal_only(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "make_llm_client",
                         lambda *a, **k: _Client({"domain": "ir", "modality": "text"}))
     # proposal-only: classifies + shows, records NOTHING (consistent with concept/claim stewards, §22.4)
-    r = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval"])
+    command = [
+        "task-facets", str(tmp_path), "dense retrieval",
+        "--action-id", "cli-task-facets-review",
+    ]
+    r = CliRunner().invoke(app, command)
     assert r.exit_code == 0 and "domain" in r.stdout and "proposal" in r.stdout
     assert not (tmp_path / "task_facets.jsonl").exists()
+    retry = CliRunner().invoke(app, command)
+    assert retry.exit_code == 0 and "domain" in retry.stdout
+    from looplab.engine.governance_health import read_curation_rows
+    rows = read_curation_rows(tmp_path / "task_facets_curation_log.jsonl")
+    assert [row["action"] for row in rows] == [
+        "steward-invocation-begun", "steward-invocation"]
+    assert rows[-1]["outcome"] == "proposed"
     # --apply is deprecated/rejected before any paid call
     r2 = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval", "--apply"])
     assert r2.exit_code == 2 and "deprecated" in r2.stdout

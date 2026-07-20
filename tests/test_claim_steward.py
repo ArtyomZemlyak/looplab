@@ -257,8 +257,12 @@ def test_cli_claim_steward(tmp_path, monkeypatch):
         ])
 
     monkeypatch.setattr(cli, "make_llm_client", _client)
-    r = CliRunner().invoke(app, ["claim-steward", str(tmp_path)])
+    command = ["claim-steward", str(tmp_path), "--action-id", "cli-claim-review"]
+    r = CliRunner().invoke(app, command)
     assert r.exit_code == 0 and "ratified" in r.stdout and "proposal only" in r.stdout
+    assert calls == ["paid"]
+    retry = CliRunner().invoke(app, command)
+    assert retry.exit_code == 0 and "ratified" in retry.stdout
     assert calls == ["paid"]
     r2 = CliRunner().invoke(app, ["claim-steward", str(tmp_path), "--apply"])
     assert r2.exit_code == 2 and "deprecated and disabled" in r2.stdout

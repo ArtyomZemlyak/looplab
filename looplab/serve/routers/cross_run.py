@@ -6,9 +6,7 @@ ask stewards for proposals, but only the typed operator endpoints below may chan
 """
 from __future__ import annotations
 
-import threading
 from collections import deque
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -71,11 +69,6 @@ class _ConceptSplit(_ConceptSource):
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    # One proposal invocation per kind at a time in this server process. This closes the common ASGI
-    # retry race where two requests with the same action_id both pay for an LLM call before either receipt
-    # exists. The durable append still supplies cross-process receipt idempotency/fail-closed conflicts.
-    _steward_locks = {"concept": threading.Lock(), "claim": threading.Lock()}
-
     def _memory_dir() -> str:
         memory_dir = getattr(srv.global_settings(), "memory_dir", None)
         if not memory_dir:
@@ -89,7 +82,9 @@ def build_router(srv) -> APIRouter:
         return datetime.now(timezone.utc).isoformat()
 
     def _raise_governance_error(exc: Exception) -> None:
-        from looplab.engine.claims import ClaimDecisionConflict, ClaimDecisionIdempotencyConflict
+        from looplab.engine.claims import (
+            ClaimDecisionConflict, ClaimDecisionIdempotencyConflict, ClaimTargetConflict,
+        )
         from looplab.engine.concept_registry import (
             ConceptGovernanceConflict,
             ConceptGovernanceGlobalConflict,
@@ -108,6 +103,10 @@ def build_router(srv) -> APIRouter:
                 "code": "claim_revision_conflict",
                 "expected_revision": exc.expected_revision,
                 "current_revision": exc.current_revision,
+            }) from exc
+        if isinstance(exc, ClaimTargetConflict):
+            raise HTTPException(409, detail={
+                "code": exc.code, **exc.detail,
             }) from exc
         if isinstance(exc, ConceptGovernanceConflict):
             raise HTTPException(409, detail={
@@ -250,64 +249,14 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/cross-run/claim-decide")
     def claim_decide(body: _ClaimDecision):
         """Ratify/reject/pin/clear exactly the claim ID and revision the operator observed."""
-        from looplab.engine.claim_key import claim_uid
-        from looplab.engine.claims import (claims_for_memory, load_claim_decisions,
-                                           record_claim_decision)
-
-        expected_uid = claim_uid(body.statement, scope=body.scope, metric=body.metric)
-        if body.claim_uid != expected_uid:
-            raise HTTPException(409, detail={
-                "code": "claim_target_changed",
-                "expected_claim_uid": expected_uid,
-            })
-
+        from looplab.engine.claims import record_observed_claim_decision
         memory_dir = _memory_dir()
-
-        def _validate_target(evidence_snapshot) -> None:
-            # A content-addressed UID proves only that body fields agree with each other. The
-            # claim must also exist in the current evidence projection, and that projection must be the one
-            # the operator reviewed. This callback runs after action-id replay and governance CAS while the
-            # decision ledger lock is held, so lost-response retries remain idempotent.
-            current_projection = claims_for_memory(
-                memory_dir, lessons=evidence_snapshot.lessons_snapshot,
-                research_claims=evidence_snapshot.research_claims_snapshot,
-                decisions=evidence_snapshot.decisions_snapshot,
-                scope_task=body.scope, structured=True,
-            )
-            current = next((claim for claim in current_projection
-                            if claim.get("claim_uid") == body.claim_uid), None)
-            if body.decision == "clear":
-                decisions = load_claim_decisions(memory_dir)
-                if body.claim_uid in decisions:
-                    # Clearing targets an existing policy record, not live evidence. It must stay possible
-                    # after retention retires the claim.
-                    return
-                active = (current or {}).get("decision") or {}
-                actual_uid = str(active.get("claim_uid") or "")
-                if actual_uid and actual_uid != body.claim_uid:
-                    # A scoped row may inherit a portfolio-wide fallback. Silently appending a scoped clear
-                    # would report success while leaving that global policy active. Return the exact durable
-                    # target so the owner can explicitly acknowledge its wider blast radius and resubmit.
-                    raise HTTPException(409, detail={
-                        "code": "claim_clear_target_mismatch",
-                        "claim_uid": actual_uid,
-                        "scope": str(active.get("scope") or ""),
-                        "metric": str(active.get("metric") or ""),
-                    })
-                raise HTTPException(409, detail={"code": "claim_decision_missing"})
-            if current is None:
-                raise HTTPException(409, detail={"code": "claim_target_missing"})
-            if current.get("evidence_digest") != body.evidence_digest:
-                raise HTTPException(409, detail={
-                    "code": "claim_evidence_changed",
-                    "current_evidence_digest": current.get("evidence_digest"),
-                })
         try:
-            rec = record_claim_decision(
-                memory_dir, statement=body.statement, scope=body.scope, metric=body.metric,
+            rec = record_observed_claim_decision(
+                memory_dir, statement=body.statement, claim_uid=body.claim_uid,
+                scope=body.scope, metric=body.metric, evidence_digest=body.evidence_digest,
                 decision=body.decision, note=body.note, by=_actor(), at=_timestamp(),
                 expected_revision=body.expected_revision, action_id=body.action_id,
-                evidence_digest=body.evidence_digest, validate_evidence=_validate_target,
             )
         except Exception as exc:  # converted to stable HTTP semantics below
             _raise_governance_error(exc)
@@ -445,75 +394,6 @@ def build_router(srv) -> APIRouter:
         from looplab.core.llm import make_llm_client
         return make_llm_client(srv.llm_settings())
 
-    def _steward_log(name: str, kind: str, action_id: str, *, proposals=None,
-                      receipt=None, error: str = "", begun_revision: int | None = None) -> dict:
-        """Durably retain every on-demand steward outcome, including empty/error results."""
-        from looplab.engine.concept_registry import _append_governance
-        path = Path(_memory_dir()) / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        has_proposals = isinstance(proposals, dict) and any(
-            isinstance(value, list) and value for value in proposals.values())
-        rec = {
-            "v": 1, "action": "steward-invocation", "from": kind,
-            "action_id": action_id, "by": _actor(), "at": _timestamp(),
-            "outcome": "error" if error else ("proposed" if has_proposals else "empty"),
-            "proposals": sanitize_cross_run_projection(
-                proposals or {}, max_chars=64_000, max_items=128, max_total_items=2_048),
-            "receipt": sanitize_cross_run_projection(
-                receipt, max_chars=32_000, max_items=128, max_total_items=1_024),
-        }
-        if begun_revision is not None:
-            rec["begun_revision"] = begun_revision
-        if error:
-            rec["error"] = cross_run_text(
-                error, max_chars=500, single_line=True, entropy=True)
-        try:
-            # This is the receipt for an already-paid external call. A best-effort sync would let the
-            # server acknowledge bytes that a restart can lose and strand the same action in ambiguity.
-            return _append_governance(
-                path, rec, require_durable=True,
-                read_rows=lambda current: _read_curation_rows(
-                    current, kind=kind, ledger=f"{kind}_curation"),
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-
-    def _begin_steward(name: str, kind: str, action_id: str) -> dict:
-        """Persist an at-most-once claim before the potentially paid, non-transactional call."""
-        from looplab.engine.concept_registry import _append_governance
-
-        path = Path(_memory_dir()) / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # ``action_id`` remains reserved for the terminal receipt because the shared governance writer
-        # treats it as one immutable idempotency payload. The begin claim uses ``invocation_id`` and is
-        # serialized by ``_steward_guard`` across cache-check, call, and terminal append.
-        rec = {
-            "v": 1, "action": "steward-invocation-begun", "from": kind,
-            "invocation_id": action_id, "by": _actor(), "at": _timestamp(),
-            "outcome": "begun",
-        }
-        try:
-            return _append_governance(
-                path, rec, require_durable=True,
-                read_rows=lambda current: _read_curation_rows(
-                    current, kind=kind, ledger=f"{kind}_curation"),
-            )
-        except Exception as exc:
-            _raise_governance_error(exc)
-
-    def _cached_steward(name: str, action_id: str) -> dict | None:
-        path = Path(_memory_dir()) / name
-        begun = None
-        outcome = None
-        for row in _iter_log(path):
-            if (row.get("action") == "steward-invocation"
-                    and str(row.get("action_id") or "") == action_id):
-                outcome = row
-            if (row.get("action") == "steward-invocation-begun"
-                    and str(row.get("invocation_id") or "") == action_id):
-                begun = row
-        return outcome or begun
-
     def _steward_response(record: dict) -> dict:
         invocation = _public_cross_run_row({key: record.get(key) for key in
                                             ("action_id", "revision", "outcome", "by", "at")})
@@ -556,23 +436,6 @@ def build_router(srv) -> APIRouter:
         from looplab.serve.assistant import safe_assistant_failure
         return f"{phase}:{safe_assistant_failure(exc)['error_kind']}"
 
-    @contextmanager
-    def _steward_guard(kind: str, name: str):
-        from looplab.engine.governance_health import GovernanceLedgerUnavailable
-        from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
-
-        # Durable action-id dedupe happens only after the LLM returns. Hold a separate cross-process
-        # invocation lock across cache-check + call + receipt; the process-local lock alone
-        # still lets two ASGI workers pay for the same nondeterministic request.
-        try:
-            base = Path(_memory_dir())
-            base.mkdir(parents=True, exist_ok=True)
-            with _steward_locks[kind]:
-                with _interprocess_lock(base / f"{name}.invoke.lock", required=True):
-                    yield
-        except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
-            _raise_governance_error(exc)
-
     @router.post("/api/cross-run/concept-steward")
     def concept_steward(action_id: str = Query(..., min_length=1, max_length=160),
                         apply: bool = False):
@@ -580,33 +443,22 @@ def build_router(srv) -> APIRouter:
         if apply:
             raise HTTPException(422, "steward endpoints are proposal-only; apply typed operator actions")
         from looplab.engine.concept_registry import concept_governance_snapshot
+        from looplab.engine.steward_invocation import run_steward_invocation
 
         # Refuse before client creation / durable paid-call claim: an unhealthy taxonomy cannot
         # produce a trustworthy prompt, and paying a steward to review a guessed projection is waste.
         _read_governance(lambda: concept_governance_snapshot(_memory_dir()))
-        with _steward_guard("concept", "concept_curation_log.jsonl"):
-            cached = _cached_steward("concept_curation_log.jsonl", action_id)
-            if cached is not None:
-                return _steward_response(cached)
-            try:
-                client = _steward_client()
-            except Exception as exc:  # noqa: BLE001
-                return _steward_response(_steward_log(
-                    "concept_curation_log.jsonl", "concept", action_id,
-                    error=_safe_steward_error(exc, phase="client")))
-            begun = _begin_steward("concept_curation_log.jsonl", "concept", action_id)
-            from looplab.engine.concept_steward import steward_concepts
-            try:
-                output = steward_concepts(
-                    _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True)
-            except Exception as exc:  # noqa: BLE001
-                record = _steward_log("concept_curation_log.jsonl", "concept", action_id,
-                                      error=_safe_steward_error(exc, phase="steward"),
-                                      begun_revision=begun.get("revision"))
-            else:
-                record = _steward_log("concept_curation_log.jsonl", "concept", action_id,
-                                      proposals=output.get("proposals"), receipt=output.get("receipt"),
-                                      begun_revision=begun.get("revision"))
+        from looplab.engine.concept_steward import steward_concepts
+        try:
+            record, _replayed = run_steward_invocation(
+                _memory_dir(), "concept", action_id, actor=_actor(), at=_timestamp(),
+                prepare=_steward_client,
+                invoke=lambda client: steward_concepts(
+                    _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True),
+                safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
+            )
+        except Exception as exc:
+            _raise_governance_error(exc)
         return _steward_response(record)
 
     @router.post("/api/cross-run/claim-steward")
@@ -616,31 +468,20 @@ def build_router(srv) -> APIRouter:
         if apply:
             raise HTTPException(422, "steward endpoints are proposal-only; apply typed operator actions")
         from looplab.engine.claims import claim_governance_revision
+        from looplab.engine.steward_invocation import run_steward_invocation
 
         _read_governance(lambda: claim_governance_revision(_memory_dir()))
-        with _steward_guard("claim", "claim_curation_log.jsonl"):
-            cached = _cached_steward("claim_curation_log.jsonl", action_id)
-            if cached is not None:
-                return _steward_response(cached)
-            try:
-                client = _steward_client()
-            except Exception as exc:  # noqa: BLE001
-                return _steward_response(_steward_log(
-                    "claim_curation_log.jsonl", "claim", action_id,
-                    error=_safe_steward_error(exc, phase="client")))
-            begun = _begin_steward("claim_curation_log.jsonl", "claim", action_id)
-            from looplab.engine.claim_steward import steward_claims
-            try:
-                output = steward_claims(
-                    _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True)
-            except Exception as exc:  # noqa: BLE001
-                record = _steward_log("claim_curation_log.jsonl", "claim", action_id,
-                                      error=_safe_steward_error(exc, phase="steward"),
-                                      begun_revision=begun.get("revision"))
-            else:
-                record = _steward_log("claim_curation_log.jsonl", "claim", action_id,
-                                      proposals=output.get("proposals"), receipt=output.get("receipt"),
-                                      begun_revision=begun.get("revision"))
+        from looplab.engine.claim_steward import steward_claims
+        try:
+            record, _replayed = run_steward_invocation(
+                _memory_dir(), "claim", action_id, actor=_actor(), at=_timestamp(),
+                prepare=_steward_client,
+                invoke=lambda client: steward_claims(
+                    _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True),
+                safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
+            )
+        except Exception as exc:
+            _raise_governance_error(exc)
         return _steward_response(record)
 
     return router

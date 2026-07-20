@@ -50,6 +50,60 @@ def _governance_cli_read(project):
             GovernanceLedgerUnavailable("cross_run_sources", "storage_unreadable"))
 
 
+def _safe_steward_error(exc: Exception, phase: str) -> str:
+    """Classify a paid failure without persisting provider text, endpoints, paths, or credentials."""
+    from looplab.serve.assistant import safe_assistant_failure
+
+    return f"{phase}:{safe_assistant_failure(exc)['error_kind']}"
+
+
+def _run_cli_steward(memory_dir: Path, kind: str, action_id: str, *, prepare, invoke) -> dict:
+    """Run/replay the shared durable paid-steward transaction and map its closed states to CLI errors."""
+    from datetime import datetime, timezone
+
+    from looplab.engine.steward_invocation import run_steward_invocation
+
+    if not action_id:
+        typer.echo("error: --action-id is required for durable paid-call recovery")
+        raise typer.Exit(2)
+    try:
+        record, replayed = _governance_cli_read(lambda: run_steward_invocation(
+            memory_dir, kind, action_id, actor="local-operator",
+            at=datetime.now(timezone.utc).isoformat(), prepare=prepare, invoke=invoke,
+            safe_error=_safe_steward_error,
+        ))
+    except ValueError as exc:
+        typer.echo(f"error: {exc}")
+        raise typer.Exit(2) from exc
+    invocation_id = str(record.get("action_id") or record.get("invocation_id") or "")
+    if record.get("action") == "steward-invocation-begun":
+        # CODEX AGENT: this is not a retryable provider error. The old process may have paid already;
+        # preserving the identity as ambiguous is the only fail-closed crash/restart outcome.
+        typer.echo(
+            "steward invocation outcome is unknown; the same --action-id will not call the model again. "
+            "Review the ambiguous attempt before intentionally choosing a new action id."
+        )
+        raise typer.Exit(2)
+    if record.get("outcome") == "error":
+        typer.echo(f"steward failed ({record.get('error') or 'unknown_failure'})")
+        raise typer.Exit(1)
+    return {
+        "proposals": record.get("proposals") or {},
+        "receipt": record.get("receipt"),
+        "invocation": {
+            "action_id": invocation_id, "revision": record.get("revision"),
+            "outcome": record.get("outcome"), "replayed": replayed,
+        },
+    }
+
+
+def _echo_cli_invocation(output: dict) -> None:
+    invocation = output["invocation"]
+    suffix = " (replayed)" if invocation.get("replayed") else ""
+    typer.echo(
+        f"(invocation {invocation['action_id']} @ revision {invocation['revision']}{suffix})")
+
+
 def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *,
                            expected_last_seq: int | None = None,
                            require_lock: bool = False,
@@ -949,12 +1003,15 @@ def concept_steward_cmd(
     model: Optional[str] = typer.Option(None, help="Override model id."),
     max_proposals: int = typer.Option(12, help="Max curation proposals."),
     as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
+    action_id: str = typer.Option(
+        "", "--action-id", help="Required stable id for at-most-once paid-call recovery."),
 ):
     """PART IV cross-run §21.20.13 / §22.4 — the AGENTIC taxonomy steward: an LLM reviews the cross-run
     concept graph and PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise).
     Proposal-only: review the exact output, then record selected operations through `concept-merge`,
     `concept-split`, or owner HTTP governance. The deprecated `--apply` option is rejected before any paid
-    LLM call or mutation. Needs a reachable LLM."""
+    LLM call or mutation. A stable action id durably fences the paid call across crash/retry. Needs a
+    reachable LLM."""
     if apply:
         typer.echo("error: --apply is deprecated and disabled; concept-steward is proposal-only. "
                    "Run without --apply, review the exact proposal, then use concept-merge/concept-split "
@@ -964,7 +1021,6 @@ def concept_steward_cmd(
     from looplab.engine.concept_steward import curation_is_empty, steward_concepts
     from looplab.engine.concept_registry import concept_governance_snapshot
     from looplab.engine.governance_health import read_curation_rows
-    import datetime as _dt
 
     def _preflight():
         concept_governance_snapshot(str(memory_dir))
@@ -977,20 +1033,20 @@ def concept_steward_cmd(
     if model:
         settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
         #                              phantom attr and silently kept the default endpoint (--model no-op)
-    try:
-        client = _make_llm_client(settings)
-    except Exception as e:  # noqa: BLE001 — the steward is LLM-only
-        typer.echo(f"concept-steward needs a reachable LLM endpoint: {e}")
-        raise typer.Exit(1)
-    out = _governance_cli_read(lambda: steward_concepts(
-        str(memory_dir), client, apply=apply,
-        at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals))
+    out = _run_cli_steward(
+        memory_dir, "concept", action_id,
+        prepare=lambda: _make_llm_client(settings),
+        invoke=lambda client: steward_concepts(
+            str(memory_dir), client, apply=False, max_proposals=max_proposals,
+            raise_on_failure=True),
+    )
     if as_json:
         typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
         return
     prop = out["proposals"]
     if curation_is_empty(prop):
         typer.echo("steward: no curation proposed (graph already clean)")
+        _echo_cli_invocation(out)
         return
     typer.echo(f"steward proposals — {len(prop['merges'])} merge(s), {len(prop['splits'])} split(s), "
                f"{len(prop['purges'])} purge(s):")
@@ -1003,6 +1059,7 @@ def concept_steward_cmd(
         typer.echo(f"  purge  '{p['from_concept']}'")
     typer.echo("(proposal only — review the exact proposal above; apply selected changes with "
                "concept-merge/concept-split or owner HTTP governance)")
+    _echo_cli_invocation(out)
 
 
 @app.command(name="claim-decide")
@@ -1015,20 +1072,41 @@ def claim_decide_cmd(
     note: str = typer.Option("", help="Optional rationale recorded with the decision."),
     scope: str = typer.Option("", "--scope", help="Task scope for the structured claim key (a decision is "
                               "scope-precise: it won't reach a same-worded claim in another task)."),
+    metric: str = typer.Option("", "--metric", help="Metric qualifier from the reviewed claim."),
+    claim_uid: str = typer.Option(
+        "", "--claim-uid", help="Required stable UID from the reviewed structured claim."),
+    evidence_digest: str = typer.Option(
+        "", "--evidence-digest", help="Required evidence digest from the reviewed claim."),
+    expected_revision: Optional[int] = typer.Option(
+        None, "--expected-revision", min=0,
+        help="Required claim-governance revision observed before this decision."),
+    action_id: str = typer.Option(
+        "", "--action-id", help="Required stable id for idempotent lost-response retry."),
 ):
-    """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin a cross-run claim. This is the
-    ONLY way to change cross-run MEANING by hand (agents can only read + cite). Append-only, overlaid on
-    the machine-proposed assessment by normalized statement; a rejected claim is dropped from agent
-    context packs, a ratified one is surfaced after explicit pins. Reversible (re-decide; last write wins)."""
-    from looplab.engine.claims import record_claim_decision
+    """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin the exact live cross-run claim
+    snapshot identified by UID, evidence digest and ledger revision. Agents can only read + cite. The
+    append is idempotent by action id and rejected if the target/evidence/policy changed since review."""
+    from looplab.engine.claims import record_observed_claim_decision
     picked = [d for d, on in (("ratified", ratify), ("rejected", reject), ("pinned", pin)) if on]
     if len(picked) != 1:
         typer.echo("choose exactly one of --ratify / --reject / --pin")
         raise typer.Exit(2)
+    missing = [name for name, value in (
+        ("--claim-uid", claim_uid), ("--evidence-digest", evidence_digest),
+        ("--expected-revision", expected_revision), ("--action-id", action_id),
+    ) if value is None or value == ""]
+    if missing:
+        typer.echo("error: required governance receipt option(s): " + ", ".join(missing))
+        raise typer.Exit(2)
     import datetime as _dt
     try:
-        rec = record_claim_decision(str(memory_dir), statement=statement, decision=picked[0], note=note,
-                                    scope=scope, at=_dt.datetime.now().isoformat(timespec="seconds"))
+        rec = record_observed_claim_decision(
+            str(memory_dir), statement=statement, claim_uid=claim_uid,
+            evidence_digest=evidence_digest, decision=picked[0], note=note,
+            scope=scope, metric=metric, expected_revision=expected_revision,
+            action_id=action_id,
+            at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        )
     except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
         _governance_cli_error(e)
     except ValueError as e:
@@ -1045,13 +1123,16 @@ def task_facets_cmd(
     apply: bool = typer.Option(False, "--apply", help="DEPRECATED compatibility option; rejected before any "
                                "paid call — task-facets is PROPOSAL-ONLY."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
+    action_id: str = typer.Option(
+        "", "--action-id", help="Required stable id for at-most-once paid-call recovery."),
 ):
     """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM PROPOSES a task's facets
     (domain/language/modality/interaction/objective) so the system can recognize when two differently-worded
     tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
     fingerprint). PROPOSAL-ONLY, consistent with concept-steward/claim-steward (§22.4 — the agentic steward
     only proposes; it never writes cross-run state): review the classification, then record it deterministically
-    with `task-facets-set` (or let the engine record it at finalize under `cross_run_curation`)."""
+    with `task-facets-set` (or let the engine record it at finalize under `cross_run_curation`). A stable
+    action id durably fences its paid call across crash/retry."""
     from looplab.core.config import Settings
     from looplab.engine.governance_health import read_curation_rows
     from looplab.engine.task_facets import steward_task_facets
@@ -1067,18 +1148,28 @@ def task_facets_cmd(
     settings = Settings()
     if model:
         settings.llm_model = model
-    try:
-        client = _make_llm_client(settings)
-    except Exception as e:  # noqa: BLE001
-        typer.echo(f"task-facets needs a reachable LLM endpoint: {e}")
-        raise typer.Exit(1)
-    out = steward_task_facets(str(memory_dir), client, task_id="", goal=goal, kind=kind, apply=False)
-    if not out["facets"]:
+    out = _run_cli_steward(
+        memory_dir, "facets", action_id,
+        prepare=lambda: _make_llm_client(settings),
+        invoke=lambda client: {
+            "proposals": {
+                "task_id": "",
+                "facets": steward_task_facets(
+                    str(memory_dir), client, task_id="", goal=goal, kind=kind,
+                    apply=False, raise_on_failure=True)["facets"],
+            },
+            "receipt": None,
+        },
+    )
+    facets = out["proposals"].get("facets") or {}
+    if not facets:
         typer.echo("task-facets: none classified")
+        _echo_cli_invocation(out)
         return
-    for ax, v in out["facets"].items():
+    for ax, v in facets.items():
         typer.echo(f"  {ax:12} {v}")
     typer.echo("(proposal — record with `task-facets-set MEMORY TASK_ID --<axis> <value> ...`)")
+    _echo_cli_invocation(out)
 
 
 @app.command(name="task-facets-set")
@@ -1121,12 +1212,15 @@ def claim_steward_cmd(
     model: Optional[str] = typer.Option(None, help="Override model id."),
     max_proposals: int = typer.Option(10, help="Max decision proposals."),
     as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
+    action_id: str = typer.Option(
+        "", "--action-id", help="Required stable id for at-most-once paid-call recovery."),
 ):
     """PART IV cross-run §22.4 — the AGENTIC CLAIM steward: an LLM reviews the evidence-grounded claims and
     PROPOSES operator decisions (ratify well-evidenced / reject contradicted-or-noise / pin load-bearing).
     Proposal-only: review the exact output, then record selected decisions through `claim-decide` or owner
     HTTP governance. The deprecated `--apply` option is rejected before any paid LLM call or mutation.
-    Scope-precise via the structured claim key. Needs a reachable LLM."""
+    Scope-precise via the structured claim key; a stable action id durably fences the paid call across
+    crash/retry. Needs a reachable LLM."""
     if apply:
         typer.echo("error: --apply is deprecated and disabled; claim-steward is proposal-only. "
                    "Run without --apply, review the exact proposal, then use claim-decide or owner HTTP "
@@ -1136,7 +1230,6 @@ def claim_steward_cmd(
     from looplab.engine.claim_steward import curation_is_empty, steward_claims
     from looplab.engine.claims import claim_governance_revision
     from looplab.engine.governance_health import read_curation_rows
-    import datetime as _dt
 
     def _preflight():
         claim_governance_revision(str(memory_dir))
@@ -1148,26 +1241,27 @@ def claim_steward_cmd(
     if model:
         settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
         #                              phantom attr and silently kept the default endpoint (--model no-op)
-    try:
-        client = _make_llm_client(settings)
-    except Exception as e:  # noqa: BLE001 — the steward is LLM-only
-        typer.echo(f"claim-steward needs a reachable LLM endpoint: {e}")
-        raise typer.Exit(1)
-    out = _governance_cli_read(lambda: steward_claims(
-        str(memory_dir), client, apply=apply,
-        at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals))
+    out = _run_cli_steward(
+        memory_dir, "claim", action_id,
+        prepare=lambda: _make_llm_client(settings),
+        invoke=lambda client: steward_claims(
+            str(memory_dir), client, apply=False, max_proposals=max_proposals,
+            raise_on_failure=True),
+    )
     if as_json:
         typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
         return
     prop = out["proposals"]
     if curation_is_empty(prop):
         typer.echo("claim-steward: no decisions proposed")
+        _echo_cli_invocation(out)
         return
     typer.echo(f"claim-steward proposals — {len(prop['decisions'])} decision(s):")
     for d in prop["decisions"]:
         typer.echo(f"  {d['decision']:9} {d['statement'][:80]}" + (f"   ({d['why']})" if d.get("why") else ""))
     typer.echo("(proposal only — review the exact proposal above; apply selected decisions with "
                "claim-decide or owner HTTP governance)")
+    _echo_cli_invocation(out)
 
 
 @app.command(name="cross-run-digest")
@@ -1371,6 +1465,9 @@ def claims_cmd(
     structured: bool = typer.Option(False, "--structured", help="Use the scope+polarity-safe structured "
                                     "claim key (§21.20.13): opposite-polarity claims contradict, not merge."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
+    governance_receipt: bool = typer.Option(
+        False, "--governance-receipt",
+        help="With --json, wrap claims with the exact claim-governance revision for claim-decide."),
 ):
     """PART IV cross-run Step 4/5 (§21.20): project distilled lessons into evidence-labelled claim
     records with support and opposition attempt references. Legacy wire states ``supported`` and
@@ -1440,6 +1537,7 @@ def claims_cmd(
                 "path": path, "lessons": lessons, "research": research, "claims": claims,
                 "research_source": research_source, "claim_source": claim_source,
                 "context_pack": context_pack,
+                "claim_revision": governance["claim_revision"],
             }
 
         return project_governed_sources(
@@ -1467,7 +1565,12 @@ def claims_cmd(
     if contested_only:
         claims = [c for c in claims if c["epistemic"] == "mixed"]
     if as_json:
-        typer.echo(orjson.dumps(claims, option=orjson.OPT_INDENT_2).decode())
+        payload = ({
+            "claims": claims,
+            "revision": snapshot["claim_revision"],
+            "structured": structured,
+        } if governance_receipt else claims)
+        typer.echo(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode())
         return
     if research_source.get("source_complete") is not True:
         typer.echo(

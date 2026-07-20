@@ -671,6 +671,52 @@ def test_governed_source_projection_fences_policy_and_evidence_writers(tmp_path)
     assert policy_done.is_set() and evidence_done.is_set()
 
 
+def test_absent_governed_source_bootstrap_cannot_mix_new_evidence_with_revision_zero(tmp_path):
+    """A missing memory root must join the ordinary lock order before its callback can read files."""
+    from looplab.events.eventstore import _interprocess_lock
+
+    memory = tmp_path / "not-created-yet"
+    entered, release = Event(), Event()
+    writer_started, writer_done = Event(), Event()
+
+    def project(governance):
+        entered.set()
+        assert release.wait(5)
+        lessons = memory / "lessons.jsonl"
+        rows = [] if not lessons.exists() else lessons.read_text(encoding="utf-8").splitlines()
+        return {"revision": governance["claim_revision"], "rows": rows}
+
+    def write_new_memory():
+        writer_started.set()
+        record_claim_decision(
+            memory, statement="new policy", decision="pinned",
+            expected_revision=0, action_id="bootstrap-policy")
+        path = memory / "lessons.jsonl"
+        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+            path.write_text(json.dumps({
+                "statement": "new evidence", "outcome": "supported",
+                "evidence": [1], "run_id": "r", "task_id": "t",
+            }) + "\n", encoding="utf-8")
+        writer_done.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        snapshot_future = executor.submit(
+            project_governed_sources, memory, project,
+            source_names=("lessons.jsonl",))
+        assert entered.wait(5)
+        writer_future = executor.submit(write_new_memory)
+        assert writer_started.wait(5)
+        assert not writer_done.wait(0.1)
+        release.set()
+        snapshot = snapshot_future.result(timeout=5)
+        writer_future.result(timeout=5)
+
+    # CODEX AGENT: either era is valid, but revision-zero policy plus later evidence never is. By
+    # deliberately pausing the first snapshot, this test pins the empty era deterministically.
+    assert snapshot == {"revision": 0, "rows": []}
+    assert writer_done.is_set()
+
+
 def test_require_existing_concept_write_fences_capsule_snapshot_through_commit(
         tmp_path, monkeypatch):
     import looplab.engine.concept_registry as registry_module

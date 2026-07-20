@@ -414,10 +414,9 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
                 return "invalid_record"
         return None
 
-    # Task-facet stewardship has no paid HTTP invocation schema. Treat any such row as foreign
-    # instead of accidentally granting it terminal/action-id semantics copied from another ledger.
-    if kind == "facets":
-        return "unsupported_schema" if version is not None else "invalid_record"
+    # CODEX AGENT: task faceting is also a paid on-demand steward in the CLI. It uses the same durable
+    # begun/terminal envelope as claim/concept review even though it has no HTTP endpoint; keeping one
+    # schema is what lets crash recovery refuse a duplicate provider call across CLI processes.
 
     # The oldest HTTP audit projection carried action_id/proposals but no discriminator. Treat it
     # as a terminal receipt so the same id can never become a new paid cache miss.
@@ -645,9 +644,11 @@ def project_governed_sources(
                 or source.name.casefold() in _GOVERNANCE_LEDGER_FILES):
             raise ValueError("governed source path must be a non-policy file directly under memory_dir")
         requested_paths.append(source)
-    # Linearize an absent store at this observation point without creating lock artifacts on a read.
-    if observed_path_missing(base):
-        return project(_empty_governance_snapshot())
+    # CODEX AGENT: bootstrap an absent memory root before taking the ordinary policy/source locks.
+    # Returning an unlocked "empty" policy snapshot let the callback observe evidence created a moment
+    # later and label it revision zero. Once the directory exists, every compliant writer and this reader
+    # rendezvous on the same inner locks; whichever side wins is projected as one complete era.
+    base.mkdir(parents=True, exist_ok=True)
 
     from looplab.engine.concept_registry import _concept_governance_transaction
     from looplab.events.eventstore import _interprocess_lock

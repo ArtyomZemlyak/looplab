@@ -429,14 +429,64 @@ def test_cli_concept_steward(tmp_path, monkeypatch):
         })
 
     monkeypatch.setattr(cli, "make_llm_client", _client)
-    r = CliRunner().invoke(app, ["concept-steward", str(tmp_path)])
+    command = ["concept-steward", str(tmp_path), "--action-id", "cli-concept-review"]
+    r = CliRunner().invoke(app, command)
     assert r.exit_code == 0 and "merge  'data/hn'" in r.stdout and "proposal only" in r.stdout
+    assert calls == ["paid"]
+    retry = CliRunner().invoke(app, command)
+    assert retry.exit_code == 0 and "merge  'data/hn'" in retry.stdout
     assert calls == ["paid"]
     r2 = CliRunner().invoke(app, ["concept-steward", str(tmp_path), "--apply"])
     assert r2.exit_code == 2 and "deprecated and disabled" in r2.stdout
     assert "concept-merge/concept-split" in r2.stdout
     assert calls == ["paid"]
     assert not (tmp_path / "concept_aliases.jsonl").exists()
+
+
+def test_cli_paid_steward_crash_after_dispatch_never_replays_same_action(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    import looplab.cli as cli
+    import looplab.engine.steward_invocation as invocation_module
+
+    ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl").add(build_concept_capsule(
+        run_id="r1", fingerprint=["k"], direction="max",
+        concepts=["data/hn"], concept_outcomes={}))
+    paid = []
+
+    class _PaidClient(_Client):
+        def complete_tool(self, messages, json_schema):
+            paid.append("called")
+            return super().complete_tool(messages, json_schema)
+
+    clients = []
+    monkeypatch.setattr(
+        cli, "make_llm_client",
+        lambda *_args, **_kwargs: clients.append("built") or _PaidClient({
+            "merges": [], "splits": [], "purges": [],
+        }),
+    )
+    original_finish = invocation_module._finish
+
+    def crash_before_terminal(*_args, **_kwargs):
+        raise RuntimeError("simulated process death after paid result")
+
+    monkeypatch.setattr(invocation_module, "_finish", crash_before_terminal)
+    command = ["concept-steward", str(tmp_path), "--action-id", "crash-fenced-paid-call"]
+    first = CliRunner().invoke(app, command)
+    assert first.exit_code != 0 and paid == ["called"] and clients == ["built"]
+
+    monkeypatch.setattr(invocation_module, "_finish", original_finish)
+    retry = CliRunner().invoke(app, command)
+    assert retry.exit_code == 2
+    assert "outcome is unknown" in retry.output
+    assert paid == ["called"] and clients == ["built"]
+    rows = [json.loads(line) for line in (
+        tmp_path / "concept_curation_log.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["action"] == "steward-invocation-begun"
+    assert rows[0]["invocation_id"] == "crash-fenced-paid-call"
 
 
 def test_cli_steward_model_override_reaches_the_client(tmp_path, monkeypatch):
@@ -450,10 +500,15 @@ def test_cli_steward_model_override_reaches_the_client(tmp_path, monkeypatch):
     s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
                                 concepts=["data/hn"], concept_outcomes={}))
     seen = {}
-    monkeypatch.setattr(cli, "make_llm_client",
-                        lambda settings, *a, **k: seen.setdefault("model", settings.llm_model) or _Client(
-                            {"merges": [], "splits": [], "purges": []}))
-    r = CliRunner().invoke(app, ["concept-steward", str(tmp_path), "--model", "some-other-model"])
+    def client_for(settings, *_args, **_kwargs):
+        seen["model"] = settings.llm_model
+        return _Client({"merges": [], "splits": [], "purges": []})
+
+    monkeypatch.setattr(cli, "make_llm_client", client_for)
+    r = CliRunner().invoke(app, [
+        "concept-steward", str(tmp_path), "--model", "some-other-model",
+        "--action-id", "cli-concept-model-override",
+    ])
     assert r.exit_code == 0 and seen.get("model") == "some-other-model"   # --model actually applied
 
 

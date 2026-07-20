@@ -549,10 +549,13 @@ an unreviewed batch. The prompt carries separate capsule-source and model-visibl
 receipts. If either is incomplete, deterministic validation allows direct synonym merges only and rejects
 split/purge proposals whose rarity or absence premise could depend on omitted concepts. Needs a reachable LLM.
 This is the on-demand companion to finalize-time
-`cross_run_curation`.
+`cross_run_curation`. Every invocation requires a stable `--action-id`: the CLI durably appends a begun row
+before model dispatch and a terminal proposed/empty/error row afterwards. A restart that finds only begun
+reports an unknown outcome and never repeats the same potentially paid call; a completed retry replays the
+durable terminal proposal without constructing a provider client.
 
 ```bash
-looplab concept-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 12] [--json]
+looplab concept-steward MEMORY_DIR --action-id ID [--apply] [--model M] [--max-proposals 12] [--json]
 ```
 
 | Option | Default | Description |
@@ -561,7 +564,8 @@ looplab concept-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 12] [-
 | `--apply` | off | **Deprecated and disabled.** Exits 2 before any LLM call or write. Run without it, review the exact proposal, then use typed `concept-merge` / `concept-split` or owner HTTP governance |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `12` | Cap the total merge/split/purge proposals per pass |
-| `--json` | off | Emit `{proposals, receipt}` as JSON; the proposal-only steward always returns `receipt: null` |
+| `--action-id` | *(required)* | Stable paid invocation identity. Reuse only to reconcile/replay that exact invocation; choose a new id for an intentional new review |
+| `--json` | off | Emit `{proposals, receipt, invocation}` as JSON; `invocation` carries the durable action id/revision/outcome and whether this was a replay |
 
 ---
 
@@ -639,6 +643,7 @@ an independent-evidence assessment: refs are attempts rather than independent ev
 
 ```bash
 looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--json]
+               [--governance-receipt]
 ```
 
 | Option | Default | Description |
@@ -650,6 +655,7 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
 | `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
+| `--governance-receipt` | off | With `--json`, emit `{claims, revision, structured}`. Use `--structured --json --governance-receipt` to obtain the exact UID/evidence-digest/revision inputs required by `claim-decide` |
 
 Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown.
 Structured lookup prefers exact scope+metric, then scope-only, global metric and global. An unscoped decision
@@ -668,11 +674,13 @@ advisory.
 PART V §22.4 — the **lean operator decision overlay**: ratify / reject / pin a cross-run claim. Agents have no
 matching mutation tool. Records append under an interprocess lock with fsync to `claim_decisions.jsonl`, keyed
 both by normalized statement text and by a stable scope+polarity `claim_uid`; the latest matching record wins.
-This local CLI is still not full governance: it has no clear verb, evidence/scope revision object,
-idempotency/CAS, server-derived actor/time or history endpoint. A later decision can replace the effective badge
-while raw JSONL history remains. The typed owner HTTP action adds claim `clear`, `expected_revision`, `action_id`,
-server-derived actor/time and stable 409 conflicts. It also requires a currently projected structured
-`claim_uid` plus the exact `evidence_digest` the operator observed and validates both inside the locked CAS.
+The CLI now requires the currently projected `claim_uid`, exact `evidence_digest`, observed ledger revision and
+a stable action id. UID validation, lost-response replay, CAS, live-target lookup, evidence freshness validation
+and durable append execute as one policy-then-evidence locked operation shared with the owner HTTP endpoint.
+It therefore cannot govern a typo/future claim or silently ratify evidence that changed after review. The local
+CLI still has no clear verb, server-derived actor/time or queryable history endpoint; owner HTTP additionally
+provides `clear` and stable structured 409 responses. A later valid decision can replace the effective badge
+while raw JSONL history remains.
 That live digest fence is not a versioned evidence release, and no queryable decision-history workbench exists.
 Operator maturity remains explicit policy until a later `clear`; it does not silently expire when evidence
 changes. Structured JSON exposes `decision_fresh`, while claims/context/tool text labels current,
@@ -680,7 +688,9 @@ stale-evidence, or unknown freshness separately so `RATIFIED`/`PINNED` never imp
 evidence digest is still current.
 
 ```bash
-looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."] [--scope TASK_ID]
+looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) \
+  --claim-uid UID --evidence-digest DIGEST --expected-revision N --action-id ID \
+  [--note "..."] [--scope TASK_ID] [--metric METRIC]
 ```
 
 | Option | Default | Description |
@@ -691,7 +701,12 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--not
 | `--reject` | — | Mark `operator-rejected`; remains human-visible and may remain in top-level claim totals, but is excluded from active context, Atlas contradictions, agent-tool and hybrid-retrieval projections |
 | `--pin` | — | Mark `operator-pinned`; pinned claims receive first retention priority in bounded context packs. The hard claim-count cap still applies, and any omitted pin count is surfaced explicitly |
 | `--note` | `""` | Optional rationale recorded with the decision |
-| `--scope` | `""` | Task scope for the **structured claim key**. A non-empty scope is task-precise and will not reach a same-worded claim in another task; the default empty scope intentionally creates the portfolio-wide fallback. The record carries a `claim_uid`+scope so the structured projection (`claims --structured`) overlays it exactly; the legacy normalized-statement overlay still applies for the lean view |
+| `--scope` | `""` | Exact task scope from the reviewed structured claim. It must participate in the supplied UID and will not reach a same-worded claim in another task; empty is valid only for a genuinely unscoped live claim. Portfolio-wide fallback writes remain a low-level migration capability, not a target the strict CLI fabricates from one scoped observation |
+| `--metric` | `""` | Metric qualifier from the reviewed structured claim; participates in the stable UID |
+| `--claim-uid` | *(required)* | Stable UID from the exact reviewed structured claim; must recompute from statement/scope/metric and still exist live |
+| `--evidence-digest` | *(required)* | Evidence digest from the reviewed claim; a changed lesson/research snapshot rejects the write |
+| `--expected-revision` | *(required)* | Claim-governance revision observed with the reviewed projection; stale concurrent policy writes reject the append |
+| `--action-id` | *(required)* | Stable idempotency id. A lost-response retry returns the original durable receipt before CAS/freshness revalidation |
 
 ---
 
@@ -704,10 +719,11 @@ machine-proposed claims (never re-litigates a human verdict). It is **proposal-o
 claim identity, scope, metric and decision, then apply only selected decisions through typed `claim-decide` or
 owner HTTP governance. The deprecated `--apply` spelling exits 2 **before model setup, paid inference or
 mutation** and never re-runs an LLM batch for immediate application. Needs a reachable LLM. The on-demand
-companion to finalize-time `cross_run_curation`.
+companion to finalize-time `cross_run_curation`. Its required action id has the same durable begun/terminal
+recovery contract as `concept-steward`.
 
 ```bash
-looplab claim-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 10] [--json]
+looplab claim-steward MEMORY_DIR --action-id ID [--apply] [--model M] [--max-proposals 10] [--json]
 ```
 
 | Option | Default | Description |
@@ -716,7 +732,8 @@ looplab claim-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 10] [--j
 | `--apply` | off | **Deprecated and disabled.** Exits 2 before any LLM call or write. Run without it, review the exact proposal, then use typed `claim-decide` or owner HTTP governance |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `10` | Cap the total ratify/reject/pin proposals per pass |
-| `--json` | off | Emit `{proposals, receipt}` as JSON; the proposal-only steward always returns `receipt: null` |
+| `--action-id` | *(required)* | Stable paid invocation identity used for crash-safe at-most-once reconciliation |
+| `--json` | off | Emit `{proposals, receipt, invocation}` including the durable action receipt |
 
 ---
 
@@ -730,10 +747,11 @@ They are currently stored/surfaced metadata reserved for a future post-scope ran
 visibility and do not change retrieval order. `build_index` stays byte-identical rebuildable. **PROPOSAL-ONLY**
 (consistent with `concept-steward`/`claim-steward`, §22.4 — the agentic steward only proposes): it classifies +
 prints; `--apply` is deprecated/rejected. Record the reviewed facets deterministically with `task-facets-set`.
-Needs a reachable LLM.
+Needs a reachable LLM. It uses the same required action-id and durable begun/terminal recovery contract as the
+other paid steward CLIs.
 
 ```bash
-looplab task-facets MEMORY_DIR "GOAL" [--kind K] [--model M]              # propose (LLM), no write
+looplab task-facets MEMORY_DIR "GOAL" --action-id ID [--kind K] [--model M] # propose (LLM), no write
 looplab task-facets-set MEMORY_DIR TASK_ID --domain … --language … …     # operator record (deterministic)
 ```
 
@@ -741,10 +759,10 @@ looplab task-facets-set MEMORY_DIR TASK_ID --domain … --language … …     #
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir (where `task_facets.jsonl` lives) |
 | `GOAL` | *(required)* | The task goal to classify |
-| `--task-id` | `""` | Task id to record facets under (required for `--apply`) |
 | `--kind` | `""` | Task kind (dataset/repo/…) — a hint for the classifier |
-| `--apply` | off | RECORD the classified facets for `--task-id` |
+| `--apply` | off | **Deprecated and disabled.** Exits before client construction or paid work; record reviewed facets with `task-facets-set` |
 | `--model` | *(config)* | Override the LLM model id |
+| `--action-id` | *(required)* | Stable paid invocation identity used for crash-safe at-most-once reconciliation |
 
 ---
 

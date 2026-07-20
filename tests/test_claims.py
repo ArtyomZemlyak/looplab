@@ -385,7 +385,18 @@ def test_cli_claim_decide_and_reflect(tmp_path):
     from typer.testing import CliRunner
     from looplab.cli import app
     (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(_lesson("some finding", "supported", [1])) + b"\n")
-    r = CliRunner().invoke(app, ["claim-decide", str(tmp_path), "some finding", "--reject", "--note", "wrong"])
+    snapshot = CliRunner().invoke(app, [
+        "claims", str(tmp_path), "--structured", "--json", "--governance-receipt",
+    ])
+    payload = orjson.loads(snapshot.stdout)
+    observed = payload["claims"][0]
+    assert payload["revision"] == 0 and payload["structured"] is True
+    r = CliRunner().invoke(app, [
+        "claim-decide", str(tmp_path), "some finding", "--reject", "--note", "wrong",
+        "--scope", "t", "--claim-uid", observed["claim_uid"],
+        "--evidence-digest", observed["evidence_digest"],
+        "--expected-revision", "0", "--action-id", "cli-reject-finding",
+    ])
     assert r.exit_code == 0 and "rejected" in r.stdout
     # the claims view now marks it REJECTED
     out = CliRunner().invoke(app, ["claims", str(tmp_path)])
@@ -397,6 +408,57 @@ def test_cli_claim_decide_requires_exactly_one(tmp_path):
     from looplab.cli import app
     r = CliRunner().invoke(app, ["claim-decide", str(tmp_path), "x"])   # none chosen
     assert r.exit_code == 2
+
+
+def test_cli_claim_decide_rejects_future_stale_and_non_cas_targets(tmp_path):
+    import orjson
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.engine.claim_key import claim_uid
+    from looplab.engine.claims import claim_governance_revision, claims_for_memory
+
+    path = tmp_path / "lessons.jsonl"
+    path.write_bytes(orjson.dumps(_lesson("observed claim", "supported", [1])) + b"\n")
+    observed = claims_for_memory(tmp_path, structured=True)[0]
+
+    def decide(statement, uid, digest, revision, action):
+        return CliRunner().invoke(app, [
+            "claim-decide", str(tmp_path), statement, "--pin", "--scope", "t",
+            "--claim-uid", uid, "--evidence-digest", digest,
+            "--expected-revision", str(revision), "--action-id", action,
+        ])
+
+    future = decide(
+        "future typo", claim_uid("future typo", scope="t"),
+        observed["evidence_digest"], 0, "cli-future")
+    assert future.exit_code == 2 and "claim_target_missing" in future.output
+    assert claim_governance_revision(tmp_path) == 0
+
+    path.write_bytes(path.read_bytes() + orjson.dumps(
+        _lesson("observed claim", "supported", [2], run_id="r2")) + b"\n")
+    stale = decide(
+        "observed claim", observed["claim_uid"], observed["evidence_digest"], 0,
+        "cli-stale-evidence")
+    assert stale.exit_code == 2 and "claim_evidence_changed" in stale.output
+    assert claim_governance_revision(tmp_path) == 0
+
+    current = claims_for_memory(tmp_path, structured=True)[0]
+    accepted = decide(
+        "observed claim", current["claim_uid"], current["evidence_digest"], 0,
+        "cli-current")
+    assert accepted.exit_code == 0
+    path.write_bytes(path.read_bytes() + orjson.dumps(
+        _lesson("observed claim", "supported", [3], run_id="r3")) + b"\n")
+    lost_response_retry = decide(
+        "observed claim", current["claim_uid"], current["evidence_digest"], 0,
+        "cli-current")
+    assert lost_response_retry.exit_code == 0
+    stale_cas = decide(
+        "observed claim", current["claim_uid"], current["evidence_digest"], 0,
+        "cli-stale-cas")
+    assert stale_cas.exit_code == 2 and "revision conflict" in stale_cas.output
+    assert claim_governance_revision(tmp_path) == 1
 
 
 # --------------------------------------------------------------------------- #
