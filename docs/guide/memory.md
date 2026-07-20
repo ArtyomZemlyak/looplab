@@ -45,12 +45,15 @@ neither grant visibility nor change ordering. External coding-agent Developer ba
 while the standalone CLI remains portfolio-wide. Proactive Researcher/Strategist influence persists lean
 source/render digest receipts. Typed owner governance writes now have revision CAS, action-id idempotency and
 explicit clear actions, while stewards remain proposal-only. These projections are real, but they do not yet
-provide an immutable comparison/access scope, complete corpus-health/snapshot receipts, evidence/taxonomy
+provide an immutable comparison/access scope, one portfolio-wide atomic snapshot, a complete concept/corpus
+coverage denominator, evidence/taxonomy
 release identity, assignment backfill or independent evidence-family accounting. Typed owner HTTP concept
 actions now validate live canonical merge/purge sources and merge targets; split may introduce provisional
 children, but this is not a versioned taxonomy/entity release. Typed
-claim decisions do fence a current claim and its observed evidence digest. An owner-only `#/atlas` **Experimental portfolio diagnostic** now renders the
-bounded read models, but it is not the complete snapshot-consistent Research Atlas. The home Runs Map and a
+claim decisions do fence a current claim and its observed evidence digest. An owner-only `#/atlas`
+**Experimental portfolio diagnostic** now renders the bounded read models. Its claim/evidence slices carry
+coherent source identity, but the four independently fetched projections are not the complete canonical
+Research Atlas. The home Runs Map and a
 run's theme grouping are different surfaces (see [Web UI](ui.md#which-graph-am-i-looking-at)).
 
 Concept capsule v2 has additive bounded-source receipts for its applicability fingerprint and both stored
@@ -82,13 +85,20 @@ receipt sentinel when a non-empty source retains zero claims):
 `claims_total`, `claims_retained`, `claims_omitted`, and `producer_complete`. The writer scans for the first
 256 valid claims instead of slicing the raw memo first, so malformed prefix entries cannot hide a valid later
 claim. Invalid and capped inputs both count as omitted. Claim projections aggregate those receipts as
-`research_source`; a v1/v2/unversioned durable row has an unknown denominator and fails closed. Retained
-evidence remains visible and citable, but a partial/unknown D8 source cannot produce either exact one-sided
-state (`supported`/`refuted`) because an omitted tail may make it mixed. It also cannot produce an agentic
-`ratified` proposal.
-Context packs, retrieval receipts, the claims endpoint/CLI, and the Atlas preview disclose the lower bound.
-The producer-prefixed receipt is additive: store read-health can contribute `quarantined_rows`/`read_complete`
-without redefining what the producer-cap fields mean.
+`research_source`; a v1/v2/unversioned durable row has an unknown denominator and fails closed. The current
+additive `read_health_v=1` extension also carries `read_complete`, durable row
+total/retained/quarantined counts, malformed/invalid counts and a lowercase snapshot digest. The extension is
+atomic; a legacy producer-only outward receipt remains readable, but a partially present or contradictory
+extension is invalid. These producer/read-health fields describe the D8 rows that were explicitly processed
+and persisted, not proof that every portfolio run executed D8.
+
+Exact claim authority is the separate v1 `claim_source`. It joins the lesson and research read-health
+segments with D8 producer completeness and binds the combined snapshot with a digest. Retained evidence
+remains visible and citable, but a quarantined lesson/research row, a partial/unknown D8 source or an unknown
+combined receipt cannot produce either exact one-sided state (`supported`/`refuted`) because omitted evidence
+may make it mixed. It also cannot produce an agentic `ratified` proposal. Context packs, retrieval receipts,
+the claims endpoint/CLI, and the Atlas preview disclose the lower bound. The producer-prefixed receipt remains
+additive: read health refines overall D8 completeness without redefining what the producer-cap fields mean.
 
 The broader Part-IV design specifies the production **cross-run research index** and UI **Research Atlas**.
 Its core distinction is:
@@ -142,8 +152,9 @@ The source tuple is trigger provenance, not a fallback paid-work identity. Reade
 `action` and key shape; in particular, they must not treat v1 rows or diagnostic v2 rows as portfolio-wide
 semantic receipts.
 
-The Research Atlas preview currently reads only bounded tails of the concept and claim ledgers. It displays
-proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse to generic proposal copy.
+The Research Atlas preview reads bounded concept/claim projections plus recent tails of the two curation
+ledgers. It displays proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse to
+generic proposal copy.
 It neither fetches the task-facets ledger nor exposes the semantic key, input digest/schema, source key, model
 or parser, so the UI is not an identity or billing audit surface.
 

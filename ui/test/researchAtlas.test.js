@@ -21,7 +21,15 @@ import {
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const completeResearchSource = Object.freeze({
+const completeReadSegment = Object.freeze({
+  read_complete: true,
+  rows_total: 1,
+  rows_retained: 1,
+  rows_quarantined: 0,
+  malformed_rows: 0,
+  invalid_rows: 0,
+})
+const legacyCompleteResearchSource = Object.freeze({
   source_complete: true,
   producer_receipt_known: true,
   producer_complete: true,
@@ -31,6 +39,28 @@ const completeResearchSource = Object.freeze({
   producer_claims_total: 1,
   producer_claims_retained: 1,
   producer_claims_omitted: 0,
+})
+const completeResearchSource = Object.freeze({
+  ...legacyCompleteResearchSource,
+  read_health_v: 1,
+  ...completeReadSegment,
+  snapshot_digest: 'a'.repeat(64),
+})
+const completeClaimSource = Object.freeze({
+  v: 1,
+  receipt_known: true,
+  source_complete: true,
+  read_complete: true,
+  research_source_complete: true,
+  lessons: completeReadSegment,
+  research: completeReadSegment,
+  snapshot_digest: 'c'.repeat(64),
+})
+const partialClaimSource = Object.freeze({
+  ...completeClaimSource,
+  source_complete: false,
+  research_source_complete: false,
+  snapshot_digest: 'd'.repeat(64),
 })
 
 const claim = (index = 0) => ({
@@ -45,6 +75,7 @@ const claim = (index = 0) => ({
   scopes: ['task-a'],
   runs: [`run-${index}`],
   research_source: completeResearchSource,
+  claim_source: completeClaimSource,
 })
 
 test('Atlas projection reconciles concurrent totals without trusting malformed text or counts', () => {
@@ -232,7 +263,11 @@ test('Atlas derives evidence balance from sanitized totals instead of payload la
     { ...claim(2), epistemic: 'inconclusive', n_support: 1, support: [], n_oppose: 1, oppose: [] },
     { ...claim(3), epistemic: 'mixed', n_support: -4, support: [], n_oppose: 'bad', oppose: [] },
   ]
-  const view = buildResearchAtlasView({}, { claims: contradictory }, {})
+  const view = buildResearchAtlasView({}, {
+    research_source: completeResearchSource,
+    claim_source: completeClaimSource,
+    claims: contradictory,
+  }, {})
 
   assert.deepEqual(view.claims.map(row => [row.nSupport, row.nOppose, row.epistemic]), [
     [2, 0, 'supported'],
@@ -278,11 +313,14 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
     producer_claims_retained: 256,
     producer_claims_omitted: 1,
   }
-  const view = buildResearchAtlasView({}, { research_source: partial, claims: [{
+  const view = buildResearchAtlasView({}, {
+    research_source: partial, claim_source: partialClaimSource, claims: [{
     ...claim(30), epistemic: 'inconclusive', n_support: 1, research_source: partial,
+    claim_source: partialClaimSource,
   }, {
     ...claim(31), epistemic: 'inconclusive', n_support: 0, support: [],
     n_oppose: 1, oppose: ['run-31:node-3'], research_source: partial,
+    claim_source: partialClaimSource,
   }] }, {})
 
   assert.equal(view.claims[0].epistemic, 'inconclusive')
@@ -294,7 +332,8 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
   }, claims: [] }, {})
   assert.deepEqual(contradictory.researchSource, { status: 'unknown', counts: null })
 
-  const forgedRow = buildResearchAtlasView({}, { research_source: partial, claims: [{
+  const forgedRow = buildResearchAtlasView({}, {
+    research_source: partial, claim_source: partialClaimSource, claims: [{
     ...claim(32), epistemic: 'supported', n_support: 1,
     research_source: completeResearchSource,
   }] }, {})
@@ -303,10 +342,12 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
 
   const splitSnapshot = buildResearchAtlasView({
     research_source: completeResearchSource,
+    claim_source: completeClaimSource,
     contradictions: [{ ...claim(33), epistemic: 'mixed', n_support: 1,
       contradicts: ['opposite'], research_source: completeResearchSource }],
-  }, { research_source: partial, claims: [{
+  }, { research_source: partial, claim_source: partialClaimSource, claims: [{
     ...claim(34), epistemic: 'inconclusive', n_support: 1, research_source: partial,
+    claim_source: partialClaimSource,
   }] }, {})
   assert.equal(splitSnapshot.claims[0].epistemic, 'inconclusive')
   assert.equal(splitSnapshot.contradictions[0].epistemic, 'mixed')
@@ -317,15 +358,198 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
     server: { middlewareMode: true },
   })
   try {
-    const { ResearchSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const { ClaimSourceNotice, ResearchSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
     const markup = renderToStaticMarkup(
       React.createElement(ResearchSourceNotice, { source: view.researchSource }),
     )
-    assert.match(markup, /Research-claim source partial/)
+    assert.match(markup, /D8 research source partial/)
     assert.match(markup, /1 claim\(s\) known omitted/)
-    assert.match(markup, /one-sided state is withheld/)
+    assert.match(markup, /does not cover lesson evidence/)
+    const authorityMarkup = renderToStaticMarkup(
+      React.createElement(ClaimSourceNotice, { source: view.claimSource }),
+    )
+    assert.match(authorityMarkup, /Combined claim source partial/)
+    assert.match(authorityMarkup, /one-sided state and absence are withheld/)
   } finally {
     await vite.close()
+  }
+})
+
+test('Atlas validates the additive D8 read-health extension atomically', () => {
+  const quarantined = {
+    ...completeResearchSource,
+    source_complete: false,
+    read_complete: false,
+    rows_total: 3,
+    rows_retained: 1,
+    rows_quarantined: 2,
+    malformed_rows: 1,
+    invalid_rows: 1,
+    snapshot_digest: 'b'.repeat(64),
+  }
+  const partial = buildResearchAtlasView({}, { research_source: quarantined }, {})
+  assert.equal(partial.researchSource.status, 'partial')
+  assert.deepEqual(partial.researchSource.read, {
+    complete: false, total: 3, retained: 1, quarantined: 2, malformed: 1, invalid: 1,
+  })
+  assert.equal(partial.researchSource.snapshotDigest, 'b'.repeat(64))
+
+  // The producer-only contract remains readable as one complete legacy shape. Once any read-health key
+  // appears, however, the whole v1 extension and its invariants are mandatory (CODEX AGENT).
+  assert.deepEqual(
+    buildResearchAtlasView({}, { research_source: legacyCompleteResearchSource }, {}).researchSource,
+    { status: 'complete', counts: {
+      producer_runs: 1, producer_partial_runs: 0, producer_unknown_runs: 0,
+      producer_claims_total: 1, producer_claims_retained: 1, producer_claims_omitted: 0,
+    } },
+  )
+  const { invalid_rows: _omitted, ...torn } = quarantined
+  for (const receipt of [
+    torn,
+    { ...quarantined, snapshot_digest: 'B'.repeat(64) },
+    { ...quarantined, rows_total: 4 },
+    { ...quarantined, read_complete: true },
+    { ...quarantined, source_complete: true },
+  ]) {
+    assert.deepEqual(
+      buildResearchAtlasView({}, { research_source: receipt }, {}).researchSource,
+      { status: 'unknown', counts: null },
+    )
+  }
+})
+
+test('Atlas uses combined claim-source authority when lesson rows are quarantined', async () => {
+  const quarantinedLessons = {
+    ...completeClaimSource,
+    source_complete: false,
+    read_complete: false,
+    lessons: {
+      read_complete: false, rows_total: 2, rows_retained: 1,
+      rows_quarantined: 1, malformed_rows: 1, invalid_rows: 0,
+    },
+    snapshot_digest: 'e'.repeat(64),
+  }
+  const row = {
+    ...claim(35), n_support: 1, epistemic: 'supported',
+    claim_source: quarantinedLessons,
+  }
+  const view = buildResearchAtlasView({}, {
+    research_source: completeResearchSource,
+    claim_source: quarantinedLessons,
+    claims: [row],
+  }, {})
+
+  assert.equal(view.researchSource.status, 'complete', 'D8 alone is healthy')
+  assert.equal(view.claimSource.status, 'partial', 'the lessons store is not healthy')
+  assert.equal(view.claims[0].epistemic, 'inconclusive',
+    'a quarantined lesson could contain the missing opposite side')
+  assert.deepEqual(view.claims[0].support, ['run-35:node-1'],
+    'retained references remain visible as a lower bound')
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { ClaimSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const markup = renderToStaticMarkup(
+      React.createElement(ClaimSourceNotice, { source: view.claimSource }),
+    )
+    assert.match(markup, /Combined claim source partial/)
+    assert.match(markup, /lessons\/research.*1\/0/is)
+    assert.match(markup, /one-sided state and absence are withheld/)
+  } finally {
+    await vite.close()
+  }
+})
+
+test('Atlas requires one combined claim snapshot across envelopes and every visible row', () => {
+  const laterClaimSource = { ...completeClaimSource, snapshot_digest: 'f'.repeat(64) }
+  const mixed = {
+    ...claim(42), epistemic: 'mixed', n_support: 1,
+    n_oppose: 1, oppose: ['run-42:node-3'],
+  }
+  const previous = {
+    atlas: {
+      research_source: completeResearchSource,
+      claim_source: completeClaimSource,
+      contradictions: [claim(40), mixed],
+    },
+    claims: {
+      research_source: completeResearchSource,
+      claim_source: completeClaimSource,
+      claims: [claim(46)],
+    },
+  }
+  const refreshed = mergeResearchAtlasPayload(previous, {
+    claims: {
+      research_source: completeResearchSource,
+      claim_source: laterClaimSource,
+      claims: [{
+        ...claim(43), n_support: 0, support: [], n_oppose: 1,
+        oppose: ['run-43:node-4'], claim_source: laterClaimSource,
+      }],
+    },
+  })
+  const split = buildResearchAtlasView(refreshed.atlas, refreshed.claims, {})
+  assert.equal(split.researchSource.status, 'complete')
+  assert.equal(split.claimSource.status, 'unknown')
+  assert.equal(split.contradictions[0].epistemic, 'inconclusive')
+  assert.equal(split.contradictions[1].epistemic, 'mixed',
+    'retained two-sided evidence remains mixed even across a split read epoch')
+  assert.equal(split.claims[0].epistemic, 'inconclusive')
+
+  const coherent = buildResearchAtlasView(previous.atlas, previous.claims, {})
+  assert.equal(coherent.claimSource.status, 'complete')
+  assert.equal(coherent.claims[0].epistemic, 'supported')
+
+  const forgedRow = buildResearchAtlasView({}, {
+    research_source: completeResearchSource,
+    claim_source: completeClaimSource,
+    claims: [{ ...claim(44), claim_source: laterClaimSource }],
+  }, {})
+  assert.equal(forgedRow.claimSource.status, 'unknown')
+  assert.equal(forgedRow.claims[0].epistemic, 'inconclusive')
+
+  const producerPartial = {
+    ...completeResearchSource,
+    source_complete: false,
+    producer_complete: false,
+    producer_partial_runs: 1,
+    producer_claims_total: 2,
+    producer_claims_omitted: 1,
+  }
+  const contradictoryDiagnostics = buildResearchAtlasView({}, {
+    research_source: producerPartial,
+    claim_source: completeClaimSource,
+    claims: [{ ...claim(50), research_source: producerPartial }],
+  }, {})
+  assert.equal(contradictoryDiagnostics.researchSource.status, 'partial')
+  assert.equal(contradictoryDiagnostics.claimSource.status, 'unknown',
+    'a claim authority receipt cannot contradict its accompanying D8 diagnostic')
+  assert.equal(contradictoryDiagnostics.claims[0].epistemic, 'inconclusive')
+})
+
+test('Atlas never accepts a legacy research receipt as combined claim authority', () => {
+  const legacyRow = { ...claim(48), research_source: legacyCompleteResearchSource }
+  delete legacyRow.claim_source
+  const view = buildResearchAtlasView({}, {
+    research_source: legacyCompleteResearchSource,
+    claims: [legacyRow],
+  }, {})
+
+  assert.equal(view.researchSource.status, 'complete')
+  assert.equal(view.claimSource.status, 'unknown')
+  assert.equal(view.claims[0].epistemic, 'inconclusive')
+
+  for (const receipt of [
+    { ...completeClaimSource, snapshot_digest: 'C'.repeat(64) },
+    { ...completeClaimSource, read_complete: false },
+    { ...completeClaimSource, lessons: { ...completeReadSegment, invalid_rows: 1 } },
+    { ...completeClaimSource, receipt_known: false },
+  ]) {
+    assert.equal(buildResearchAtlasView({}, { claim_source: receipt }, {}).claimSource.status,
+      'unknown')
   }
 })
 
@@ -658,7 +882,7 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     const allCurrent = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, conceptSource: { status: 'complete' }, researchSource: { status: 'complete' },
+      }, conceptSource: { status: 'complete' }, claimSource: { status: 'complete' },
       pending: [], retry() {}, busy: false, onBack() {},
     }))
     const currentDom = new JSDOM(allCurrent)
@@ -677,7 +901,7 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     const bounded = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, conceptSource: { status: 'partial' }, researchSource: { status: 'complete' },
+      }, conceptSource: { status: 'partial' }, claimSource: { status: 'complete' },
       pending: [], retry() {}, busy: false, onBack() {},
     }))
     const boundedDom = new JSDOM(bounded)
@@ -706,7 +930,7 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     const partial = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: failed, conceptCuration: failed, claimCuration: stale,
-      }, conceptSource: { status: 'complete' }, researchSource: { status: 'unknown' },
+      }, conceptSource: { status: 'complete' }, claimSource: { status: 'unknown' },
       pending: ['conceptCuration'],
       retry() {}, busy: false, onBack() {},
     }))
@@ -901,6 +1125,9 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
     /No cross-run evidence/, /Some sources unavailable\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
+  assert.match(atlas, /Source receipts cover durable D8 rows from explicitly processed and persisted runs/)
+  assert.match(atlas, /they do not prove that every portfolio run executed D8/)
+  assert.match(atlas, /<ClaimSourceNotice source=\{view\.claimSource\}/)
   assert.match(atlas, /Referenced runs/)
   assert.match(atlas, /Atlas source readiness/)
   // Keep the implicit list role: role="region" would erase list semantics for assistive technology.

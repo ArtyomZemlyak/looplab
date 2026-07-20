@@ -181,10 +181,15 @@ test('every Part IV/V flag is visible and round-trips its boolean value', () => 
     assert.equal(payload[key], true, `${key} must round-trip through the form`)
   }
   assert.equal(Object.hasOwn(payload, 'future_engine_override'), false)
-  assert.match(FIELD_BY_KEY.concept_pivot.help, /never ranks or selects/i)
+  // CODEX AGENT: settings copy must disclose live steering and paid/tool-loop effects, not freeze the
+  // older audit-only story after the implementation began influencing generated proposals.
+  assert.match(FIELD_BY_KEY.concept_pivot.help, /affect downstream selection/i)
+  assert.match(FIELD_BY_KEY.concept_pivot.help, /does not itself rank candidates/i)
   assert.match(FIELD_BY_KEY.graded_novelty.help, /proposal admission/i)
   assert.match(FIELD_BY_KEY.capability_expansion.help, /Concept coverage pivot/i)
   assert.match(FIELD_BY_KEY.cross_run_concepts.help, /D8.*persist independently/i)
+  assert.match(FIELD_BY_KEY.cross_run_read_tools.help, /model\/tool-loop turns.*inference cost/i)
+  assert.match(FIELD_BY_KEY.cross_run_curation.warning, /finalization latency.*paid model cost/i)
   assert.match(FIELD_BY_KEY.cross_run_curation_auto.warning, /never applies/i)
   assert.match(FIELD_BY_KEY.cross_run_curation_auto.help, /explicit operator/i)
 })
