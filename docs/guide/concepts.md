@@ -699,10 +699,17 @@ are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge 
 This shipped lesson/case memory should not be confused with the complete **portfolio research index**.
 An experimental Part-IV slice now ships enabled by default in product `Settings` (the bare-library
 `EngineOptions` defaults remain off): rebuildable run passports/facts, per-run concept capsules,
-versioned concept-key alias/split overlays, v2 D8 claims, task facets, bounded retrieval, and backend
+versioned concept-key alias/split overlays, v3 D8 claims, task facets, bounded retrieval, and backend
 Atlas/claims projections. Its bound agent tools use role and compatible direction; lessons/capsules accept
-exact task or a strict related-goal fingerprint, while v2 D8 is exact-task-only because it stores no goal
-fingerprint. Task facets are advisory metadata reserved for future ranking and currently neither grant
+exact task or a strict related-goal fingerprint, while v3 D8 is exact-task-only because it stores no goal
+fingerprint. Each explicitly processed v3 D8 run carries a producer total/retained/omitted receipt, and
+readers carry independent lesson/research JSONL read-health; malformed, schema-invalid and unknown-future
+rows are quarantined rather than interpreted as evidence. A processed-empty run therefore leaves a durable
+zero/zero sentinel, but these receipts do **not** prove that D8 ran for every historical portfolio run.
+Legacy v0-v2 rows remain readable, but their producer denominator is unknown.
+Any incomplete producer or read-health receipt makes retained claim counts and absence lower bounds and
+withholds exact one-sided states across Atlas, retrieval, tools and advisory prompts. Task facets are
+advisory metadata reserved for future ranking and currently neither grant
 visibility nor change ordering. External coding-agent Developer backends receive no D8 provider. Proactive
 prompt influence carries lean digest receipts. The `cross_run_concept_map` tool computes exact node/run totals
 from the validated retained capsule snapshot, but deliberately limits edge generation to the top 512 graph

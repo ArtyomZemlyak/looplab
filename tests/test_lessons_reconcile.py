@@ -73,7 +73,7 @@ def _seed(mem: Path, rows):
 
 def _rows(mem: Path) -> list[dict]:
     p = mem / "lessons.jsonl"
-    return [orjson.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+    return [orjson.loads(line) for line in p.read_text().splitlines() if line.strip()] if p.exists() else []
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +399,8 @@ def test_reconcile_offline_leaves_store_and_will_retry(tmp_path):
 def test_reconcile_survives_malformed_store_rows(tmp_path, monkeypatch):
     mem = tmp_path / "mem"
     mem.mkdir(parents=True)
-    (mem / "lessons.jsonl").write_text("not json\n" + orjson.dumps(
+    future = {"v": 99, "record_kind": "future-lesson", "statement": "future"}
+    (mem / "lessons.jsonl").write_text("not json\n" + orjson.dumps(future).decode() + "\n" + orjson.dumps(
         {"run_id": "run_me", "source": "comparative", "statement": "MINE stale", "outcome": "supported",
          "evidence": [1, 0], "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"},
          "fingerprint": [], "kind": "quadratic"}).decode() + "\n")
@@ -408,4 +409,35 @@ def test_reconcile_survives_malformed_store_rows(tmp_path, monkeypatch):
                  _node(1, metric=6.0, parent_ids=[0], params={"x": 3.0}, code="x=3\n")])
     monkeypatch.setattr(eng, "_reflect_client", lambda: FakeClient("P1 [BAD] regressed\n"))
     eng.lessons.reconcile_lessons(st)                                  # must not raise
-    assert not any("MINE stale" in r.get("statement", "") for r in _rows(mem))
+    raw = (mem / "lessons.jsonl").read_text()
+    # CODEX AGENT: reconciliation retires only understood stale lessons. Quarantine is byte-preserved and
+    # remains visible to claim-source health until an explicit repair/migration.
+    assert raw.splitlines()[:2] == ["not json", orjson.dumps(future).decode()]
+    from looplab.events.eventstore import read_jsonl_lenient
+    rows = read_jsonl_lenient(mem / "lessons.jsonl")
+    assert not any("MINE stale" in r.get("statement", "") for r in rows)
+
+
+def test_reconcile_aborts_when_authoritative_locked_read_fails(tmp_path, monkeypatch):
+    mem = tmp_path / "mem"
+    stale = {
+        "run_id": "run_me", "source": "comparative", "statement": "MINE stale",
+        "outcome": "supported", "evidence": [1, 0],
+        "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"},
+        "fingerprint": [], "kind": "quadratic",
+    }
+    _seed(mem, [stale])
+    before = (mem / "lessons.jsonl").read_bytes()
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    state = _state([_node(0, metric=9.0), _node(1, metric=6.0, parent_ids=[0])])
+    monkeypatch.setattr(eng, "_reflect_client", lambda: FakeClient("P1 [BAD] regressed\n"))
+    monkeypatch.setattr(
+        "looplab.engine.claims._load_claim_source_path",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("locked read failed")),
+    )
+
+    eng.lessons.reconcile_lessons(state)
+
+    assert (mem / "lessons.jsonl").read_bytes() == before
+    assert not [event for event in eng.store.read_all() if event.type == "lessons_reconciled"]
+    assert eng.lessons._reconcile_sig_hash is None

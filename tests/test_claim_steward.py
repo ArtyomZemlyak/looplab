@@ -35,6 +35,15 @@ def _claim(statement, *, epistemic="supported", n_support=2, n_oppose=0, scopes=
                 "producer_partial_runs": 0, "producer_unknown_runs": 0,
                 "producer_claims_total": 0, "producer_claims_retained": 0,
                 "producer_claims_omitted": 0,
+            },
+            "claim_source": {
+                "v": 1, "receipt_known": True, "source_complete": True,
+                "read_complete": True, "research_source_complete": True,
+                "lessons": {"read_complete": True, "rows_total": 1, "rows_retained": 1,
+                            "rows_quarantined": 0, "malformed_rows": 0, "invalid_rows": 0},
+                "research": {"read_complete": True, "rows_total": 0, "rows_retained": 0,
+                             "rows_quarantined": 0, "malformed_rows": 0, "invalid_rows": 0},
+                "snapshot_digest": "0" * 64,
             }}
 
 
@@ -99,8 +108,11 @@ def test_steward_cannot_ratify_partial_or_legacy_unknown_research_source():
         "producer_claims_total": 257, "producer_claims_retained": 256,
         "producer_claims_omitted": 1,
     }
+    partial["claim_source"]["source_complete"] = False
+    partial["claim_source"]["research_source_complete"] = False
     legacy = _claim("legacy source looks positive")
     legacy.pop("research_source")
+    legacy.pop("claim_source")
     client = _Client([
         {"statement": partial["statement"], "decision": "ratified"},
         {"statement": legacy["statement"], "decision": "ratified"},

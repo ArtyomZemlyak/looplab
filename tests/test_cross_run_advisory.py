@@ -80,6 +80,19 @@ def test_on_includes_coverage_line_from_capsules(tmp_path):
     assert "Bounded live concept observations (not coverage)" in txt and "hard-neg" in txt
 
 
+def test_advisory_keeps_corrupt_only_claim_source_model_visible(tmp_path):
+    (tmp_path / "lessons.jsonl").write_bytes(b"{broken\n")
+    host = _Host(tmp_path, on=True)
+
+    text = host._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max"))
+
+    assert "claim evidence stores are PARTIAL" in text
+    assert "absence is not exact" in text
+    assert host._cross_run_advisory_receipt["n_lessons"] == 0
+    assert host._cross_run_advisory_receipt["claim_source"]["source_complete"] is False
+
+
 def test_related_advisory_rejects_capsule_with_unknown_fingerprint_projection(tmp_path):
     class _RelatedHost(_Host):
         def _task_fingerprint(self, state, best=None):
@@ -189,17 +202,22 @@ def test_exact_task_advisory_rejects_missing_or_garbled_lesson_direction(
     text = host._cross_run_advisory_text(
         RunState(run_id="current", task_id="t", direction="max"))
 
-    assert text == ""
-    assert host._cross_run_advisory_receipt == {}
+    if persisted_direction in (None, ""):
+        assert text == ""
+        assert host._cross_run_advisory_receipt == {}
+    else:
+        assert "claim evidence stores are PARTIAL" in text
+        assert host._cross_run_advisory_receipt["claim_source"]["source_complete"] is False
 
 
 def test_exact_task_advisory_rejects_research_without_direction(tmp_path):
     from looplab.engine.claims import record_research_claims
 
-    record_research_claims(str(tmp_path), run_id="legacy", task_id="task-a", claims=[{
+    assert record_research_claims(
+        str(tmp_path), run_id="legacy", task_id="task-a", direction="", claims=[{
         "statement": "legacy research without polarity", "node_ids": [7],
         "verification": {"verdict": "supported", "method": "llm"},
-    }])
+    }]) == 0
 
     host = _Host(tmp_path, on=True)
     text = host._cross_run_advisory_text(

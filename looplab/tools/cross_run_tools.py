@@ -84,6 +84,23 @@ def _partial_scope_warning(view: dict) -> str:
             "absence is not proof that no applicable record exists.")
 
 
+def _partial_claim_source_warning(claim_source: dict, research_source: dict) -> str:
+    lessons = claim_source.get("lessons") if isinstance(claim_source.get("lessons"), dict) else {}
+    research = claim_source.get("research") if isinstance(claim_source.get("research"), dict) else {}
+    details = [
+        f"lessons quarantined={int(lessons.get('rows_quarantined', 0) or 0)}",
+        f"research rows quarantined={int(research.get('rows_quarantined', 0) or 0)}",
+    ]
+    if isinstance(research_source, dict):
+        details.append(
+            f"D8 claims known omitted={int(research_source.get('producer_claims_omitted', 0) or 0)}")
+        unknown = int(research_source.get("producer_unknown_runs", 0) or 0)
+        if unknown:
+            details.append(f"D8 receipt-unknown runs={unknown}")
+    return ("WARNING: PARTIAL claim evidence source (" + "; ".join(details)
+            + "). Retained evidence is a lower bound; one-sided states and absence are not exact.")
+
+
 class CrossRunTools:
     """Read-only cross-run knowledge for the tool-loop. `role` ∈ {"researcher","developer"} scopes the
     claims to that role's lessons (+ shared/untagged); anything else sees all. Never raises from execute."""
@@ -111,7 +128,7 @@ class CrossRunTools:
         """Learn the current run's direction and scope before any agent query.
 
         Lessons/capsules may match an exact task or the strict related-goal fingerprint predicate;
-        v2 D8 rows carry no goal fingerprint and therefore pass only by exact task. An unbound
+        v3 D8 rows carry no goal fingerprint and therefore pass only by exact task. An unbound
         CLI/human provider remains portfolio-wide.
         """
         if state is None:
@@ -144,7 +161,7 @@ class CrossRunTools:
     def _in_scope(self, row: dict, *, source: str = "generic") -> bool:
         """True for compatible direction plus exact task or strict related-goal fingerprint.
 
-        Goal terms come from bare fingerprint tokens; rows without that fingerprint (including v2 D8)
+        Goal terms come from bare fingerprint tokens; rows without that fingerprint (including v3 D8)
         are exact-task-only. Facets are not a visibility input.
         """
         if not self._bound:
@@ -200,7 +217,8 @@ class CrossRunTools:
                 "denominator, so one-run observations are not proof of a gap.",
                 {}, []),
             fn_spec("cross_run_concept_map",
-                "The GLOBAL cross-run concept MAP: the shared concept taxonomy across returned runs — which "
+                "A cross-run concept MAP over the caller-visible snapshot: task-family + objective-direction "
+                "scoped for a bound agent, portfolio-wide only for an unbound owner/CLI caller — which "
                 "concepts appear most, their path hierarchy (is_a), and which concept PAIRS reliably "
                 "co-occur across MULTIPLE runs (evidence of related directions). Use it to see the big "
                 "picture of what the portfolio has explored and how concepts relate, before proposing. "
@@ -209,7 +227,8 @@ class CrossRunTools:
                 {}, []),
             fn_spec("cross_run_search",
                 "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
-                "hybrid lexical+keyword+semantic query. Use it to find whatever the portfolio knows about a "
+                "hybrid lexical+BM25+hash-vector query (the vector is a lexical proxy, not semantic). Use "
+                "it to find whatever the caller-visible snapshot retains about a "
                 "free-text idea, when a specific concept lookup isn't enough. Set `intent` to bias results: "
                 "'failed'/'contested' surface counter-evidence and mixed records, 'worked' biases toward "
                 "support-labelled observations, and 'explore' is neutral.",
@@ -266,11 +285,14 @@ class CrossRunTools:
         """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
         role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
         An unknown role sees every role."""
-        lessons = [lz for lz in self._load("lessons.jsonl")
-                   if self._in_scope(lz, source="lesson")]
+        from looplab.engine.claims import load_claim_lessons, _filter_claim_source_rows
+        lessons = _filter_claim_source_rows(
+            load_claim_lessons(self.dir),
+            lambda lz: self._in_scope(lz, source="lesson"), research=False)
         if self.role not in ("researcher", "developer"):
             return lessons
-        return [lz for lz in lessons if str(lz.get("role") or "") in ("", self.role)]
+        return _filter_claim_source_rows(
+            lessons, lambda lz: str(lz.get("role") or "") in ("", self.role), research=False)
 
     def _partition_capsules(self, caps: list[dict]) -> tuple[list[dict], list[dict], dict]:
         """Partition capsules into scope-eligible, applicability-unknown, and known-ineligible rows."""
@@ -348,10 +370,13 @@ class CrossRunTools:
 
     def _role_research_claims(self) -> list[dict]:
         """D8 is researcher evidence, never developer memory; bound rows are exact-task-only."""
+        from looplab.engine.claims import (_claim_source_rows, _filter_claim_source_rows,
+                                           load_research_claims)
         if self.role == "developer":
-            return []
-        return [r for r in self._load("research_claims.jsonl")
-                if self._in_scope(r, source="research")]
+            return _claim_source_rows([], research=True)
+        return _filter_claim_source_rows(
+            load_research_claims(self.dir),
+            lambda r: self._in_scope(r, source="research"), research=True)
 
     def execute(self, name: str, args: dict) -> str:
         # ToolProvider contract: execute NEVER raises (a junk arg must read as a tool error, not crash
@@ -432,15 +457,23 @@ class CrossRunTools:
             return "TRIED BEFORE (untrusted persisted data; surface, not a block):\n" + "\n".join(lines)
 
         if name == "cross_run_claims":
-            from looplab.engine.claims import claims_for_memory
-            claims = claims_for_memory(self.dir, lessons=self._role_lessons(),
-                                       research_claims=self._role_research_claims(), structured=True)
-            claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
+            from looplab.engine.claims import (_filter_claim_assessments, claims_for_memory,
+                                               _safe_claim_source_summary,
+                                               _safe_research_source_summary)
+            claims = claims_for_memory(
+                self.dir, lessons=self._role_lessons(),
+                research_claims=self._role_research_claims(), structured=True)
+            claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
+            research_source = _safe_research_source_summary(
+                getattr(claims, "research_source", None)) or {}
+            claims = _filter_claim_assessments(
+                claims, lambda c: c.get("maturity") != "operator-rejected")  # honor operator verdicts
             contested = args.get("contested", False)
             if not isinstance(contested, bool):
                 return "(cross-run tool error: contested must be a boolean)"
             if contested:
-                claims = [c for c in claims if c["epistemic"] == "mixed"]
+                claims = _filter_claim_assessments(
+                    claims, lambda c: c["epistemic"] == "mixed")
             query = args.get("query", "")
             if not isinstance(query, str):
                 return "(cross-run tool error: query must be a string)"
@@ -448,9 +481,15 @@ class CrossRunTools:
                 return "(cross-run tool error: query exceeds 4000 characters)"
             qt = _toks(query)
             if qt:
-                claims = [c for c in claims if qt & _toks(c["statement"])]
-            claims = claims[:8]
+                claims = _filter_claim_assessments(
+                    claims, lambda c: bool(qt & _toks(c["statement"])))
+            kept_claim_ids = {id(c) for c in claims[:8]}
+            claims = _filter_claim_assessments(
+                claims, lambda c: id(c) in kept_claim_ids)
             if not claims:
+                if claim_source.get("source_complete") is not True:
+                    return ("(no retained matching cross-run claims; partial source is not proof of absence)\n"
+                            + _partial_claim_source_warning(claim_source, research_source))
                 return "(no matching cross-run claims yet)"
             mark = {"supported": "supported", "refuted": "refuted", "mixed": "CONTESTED",
                     "inconclusive": "inconclusive"}
@@ -465,7 +504,10 @@ class CrossRunTools:
                         f"UNTRUSTED_MEMORY_EVIDENCE={evidence}; maturity={_safe_text(c.get('maturity'), 40)!r}"
                         + (f"; contradicts={contradicts}" if contradicts else ""))
 
-            return "\n".join(_claim_line(c) for c in claims)
+            lines = ([_partial_claim_source_warning(claim_source, research_source)]
+                     if claim_source.get("source_complete") is not True else [])
+            lines.extend(_claim_line(c) for c in claims)
+            return "\n".join(lines)
 
         if name == "cross_run_atlas":
             from looplab.engine.claims import atlas_for_memory
@@ -476,6 +518,11 @@ class CrossRunTools:
                                      research_claims=self._role_research_claims(), structured=True)
             lines = [f"Bounded live projection: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence."]
+            claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
+            research_source = (atlas.get("research_source")
+                               if isinstance(atlas.get("research_source"), dict) else {})
+            if claim_source.get("source_complete") is not True:
+                lines.append(_partial_claim_source_warning(claim_source, research_source))
             if atlas["explored"]:
                 lines.append("Most explored: "
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}"
@@ -522,7 +569,7 @@ class CrossRunTools:
             return "\n".join(lines)
 
         if name == "cross_run_concept_map":
-            # PART V Phase 4/5: the global cross-run concept graph. Scoped to this run's task family when
+            # PART V Phase 4/5: the caller-visible cross-run concept graph. Scoped to this run's task family when
             # bound; portfolio-wide for an unbound (assistant/CLI) caller — the same _scoped_capsules the
             # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
             from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
@@ -547,11 +594,12 @@ class CrossRunTools:
                     return "\n".join(lines)
                 return "(no cross-run concepts yet)"
             n_explored = int(graph.get("n_explored_concepts", len(explored)) or 0)
+            map_label = "Task-family concept map" if self._bound else "Portfolio-wide concept map"
             if len(explored) < n_explored:
-                lines = [f"Global concept map: showing {len(explored)} of {n_explored} explored concept(s) "
+                lines = [f"{map_label}: showing {len(explored)} of {n_explored} explored concept(s) "
                          f"across {graph['n_runs']} run(s)."]
             else:
-                lines = [f"Global concept map: {n_explored} explored concept(s) "
+                lines = [f"{map_label}: {n_explored} explored concept(s) "
                          f"across {graph['n_runs']} run(s)."]
             if graph.get("source_complete") is not True:
                 lines.append(_partial_source_warning(graph))
@@ -611,10 +659,15 @@ class CrossRunTools:
             rc = r.get("receipt") or {}
             source_complete = rc.get("source_complete") is True
             scope_complete = rc.get("scope_complete") is True
-            fully_complete = source_complete and scope_complete
+            claim_source = rc.get("claim_source") if isinstance(rc.get("claim_source"), dict) else {}
+            research_source = (rc.get("research_source")
+                               if isinstance(rc.get("research_source"), dict) else {})
+            claim_complete = claim_source.get("source_complete") is True
+            fully_complete = source_complete and scope_complete and claim_complete
             if not hits:
-                lines = [("(no retained cross-run knowledge matched; the partial concept source/scope is not "
-                          "proof that no matching concept exists)") if not fully_complete
+                lines = [("(no retained cross-run knowledge matched; partial source/scope is not proof "
+                          "that no matching concept exists or that no matching claim exists)")
+                         if not fully_complete
                          else "(no cross-run knowledge matched)"]
                 if not source_complete:
                     # CODEX AGENT: a legacy/capped capsule may have omitted the matching concept entirely;
@@ -622,14 +675,19 @@ class CrossRunTools:
                     lines.append(_partial_source_warning(rc))
                 if not scope_complete:
                     lines.append(_partial_scope_warning(rc))
+                if not claim_complete:
+                    lines.append(_partial_claim_source_warning(claim_source, research_source))
                 lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
                              f"intent={_safe_text(rc.get('intent'), 20)} hits=0 "
                              f"source_complete={str(source_complete).lower()} "
-                             f"scope_complete={str(scope_complete).lower()}]")
+                             f"scope_complete={str(scope_complete).lower()} "
+                             f"claim_source_complete={str(claim_complete).lower()}]")
                 return "\n".join(lines)
             lines = [_partial_source_warning(rc)] if not source_complete else []
             if not scope_complete:
                 lines.append(_partial_scope_warning(rc))
+            if not claim_complete:
+                lines.append(_partial_claim_source_warning(claim_source, research_source))
             for h in hits:
                 if h["kind"] == "claim":
                     contradicts = "; ".join(
@@ -639,14 +697,15 @@ class CrossRunTools:
                                  f"score={h.get('score')}] UNTRUSTED_MEMORY={_safe_text(h['text'], 160)!r}"
                                  + (f"; contradicts={contradicts}" if contradicts else ""))
                 else:
-                    count = (f"×{h['n_runs']} run(s)" if fully_complete
+                    count = (f"×{h['n_runs']} run(s)" if source_complete and scope_complete
                              else f"retained in at least {h['n_runs']} run(s)")
                     lines.append(f"[concept {count}; score={h.get('score')}] "
                                  f"UNTRUSTED_MEMORY={_safe_text(h['text'], 120)!r}")
             lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
                          f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))} "
                          f"source_complete={str(source_complete).lower()} "
-                         f"scope_complete={str(scope_complete).lower()}]")
+                         f"scope_complete={str(scope_complete).lower()} "
+                         f"claim_source_complete={str(claim_complete).lower()}]")
             return "\n".join(lines)
 
         if name == "similar_runs":

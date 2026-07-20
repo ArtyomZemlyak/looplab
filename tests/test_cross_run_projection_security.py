@@ -120,7 +120,7 @@ def test_research_claim_and_governance_writers_never_persist_raw_secrets(tmp_pat
     from looplab.engine.claims import record_claim_decision, record_research_claims
 
     statement = f"password={_SECRET} improves retrieval"
-    record_research_claims(tmp_path, run_id="r1", task_id="t", claims=[{
+    record_research_claims(tmp_path, run_id="r1", task_id="t", direction="max", claims=[{
         "statement": statement, "node_ids": [1],
         "urls": [f"https://user:{_SECRET}@provider.invalid/?token={_SECRET}"],
         "verification": {"verdict": "supported", "method": "llm",

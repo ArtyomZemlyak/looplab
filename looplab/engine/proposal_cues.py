@@ -292,8 +292,14 @@ class ProposalCuesMixin:
             import json
             from pathlib import Path
 
-            from looplab.engine.claims import (build_context_pack, claims_for_memory, load_research_claims,
-                                               render_context_pack)
+            from looplab.engine.claims import (
+                _filter_claim_source_rows,
+                build_context_pack,
+                claims_for_memory,
+                load_claim_lessons,
+                load_research_claims,
+                render_context_pack,
+            )
             from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
             from looplab.engine.memory import (
                 ConceptCapsuleStore,
@@ -303,10 +309,9 @@ class ProposalCuesMixin:
                 _portfolio_concept_overview_data,
                 _filter_capsule_rows,
             )
-            from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
-            lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
-            lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
+            cp = base / "concept_capsules.jsonl"
+            lessons = load_claim_lessons(base)
             capsules = ConceptCapsuleStore(cp).all() if cp.exists() else []
             # Freeze one task-scoped view for this prompt. Exact task id is authoritative only after
             # direction provenance matches; related-task transfer uses the same fingerprint threshold as
@@ -375,12 +380,15 @@ class ProposalCuesMixin:
                 stored = [t for t in stored if not str(t).startswith("param:")]
                 return fingerprint_similarity(fp, stored) >= 0.34
 
-            lessons = [r for r in lessons if _scoped(r)]
+            lessons = _filter_claim_source_rows(lessons, _scoped, research=False)
             capsules = _filter_capsule_rows(capsules, lambda r: _scoped(r, capsule=True))
-            research = [r for r in load_research_claims(base)
-                        if (not rid or str(r.get("run_id") or "") != rid)
-                        and bool(tid) and str(r.get("task_id") or "") == tid
-                        and same_live_direction(current_direction, r.get("direction"))]
+            research = _filter_claim_source_rows(
+                load_research_claims(base),
+                lambda r: ((not rid or str(r.get("run_id") or "") != rid)
+                           and bool(tid) and str(r.get("task_id") or "") == tid
+                           and same_live_direction(current_direction, r.get("direction"))),
+                research=True,
+            )
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
             capsule_source = _capsule_source_summary(capsules)
@@ -390,13 +398,16 @@ class ProposalCuesMixin:
                     splits=load_concept_splits(base))
             else:
                 overview, concept_rows = None, None
-            if (not lessons and not overview and not research
-                    and concept_scope["scope_complete"]):
-                self._cross_run_advisory_receipt = {}
-                return ""
             # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
             claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                        structured=getattr(self, "_cross_run_structured_claims", False))
+            claim_source = getattr(claims, "claim_source", {})
+            if (not lessons and not overview and not research
+                    and concept_scope["scope_complete"]
+                    and isinstance(claim_source, dict)
+                    and claim_source.get("source_complete") is True):
+                self._cross_run_advisory_receipt = {}
+                return ""
             # CODEX AGENT: live tendency selection consumes the exact scoped retained aggregate before the
             # overview's display cap; build_context_pack still bounds every model-visible list itself.
             pack = build_context_pack(
@@ -427,6 +438,7 @@ class ProposalCuesMixin:
                     rid, max_chars=500, single_line=True, entropy=False),
                 "n_lessons": len(lessons), "n_capsules": len(capsules), "n_research": len(research),
                 "concept_scope": concept_scope,
+                "claim_source": claim_source,
                 "corpus_digest": hashlib.sha256(corpus).hexdigest(),
                 "render_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             }

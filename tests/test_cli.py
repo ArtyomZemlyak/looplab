@@ -100,7 +100,7 @@ def test_atlas_and_claims_accept_d8_only_memory(tmp_path):
     from looplab.engine.claims import record_research_claims
 
     memory = tmp_path / "memory"
-    record_research_claims(memory, run_id="run-d8", task_id="task-d8", claims=[{
+    record_research_claims(memory, run_id="run-d8", task_id="task-d8", direction="max", claims=[{
         "statement": "hard negatives improve retrieval",
         "node_ids": [3],
         "urls": ["https://example.test/evidence"],
@@ -118,7 +118,8 @@ def test_atlas_and_claims_accept_d8_only_memory(tmp_path):
 def test_claims_missing_explicit_file_does_not_fall_back_to_sibling_d8(tmp_path):
     from looplab.engine.claims import record_research_claims
 
-    record_research_claims(tmp_path, run_id="sibling-run", task_id="sibling-task", claims=[{
+    record_research_claims(
+        tmp_path, run_id="sibling-run", task_id="sibling-task", direction="max", claims=[{
         "statement": "this sibling claim must not satisfy an explicit missing path",
         "node_ids": [1],
     }])
@@ -135,6 +136,20 @@ def test_claims_missing_explicit_file_does_not_fall_back_to_sibling_d8(tmp_path)
     assert result.exit_code == 1
     assert "does not exist" in result.output
     assert "this sibling claim" not in result.output
+
+
+def test_claims_and_atlas_cli_disclose_corrupt_only_claim_store(tmp_path):
+    (tmp_path / "lessons.jsonl").write_bytes(b"{broken\n")
+
+    claims = runner.invoke(app, ["claims", str(tmp_path)])
+    atlas = runner.invoke(app, ["atlas", str(tmp_path)])
+
+    assert claims.exit_code == 0, claims.output
+    assert "claim evidence stores are partial" in claims.output
+    assert "absence is not exact" in claims.output
+    assert atlas.exit_code == 0, atlas.output
+    assert "claim evidence source is PARTIAL" in atlas.output
+    assert "lessons quarantined=1" in atlas.output
 
 
 def test_asset_brief_llm_uses_ambient_settings_without_a_run_dir(tmp_path, monkeypatch):

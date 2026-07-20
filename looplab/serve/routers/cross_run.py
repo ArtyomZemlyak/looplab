@@ -146,15 +146,34 @@ def build_router(srv) -> APIRouter:
                 exc, max_chars=500, single_line=True, entropy=True)) from exc
         raise exc
 
+    def _raise_evidence_read_error(exc: Exception) -> None:
+        """Map a failed required snapshot lock to stable read semantics, never a truthful empty view."""
+        from looplab.events.eventstore import EventStoreLockError
+
+        if isinstance(exc, EventStoreLockError):
+            raise HTTPException(503, detail={
+                "code": "cross_run_evidence_unavailable",
+                "message": "cross-run evidence cannot be read as one coherent snapshot",
+            }) from exc
+        raise exc
+
     @router.get("/api/cross-run/atlas")
     def atlas(limit: int = Query(24, ge=1, le=100),
               scope_task: str = Query("", max_length=500)):
         """Live structured Research Atlas projection, bounded per section."""
-        from looplab.engine.claims import atlas_for_memory
+        from looplab.engine.claims import atlas_for_memory, locked_claim_evidence_snapshot
 
         memory_dir = _memory_dir()
-        payload = atlas_for_memory(memory_dir, scope_task=scope_task, max_items=limit,
-                                   structured=True)
+        try:
+            with locked_claim_evidence_snapshot(memory_dir, structured=True) as evidence:
+                payload = atlas_for_memory(
+                    memory_dir, lessons=evidence.lessons_snapshot,
+                    research_claims=evidence.research_claims_snapshot,
+                    decisions=evidence.decisions_snapshot, scope_task=scope_task,
+                    max_items=limit, structured=True,
+                )
+        except Exception as exc:
+            _raise_evidence_read_error(exc)
         payload.update({
             "projection": "live",
             "scope_task": cross_run_text(
@@ -173,19 +192,27 @@ def build_router(srv) -> APIRouter:
                offset: int = Query(0, ge=0, le=1_000_000)):
         """Scope/polarity-safe claims with stable IDs and bounded offset pagination."""
         from looplab.engine.claims import (
-            _research_source_summary, _valid_claim_source_rows, claims_for_memory,
-            claim_governance_revision, load_research_claims,
+            _filter_claim_assessments, _safe_claim_source_summary,
+            _safe_research_source_summary, claims_for_memory, claim_governance_revision,
+            locked_claim_evidence_snapshot,
         )
 
         memory_dir = _memory_dir()
-        research = _valid_claim_source_rows(load_research_claims(memory_dir), research=True)
-        if scope_task:
-            research = [row for row in research if str(row.get("task_id") or "") == scope_task]
-        rows = claims_for_memory(
-            memory_dir, research_claims=research, scope_task=scope_task, structured=True)
-        research_source = _research_source_summary(research)
+        try:
+            with locked_claim_evidence_snapshot(memory_dir, structured=True) as evidence:
+                rows = claims_for_memory(
+                    memory_dir, lessons=evidence.lessons_snapshot,
+                    research_claims=evidence.research_claims_snapshot,
+                    decisions=evidence.decisions_snapshot, scope_task=scope_task, structured=True,
+                )
+        except Exception as exc:
+            _raise_evidence_read_error(exc)
+        research_source = _safe_research_source_summary(
+            getattr(rows, "research_source", None)) or {}
+        claim_source = _safe_claim_source_summary(getattr(rows, "claim_source", None)) or {}
         if contested:
-            rows = [row for row in rows if row.get("epistemic") == "mixed"]
+            rows = _filter_claim_assessments(
+                rows, lambda row: row.get("epistemic") == "mixed")
         total = len(rows)
         page = [_public_cross_run_row(row) for row in rows[offset:offset + limit]]
         return {
@@ -197,6 +224,7 @@ def build_router(srv) -> APIRouter:
             "scope_task": cross_run_text(
                 scope_task, max_chars=500, single_line=True, entropy=False),
             "research_source": research_source,
+            "claim_source": claim_source,
             "revision": claim_governance_revision(memory_dir),
         }
 
@@ -204,7 +232,8 @@ def build_router(srv) -> APIRouter:
     def claim_decide(body: _ClaimDecision):
         """Ratify/reject/pin/clear exactly the claim ID and revision the operator observed."""
         from looplab.engine.claim_key import claim_uid
-        from looplab.engine.claims import claims_for_memory, load_claim_decisions, record_claim_decision
+        from looplab.engine.claims import (claims_for_memory, load_claim_decisions,
+                                           record_claim_decision)
 
         expected_uid = claim_uid(body.statement, scope=body.scope, metric=body.metric)
         if body.claim_uid != expected_uid:
@@ -215,12 +244,18 @@ def build_router(srv) -> APIRouter:
 
         memory_dir = _memory_dir()
 
-        def _validate_target() -> None:
+        def _validate_target(evidence_snapshot) -> None:
             # A content-addressed UID proves only that body fields agree with each other. The
             # claim must also exist in the current evidence projection, and that projection must be the one
             # the operator reviewed. This callback runs after action-id replay and governance CAS while the
             # decision ledger lock is held, so lost-response retries remain idempotent.
-            current = next((claim for claim in claims_for_memory(memory_dir, structured=True)
+            current_projection = claims_for_memory(
+                memory_dir, lessons=evidence_snapshot.lessons_snapshot,
+                research_claims=evidence_snapshot.research_claims_snapshot,
+                decisions=evidence_snapshot.decisions_snapshot,
+                scope_task=body.scope, structured=True,
+            )
+            current = next((claim for claim in current_projection
                             if claim.get("claim_uid") == body.claim_uid), None)
             if body.decision == "clear":
                 decisions = load_claim_decisions(memory_dir)
@@ -253,7 +288,7 @@ def build_router(srv) -> APIRouter:
                 memory_dir, statement=body.statement, scope=body.scope, metric=body.metric,
                 decision=body.decision, note=body.note, by=_actor(), at=_timestamp(),
                 expected_revision=body.expected_revision, action_id=body.action_id,
-                evidence_digest=body.evidence_digest, validate=_validate_target,
+                evidence_digest=body.evidence_digest, validate_evidence=_validate_target,
             )
         except Exception as exc:  # converted to stable HTTP semantics below
             _raise_governance_error(exc)

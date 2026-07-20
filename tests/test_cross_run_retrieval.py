@@ -141,7 +141,7 @@ def test_scope_task_isolates_every_joined_source(tmp_path):
               build_concept_capsule(run_id="c2", task_id="otherTask", fingerprint=["b"], direction="max",
                                     concepts=["secret-concept"], concept_outcomes={}),
           ])
-    record_research_claims(str(tmp_path), run_id="rX", task_id="otherTask",
+    record_research_claims(str(tmp_path), run_id="rX", task_id="otherTask", direction="max",
                            claims=[{"statement": "shared topic marker secret", "node_ids": [9]}])
     scoped = cross_run_retrieve(str(tmp_path), "shared topic marker secret concept", k=20, scope_task="t")
     assert all("secret" not in h["text"] for h in scoped["results"])
@@ -199,7 +199,7 @@ def test_receipt_digest_tracks_metadata_but_document_id_stays_stable():
         _lesson("stable claim improves recall", evidence=(1,), run_id="r1")])
     second = cross_run_retrieve("", "stable claim", k=2, capsules=[], lessons=[
         _lesson("stable claim improves recall", evidence=(9,), run_id="r2")])
-    assert first["receipt"]["corpus_digest_version"] == 6
+    assert first["receipt"]["corpus_digest_version"] == 7
     assert first["receipt"]["corpus_digest"] != second["receipt"]["corpus_digest"]
     assert first["results"][0]["stable_id"] == second["results"][0]["stable_id"]
 

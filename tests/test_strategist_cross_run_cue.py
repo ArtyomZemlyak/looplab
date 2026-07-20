@@ -92,6 +92,25 @@ def test_source_completeness_changes_strategist_note_and_semantic_receipt(tmp_pa
             != partial_host._cross_run_note_receipt["render_digest"])
 
 
+def test_corrupt_claim_store_qualifies_zero_mixed_evidence_in_strategy_note(tmp_path):
+    row = {
+        "statement": "retained support", "outcome": "supported", "evidence": [1],
+        "run_id": "prior", "task_id": "t", "direction": "max",
+    }
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n{broken\n")
+    host = _Host(tmp_path, on=True)
+
+    note = host._cross_run_note_for_ctx(
+        RunState(run_id="current", task_id="t", direction="max"))
+
+    assert "claim source receipt: known=true, complete=false" in note
+    assert "zero mixed-evidence, and absence are lower bounds only" in note
+    source = host._cross_run_note_receipt["claim_source"]
+    assert source["source_complete"] is False
+    assert source["lessons"]["rows_quarantined"] == 1
+    assert len(source["snapshot_digest"]) == 64
+
+
 @pytest.mark.parametrize("persisted_direction", [None, "", "MAX", "sideways", 1])
 def test_strategist_note_rejects_missing_or_garbled_persisted_direction(
         tmp_path, persisted_direction):
@@ -104,9 +123,14 @@ def test_strategist_note_rejects_missing_or_garbled_persisted_direction(
     (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n")
     host = _Host(tmp_path, on=True)
 
-    assert host._cross_run_note_for_ctx(
-        RunState(run_id="current", task_id="t", direction="max")) == ""
-    assert host._cross_run_note_receipt == {}
+    note = host._cross_run_note_for_ctx(
+        RunState(run_id="current", task_id="t", direction="max"))
+    if persisted_direction in (None, ""):
+        assert note == ""
+        assert host._cross_run_note_receipt == {}
+    else:
+        assert "claim source receipt: known=true, complete=false" in note
+        assert host._cross_run_note_receipt["claim_source"]["source_complete"] is False
 
 
 @pytest.mark.parametrize("current_direction", [None, "", "MAX", "sideways", 1])

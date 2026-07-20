@@ -1132,6 +1132,7 @@ def cross_run_search_cmd(
         return
     rc = r["receipt"]
     source_complete = rc.get("source_complete") is True
+    claim_source = rc.get("claim_source") if isinstance(rc.get("claim_source"), dict) else {}
     trunc = f", {rc['truncated']} dropped" if rc.get("truncated") else ""
     typer.echo(f"cross-run search '{query}' — {rc['n_hits']}/{rc['n_corpus']}{trunc} "
                f"[intent={rc.get('intent', '?')}, {rc.get('n_caveats', 0)} caveat(s) reserved] "
@@ -1146,6 +1147,15 @@ def cross_run_search_cmd(
                       if rc.get("source_unknown_capsules", 0) else "")
                    + (f"; {rc.get('source_rows_quarantined', 0)} durable row(s) quarantined"
                       if rc.get("source_rows_quarantined", 0) else ""))
+    if claim_source.get("source_complete") is not True:
+        lesson_bad = ((claim_source.get("lessons") or {}).get("rows_quarantined", 0))
+        research_bad = ((claim_source.get("research") or {}).get("rows_quarantined", 0))
+        typer.echo(
+            "  WARNING: claim evidence source is partial; retained claim matches/counts are lower bounds "
+            "and an empty match is not proof of absence: "
+            f"lessons quarantined={int(lesson_bad or 0)}; "
+            f"research quarantined={int(research_bad or 0)}"
+        )
     for h in r["results"]:
         if h["kind"] == "claim":
             typer.echo(f"  claim [{h['epistemic']} {h['n_support']}↑/{h['n_oppose']}↓] {h['text'][:100]}")
@@ -1169,19 +1179,23 @@ def atlas_cmd(
     Wire keys such as ``thin_coverage`` and ``contradictions`` are retained for compatibility; they
     do not establish a CoverageFrame, an untried gap, or a proposition-level contradiction verdict.
     """
-    from looplab.engine.claims import atlas_for_memory, load_research_claims
+    from looplab.engine.claims import atlas_for_memory, load_claim_lessons, load_research_claims
     from looplab.engine.memory import ConceptCapsuleStore
-    from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir)
-    lessons_p, caps_p = base / "lessons.jsonl", base / "concept_capsules.jsonl"
-    lessons = read_jsonl_lenient(lessons_p, loads=orjson.loads, dicts_only=True) if lessons_p.exists() else []
+    caps_p = base / "concept_capsules.jsonl"
+    lessons = load_claim_lessons(base)
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
     research = load_research_claims(base)
-    if not lessons and not caps and not research:
-        typer.echo(f"no cross-run memory at {base} (need lessons, capsules, and/or research claims)")
-        raise typer.Exit(1)
     atlas = atlas_for_memory(base, lessons=lessons, capsules=caps,
                              research_claims=research, max_items=max_items)
+    claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
+    concept_source_for_empty = (
+        atlas.get("concept_source") if isinstance(atlas.get("concept_source"), dict) else {})
+    if (not lessons and not caps and not research
+            and claim_source.get("source_complete") is True
+            and concept_source_for_empty.get("source_complete") is True):
+        typer.echo(f"no cross-run memory at {base} (need lessons, capsules, and/or research claims)")
+        raise typer.Exit(1)
     if as_json:
         typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
         return
@@ -1205,6 +1219,15 @@ def atlas_cmd(
             + (f"; {int(concept_source.get('source_rows_quarantined', 0) or 0)} durable row(s) quarantined"
                if concept_source.get("source_rows_quarantined", 0) else "")
             + ").")
+    if claim_source.get("source_complete") is not True:
+        lesson_bad = ((claim_source.get("lessons") or {}).get("rows_quarantined", 0))
+        research_bad = ((claim_source.get("research") or {}).get("rows_quarantined", 0))
+        typer.echo(
+            "WARNING: claim evidence source is PARTIAL; retained claims/counts are lower bounds and "
+            "absence is not exact "
+            f"(lessons quarantined={int(lesson_bad or 0)}; "
+            f"research quarantined={int(research_bad or 0)})."
+        )
     if atlas["explored"]:
         typer.echo("Concept observations (concept × returned runs):")
         for e in atlas["explored"]:
@@ -1248,32 +1271,33 @@ def claims_cmd(
     → opposition-only → insufficient; a caveat may replace the weakest non-pinned positive). Pure read of
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
     from looplab.engine.claims import (
-        _research_source_summary, build_context_pack, claims_for_memory,
-        load_research_claims, render_context_pack,
+        _load_claim_source_path, _safe_claim_source_summary,
+        _safe_research_source_summary, build_context_pack, claims_for_memory,
+        load_claim_lessons, load_research_claims, render_context_pack,
     )
     from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
-    from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
     if p.is_file():
         path, base = p, p.parent
-        lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
+        lessons = _load_claim_source_path(path, research=False)
     elif p.is_dir():
         path, base = p / "lessons.jsonl", p
         # A memory directory may legitimately contain D8 research claims without distilled lessons.
-        lessons = (read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
-                   if path.exists() else [])
+        lessons = load_claim_lessons(base)
     else:
         # Reject before selecting a parent directory; otherwise an explicit missing file
         # silently reads an unrelated sibling research_claims.jsonl and reports success for the wrong input.
         typer.echo(f"cross-run memory path does not exist or is not a file/directory: {p}")
         raise typer.Exit(1)
     research = load_research_claims(base)
-    if not lessons and not research:
-        typer.echo(f"no lessons at {path}")
-        raise typer.Exit(1)
     claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                fuzzy=fuzzy, structured=structured)
-    research_source = _research_source_summary(research)
+    research_source = _safe_research_source_summary(
+        getattr(claims, "research_source", None)) or {}
+    claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
+    if (not lessons and not research and claim_source.get("source_complete") is True):
+        typer.echo(f"no lessons at {path}")
+        raise typer.Exit(1)
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present — honor the
         # recorded taxonomy governance (aliases/splits), consistent with every other consumer (live-test).
@@ -1298,10 +1322,19 @@ def claims_cmd(
     if as_json:
         typer.echo(orjson.dumps(claims, option=orjson.OPT_INDENT_2).decode())
         return
-    if isinstance(research_source, dict) and research_source.get("source_complete") is not True:
+    if research_source.get("source_complete") is not True:
         typer.echo(
             "WARNING: D8 research-claim source is partial/unknown; retained evidence is a lower bound and "
             "exact one-sided states are withheld."
+        )
+    if claim_source.get("source_complete") is not True:
+        lesson_bad = ((claim_source.get("lessons") or {}).get("rows_quarantined", 0))
+        research_bad = ((claim_source.get("research") or {}).get("rows_quarantined", 0))
+        typer.echo(
+            "WARNING: claim evidence stores are partial; retained claims/counts are lower bounds and "
+            "absence is not exact "
+            f"(lessons quarantined={int(lesson_bad or 0)}; "
+            f"research quarantined={int(research_bad or 0)})."
         )
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
     _mat = {"operator-ratified": " [RATIFIED]", "operator-rejected": " [REJECTED]", "operator-pinned": " [PINNED]"}

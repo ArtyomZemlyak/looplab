@@ -45,9 +45,36 @@ def test_claims_and_atlas_read(tmp_path):
     claim = next(c for c in r.json()["claims"] if "hard-neg helps" in c["statement"])
     assert claim["claim_uid"].startswith("clm_") and claim["scope"] == "t"
     assert r.json()["limit"] == 80 and r.json()["revision"] == 0
+    assert len(r.json()["claim_source"]["snapshot_digest"]) == 64
     a = client.get("/api/cross-run/atlas")
     assert a.status_code == 200 and a.json()["n_claims"] >= 1
     assert a.json()["projection"] == "live" and a.json()["page"]["limit"] == 24
+    assert a.json()["claim_source"]["snapshot_digest"] == r.json()["claim_source"]["snapshot_digest"]
+
+
+@pytest.mark.parametrize("endpoint", ["/api/cross-run/claims", "/api/cross-run/atlas"])
+def test_claim_snapshot_lock_unavailable_is_stable_503_not_false_empty(
+        tmp_path, monkeypatch, endpoint):
+    from contextlib import contextmanager
+
+    from looplab.events.eventstore import EventStoreLockError
+
+    _seed_memory()
+
+    @contextmanager
+    def _unavailable(path, *, required=False):
+        assert required is True
+        raise EventStoreLockError(path, OSError("locking unsupported"))
+        yield  # pragma: no cover - preserves the contextmanager shape
+
+    monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", _unavailable)
+    response = TestClient(make_app(tmp_path)).get(endpoint)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "cross_run_evidence_unavailable",
+        "message": "cross-run evidence cannot be read as one coherent snapshot",
+    }
 
 
 def _claim_action(client, *, decision="rejected", action_id="claim-action-1", note=""):
@@ -120,6 +147,48 @@ def test_claim_decision_fences_nonexistent_and_changed_evidence(tmp_path):
             "run_id": "r2", "task_id": observed["scope"],
         }) + b"\n")
     response = client.post("/api/cross-run/claim-decide", json=observed)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "claim_evidence_changed"
+
+
+def test_scoped_claim_decision_ignores_other_task_rewrite_but_fences_same_task(tmp_path):
+    md = Path(os.environ["LOOPLAB_MEMORY_DIR"])
+    md.mkdir(parents=True, exist_ok=True)
+
+    def _row(statement, run_id, task_id, node_id):
+        return {
+            "statement": statement, "outcome": "supported", "evidence": [node_id],
+            "run_id": run_id, "task_id": task_id, "direction": "max",
+        }
+
+    path = md / "lessons.jsonl"
+    path.write_bytes(b"\n".join(orjson.dumps(row) for row in (
+        _row("task A claim", "a1", "task-a", 1),
+        _row("task B claim", "b1", "task-b", 1),
+    )) + b"\n")
+    client = TestClient(make_app(tmp_path))
+    scoped = client.get("/api/cross-run/claims", params={"scope_task": "task-a"}).json()
+    claim = scoped["claims"][0]
+    body = {
+        "statement": claim["statement"], "claim_uid": claim["claim_uid"],
+        "evidence_digest": claim["evidence_digest"], "scope": "task-a", "metric": "",
+        "decision": "ratified", "note": "", "expected_revision": scoped["revision"],
+        "action_id": "scoped-unrelated-safe",
+    }
+    with path.open("ab") as stream:
+        stream.write(orjson.dumps(_row("task B other", "b2", "task-b", 2)) + b"\n")
+    assert client.post("/api/cross-run/claim-decide", json=body).status_code == 200
+
+    fresh = client.get("/api/cross-run/claims", params={"scope_task": "task-a"}).json()
+    current = fresh["claims"][0]
+    stale = {
+        **body, "evidence_digest": current["evidence_digest"],
+        "decision": "pinned", "expected_revision": fresh["revision"],
+        "action_id": "scoped-same-task-stale",
+    }
+    with path.open("ab") as stream:
+        stream.write(orjson.dumps(_row("task A claim", "a2", "task-a", 3)) + b"\n")
+    response = client.post("/api/cross-run/claim-decide", json=stale)
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "claim_evidence_changed"
 

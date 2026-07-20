@@ -125,13 +125,18 @@ class StrategyCadenceMixin:
             import json
             from pathlib import Path
 
-            from looplab.engine.claims import atlas_for_memory, load_research_claims
+            from looplab.engine.claims import (
+                _filter_claim_source_rows,
+                _safe_claim_source_summary,
+                atlas_for_memory,
+                load_claim_lessons,
+                load_research_claims,
+            )
             from looplab.engine.memory import (ConceptCapsuleStore, _capsule_source_summary,
                                                _filter_capsule_rows)
-            from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
-            lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
-            lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
+            cp = base / "concept_capsules.jsonl"
+            lessons = load_claim_lessons(base)
             caps = ConceptCapsuleStore(cp).all() if cp.exists() else []
             research = load_research_claims(base)
             task_id = str(getattr(state, "task_id", "") or "") if state is not None else ""
@@ -140,14 +145,10 @@ class StrategyCadenceMixin:
                 return (same_live_direction(current_direction, row.get("direction"))
                         and bool(task_id) and str(row.get("task_id") or "") == task_id
                         and (not run_id or str(row.get("run_id") or "") != run_id))
-            lessons = [row for row in lessons if _visible(row)]
+            lessons = _filter_claim_source_rows(lessons, _visible, research=False)
             caps = _filter_capsule_rows(caps, _visible)
-            research = [row for row in research if _visible(row)]
+            research = _filter_claim_source_rows(research, _visible, research=True)
             capsule_source = _capsule_source_summary(caps)
-            if (not lessons and not caps and not research
-                    and capsule_source.get("source_complete") is True):
-                self._cross_run_note_receipt = {}
-                return ""
             # Use the same scope+polarity-safe projection as the Researcher advisory while
             # retaining the already-filtered, current-run-excluding snapshot used for the audit receipt.
             a = atlas_for_memory(
@@ -157,6 +158,13 @@ class StrategyCadenceMixin:
                 research_claims=research,
                 structured=getattr(self, "_cross_run_structured_claims", False),
             )
+            claim_source = _safe_claim_source_summary(a.get("claim_source"))
+            if (not lessons and not caps and not research
+                    and capsule_source.get("source_complete") is True
+                    and claim_source is not None
+                    and claim_source.get("source_complete") is True):
+                self._cross_run_note_receipt = {}
+                return ""
             raw_source = a.get("concept_source")
             if not isinstance(raw_source, dict):
                 context_pack = a.get("context_pack") if isinstance(a.get("context_pack"), dict) else {}
@@ -216,6 +224,28 @@ class StrategyCadenceMixin:
             # CODEX AGENT: the source receipt is model-visible AND part of both semantic/render digests.
             # Partial→complete with identical retained rows must create a different advisory identity.
             parts.append(source_part)
+            if claim_source is None:
+                claim_receipt = {}
+                claim_part = (
+                    "claim source receipt: known=false, complete=false; retained claim counts and absence "
+                    "are lower bounds only"
+                )
+            else:
+                claim_receipt = claim_source
+                claim_part = (
+                    "claim source receipt: "
+                    f"known={str(claim_source['receipt_known']).lower()}, "
+                    f"complete={str(claim_source['source_complete']).lower()}, "
+                    f"lessons_quarantined={claim_source['lessons']['rows_quarantined']}, "
+                    f"research_quarantined={claim_source['research']['rows_quarantined']}"
+                )
+                if not claim_source["source_complete"]:
+                    claim_part += (
+                        "; retained claim counts, zero mixed-evidence, and absence are lower bounds only"
+                    )
+            # CODEX AGENT: zero mixed-evidence records is exact only when both evidence stores and the D8
+            # producer denominator are complete. Keep that authority bit inside both model-visible digests.
+            parts.append(claim_part)
             def _safe(value, limit):
                 return cross_run_text(
                     value, max_chars=limit, single_line=True, entropy=True).strip()
@@ -242,6 +272,7 @@ class StrategyCadenceMixin:
                     run_id, max_chars=500, single_line=True, entropy=False),
                 "n_lessons": len(lessons), "n_capsules": len(caps), "n_research": len(research),
                 "concept_source": concept_source,
+                "claim_source": claim_receipt,
                 "corpus_digest": hashlib.sha256(corpus).hexdigest(),
                 "render_digest": hashlib.sha256(note.encode("utf-8")).hexdigest(),
             }

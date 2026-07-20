@@ -19,7 +19,7 @@ from typing import Optional
 
 from looplab.core.models import RunState
 from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
-from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
+from looplab.events.eventstore import read_jsonl_lenient
 from looplab.events.replay import fold
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_RECONCILED
 
@@ -273,15 +273,25 @@ class LessonReconcileMixin:
             # be atomic vs a concurrent run's O_APPEND, or the whole-file replace clobbers a lesson that
             # landed in the read→write window (the pre-lock snapshot never saw it) — the exact race the
             # lock exists to prevent (JsonlCaseLibrary.add / append_lessons both re-read inside the lock).
-            from looplab.events.eventstore import _interprocess_lock
-            with _interprocess_lock(Path(str(path) + ".lock")):
-                try:
-                    cur = read_jsonl_lenient(path)   # authoritative current file, inside the lock
-                except OSError:
-                    cur = [o for o in rows if isinstance(o, dict)]
+            from looplab.engine.claims import (_load_claim_source_path,
+                                               _valid_claim_source_row)
+            from looplab.events.eventstore import (
+                _interprocess_lock,
+                replace_jsonl_rows_atomic_preserving_quarantine,
+            )
+            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+                # An authoritative in-lock read failure aborts the best-effort reconcile. Falling back to
+                # the stale pre-lock scan would let a later whole-file replace erase concurrent appends.
+                cur = _load_claim_source_path(
+                    path, research=False)   # authoritative interpreted rows, inside the lock
                 kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
                 n_retired = len(cur) - len(kept)   # rows ACTUALLY dropped (audit); reflect-sweep included
-                write_jsonl_atomic(path, kept + fresh)
+                # CODEX AGENT: replace only current understood lesson rows. Malformed/future raw records
+                # remain byte-preserved quarantine and continue to make claim-source health incomplete.
+                replace_jsonl_rows_atomic_preserving_quarantine(
+                    path, kept + fresh,
+                    replace_if=lambda row: _valid_claim_source_row(row, research=False),
+                )
                 # The write above COMMITTED the fresh comparative lessons to disk. Consolidate/compact
                 # merely merge near-dups + cap the file AFTER that; they call the LLM merge agent /
                 # embedder and can raise (transient error). Swallow that LOCALLY so a post-write failure

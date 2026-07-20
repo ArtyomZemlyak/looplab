@@ -37,16 +37,18 @@ def test_explicit_claim_stance_separates_literal_truth_from_action_outcome():
         assert claim["support"] == ["r1:7"] and claim["oppose"] == []
 
 
-def test_explicit_oppose_neutral_and_invalid_stances_override_outcome_fail_closed():
+def test_explicit_oppose_and_neutral_override_outcome_while_invalid_stance_is_quarantined():
     opposed = claim_assessments([
         _lesson("X helps", "supported", [1], claim_stance="oppose")])[0]
     neutral = claim_assessments([
         _lesson("Y helps", "supported", [2], claim_stance="neutral")])[0]
     malformed = claim_assessments([
-        _lesson("Z helps", "supported", [3], claim_stance="definitely")])[0]
+        _lesson("Z helps", "supported", [3], claim_stance="definitely")])
     assert opposed["epistemic"] == "refuted" and opposed["oppose"] == ["r1:1"]
-    assert neutral["epistemic"] == malformed["epistemic"] == "inconclusive"
-    assert neutral["support"] == malformed["support"] == []
+    assert neutral["epistemic"] == "inconclusive" and neutral["support"] == []
+    assert malformed == []
+    assert malformed.claim_source["source_complete"] is False
+    assert malformed.claim_source["lessons"]["invalid_rows"] == 1
 
 
 def test_conflicting_verdicts_make_a_mixed_claim_not_newest_wins():
@@ -126,12 +128,12 @@ def test_ranking_most_evidenced_and_contested_first():
     assert out[0]["statement"] == "contested claim" and out[0]["epistemic"] == "mixed"
 
 
-def test_urls_are_not_treated_as_node_evidence():
+def test_numeric_string_node_ids_are_compatible_and_urls_are_not_node_evidence():
     out = claim_assessments(
-        [], research_claims=[{"statement": "s", "node_ids": ["4", "bad", True], "urls": ["u"],
+        [], research_claims=[{"statement": "s", "node_ids": ["4", "-5"], "urls": ["u"],
                               "verification": {"verdict": "supported", "method": "llm"}}])
-    # "4" coerces to node 4; "bad"/bool dropped; url goes to sources not support
-    assert out[0]["support"] == ["?:4"] and out[0]["sources"] == ["u"]
+    # Legacy bounded integer strings still coerce exactly; a URL belongs only in sources.
+    assert out[0]["support"] == ["?:-5", "?:4"] and out[0]["sources"] == ["u"]
 
 
 def test_empty_input_is_empty():
@@ -395,9 +397,9 @@ def test_cli_claim_decide_requires_exactly_one(tmp_path):
 
 def test_record_and_load_research_claims_upsert(tmp_path):
     from looplab.engine.claims import load_research_claims, record_research_claims
-    record_research_claims(str(tmp_path), run_id="r1", task_id="t",
+    record_research_claims(str(tmp_path), run_id="r1", task_id="t", direction="max",
                            claims=[{"statement": "doc2query helps", "node_ids": [5], "urls": ["u"]}, {"statement": ""}])
-    record_research_claims(str(tmp_path), run_id="r1", task_id="t",     # re-run replaces r1's rows
+    record_research_claims(str(tmp_path), run_id="r1", task_id="t", direction="max",  # replaces r1
                            claims=[{"statement": "doc2query helps", "node_ids": [7]}])
     rows = load_research_claims(str(tmp_path))
     assert len(rows) == 1 and rows[0]["run_id"] == "r1" and rows[0]["node_ids"] == [7]
@@ -416,8 +418,8 @@ def test_research_claim_upsert_preserves_malformed_future_and_invalid_same_run_r
         "statement": "current claim", "node_ids": [1],
         "verification": {"verdict": "supported"},
     }
-    record_research_claims(tmp_path, run_id="same", task_id="t", claims=[current])
-    record_research_claims(tmp_path, run_id="sibling", task_id="t", claims=[{
+    record_research_claims(tmp_path, run_id="same", task_id="t", direction="max", claims=[current])
+    record_research_claims(tmp_path, run_id="sibling", task_id="t", direction="max", claims=[{
         "statement": "sibling claim", "node_ids": [2],
     }])
     path = tmp_path / "research_claims.jsonl"
@@ -445,7 +447,7 @@ def test_research_claim_upsert_preserves_malformed_future_and_invalid_same_run_r
                      + orjson.dumps(future_kind) + b"\n"
                      + orjson.dumps(invalid_current) + b"\n")
 
-    record_research_claims(tmp_path, run_id="same", task_id="t", claims=[{
+    record_research_claims(tmp_path, run_id="same", task_id="t", direction="max", claims=[{
         **current, "node_ids": [7],
     }])
 
@@ -476,7 +478,7 @@ def test_nonempty_all_invalid_d8_source_persists_receipt_sentinel_without_indexi
     )
 
     assert record_research_claims(
-        tmp_path, run_id="invalid-only", task_id="t",
+        tmp_path, run_id="invalid-only", task_id="t", direction="max",
         claims=[None, {"statement": ""}]) == 0
     rows = load_research_claims(tmp_path)
     assert rows == [{
@@ -484,7 +486,7 @@ def test_nonempty_all_invalid_d8_source_persists_receipt_sentinel_without_indexi
         "record_kind": "source_receipt",
         "run_id": "invalid-only",
         "task_id": "t",
-        "direction": "",
+        "direction": "max",
         "source_receipt": {
             "v": 1, "claims_total": 2, "claims_retained": 0,
             "claims_omitted": 2, "producer_complete": False,
@@ -530,7 +532,7 @@ def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unkn
     }
 
     assert record_research_claims(
-        tmp_path, run_id="r-cap", task_id="t",
+        tmp_path, run_id="r-cap", task_id="t", direction="max",
         claims=[positive, *fillers, omitted_opposite]) == 256
     retained = load_research_claims(tmp_path)
     assert len(retained) == 256
@@ -544,7 +546,11 @@ def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unkn
     target = next(row for row in claims if row["statement"] == positive["statement"])
     assert target["support"] == ["r-cap:1"]
     assert target["epistemic"] == "inconclusive"
-    assert target["research_source"] == {
+    assert {key: target["research_source"][key] for key in (
+        "source_complete", "producer_receipt_known", "producer_complete", "producer_runs",
+        "producer_partial_runs", "producer_unknown_runs", "producer_claims_total",
+        "producer_claims_retained", "producer_claims_omitted",
+    )} == {
         "source_complete": False,
         "producer_receipt_known": True,
         "producer_complete": False,
@@ -555,6 +561,8 @@ def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unkn
         "producer_claims_retained": 256,
         "producer_claims_omitted": 1,
     }
+    assert target["research_source"]["read_complete"] is True
+    assert len(target["research_source"]["snapshot_digest"]) == 64
     rendered = render_context_pack(build_context_pack([target]))
     assert "D8 research-claim source is PARTIAL/UNKNOWN" in rendered
     assert "exact one-sided states are withheld" in rendered
@@ -606,13 +614,119 @@ def test_d8_claim_contests_a_lesson_verdict(tmp_path):
     # (unreachable from consolidated lessons alone, which carry one verdict per statement).
     from looplab.engine.claims import claims_for_memory, record_research_claims
     _write_lessons(tmp_path / "lessons.jsonl", [_lesson("distillation helps", "refuted", [2], run_id="rL")])
-    record_research_claims(str(tmp_path), run_id="rR", task_id="t",
+    record_research_claims(str(tmp_path), run_id="rR", task_id="t", direction="max",
                            claims=[{"statement": "distillation helps", "node_ids": [9],
                                     "verification": {"verdict": "supported", "method": "llm"}}])
     out = {c["statement"]: c for c in claims_for_memory(str(tmp_path))}
     c = out["distillation helps"]
     assert c["epistemic"] == "mixed"                       # now contested
     assert c["support"] == ["rR:9"] and c["oppose"] == ["rL:2"]
+
+
+def test_claim_sources_quarantine_malformed_future_and_incomplete_v3_rows(tmp_path):
+    import orjson
+
+    from looplab.engine.claims import claims_for_memory, load_research_claims, record_research_claims
+
+    lesson = _lesson("stable lesson", "supported", [1], run_id="lesson-run")
+    (tmp_path / "lessons.jsonl").write_bytes(
+        orjson.dumps(lesson) + b"\n{broken\n" + orjson.dumps({**lesson, "v": 99}) + b"\n")
+    record_research_claims(
+        tmp_path, run_id="research-run", task_id="t", direction="min",
+        claims=[{"statement": "stable research", "node_ids": [2],
+                 "verification": {"verdict": "supported", "method": "test"}}],
+    )
+    path = tmp_path / "research_claims.jsonl"
+    valid = orjson.loads(path.read_bytes().splitlines()[0])
+    with path.open("ab") as f:
+        f.write(orjson.dumps({k: v for k, v in valid.items() if k != "direction"}) + b"\n")
+        f.write(orjson.dumps({**valid, "record_kind": "future-kind"}) + b"\n")
+        f.write(orjson.dumps({**valid, "v": 99}) + b"\n{also-broken\n")
+
+    research = load_research_claims(tmp_path)
+    assert len(research) == 1 and research[0]["statement"] == "stable research"
+    claims = claims_for_memory(tmp_path, structured=True)
+    by_statement = {row["statement"]: row for row in claims}
+    assert by_statement["stable lesson"]["epistemic"] == "inconclusive"
+    assert by_statement["stable research"]["epistemic"] == "inconclusive"
+    source = claims.claim_source
+    assert source["source_complete"] is False and source["read_complete"] is False
+    assert source["lessons"] == {
+        "read_complete": False, "rows_total": 3, "rows_retained": 1,
+        "rows_quarantined": 2, "malformed_rows": 1, "invalid_rows": 1,
+    }
+    assert source["research"] == {
+        "read_complete": False, "rows_total": 5, "rows_retained": 1,
+        "rows_quarantined": 4, "malformed_rows": 1, "invalid_rows": 3,
+    }
+    assert len(source["snapshot_digest"]) == 64
+    assert claims.research_source["producer_receipt_known"] is True
+    assert claims.research_source["read_complete"] is False
+
+
+def test_explicit_empty_d8_snapshot_persists_authoritative_zero_sentinel(tmp_path):
+    from looplab.engine.claims import load_research_claims, record_research_claims, _research_source_summary
+
+    record_research_claims(
+        tmp_path, run_id="r", task_id="t", direction="max",
+        claims=[{"statement": "stale", "node_ids": [1],
+                 "verification": {"verdict": "supported", "method": "test"}}],
+    )
+    assert record_research_claims(
+        tmp_path, run_id="r", task_id="t", direction="max", claims=[]) == 0
+    rows = load_research_claims(tmp_path)
+    assert len(rows) == 1 and rows[0]["record_kind"] == "source_receipt"
+    assert rows[0]["source_receipt"] == {
+        "v": 1, "claims_total": 0, "claims_retained": 0,
+        "claims_omitted": 0, "producer_complete": True,
+    }
+    source = _research_source_summary(rows)
+    assert source["producer_runs"] == 1
+    assert source["producer_claims_total"] == 0
+    assert source["producer_complete"] is True
+
+
+def test_v3_writer_rejects_unknown_direction_without_replacing_prior_snapshot(tmp_path):
+    from looplab.engine.claims import load_research_claims, record_research_claims
+
+    claim = {"statement": "orientation matters", "node_ids": [1]}
+    assert record_research_claims(
+        tmp_path, run_id="r", task_id="t", direction="min", claims=[claim]) == 1
+    before = (tmp_path / "research_claims.jsonl").read_bytes()
+    assert record_research_claims(
+        tmp_path, run_id="r", task_id="t", direction="", claims=[]) == 0
+    assert (tmp_path / "research_claims.jsonl").read_bytes() == before
+    assert load_research_claims(tmp_path)[0]["direction"] == "min"
+
+
+def test_claim_snapshot_digest_is_stable_and_detects_same_count_rewrite(tmp_path):
+    import orjson
+
+    from looplab.engine.claims import claims_for_memory
+
+    path = tmp_path / "lessons.jsonl"
+    path.write_bytes(orjson.dumps(_lesson("first", "supported", [1])) + b"\n")
+    first = claims_for_memory(tmp_path).claim_source["snapshot_digest"]
+    assert len(first) == 64 and first == claims_for_memory(tmp_path).claim_source["snapshot_digest"]
+    path.write_bytes(orjson.dumps(_lesson("second", "supported", [1])) + b"\n")
+    second = claims_for_memory(tmp_path).claim_source["snapshot_digest"]
+    assert second != first
+
+
+def test_research_source_read_health_extension_is_atomic_and_receipt_invariants_hold():
+    from looplab.engine.claims import _research_source_summary, _safe_research_source_summary
+
+    current = _research_source_summary([])
+    assert _safe_research_source_summary(current) == current
+    partial = dict(current)
+    partial.pop("invalid_rows")
+    assert _safe_research_source_summary(partial) is None
+    contradictory = dict(current)
+    contradictory.update({
+        "producer_receipt_known": True, "producer_unknown_runs": 1,
+        "producer_runs": 1, "producer_complete": True, "source_complete": True,
+    })
+    assert _safe_research_source_summary(contradictory) is None
 
 
 def test_claims_for_memory_applies_decisions_too(tmp_path):
@@ -915,7 +1029,7 @@ def test_scopeless_decision_applies_in_lean_mode(tmp_path):
 def test_research_claims_are_scoped_by_task(tmp_path):
     # mega-review HIGH regression: claims_for_memory(scope_task=) must filter D8 research to the bound task.
     from looplab.engine.claims import claims_for_memory, record_research_claims
-    record_research_claims(str(tmp_path), run_id="rX", task_id="taskB",
+    record_research_claims(str(tmp_path), run_id="rX", task_id="taskB", direction="max",
                            claims=[{"statement": "other task secret finding", "node_ids": [9]}])
     scoped = claims_for_memory(str(tmp_path), lessons=[_lesson("local", "supported", [1], task_id="taskA")],
                                scope_task="taskA")
@@ -987,7 +1101,7 @@ def test_claim_readers_quarantine_malformed_persisted_rows(tmp_path):
     lessons = [
         {"statement": {"nested": "not identity"}, "outcome": "supported", "evidence": [1]},
         {"statement": "oversized evidence", "outcome": "supported", "evidence": list(range(257))},
-        {"statement": "huge numeric id is ignored", "outcome": "supported",
+        {"statement": "huge numeric id is quarantined", "outcome": "supported",
          "evidence": ["9" * 10_000], "run_id": "r-huge", "task_id": "t"},
         _lesson("usable lesson", "supported", [7], run_id="r-good"),
     ]
@@ -1003,7 +1117,8 @@ def test_claim_readers_quarantine_malformed_persisted_rows(tmp_path):
     rows = claims_for_memory(tmp_path, structured=True)
     by_statement = {row["statement"]: row for row in rows}
 
-    assert set(by_statement) == {"huge numeric id is ignored", "usable lesson", "usable research"}
-    assert by_statement["huge numeric id is ignored"]["n_support"] == 0
+    assert set(by_statement) == {"usable lesson", "usable research"}
     assert by_statement["usable lesson"]["support"] == ["r-good:7"]
     assert by_statement["usable research"]["support"] == ["rr:8"]
+    assert rows.claim_source["source_complete"] is False
+    assert rows.claim_source["lessons"]["invalid_rows"] == 3

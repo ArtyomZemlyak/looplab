@@ -216,14 +216,14 @@ def test_atlas_tool_discloses_each_bounded_projection_section(tmp_path):
             "2 single-run observation(s), 0 mixed-evidence record(s).") in out
 
 
-def test_concept_map_tool_renders_global_graph(tmp_path):
-    # PART V Phase 4/5: the global cross-run concept map — most-explored concepts + cross-run co-occurrences.
+def test_concept_map_tool_renders_portfolio_wide_graph_when_unbound(tmp_path):
+    # PART V Phase 4/5: unbound owner/CLI sees portfolio-wide; bound agents get task-family scope.
     _seed(tmp_path, capsules=[
         _cap("r1", ["loss/dcl", "arch/moe"], {}),
         _cap("r2", ["loss/dcl", "arch/moe"], {}),
     ])
     out = CrossRunTools(tmp_path).execute("cross_run_concept_map", {})
-    assert "Global concept map: 2 explored concept(s) across 2 run(s)." in out   # spine excluded from count
+    assert "Portfolio-wide concept map: 2 explored concept(s) across 2 run(s)." in out
     assert "×0" not in out                                     # no zero-run structural spine placeholders
     assert "loss/dcl" in out and "arch/moe" in out
     axes_line = next(line for line in out.splitlines() if line.startswith("Axes:"))
@@ -232,6 +232,33 @@ def test_concept_map_tool_renders_global_graph(tmp_path):
     assert "×2" in pair_line                                   # the pair appeared together in 2 runs
     assert pair_line.count("UNTRUSTED_MEMORY=") >= 2           # both slugs of the pair are framed untrusted
     assert "cross_run_concept_map" in {s["function"]["name"] for s in CrossRunTools(tmp_path).specs()}
+
+
+def test_tool_specs_disclose_scope_and_nonsemantic_hash_vector(tmp_path):
+    specs = {spec["function"]["name"]: spec["function"]["description"]
+             for spec in CrossRunTools(tmp_path).specs()}
+    assert "task-family + objective-direction" in specs["cross_run_concept_map"]
+    assert "portfolio-wide only for an unbound owner/CLI" in specs["cross_run_concept_map"]
+    assert "lexical proxy, not semantic" in specs["cross_run_search"]
+
+
+def test_claim_tools_disclose_physical_quarantine_and_nonmatch_is_not_absence(tmp_path):
+    row = {
+        "statement": "retained support", "outcome": "supported", "evidence": [1],
+        "run_id": "r", "task_id": "t", "direction": "max",
+    }
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n{broken\n")
+    tools = CrossRunTools(tmp_path)
+
+    claims = tools.execute("cross_run_claims", {"query": "definitely absent token"})
+    atlas = tools.execute("cross_run_atlas", {})
+    search = tools.execute("cross_run_search", {"query": "definitely absent token"})
+
+    assert "partial source is not proof of absence" in claims
+    assert "lessons quarantined=1" in claims
+    assert "PARTIAL claim evidence source" in atlas
+    assert "partial source/scope is not proof" in search
+    assert "claim_source_complete=false" in search
 
 
 def test_concept_map_tool_discloses_edges_outside_bounded_node_projection(tmp_path):
@@ -271,7 +298,7 @@ def test_cross_run_read_failure_never_reaches_tool_result_or_logs(
     def fail_read(*_args, **_kwargs):
         raise OSError(leak)
 
-    monkeypatch.setattr("looplab.events.eventstore.read_jsonl_lenient", fail_read)
+    monkeypatch.setattr("looplab.events.eventstore.read_jsonl_lenient_with_health", fail_read)
     with caplog.at_level(logging.WARNING, logger="looplab.tools.cross_run_tools"):
         out = CrossRunTools(tmp_path).execute("cross_run_claims", {})
 
@@ -437,8 +464,7 @@ def test_d8_claims_are_task_scoped_and_never_routed_to_developer(tmp_path):
     from types import SimpleNamespace
     from looplab.engine.claims import record_research_claims
     for task, statement in (("mine", "my verified memo"), ("foreign", "foreign verified memo")):
-        record_research_claims(tmp_path, run_id=f"r-{task}", task_id=task,
-                               direction="max",
+        record_research_claims(tmp_path, run_id=f"r-{task}", task_id=task, direction="max",
                                claims=[{"statement": statement, "node_ids": [1],
                                         "verification": {"verdict": "supported", "method": "llm"}}])
     researcher = CrossRunTools(tmp_path, role="researcher")
@@ -573,8 +599,7 @@ def test_cross_run_claims_scopes_D8_research_to_bound_task(tmp_path):
     from types import SimpleNamespace
     from looplab.engine.claims import record_research_claims
     _seed(tmp_path, lessons=[_lz_scoped("local finding retrieval", "rubert", ["retrieval", "russian"])])
-    record_research_claims(str(tmp_path), run_id="rX", task_id="otherTask",
-                           direction="max",
+    record_research_claims(str(tmp_path), run_id="rX", task_id="otherTask", direction="max",
                            claims=[{"statement": "foreign secret research", "node_ids": [9]}])
     t = CrossRunTools(tmp_path)
     t.bind_state(SimpleNamespace(
@@ -1148,10 +1173,10 @@ def test_concept_card_surfaces_lessons_that_mention_it(tmp_path):
     _seed(tmp_path,
           capsules=[_cap_scoped("a", "t", concepts=["regularization/r-drop", "loss/plain"],
                                 fingerprint=["kind:dataset"])],
-          lessons=[_lesson("R-drop consistency regularization stabilised training", "helped",
-                           "e", run_id="a")])
+          lessons=[_lesson("R-drop consistency regularization stabilised training", "noted",
+                           [1], run_id="a")])
     out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "regularization/r-drop"})
-    assert "what runs noted:" in out and "[helped]" in out
+    assert "what runs noted:" in out and "[noted]" in out
     assert "stabilised training" in out
 
 
@@ -1232,7 +1257,7 @@ def test_concept_card_fuzzy_ties_are_lexical_and_short_names_do_not_claim_lesson
     _seed(tmp_path, capsules=[
         _cap_scoped("a", "t", concepts=["axis/abd", "axis/a"], fingerprint=["kind:dataset"]),
         _cap_scoped("b", "t", concepts=["axis/abe"], fingerprint=["kind:dataset"]),
-    ], lessons=[_lesson("training remained stable", "helped", "e", run_id="a")])
+    ], lessons=[_lesson("training remained stable", "noted", [1], run_id="a")])
     tools = _bind(CrossRunTools(tmp_path))
 
     tied = tools.execute("concept_card", {"slug": "abc"})

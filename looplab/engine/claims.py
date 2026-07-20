@@ -40,6 +40,174 @@ _RESEARCH_CLAIM_VERSION = 3
 _RESEARCH_SOURCE_RECEIPT_VERSION = 1
 _MAX_RESEARCH_CLAIMS_PER_RUN = 256
 _MAX_RESEARCH_SOURCE_ITEMS = (1 << 31) - 1
+_CLAIM_READ_HEALTH_VERSION = 1
+_LESSON_OUTCOMES = frozenset((*_NEGATIVE, "supported", "noted", ""))
+
+
+def _empty_claim_read_segment() -> dict:
+    return {
+        "read_complete": True,
+        "rows_total": 0,
+        "rows_retained": 0,
+        "rows_quarantined": 0,
+        "malformed_rows": 0,
+        "invalid_rows": 0,
+    }
+
+
+def _empty_claim_read_health() -> dict:
+    return {
+        "v": _CLAIM_READ_HEALTH_VERSION,
+        "receipt_known": True,
+        "read_complete": True,
+        "lessons": _empty_claim_read_segment(),
+        "research": _empty_claim_read_segment(),
+    }
+
+
+def _safe_claim_read_segment(raw) -> Optional[dict]:
+    if not isinstance(raw, dict) or type(raw.get("read_complete")) is not bool:
+        return None
+    keys = ("rows_total", "rows_retained", "rows_quarantined", "malformed_rows", "invalid_rows")
+    if any(type(raw.get(key)) is not int or not 0 <= raw[key] <= _MAX_RESEARCH_SOURCE_ITEMS
+           for key in keys):
+        return None
+    out = {"read_complete": raw["read_complete"], **{key: raw[key] for key in keys}}
+    consistent = (
+        out["rows_quarantined"] == out["malformed_rows"] + out["invalid_rows"]
+        and out["rows_total"] == out["rows_retained"] + out["rows_quarantined"]
+        and out["read_complete"] == (out["rows_quarantined"] == 0)
+    )
+    return out if consistent else None
+
+
+def _safe_claim_read_health(raw) -> Optional[dict]:
+    if not isinstance(raw, dict) or raw.get("v") != _CLAIM_READ_HEALTH_VERSION:
+        return None
+    lessons = _safe_claim_read_segment(raw.get("lessons"))
+    research = _safe_claim_read_segment(raw.get("research"))
+    if (lessons is None or research is None or type(raw.get("read_complete")) is not bool
+            or raw["read_complete"] != (lessons["read_complete"] and research["read_complete"])):
+        return None
+    return {
+        "v": _CLAIM_READ_HEALTH_VERSION,
+        "read_complete": raw["read_complete"],
+        "lessons": lessons,
+        "research": research,
+    }
+
+
+class _ClaimSourceRows(list):
+    """List-compatible evidence snapshot carrying file/schema health through scope filters."""
+
+    def __init__(self, rows=(), *, read_health: Optional[dict] = None):
+        super().__init__(rows)
+        self.read_health = _safe_claim_read_health(read_health) or _empty_claim_read_health()
+
+
+def _claim_source_rows(rows, *, research: bool) -> _ClaimSourceRows:
+    source = rows if isinstance(rows, (list, tuple)) else []
+    valid = [row for row in source if _valid_claim_source_row(row, research=research)]
+    inherited = _safe_claim_read_health(getattr(source, "read_health", None))
+    if inherited is not None:
+        # A scoped/filter projection keeps the physical denominator. If a caller mutates a carried snapshot
+        # by appending a bad row, conservatively add that newly visible schema failure as well.
+        local_invalid = len(source) - len(valid)
+        if local_invalid:
+            inherited = {
+                **inherited,
+                "lessons": dict(inherited["lessons"]),
+                "research": dict(inherited["research"]),
+            }
+            key = "research" if research else "lessons"
+            segment = inherited[key]
+            segment["invalid_rows"] += local_invalid
+            segment["rows_quarantined"] += local_invalid
+            segment["rows_total"] += local_invalid
+            segment["read_complete"] = False
+            inherited["read_complete"] = False
+        return _ClaimSourceRows(valid, read_health=inherited)
+
+    key = "research" if research else "lessons"
+    health = _empty_claim_read_health()
+    invalid = len(source) - len(valid)
+    health[key] = {
+        "read_complete": invalid == 0,
+        "rows_total": len(source),
+        "rows_retained": len(valid),
+        "rows_quarantined": invalid,
+        "malformed_rows": 0,
+        "invalid_rows": invalid,
+    }
+    health["read_complete"] = invalid == 0
+    return _ClaimSourceRows(valid, read_health=health)
+
+
+def _filter_claim_source_rows(rows, predicate, *, research: bool) -> _ClaimSourceRows:
+    source = _claim_source_rows(rows, research=research)
+    return _ClaimSourceRows(
+        (row for row in source if predicate(row)), read_health=source.read_health)
+
+
+def _claim_rows_snapshot_digest(rows, *, read_segment: dict) -> str:
+    """Content identity for one validated/scoped source snapshot, not merely its row counts."""
+    # Hash every row independently so a response/display cap cannot make a same-count rewrite outside its
+    # first page invisible. Commit only fields consumed by claim/scope/producer logic; unrelated custom
+    # extras must not make governance identity expensive or unstable.
+    semantic_keys = (
+        "v", "record_kind", "run_id", "task_id", "direction", "statement", "metric",
+        "node_ids", "urls", "verification", "source_receipt", "outcome", "claim_stance",
+        "evidence", "fingerprint", "source", "role",
+    )
+    row_digests = []
+    for row in rows:
+        semantic = {key: row.get(key) for key in semantic_keys if key in row}
+        semantic = sanitize_cross_run_projection(
+            semantic, max_chars=128_000, max_items=256, max_total_items=1_024)
+        encoded = json.dumps(
+            semantic, ensure_ascii=False, sort_keys=True, default=str,
+            separators=(",", ":"),
+        )
+        row_digests.append(hashlib.sha256(encoded.encode("utf-8")).hexdigest())
+    raw = json.dumps(
+        {"row_digests": row_digests, "read_health": {
+            # Physical quarantine is global authority even for a scoped query. Valid rows outside the
+            # requested scope, however, must not stale a scope-local governance digest merely by changing
+            # the file-wide retained denominator.
+            key: read_segment[key] for key in (
+                "read_complete", "rows_quarantined", "malformed_rows", "invalid_rows")
+        }},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_claim_source_path(path, *, research: bool) -> _ClaimSourceRows:
+    """Read one durable evidence store without laundering malformed/schema-invalid rows into absence."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient_with_health
+    p = Path(path)
+    rows, raw_health = read_jsonl_lenient_with_health(
+        p, loads=json.loads, dicts_only=True) if p.exists() else ([], {
+            "source_lines": 0, "malformed_lines": 0, "invalid_shape_lines": 0,
+        })
+    valid = [row for row in rows if _valid_claim_source_row(row, research=research)]
+    malformed = int(raw_health.get("malformed_lines", 0) or 0)
+    invalid = int(raw_health.get("invalid_shape_lines", 0) or 0) + len(rows) - len(valid)
+    quarantined = malformed + invalid
+    key = "research" if research else "lessons"
+    health = _empty_claim_read_health()
+    health[key] = {
+        "read_complete": quarantined == 0,
+        "rows_total": int(raw_health.get("source_lines", 0) or 0),
+        "rows_retained": len(valid),
+        "rows_quarantined": quarantined,
+        "malformed_rows": malformed,
+        "invalid_rows": invalid,
+    }
+    health["read_complete"] = quarantined == 0
+    return _ClaimSourceRows(valid, read_health=health)
 
 
 def _valid_node_source(raw) -> bool:
@@ -49,14 +217,20 @@ def _valid_node_source(raw) -> bool:
     if not isinstance(values, (list, tuple)) or len(values) > _MAX_SOURCE_EVIDENCE:
         return False
     for value in values:
-        if isinstance(value, bool):
+        if type(value) is int:
             continue
-        if isinstance(value, int):
-            continue
-        # Keep the historical drop-invalid-elements behavior, but never feed an enormous decimal
-        # string into ``int`` (Python raises once its conversion limit is exceeded).
-        if isinstance(value, str) and len(value.strip()) <= 24:
-            continue
+        # CODEX AGENT: claim source health is an authority signal, so a poisoned element cannot be
+        # silently dropped by ``_node_ids`` while the surrounding row remains "complete". Numeric-string
+        # compatibility stays bounded and exact; bool/float/container/arbitrary strings quarantine the row.
+        if isinstance(value, str):
+            text = value.strip()
+            if text and len(text) <= 24 and text.lstrip("-").isdigit():
+                try:
+                    int(text)
+                except (ValueError, OverflowError):
+                    return False
+                continue
+        return False
     return True
 
 
@@ -69,19 +243,54 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
         return (
             row.get("v") == _RESEARCH_CLAIM_VERSION
             and isinstance(run_id, str) and bool(run_id) and len(run_id) <= _MAX_SOURCE_ID
-            and (task_id is None or isinstance(task_id, str) and len(task_id) <= _MAX_SOURCE_ID)
-            and (direction is None or direction in ("", "min", "max"))
+            and isinstance(task_id, str) and len(task_id) <= _MAX_SOURCE_ID
+            and isinstance(direction, str) and direction in ("min", "max")
             and _research_source_receipt(row) is not None
         )
+    if research:
+        version = row.get("v")
+        if version == _RESEARCH_CLAIM_VERSION:
+            # CODEX AGENT: v3 is exact, not a duck-typed extension point. Unknown kinds and malformed
+            # producer receipts stay quarantined as raw rows; they cannot become claim evidence merely by
+            # also carrying a plausible statement.
+            if (row.get("record_kind") != "claim"
+                    or _research_source_receipt(row) is None
+                    or not isinstance(row.get("run_id"), str)
+                    or not row["run_id"] or len(row["run_id"]) > _MAX_SOURCE_ID
+                    or not isinstance(row.get("task_id"), str)
+                    or len(row["task_id"]) > _MAX_SOURCE_ID
+                    or not isinstance(row.get("direction"), str)
+                    or row["direction"] not in ("min", "max")
+                    or not isinstance(row.get("metric"), str)
+                    or len(row["metric"]) > 200
+                    or not isinstance(row.get("node_ids"), list)
+                    or any(type(node_id) is not int for node_id in row["node_ids"])
+                    or not isinstance(row.get("urls"), list)
+                    or any(not isinstance(url, str) or len(url) > 2000 for url in row["urls"])
+                    or not isinstance(row.get("verification"), dict)
+                    or row["verification"].get("verdict") not in _RESEARCH_VERDICTS
+                    or not isinstance(row["verification"].get("method"), str)
+                    or len(row["verification"]["method"]) > 80
+                    or not isinstance(row["verification"].get("note"), str)
+                    or len(row["verification"]["note"]) > 400):
+                return False
+        elif version not in (None, 0, 1, 2) or row.get("record_kind") not in (None, ""):
+            return False
+    elif "v" in row or "record_kind" in row:
+        # lessons.jsonl has an unversioned current claim-source shape. A versioned/kinded row belongs to an
+        # unknown future contract and is retained by the mutable store but not interpreted by this reader.
+        return False
     statement = row.get("statement")
     if not isinstance(statement, str) or not statement.strip() or len(statement) > _MAX_SOURCE_STATEMENT:
         return False
     for key in ("run_id", "task_id"):
-        value = row.get(key)
-        if value is not None and (not isinstance(value, str) or len(value) > _MAX_SOURCE_ID):
+        # Absence is the legacy unknown-scope discriminator. Explicit null/container/numeric scope is a
+        # malformed semantic field, not permission to normalize the row into the shared portfolio scope.
+        if key in row and (not isinstance(row[key], str) or len(row[key]) > _MAX_SOURCE_ID):
             return False
-    direction = row.get("direction")
-    if direction is not None and direction not in ("", "min", "max"):
+    if "direction" in row and (
+            not isinstance(row["direction"], str)
+            or row["direction"] not in ("", "min", "max")):
         return False
     if not _valid_node_source(row.get("node_ids" if research else "evidence")):
         return False
@@ -99,12 +308,26 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
         verification = row.get("verification")
         if verification is not None and not isinstance(verification, dict):
             return False
+    else:
+        # Missing/empty outcome remains the documented legacy-neutral form. Once present, every other
+        # verdict and explicit stance must belong to the current durable vocabulary; otherwise downstream
+        # string coercion could erase poisoned semantics while source_complete incorrectly stayed true.
+        if ("outcome" in row
+                and (not isinstance(row["outcome"], str)
+                     or row["outcome"] not in _LESSON_OUTCOMES)):
+            return False
+        if ("claim_stance" in row
+                and (not isinstance(row["claim_stance"], str)
+                     or row["claim_stance"] not in _CLAIM_STANCES)):
+            return False
+        role = row.get("role")
+        if role is not None and role not in ("", "researcher", "developer"):
+            return False
     return True
 
 
 def _valid_claim_source_rows(rows, *, research: bool) -> list[dict]:
-    source = rows if isinstance(rows, (list, tuple)) else []
-    return [row for row in source if _valid_claim_source_row(row, research=research)]
+    return _claim_source_rows(rows, research=research)
 
 
 def _claim_text(value, maximum: int = 4000) -> str:
@@ -217,8 +440,9 @@ def _research_source_summary(rows) -> dict:
     unversioned rows are tagged ``v=0`` by ``load_research_claims`` and therefore remain UNKNOWN, just like
     durable v1/v2 rows whose former writer did not record its input cardinality.
     """
-    source = [row for row in (rows if isinstance(rows, (list, tuple)) else [])
-              if isinstance(row, dict)]
+    validated = _claim_source_rows(rows, research=True)
+    source = [row for row in validated if isinstance(row, dict)]
+    read_health = validated.read_health["research"]
     groups: dict[str, list[dict]] = {}
     for row in source:
         run_id = _identity_text(row.get("run_id"), _MAX_SOURCE_ID)
@@ -247,12 +471,13 @@ def _research_source_summary(rows) -> dict:
 
     receipt_known = unknown == 0
     producer_complete = receipt_known and partial == 0
+    read_complete = read_health["read_complete"]
     return {
         # CODEX AGENT: this field is the policy gate consumed by claim verdicts/stewards. The producer-
         # prefixed fields intentionally leave an additive seam for store read-health (`quarantined_rows`,
         # `read_complete`): overall source completeness can later become their conjunction without changing
         # what this receipt says about the memo producer's 256-row cap.
-        "source_complete": producer_complete,
+        "source_complete": producer_complete and read_complete,
         "producer_receipt_known": receipt_known,
         "producer_complete": producer_complete,
         "producer_runs": len(groups),
@@ -262,6 +487,15 @@ def _research_source_summary(rows) -> dict:
         "producer_claims_retained": sum(
             row.get("record_kind") != "source_receipt" for row in source),
         "producer_claims_omitted": known_omitted,
+        "read_health_v": _CLAIM_READ_HEALTH_VERSION,
+        "read_complete": read_complete,
+        "rows_total": read_health["rows_total"],
+        "rows_retained": read_health["rows_retained"],
+        "rows_quarantined": read_health["rows_quarantined"],
+        "malformed_rows": read_health["malformed_rows"],
+        "invalid_rows": read_health["invalid_rows"],
+        "snapshot_digest": _claim_rows_snapshot_digest(
+            validated, read_segment=read_health),
     }
 
 
@@ -269,40 +503,195 @@ def _safe_research_source_summary(raw) -> Optional[dict]:
     """Bound and validate a projected aggregate receipt before forwarding it to another boundary."""
     if not isinstance(raw, dict):
         return None
-    bool_keys = ("source_complete", "producer_receipt_known", "producer_complete")
-    int_keys = (
+    base_bool_keys = ("source_complete", "producer_receipt_known", "producer_complete")
+    base_int_keys = (
         "producer_runs", "producer_partial_runs", "producer_unknown_runs",
         "producer_claims_total", "producer_claims_retained", "producer_claims_omitted",
     )
-    if any(type(raw.get(key)) is not bool for key in bool_keys):
+    if any(type(raw.get(key)) is not bool for key in base_bool_keys):
         return None
     if any(type(raw.get(key)) is not int or not 0 <= raw[key] <= _MAX_RESEARCH_SOURCE_ITEMS
-           for key in int_keys):
+           for key in base_int_keys):
         return None
-    out = {key: raw[key] for key in (*bool_keys, *int_keys)}
+    out = {key: raw[key] for key in (*base_bool_keys, *base_int_keys)}
     known = out["producer_receipt_known"]
-    consistent = (
+    base_consistent = (
         out["producer_partial_runs"] + out["producer_unknown_runs"] <= out["producer_runs"]
         # CODEX AGENT: `known=true` and a non-zero unknown-run count is not a harmless diagnostic
         # mismatch: it would let a forged aggregate claim exact one-sided evidence while admitting an
         # unreadable producer receipt. The boolean and count are one invariant at every boundary.
         and known == (out["producer_unknown_runs"] == 0)
         and out["producer_complete"] == (known and out["producer_partial_runs"] == 0)
-        and out["source_complete"] == out["producer_complete"]
         and (not known or (
             out["producer_claims_total"] >= out["producer_claims_retained"]
             and out["producer_claims_omitted"]
             == out["producer_claims_total"] - out["producer_claims_retained"]))
     )
+    if not base_consistent:
+        return None
+
+    extension_keys = (
+        "read_health_v", "read_complete", "rows_total", "rows_retained",
+        "rows_quarantined", "malformed_rows", "invalid_rows", "snapshot_digest",
+    )
+    present = [key in raw for key in extension_keys]
+    if not any(present):
+        # Backward-compatible producer-only receipt. Absence of the ENTIRE additive extension is one
+        # coherent legacy contract; a partial extension below is rejected rather than default-filled.
+        if out["source_complete"] != out["producer_complete"]:
+            return None
+        retained = out["producer_claims_retained"]
+        return {
+            **out,
+            "read_health_v": 0,
+            "read_complete": True,
+            "rows_total": retained,
+            "rows_retained": retained,
+            "rows_quarantined": 0,
+            "malformed_rows": 0,
+            "invalid_rows": 0,
+            "snapshot_digest": "",
+        }
+    if not all(present) or raw.get("read_health_v") != _CLAIM_READ_HEALTH_VERSION:
+        return None
+    if type(raw.get("read_complete")) is not bool:
+        return None
+    snapshot_digest = raw.get("snapshot_digest")
+    if (not isinstance(snapshot_digest, str) or len(snapshot_digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in snapshot_digest)):
+        return None
+    read_int_keys = ("rows_total", "rows_retained", "rows_quarantined", "malformed_rows", "invalid_rows")
+    if any(type(raw.get(key)) is not int or not 0 <= raw[key] <= _MAX_RESEARCH_SOURCE_ITEMS
+           for key in read_int_keys):
+        return None
+    out.update({"read_health_v": raw["read_health_v"], "read_complete": raw["read_complete"],
+                **{key: raw[key] for key in read_int_keys},
+                "snapshot_digest": snapshot_digest})
+    consistent = (
+        out["rows_quarantined"] == out["malformed_rows"] + out["invalid_rows"]
+        and out["rows_total"] == out["rows_retained"] + out["rows_quarantined"]
+        and out["read_complete"] == (out["rows_quarantined"] == 0)
+        and out["source_complete"] == (out["producer_complete"] and out["read_complete"])
+    )
     return out if consistent else None
 
 
-def _source_guarded_epistemic(support, oppose, research_source: dict) -> str:
+def _claim_source_summary(lessons, research, *, research_source: Optional[dict] = None) -> dict:
+    """Combine both physical/schema snapshots with the D8 producer-cap receipt."""
+    lesson_rows = _claim_source_rows(lessons, research=False)
+    research_rows = _claim_source_rows(research, research=True)
+    lesson_read = lesson_rows.read_health["lessons"]
+    research_read = research_rows.read_health["research"]
+    research_source = (_safe_research_source_summary(research_source)
+                       if research_source is not None else _research_source_summary(research_rows))
+    if research_source is None:
+        research_source = {
+            **_research_source_summary(_ClaimSourceRows()),
+            "source_complete": False,
+            "producer_receipt_known": False,
+            "producer_complete": False,
+            "producer_runs": 1,
+            "producer_unknown_runs": 1,
+        }
+    read_complete = lesson_read["read_complete"] and research_read["read_complete"]
+    return {
+        "v": _CLAIM_READ_HEALTH_VERSION,
+        "receipt_known": True,
+        # CODEX AGENT: exact one-sided/absence claims cross BOTH mutable files and the D8 producer cap.
+        # Poisoned rows remain excluded as evidence, but they cannot disappear from this authority bit.
+        "source_complete": lesson_read["read_complete"] and research_source["source_complete"],
+        "read_complete": read_complete,
+        "research_source_complete": research_source["source_complete"],
+        "lessons": dict(lesson_read),
+        "research": dict(research_read),
+        "snapshot_digest": hashlib.sha256(
+            ("claims/v1\0"
+             + _claim_rows_snapshot_digest(lesson_rows, read_segment=lesson_read)
+             + "\0"
+             + _claim_rows_snapshot_digest(research_rows, read_segment=research_read))
+            .encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _safe_claim_source_summary(raw) -> Optional[dict]:
+    if (not isinstance(raw, dict) or raw.get("v") != _CLAIM_READ_HEALTH_VERSION
+            or type(raw.get("receipt_known")) is not bool
+            or type(raw.get("source_complete")) is not bool
+            or type(raw.get("read_complete")) is not bool
+            or type(raw.get("research_source_complete")) is not bool):
+        return None
+    snapshot_digest = raw.get("snapshot_digest")
+    digest_valid = (isinstance(snapshot_digest, str)
+                    and ((raw["receipt_known"] is False and snapshot_digest == "")
+                         or (len(snapshot_digest) == 64
+                             and all(ch in "0123456789abcdef" for ch in snapshot_digest))))
+    if not digest_valid:
+        return None
+    lessons = _safe_claim_read_segment(raw.get("lessons"))
+    research = _safe_claim_read_segment(raw.get("research"))
+    if lessons is None or research is None:
+        return None
+    read_complete = lessons["read_complete"] and research["read_complete"]
+    consistent = ((not raw["receipt_known"] and not raw["source_complete"]
+                   and not raw["read_complete"] and not raw["research_source_complete"])
+                  or (raw["receipt_known"]
+                      and raw["read_complete"] == read_complete
+                      and (not raw["research_source_complete"] or research["read_complete"])
+                      and raw["source_complete"]
+                      == (lessons["read_complete"] and raw["research_source_complete"])))
+    if not consistent:
+        return None
+    return {
+        "v": _CLAIM_READ_HEALTH_VERSION,
+        "receipt_known": raw["receipt_known"],
+        "source_complete": raw["source_complete"],
+        "read_complete": raw["read_complete"],
+        "research_source_complete": raw["research_source_complete"],
+        "lessons": lessons,
+        "research": research,
+        "snapshot_digest": snapshot_digest,
+    }
+
+
+def _unknown_claim_source_summary() -> dict:
+    return {
+        "v": _CLAIM_READ_HEALTH_VERSION,
+        "receipt_known": False,
+        "source_complete": False,
+        "read_complete": False,
+        "research_source_complete": False,
+        "lessons": _empty_claim_read_segment(),
+        "research": _empty_claim_read_segment(),
+        "snapshot_digest": "",
+    }
+
+
+class _ClaimAssessmentRows(list):
+    """Claim projection retaining aggregate source authority even when zero rows survive filters."""
+
+    def __init__(self, rows=(), *, claim_source: Optional[dict] = None,
+                 research_source: Optional[dict] = None):
+        super().__init__(rows)
+        self.claim_source = _safe_claim_source_summary(claim_source)
+        self.research_source = _safe_research_source_summary(research_source)
+
+
+def _filter_claim_assessments(rows, predicate) -> _ClaimAssessmentRows:
+    source = rows if isinstance(rows, (list, tuple)) else []
+    return _ClaimAssessmentRows(
+        (row for row in source if predicate(row)),
+        claim_source=getattr(source, "claim_source", None),
+        research_source=getattr(source, "research_source", None),
+    )
+
+
+def _source_guarded_epistemic(support, oppose, claim_source: dict) -> str:
     state = _epistemic(support, oppose)
-    # A missing D8 tail may contain a supported opposite-polarity assertion. Preserve the retained refs, but
-    # do not emit either one-sided state from a lower-bound prefix (CODEX AGENT).
+    # A missing lesson/research row or D8 tail may contain the other side. Preserve retained refs, but do not
+    # emit either one-sided state from a lower-bound evidence source (CODEX AGENT).
     return ("inconclusive" if state in ("supported", "refuted")
-            and research_source["source_complete"] is not True else state)
+            and claim_source["source_complete"] is not True else state)
 
 
 def _metric_identity(row: dict) -> str:
@@ -341,8 +730,23 @@ def claim_evidence_digest(claim: dict) -> str:
     fields = (
         "claim_uid", "statement", "scope", "metric", "polarity", "epistemic", "support", "oppose",
         "unverified", "runs", "scopes", "sources", "verification", "contradicts", "research_source",
+        "claim_source",
     )
     payload = {key: claim.get(key) for key in fields}
+    research_source = _safe_research_source_summary(payload.get("research_source"))
+    if research_source is not None:
+        payload["research_source"] = {key: research_source[key] for key in (
+            "source_complete", "producer_receipt_known", "producer_complete", "producer_runs",
+            "producer_partial_runs", "producer_unknown_runs", "producer_claims_total",
+            "producer_claims_retained", "producer_claims_omitted", "read_health_v", "read_complete",
+            "rows_quarantined", "malformed_rows", "invalid_rows", "snapshot_digest",
+        )}
+    claim_source = _safe_claim_source_summary(payload.get("claim_source"))
+    if claim_source is not None:
+        payload["claim_source"] = {key: claim_source[key] for key in (
+            "v", "receipt_known", "source_complete", "read_complete",
+            "research_source_complete", "snapshot_digest",
+        )}
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "cev_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
@@ -396,6 +800,11 @@ def _bounded_claim_projection(row: dict) -> dict:
         out.pop("research_source", None)
     else:
         out["research_source"] = research_source
+    claim_source = _safe_claim_source_summary(row.get("claim_source"))
+    if claim_source is None:
+        out.pop("claim_source", None)
+    else:
+        out["claim_source"] = claim_source
     if omitted:
         # CODEX AGENT: per-field omission metadata is part of the projection contract; a hard nested cap
         # must never silently turn "64 shown of 3,000" into "there are 64".
@@ -494,7 +903,8 @@ def claim_governance_revision(memory_dir) -> int:
 def record_claim_decision(memory_dir, *, statement: str, decision: str, note: str = "",
                           by: str = "operator", at: str = "", scope: str = "", metric: str = "",
                           expected_revision: Optional[int] = None, action_id: str = "",
-                          evidence_digest: str = "", validate: Optional[Callable[[], None]] = None) -> dict:
+                          evidence_digest: str = "", validate: Optional[Callable[[], None]] = None,
+                          validate_evidence: Optional[Callable[[list[dict]], None]] = None) -> dict:
     """Persist an OPERATOR verdict on a claim (ratify / reject / pin). Append-only JSONL, keyed BOTH by the
     legacy `normalize_statement` (so the lean projection still overlays) AND by a structured `claim_uid`
     (scope+polarity-precise, so a decision in task A never reaches a same-worded claim in task B — CODEX).
@@ -548,21 +958,31 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                 raise ValueError("expected_revision must be an integer")
             if expected_revision != current:
                 raise ClaimDecisionConflict(expected_revision, current)
-        if validate is not None:
-            validate()
-        stored = {**rec, "revision": current + 1}
-        separator = ""
-        if path.exists() and path.stat().st_size:
-            with open(path, "rb") as existing:
-                existing.seek(-1, 2)
-                if existing.read(1) not in (b"\n", b"\r"):
-                    # Preserve the torn forensic fragment but isolate the acknowledged valid row.
-                    separator = "\n"
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(separator + json.dumps(stored) + "\n")
-            f.flush()
-            best_effort_fsync(f.fileno())
-        return stored
+        from contextlib import nullcontext
+        evidence_context = (
+            locked_claim_evidence_snapshot(memory_dir, structured=True)
+            if validate_evidence is not None else nullcontext(None)
+        )
+        # CODEX AGENT: the evidence locks remain held through validation AND durable decision append. A
+        # lesson/research rewrite cannot slip between evidence_digest comparison and governance commit.
+        with evidence_context as evidence_snapshot:
+            if validate is not None:
+                validate()
+            if validate_evidence is not None:
+                validate_evidence(evidence_snapshot)
+            stored = {**rec, "revision": current + 1}
+            separator = ""
+            if path.exists() and path.stat().st_size:
+                with open(path, "rb") as existing:
+                    existing.seek(-1, 2)
+                    if existing.read(1) not in (b"\n", b"\r"):
+                        # Preserve the torn forensic fragment but isolate the acknowledged valid row.
+                        separator = "\n"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(separator + json.dumps(stored) + "\n")
+                f.flush()
+                best_effort_fsync(f.fileno())
+            return stored
 
 
 def _global_key(legacy_key: str) -> str:
@@ -661,7 +1081,7 @@ def _string_list(raw, *, maximum: int, item_maximum: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
-                           direction: str = "") -> int:
+                           direction: str) -> int:
     """Upsert (by run_id) a run's D8 research claims into `research_claims.jsonl`. Each row:
     {run_id, task_id, statement, node_ids, urls, source_receipt}. Append-with-replace so a re-run doesn't
     double-count. Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
@@ -678,7 +1098,9 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     rows = []
     direction = str(direction or "")
     if direction not in ("min", "max"):
-        direction = ""
+        # Current v3 identity is exact. An orientation-free record would be permanently unusable for live
+        # scope and indistinguishable from a malformed writer, so refuse before replacing any prior rows.
+        return 0
     source = claims if isinstance(claims, (list, tuple)) else []
     source_total = len(source) + int(claims is not None and not isinstance(claims, (list, tuple)))
     # CODEX AGENT: select the first bounded set of VALID claims rather than slicing the raw list first. A
@@ -709,10 +1131,11 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     }
     for row in rows:
         row["source_receipt"] = receipt
-    if source_total > 0 and claim_count == 0:
-        # A non-empty memo whose every claim failed validation still needs durable negative evidence about
-        # its missing source. This sentinel participates in completeness only; assessment/index loops ignore
-        # it because it has no statement (CODEX AGENT).
+    if claim_count == 0:
+        # Every explicitly processed empty snapshot needs a durable denominator too. Otherwise a successful
+        # empty extraction is indistinguishable from a run that never produced D8 at all, and a same-run
+        # refresh can erase its only receipt. This sentinel participates in completeness only; assessment/
+        # index loops ignore it because it has no statement (CODEX AGENT).
         rows.append({
             "v": _RESEARCH_CLAIM_VERSION,
             "record_kind": "source_receipt",
@@ -747,22 +1170,65 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
 
 
 def load_research_claims(memory_dir) -> list[dict]:
-    """Persisted D8 claims plus any non-indexed all-invalid-source receipt sentinel. [] when none."""
+    """Persisted D8 claims plus non-indexed processed-empty/all-invalid receipt sentinels. [] when none."""
     from pathlib import Path
 
-    from looplab.events.eventstore import read_jsonl_lenient
     if not memory_dir:
-        return []
+        return _ClaimSourceRows()
     path = Path(memory_dir) / "research_claims.jsonl"
-    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    rows = _load_claim_source_path(path, research=True)
     projected = []
-    for row in _valid_claim_source_rows(rows, research=True):
+    for row in rows:
         durable = dict(row)
         # Missing version in a persisted file is not the direct pure-API snapshot compatibility case.
         durable.setdefault("v", 0)
         projected.append(sanitize_cross_run_projection(
             durable, max_chars=32_000, max_items=64, max_total_items=256))
-    return projected
+    return _ClaimSourceRows(projected, read_health=rows.read_health)
+
+
+def load_claim_lessons(memory_dir) -> list[dict]:
+    """Claim-compatible lesson rows with physical/schema read health attached to the snapshot."""
+    from pathlib import Path
+
+    if not memory_dir:
+        return _ClaimSourceRows()
+    return _load_claim_source_path(Path(memory_dir) / "lessons.jsonl", research=False)
+
+
+def locked_claim_evidence_snapshot(memory_dir, *, structured: bool = True):
+    """Context manager yielding one cross-file evidence snapshot locked until its caller commits.
+
+    This is intentionally separate from ordinary read projections: governance needs lessons.jsonl and
+    research_claims.jsonl to stay unchanged from evidence-digest validation through decision append.
+    """
+    from contextlib import ExitStack, contextmanager
+    from pathlib import Path
+
+    from looplab.events.eventstore import _interprocess_lock
+
+    @contextmanager
+    def _snapshot():
+        base = Path(memory_dir)
+        paths = sorted(
+            (base / "lessons.jsonl", base / "research_claims.jsonl"), key=lambda p: str(p))
+        with ExitStack() as stack:
+            for source_path in paths:
+                stack.enter_context(_interprocess_lock(
+                    Path(str(source_path) + ".lock"), required=True))
+            lessons = load_claim_lessons(base)
+            research = load_research_claims(base)
+            # The decision overlay is read while record_claim_decision owns its ledger lock. Its maturity
+            # does not enter evidence_digest, but is required for scope/global-clear target diagnostics.
+            decisions = load_claim_decisions(base)
+            assessments = claim_assessments(
+                lessons, research_claims=research, decisions=decisions, structured=structured)
+            assessments.lessons_snapshot = lessons
+            assessments.research_claims_snapshot = research
+            assessments.decisions_snapshot = decisions
+            yield assessments
+
+    return _snapshot()
 
 
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
@@ -774,20 +1240,17 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
     `structured` (opt-in) uses the scope+polarity-safe structured claim key (the full CR); `scope_task`
     filters the D8 research claims to the bound task so a task-scoped caller does not re-read another task's
     research claims (mega-review) — the decisions overlay is applied scope-safely by `claim_assessments`."""
-    from pathlib import Path
-
-    from looplab.events.eventstore import read_jsonl_lenient
-    base = Path(memory_dir) if memory_dir else None
     if lessons is None:
-        lp = base / "lessons.jsonl" if base else None
-        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+        lessons = load_claim_lessons(memory_dir)
     lessons = _valid_claim_source_rows(lessons, research=False)
-    research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
+    research = load_research_claims(memory_dir) if research_claims is None else research_claims
     research = _valid_claim_source_rows(research, research=True)
     if scope_task:
         wanted = str(scope_task)
-        lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
-        research = [r for r in research if str(r.get("task_id") or "") == wanted]
+        lessons = _filter_claim_source_rows(
+            lessons, lambda r: str(r.get("task_id") or "") == wanted, research=False)
+        research = _filter_claim_source_rows(
+            research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
     dec = load_claim_decisions(memory_dir) if decisions is None else decisions
     return claim_assessments(lessons, research_claims=research, decisions=dec,
                              fuzzy=fuzzy, structured=structured)
@@ -806,27 +1269,27 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
     from looplab.engine.memory import (ConceptCapsuleStore, _dedup_valid_capsules,
                                        _filter_capsule_rows)
-    from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
     if lessons is None:
-        lp = base / "lessons.jsonl" if base else None
-        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+        lessons = load_claim_lessons(memory_dir)
     lessons = _valid_claim_source_rows(lessons, research=False)
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
         capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
     capsule_source = capsules if isinstance(capsules, (list, tuple)) else []
     capsules = _dedup_valid_capsules(capsule_source)
-    research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
+    research = load_research_claims(memory_dir) if research_claims is None else research_claims
     research = _valid_claim_source_rows(research, research=True)
     if scope_task:
         wanted = str(scope_task)
         # Scope is an access boundary across every joined store, not just D8. Filtering only
         # research rows still leaked other tasks through lessons and concept capsules in the same response.
-        lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
+        lessons = _filter_claim_source_rows(
+            lessons, lambda r: str(r.get("task_id") or "") == wanted, research=False)
         capsules = _filter_capsule_rows(
             capsules, lambda r: str(r.get("task_id") or "") == wanted)
-        research = [r for r in research if str(r.get("task_id") or "") == wanted]
+        research = _filter_claim_source_rows(
+            research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
     return portfolio_atlas(lessons, capsules, max_items=max_items,
                            decisions=(load_claim_decisions(memory_dir) if decisions is None else decisions),
                            research_claims=research,
@@ -892,9 +1355,11 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
         mat = members[0].get("maturity", "machine-proposed")
         research_source = (_safe_research_source_summary(members[0].get("research_source"))
                            or _research_source_summary([]))
+        claim_source = (_safe_claim_source_summary(members[0].get("claim_source"))
+                        or _claim_source_summary([], [], research_source=research_source))
         out.append({
             "statement": rep["statement"],
-            "epistemic": _source_guarded_epistemic(sup, opp, research_source), "maturity": mat,
+            "epistemic": _source_guarded_epistemic(sup, opp, claim_source), "maturity": mat,
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
             "unverified": unverified, "n_unverified": len(unverified),
             "runs": sorted({r for m in members for r in m["runs"]}),
@@ -904,12 +1369,15 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
             "decision": members[0].get("decision"),
             "merged_from": sorted(m["statement"] for m in members),
             "research_source": research_source,
+            "claim_source": claim_source,
         })
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
     return out
 
 
-def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
+def _structured_assessments(lessons, research_claims, decisions, *,
+                            research_source: Optional[dict] = None,
+                            claim_source: Optional[dict] = None) -> list[dict]:
     """The SCOPE+POLARITY-safe structured projection (full CR of the lean fuzzy merge). Identity is the
     `claim_signature` merge_key: (subject stems, scope=task, metric, polarity). Opposite-polarity claims
     sharing a `contra_key` are surfaced as a CONTRADICTION (they never merge, and each is marked contested).
@@ -917,7 +1385,16 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
     from looplab.engine.claim_key import claim_signature, claim_uid
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
-    research_source = _research_source_summary(research_claims)
+    research_source = (_safe_research_source_summary(research_source)
+                       if research_source is not None else _research_source_summary(research_claims))
+    if research_source is None:
+        research_source = _research_source_summary(research_claims)
+    claim_source = (_safe_claim_source_summary(claim_source)
+                    if claim_source is not None else _claim_source_summary(
+                        lessons, research_claims, research_source=research_source))
+    if claim_source is None:
+        claim_source = _claim_source_summary(
+            lessons, research_claims, research_source=research_source)
     decisions = decisions if isinstance(decisions, dict) else {}
     groups: dict[str, dict] = {}
 
@@ -1045,7 +1522,7 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
             # a polarity contradiction is the strongest contested signal -> mixed even if this side's own
             # evidence is one-directional (that is exactly what the structured key makes reachable).
             "epistemic": ("mixed" if contradicts and sup
-                           else _source_guarded_epistemic(sup, opp, research_source)),
+                           else _source_guarded_epistemic(sup, opp, claim_source)),
             "maturity": item["maturity"],
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
             "unverified": unverified, "n_unverified": len(unverified),
@@ -1055,10 +1532,11 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
             "metric": g["metric"],
             "decision": item["decision"], "contradicts": contradicts,
             "research_source": research_source,
+            "claim_source": claim_source,
         }
         digest_row = {**row,
                       "epistemic": ("mixed" if raw_contradicts and sup
-                                     else _source_guarded_epistemic(sup, opp, research_source)),
+                                     else _source_guarded_epistemic(sup, opp, claim_source)),
                       "contradicts": raw_contradicts}
         row["evidence_digest"] = claim_evidence_digest(digest_row)
         decision_digest = str((item["decision"] or {}).get("evidence_digest") or "")
@@ -1086,10 +1564,16 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
     research_source = _research_source_summary(research_claims)
+    claim_source = _claim_source_summary(
+        lessons, research_claims, research_source=research_source)
     decisions = decisions if isinstance(decisions, dict) else {}
     if structured:
-        rows = _structured_assessments(lessons, research_claims, decisions)
-        return [_bounded_claim_projection(row) for row in rows] if bounded else rows
+        rows = _structured_assessments(
+            lessons, research_claims, decisions,
+            research_source=research_source, claim_source=claim_source)
+        projected = [_bounded_claim_projection(row) for row in rows] if bounded else rows
+        return _ClaimAssessmentRows(
+            projected, claim_source=claim_source, research_source=research_source)
     groups: dict[str, dict] = {}
 
     def _group(stmt: str) -> Optional[dict]:
@@ -1176,7 +1660,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
                 d, max_chars=16_000, max_items=64, max_total_items=256)
         out.append({
             "statement": g["statement"],
-            "epistemic": _source_guarded_epistemic(sup, opp, research_source),
+            "epistemic": _source_guarded_epistemic(sup, opp, claim_source),
             "maturity": _dec.get((d or {}).get("decision"), "machine-proposed"),
             "support": sup, "oppose": opp,
             "n_support": len(sup), "n_oppose": len(opp),
@@ -1185,11 +1669,14 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
             "sources": sorted(g["sources"]), "verification": sorted(g["verification"]),
             "decision": d,
             "research_source": research_source,
+            "claim_source": claim_source,
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
     rows = _fuzzy_merge_claims(out) if fuzzy else out
-    return [_bounded_claim_projection(row) for row in rows] if bounded else rows
+    projected = [_bounded_claim_projection(row) for row in rows] if bounded else rows
+    return _ClaimAssessmentRows(
+        projected, claim_source=claim_source, research_source=research_source)
 
 
 # --------------------------------------------------------------------------- #
@@ -1201,6 +1688,9 @@ _CAVEAT_STATES = ("mixed", "refuted", "inconclusive")
 
 def _claim_research_source_summary(claims) -> Optional[dict]:
     """Return one coherent aggregate receipt carried by all rows in an assessment snapshot."""
+    carried = _safe_research_source_summary(getattr(claims, "research_source", None))
+    if carried is not None:
+        return carried
     rows = [row for row in (claims if isinstance(claims, (list, tuple)) else [])
             if isinstance(row, dict)]
     explicit = [_safe_research_source_summary(row.get("research_source")) for row in rows
@@ -1225,10 +1715,28 @@ def _claim_research_source_summary(claims) -> Optional[dict]:
     }
 
 
+def _claim_claim_source_summary(claims) -> Optional[dict]:
+    """Return one coherent lessons+research authority receipt, including for an empty snapshot."""
+    carried = _safe_claim_source_summary(getattr(claims, "claim_source", None))
+    if carried is not None:
+        return carried
+    rows = [row for row in (claims if isinstance(claims, (list, tuple)) else [])
+            if isinstance(row, dict)]
+    explicit = [_safe_claim_source_summary(row.get("claim_source")) for row in rows
+                if "claim_source" in row]
+    if not explicit:
+        return None
+    first = explicit[0]
+    if first is not None and len(explicit) == len(rows) and all(item == first for item in explicit[1:]):
+        return first
+    return _unknown_claim_source_summary()
+
+
 def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] = None,
                        max_claims: int = 5,
                        _concept_rows: Optional[list[dict]] = None,
-                       _research_source: Optional[dict] = None) -> dict:
+                       _research_source: Optional[dict] = None,
+                       _claim_source: Optional[dict] = None) -> dict:
     """Assemble a CLAIM-COUNT-bounded cross-run context pack from claim assessments (+ an optional concept
     overview) for a proposing agent (§21.20.5, Step 5). ("Claim-count", not token/byte: the pack caps the
     number of claims + per-claim field lengths; a true serialized-token envelope is the CR2b TODO — see the
@@ -1318,6 +1826,12 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         }
     if research_source is not None:
         pack["research_source"] = research_source
+    claim_source = (_safe_claim_source_summary(_claim_source)
+                    if _claim_source is not None else _claim_claim_source_summary(claims))
+    if _claim_source is not None and claim_source is None:
+        claim_source = _unknown_claim_source_summary()
+    if claim_source is not None:
+        pack["claim_source"] = claim_source
     if concept_overview:
         from looplab.engine.memory import concept_profit_tendencies
         # CODEX AGENT: callers that own the retained capsule snapshot may supply its private pre-cap rows.
@@ -1414,7 +1928,7 @@ _INTENTS = ("failed", "contested", "worked", "explore")
 # Document ids are a stable identity for the same searchable statement/concept.  The corpus digest has a
 # separate schema because it also commits to aggregate source receipts that do not belong in every doc id.
 _RETRIEVAL_DOCUMENT_VERSION = 2
-_RETRIEVAL_CORPUS_VERSION = 6
+_RETRIEVAL_CORPUS_VERSION = 7
 _INTENT_SCORE_BONUS = 0.001
 _CAVEAT_SCORE_RATIO = 0.50
 _CAVEAT_QUERY_COVERAGE = 0.10
@@ -1447,11 +1961,13 @@ def _retrieval_doc(kind: str, text: str, meta: dict) -> tuple[str, str, dict]:
     return kind, str(text or ""), {**meta, "stable_id": stable_id}
 
 
-def _retrieval_corpus_digest(docs, *, concept_source: dict, research_source: dict) -> str:
+def _retrieval_corpus_digest(docs, *, concept_source: dict, research_source: dict,
+                             claim_source: dict) -> str:
     canonical = [{"kind": kind, "text": text, "meta": meta}
                  for kind, text, meta in sorted(docs, key=lambda d: d[2]["stable_id"])]
     envelope = {"v": _RETRIEVAL_CORPUS_VERSION, "docs": canonical,
-                "concept_source": concept_source, "research_source": research_source}
+                "concept_source": concept_source, "research_source": research_source,
+                "claim_source": claim_source}
     return _json_digest(envelope, length=20)
 
 
@@ -1499,27 +2015,31 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     from looplab.engine.concept_registry import (load_concept_aliases, load_concept_splits)
     from looplab.engine.memory import (ConceptCapsuleStore, _filter_capsule_rows,
                                        _portfolio_concept_overview_data)
-    from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
         capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
     if lessons is None:
-        lp = base / "lessons.jsonl" if base else None
-        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+        lessons = load_claim_lessons(memory_dir)
+    lessons = _valid_claim_source_rows(lessons, research=False)
     # Scope EVERY source before joining. Decisions are a governance overlay; they never grant visibility.
-    research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
+    research = load_research_claims(memory_dir) if research_claims is None else research_claims
     if scope_task:
         wanted = str(scope_task)
-        lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
+        lessons = _filter_claim_source_rows(
+            lessons, lambda r: str(r.get("task_id") or "") == wanted, research=False)
         capsules = _filter_capsule_rows(
             capsules, lambda r: str(r.get("task_id") or "") == wanted)
-        research = [r for r in research if str(r.get("task_id") or "") == wanted]
+        research = _filter_claim_source_rows(
+            research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
     research = _valid_claim_source_rows(research, research=True)
     research_source = _research_source_summary(research)
-    claims = [c for c in claim_assessments(lessons, research_claims=research,
-                                           decisions=load_claim_decisions(memory_dir), structured=structured)
-              if c.get("maturity") != "operator-rejected"]
+    claims = _filter_claim_assessments(
+        claim_assessments(lessons, research_claims=research,
+                          decisions=load_claim_decisions(memory_dir), structured=structured),
+        lambda c: c.get("maturity") != "operator-rejected")
+    claim_source = (_safe_claim_source_summary(claims.claim_source)
+                    or _claim_source_summary(lessons, research, research_source=research_source))
     overview, concept_rows = _portfolio_concept_overview_data(
         capsules, aliases=load_concept_aliases(memory_dir),
         splits=load_concept_splits(memory_dir))
@@ -1579,7 +2099,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         evidence_digest = _json_digest({"support": c.get("support", []), "oppose": c.get("oppose", []),
                                         "unverified": c.get("unverified", []),
                                         "sources": c.get("sources", []),
-                                        "research_source": c.get("research_source")})
+                                        "research_source": c.get("research_source"),
+                                        "claim_source": c.get("claim_source")})
         docs.append(_retrieval_doc("claim", c["statement"], {
             "epistemic": c["epistemic"], "n_support": c["n_support"],
             "n_oppose": c["n_oppose"], "n_unverified": c.get("n_unverified", 0),
@@ -1587,6 +2108,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             "maturity": c.get("maturity"), "claim_uid": c.get("claim_uid", ""),
             "metric": c.get("metric", ""), "scopes": c.get("scopes", []),
             "research_source": c.get("research_source", research_source),
+            "claim_source": c.get("claim_source", claim_source),
             "decision_revision": (c.get("decision") or {}).get("revision"),
             "governance_digest": _json_digest(c.get("decision") or {}),
             "evidence_digest": evidence_digest}))
@@ -1613,9 +2135,11 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         "claims_omitted": len(claims) - claims_indexed,
     }
     corpus_digest = _retrieval_corpus_digest(
-        docs, concept_source=concept_source, research_source=research_source)
+        docs, concept_source=concept_source, research_source=research_source,
+        claim_source=claim_source)
     indexed_source = {**concept_source, **projection_receipt}
-    retrieval_source = {**indexed_source, "research_source": research_source}
+    retrieval_source = {**indexed_source, "research_source": research_source,
+                        "claim_source": claim_source}
     # The AGENT may pass an explicit `intent` (it knows why it is searching — genuinely agentic); otherwise
     # classify deterministically from the query text. An unknown value falls back to classification.
     intent = intent if intent in _INTENTS else _classify_intent(query)
@@ -1638,7 +2162,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                "corpus_digest": corpus_digest,
                "retrieval_digest": _retrieval_corpus_digest(
                    indexed_docs, concept_source=indexed_source,
-                   research_source=research_source), "truncated": truncated,
+                   research_source=research_source, claim_source=claim_source),
+               "truncated": truncated,
                "preselection": "query-overlap+one-per-source/v1",
                "contradiction_quota": round(base_quota, 3),
                "effective_quota": round(q, 3), "caveat_target": target,
@@ -1729,8 +2254,12 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # outward contradictions/context projections are capped below.
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
                                structured=structured, bounded=False)
-    research_source = _research_source_summary(
-        _valid_claim_source_rows(research_claims, research=True))
+    research_source = (_safe_research_source_summary(getattr(claims, "research_source", None))
+                       or _research_source_summary(
+                           _valid_claim_source_rows(research_claims, research=True)))
+    claim_source = (_safe_claim_source_summary(getattr(claims, "claim_source", None))
+                    or _claim_source_summary(lessons, research_claims,
+                                             research_source=research_source))
     # A contradiction the operator REJECTED is no longer live, consistent with build_context_pack and
     # cross_run_claims. Pin priority applies inside the embedded context pack; this human-facing contested
     # summary remains evidence-ordered and independently capped.
@@ -1768,6 +2297,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
             "source_duplicate_run_rows",
         )},
         "research_source": research_source,
+        "claim_source": claim_source,
         "explored": explored,                               # what's been tried (concept × runs)
         "explored_total": len(full_concept_rows),
         "explored_omitted": len(full_concept_rows) - len(explored),
@@ -1779,7 +2309,8 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
         "contradictions_omitted": len(contested) - len(contradictions),
         "context_pack": build_context_pack(
             claims, concept_overview=pack_overview, max_claims=max_items,
-            _concept_rows=full_concept_rows, _research_source=research_source),
+            _concept_rows=full_concept_rows, _research_source=research_source,
+            _claim_source=claim_source),
     }
     return sanitize_cross_run_projection(
         payload, max_chars=128_000_000, max_items=128, max_total_items=100_000)
@@ -1797,7 +2328,8 @@ def render_context_pack(pack: dict) -> str:
     Deterministic; retains mixed evidence so the agent sees counter-arguments, not only positives.
     All memory-derived text is sanitized (control chars/newlines stripped) — quoted DATA, not instructions
     (mega-review prompt-injection hardening)."""
-    if not pack.get("claims") and not pack.get("coverage") and not pack.get("research_source"):
+    if (not pack.get("claims") and not pack.get("coverage")
+            and not pack.get("research_source") and not pack.get("claim_source")):
         return ""
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
     lines = [f"Cross-run evidence ({pack.get('n_claims_total', 0)} claim records, "
@@ -1815,6 +2347,18 @@ def render_context_pack(pack: dict) -> str:
             + (f"; {research_source['producer_unknown_runs']} legacy/malformed run receipt(s)"
                if research_source["producer_unknown_runs"] else "")
             + "); retained evidence is a lower bound and exact one-sided states are withheld.")
+    claim_source = _safe_claim_source_summary(pack.get("claim_source"))
+    if claim_source is None and "claim_source" in pack:
+        lines.append(
+            "  WARNING: claim evidence source receipt is malformed/unknown; exact one-sided states and "
+            "absence are withheld.")
+    elif claim_source is not None and claim_source["read_complete"] is not True:
+        lessons_bad = claim_source["lessons"]["rows_quarantined"]
+        research_bad = claim_source["research"]["rows_quarantined"]
+        lines.append(
+            "  WARNING: claim evidence stores are PARTIAL "
+            f"(lessons quarantined={lessons_bad}; research quarantined={research_bad}); "
+            "retained evidence is a lower bound and absence is not exact.")
     for c in pack.get("claims", []):
         statement = _safe_text(c.get("statement"), 120)
         contradicts = "; ".join(

@@ -42,7 +42,6 @@ from looplab.engine.lessons_priors import (  # noqa: F401
     LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER, LessonPriorsMixin)
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import JsonlCaseLibrary
-from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
 from looplab.events.replay import fold
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED
 
@@ -140,7 +139,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         base.mkdir(parents=True, exist_ok=True)
         path = base / "lessons.jsonl"
         payload = b"\n".join(orjson.dumps(lz) for lz in lessons)
-        with _interprocess_lock(Path(str(path) + ".lock")):
+        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
             append_jsonl_bytes_locked(path, payload)
             if hygiene:
                 # D2 hygiene: consolidate the store after appending — merge duplicate claims into
@@ -252,12 +251,20 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         exact key misses (`parser`/`prompts` configure that pass's structured-output parser and
         merge_system override). Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
         try:
+            from looplab.engine.claims import (_load_claim_source_path,
+                                               _valid_claim_source_row)
             from looplab.engine.memory import consolidate_lessons
-            rows = read_jsonl_lenient(path)
+            from looplab.events.eventstore import replace_jsonl_rows_atomic_preserving_quarantine
+            rows = _load_claim_source_path(path, research=False)
             merged = consolidate_lessons(rows, client=client, embed=embed,
                                          parser=parser, prompts=prompts)
             if len(merged) < len(rows):
-                write_jsonl_atomic(path, merged)
+                # CODEX AGENT: hygiene owns only understood lesson rows. Raw malformed/future records stay
+                # byte-preserved quarantine until an explicit repair/migration acknowledges them.
+                replace_jsonl_rows_atomic_preserving_quarantine(
+                    path, merged,
+                    replace_if=lambda row: _valid_claim_source_row(row, research=False),
+                )
         except Exception:  # noqa: BLE001
             pass
 
@@ -267,10 +274,17 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         a few lines per finished run forever. Past `max_lines`, keep the most recent `keep` (recency
         also wins ties at retrieval, so the dropped prefix is the least useful part)."""
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-            if len(lines) > max_lines:
-                from looplab.core.atomicio import atomic_write_text
-                atomic_write_text(path, "\n".join(lines[-keep:]) + "\n")
+            from looplab.engine.claims import (_load_claim_source_path,
+                                               _valid_claim_source_row)
+            from looplab.events.eventstore import replace_jsonl_rows_atomic_preserving_quarantine
+            rows = _load_claim_source_path(path, research=False)
+            if len(rows) > max_lines:
+                # Retention applies to interpreted lessons, never to quarantine bytes. A damaged/future
+                # row may exceed the soft file cap but cannot be silently laundered by unrelated hygiene.
+                replace_jsonl_rows_atomic_preserving_quarantine(
+                    path, rows[-keep:],
+                    replace_if=lambda row: _valid_claim_source_row(row, research=False),
+                )
         except Exception:  # noqa: BLE001 — compaction is best-effort; never fail the run for it
             pass
 
