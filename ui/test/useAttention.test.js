@@ -247,3 +247,39 @@ test('useAttention paginates, preserves pages on transport failure, and resets a
       [first.id, older.id, older.id, first.id])
   })
 })
+
+test('useAttention invalidates archival pages across partial-source transitions', async t => {
+  const first = runItem('a')
+  const older = runItem('b', { created: 1_600_000_000 })
+
+  await withAttentionHook(t, {
+    attention: [attentionPage([first], { truncated: true, cursor: first.id })],
+    permissions: [{ pending: [] }],
+  }, async hook => {
+    hook.enqueue('attention', attentionPage([older]))
+    await hook.loadMore()
+    assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id, older.id])
+
+    hook.enqueue('attention', attentionPage([first], {
+      truncated: true, cursor: first.id, partial: true,
+    }))
+    hook.enqueue('permissions', { pending: [] })
+    await hook.refresh(() => hook.latest.partial && hook.latest.runs.length === 1)
+    assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id],
+      'a newly partial scan cannot retain archival cards from a different source universe')
+
+    hook.enqueue('attention', attentionPage([older], { partial: true }))
+    await hook.loadMore()
+    assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id, older.id])
+
+    hook.enqueue('attention', attentionPage([first], {
+      truncated: true, cursor: first.id, partial: false,
+    }))
+    hook.enqueue('permissions', { pending: [] })
+    await hook.refresh(() => !hook.latest.partial && hook.latest.runs.length === 1)
+    assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id],
+      'a recovered complete scan must not reuse pages fetched while the source was partial')
+    assert.equal(hook.latest.hasMore, true)
+    assert.equal(hook.latest.nextCursor, first.id)
+  })
+})

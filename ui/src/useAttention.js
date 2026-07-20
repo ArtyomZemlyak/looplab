@@ -76,7 +76,12 @@ export function useAttention({ intervalMs = 4000 } = {}) {
           if (firstPage) {
             const sameFirstPage = sameIds(previous.runPages[0] || [], firstPage.items)
             firstNextCursor = firstPage.nextCursor
-            if (sameFirstPage && firstPage.truncated && previous.runPages.length > 1) {
+            // # CODEX AGENT: extra pages have no snapshot token. Preserve them only across two
+            // complete scans; a partial scan can omit a different run on every poll, so carrying an
+            // older page through either edge would present stale/omitted cards as a complete list.
+            const archivalPagesStillAuthoritative = !previous.partial && !firstPage.partial
+            if (sameFirstPage && firstPage.truncated && previous.runPages.length > 1
+                && archivalPagesStillAuthoritative) {
               runPages = [firstPage.items, ...previous.runPages.slice(1)]
             } else {
               runPages = [firstPage.items]
