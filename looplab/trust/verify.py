@@ -140,7 +140,8 @@ def _evidence_snapshot(claim: dict, state: RunState,
         n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
         # CODEX AGENT: a node id is an ABA-prone slot, not an evidence identity. Only the current,
         # non-deleted lifecycle may enter the verifier prompt and its promotion receipt.
-        if n is None or n.tombstoned or nid in aborted:
+        if (n is None or n.tombstoned or nid in aborted
+                or n.status not in (NodeStatus.evaluated, NodeStatus.failed)):
             continue
         generation = n.attempt
         if type(generation) is not int or generation < 0:
@@ -171,21 +172,26 @@ def _evidence_snapshot(claim: dict, state: RunState,
 
     matched_sources: list[dict[str, str]] = []
     matched_identities: list[str] = []
+    source_inputs_valid = 0
     source_lookup = sources or {}
     seen_sources: set[str] = set()
     for identity, _display_url in _claim_source_refs(claim):
         source = source_lookup.get(identity)
         if source is None:
             continue
+        source_inputs_valid += 1
         if identity in seen_sources:
             continue
         seen_sources.add(identity)
         matched_identities.append(identity)
         matched_sources.append(source)
 
+    # CODEX AGENT: completeness covers every retained citation, not merely one usable channel. A matched
+    # node must not conceal an unfetched URL (or vice versa), and pending attempts are not terminal evidence.
     complete = bool(
         receipt["complete"]
         and node_inputs_valid == receipt["node_refs_retained"]
+        and source_inputs_valid == receipt["url_refs_retained"]
     )
     evidence = {"experiments": nodes, "consulted_sources": matched_sources}
     identity_receipt = {
@@ -222,11 +228,25 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
         return None, "verification evidence identity is malformed"
 
     cited_nodes = claim.get("node_ids") if isinstance(claim.get("node_ids"), (list, tuple)) else ()
+    if any(type(nid) is not int or nid < 0 for nid in cited_nodes):
+        return None, "verification evidence identity does not match the claim"
+    aborted = set(getattr(state, "aborted_nodes", ()))
+    final_nodes = getattr(state, "nodes", {})
+    expected_node_refs: list[dict[str, int]] = []
+    expected_node_identities: set[tuple[int, int]] = set()
+    for nid in cited_nodes:
+        n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
+        if (n is None or n.tombstoned or nid in aborted
+                or n.status not in (NodeStatus.evaluated, NodeStatus.failed)
+                or type(n.attempt) is not int or n.attempt < 0):
+            return None, "verification evidence lifecycle is stale"
+        identity = (nid, n.attempt)
+        if identity not in expected_node_identities:
+            expected_node_identities.add(identity)
+            expected_node_refs.append({"node_id": nid, "generation": n.attempt})
     node_refs: list[dict[str, int]] = []
     node_ids: list[int] = []
     seen_nodes: set[tuple[int, int]] = set()
-    aborted = set(getattr(state, "aborted_nodes", ()))
-    final_nodes = getattr(state, "nodes", {})
     for ref in raw_node_refs:
         if (not isinstance(ref, dict) or type(ref.get("node_id")) is not int
                 or type(ref.get("generation")) is not int):
@@ -237,31 +257,39 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
         n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
         # CODEX AGENT: reset is an ABA boundary and delete/abort removes a lifecycle from active
         # evidence. Never ratify a verdict whose inspected node no longer exists in that exact state.
-        if (n is None or n.attempt != generation or n.tombstoned or nid in aborted):
+        if (n is None or n.attempt != generation or n.tombstoned or nid in aborted
+                or n.status not in (NodeStatus.evaluated, NodeStatus.failed)):
             return None, "verification evidence lifecycle is stale"
         identity = (nid, generation)
-        if identity not in seen_nodes:
-            seen_nodes.add(identity)
-            node_refs.append({"node_id": nid, "generation": generation})
-            node_ids.append(nid)
+        if identity in seen_nodes:
+            return None, "verification evidence identity is malformed"
+        seen_nodes.add(identity)
+        node_refs.append({"node_id": nid, "generation": generation})
+        node_ids.append(nid)
 
     claim_urls = claim.get("urls") if isinstance(claim.get("urls"), (list, tuple)) else ()
     claim_url_ids = (claim.get("url_identities")
                      if isinstance(claim.get("url_identities"), (list, tuple)) else ())
-    url_lookup = {
-        identity: claim_urls[index]
-        for index, identity in enumerate(claim_url_ids)
-        if index < len(claim_urls) and valid_source_identity(identity)
-        and isinstance(claim_urls[index], str)
-    }
+    if (len(claim_url_ids) != len(claim_urls)
+            or any(not valid_source_identity(identity) for identity in claim_url_ids)
+            or any(not isinstance(url, str) or not url for url in claim_urls)):
+        return None, "verification source identity does not match the claim"
+    url_lookup = {identity: claim_urls[index] for index, identity in enumerate(claim_url_ids)}
+    expected_url_ids = list(dict.fromkeys(claim_url_ids))
     url_ids: list[str] = []
     urls: list[str] = []
     for identity in raw_url_ids:
         if not valid_source_identity(identity) or identity not in url_lookup:
             return None, "verification source identity does not match the claim"
-        if identity not in url_ids:
-            url_ids.append(identity)
-            urls.append(url_lookup[identity])
+        if identity in url_ids:
+            return None, "verification evidence identity is malformed"
+        url_ids.append(identity)
+        urls.append(url_lookup[identity])
+
+    # CODEX AGENT: the replayed verdict's ``complete`` bit is untrusted input. Reconstruct the exact unique
+    # identity set from the claim and require equality, so a forged/subset receipt cannot survive finalize.
+    if node_refs != expected_node_refs or url_ids != expected_url_ids:
+        return None, "verification evidence identity does not cover the complete claim"
 
     if not node_refs and not url_ids:
         return None, "verification did not inspect usable evidence"

@@ -295,7 +295,10 @@ def test_semantic_verifier_gets_only_matched_redacted_source_evidence(monkeypatc
                       client=object())
 
     rendered = "\n".join(message["content"] for message in captured["messages"])
-    assert out["verdicts"][0]["verdict"] == "supported"
+    # One matched source must not launder the claim's unmatched citation into a complete evidence set.
+    assert out["verdicts"][0]["verdict"] == "unclear"
+    assert out["verdicts"][0]["note"] == "evidence set is incomplete or stale"
+    assert out["verdicts"][0]["evidence"]["complete"] is False
     assert matched in rendered and "Paper" in rendered
     assert forged not in rendered and secret not in rendered and tail not in rendered
     assert "\x1b" not in rendered and "***" in rendered
@@ -360,6 +363,25 @@ def test_omitted_ninth_node_cannot_upgrade_the_inspected_prefix(monkeypatch):
         "url_identities": [],
         "complete": False,
     }
+
+
+def test_pending_node_is_not_terminal_verifier_evidence(monkeypatch):
+    from looplab.core.advisory_payloads import sanitize_research_memo_payload
+
+    memo = sanitize_research_memo_payload({
+        "claims": [{"statement": "the running attempt improved the metric", "node_ids": [0]}],
+    })
+    state = _state([_node(0, status=NodeStatus.pending)])
+
+    import looplab.agents.agent as agent_mod
+    monkeypatch.setattr(
+        agent_mod, "agentic_struct",
+        lambda *_args, **_kwargs: pytest.fail("pending evidence reached the semantic verifier"),
+    )
+    out = verify_memo(memo, state, client=object())
+
+    assert out["verdicts"][0]["verdict"] == "unsupported"
+    assert out["verdicts"][0]["evidence"]["complete"] is False
 
 
 # --------------------------------------------------------------------------- #

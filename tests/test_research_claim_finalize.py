@@ -215,6 +215,38 @@ def test_finalize_downgrades_verification_when_node_lifecycle_changes(tmp_path, 
     assert claim["unverified"] == ["run-finalize:0"]
 
 
+def test_finalize_rejects_supported_verdict_with_subset_identity_receipt(tmp_path):
+    urls = ["https://example.test/first", "https://example.test/second"]
+    memo = sanitize_research_memo_payload({
+        "claims": [{"statement": "both papers establish the result", "urls": urls}],
+        "sources": [{"url": url, "title": url.rsplit("/", 1)[-1]} for url in urls],
+    })
+    identities = memo["claims"][0]["url_identities"]
+    memo = sanitize_research_memo_payload({
+        **memo,
+        "verification": {
+            "method": "llm",
+            "verdicts": [{
+                "statement": "both papers establish the result",
+                "verdict": "supported",
+                "note": "only the first citation was retained",
+                # Simulate a legacy/custom event that asserted completeness over a strict subset.
+                "evidence": {
+                    "v": 1, "node_refs": [], "url_identities": identities[:1], "complete": True,
+                },
+            }],
+        },
+    })
+
+    rows = _finalize_claims(tmp_path, [memo])
+
+    assert rows[0]["verification"]["verdict"] == "unverified"
+    assert rows[0]["verification"]["note"] \
+        == "verification evidence identity does not cover the complete claim"
+    assert rows[0]["source_receipt"]["producer_complete"] is False
+    assert claim_assessments([], research_claims=rows, structured=True)[0]["support"] == []
+
+
 def test_finalize_carries_more_than_64_claims_into_authoritative_omission_receipt(tmp_path):
     node = _node(0)
     state = RunState(run_id="run-finalize", task_id="task-finalize", direction="max")

@@ -99,6 +99,12 @@ atomic; a legacy producer-only outward receipt remains readable, but a partially
 extension is invalid. These producer/read-health fields describe the D8 rows that were explicitly processed
 and persisted, not proof that every portfolio run executed D8.
 
+A positive D8 verifier verdict is promotable only when every retained citation was inspected: node references
+must name terminal, active attempts and every cited URL identity must match a source actually consulted by the
+research stage. Finalization reconstructs the complete unique node/URL identity set from the durable claim and
+requires exact equality with the verifier receipt; a subset receipt, pending attempt, reset, tombstone or abort
+downgrades the claim to unverified evidence rather than durable support.
+
 Exact claim authority is the separate v1 `claim_source`. It joins the lesson and research read-health
 segments with D8 producer completeness and binds the combined snapshot with a digest. Retained evidence
 remains visible and citable, but a quarantined lesson/research row, a partial/unknown D8 source or an unknown
