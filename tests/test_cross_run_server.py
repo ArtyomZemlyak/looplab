@@ -39,6 +39,40 @@ def _seed_memory(statement="hard-neg helps"):
     return md
 
 
+def test_part_iv_v_openapi_publishes_response_envelopes_and_governance_inputs(tmp_path):
+    schema = make_app(tmp_path).openapi()
+    paths = schema["paths"]
+
+    # CODEX AGENT: an empty `{}` response schema makes generated owner clients fail open to any
+    # shape. Keep the top-level evidence/revision envelopes executable even while nested rows evolve.
+    expected_responses = {
+        ("/api/cross-run/atlas", "get"): "CrossRunAtlasResponse",
+        ("/api/cross-run/claims", "get"): "CrossRunClaimsResponse",
+        ("/api/cross-run/claim-decide", "post"): "ClaimDecisionResponse",
+        ("/api/cross-run/concept-merge", "post"): "ConceptAliasResponse",
+        ("/api/cross-run/concept-split", "post"): "ConceptSplitResponse",
+        ("/api/cross-run/curation-log", "get"): "CurationLogResponse",
+        ("/api/cross-run/concept-steward", "post"): "StewardProposalResponse",
+    }
+    for (path, method), model in expected_responses.items():
+        response = paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert response == {"$ref": f"#/components/schemas/{model}"}
+
+    components = schema["components"]["schemas"]
+    assert set(components["CrossRunClaimsResponse"]["required"]) >= {
+        "claims", "n", "returned", "offset", "limit", "claim_source", "revision",
+    }
+    decision_ref = paths["/api/cross-run/claim-decide"]["post"]["requestBody"]["content"][
+        "application/json"]["schema"]["$ref"]
+    decision_schema = components[decision_ref.rsplit("/", 1)[-1]]
+    assert set(decision_schema["required"]) >= {
+        "claim_uid", "evidence_digest", "expected_revision", "action_id", "decision",
+    }
+    steward_parameters = paths["/api/cross-run/concept-steward"]["post"]["parameters"]
+    assert any(item["name"] == "action_id" and item["required"] is True
+               for item in steward_parameters)
+
+
 def test_claims_and_atlas_read(tmp_path):
     _seed_memory()
     client = TestClient(make_app(tmp_path))

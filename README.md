@@ -64,7 +64,7 @@ Requires **Python ≥ 3.11**. Core dependencies are small and pure-Python (`pyda
 looplab run --no-genesis --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo
 
 # 2. Inspect the result and verify reproducibility.
-looplab inspect runs/demo          # resolved config + best result
+looplab inspect runs/demo          # raw launch snapshot + current folded best result
 looplab replay  runs/demo          # rebuild full state from the event log
 
 # 3. A real ML task: polynomial-degree + ridge selection via 5-fold CV.
@@ -155,7 +155,7 @@ See the [Task reference](docs/guide/tasks.md) for every field and more examples.
 looplab init                             # scaffold a documented looplab.yaml (config-as-docs)
 looplab run     [CONFIG|TASK] [-s k=v]   # YAML/JSON config, a bare task, or --goal/--kind (no file)
 looplab resume  RUN_DIR                  # continue a crashed/incomplete run by replay
-looplab inspect RUN_DIR                  # resolved config snapshot + best result
+looplab inspect RUN_DIR                  # raw launch snapshot + current folded best result
 looplab replay  RUN_DIR                  # pure fold of the event log → state (read-only)
 looplab smoke                            # ping the configured LLM endpoint
 looplab approve RUN_DIR                  # ratify a paused run (HITL / onboarding)

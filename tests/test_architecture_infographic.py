@@ -30,3 +30,13 @@ def test_research_claim_one_pager_names_current_receipts_and_defaults():
     assert "product flag ON · library default OFF" in text
     assert "v2 scoped evidence store" not in text
     assert "reads opt-in" not in text
+
+
+def test_finalize_diagram_keeps_paid_stewards_before_the_cost_boundary():
+    text = DIAGRAM.read_text(encoding="utf-8")
+    # CODEX AGENT: all three paid stewards must precede llm_cost or their usage disappears from the
+    # terminal roll-up; the diagram is an operator-facing architecture contract, not decorative copy.
+    ordered = ["→ reflection", "→ concept steward → claim steward",
+               "→ task facets → llm_cost → completion"]
+    positions = [text.index(token) for token in ordered]
+    assert positions == sorted(positions)

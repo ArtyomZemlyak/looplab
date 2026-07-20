@@ -290,6 +290,15 @@ def test_tool_and_cli(tmp_path):
     res = CliRunner().invoke(app, ["cross-run-search", str(tmp_path), "hard negatives"])
     assert res.exit_code == 0 and "cross-run search" in res.stdout and "hard negative" in res.stdout.lower()
 
+    # CODEX AGENT: the engine retains a defensive clamp for programmatic callers, but the public CLI
+    # must reject out-of-contract values instead of silently turning an operator's request into k=64.
+    too_many = CliRunner().invoke(
+        app, ["cross-run-search", str(tmp_path), "hard negatives", "--k", "65"])
+    zero = CliRunner().invoke(
+        app, ["cross-run-search", str(tmp_path), "hard negatives", "--k", "0"])
+    assert too_many.exit_code == zero.exit_code == 2
+    assert "64" in too_many.output and "1" in zero.output
+
 
 def test_tool_and_cli_search_label_partial_concept_source_as_retained(tmp_path):
     from typer.testing import CliRunner

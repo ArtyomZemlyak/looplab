@@ -15,6 +15,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from looplab.core.config import Settings
+from looplab.serve.settings_ui_schema import (
+    SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT,
+    SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT,
+)
 
 _DOC = Path(__file__).resolve().parents[1] / "docs" / "guide" / "configuration.md"
 
@@ -44,3 +48,24 @@ def test_no_ghost_rows_for_removed_fields():
     assert not ghosts, (
         f"configuration.md settings-table row(s) {ghosts} name no existing Settings field "
         "— a removed/renamed knob left its doc row behind.")
+
+
+def test_settings_catalogue_counts_and_profile_semantics_are_current():
+    text = _DOC.read_text(encoding="utf-8")
+    assert (f"{SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT} of the "
+            f"{SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT} direct `Settings` fields") in text
+    profile = text.split("## Profile (one-word preset)", 1)[1].split("## Search budget", 1)[0]
+    # CODEX AGENT: product Settings deliberately ship Part IV/V on; `thorough` is the extra
+    # trust/quality bundle and must not be documented as the switch for every intelligence feature.
+    assert "every intelligence feature" not in profile
+    assert "Part IV/V" in profile and "normally-disabled quality/trust bundle" in profile
+
+
+def test_cli_docs_expose_recovery_and_raw_snapshot_boundaries():
+    root = _DOC.parents[2]
+    cli = (root / "docs" / "guide" / "cli-reference.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "looplab finalize RUN_DIR [--task-file TASK.json]" in cli
+    assert "inclusive range `1..64`" in cli
+    assert "raw launch snapshot + current folded best result" in cli
+    assert "raw launch snapshot + current folded best result" in readme

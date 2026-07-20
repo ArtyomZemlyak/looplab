@@ -10,7 +10,7 @@ looplab resume          Resume/continue a run (crash, stopped, or finished) by r
 looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
-looplab inspect         Show the resolved config + best result
+looplab inspect         Show the raw launch snapshot + current folded best result
 looplab replay          Pure fold of the event log → state (read-only)
 looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
@@ -178,8 +178,13 @@ Stop a run **and** run the end-of-run wrap-up (report, cross-run lessons/case, c
 driving the run, `finalize` re-enters the loop itself to produce the wrap-up.
 
 ```bash
-looplab finalize RUN_DIR
+looplab finalize RUN_DIR [--task-file TASK.json]
 ```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory to stop and wrap up |
+| `--task-file PATH` | `RUN_DIR/task.snapshot.json` | Explicit task definition for recovery of a legacy run whose canonical task snapshot is absent |
 
 ---
 
@@ -601,10 +606,12 @@ the full validated canonical retained concept set before that cap, rather than t
 projection. Receipts distinguish exact concept/claim totals, indexed counts and omissions, and commit those
 counts plus any bypassed overview projection tail to the versioned retrieval digest.
 
-It still does not expose each channel's per-hit contribution, carry evidence refs/source/scope/snapshot/index-
-health on each result, enforce a ComparisonContract, or persist the derivation receipt. The CLI has no scope
-option and reads the portfolio-wide stores. Bound agent callers instead pass a role-filtered snapshot scoped by
-compatible direction plus exact task or a strict related-goal fingerprint for lessons/capsules. V2 D8 rows carry
+Claim hits carry their scope, evidence digest, and nested research/combined-source health receipts (including
+the live snapshot digest), but the result still does not expose raw evidence references, each channel's per-hit
+contribution, a frozen portfolio watermark/index release, a ComparisonContract, or a persisted derivation
+receipt. The CLI has no scope option and reads the portfolio-wide stores. Bound agent callers instead pass a
+role-filtered snapshot scoped by compatible direction plus exact task or a strict related-goal fingerprint for
+lessons/capsules. V3 D8 rows carry
 no goal fingerprint and are exact-task-only. Task facets are advisory metadata reserved for future post-scope
 ranking; they grant no visibility and currently do not change order. This is useful applicability filtering,
 not a security boundary. This remains an experimental recall, not the full “Why recalled?” proof contract in
@@ -618,7 +625,7 @@ looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir; CLI reads are intentionally portfolio-wide |
 | `QUERY` | *(required)* | Free-text idea, technique or question |
-| `--k N` | `8` | Requested result count; no product-level maximum/paging contract exists yet |
+| `--k N` | `8` | Requested result count, validated in the inclusive range `1..64`; the retrieval receipt records the effective `k` |
 | `--json` | off | Emit ranked results plus the intent/corpus/quota receipt |
 
 ---
@@ -766,6 +773,30 @@ looplab task-facets-set MEMORY_DIR TASK_ID --domain … --language … …     #
 
 ---
 
+## `task-facets-set`
+
+The deterministic **operator** half of task faceting. It appends one reviewed, task-scoped overlay; it never
+calls an LLM. Values are canonicalized with Unicode NFKC, case-folding and whitespace collapse. At least one
+non-empty axis is required after normalization, so this command cannot perform an implicit clear. A later
+valid row for the same exact `TASK_ID` replaces the effective facets while append-only history remains.
+
+```bash
+looplab task-facets-set MEMORY_DIR TASK_ID [--domain V] [--language V] [--modality V]
+                         [--interaction V] [--objective V]
+```
+
+| Argument / Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir where `task_facets.jsonl` is appended |
+| `TASK_ID` | *(required)* | Exact task identity governed by this overlay |
+| `--domain` | `""` | Domain facet (for example `information-retrieval`) |
+| `--language` | `""` | Language facet |
+| `--modality` | `""` | Data modality facet |
+| `--interaction` | `""` | Interaction/task-shape facet |
+| `--objective` | `""` | Objective family facet |
+
+---
+
 ## `atlas`
 
 PART IV cross-run Step 6 (§21.20). A **capped Experimental portfolio summary** exposed by the historical
@@ -782,8 +813,10 @@ available `lessons.jsonl`, `concept_capsules.jsonl`, persisted `research_claims.
 `claim_decisions.jsonl`, `concept_aliases.jsonl` and `concept_splits.jsonl` sidecars; active contradictions exclude operator-rejected
 claims, while top-level raw claim totals may still include them.
 Aggregate concept buckets apply exact-slug aliases, but responses still carry display slugs and raw run cards
-can disagree after a merge. It has no saved-scope, comparison, snapshot/health, pagination, stable versioned
-identity or CoverageFrame contract; it is not the full backend in [doc 18 §§28, 33](../18-ui-ux-review-2026-07-11.md).
+can disagree after a merge. The payload carries live governed source-health and snapshot digests, but has no
+saved/frozen scope, ComparisonContract, portfolio watermark or versioned evidence/taxonomy release,
+pagination, stable versioned identity or CoverageFrame contract; it is not the full backend in
+[doc 18 §§28, 33](../18-ui-ux-review-2026-07-11.md).
 The CLI accepts any non-empty combination of lessons, concept capsules or D8 `research_claims.jsonl`, including
 a D8-only store. It remains a bounded live summary rather than a frozen/paged Atlas query.
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
@@ -65,6 +65,85 @@ class _ConceptSplitRule(_StrictBody):
 class _ConceptSplit(_ConceptSource):
     rules: list[_ConceptSplitRule] = Field(min_length=1, max_length=64)
     default: str = Field(default="", max_length=500)
+
+
+class _CrossRunResponse(BaseModel):
+    """Typed top-level contract while nested evidence rows remain versioned projections."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class CrossRunAtlasResponse(_CrossRunResponse):
+    n_runs: int
+    n_concepts: int
+    n_claims: int
+    n_contested: int
+    concept_source: dict[str, Any]
+    research_source: dict[str, Any]
+    claim_source: dict[str, Any]
+    explored: list[dict[str, Any]]
+    explored_total: int
+    explored_omitted: int
+    thin_coverage: list[str]
+    thin_coverage_total: int
+    thin_coverage_omitted: int
+    contradictions: list[dict[str, Any]]
+    contradictions_total: int
+    contradictions_omitted: int
+    context_pack: dict[str, Any]
+    governance: dict[str, Any]
+    projection: Literal["live"]
+    scope_task: str
+    page: dict[str, int]
+    revisions: dict[str, int]
+
+
+class CrossRunClaimsResponse(_CrossRunResponse):
+    claims: list[dict[str, Any]]
+    n: int
+    returned: int
+    offset: int
+    limit: int
+    scope_task: str
+    research_source: dict[str, Any]
+    claim_source: dict[str, Any]
+    revision: int
+
+
+class ClaimDecisionResponse(_CrossRunResponse):
+    ok: bool
+    decision: dict[str, Any]
+    revision: int
+
+
+class ConceptAliasResponse(_CrossRunResponse):
+    ok: bool
+    alias: dict[str, Any]
+    revision: int
+    governance_revision: int
+
+
+class ConceptSplitResponse(_CrossRunResponse):
+    ok: bool
+    split: dict[str, Any]
+    revision: int
+    governance_revision: int
+
+
+class CurationLogResponse(_CrossRunResponse):
+    v: Literal[1]
+    status: Literal["complete"]
+    complete: Literal[True]
+    entries: list[dict[str, Any]]
+    n: int
+    limit: int
+
+
+class StewardProposalResponse(_CrossRunResponse):
+    ok: bool
+    proposals: dict[str, Any]
+    receipt: dict[str, Any] | None
+    invocation: dict[str, Any]
 
 
 def build_router(srv) -> APIRouter:
@@ -173,7 +252,7 @@ def build_router(srv) -> APIRouter:
         except (EventStoreLockError, OSError) as exc:
             _raise_evidence_read_error(exc)
 
-    @router.get("/api/cross-run/atlas")
+    @router.get("/api/cross-run/atlas", response_model=CrossRunAtlasResponse)
     def atlas(limit: int = Query(24, ge=1, le=100),
               scope_task: str = Query("", max_length=500)):
         """Live structured Research Atlas projection, bounded per section."""
@@ -202,7 +281,7 @@ def build_router(srv) -> APIRouter:
             payload, max_chars=128_000_000, max_items=256,
             max_total_items=500_000)
 
-    @router.get("/api/cross-run/claims")
+    @router.get("/api/cross-run/claims", response_model=CrossRunClaimsResponse)
     def claims(contested: bool = False,
                scope_task: str = Query("", max_length=500),
                limit: int = Query(80, ge=1, le=200),
@@ -248,7 +327,7 @@ def build_router(srv) -> APIRouter:
             "revision": revision,
         }
 
-    @router.post("/api/cross-run/claim-decide")
+    @router.post("/api/cross-run/claim-decide", response_model=ClaimDecisionResponse)
     def claim_decide(body: _ClaimDecision):
         """Ratify/reject/pin/clear exactly the claim ID and revision the operator observed."""
         from looplab.engine.claims import record_observed_claim_decision
@@ -265,7 +344,7 @@ def build_router(srv) -> APIRouter:
         return {"ok": True, "decision": _public_cross_run_row(rec),
                 "revision": rec["revision"]}
 
-    @router.post("/api/cross-run/concept-merge")
+    @router.post("/api/cross-run/concept-merge", response_model=ConceptAliasResponse)
     def concept_merge(body: _ConceptMerge):
         """Merge one non-empty concept into another; purge is a separate confirmed action."""
         from looplab.engine.concept_registry import record_concept_alias
@@ -284,7 +363,7 @@ def build_router(srv) -> APIRouter:
             "governance_revision": rec["governance_revision"],
         }
 
-    @router.post("/api/cross-run/concept-purge")
+    @router.post("/api/cross-run/concept-purge", response_model=ConceptAliasResponse)
     def concept_purge(body: _ConceptPurge):
         """Explicitly tombstone one concept after a typed confirmation."""
         from looplab.engine.concept_registry import record_concept_alias
@@ -303,7 +382,7 @@ def build_router(srv) -> APIRouter:
             "governance_revision": rec["governance_revision"],
         }
 
-    @router.post("/api/cross-run/concept-alias-clear")
+    @router.post("/api/cross-run/concept-alias-clear", response_model=ConceptAliasResponse)
     def concept_alias_clear(body: _ConceptSource):
         """Undo the current alias/purge policy without deleting its audit history."""
         from looplab.engine.concept_registry import clear_concept_alias
@@ -322,7 +401,7 @@ def build_router(srv) -> APIRouter:
             "governance_revision": rec["governance_revision"],
         }
 
-    @router.post("/api/cross-run/concept-split")
+    @router.post("/api/cross-run/concept-split", response_model=ConceptSplitResponse)
     def concept_split(body: _ConceptSplit):
         """Record one bounded deterministic split rule set."""
         from looplab.engine.concept_registry import record_concept_split
@@ -342,7 +421,7 @@ def build_router(srv) -> APIRouter:
             "governance_revision": rec["governance_revision"],
         }
 
-    @router.post("/api/cross-run/concept-split-clear")
+    @router.post("/api/cross-run/concept-split-clear", response_model=ConceptSplitResponse)
     def concept_split_clear(body: _ConceptSource):
         """Undo the active split while preserving the append-only history."""
         from looplab.engine.concept_registry import clear_concept_split
@@ -377,11 +456,11 @@ def build_router(srv) -> APIRouter:
             "entries": list(reversed(latest)), "n": count, "limit": limit,
         }
 
-    @router.get("/api/cross-run/curation-log")
+    @router.get("/api/cross-run/curation-log", response_model=CurationLogResponse)
     def curation_log(limit: int = Query(20, ge=1, le=200)):
         return _read_governance(lambda: _recent_log("concept_curation_log.jsonl", limit))
 
-    @router.get("/api/cross-run/claim-curation-log")
+    @router.get("/api/cross-run/claim-curation-log", response_model=CurationLogResponse)
     def claim_curation_log(limit: int = Query(20, ge=1, le=200)):
         return _read_governance(lambda: _recent_log("claim_curation_log.jsonl", limit))
 
@@ -438,7 +517,7 @@ def build_router(srv) -> APIRouter:
         from looplab.serve.assistant import safe_assistant_failure
         return f"{phase}:{safe_assistant_failure(exc)['error_kind']}"
 
-    @router.post("/api/cross-run/concept-steward")
+    @router.post("/api/cross-run/concept-steward", response_model=StewardProposalResponse)
     def concept_steward(action_id: str = Query(..., min_length=1, max_length=160),
                         apply: bool = False):
         """Run a proposal-only taxonomy review; typed operator actions apply selected proposals."""
@@ -464,7 +543,7 @@ def build_router(srv) -> APIRouter:
             _raise_governance_error(exc)
         return _steward_response(record)
 
-    @router.post("/api/cross-run/claim-steward")
+    @router.post("/api/cross-run/claim-steward", response_model=StewardProposalResponse)
     def claim_steward(action_id: str = Query(..., min_length=1, max_length=160),
                       apply: bool = False):
         """Run a proposal-only claim review; typed operator actions apply selected proposals."""

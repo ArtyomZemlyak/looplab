@@ -87,10 +87,11 @@ def run_start_pinned_settings(state) -> dict:
 #
 # `thorough` deliberately touches only QUALITY/TRUST machinery, not spend: it does NOT raise
 # max_nodes / max_parallel (those are cost knobs the user owns). It enables multi-seed confirmation
-# (demote seed-lucky leaders), the novelty gate (stop re-evaluating duplicates), the reward-hack /
-# leakage / critic monitors AND flips them from advisory to *gating* (`trust_gate="gate"` — a
+# (demote seed-lucky leaders), the reward-hack / leakage / critic monitors AND flips them from
+# advisory to *gating* (`trust_gate="gate"` — a
 # flagged win can no longer be selected as best), ablation-driven refinement, and the prompt cues
-# (complexity / budget / failure-reflection / watchdog-reflection). Effect is large; marginal cost is a
+# (complexity / budget / failure-reflection / watchdog-reflection). Agentic novelty and the experimental
+# Part IV/V bundle are already product defaults, not profile changes. Effect is large; marginal cost is a
 # few extra evals.
 PROFILES: dict[str, dict] = {
     "default": {},   # explicit no-op alias for "ship-as-is" (== omitting profile)

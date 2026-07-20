@@ -160,6 +160,10 @@ def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "ste
             raise ValueError(f"facet {axis} exceeds {_MAX_FACET} characters")
         if value:
             clean[axis] = value
+    # CODEX AGENT: `{}` would be an implicit last-write-wins clear. Clearing applicability metadata
+    # needs an explicit typed action; whitespace/control-only CLI values must not manufacture one.
+    if not clean:
+        raise ValueError("give at least one non-empty facet axis")
     rec = {"task_id": tid, "facets": clean, "by": actor, "at": recorded_at}
     path = Path(memory_dir) / "task_facets.jsonl"
     try:

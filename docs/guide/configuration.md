@@ -59,8 +59,8 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **143 of the 166 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 17 high-frequency keys; search spans all 143 catalogued keys.
+server-owned curated catalogue with **153 of the 180 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 17 high-frequency keys; search spans all 153 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
 
@@ -98,13 +98,15 @@ new clients. See [Web UI](ui.md) for the visible conflict/recovery behavior.
 |---|---|---|---|
 | `profile` | `LOOPLAB_PROFILE` | `default` | `default`/`fast` = lean defaults; `thorough` = turn the built quality/trust machinery on |
 
-`profile` is a **named bundle of setting defaults**. The engine ships every intelligence feature
-*off* so a toy `looplab run` stays cheap and deterministic; `profile: thorough` turns the
-built-and-tested machinery on in one word — multi-seed confirmation (`confirm_top_k=3`,
+`profile` is a **named override bundle** over the product defaults. `default` / `fast` preserve those
+defaults, which already enable the ordinary agent loop and the explicitly experimental Part IV/V concept,
+cross-run read/advisory and proposal-only curation features documented below. `profile: thorough` additionally
+turns on the normally-disabled quality/trust bundle — multi-seed confirmation (`confirm_top_k=3`,
 `confirm_seeds=3`), the reward-hack / leakage / critic monitors **plus**
 `trust_gate=gate` (a flagged win can no longer be selected as best), ablation-driven refinement
 (`ablate_every=3`), the adaptive operator bandit (`operator_bandit`), and the proposal cues
-(`complexity_cue`, `budget_aware`, `failure_reflection`, `watchdog_reflection`).
+(`complexity_cue`, `budget_aware`). Failure/watchdog reflection and reflection priors are already on in the
+product defaults; the preset keeps those values on but does not newly activate them.
 
 A profile is **config-first**: it only fills fields you did *not* set yourself, so any explicit
 knob — in the file, on the CLI (`--set`), or via `LOOPLAB_*` — always wins. It deliberately touches

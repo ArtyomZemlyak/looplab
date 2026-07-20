@@ -1135,8 +1135,8 @@ def task_facets_cmd(
     tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
     fingerprint). PROPOSAL-ONLY, consistent with concept-steward/claim-steward (§22.4 — the agentic steward
     only proposes; it never writes cross-run state): review the classification, then record it deterministically
-    with `task-facets-set` (or let the engine record it at finalize under `cross_run_curation`). A stable
-    action id durably fences its paid call across crash/retry."""
+    with `task-facets-set`. Finalize may queue another proposal but cannot ratify it. A stable action id
+    durably fences this paid call across crash/retry."""
     from looplab.core.config import Settings
     from looplab.engine.governance_health import read_curation_rows
     from looplab.engine.task_facets import steward_task_facets, task_facets_input_digest
@@ -1334,7 +1334,7 @@ def cross_run_digest_cmd(
 def cross_run_search_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir."),
     query: str = typer.Argument(..., help="Free-text query (idea / technique / question)."),
-    k: int = typer.Option(8, help="How many results."),
+    k: int = typer.Option(8, min=1, max=64, help="How many results (hard range: 1-64)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full result + receipt as JSON."),
 ):
     """PART IV cross-run CR2a (§21.20.5): relevance-ranked hybrid SEARCH over the cross-run knowledge

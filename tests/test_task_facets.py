@@ -177,6 +177,11 @@ def test_cli_task_facets_is_proposal_only(tmp_path, monkeypatch):
     r2 = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval", "--apply"])
     assert r2.exit_code == 2 and "deprecated" in r2.stdout
 
+    help_result = CliRunner().invoke(app, ["task-facets", "--help"])
+    assert help_result.exit_code == 0
+    assert "task-facets-set" in help_result.output
+    assert "let the engine record it at finalize" not in help_result.output
+
 
 def test_cli_task_facets_action_id_cannot_replay_a_different_goal(tmp_path, monkeypatch):
     from typer.testing import CliRunner
@@ -243,3 +248,8 @@ def test_cli_task_facets_set_is_the_operator_write(tmp_path):
     # empty write is a clean error
     r2 = CliRunner().invoke(app, ["task-facets-set", str(tmp_path), "t2"])
     assert r2.exit_code == 2
+    before = (tmp_path / "task_facets.jsonl").read_bytes()
+    whitespace = CliRunner().invoke(
+        app, ["task-facets-set", str(tmp_path), "t2", "--domain", "   "])
+    assert whitespace.exit_code == 2 and "non-empty facet" in whitespace.output
+    assert (tmp_path / "task_facets.jsonl").read_bytes() == before

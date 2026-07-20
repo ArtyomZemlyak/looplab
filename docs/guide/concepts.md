@@ -805,23 +805,28 @@ Where each concept lives in the code:
 
 | Concept | Module |
 |---|---|
-| Domain models + event envelope | `models.py` |
-| Layered settings + masked snapshot | `config.py` |
-| Append-only log / pure fold / SQLite read-model | `eventstore.py`, `replay.py`, `readmodel.py` |
-| Sandbox seam + subprocess/Docker bodies | `sandbox.py` |
-| Researcher/Developer roles (toy + LLM) | `roles.py`, `unified_agent.py` |
-| Structured output + LLM client + cost accountant | `parse.py`, `llm.py` |
+| Domain models + event envelope | `core/models.py` |
+| Layered settings + masked snapshot | `core/config.py` |
+| Append-only log / pure fold / SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
+| Sandbox seam + subprocess/Docker bodies | `runtime/sandbox.py` |
+| Researcher/Developer roles (toy + LLM) | `agents/roles.py`, `agents/unified_agent.py` |
+| Structured output + LLM client + cost accountant | `core/parse.py`, `core/llm.py` |
 | Durable per-run observed-usage ledger | `engine/costs.py` |
-| Operators (merge/ensemble, sweep) | `operators.py`, `sweep.py` |
-| Control loop + crash-resume | `orchestrator.py` |
+| Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
+| Control loop + crash-resume | `engine/orchestrator.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
-| Variance gate + multi-seed confirmation | `gate.py`, `confirm.py` |
-| CV harness, K-fold, purged walk-forward | `cv.py` |
-| Leakage detectors + data profiler | `leakage.py`, `profile.py` |
-| Vector store + agentic retrieval | `vectorstore.py`, `retrieval.py`, `knowledge_tools.py`, `agent.py` |
-| Cross-run case library | `memory.py` |
-| Trace span exporter | `tracing.py` |
-| Search policies | `policy.py` |
-| Static HTML lineage tree | `htmlview.py` |
-| Task adapters + loader | `tasks.py`, `toytask.py`, `regression.py`, `classification.py`, `timeseries.py`, `mlebench*.py`, `repo_task.py` |
-| Strategist / Deep-Research / report | `strategist.py`, `deep_research.py`, `report.py` |
+| Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
+| CV harness, K-fold, purged walk-forward | `trust/cv.py` |
+| Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
+| Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
+| Cross-run case library | `engine/memory.py` |
+| Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py` |
+| Cross-run index, claims + agent reads | `engine/cross_run_index.py`, `engine/claims.py`, `tools/cross_run_tools.py` |
+| Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
+| Research Atlas / typed owner governance HTTP | `serve/routers/cross_run.py` |
+| Research Atlas UI + evidence validation | `ui/src/ResearchAtlas.jsx`, `ui/src/researchAtlasModel.js` |
+| Trace span exporter | `core/tracing.py` |
+| Search policies | `search/policy.py` |
+| Static HTML lineage tree | `events/htmlview.py` |
+| Task adapters + loader | `adapters/tasks.py`, `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
+| Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
