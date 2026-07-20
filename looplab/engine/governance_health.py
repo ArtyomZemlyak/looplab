@@ -17,7 +17,7 @@ _ProjectionT = TypeVar("_ProjectionT")
 
 _PUBLIC_LEDGERS = frozenset((
     "concept_aliases", "concept_splits", "claim_decisions", "concept_governance",
-    "concept_curation", "claim_curation", "task_facets_curation",
+    "concept_capsules", "concept_curation", "claim_curation", "task_facets_curation",
 ))
 _PUBLIC_REASONS = frozenset((
     "storage_unreadable", "torn_tail", "blank_row", "malformed_json", "non_object",

@@ -244,11 +244,12 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
             raise ValueError(f"alias {src!r} -> {dst!r} would close a cycle")
 
     with _concept_governance_transaction(memory_dir):
-        return _append_governance(path, rec, validate=_validate_locked,
-                                  expected_revision=expected_revision,
-                                  governance_memory_dir=memory_dir,
-                                  expected_governance_revision=expected_governance_revision,
-                                  require_durable=True)
+        with _concept_source_transaction(memory_dir, required=require_existing):
+            return _append_governance(path, rec, validate=_validate_locked,
+                                      expected_revision=expected_revision,
+                                      governance_memory_dir=memory_dir,
+                                      expected_governance_revision=expected_governance_revision,
+                                      require_durable=True)
 
 
 def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
@@ -509,11 +510,12 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
                 )
 
     with _concept_governance_transaction(memory_dir):
-        return _append_governance(path, rec, validate=_validate_targets,
-                                  expected_revision=expected_revision,
-                                  governance_memory_dir=memory_dir,
-                                  expected_governance_revision=expected_governance_revision,
-                                  require_durable=True)
+        with _concept_source_transaction(memory_dir, required=require_existing):
+            return _append_governance(path, rec, validate=_validate_targets,
+                                      expected_revision=expected_revision,
+                                      governance_memory_dir=memory_dir,
+                                      expected_governance_revision=expected_governance_revision,
+                                      require_durable=True)
 
 
 def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
@@ -698,22 +700,24 @@ def _observed_concept_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     Capsules are the evidence-backed entities. Active split children are provisional taxonomy
     entities introduced by the split itself, so a later action may target them even before a run
     happens to exercise that branch. The caller holds the memory-wide governance lock; capsule
-    replacement is atomic, therefore this observes one coherent old-or-new file snapshot.
+    replacement is fenced by the caller through the governance commit.
     """
-    from looplab.engine.memory import _valid_capsule_record
-    from looplab.events.eventstore import read_jsonl_lenient
+    from looplab.engine.memory import ConceptCapsuleStore
 
     aliases = load_concept_aliases(memory_dir) if aliases is None else aliases
     splits = load_concept_splits(memory_dir) if splits is None else splits
     path = Path(memory_dir) / "concept_capsules.jsonl"
-    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    try:
+        store = ConceptCapsuleStore(path)
+    except OSError as exc:
+        raise GovernanceLedgerUnavailable("concept_capsules", "storage_unreadable") from exc
+    if store.source_health.get("source_store_complete") is not True:
+        # CODEX AGENT: quarantine is safe for advisory display, but not authority to prove that
+        # an operator's merge/purge/split source exists (or is absent) in the complete portfolio.
+        raise GovernanceLedgerUnavailable("concept_capsules", "invalid_record")
     known: set[str] = set()
-    for capsule in rows:
-        concepts = capsule.get("concepts")
-        # CODEX AGENT: governance and retrieval must observe the same capsule trust generation. A
-        # hard-coded old version here made every v2 entity vanish from owner CAS validation.
-        if not _valid_capsule_record(capsule) or not isinstance(concepts, list):
-            continue
+    for capsule in store.all():
+        concepts = capsule["concepts"]
         known.update(canonicalize_concepts(concepts, aliases=aliases, splits=splits))
     for spec in (splits or {}).values():
         targets = [rule.get("to") for rule in spec.get("rules", []) if isinstance(rule, dict)]
@@ -832,6 +836,19 @@ def _concept_governance_transaction(memory_dir):
     with _CONCEPT_GOVERNANCE_THREAD_LOCK:
         with _interprocess_lock(base / "concept_governance.lock", required=True):
             yield
+
+
+@contextmanager
+def _concept_source_transaction(memory_dir, *, required: bool):
+    """Fence require-existing evidence after concept-global and before the child policy ledger."""
+    if not required:
+        yield
+        return
+    from looplab.events.eventstore import _interprocess_lock
+
+    source_lock = Path(memory_dir) / "concept_capsules.jsonl.lock"
+    with _interprocess_lock(source_lock, required=True):
+        yield
 
 
 def _idempotency_payload(rec: dict) -> str:

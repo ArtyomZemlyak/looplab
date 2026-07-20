@@ -455,6 +455,68 @@ def test_governed_source_projection_fences_policy_and_evidence_writers(tmp_path)
     assert policy_done.is_set() and evidence_done.is_set()
 
 
+def test_require_existing_concept_write_fences_capsule_snapshot_through_commit(
+        tmp_path, monkeypatch):
+    import looplab.engine.concept_registry as registry_module
+
+    capsule_path = tmp_path / "concept_capsules.jsonl"
+    ConceptCapsuleStore(capsule_path).add(build_concept_capsule(
+        run_id="same-run", task_id="task", fingerprint=["task"], direction="max",
+        concepts=["loss/a", "loss/b"], concept_outcomes={},
+    ))
+    snapshot_read, release = Event(), Event()
+    writer_started, writer_done = Event(), Event()
+    original_snapshot = registry_module._observed_concept_snapshot
+
+    def paused_snapshot(*args, **kwargs):
+        snapshot = original_snapshot(*args, **kwargs)
+        snapshot_read.set()
+        assert release.wait(5)
+        return snapshot
+
+    def replace_capsule():
+        writer_started.set()
+        ConceptCapsuleStore(capsule_path).add(build_concept_capsule(
+            run_id="same-run", task_id="task", fingerprint=["task"], direction="max",
+            concepts=["loss/b"], concept_outcomes={},
+        ))
+        writer_done.set()
+
+    monkeypatch.setattr(registry_module, "_observed_concept_snapshot", paused_snapshot)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        policy = executor.submit(
+            record_concept_alias, tmp_path, from_concept="loss/a", to_concept="loss/b",
+            require_existing=True)
+        assert snapshot_read.wait(5)
+        writer = executor.submit(replace_capsule)
+        assert writer_started.wait(5)
+        assert not writer_done.wait(0.1)
+        release.set()
+        receipt = policy.result(timeout=5)
+        writer.result(timeout=5)
+
+    assert receipt["concept_snapshot_count"] == 2
+    assert load_concept_aliases(tmp_path) == {"loss/a": "loss/b"}
+    assert writer_done.is_set()
+
+
+def test_require_existing_concept_write_refuses_quarantined_capsule_source(tmp_path):
+    capsule_path = tmp_path / "concept_capsules.jsonl"
+    valid = build_concept_capsule(
+        run_id="valid", task_id="task", fingerprint=["task"], direction="max",
+        concepts=["loss/a", "loss/b"], concept_outcomes={},
+    )
+    capsule_path.write_text(json.dumps(valid) + "\n{not-json}\n", encoding="utf-8")
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        record_concept_alias(
+            tmp_path, from_concept="loss/a", to_concept="loss/b", require_existing=True)
+
+    assert exc.value.ledger == "concept_capsules"
+    assert exc.value.reason == "invalid_record"
+    assert not (tmp_path / "concept_aliases.jsonl").exists()
+
+
 def test_idempotent_alias_retry_still_refuses_an_unhealthy_sibling_ledger(tmp_path):
     receipt = record_concept_alias(
         tmp_path, from_concept="a", to_concept="b", expected_revision=0,
