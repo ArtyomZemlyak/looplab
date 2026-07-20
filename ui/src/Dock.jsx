@@ -20,6 +20,7 @@ import { crossRunPriorNarration } from './crossRunPrior.js'
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
 // as a differentiated message. The per-run "boss" chat moved to the single persistent assistant, so
 // there is no composer here — just the timeline, scrubber, filters, and transport.
+const note = (value, limit = 80) => value ? ` — ${String(value).slice(0, limit)}` : ''
 
 const NARR = {
   run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
@@ -27,7 +28,7 @@ const NARR = {
   node_created: (d) => `node #${d.node_id} via ${d.operator}${d.idea?.rationale ? ' — ' + stripMd(d.idea.rationale).slice(0, 80) : ''}`,
   node_evaluated: (d) => `node #${d.node_id} → ${fmt(d.metric)}`,
   node_failed: (d) => `node #${d.node_id} failed (${d.reason})${d.triage_action === 'reject_idea' ? ' — idea rejected' + (d.triage_rationale ? ': ' + String(d.triage_rationale).slice(0, 70) : '') : ''}`,
-  node_repaired: (d) => `node #${d.node_id} repaired in place (attempt ${d.attempt})${d.rationale ? ' — ' + String(d.rationale).slice(0, 80) : ''}`,
+  node_repaired: (d) => `node #${d.node_id} repaired (attempt ${d.attempt})${note(d.rationale)}`,
   node_confirmed: (d) => `node #${d.node_id} confirmed: ${fmt(d.mean)} ±${fmt(d.std)} (${d.seeds}×)`,
   best_confirmed: (d) => `robust winner: #${d.node_id}${d.significant ? ' (significant >1SE)' : ''}`,
   ablate: (d) => `ablated #${d.parent_id}: ${Object.entries(d.impacts || {}).map(([k, v]) => `${k}=${fmt(v, 2)}`).join(', ')}`,
@@ -51,14 +52,14 @@ const NARR = {
   rung_promoted: (d) => `ASHA rung ↑${d.rung}: promoted ${(d.survivors || []).map(s => '#' + s).join(', ')}`,
   set_strategy: (d) => `operator pinned strategy → ${d.strategy?.policy || ''}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}`,
   deep_research: () => 'deep research requested',
-  research_completed: (d) => `deep research (${d.trigger || 'auto'})${d.memo?.summary ? ' — ' + String(d.memo.summary).slice(0, 80) : ''}`,
-  report_generated: (d) => `run report updated${d.content?.headline ? ' — ' + String(d.content.headline).slice(0, 90) : ''}`,
-  reflection_note: (d) => `run reflection → memory: ${d.n_lessons || 0} lesson${(d.n_lessons || 0) === 1 ? '' : 's'}${d.n_skills ? `, ${d.n_skills} auto-skill${d.n_skills === 1 ? '' : 's'}` : ''}${d.note ? ' — ' + String(d.note).slice(0, 80) : ''}`,
+  research_completed: (d) => `deep research (${d.trigger || 'auto'})${note(d.memo?.summary)}`,
+  report_generated: (d) => `run report updated${note(d.content?.headline, 90)}`,
+  reflection_note: (d) => `memory: ${d.n_lessons || 0} lesson${(d.n_lessons || 0) === 1 ? '' : 's'}${d.n_skills ? `, ${d.n_skills} skill${d.n_skills === 1 ? '' : 's'}` : ''}${note(d.note)}`,
   proxy_scored: (d) => `proxy scored #${d.node_id}: ${fmt(d.score)}${d.skipped ? ' (skipped full eval)' : ''}`,
   reward_hack_suspected: (d) => `reward-hack suspected on #${d.node_id}: ${(d.signals || []).map(s => s.signal).join(', ')}`,
   novelty_rejected: (d) => `dedup: proposal near #${d.near_node} (dist ${fmt(d.distance, 3)}) nudged to diversify`,
-  hypothesis_ranked: (d) => `foresight ranked ${d.n || (d.order || []).length} open hypotheses by predicted payoff${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${d.reason ? ' — ' + String(d.reason).slice(0, 70) : ''}`,
-  foresight_selected: (d) => `foresight picked ${d.kind === 'solution' ? 'implementation' : 'idea'} ${(d.chosen ?? 0) + 1} of ${d.n || (d.order || []).length}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${d.reason ? ' — ' + String(d.reason).slice(0, 70) : ''}`,
+  hypothesis_ranked: (d) => `ranked ${d.n || (d.order || []).length} hypotheses by payoff${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${note(d.reason, 70)}`,
+  foresight_selected: (d) => `foresight picked ${d.kind === 'solution' ? 'implementation' : 'idea'} ${(d.chosen ?? 0) + 1} of ${d.n || (d.order || []).length}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${note(d.reason, 70)}`,
   run_finished: (d) => (d?.reason === 'aborted' || d?.reason === 'finalized') ? 'run finalized (wrapped up)'
     : `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
   llm_cost: (d) => `LLM: ${d.total_tokens} tokens, $${fmt(d.cost)}`,
@@ -83,13 +84,13 @@ const NARR = {
   inject_done: () => 'experiment injected into the tree',
   confirm_done: (d) => `multi-seed confirm finished for #${d.node_id}`,
   confirm_eval: (d) => `confirm seed ${d.seed} on #${d.node_id} → ${fmt(d.metric)}`,
-  agent_decision: (d) => `agent chose ${d.chosen?.kind || '?'}${d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : ''} (of ${(d.legal || []).length} legal move${(d.legal || []).length === 1 ? '' : 's'})${d.rationale ? ' — ' + String(d.rationale).slice(0, 70) : ''}`,
+  agent_decision: (d) => `agent chose ${d.chosen?.kind || '?'}${d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : ''} (of ${(d.legal || []).length} legal move${(d.legal || []).length === 1 ? '' : 's'})${note(d.rationale, 70)}`,
   agent_validated: (d) => `developer validated #${d.node_id}${d.fell_back ? ' (fell back to a simpler build)' : d.ok === false ? ' (checks failed)' : ' ✓'}`,
   spec_proposed: () => 'eval spec proposed — awaiting ratification',
   spec_approval_requested: () => 'awaiting your approval of the eval spec',
   spec_approved: () => 'eval spec ratified',
   spec_drift: (d) => `spec drift on #${d.node_id}${d.seed != null ? ' (seed ' + d.seed + ')' : ''} — metric discarded`,
-  drift_unavailable: (d) => `drift check unavailable${d.reason ? ' — ' + String(d.reason).slice(0, 80) : ''}`,
+  drift_unavailable: (d) => `drift check unavailable${note(d.reason)}`,
   data_profiled: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return `dataset profiled (${n} column${n === 1 ? '' : 's'})` },
   data_provenance: (d) => { const n = Object.keys(d.assets || {}).length; return `dataset provenance pinned (${n} asset${n === 1 ? '' : 's'})` },
   // Setup phase (task + data), made watchable: these appear live between run start and the first node.
@@ -121,12 +122,12 @@ const NARR = {
   concept_tag_edited: (d) => `operator re-tagged #${d.node_id}: ${(d.concepts || []).slice(0, 4).join(', ') || '(cleared)'}`,
   hypothesis_updated: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
   trust_gate_changed: (d) => `trust gate changed${d.gate ? ` — ${d.gate}` : ''}`,
-  inject_failed: (d) => `experiment injection failed${d.reason ? ' — ' + String(d.reason).slice(0, 80) : ''}`,
+  inject_failed: (d) => `experiment injection failed${note(d.reason)}`,
   env_changed: () => 'environment changed since run start — re-grounding',
   // Failure/audit + progress events whose SUCCESS or sibling twins are already narrated — hiding only the
   // failure/correction case was the wrong asymmetry, so surface them here too (found by the coverage audit).
-  report_refresh_failed: (d) => `report refresh failed${d.reason || d.error || d.message ? ' — ' + String(d.reason || d.error || d.message).slice(0, 80) : ''}`,
-  log_repaired: (d) => `event log repaired${d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'} records` : ' at a divergence boundary'}`,
+  report_refresh_failed: (d) => `report refresh failed${note(d.reason || d.error || d.message)}`,
+  log_repaired: (d) => `event log repaired${d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'}` : ' at divergence'}`,
   stage_finished: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
   lessons_reconciled: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}`,
   train_monitor_alert: (d) => `training monitor: #${d.node_id} looks ${d.status}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
@@ -421,18 +422,18 @@ function agentStatus(live, log) {
   if (!live) return null
   const lifecycle = runLifecycle(live)
   if (lifecycle.mode === 'finished') return null
-  if (lifecycle.mode === 'finishing') return 'Finishing terminal write-out…'
-  if (lifecycle.mode === 'finalization-stalled') return 'Finalization stalled — recovery is required.'
-  if (lifecycle.mode === 'finalizing') return 'Finalizing — wrapping up report, lessons, and cost…'
+  if (lifecycle.mode === 'finishing') return 'Finishing write-out…'
+  if (lifecycle.mode === 'finalization-stalled') return 'Finalization stalled — recovery required.'
+  if (lifecycle.mode === 'finalizing') return 'Finalizing report, memory, and cost…'
   if (live.paused) return 'Paused'
   // Zombie guard: the run isn't finished but no engine process holds the lock (engine_running===false,
   // server-probed). Without this the strip would pulse "Thinking about the next step…" forever even
   // though nothing is running — the exact symptom of a resume that died without emitting run_finished.
-  if (live.engine_running === false) return 'Engine stopped — resume to keep going'
+  if (live.engine_running === false) return 'Engine stopped — resume to continue'
   const phase = live.phase
-  if (phase === 'grounding' || phase === 'onboarding') return 'Setting up the task & data…'
-  if (phase === 'approval') return 'Waiting for your approval…'
-  if (phase === 'spec_approval') return 'Waiting to ratify the eval spec…'
+  if (phase === 'grounding' || phase === 'onboarding') return 'Setting up task and data…'
+  if (phase === 'approval') return 'Waiting for approval…'
+  if (phase === 'spec_approval') return 'Waiting for eval-spec approval…'
   // WRITING vs RUNNING are distinct and were conflated before (both said "Running experiment"):
   //   • `building` is set from node_building until node_created folds → the Developer is WRITING code;
   //   • a node with status 'pending' → its code is written and the sandbox is TRAINING it.
@@ -464,13 +465,13 @@ function agentStatus(live, log) {
   // label stays put on "Planning…" instead of blinking every time a coverage/cost event lands.
   let last = null
   for (let i = log.length - 1; i >= 0; i--) { if (!STATUS_NOISE.has(log[i].type)) { last = log[i].type; break } }
-  if (last === 'setup_started' || last === 'setup_step' || last === 'workspace_seeded') return 'Setting up task & data…'
+  if (last === 'setup_started' || last === 'setup_step' || last === 'workspace_seeded') return 'Setting up task and data…'
   if (last === 'run_setup_started') return 'Installing dependencies…'
   if (last === 'strategy_decision' || last === 'set_strategy') return 'Choosing a strategy…'
   if (last === 'research_completed' || last === 'deep_research') return 'Reading the literature…'
-  if (last === 'node_created') return 'Writing & running the experiment…'
+  if (last === 'node_created') return 'Writing and running experiment…'
   // node_evaluated / node_failed / policy_decision / agent_decision → the loop is picking what's next.
-  return 'Planning the next experiment…'
+  return 'Planning next experiment…'
 }
 
 const Disclosure = ({ label, children }) => {
@@ -1303,16 +1304,16 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
         {/* clickable so the user can return to live even when the controls (with the Live button) are hidden */}
         <button type="button" className={'hist-tag-mini ' + (visiblyLive ? 'live' : 'hist')}
               onClick={returnToLive} disabled={visiblyLive}
-              title={visiblyLive ? '' : 'jump to the newest verified events'}>
+              title={visiblyLive ? '' : 'Jump to latest verified event'}>
           {atLiveView
             ? visiblyLive ? `live · ${liveSeq}` : 'reading · jump latest'
             : `replay ${sliderVal}/${liveSeq} → live`}</button>
         {/* a left-over filter is invisible once controls collapse — surface it so the feed never looks empty for no reason */}
         {!showControls && (filter.trim() || kinds.size > 0) &&
           <button type="button" className="hist-tag-mini hist"
-                title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</button>}
+                title="Open active filters" onClick={toggleControls}>⌕ filtered</button>}
         <span className="spacer" />
-        <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
+        <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="Timeline filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
         <button ref={collapseButtonRef} className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
                 aria-label={collapsed ? 'Expand events and timeline' : 'Collapse events and timeline'}
@@ -1335,7 +1336,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
               onClick={() => toggleKind(g)}>
               <OpIcon name={GROUP_GLYPH[g]} size={12} /> {label}</button>)}
             {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
-            <input className="text feed-filter" aria-label="Filter loaded timeline events" placeholder="filter loaded events…" value={filter} onChange={e => onFilterChange?.(e.target.value)} />
+            <input className="text feed-filter" aria-label="Filter loaded events" placeholder="filter events…" value={filter} onChange={e => onFilterChange?.(e.target.value)} />
           </div>
         </div>}
         <div className="timeline-pagebar">
@@ -1352,18 +1353,18 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             {timeline.loading.newer ? 'Loading…' : 'Load newer'}</button>}
         </div>
         {(filter.trim() !== '' || kinds.size > 0) && timeline.totalEvents != null && timeline.totalEvents > log.length &&
-          <div className="timeline-window-note" role="note">Filter searches this loaded window. Page older/newer to inspect other events.</div>}
+          <div className="timeline-window-note" role="note">Filters search loaded events only; page for more.</div>}
         {timeline.status === 'loading' && log.length === 0 && <div className="timeline-resource muted" role="status">Loading timeline…</div>}
-        {timeline.loading.around && <div className="timeline-resource muted" role="status">Loading replay events around seq {viewSeq}…</div>}
+        {timeline.loading.around && <div className="timeline-resource muted" role="status">Loading around seq {viewSeq}…</div>}
         {timeline.errors.tail && <div className="notice resource-error" role="alert">
-          <span>{log.length ? 'Could not refresh the newest events; the loaded window is unchanged.' : timeline.errors.tail}</span>
+          <span>{log.length ? 'Refresh failed; window unchanged.' : timeline.errors.tail}</span>
           <button className="btn sm" onClick={() => timeline.retry('tail')}>Retry</button></div>}
         {timeline.errors.older && <div className="notice resource-error compact" role="alert">
-          <span>Could not load older events; the current window is unchanged.</span><button className="btn sm" onClick={timeline.loadOlder}>Retry</button></div>}
+          <span>Older events unavailable.</span><button className="btn sm" onClick={timeline.loadOlder}>Retry</button></div>}
         {timeline.errors.newer && <div className="notice resource-error compact" role="alert">
-          <span>Live event refresh failed; loaded events may be behind.</span><button className="btn sm" onClick={timeline.loadNewer}>Retry</button></div>}
+          <span>Live refresh failed; events may lag.</span><button className="btn sm" onClick={timeline.loadNewer}>Retry</button></div>}
         {timeline.errors.around && <div className="notice resource-error compact" role="alert">
-          <span>Could not load events around replay seq {viewSeq}; the current window is unchanged.</span>
+          <span>Replay seq {viewSeq} unavailable.</span>
           <button className="btn sm" onClick={() => timeline.retry('around')}>Retry</button></div>}
         {timeline.tornTail && <div className="timeline-window-note warning" role="status">
           {timeline.sourceTailLimited
@@ -1404,7 +1405,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
         <div className="dock-foot">
           <span className="muted dock-foot-hint">
             {readOnly ? 'Historical timeline — live controls and sidecar trace details are disabled.' : <>
-              Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/finalize</code> · <code className="cmd-hint">/resume</code> · <code className="cmd-hint">/approve #id</code>.
+              Steer below by chat or <code className="cmd-hint">/stop · /finalize · /resume · /approve #id</code>.
             </>}
           </span>
           {!readOnly && <div className="transport">
@@ -1427,13 +1428,13 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
               </span>
               {transportPending.statusUnavailable && <>
                 <span className="transport-detail">{transportPending.observationKind === 'access'
-                  ? 'Verify owner access, then check this same command.'
+                  ? 'Verify owner access, then check again.'
                   : transportPending.observationKind === 'protocol'
-                    ? 'The saved command response could not be verified.'
-                    : 'Reconnect, then check this same command before submitting another intent.'}</span>
+                    ? 'Saved command response unverifiable.'
+                    : 'Reconnect and check before another action.'}</span>
                 <button className="btn sm" onClick={onCheckTransport}
-                  aria-label={`Check status of the preserved ${transportPending.action} command`}>
-                  Check same command</button>
+                  aria-label={`Check preserved ${transportPending.action} command`}>
+                  Check command</button>
                 {transportPending.protocolInvalid && <button className="btn sm ghost"
                   onClick={dismissProtocolTransport}>Dismiss</button>}
               </>}
@@ -1456,29 +1457,29 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                 <span className="transport-detail">{commandErrorMessage(transportFailure.record)}</span>
               </div>
               {canRetryTransport && <button className="btn sm" onClick={onRetryTransport}
-                title="Retry this exact durable command; no new intent is created">Retry same command</button>}
+                title="Retry the same durable command">Retry command</button>}
               <button className="btn sm ghost" onClick={dismissTransportFailure}
-                title="Dismiss this command result">Dismiss</button>
+                title="Dismiss result">Dismiss</button>
             </>}
             {!transportBusy && !transportFailure && mode === 'finalizing' && <span className="muted" role="status">Finalizing…</span>}
-            {!transportBusy && !transportFailure && mode === 'finishing' && <span className="muted" role="status">Finishing terminal write-out…</span>}
+            {!transportBusy && !transportFailure && mode === 'finishing' && <span className="muted" role="status">Finishing write-out…</span>}
             {!transportBusy && !transportFailure && mode === 'finalization-stalled' && <>
               <span className="muted" role="alert">Finalization stalled</span>
               <button className="btn sm" onClick={onFinalize}
-                title="The engine stopped before wrap-up completed; safely reattach to pending finalization">Reattach finalization</button>
+                title="Resume pending finalization">Reattach finalization</button>
             </>}
             {!transportBusy && !transportFailure && mode === 'running' && <>
               <button className="btn sm" aria-label="Stop run without finalizing"
-                title="Stop — freeze the run (no wrap-up; resume or finalize later)" onClick={onStop}><OpIcon name="pause" size={13} /></button>
+                title="Stop now; resume or finalize later" onClick={onStop}><OpIcon name="pause" size={13} /></button>
               <button className="btn sm danger" aria-label="Finalize run"
-                title="Finalize — stop AND wrap up (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
+                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
             {!transportBusy && !transportFailure && (mode === 'paused' || mode === 'stalled') && <>
-              <button className="btn sm primary" aria-label="Resume run" title="Resume — continue the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm primary" aria-label="Resume run" title="Continue run" onClick={onResume}><OpIcon name="play" size={13} /></button>
               <button className="btn sm danger" aria-label="Finalize run"
-                title="Finalize — wrap it up now (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
+                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
             {!transportBusy && !transportFailure && mode === 'finished' && <>
-              <button className="btn sm primary" aria-label="Resume finished run" title="Resume — reopen & continue" onClick={onResume}><OpIcon name="play" size={13} /></button>
-              <button className="btn sm" aria-label="Replay run from scratch" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
+              <button className="btn sm primary" aria-label="Resume finished run" title="Reopen and continue" onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm" aria-label="Replay run from scratch" title="Restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
           </div>}
         </div>
       </div>}

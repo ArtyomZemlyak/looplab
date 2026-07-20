@@ -70,13 +70,13 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
 
 test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
   const dock = await source('Dock.jsx')
-  assert.match(dock, /get\(runNodeApiPath\(runId, traceNid, '\/trace'\)\)/)
+  assert.match(dock, /get\(runNodeApiPath\(runId, traceNid,[\s\S]*?nodeTraceLimit > 0[\s\S]*?'\/trace'\)\)/)
   // liveBuilding is a Map<nodeId, generation> of EVERY concurrent build (parallel_build>1), so each
   // in-flight build's row polls its own exact lifecycle — not just the singular last-appended one.
   assert.match(dock, /timeline\.generation !== expectedGeneration[\s\S]*?Object\.values\(live\.buildings\)[\s\S]*?map\.set\(nodeId, generation\)[\s\S]*?return map\.size \? map : null/)
   assert.match(dock, /const exactBuilding =[\s\S]*?liveBuilding\.get\(traceNid\) === traceGeneration/)
   assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
-  assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| exactBuilding\) return undefined[\s\S]*?\[open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce\]/)
+  assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| exactBuilding\) return undefined[\s\S]*?\[open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce, nodeTraceLimit\]/)
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/)
   assert.match(dock, /const scope = `\$\{runId\}:\$\{generation \|\| 'pending'\}`[\s\S]*?tailState\.scope === scope/,
     'live trace rows must disappear immediately when the run generation changes')
@@ -120,7 +120,7 @@ test('feed-hidden bookkeeping keeps the pagebar and unread badge honest about wh
 test('bounded omissions and loaded-window search limitations are explicit on both event surfaces', async () => {
   const [dock, panels] = await Promise.all([source('Dock.jsx'), source('panels.jsx')])
   assert.match(dock, /details omitted \(\$\{omittedBytes\.toLocaleString\(\)\} source bytes exceed page limit\)/)
-  assert.match(dock, /Filter searches this loaded window/)
+  assert.match(dock, /Filters search loaded events only/)
   assert.match(dock, /rawPreview = JSON\.stringify\(event\.data \?\? \{\}\)\.slice\(0, 500\)/)
   assert.match(dock, /`\$\{event\.type \|\| ''\} \$\{narration\} \$\{rawPreview\}`\.toLowerCase\(\)/)
   assert.match(panels, /details omitted · \$\{bytes\.toLocaleString\(\)\} source bytes exceed page limit/)

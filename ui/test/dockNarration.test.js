@@ -76,8 +76,8 @@ test('timeline narration stays renderable for malformed and forward-compatible e
       },
     })
     const exact = eventNarration(prior())
-    assert.match(exact, /matched outcome loss\/target=0\.1/)
-    assert.doesNotMatch(exact, /run best|completeness unknown|PARTIAL/)
+    assert.match(exact, /loss\/target.*1 retained run.*evidence completeness unknown/)
+    assert.doesNotMatch(exact, /matched outcome|run best|PARTIAL/)
 
     const runBest = eventNarration(prior({ prior_runs: [{
       run_id: 'old', best_metric: 0.9, run_best_metric: 0.9,
@@ -86,14 +86,14 @@ test('timeline narration stays renderable for malformed and forward-compatible e
         { concept: 'loss/target', outcome_retained: false, outcome: null },
       ],
     }] }))
-    assert.match(runBest, /closest run best 0\.9/)
-    assert.doesNotMatch(runBest, /matched outcome/)
+    assert.match(runBest, /1 retained run.*evidence completeness unknown/)
+    assert.doesNotMatch(runBest, /matched outcome|run best/)
 
     const partial = eventNarration(prior({
       concept_source: { ...completeSource, source_complete: false, partial_capsules: 1,
         source_unknown_capsules: 1 },
     }))
-    assert.match(partial, /PARTIAL source \(some capsule receipts unknown\)/)
+    assert.match(partial, /evidence completeness unknown/)
 
     const knownPartial = eventNarration(prior({
       concept_source: { ...completeSource, source_complete: false, partial_capsules: 1 },
@@ -106,8 +106,10 @@ test('timeline narration stays renderable for malformed and forward-compatible e
         },
       }],
     }))
-    assert.match(knownPartial, /PARTIAL source/)
-    assert.doesNotMatch(knownPartial, /completeness unknown/)
+    // # CODEX AGENT: a bounded live event remains an audit preview even when its embedded receipt
+    // claims a known partial source; only the governed Atlas endpoint may present source authority.
+    assert.match(knownPartial, /evidence completeness unknown/)
+    assert.doesNotMatch(knownPartial, /PARTIAL source|matched outcome|run best/)
 
     const preProducerReceipt = eventNarration(prior({
       prior_runs: [{
@@ -128,8 +130,8 @@ test('timeline narration stays renderable for malformed and forward-compatible e
         source_invalid_capsule_rows: 0, source_duplicate_run_rows: 0,
       },
     }))
-    assert.match(quarantined, /PARTIAL source \(1 durable row quarantined\)/)
-    assert.doesNotMatch(quarantined, /completeness unknown/)
+    assert.match(quarantined, /evidence completeness unknown/)
+    assert.doesNotMatch(quarantined, /PARTIAL source/)
 
     for (const corrupt of [
       { matched_concepts: ['loss/target', ' loss/target'] },
@@ -188,7 +190,7 @@ test('timeline narration stays renderable for malformed and forward-compatible e
       prior().data.prior_runs[0],
       { run_id: 'older', matched_concepts: ['loss/target'], source_receipt: null },
     ] }))
-    assert.match(corruptSibling, /matched outcome loss\/target=0\.1/)
+    assert.doesNotMatch(corruptSibling, /matched outcome|run best/)
     assert.match(corruptSibling, /evidence completeness unknown/)
 
     const bidi = eventNarration(prior({ matched_concepts: ['loss/\u202etarget'] }))
@@ -206,7 +208,7 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     } }), 'cross_run_prior — details could not be summarized')
     assert.match(eventNarration({ type: 'cross_run_prior', data: {
       matched_concepts: ['loss/target'], prior_runs: [{ best_metric: 0.9 }],
-    } }), /closest run best 0\.9 · evidence completeness unknown/)
+    } }), /1 retained run · evidence completeness unknown/)
   } finally {
     await vite.close()
   }

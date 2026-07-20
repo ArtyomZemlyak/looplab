@@ -15,7 +15,7 @@ export const ATLAS_SOURCE_KEYS = Object.freeze([
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 const list = value => Array.isArray(value) ? value : []
-// CODEX AGENT: JSON booleans and numeric strings are not receipt counts. Number-coercing them would
+// # CODEX AGENT: JSON booleans and numeric strings are not receipt counts. Number-coercing them would
 // fabricate evidence (true -> 1) or let an untyped total hide rows omitted by the client projection.
 const count = (value, fallback = 0) => Number.isSafeInteger(value) && value >= 0 ? value : fallback
 
@@ -28,44 +28,25 @@ const thinProjectionTotal = (atlas, included, fallback) => {
 }
 
 const normalizeConceptSource = atlas => {
-  const receipt = record(Object.hasOwn(atlas, 'concept_source')
-    ? atlas.concept_source : record(atlas.context_pack).coverage)
+  const receipt = record(atlas.concept_source)
   const keys = ['partial_capsules', 'source_unknown_capsules',
     'source_concepts_omitted', 'source_outcomes_omitted']
-  const counts = keys.map(key => Object.hasOwn(receipt, key)
-    && Number.isSafeInteger(receipt[key]) && receipt[key] >= 0 ? receipt[key] : -1)
+  const counts = keys.map(key => count(receipt[key], -1))
   const storeKeys = ['source_rows_total', 'source_rows_quarantined',
     'source_malformed_rows', 'source_invalid_capsule_rows', 'source_duplicate_run_rows']
-  const storeFieldCount = ['source_store_complete', ...storeKeys]
-    .filter(key => Object.hasOwn(receipt, key)).length
-  const hasStoreReceipt = storeFieldCount > 0
-  const storeCounts = storeKeys.map(key => Object.hasOwn(receipt, key)
-    && Number.isSafeInteger(receipt[key]) && receipt[key] >= 0 ? receipt[key] : -1)
-  // CODEX AGENT: old v2 receipts remain readable, while the additive durable-store extension must be
-  // present and coherent as one unit. Quarantine is known partial evidence, not an unknown receipt.
-  const storeValid = !hasStoreReceipt || (storeFieldCount === storeKeys.length + 1
-    && typeof receipt.source_store_complete === 'boolean'
-    && storeCounts.every(value => value >= 0)
-    && storeCounts[1] <= storeCounts[0]
-    && storeCounts[1] === storeCounts[2] + storeCounts[3] + storeCounts[4]
-    && receipt.source_store_complete === (storeCounts[1] === 0))
+  const store = storeKeys.map(key => count(receipt[key], -1))
   const complete = receipt.source_complete
-  const valid = Object.hasOwn(receipt, 'source_complete')
-    && typeof complete === 'boolean' && counts.every(value => value >= 0)
-    && storeValid && complete === (counts[0] === 0
-      && (!hasStoreReceipt || receipt.source_store_complete)) && counts[1] <= counts[0]
+  // # CODEX AGENT: the current Atlas API always emits one atomic capsule+store receipt. Legacy/missing
+  // response shapes remain safely UNKNOWN instead of shipping a second client-side compatibility mode.
+  const valid = typeof complete === 'boolean' && typeof receipt.source_store_complete === 'boolean'
+    && counts.every(value => value >= 0) && store.every(value => value >= 0)
+    && counts[1] <= counts[0] && store[1] <= store[0]
+    && store[1] === store[2] + store[3] + store[4]
+    && receipt.source_store_complete === (store[1] === 0)
+    && complete === (counts[0] === 0 && receipt.source_store_complete)
     && !(complete && counts.some(Boolean))
-  // CODEX AGENT: missing, malformed, and internally contradictory receipts are UNKNOWN. A fresh HTTP
-  // response is not proof that its bounded capsule source was complete.
   if (!valid) return { status: 'unknown' }
-  const normalized = { status: complete ? 'complete' : 'partial', counts }
-  if (hasStoreReceipt) {
-    normalized.store = {
-      total: storeCounts[0], quarantined: storeCounts[1], malformed: storeCounts[2],
-      invalid: storeCounts[3], duplicates: storeCounts[4],
-    }
-  }
-  return normalized
+  return { status: complete ? 'complete' : 'partial', counts }
 }
 
 const READ_KEYS = ['rows_total', 'rows_retained', 'rows_quarantined',
@@ -77,90 +58,13 @@ const normalizeReadSegment = value => {
   if (typeof segment.read_complete !== 'boolean' || values.some(item => item < 0)
     || total !== retained + quarantined || quarantined !== malformed + invalid
     || segment.read_complete !== (quarantined === 0)) return null
-  return { complete: segment.read_complete, total, retained, quarantined, malformed, invalid }
+  return [segment.read_complete, total, retained, quarantined, malformed, invalid]
 }
 // All inputs are first projected into small fixed-order records, so canonical JSON equality is a bounded,
 // exact comparison without repeating a second field list for every receipt family.
 const sameReceipt = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 
-const normalizeResearchSource = value => {
-  const receipt = record(value)
-  const boolKeys = ['source_complete', 'producer_receipt_known', 'producer_complete']
-  const intKeys = ['producer_runs', 'producer_partial_runs', 'producer_unknown_runs',
-    'producer_claims_total', 'producer_claims_retained', 'producer_claims_omitted']
-  const extensionKeys = ['read_health_v', 'read_complete', ...READ_KEYS, 'snapshot_digest']
-  const boolsValid = boolKeys.every(key => typeof receipt[key] === 'boolean')
-  const counts = Object.fromEntries(intKeys.map(key => [key,
-    Number.isSafeInteger(receipt[key]) && receipt[key] >= 0 ? receipt[key] : -1]))
-  const countsValid = intKeys.every(key => counts[key] >= 0)
-  const known = receipt.producer_receipt_known === true
-  const baseConsistent = boolsValid && countsValid
-    && counts.producer_partial_runs + counts.producer_unknown_runs <= counts.producer_runs
-    // CODEX AGENT: a producer receipt cannot be both known and count an unknown run. Reject the whole
-    // aggregate instead of rendering a contradictory exact/complete state from an untrusted response.
-    && known === (counts.producer_unknown_runs === 0)
-    && receipt.producer_complete === (known && counts.producer_partial_runs === 0)
-    && (!known || (counts.producer_claims_total >= counts.producer_claims_retained
-      && counts.producer_claims_omitted
-        === counts.producer_claims_total - counts.producer_claims_retained))
-  if (!baseConsistent) return { status: 'unknown', counts: null }
-  const extensionPresent = extensionKeys.map(key => Object.hasOwn(receipt, key))
-  if (!extensionPresent.some(Boolean)) {
-    if (receipt.source_complete !== receipt.producer_complete) {
-      return { status: 'unknown', counts: null }
-    }
-    return {
-      status: receipt.source_complete ? 'complete'
-        : counts.producer_partial_runs > 0 ? 'partial' : 'unknown',
-      counts,
-    }
-  }
-  const read = normalizeReadSegment(receipt)
-  const digest = receipt.snapshot_digest
-  const extensionConsistent = extensionPresent.every(Boolean)
-    && receipt.read_health_v === 1 && read
-    && typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest)
-    && receipt.source_complete === (receipt.producer_complete && receipt.read_complete)
-  if (!extensionConsistent) return { status: 'unknown', counts: null }
-  return {
-    status: receipt.source_complete ? 'complete'
-      : known && (counts.producer_partial_runs > 0 || read.quarantined > 0)
-      ? 'partial' : 'unknown',
-    counts,
-    read,
-    snapshotDigest: digest,
-  }
-}
-
-const unknownResearchSource = () => ({ status: 'unknown', counts: null })
-
-const sectionResearchSource = (envelope, rows, hasRows = rows.length > 0) => {
-  const hasEnvelope = Object.hasOwn(envelope, 'research_source')
-  const source = normalizeResearchSource(hasEnvelope
-    ? envelope.research_source : record(rows[0]).research_source)
-  // CODEX AGENT: every row and its endpoint envelope describe one frozen D8 denominator. A single
-  // mismatching/missing row receipt makes the whole visible section unknown; otherwise a forged card could
-  // restore `supported` underneath a partial top-level warning.
-  const coherent = rows.every(row => sameReceipt(
-    normalizeResearchSource(record(row).research_source), source))
-  return {
-    present: hasEnvelope || hasRows,
-    source: coherent ? source : unknownResearchSource(),
-  }
-}
-
-const combinedResearchSource = (...sections) => {
-  const visible = sections.filter(section => section.present)
-  if (visible.length === 0) return unknownResearchSource()
-  const first = visible[0].source
-  return visible.every(section => sameReceipt(section.source, first))
-    ? first : unknownResearchSource()
-}
-
-const unknownClaimSource = () => ({
-  status: 'unknown', receiptKnown: false,
-  researchSourceComplete: false, lessons: null, research: null, snapshotDigest: '',
-})
+const unknownClaimSource = () => ({ status: 'unknown' })
 
 const normalizeClaimSource = value => {
   const receipt = record(value)
@@ -168,53 +72,51 @@ const normalizeClaimSource = value => {
   const research = normalizeReadSegment(receipt.research)
   const boolsValid = ['receipt_known', 'source_complete', 'read_complete',
     'research_source_complete'].every(key => typeof receipt[key] === 'boolean')
-  if (receipt.v !== 1 || !boolsValid || !lessons || !research) return unknownClaimSource()
+  if (receipt.v !== 1 || !boolsValid || !lessons || !research) return null
   const known = receipt.receipt_known
   const digest = receipt.snapshot_digest
   const digestValid = typeof digest === 'string'
     && (known ? /^[0-9a-f]{64}$/.test(digest) : digest === '')
-  const readComplete = lessons.complete && research.complete
+  const readComplete = lessons[0] && research[0]
   const consistent = digestValid && (known
     ? receipt.read_complete === readComplete
-      && (!receipt.research_source_complete || research.complete)
-      && receipt.source_complete === (lessons.complete && receipt.research_source_complete)
+      && (!receipt.research_source_complete || research[0])
+      && receipt.source_complete === (lessons[0] && receipt.research_source_complete)
     : receipt.source_complete === false && receipt.read_complete === false
       && receipt.research_source_complete === false)
-  if (!consistent) return unknownClaimSource()
-  return {
-    status: known ? (receipt.source_complete ? 'complete' : 'partial') : 'unknown',
-    receiptKnown: known,
-    researchSourceComplete: receipt.research_source_complete,
-    lessons,
-    research,
-    snapshotDigest: digest,
-  }
+  return consistent ? receipt : null
 }
 
-const sectionClaimSource = (envelope, rows, hasRows = rows.length > 0) => {
+// # CODEX AGENT: the server's validated combined claim-source receipt is the one UI authority. Requiring
+// the same bounded receipt on both envelopes and every visible row keeps refresh races fail-closed without
+// shipping a second, subtly different implementation of the server's producer-ledger validator.
+const claimSection = (envelope, rows, hasRows = rows.length > 0) => {
   const hasEnvelope = Object.hasOwn(envelope, 'claim_source')
-  const source = hasEnvelope
-    ? normalizeClaimSource(envelope.claim_source) : unknownClaimSource()
-  // CODEX AGENT: a claim card is not its own authority receipt. Require the endpoint envelope and every
-  // visible row to carry the exact same combined lessons+research snapshot before trusting one-sided state.
-  const coherent = hasEnvelope && rows.every(row => Object.hasOwn(record(row), 'claim_source')
-    && sameReceipt(normalizeClaimSource(record(row).claim_source), source))
-  return {
-    present: hasEnvelope || hasRows,
-    source: coherent ? source : unknownClaimSource(),
-  }
+  const source = normalizeClaimSource(envelope.claim_source)
+  const coherent = hasEnvelope && rows.every(row => {
+    const item = record(row)
+    return Object.hasOwn(item, 'claim_source')
+      && sameReceipt(normalizeClaimSource(item.claim_source), source)
+  })
+  return { present: hasEnvelope || hasRows, source: coherent ? source : null }
 }
 
-const combinedClaimSource = (...sections) => {
+const combinedClaimSource = sections => {
   const visible = sections.filter(section => section.present)
-  if (visible.length === 0) return unknownClaimSource()
+  if (visible.length === 0) return null
   const first = visible[0].source
   if (visible.length === 1) return first
   // Independent endpoint reads may race a store rewrite. A non-empty combined snapshot digest is the
   // cross-endpoint identity; matching counts/status alone cannot prove the rows came from one read epoch.
-  return first.snapshotDigest
+  return first?.snapshot_digest
     && visible.every(section => sameReceipt(section.source, first))
-    ? first : unknownClaimSource()
+    ? first : null
+}
+
+const claimSourceView = receipt => {
+  if (!receipt) return unknownClaimSource()
+  return { status: receipt.receipt_known
+    ? (receipt.source_complete ? 'complete' : 'partial') : 'unknown' }
 }
 
 const sourceRevision = (key, value) => {
@@ -257,18 +159,12 @@ export function isValidAtlasSourceEnvelope(key, value) {
       || !value.entries.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry))) {
       return false
     }
-    const has = field => Object.hasOwn(value, field)
-    const healthFields = ['v', 'status', 'complete']
-    const hasHealth = healthFields.some(has)
-    // CODEX AGENT: the v1 extension is atomic. A fulfilled but partial/contradictory health envelope
-    // must retain the last-good slice just like a 503; otherwise a torn ledger looks current and empty.
-    if (hasHealth && !(healthFields.every(has)
-      && value.v === 1 && value.status === 'complete' && value.complete === true
-      && has('n') && has('limit'))) return false
-    if (has('n') && (!Number.isSafeInteger(value.n) || value.n < value.entries.length)) return false
-    if (has('limit') && (!Number.isSafeInteger(value.limit)
-      || value.limit < 1 || value.limit > 200 || value.entries.length > value.limit)) return false
-    return true
+    // # CODEX AGENT: current UI and server ship together; require the complete v1 health envelope so a
+    // legacy/torn 200 response retains last-good state exactly like an unavailable read.
+    return value.v === 1 && value.status === 'complete' && value.complete === true
+      && Number.isSafeInteger(value.n) && value.n >= value.entries.length
+      && Number.isSafeInteger(value.limit) && value.limit >= 1 && value.limit <= 200
+      && value.entries.length <= value.limit
   }
   return false
 }
@@ -358,8 +254,7 @@ const normalizeConcept = value => {
   }
 }
 
-const normalizeClaim = (value, sectionResearch = unknownResearchSource(),
-  sectionClaims = unknownClaimSource()) => {
+const normalizeClaim = (value, source = unknownClaimSource()) => {
   const row = record(value)
   const statement = boundedAtlasText(row.statement, 500)
   if (!statement) return null
@@ -376,12 +271,6 @@ const normalizeClaim = (value, sectionResearch = unknownResearchSource(),
   const contradicts = textList(rawContradicts, ATLAS_RENDER_LIMITS.evidence, 300)
   const nSupport = Math.max(count(row.n_support), support.length)
   const nOppose = Math.max(count(row.n_oppose), oppose.length)
-  const rowSource = normalizeResearchSource(row.research_source)
-  const researchSource = sameReceipt(rowSource, sectionResearch)
-    ? rowSource : unknownResearchSource()
-  const rowClaimSource = normalizeClaimSource(row.claim_source)
-  const claimSource = sameReceipt(rowClaimSource, sectionClaims)
-    ? rowClaimSource : unknownClaimSource()
   // The backend's structured `mixed` state can encode assertion-level counter-evidence that is not
   // counted in n_oppose. Honor it only with supporting evidence, matching the backend rule, while
   // still deriving malformed or contradictory support/refute labels from sanitized counts.
@@ -390,10 +279,10 @@ const normalizeClaim = (value, sectionResearch = unknownResearchSource(),
   const evidenceEpistemic = mixed
     ? 'mixed'
     : (nSupport > 0 ? 'supported' : (nOppose > 0 ? 'refuted' : 'inconclusive'))
-  // CODEX AGENT: D8 is only one input. A quarantined lesson row can contain the missing opposite side even
+  // # CODEX AGENT: D8 is only one input. A quarantined lesson row can contain the missing opposite side even
   // when D8 is complete, so only the combined claim-source authority may unlock a one-sided state.
   const epistemic = ['supported', 'refuted'].includes(evidenceEpistemic)
-    && claimSource.status !== 'complete'
+    && source.status !== 'complete'
     ? 'inconclusive' : evidenceEpistemic
   return {
     uid: boundedAtlasText(row.claim_uid, 180),
@@ -409,8 +298,6 @@ const normalizeClaim = (value, sectionResearch = unknownResearchSource(),
     oppose,
     unverified,
     contradicts,
-    researchSource,
-    claimSource,
     scopes: textList(row.scopes, ATLAS_RENDER_LIMITS.evidence),
     runs: textList(row.runs, ATLAS_RENDER_LIMITS.evidence, 160),
   }
@@ -421,30 +308,18 @@ const normalizeCuration = value => {
   const row = record(value)
   const proposals = record(row.proposals)
   const receipt = record(row.receipt)
-  const merges = itemCount(proposals.merges)
-  const splits = itemCount(proposals.splits)
-  const purges = itemCount(proposals.purges)
-  const decisions = itemCount(proposals.decisions)
+  const proposed = ['merges', 'splits', 'purges', 'decisions']
+    .reduce((sum, key) => sum + itemCount(proposals[key]), 0)
   const applied = itemCount(receipt.applied)
-  const skipped = itemCount(receipt.skipped)
   const knownOutcome = ['proposed', 'empty', 'unavailable', 'error', 'already-governed']
     .includes(row.outcome) ? row.outcome : ''
   const normalized = {
     kind: row.kind === 'claim' ? 'claim' : 'concept',
-    runId: boundedAtlasText(row.run_id, 160),
-    at: boundedAtlasText(row.at, 80),
-    revision: count(row.revision),
-    outcome: knownOutcome || (merges + splits + purges + decisions > 0 ? 'proposed' : 'unknown'),
-    autoRequested: row.auto_requested === true,
-    merges,
-    splits,
-    purges,
-    decisions,
+    outcome: knownOutcome || (proposed > 0 ? 'proposed' : 'unknown'),
+    proposals: proposed,
     applied,
-    skipped,
   }
-  const activity = merges + splits + purges + decisions + applied + skipped
-  return normalized.runId || normalized.at || knownOutcome || activity > 0 ? normalized : null
+  return knownOutcome || proposed + applied > 0 ? normalized : null
 }
 
 export function mergeCurationLogs(conceptValue, claimValue) {
@@ -452,24 +327,13 @@ export function mergeCurationLogs(conceptValue, claimValue) {
     { kind: 'concept', envelope: record(conceptValue) },
     { kind: 'claim', envelope: record(claimValue) },
   ]
-  const entries = sources.flatMap(({ kind, envelope }) => take(envelope.entries, ATLAS_RENDER_LIMITS.curation)
-    .map((entry, sourceIndex) => ({ ...record(entry), kind, _sourceIndex: sourceIndex })))
-  entries.sort((a, b) => {
-    const aTime = Date.parse(boundedAtlasText(a.at, 80))
-    const bTime = Date.parse(boundedAtlasText(b.at, 80))
-    const timeDelta = (Number.isFinite(bTime) ? bTime : -1) - (Number.isFinite(aTime) ? aTime : -1)
-    if (timeDelta) return timeDelta
-    const revisionDelta = count(b.revision) - count(a.revision)
-    if (revisionDelta) return revisionDelta
-    const kindDelta = a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0
-    return kindDelta || a._sourceIndex - b._sourceIndex
-  })
+  // Each API log is newest-first. One entry per steward keeps this preview useful and bounded without
+  // recreating a cross-ledger ordering that the independent snapshots cannot prove (CODEX AGENT).
+  const entries = sources.flatMap(({ kind, envelope }) => list(envelope.entries).length
+    ? [{ ...record(envelope.entries[0]), kind }] : [])
   const total = sources.reduce((sum, { envelope }) =>
-    sum + Math.max(count(envelope.n), take(envelope.entries, ATLAS_RENDER_LIMITS.curation).length), 0)
-  return {
-    entries: entries.map(({ _sourceIndex, ...entry }) => entry),
-    n: total,
-  }
+    sum + Math.max(count(envelope.n), list(envelope.entries).length), 0)
+  return { entries, n: total }
 }
 
 export function mergeResearchAtlasPayload(previousValue, successfulValue) {
@@ -502,28 +366,15 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   const curationRows = take(rawCuration, ATLAS_RENDER_LIMITS.curation)
   // Receipt coherence is needed only for rows that can cross the render boundary. Keep the validation
   // work under the same hard caps as normalization even when a hostile response contains millions of rows.
-  const atlasResearch = sectionResearchSource(
-    atlas, contradictionRows, rawContradictions.length > 0)
-  const claimsResearch = sectionResearchSource(
-    claimsEnvelope, claimRows, rawClaims.length > 0)
-  const researchSource = combinedResearchSource(atlasResearch, claimsResearch)
-  const atlasClaims = sectionClaimSource(
-    atlas, contradictionRows, rawContradictions.length > 0)
-  const claimsClaims = sectionClaimSource(
-    claimsEnvelope, claimRows, rawClaims.length > 0)
-  const combinedClaims = combinedClaimSource(atlasClaims, claimsClaims)
-  // `claim_source` is the authority, but a known receipt must still agree with the accompanying D8
-  // diagnostic. This is a consistency fence only: research_source can never unlock a positive by itself.
-  const claimSource = combinedClaims.receiptKnown
-    && (researchSource.counts === null
-      || combinedClaims.researchSourceComplete !== (researchSource.status === 'complete'))
-    ? unknownClaimSource() : combinedClaims
+  const claimReceipt = combinedClaimSource([
+    claimSection(atlas, contradictionRows, rawContradictions.length > 0),
+    claimSection(claimsEnvelope, claimRows, rawClaims.length > 0),
+  ])
+  const claimSource = claimSourceView(claimReceipt)
   const concepts = conceptRows.map(normalizeConcept).filter(Boolean)
   const thin = textList(thinRows, ATLAS_RENDER_LIMITS.thin, 220)
-  const contradictions = contradictionRows
-    .map(row => normalizeClaim(row, researchSource, claimSource)).filter(Boolean)
-  const claims = claimRows
-    .map(row => normalizeClaim(row, researchSource, claimSource)).filter(Boolean)
+  const contradictions = contradictionRows.map(row => normalizeClaim(row, claimSource)).filter(Boolean)
+  const claims = claimRows.map(row => normalizeClaim(row, claimSource)).filter(Boolean)
   const curation = curationRows.map(normalizeCuration).filter(Boolean)
   const thinTotal = thinProjectionTotal(atlas, rawThin.length,
     rawThin.length > ATLAS_RENDER_LIMITS.thin ? rawThin.length : thin.length)
@@ -554,7 +405,6 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   return {
     totals,
     conceptSource: normalizeConceptSource(atlas),
-    researchSource,
     claimSource,
     concepts,
     thin,

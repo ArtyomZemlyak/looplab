@@ -30,22 +30,13 @@ const EPISTEMIC_COPY = {
   mixed: 'mixed evidence',
   inconclusive: 'insufficient evidence',
 }
-const curationOutcomeLabel = entry => {
-  if (entry.applied > 0) return `${entry.applied} applied`
-  if (entry.outcome === 'empty') return 'no changes proposed'
-  if (entry.outcome === 'unavailable') return 'steward unavailable'
-  if (entry.outcome === 'error') return 'steward error logged'
-  if (entry.outcome === 'already-governed') return 'already governed'
-  return 'proposal only'
-}
-
 export function AtlasRunReference({ run }) {
   const context = [run.task && `task: ${run.task}`, run.scope && `scope: ${run.scope}`]
     .filter(Boolean).join(' · ')
   const disclosure = run.metricSuppressed
-    ? 'Metric hidden · task, scope, or objective orientation missing.'
+    ? 'Metric hidden · missing task/scope or objective direction.'
     : run.metric != null && run.optimizationOrientation
-    ? `Not cross-run comparable · metric name/unit unknown · ${run.optimizationOrientation} objective · ${run.metric.toLocaleString(undefined, { maximumSignificantDigits: 6 })}`
+    ? `Not comparable across runs · metric name/unit unknown · ${run.optimizationOrientation} · ${run.metric.toLocaleString(undefined, { maximumSignificantDigits: 6 })}`
     : ''
   return <a href={`#/run/${encodeURIComponent(run.runId)}`}>
     <span className="atlas-runref-id">{run.runId}</span>
@@ -57,12 +48,9 @@ export function AtlasRunReference({ run }) {
 
 function SourceWatermark({ sourceKey, label, source, retry, busy, pending, children }) {
   const state = source.state
-  const displayState = pending ? 'loading' : state
-  const loadedAt = source.loadedAt
-  return <p className={`atlas-source-note atlas-source-${displayState}`}>
+  return <p className={`atlas-source-note atlas-source-${pending ? 'loading' : state}`}>
     <strong>{label}</strong> · <span>{pending ? 'loading'
       : state === 'retained-stale' ? 'stale' : state === 'failed' ? 'unavailable' : 'loaded'}</span>
-    {loadedAt && <> · loaded <time dateTime={loadedAt}>{loadedAt}</time></>}
     {' · '}revision {source.revision || 'not reported'} · {children}
     {state !== 'current' && <> · <button type="button" className="btn sm" disabled={busy}
       onClick={() => retry(sourceKey)} aria-label={`Retry ${label}`}>
@@ -70,47 +58,13 @@ function SourceWatermark({ sourceKey, label, source, retry, busy, pending, child
   </p>
 }
 
-export function ConceptSourceNotice({ source }) {
-  if (source.status === 'complete') return null
-  const partial = source.status === 'partial'
-  const quarantined = partial && source.store?.quarantined > 0 ? source.store : null
+export function EvidenceSourceNotice({ concept, claims }) {
+  if (concept.status === 'complete' && claims.status === 'complete') return null
   return <div className="notice resource-warning atlas-degraded" role="status">
-    <b>Concept source {partial ? 'partial.' : 'unknown.'}</b>
-    <span>{partial
-      ? `Bounds (partial/legacy/concepts/outcomes): ${source.counts.join('/')}.`
-      : 'Receipt missing/invalid.'}
-      {quarantined && ` Durable rows quarantined: ${quarantined.quarantined} (malformed/invalid/duplicate: ${quarantined.malformed}/${quarantined.invalid}/${quarantined.duplicates}).`}
-      {' Absence unknown.'}</span>
-  </div>
-}
-
-export function ResearchSourceNotice({ source }) {
-  if (source.status === 'complete') return null
-  const counts = source.counts
-  const partial = source.status === 'partial'
-  const read = source.read
-  return <div className="notice resource-warning atlas-degraded" role="status">
-    <b>D8 research source {partial ? 'partial.' : 'unknown.'}</b>
-    <span>{counts
-      ? `${counts.producer_claims_omitted} claim(s) known omitted across ${counts.producer_partial_runs} capped run(s); ${counts.producer_unknown_runs} run receipt(s) unknown.`
-      : 'Receipt missing/invalid.'}
-      {read?.quarantined > 0
-        && ` Durable D8 rows quarantined: ${read.quarantined} (malformed/invalid: ${read.malformed}/${read.invalid}).`}
-      {' This D8-only diagnostic does not cover lesson evidence.'}</span>
-  </div>
-}
-
-export function ClaimSourceNotice({ source }) {
-  if (source.status === 'complete') return null
-  const partial = source.status === 'partial'
-  const known = source.receiptKnown && source.lessons && source.research
-  return <div className="notice resource-warning atlas-degraded" role="status">
-    <b>Combined claim source {partial ? 'partial.' : 'unknown.'}</b>
-    <span>{known
-      ? `Durable rows quarantined (lessons/research): ${source.lessons.quarantined}/${source.research.quarantined}; malformed/invalid: ${source.lessons.malformed}/${source.lessons.invalid} and ${source.research.malformed}/${source.research.invalid}.`
-      : 'Receipt missing/invalid or claim endpoint snapshots disagree.'}
-      {known && !source.researchSourceComplete && ' D8 producer/read source is incomplete.'}
-      {' Retained evidence is a lower bound; one-sided state and absence are withheld.'}</span>
+    <b>Evidence source incomplete.</b>
+    <span>Concepts {concept.status}; claims {claims.status}.
+      {concept.status === 'partial' && ` Concept bounds ${concept.counts.join('/')}.`}
+      {' Absence and one-sided claim state withheld.'}</span>
   </div>
 }
 
@@ -118,25 +72,19 @@ export function AtlasEmptyState({ sourceStates, conceptSource,
   claimSource = { status: 'unknown' },
   pending = [], retry, busy, onBack }) {
   const pendingSources = new Set(pending)
-  const allLoaded = pending.length === 0
+  const allCurrent = pending.length === 0
     && Object.values(sourceStates).every(source => source.state === 'current')
-  const atlasState = conceptSource.status === 'complete' ? 'Empty'
-    : conceptSource.status === 'partial' ? 'Partial' : 'Unknown'
-  const claimState = claimSource.status === 'complete' ? 'Empty'
-    : claimSource.status === 'partial' ? 'Partial' : 'Unknown'
-  const completeEmpty = allLoaded && conceptSource.status === 'complete'
+  const completeEmpty = allCurrent && conceptSource.status === 'complete'
     && claimSource.status === 'complete'
   return <section className="atlas-empty" aria-labelledby="atlas-empty-title" role="status">
     <div className="atlas-empty-copy">
-      <p className="atlas-eyebrow">Source readiness</p>
       <h2 id="atlas-empty-title">{completeEmpty
         ? 'No cross-run evidence'
-        : allLoaded ? 'No retained cross-run evidence' : 'No current Atlas records'}</h2>
+        : allCurrent ? 'No retained evidence' : 'Atlas evidence unavailable'}</h2>
       <p>{completeEmpty
         ? 'No shared-memory evidence returned; runs may still exist.'
-        : allLoaded
-        ? 'Partial/unknown receipt: empty rows do not prove absence.'
-        : 'Retry each unavailable or stale source below.'}</p>
+        : allCurrent ? 'Incomplete receipts: empty rows do not prove absence.'
+        : 'Retry unavailable or stale sources.'}</p>
       <div className="atlas-empty-actions">
         <button type="button" className="btn primary" onClick={onBack}>Back to runs</button>
         <a className="btn" href="#/settings">Memory settings</a>
@@ -146,17 +94,13 @@ export function AtlasEmptyState({ sourceStates, conceptSource,
       {SOURCE_READINESS.map(([key, label]) => {
         const state = sourceStates[key]?.state || 'failed'
         const loading = pendingSources.has(key)
-        const status = loading ? 'Loading' : state === 'current'
-          ? key === 'atlas' ? atlasState : key === 'claims' ? claimState : 'Empty'
-          : state === 'retained-stale' ? 'Stale' : 'Unavailable'
+        const status = loading ? 'loading' : state === 'current'
+          ? key === 'atlas' ? conceptSource.status : key === 'claims' ? claimSource.status : 'complete'
+          : state === 'retained-stale' ? 'stale' : 'unavailable'
         const retryable = !loading && state !== 'current'
         return <li key={key}
         className={`atlas-empty-source atlas-empty-source-${loading ? 'loading' : state}`}>
-        <span className="atlas-readiness-dot" aria-hidden="true" />
-        <div className="atlas-empty-source-head">
-            <strong>{label}</strong>
-            <span className="atlas-readiness-state">{status}</span>
-        </div>
+        <strong>{label}</strong><span className="atlas-readiness-state">{status}</span>
         {retryable && <button type="button" className="btn sm" disabled={busy}
           onClick={() => retry(key)} aria-label={`Retry ${label}`}>
           {busy ? 'Refreshing…' : 'Retry'}
@@ -167,12 +111,14 @@ export function AtlasEmptyState({ sourceStates, conceptSource,
 }
 
 export function ClaimCard({ claim, compact = false }) {
-  const evidence = claim.support.length + claim.oppose.length + claim.unverified.length
-    + claim.contradicts.length
-  const hiddenEvidence = Math.max(0, claim.nSupport - claim.support.length)
-    + Math.max(0, claim.nOppose - claim.oppose.length)
-    + Math.max(0, claim.nUnverified - claim.unverified.length)
-    + Math.max(0, claim.nContradicts - claim.contradicts.length)
+  const groups = [
+    ['support', claim.support, claim.nSupport], ['oppose', claim.oppose, claim.nOppose],
+    ['unverified', claim.unverified, claim.nUnverified],
+    ['contradiction', claim.contradicts, claim.nContradicts],
+  ]
+  const evidence = groups.flatMap(([kind, values]) => values.map(value => [kind, value]))
+  const hiddenEvidence = groups.reduce((sum, [, values, total]) =>
+    sum + Math.max(0, total - values.length), 0)
   const context = [
     ...claim.scopes.map(value => `claim grouping · ${value}`),
     ...claim.runs.map(value => `run · ${value}`),
@@ -191,10 +137,8 @@ export function ClaimCard({ claim, compact = false }) {
     </div>
     <p>{claim.statement}</p>
     <div className="atlas-claim-counts" aria-label="Claim evidence counts">
-      <span>support refs <b>{claim.nSupport}</b></span>
-      <span>oppose refs <b>{claim.nOppose}</b></span>
-      {claim.nUnverified > 0 && <span>unverified refs <b>{claim.nUnverified}</b></span>}
-      {claim.nContradicts > 0 && <span>contradicting claims <b>{claim.nContradicts}</b></span>}
+      {groups.map(([kind, , total], index) => (index < 2 || total > 0)
+        && <span key={kind}>{kind}{kind === 'contradiction' ? 's' : ' refs'} <b>{total}</b></span>)}
       {claim.scopes.length > 0 && <span title={claim.scopes.join(', ')}>
         {countLabel(claim.scopes.length, 'claim grouping')}
       </span>}
@@ -203,15 +147,12 @@ export function ClaimCard({ claim, compact = false }) {
       {context.slice(0, 3).map((value, index) => <span className="pill" key={index}>{value}</span>)}
       {context.length > 3 && <span className="muted">+{context.length - 3} more</span>}
     </div>}
-    {!compact && (evidence > 0 || hiddenEvidence > 0) && <details>
+    {!compact && (evidence.length > 0 || hiddenEvidence > 0) && <details>
       <summary>Show evidence context</summary>
       <div className="atlas-evidence">
-        {evidence === 0 && <span className="atlas-evidence-boundary">No evidence context returned.</span>}
-        {claim.support.map((ref, index) => <code key={`s-${index}`}>support · {ref}</code>)}
-        {claim.oppose.map((ref, index) => <code key={`o-${index}`}>oppose · {ref}</code>)}
-        {claim.unverified.map((ref, index) => <code key={`u-${index}`}>unverified · {ref}</code>)}
-        {claim.contradicts.map((statement, index) => <code key={`c-${index}`}>
-          contradiction · {statement}
+        {evidence.length === 0 && <span className="atlas-evidence-boundary">No evidence context returned.</span>}
+        {evidence.map(([kind, value], index) => <code key={`${kind}-${index}`}>
+          {kind} · {value}
         </code>)}
         {hiddenEvidence > 0 && <span className="atlas-evidence-boundary">
           {countLabel(hiddenEvidence, 'additional reference')} omitted by the claim limit.
@@ -224,12 +165,11 @@ export function ClaimCard({ claim, compact = false }) {
 function RouteState({ kind, errors, onRetry }) {
   if (kind === 'loading') return <div className="run-resource-state" role="status" aria-live="polite">
     <span className="dag-empty-spinner" aria-hidden="true" />
-    <h1>Loading Research Atlas preview</h1>
+    <h1>Loading Atlas</h1>
   </div>
   const memoryMissing = errors.length > 0 && errors.every(error => error.status === 400)
   return <div className="run-resource-state" role={memoryMissing ? 'status' : 'alert'}>
-    <div className="resource-state-icon" aria-hidden="true">×</div>
-    <h1>{memoryMissing ? 'Research Atlas is not configured' : 'Research Atlas preview unavailable'}</h1>
+    <h1>{memoryMissing ? 'Atlas not configured' : 'Atlas unavailable'}</h1>
     <p>{memoryMissing
       ? 'Set Memory dir in Settings.'
       : 'Atlas sources unavailable.'}</p>
@@ -330,9 +270,8 @@ export default function ResearchAtlas({ onBack }) {
             <div>
               <p className="atlas-eyebrow">Experimental Part IV/V</p>
               <h1>Bounded portfolio evidence preview</h1>
-              <p>Bounded read-only observations; experimental claim identity and clipping prevent coverage claims.</p>
-              <p>Source receipts cover durable D8 rows from explicitly processed and persisted runs;
-                they do not prove that every portfolio run executed D8.</p>
+              <p>Read-only bounded records cannot establish coverage. D8 receipts cover only explicitly
+                processed durable rows, not every portfolio run.</p>
             </div>
           </header>
 
@@ -350,9 +289,7 @@ export default function ResearchAtlas({ onBack }) {
             <span>{countLabel(view.invalidRows.total, 'record')}; server totals may still include them.</span>
           </div>}
 
-          <ConceptSourceNotice source={view.conceptSource} />
-          <ResearchSourceNotice source={view.researchSource} />
-          <ClaimSourceNotice source={view.claimSource} />
+          <EvidenceSourceNotice concept={view.conceptSource} claims={view.claimSource} />
 
           <section className="atlas-summary" aria-label="Portfolio summary">
             {[
@@ -373,7 +310,7 @@ export default function ResearchAtlas({ onBack }) {
           {!view.empty && <div className="atlas-grid">
             <section className="atlas-panel atlas-coverage" aria-labelledby="atlas-coverage-title">
               <div className="atlas-panel-head">
-                <div><p className="atlas-eyebrow">Concept observations</p><h2 id="atlas-coverage-title">Concepts seen across runs</h2></div>
+                <div><h2 id="atlas-coverage-title">Concepts seen across runs</h2></div>
                 <span className="muted">{atlasLoaded
                   ? `showing ${view.concepts.length} of ${view.totals.concepts}` : 'not loaded'}</span>
               </div>
@@ -403,7 +340,7 @@ export default function ResearchAtlas({ onBack }) {
                     </p>}
                   </div>
               </>}
-              <SourceWatermark sourceKey="atlas" label="Atlas concept/evidence projection"
+              <SourceWatermark sourceKey="atlas" label="Concept projection"
                 source={sourceStates.atlas} retry={retry} busy={busy}
                 pending={resource.pending.includes('atlas')}>
                 bounded observations, not coverage.
@@ -412,7 +349,7 @@ export default function ResearchAtlas({ onBack }) {
 
             <section className="atlas-panel atlas-contradictions" aria-labelledby="atlas-contradictions-title">
               <div className="atlas-panel-head">
-                <div><p className="atlas-eyebrow">Evidence balance</p><h2 id="atlas-contradictions-title">Mixed-evidence claim records</h2></div>
+                <div><h2 id="atlas-contradictions-title">Mixed-evidence claim records</h2></div>
                 <span className="chip xs warn">{atlasLoaded ? `${view.totals.contested} mixed` : 'not loaded'}</span>
               </div>
               {atlasLoaded && (view.contradictions.length > 0
@@ -423,7 +360,7 @@ export default function ResearchAtlas({ onBack }) {
               {atlasLoaded && view.hiddenContradictions > 0 && <p className="atlas-boundary-note">
                 {countLabel(view.hiddenContradictions, 'additional mixed-evidence record')} omitted by the bounded projection.
               </p>}
-              <SourceWatermark sourceKey="atlas" label="Atlas claim/evidence projection"
+              <SourceWatermark sourceKey="atlas" label="Mixed claims"
                 source={sourceStates.atlas} retry={retry} busy={busy}
                 pending={resource.pending.includes('atlas')}>
                 not a verdict or applicability decision.
@@ -432,7 +369,7 @@ export default function ResearchAtlas({ onBack }) {
 
             <section className="atlas-panel atlas-all-claims" aria-labelledby="atlas-claims-title">
               <div className="atlas-panel-head">
-                <div><p className="atlas-eyebrow">Claim projection</p><h2 id="atlas-claims-title">Claim records</h2></div>
+                <div><h2 id="atlas-claims-title">Claim records</h2></div>
                 <span className="muted">{claimsLoaded
                   ? `showing ${view.claims.length} of ${view.totals.claims}` : 'not loaded'}</span>
               </div>
@@ -453,34 +390,17 @@ export default function ResearchAtlas({ onBack }) {
 
             <section className="atlas-panel atlas-curation" aria-labelledby="atlas-curation-title">
               <div className="atlas-panel-head">
-                <div><p className="atlas-eyebrow">Steward invocation log</p><h2 id="atlas-curation-title">Recent proposals + outcomes</h2></div>
+                <div><h2 id="atlas-curation-title">Recent proposals + outcomes</h2></div>
                 <span className="muted">{curationCurrent
                   ? `showing ${view.curation.length} of ${view.totals.curation}`
                   : 'incomplete merge'}</span>
               </div>
               {view.curation.length > 0
-                ? <ol className="atlas-curation-list">{view.curation.map((entry, index) => {
-                    const proposals = entry.merges + entry.splits + entry.purges + entry.decisions
-                    const timeLabel = entry.at || (entry.revision
-                      ? `revision ${entry.revision}` : 'time not recorded')
-                    return <li key={`${entry.runId}-${entry.at}-${index}`}>
-                      <div className="atlas-curation-meta"><strong className="atlas-curation-run">{entry.runId
-                        ? <a href={`#/run/${encodeURIComponent(entry.runId)}`}
-                            title={entry.runId}>{entry.runId}</a>
-                        : 'Portfolio steward'}</strong><span className="atlas-curation-time"
-                          title={timeLabel}>{timeLabel}</span></div>
-                      <p><span className="atlas-curation-kind">{entry.kind} steward</span> · {countLabel(proposals, 'proposal')}
-                        {entry.kind === 'claim'
-                          ? ` · ${countLabel(entry.decisions, 'claim decision')}`
-                          : ` · ${countLabel(entry.merges, 'merge')} · ${countLabel(entry.splits, 'split')} · ${countLabel(entry.purges, 'purge')}`}</p>
-                      <div className="atlas-curation-status">
-                        <span className={`pill atlas-outcome-${entry.outcome} ${entry.applied > 0 ? 'atlas-applied' : ''}`}>
-                          {curationOutcomeLabel(entry)}{entry.skipped > 0 ? ` · ${entry.skipped} skipped` : ''}
-                        </span>
-                        {entry.autoRequested && <span className="pill atlas-auto-requested">legacy auto requested · not applied</span>}
-                      </div>
-                    </li>
-                  })}</ol>
+                ? <ol className="atlas-curation-list">{view.curation.map((entry, index) =>
+                    <li key={`${entry.kind}-${index}`}>
+                      <b>{entry.kind} steward</b> · {countLabel(entry.proposals, 'proposal')} ·
+                      {' '}{entry.applied ? `${entry.applied} applied` : entry.outcome.replaceAll('-', ' ')}
+                    </li>)}</ol>
                 : <p className="atlas-section-empty">{curationCurrent
                   ? 'No steward records returned.'
                   : 'No records shown; merge incomplete.'}</p>}
@@ -489,7 +409,7 @@ export default function ResearchAtlas({ onBack }) {
               </p>}
               {[['conceptCuration', 'Concept'], ['claimCuration', 'Claim']].map(([sourceKey, kind]) =>
                 <SourceWatermark key={sourceKey} sourceKey={sourceKey}
-                  label={`${kind} steward invocation log`} source={sourceStates[sourceKey]} retry={retry}
+                  label={`${kind} steward log`} source={sourceStates[sourceKey]} retry={retry}
                   busy={busy} pending={resource.pending.includes(sourceKey)}>
                   history, not current governance.
                 </SourceWatermark>)}
