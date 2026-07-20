@@ -329,6 +329,10 @@ function collectThinking(trace, nid) {
 const TRACE_LIMIT_DEFAULT = 40
 const TRACE_LIMIT_STEP = 80
 const TRACE_LIMIT_MAX = 400
+// Node-trace "load more spans": default per-node span cap + the on-demand ceiling (mirror the server's
+// TRACE_NODE_SPAN_CAP / TRACE_NODE_SPAN_CAP_MAX). 0 = ask for the default; the button raises it.
+const NODE_TRACE_CAP = 512
+const NODE_TRACE_CAP_MAX = 4096
 
 function LiveTrace({ runId, generation, active }) {
   const scope = `${runId}:${generation || 'pending'}`
@@ -695,6 +699,11 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const [nodeTrace, setNodeTrace] = useState(null)
   const [nodeTraceError, setNodeTraceError] = useState(false)
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
+  // "load more spans": 0 = the default server cap; the button raises it toward NODE_TRACE_CAP_MAX so a
+  // heavily-repaired node's full span tree can be paged in on demand (see NodeTrace's onLoadMore).
+  const [nodeTraceLimit, setNodeTraceLimit] = useState(0)
+  const loadMoreNodeTrace = () =>
+    setNodeTraceLimit(l => Math.min((l || NODE_TRACE_CAP) + NODE_TRACE_CAP, NODE_TRACE_CAP_MAX))
   const rawTraceGeneration = Object.hasOwn(e.data || {}, 'generation')
     ? e.data.generation : (e.type === 'node_repaired' ? e.data?.attempt : 0)
   const traceGeneration = Number.isInteger(rawTraceGeneration) && rawTraceGeneration >= 0
@@ -705,7 +714,8 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
     && liveBuilding.get(traceNid) === traceGeneration
   // Clear the error flag only on a SUCCESSFUL load (not eagerly at the start of every poll tick):
   // clearing then re-setting each 4s tick made the error/Retry banner flicker on a persistent failure.
-  const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid, '/trace'))
+  const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid,
+      nodeTraceLimit > 0 ? `/trace?limit=${nodeTraceLimit}` : '/trace'))
     .then(d => { if (alive()) { setNodeTrace(d); setNodeTraceError(false) } })
     .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
   const retryNodeTrace = () => {
@@ -714,14 +724,14 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
     setNodeTraceNonce(value => value + 1)
   }
   usePoll((alive) => loadNodeTrace(alive), 4000,
-    [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce],
+    [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce, nodeTraceLimit],
     { enabled: open && !readOnly && traceNid != null && exactBuilding })
   useEffect(() => {
     if (!open || readOnly || traceNid == null || exactBuilding) return undefined
     let alive = true
     loadNodeTrace(() => alive)
     return () => { alive = false }
-  }, [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce])
+  }, [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce, nodeTraceLimit])
   const nodeSpans = Array.isArray(nodeTrace?.nodes) ? nodeTrace.nodes : []
   const hasTrace = !readOnly && traceNid != null
   // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
@@ -765,7 +775,8 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
               onClick={retryNodeTrace}>Retry</button>
           </div>}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
-            projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace} />}
+            projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
+            onLoadMore={nodeTraceLimit < NODE_TRACE_CAP_MAX ? loadMoreNodeTrace : undefined} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>

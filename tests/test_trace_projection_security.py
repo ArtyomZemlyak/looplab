@@ -294,6 +294,45 @@ def test_trace_tail_limit_pages_further_back_up_to_the_raised_ceiling(tmp_path):
     assert maxed["projection"]["truncated"] is False
 
 
+def _flatten_trace(nodes):
+    out = []
+    for n in nodes or []:
+        out.append(n)
+        out.extend(_flatten_trace(n.get("children")))
+    return out
+
+
+def test_node_trace_limit_pages_a_heavily_repaired_node_past_the_default_cap(tmp_path):
+    # The node-trace "load more spans" control raises this node's span ceiling on demand. The default
+    # (no limit) stays capped at TRACE_NODE_SPAN_CAP=512; a bigger limit surfaces more of THAT node's
+    # spans, clamped at TRACE_NODE_SPAN_CAP_MAX=4096. Redaction must hold at the larger window.
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    total = 700                                        # > the 512 default cap for ONE node (node_id=0)
+    spans = [_span(index, trace_id=f"t{index}", kind="tool") for index in range(total)]
+    (run_dir / "spans.jsonl").write_text(
+        "".join(json.dumps(span) + "\n" for span in spans), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    default = client.get("/api/runs/demo/nodes/0/trace").json()
+    default_n = len(_flatten_trace(default["nodes"]))
+    assert default_n <= 512                            # capped at the default
+    assert default["projection"].get("truncated") is True   # more remains -> UI offers "load more"
+    assert SECRET not in json.dumps(default)
+
+    more = client.get("/api/runs/demo/nodes/0/trace", params={"limit": 2000}).json()
+    assert len(_flatten_trace(more["nodes"])) > default_n   # the raised cap surfaces more of the node
+    assert SECRET not in json.dumps(more)
+
+
 def test_trace_route_read_failures_are_not_reported_as_complete_empty_data(tmp_path, monkeypatch):
     """I/O failure has unknown cardinality; it must differ from a successful empty sidecar read."""
     pytest.importorskip("fastapi")

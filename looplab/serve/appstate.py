@@ -305,20 +305,28 @@ class AppState:
         with self._trace_view_lock:
             self._trace_view_cache.pop(str(rd), None)
 
-    def node_trace_view(self, rd: Path, nid) -> dict:
+    def node_trace_view(self, rd: Path, nid, cap: Optional[int] = None) -> dict:
         """The LIGHT trace view built over ONLY one node's spans (via `light_spans_for_node`, in-memory)
         — so expanding a node's trace is O(node), not O(whole run) indexed down. `build_trace_view` over
         just that node's traces preserves its bounded tree/rollup projection without scanning unrelated
         nodes; its summary is correspondingly node-scoped. If the index cannot be used, `trace_view`
-        supplies the bounded run projection, while unreadable telemetry still propagates as unavailable."""
+        supplies the bounded run projection, while unreadable telemetry still propagates as unavailable.
+
+        `cap` (the UI's "load more spans" control) raises the per-node span ceiling on explicit demand;
+        the default stays TRACE_NODE_SPAN_CAP, and it is clamped to TRACE_NODE_SPAN_CAP_MAX so a single
+        huge node can never materialize an unbounded tree. Still O(node) — a bigger cap only surfaces
+        more of THAT node's already-scoped spans."""
         from looplab.events.span_index import get_index
-        from looplab.events.traceview import TRACE_NODE_SPAN_CAP, build_trace_view
+        from looplab.events.traceview import (TRACE_NODE_SPAN_CAP, TRACE_NODE_SPAN_CAP_MAX,
+                                              build_trace_view)
+        span_cap = (TRACE_NODE_SPAN_CAP if not cap
+                    else max(TRACE_NODE_SPAN_CAP, min(int(cap), TRACE_NODE_SPAN_CAP_MAX)))
         idx = get_index(rd / "spans.jsonl")
         if idx is None:
             return self.trace_view(rd)
         return build_trace_view(
-            self.trace_scalars(rd), idx.light_spans_for_node(nid, TRACE_NODE_SPAN_CAP), light=True,
-            total_spans=idx.node_span_count(nid), span_cap=TRACE_NODE_SPAN_CAP)
+            self.trace_scalars(rd), idx.light_spans_for_node(nid, span_cap), light=True,
+            total_spans=idx.node_span_count(nid), span_cap=span_cap)
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write

@@ -1754,14 +1754,14 @@ def build_router(srv) -> APIRouter:
             m = {}
         return {"metrics": m}
 
-    def _node_trace(rd: Path, nid: int) -> dict:
+    def _node_trace(rd: Path, nid: int, cap: Optional[int] = None) -> dict:
         try:
             # light=True: the tree carries structure + tokens + timing but NOT prompts/outputs. The UI
             # fetches a bounded/redacted observation projection lazily via /spans/{sid} when expanded,
             # so a heavily-repaired node's trace stays small and its omission receipt remains explicit.
             # `srv.node_trace_view` builds over ONLY this node's spans via the light span INDEX (in-
             # memory, O(node) — not the whole-run tree), so a 1 GB, 4000-node run's node trace is ~ms.
-            tv = srv.node_trace_view(rd, nid)
+            tv = srv.node_trace_view(rd, nid, cap=cap)
             return {"schema": tv.get("schema"),
                     "nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
@@ -1771,11 +1771,15 @@ def build_router(srv) -> APIRouter:
             return _trace_unavailable(nodes=[], rollup={}, summary={})
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
-    def node_trace(run_id: str, nid: int):
+    def node_trace(run_id: str, nid: int, limit: int = 0):
         """The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads
         only that node's spans via the index (O(node)), so the UI can fetch a node's trace lazily on
-        expand instead of loading (and re-rendering) the whole-run timeline for a 4000-node run."""
-        return _node_trace(_run_dir(run_id), nid)
+        expand instead of loading (and re-rendering) the whole-run timeline for a 4000-node run.
+
+        `limit` (>0) is the UI's "load more spans" control: it raises this node's span ceiling on demand
+        (default 512, clamped to TRACE_NODE_SPAN_CAP_MAX in node_trace_view); 0/absent keeps the default."""
+        cap = int(limit) if limit and int(limit) > 0 else None
+        return _node_trace(_run_dir(run_id), nid, cap=cap)
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str):

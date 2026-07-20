@@ -672,15 +672,28 @@ function StageBlock({ s, t0, total, runId }) {
 
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
-export function NodeTrace({ spans, runId, projection = {}, onRetry }) {
+export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore }) {
   const roots = spans || []
   if (traceUnavailable(projection)) return <TraceUnavailable onRetry={onRetry} />
-  if (!roots.length && tracePartial(projection))
-    return <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
-  if (!roots.length) return <div className="muted trace-small">No execution spans captured yet.</div>
+  const partial = tracePartial(projection)
+  // Prefer an ACTIONABLE control over a dead "projection is partial" notice: when the caller can page
+  // (onLoadMore, i.e. the node-trace view), render a button that raises the span ceiling; else keep the
+  // plain notice (a caller like by-trace OpTrace has no paging). omitted = the count still hidden.
+  const omitted = Math.max(Number(projection?.omitted_spans) || 0,
+    (Number(projection?.total_spans) || 0) - (Number(projection?.visible_spans) || 0))
+  const loadMore = (partial && onLoadMore)
+    ? <button type="button" className="trace-loadmore disclosure-button" onClick={onLoadMore}>
+        ↧ load more spans{omitted > 0 ? ` (${omitted} more)` : ''}
+      </button>
+    : null
+  if (!roots.length) {
+    if (loadMore) return loadMore
+    if (partial) return <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
+    return <div className="muted trace-small">No execution spans captured yet.</div>
+  }
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
-    {tracePartial(projection) && <div className="notice compact" role="status">Trace projection is partial.</div>}
+    {loadMore || (partial && <div className="notice compact" role="status">Trace projection is partial.</div>)}
     {roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}
   </div>
 }

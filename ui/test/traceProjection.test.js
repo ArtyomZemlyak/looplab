@@ -66,7 +66,9 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'span detail unavailable must be retryable even after the first expansion')
   assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, n\.id, working, reloadNonce\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
     'a finished conversation one-shot must expose an explicit retry')
-  assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry \}\)[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
+  assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry, onLoadMore \}\)[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
+  assert.match(inspector, /const loadMore = \(partial && onLoadMore\)[\s\S]*?onClick=\{onLoadMore\}[\s\S]*?load more spans/,
+    'a partial node trace with a pager must offer a "load more spans" button instead of a dead notice')
   assert.match(inspector, />span tree<\/button>/)
   assert.doesNotMatch(inspector, />raw spans<\/button>|every span's full I\/O|nothing is lost|WHOLE re-sent/)
 

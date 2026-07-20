@@ -33,6 +33,10 @@ _MAX_PARENT_HOPS = 1024
 TRACE_PROJECTION_SCHEMA = 2
 TRACE_VIEW_SPAN_CAP = 1024
 TRACE_NODE_SPAN_CAP = 512
+# Ceiling for the UI's "load more spans" control on a single node's trace: the default cap stays 512
+# (fast expand), but a user can page a heavily-repaired node up to this bound on demand. Still O(node)
+# — a bigger cap only surfaces more of THAT node's already-scoped spans (see appstate.node_trace_view).
+TRACE_NODE_SPAN_CAP_MAX = 4096
 TRACE_DETAIL_SPAN_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
 
