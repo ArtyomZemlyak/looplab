@@ -106,13 +106,19 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     by_key = {field["key"]: field for field in fields}
     assert set(("concept_pivot", "concept_run_base", "concept_retag_every",
                 "graded_novelty", "capability_expansion")) <= set(by_key)
-    assert "never ranks or selects" in by_key["concept_pivot"]["help"]
+    assert "does not itself rank candidates" in by_key["concept_pivot"]["help"]
     assert "materialization receipts" in by_key["concept_run_base"]["help"]
     assert "display-only" in by_key["concept_run_base"]["help"]
     assert "Researcher-authored additions" in by_key["concept_retag_every"]["help"]
     assert "proposal admission" in by_key["graded_novelty"]["help"]
     assert "Concept coverage pivot" in by_key["capability_expansion"]["help"]
     assert "D8" in by_key["cross_run_concepts"]["help"]
+    # CODEX AGENT: product-default experimental switches must disclose behavioral and paid-work effects;
+    # otherwise the Settings UI is materially less truthful than the config reference it controls.
+    assert "affect downstream selection" in by_key["concept_pivot"]["help"]
+    assert "model/tool-loop turns" in by_key["cross_run_read_tools"]["help"]
+    assert "delay finalization" in by_key["cross_run_curation"]["help"]
+    assert "paid model cost" in by_key["cross_run_curation"]["warning"]
     assert "never applies" in by_key["cross_run_curation_auto"]["warning"]
     assert packaged["agent_role_pills"]["researcher"]["short"] == "R"
 
