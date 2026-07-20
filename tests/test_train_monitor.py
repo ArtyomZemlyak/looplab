@@ -129,6 +129,61 @@ class _MonitorStub(TrainingMonitorMixin):
         self._train_monitor_interval_s = interval
 
 
+def test_monitor_cancellation_joins_the_paid_verdict_worker(tmp_path):
+    """The monitor may be advisory, but its shared client's cost ledger is not.
+
+    Exercise cancellation exactly while the sync verdict call is blocked. Event handshakes pin that
+    point; an abandoned call unwinds the monitor before the timer releases the worker, while an owned
+    call keeps the monitor task alive until the worker returns.
+    """
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\n")
+    release = threading.Event()
+    worker_finished = threading.Event()
+
+    async def drive():
+        started = threading.Event()
+        tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
+        host = _MonitorStub(tracer, interval=0.02)
+        host._monitor_cadence = lambda: 0.0
+
+        def _blocking_verdict(digest, context):
+            started.set()
+            release.wait()
+            worker_finished.set()
+            return None
+
+        host._training_verdict = _blocking_verdict
+        cancel = threading.Event()
+
+        async def _monitor():
+            await host._monitor_training(0, 0, str(wd), cancel)
+
+        release_timer = threading.Timer(0.25, release.set)
+        timer_started = False
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_monitor)
+                await anyio.to_thread.run_sync(started.wait, abandon_on_cancel=True)
+                release_timer.start()
+                timer_started = True
+                tg.cancel_scope.cancel()
+            detached = not worker_finished.is_set()
+        finally:
+            started.set()
+            release.set()
+            release_timer.cancel()
+            if timer_started:
+                release_timer.join()
+        await anyio.to_thread.run_sync(worker_finished.wait)
+        return detached
+
+    detached = anyio.run(drive)
+    assert detached is False
+    assert worker_finished.is_set()
+
+
 def _run_monitor(tmp_path, *, workdir, hold_s=0.22):
     tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
     stub = _MonitorStub(tracer, interval=0.05)

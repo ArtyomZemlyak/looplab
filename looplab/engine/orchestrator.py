@@ -1602,19 +1602,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         loop when the evals join (see `_dispatch_evals`)."""
         if not self.concurrent_research:
             return
+        # CODEX AGENT: repeat is a continuation of a research episode, not an independent timer.
+        # Requiring a due cadence/strategist trigger here keeps ``deep_research_every=0`` truly
+        # manual-only and prevents a long eval from silently starting paid research on its own.
+        rtrig = self._due_research_trigger(state)
+        if rtrig is None:
+            return
         # Defensive getattr: some tests build a partial Engine (no __init__) — a missing knob means
         # the safe one-shot default (== today), exactly like the train-monitor gates.
         if getattr(self, "_concurrent_research_repeat", False):
             # Repeat mode: keep researching for the whole eval window. Pass the initially-due trigger
-            # so the FIRST pass fires promptly (matching one-shot promptness) when research was due.
-            # Skip entirely with no model wired — the one-shot path no-ops the same way (via
-            # `_due_research_trigger` returning None), so we don't spin recording "unavailable" stubs.
-            if self.deep_researcher is None:
-                return
-            tg.start_soon(self._research_overlap_loop, self._due_research_trigger(state))
-            return
-        rtrig = self._due_research_trigger(state)
-        if rtrig is None:
+            # so the FIRST pass fires promptly (matching one-shot promptness). `_due_research_trigger`
+            # already rejects a missing model, so an unavailable stage cannot spin stub memos either.
+            tg.start_soon(self._research_overlap_loop, rtrig)
             return
 
         async def _bg(snap=state, trig=rtrig):
@@ -1673,10 +1673,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             await anyio.sleep(next_sleep)    # only cancellation (evals joined) unwinds the loop from here
             try:
                 # Re-fold each tick (invariant #4): pick up sibling evals that finished + fresh hints.
-                # abandon_on_cancel=True on the reads: when the evals join and this loop is cancelled,
-                # node dispatch must NOT wait for an in-flight multi-turn research LLM call (an endpoint
-                # timeout+retry could be minutes) — the same latency fix train_monitor uses. The
-                # abandoned thread finishes in the background; its (now-moot) result is discarded.
+                # This snapshot read is pure and owns no paid/shared role, so cancellation may abandon
+                # only this read without permitting a late event/cost or rebinding run-scoped tools.
                 snap = await anyio.to_thread.run_sync(
                     lambda: fold(self.store.read_all()), abandon_on_cancel=True)
                 # Overlap the hypothesis-board CONSOLIDATION too (Phase 2): repeated research keeps
@@ -1698,9 +1696,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         functools.partial(self._maybe_merge_hypotheses, snap))
                 if cap > 0 and calls >= cap:
                     return                   # research LLM budget spent; the health monitor still runs
+                # CODEX AGENT: DeepResearcher owns a paid client and mutable run-bound tools. Its worker
+                # must be joined before the eval window closes; abandoning it permits post-finalization
+                # usage events and lets the next research pass rebind the same tools under a live call.
                 memo = await anyio.to_thread.run_sync(
                     functools.partial(self._compute_deep_research, snap, trig, trace=False),
-                    abandon_on_cancel=True)
+                    abandon_on_cancel=False)
                 calls += 1
                 if memo is None:
                     next_sleep = base

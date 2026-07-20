@@ -398,12 +398,12 @@ class TrainingMonitorMixin:
                     if llm_calls >= _MAX_MONITOR_LLM_CALLS:
                         sp.set("llm_capped", True)
                     else:
-                        # abandon_on_cancel=True: when the eval finishes and the task group cancels, node
-                        # completion must NOT wait for an in-flight LLM call (an endpoint timeout+retry could be
-                        # minutes). Cancel unwinds immediately; the abandoned thread finishes in the background
-                        # and its (now-moot) verdict is discarded. The verdict is advisory, so losing it is fine.
+                        # CODEX AGENT: the verdict is advisory, but its client usage is billable and is
+                        # recorded on shared run state. Join an in-flight call on eval cancellation so
+                        # no detached worker can emit cost after the node/run has finalized. Endpoint
+                        # timeouts remain the upper bound for this ownership hand-off.
                         verdict = await anyio.to_thread.run_sync(
-                            self._training_verdict, tail, context, abandon_on_cancel=True)
+                            self._training_verdict, tail, context, abandon_on_cancel=False)
                         llm_calls += 1
                     if verdict is not None:
                         conf = max(0.0, min(1.0, float(verdict.confidence)))

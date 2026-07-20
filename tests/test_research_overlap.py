@@ -3,6 +3,7 @@ the WHOLE eval window instead of idling a multi-day training after one memo. The
 pieces (content signature, adaptive cadence) and drive the loop itself through a light stub host so no
 real Engine/LLM is needed. The loop is advisory-only (records via the BACKGROUND_APPENDABLE path), so
 none of this touches folded selection or replay."""
+import threading
 import types
 
 import anyio
@@ -95,6 +96,84 @@ class _LoopStub:
         self.recorded.append((research_memo_sig(memo), trigger))
 
 
+async def _cancel_blocked_paid_task(task, started, release, worker_finished):
+    """Cancel ``task`` while its paid sync worker is blocked and report an early detach.
+
+    The timer is only a deadlock breaker for the intentionally blocked worker; synchronization uses
+    events. An abandoned host exits before release, while an owned host cannot exit until the timer
+    releases the worker. Always join the probe worker so a failing regression test leaks nothing.
+    """
+    release_timer = threading.Timer(0.25, release.set)
+    timer_started = False
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(task)
+            await anyio.to_thread.run_sync(started.wait, abandon_on_cancel=True)
+            release_timer.start()
+            timer_started = True
+            tg.cancel_scope.cancel()
+        detached = not worker_finished.is_set()
+    finally:
+        started.set()
+        release.set()
+        release_timer.cancel()
+        if timer_started:
+            release_timer.join()
+    await anyio.to_thread.run_sync(worker_finished.wait)
+    return detached
+
+
+def test_repeat_mode_does_not_start_without_a_due_trigger():
+    # `deep_research_every=0` is the shipped manual-only contract. Turning repeat on must not turn
+    # that disabled auto cadence into a hidden paid timer for every long-running evaluation.
+    class _TaskGroupProbe:
+        def __init__(self):
+            self.started = []
+
+        def start_soon(self, func, *args):
+            self.started.append((func, args))
+
+    state = types.SimpleNamespace(nodes={0: object()}, research=[], strategy_history=[])
+    host = types.SimpleNamespace(
+        concurrent_research=True,
+        _concurrent_research_repeat=True,
+        deep_researcher=object(),
+        deep_research_every=0,
+        _already_researched_at=lambda _state, _n: False,
+        _cadence_research_memos=lambda _state: [],
+        _cadence_due=Engine._cadence_due,
+        _research_overlap_loop=lambda _trigger: None,
+    )
+    host._due_research_trigger = lambda current: Engine._due_research_trigger(host, current)
+    assert host._due_research_trigger(state) is None
+    tg = _TaskGroupProbe()
+    Engine._spawn_research(host, tg, state)
+    assert tg.started == []
+
+
+def test_repeat_mode_forwards_the_due_trigger_once():
+    class _TaskGroupProbe:
+        def __init__(self):
+            self.started = []
+
+        def start_soon(self, func, *args):
+            self.started.append((func, args))
+
+    async def loop(_trigger):
+        return None
+
+    host = types.SimpleNamespace(
+        concurrent_research=True,
+        _concurrent_research_repeat=True,
+        deep_researcher=object(),
+        _due_research_trigger=lambda _state: "strategist",
+        _research_overlap_loop=loop,
+    )
+    tg = _TaskGroupProbe()
+    Engine._spawn_research(host, tg, types.SimpleNamespace())
+    assert tg.started == [(loop, ("strategist",))]
+
+
 def test_loop_records_new_memos_and_skips_identical_reruns():
     # A -> B -> B -> B -> B: A and B each record once; the converged B re-runs are skipped.
     a, b = _memo("A", ["x"]), _memo("B", ["y"])
@@ -132,6 +211,33 @@ def test_loop_stops_on_cancellation_when_evals_join():
     anyio.run(drive)                                            # returns cleanly (no leaked task / hang)
     assert stub.compute_calls >= 1                              # it did run while the "eval" was in flight
     assert len(stub.recorded) == 1                              # identical A only recorded once
+
+
+def test_loop_cancellation_joins_the_paid_research_worker():
+    release = threading.Event()
+    worker_finished = threading.Event()
+
+    async def drive():
+        started = threading.Event()
+        stub = _LoopStub([_memo("unused")], cap=1)
+
+        def _blocking_compute(state, trig, *, trace=True):
+            started.set()
+            release.wait()
+            worker_finished.set()
+            return None
+
+        stub._compute_deep_research = _blocking_compute
+        return await _cancel_blocked_paid_task(
+            lambda: Engine._research_overlap_loop(stub, "cadence"),
+            started,
+            release,
+            worker_finished,
+        )
+
+    detached = anyio.run(drive)
+    assert detached is False
+    assert worker_finished.is_set()
 
 
 def test_converged_backoff_never_drops_below_the_interval_floor():
