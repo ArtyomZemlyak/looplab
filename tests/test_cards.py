@@ -308,6 +308,70 @@ def test_priority_falls_back_to_hypothesis_ranking_and_matches_the_shadow():
     assert st.cards[hypothesis_id(a)].priority == 0                          # open card ranked first
 
 
+# --- Layer 1c: the actionable exclusion seam ------------------------------------------------------
+
+def test_actionable_excludes_dropped_gated_and_abandoned_cards():
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        # proposed (no node) + evaluated (a clean result) are actionable
+        ("card_added", {"id": "card-fresh", "statement": "fresh", "source": "operator"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "clean"}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.8}),
+        # gated (evidence infeasible/trust-gated) is NOT actionable
+        ("node_created", {"node_id": 2, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "leaky"}}),
+        ("node_evaluated", {"node_id": 2, "metric": 0.9, "violations": ["used test set"]}),
+        # abandoned is NOT actionable
+        ("hypothesis_added", {"statement": "dead direction", "source": "human"}),
+        ("hypothesis_updated", {"id": hypothesis_id("dead direction"), "status": "abandoned"}),
+        # dropped is NOT actionable
+        ("node_created", {"node_id": 3, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "dropped one"}}),
+        ("node_evaluated", {"node_id": 3, "metric": 0.7}),
+        ("card_dropped", {"id": hypothesis_id("dropped one"), "reason": "superseded"}),
+    ]))
+    # Poison every card's flag to the WRONG value, then re-derive: now BOTH the True and the False
+    # assertions genuinely prove step 8 executed (a bare read would pass against the True default).
+    for c in st.cards.values():
+        c.actionable = not c.actionable
+    _derive_cards(st)
+    act = {c.statement: c.actionable for c in st.cards.values()}
+    assert act["fresh"] is True and act["clean"] is True
+    assert act["leaky"] is False and act["dead direction"] is False and act["dropped one"] is False
+
+
+def test_running_card_is_actionable():
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "in flight"}}),   # pending
+    ]))
+    c = st.cards[hypothesis_id("in flight")]
+    assert c.status == "running"
+    # Poison the default so the assertion actually proves step 8 RE-derived it (a bare `is True` would
+    # pass even if the whole derivation were deleted — Card.actionable defaults True).
+    c.actionable = False
+    _derive_cards(st)
+    assert st.cards[hypothesis_id("in flight")].actionable is True
+
+
+def test_tolerates_a_card_whose_only_node_was_superseded():
+    # The Layer-5 freshness gate drops a stale speculation via node_failed(reason='superseded'). Such a
+    # card must fold CLEANLY (no crash). A superseded/failed node is NOT a Layer-1c exclusion lane: with
+    # no usable evidence the card lands in 'evaluated'/verdict 'open' and stays ACTIONABLE — the seam
+    # excludes only dropped/gated/abandoned. (Suppressing a stale speculation is L5's job, done at the
+    # NODE level via the freshness gate, not through this card flag.)
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "improve", "parent_ids": [],
+                          "idea": {"operator": "improve", "hypothesis": "stale speculation"}}),
+        ("node_failed", {"node_id": 1, "reason": "superseded", "eval_seconds": 0}),
+    ]))
+    c = st.cards[hypothesis_id("stale speculation")]
+    assert c.status == "evaluated" and c.verdict == "open" and c.actionable is True
+
+
 def test_operator_pin_wins_over_engine_enrichment():
     # The reserved operator overlay runs AFTER 1b enrichment, so an operator resource pin overrides a
     # researcher-proposed footprint (docs/23 decision 27: operator wins).

@@ -3366,6 +3366,15 @@ def _derive_cards(st: RunState) -> None:
             fp["pinned_by"] = "operator"
             c.footprint = fp
 
+    # 8) LAYER-1c exclusion seam — derive `actionable` from the FINAL status/verdict (after every
+    #    override), so the Layer-3 scorer never re-derives "is this card dead?". A dropped card, a `gated`
+    #    card (evidence all trust-gated/breed-excluded -> not re-proposable as fresh), and an abandoned
+    #    card are excluded; everything else (proposed/running/evaluated) is a legitimate candidate.
+    #    Merged-away (non-canonical) cards are already absent from `cards`, so they are excluded by
+    #    construction. Advisory in Layer 1 — nothing reads it until Layer 3.
+    for c in cards.values():
+        c.actionable = c.status not in ("dropped", "gated") and c.verdict != "abandoned"
+
     # A hypothesis DELETED by the operator (hypothesis_updated status=deleted) is removed from the board
     # entirely; the shadow card must vanish with it (mirrors `_derive_hypotheses`' final filter). Until a
     # card-native delete exists, reuse `hypotheses_deleted`; card ids == hypothesis ids in Layer 1a.

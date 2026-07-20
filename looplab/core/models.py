@@ -616,6 +616,12 @@ class Card(BaseModel):
     # Research verdict (DERIVED via the shared `_evidence_verdict` helper — byte-identical to the
     # hash-joined hypothesis): open | testing | supported | tested | abandoned.
     verdict: str = "open"
+    # Layer 1c: is this card a legitimate candidate for the (future) work queue? DERIVED — False for a
+    # dropped card, a `gated` card (its evidence was all trust-gated/breed-excluded, so it is NOT
+    # re-proposable as fresh — docs/23 decision 28), or an abandoned one; True otherwise (proposed /
+    # running / evaluated). ADVISORY in Layer 1 (nothing reads it until the Layer-3 scorer); it is the
+    # clean exclusion seam so the scorer never has to re-derive "is this card dead?".
+    actionable: bool = True
     evidence: list[int] = Field(default_factory=list)   # node ids that tested it (== node_ids)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # Identity / lineage.
