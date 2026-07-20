@@ -218,6 +218,27 @@ def test_loop_records_asha_rank_when_underperforming(tmp_path, monkeypatch):
     assert alerts[0]["node_id"] == 0 and alerts[0]["population"] == 3
 
 
+def test_loop_records_recovery_transition_after_underperformance(tmp_path, monkeypatch):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    samples = iter(['{"recall": 0.30}\n', '{"recall": 0.90}\n'])
+    latest = ['{"recall": 0.90}\n']
+
+    def _tail(_workdir, **_kwargs):
+        try:
+            latest[0] = next(samples)
+        except StopIteration:
+            pass
+        return latest[0]
+
+    monkeypatch.setattr("looplab.engine.train_monitor.read_training_tail_raw", _tail)
+    stub = _AshaStub(kill=False, quantile=0.5, min_siblings=3)
+    _run_loop(stub, wd, {"kind": "stdout_json", "key": "recall"}, "max", {}, monkeypatch,
+              finals=[0.80, 0.70, 0.60], window=0.08)
+    transitions = [d["underperforming"] for (t, d) in stub.store.events if t == EV_ASHA_RANK]
+    assert transitions[:2] == [True, False]
+
+
 def test_loop_stays_quiet_when_on_track_or_too_few_siblings(tmp_path, monkeypatch):
     wd = tmp_path / "node_0"
     wd.mkdir()

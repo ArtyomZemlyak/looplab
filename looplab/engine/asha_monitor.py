@@ -6,7 +6,7 @@ stricter: the metric spec must explicitly name ``resource_key`` and enough compl
 retain metric observations at exactly the same resource value. An early point is never treated as
 comparable to a finished endpoint merely because both contain the objective metric.
 
-Advisory by default: a non-healthy rank records a fold-IGNORED `EV_ASHA_RANK` diagnostic event (so its
+Advisory by default: each rank-state transition records a fold-IGNORED `EV_ASHA_RANK` diagnostic event (so its
 thread-schedule-dependent position never touches replay/selection — splice-neutral by construction) and
 a `asha_monitor` trace span. An opt-in `asha_live_kill` lets it tree-kill an underperformer early,
 reusing the training monitor's `kill_signal` + the single `_evaluate` terminal (reason
@@ -226,9 +226,9 @@ class AshaMonitorMixin:
                             metric_spec: dict, direction: str,
                             kill_signal: Optional[dict] = None, log_snapshot=None) -> None:
         """Tail the live log on a timer, extract the intermediate objective metric, rank it against the
-        completed sibling endpoints for diagnostics, and (opt-in) tree-kill only when it persistently
-        underperforms enough sibling observations at the same declared resource. See the module docstring
-        for the safety rails. Exits with the eval; a per-tick hiccup skips only that tick."""
+        completed sibling endpoints for diagnostics, and record advisory `EV_ASHA_RANK` transitions.
+        Opt-in tree-kill requires persistent underperformance against enough sibling observations at the
+        same declared resource. Exits with the eval; a per-tick hiccup skips only that tick."""
         import anyio
 
         from looplab.engine.train_monitor import read_training_tail_raw
@@ -272,22 +272,30 @@ class AshaMonitorMixin:
                 diagnostic_key = (endpoint_under, comparable_under)
                 # ADVISORY record — only when the verdict CHANGES (no log/feed spam), kept separate from
                 # the kill decision below so a persistent-underperform streak still reaches the kill check.
-                if diagnostic_key != last_flag:
+                previous_flag = last_flag
+                if diagnostic_key != previous_flag:
                     last_flag = diagnostic_key
+                    underperforming = bool(endpoint_under) or comparable_under is True
+                    previous_underperforming = bool(
+                        previous_flag
+                        and (previous_flag[0] or previous_flag[1] is True)
+                    )
                     with self.tracer.span("asha_monitor", node_id=node_id) as sp:
                         sp.set_many(generation=generation, intermediate=round(value, 6),
-                                    underperforming=bool(endpoint_under), population=len(population),
+                                    underperforming=underperforming, population=len(population),
                                     quantile=round(quantile, 3),
                                     kill_comparable=comparable_under is not None,
                                     comparable_population=len(comparable_population))
                         if sample.resource_key is not None and sample.resource is not None:
                             sp.set_many(resource_key=sample.resource_key, resource=sample.resource)
-                        if endpoint_under or comparable_under is True:
-                            # DIAGNOSTIC => the fold never reads it, so appending it from this concurrent
-                            # watchdog is splice-neutral and replay-safe by construction.
+                        # CODEX AGENT: publish both warning and recovery edges for the combined endpoint /
+                        # same-resource advisory. Otherwise digest and Attention retain a historical flag
+                        # after this exact node generation recovers.
+                        if underperforming or previous_underperforming:
                             assert EV_ASHA_RANK in DIAGNOSTIC_EVENTS
                             event = {
                                 "node_id": node_id, "generation": generation,
+                                "underperforming": underperforming,
                                 "intermediate": round(value, 6), "quantile": round(quantile, 3),
                                 "population": len(population), "direction": str(direction),
                                 "endpoint_underperforming": bool(endpoint_under),

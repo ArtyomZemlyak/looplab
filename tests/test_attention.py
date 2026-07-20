@@ -445,6 +445,16 @@ def test_broken_training_monitor_alert_surfaces_a_stable_node_keyed_item(tmp_pat
              if i["kind"] == "train_monitor"]
     assert len(third) == 1 and third[0]["id"] == mon[0]["id"]
 
+    store.append(EV_TRAIN_MONITOR_ALERT, {
+        "node_id": 0, "generation": 0, "status": "healthy",
+        "reason": "loss recovered", "confidence": 0.9})
+    recovered = project_run_attention("demo", store.read_all(), engine_running=True)
+    assert "train_monitor" not in _kinds(recovered)  # explicit recovery clears this lifecycle
+
+    store.append(EV_TRAIN_MONITOR_ALERT, {
+        "node_id": 0, "generation": 0, "status": "broken",
+        "reason": "regressed again", "confidence": 0.98})
+
     # Once the node reaches a terminal (no longer pending), the stale alert drops from the inbox.
     store.append(EV_NODE_FAILED, {"node_id": 0, "generation": 0, "reason": "monitor_broken",
                                   "error": "stopped", "eval_seconds": 1.0})
@@ -481,6 +491,16 @@ def test_asha_underperform_surfaces_a_soft_node_keyed_inbox_item(tmp_path):
     third = [i for i in project_run_attention("demo", store.read_all(), engine_running=True)
              if i["kind"] == "asha"]
     assert len(third) == 1 and third[0]["id"] == ash[0]["id"]
+
+    store.append(EV_ASHA_RANK, {
+        "node_id": 0, "generation": 0, "underperforming": False,
+        "intermediate": 0.35, "quantile": 0.5, "population": 5, "direction": "min"})
+    recovered = project_run_attention("demo", store.read_all(), engine_running=True)
+    assert "asha" not in _kinds(recovered)             # explicit recovery clears this lifecycle
+
+    store.append(EV_ASHA_RANK, {
+        "node_id": 0, "generation": 0, "underperforming": True,
+        "intermediate": 0.4, "quantile": 0.5, "population": 5, "direction": "min"})
 
     # Once the node terminates (no longer pending), the stale rank flag drops from the inbox.
     store.append(EV_NODE_EVALUATED, {"node_id": 0, "generation": 0, "metric": 0.3, "eval_seconds": 1.0})

@@ -31,11 +31,11 @@ def _probe_watchdog_signals():
     from looplab.core.models import Event
     from looplab.events.digest import watchdog_reflection
     from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
-    events = [
-        Event(seq=1, ts=0.0, type=EV_TRAIN_MONITOR_ALERT,
+    events = _watchdog_lifecycle_events(4, 5) + [
+        Event(seq=10, ts=0.0, type=EV_TRAIN_MONITOR_ALERT,
               data={"node_id": 4, "generation": 0, "status": "broken",
                     "reason": "loss diverged to NaN", "confidence": 0.9}),
-        Event(seq=2, ts=0.0, type=EV_ASHA_RANK,
+        Event(seq=11, ts=0.0, type=EV_ASHA_RANK,
               data={"node_id": 5, "generation": 0, "intermediate": 0.3,
                     "quantile": 0.5, "population": 4, "direction": "max"}),
     ]
@@ -194,6 +194,16 @@ def _wd_event(seq, etype, **data):
     return Event(seq=seq, ts=0.0, type=etype, data=data)
 
 
+def _watchdog_lifecycle_events(*node_ids):
+    events = [_wd_event(0, "run_started", run_id="r", task_id="t", goal="g", direction="min")]
+    events.extend(
+        _wd_event(index, "node_created", node_id=node_id, generation=0, parent_ids=[],
+                  operator="draft", idea={"operator": "draft", "params": {}, "rationale": "x"})
+        for index, node_id in enumerate(node_ids, start=1)
+    )
+    return events
+
+
 def test_watchdog_reflection_empty_and_irrelevant_events_render_nothing():
     from looplab.events.digest import watchdog_reflection
     from looplab.events.types import EV_NODE_EVALUATED
@@ -204,12 +214,12 @@ def test_watchdog_reflection_empty_and_irrelevant_events_render_nothing():
 def test_watchdog_reflection_keeps_latest_per_node_and_combines_both_signals():
     from looplab.events.digest import watchdog_reflection
     from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
-    events = [
-        _wd_event(1, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=0, status="watch",
+    events = _watchdog_lifecycle_events(2) + [
+        _wd_event(10, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=0, status="watch",
                   reason="loss plateaued early", confidence=0.4),
-        _wd_event(2, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=0, status="broken",
+        _wd_event(11, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=0, status="broken",
                   reason="loss diverged", confidence=0.85),          # later -> supersedes the watch above
-        _wd_event(3, EV_ASHA_RANK, node_id=2, generation=0, intermediate=0.31,
+        _wd_event(12, EV_ASHA_RANK, node_id=2, generation=0, intermediate=0.31,
                   quantile=0.5, population=4, direction="max"),
     ]
     out = watchdog_reflection(events)
@@ -223,8 +233,9 @@ def test_watchdog_reflection_keeps_latest_per_node_and_combines_both_signals():
 def test_watchdog_reflection_bounds_to_most_recent_nodes():
     from looplab.events.digest import watchdog_reflection
     from looplab.events.types import EV_ASHA_RANK
-    events = [_wd_event(i, EV_ASHA_RANK, node_id=i, generation=0, intermediate=0.1 * i,
-                        quantile=0.5, population=3, direction="max") for i in range(1, 6)]
+    events = _watchdog_lifecycle_events(*range(1, 6))
+    events += [_wd_event(10 + i, EV_ASHA_RANK, node_id=i, generation=0, intermediate=0.1 * i,
+                         quantile=0.5, population=3, direction="max") for i in range(1, 6)]
     out = watchdog_reflection(events, max_shown=2)
     assert "node 5:" in out and "node 4:" in out                      # the two most recent nodes...
     assert "node 3:" not in out and "node 1:" not in out              # ...older ones are bounded out
@@ -239,7 +250,7 @@ def test_watchdog_reflection_distinguishes_endpoint_warning_from_same_resource_r
         comparable_population=3, resource_underperforming=False,
     )
 
-    out = watchdog_reflection([event])
+    out = watchdog_reflection(_watchdog_lifecycle_events(4) + [event])
     assert "ranked below" in out                         # endpoint comparison remains visible
     assert "on track against 3 same-resource" in out    # but is not narrated as doomed
 
@@ -248,9 +259,40 @@ def test_watchdog_reflection_distinguishes_endpoint_warning_from_same_resource_r
         quantile=0.5, population=3, direction="max", endpoint_underperforming=False,
         comparable_population=3, resource_underperforming=True,
     )
-    comparable_out = watchdog_reflection([comparable_only])
+    comparable_out = watchdog_reflection(_watchdog_lifecycle_events(5) + [comparable_only])
     assert "3 same-resource sibling(s)" in comparable_out
     assert "finished sibling" not in comparable_out
+
+
+def test_watchdog_reflection_recovery_and_generation_are_authoritative():
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
+
+    events = _watchdog_lifecycle_events(2)
+    events += [
+        _wd_event(10, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=0, status="broken",
+                  reason="old lifecycle", confidence=0.9),
+        _wd_event(11, EV_ASHA_RANK, node_id=2, generation=0, underperforming=True,
+                  intermediate=0.2, quantile=0.5, population=3),
+        _wd_event(12, "node_reset", node_id=2, generation=0, from_stage="eval"),
+        # Malformed mixed ids used to reach the raw dict/sort path and brick proposal generation.
+        _wd_event(13, EV_TRAIN_MONITOR_ALERT, node_id="2", generation=1, status="broken"),
+        _wd_event(14, EV_ASHA_RANK, node_id=True, generation=1, underperforming=True),
+        _wd_event(15, EV_TRAIN_MONITOR_ALERT, node_id=[2], generation=1, status="broken"),
+        _wd_event(16, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=1, status="watch",
+                  reason="current lifecycle", confidence=0.5),
+    ]
+    out = watchdog_reflection(events)
+    assert "current lifecycle" in out and "old lifecycle" not in out
+
+    # Both watchdogs publish explicit recovery edges; the latest lifecycle state clears the warning.
+    events += [
+        _wd_event(17, EV_TRAIN_MONITOR_ALERT, node_id=2, generation=1, status="healthy",
+                  reason="loss recovered", confidence=0.9),
+        _wd_event(18, EV_ASHA_RANK, node_id=2, generation=1, underperforming=False,
+                  intermediate=0.8, quantile=0.5, population=3),
+    ]
+    assert watchdog_reflection(events) == ""
 
 
 def test_trust_reflection_names_a_hardcoded_metric_flag():

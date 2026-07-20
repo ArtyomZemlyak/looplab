@@ -203,8 +203,6 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         if event.type != EV_TRAIN_MONITOR_ALERT:
             continue
         d = event.data or {}
-        if str(d.get("status") or "").strip().lower() != "broken":
-            continue
         nid = _integer(d.get("node_id"))
         gen = _integer(d.get("generation"))
         if nid is None or gen is None:
@@ -214,6 +212,10 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             monitor_latest[(nid, gen)] = event
     rid = _run_id(run_id)
     for (nid, gen), event in sorted(monitor_latest.items()):
+        # CODEX AGENT: select the latest lifecycle verdict before filtering. Filtering to broken while
+        # scanning made a later healthy recovery invisible and left the old warning permanently active.
+        if str((event.data or {}).get("status") or "").strip().lower() != "broken":
+            continue
         # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
         # node's broken alert is stale and not actionable. Mirrors the failure-spike lifecycle guard.
         cur = state.nodes.get(nid)
@@ -271,6 +273,9 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         if prev is None or (_integer(event.seq) or -1) > (_integer(prev.seq) or -1):
             asha_latest[(nid, gen)] = event
     for (nid, gen), event in sorted(asha_latest.items()):
+        # An absent bit is a legacy underperforming row; an explicit false is the modern recovery edge.
+        if (event.data or {}).get("underperforming", True) is not True:
+            continue
         # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
         # node's rank flag is stale. Mirrors the training-monitor + failure-spike lifecycle guard.
         cur = state.nodes.get(nid)

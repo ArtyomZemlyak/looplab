@@ -353,7 +353,8 @@ class TrainingMonitorMixin:
         Advisory (always): every tick with a CHANGED digest emits a `train_monitor` trace span carrying
         the verdict; a NON-healthy verdict additionally appends an EV_TRAIN_MONITOR_ALERT diagnostic event
         (fold-ignored — never touches node selection or replay — for the owner attention feed + audit).
-        Healthy verdicts stay trace-only, so events.jsonl carries only actionable flags.
+        Healthy verdicts stay trace-only except for a healthy transition after an alert; that explicit
+        recovery row lets every lifecycle projection clear the earlier warning.
 
         Intervention (Phase 3, only when `_train_monitor_kill` is on): on a confident 'broken' verdict the
         monitor records the reason into `kill_signal` and sets `cancel` — the SAME tree-kill path an
@@ -374,6 +375,7 @@ class TrainingMonitorMixin:
         next_sleep = base
         last_digest: Optional[str] = None
         healthy_streak = 0
+        last_event_status: Optional[str] = None
         llm_calls = 0
         while True:
             await anyio.sleep(next_sleep)    # only cancellation (eval finished) unwinds the task, from here
@@ -420,15 +422,18 @@ class TrainingMonitorMixin:
                             base, status=verdict.status, recheck_after_s=verdict.recheck_after_s,
                             healthy_streak=healthy_streak)
                         sp.set("next_check_s", round(next_sleep, 2))
-                        if verdict.status != "healthy":
-                            # Advisory flag only. DIAGNOSTIC => the fold never reads it, so appending it from
-                            # this concurrent monitor task is splice-neutral and replay-safe by construction.
+                        if (verdict.status != "healthy"
+                                or last_event_status in ("watch", "broken")):
+                            # CODEX AGENT: healthy is normally trace-only, but the transition from an alert
+                            # is a durable recovery edge. Without it, projections can only ever discover the
+                            # old bad verdict and keep warning after the live curve has recovered.
                             assert EV_TRAIN_MONITOR_ALERT in DIAGNOSTIC_EVENTS
                             async with self._write_lock:
                                 self.store.append(EV_TRAIN_MONITOR_ALERT, {
                                     "node_id": node_id, "generation": generation,
                                     "status": verdict.status, "reason": reason,
                                     "confidence": round(conf, 3)})
+                        last_event_status = verdict.status
                         # Phase 3 intervention (opt-in): a confident 'broken' run is tree-killed EARLY. Hand
                         # the reason to `_evaluate` via `kill_signal`, set `cancel` (same path as an operator
                         # abort), and stop watching — `_evaluate` writes the single terminal node_failed.

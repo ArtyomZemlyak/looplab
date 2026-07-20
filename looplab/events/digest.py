@@ -312,26 +312,50 @@ def watchdog_reflection(events, max_shown: int = 2) -> str:
     Advisory wording (the watchdogs are heuristics). "" when there's nothing to say — so the prompt is
     byte-identical when off or quiet. Pure; extracted here so `tests/test_signal_delivery.py` exercises
     it directly."""
+    from looplab.events.replay import fold
     from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
-    mon: dict = {}
-    asha: dict = {}
-    for e in events or ():
+
+    rows = list(events or ())
+    state = fold(rows)
+    mon: dict[tuple[int, int], tuple[dict, int]] = {}
+    asha: dict[tuple[int, int], tuple[dict, int]] = {}
+    for position, e in enumerate(rows):
         etype = getattr(e, "type", None)
         if etype not in (EV_TRAIN_MONITOR_ALERT, EV_ASHA_RANK):
             continue
         d = getattr(e, "data", None) or {}
         nid = d.get("node_id")
-        if nid is None:
+        generation = d.get("generation")
+        # CODEX AGENT: diagnostics are untrusted append-only rows too. Keying on raw ids both mixed
+        # lifecycles and let a bool/string/list brick sorting or hashing during the next proposal.
+        if (not isinstance(nid, int) or isinstance(nid, bool) or nid < 0
+                or not isinstance(generation, int) or isinstance(generation, bool)
+                or generation < 0):
             continue
         # Events arrive in append (seq) order, so a later row for the same node overwrites an earlier
         # one — the LATEST verdict/rank per node wins with no explicit seq compare.
-        (mon if etype == EV_TRAIN_MONITOR_ALERT else asha)[nid] = d
-    node_ids = sorted(set(mon) | set(asha), reverse=True)[:max_shown]      # most-recent nodes first
+        key = (nid, generation)
+        (mon if etype == EV_TRAIN_MONITOR_ALERT else asha)[key] = (d, position)
+
+    # CODEX AGENT: a reset is an evidence boundary. Diagnostics from an older generation must not steer
+    # fresh code, and an aborted/tombstoned lifecycle is no longer a proposal precedent.
+    active: set[tuple[int, int]] = set()
+    for key in set(mon) | set(asha):
+        nid, generation = key
+        node = state.nodes.get(nid)
+        if (node is not None and node.attempt == generation and not node.tombstoned
+                and nid not in state.aborted_nodes):
+            active.add(key)
+    lifecycle_keys = sorted(
+        active,
+        key=lambda key: max(mon.get(key, ({}, -1))[1], asha.get(key, ({}, -1))[1]),
+        reverse=True,
+    )[:max_shown]
     lines = []
-    for nid in node_ids:
+    for nid, generation in lifecycle_keys:
         parts = []
-        m = mon.get(nid)
-        if m:
+        m = mon.get((nid, generation), (None, -1))[0]
+        if m and str(m.get("status") or "").strip().lower() in ("watch", "broken"):
             status = str(m.get("status") or "flagged")
             reason = " ".join(str(m.get("reason") or "").split())[:120]    # reason is redacted at source
             conf = m.get("confidence")
@@ -341,8 +365,9 @@ def watchdog_reflection(events, max_shown: int = 2) -> str:
             if isinstance(conf, (int, float)) and not isinstance(conf, bool):
                 seg += f" [confidence {conf:.0%}]"
             parts.append(seg)
-        a = asha.get(nid)
-        if a:
+        a = asha.get((nid, generation), (None, -1))[0]
+        # Legacy rows represented only underperformance. A modern false row is the recovery edge.
+        if a and a.get("underperforming", True) is True:
             val, q, pop = a.get("intermediate"), a.get("quantile"), a.get("population")
             seg = "intermediate metric"
             if isinstance(val, (int, float)) and not isinstance(val, bool):

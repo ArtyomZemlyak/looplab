@@ -311,6 +311,30 @@ def test_healthy_verdict_stays_trace_only_no_event(tmp_path):
     assert tm and tm[0]["attributes"].get("status") == "healthy"                       # but traced
 
 
+def test_healthy_transition_records_explicit_recovery_event(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    logf = wd / "train.log"
+    logf.write_text("step 1 loss: nan\n")
+
+    class _RecoveringClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_tool(self, messages, schema):
+            self.calls += 1
+            if self.calls == 1:
+                with open(logf, "a", encoding="utf-8") as fh:
+                    fh.write("step 2 loss: 0.4\n")       # make the next digest observable
+                return {"status": "broken", "reason": "loss is nan", "confidence": 0.9}
+            return {"status": "healthy", "reason": "finite loss is decreasing", "confidence": 0.9}
+
+    host, _spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(_RecoveringClient()), hold_s=0.3)
+    alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
+    assert [event["status"] for event in alerts[:2]] == ["broken", "healthy"]
+
+
 def test_unchanged_digest_does_not_re_call_the_llm(tmp_path):
     wd = tmp_path / "node_0"
     wd.mkdir()
