@@ -560,8 +560,10 @@ def test_propose_batch_captures_per_idea_foreagent_telemetry(tmp_path):
 
 
 def test_propose_batch_uses_a_native_backend_when_present(tmp_path):
-    # A backend that CAN batch (one call -> N ideas) is used directly; `propose` is never touched.
+    # A backend that CAN batch (one call -> N ideas) is used directly; `propose` is never touched, but
+    # the optimization must still cross the ordinary history/graded-novelty admission boundary.
     eng = _engine(tmp_path / "batch-native")
+    gated = []
 
     class _BatchResearcher:
         def propose_batch(self, state, n):
@@ -572,8 +574,16 @@ def test_propose_batch_uses_a_native_backend_when_present(tmp_path):
             raise AssertionError("native propose_batch must be preferred over propose")
 
     eng.researcher = _BatchResearcher()
+    original_gate = eng._apply_novelty_gate
+
+    def _record_gate(state, idea, repropose=None, researcher=None):
+        gated.append((idea.params["x"], callable(repropose), researcher is eng.researcher))
+        return original_gate(state, idea, repropose=repropose, researcher=researcher)
+
+    eng._apply_novelty_gate = _record_gate
     ideas = eng._propose_batch(RunState(), 3)
     assert len(ideas) == 3 and len({i.params["x"] for i in ideas}) == 3
+    assert gated == [(0, True, True), (1, True, True), (2, True, True)]
 
 
 def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):

@@ -400,8 +400,26 @@ class NoveltyGateMixin:
         ideas: list = []
         if callable(native):
             try:
-                produced = list(native(state, n)) or []
+                from itertools import islice
+
+                # CODEX AGENT: native batching is only a latency/diversity optimization. It must not
+                # bypass the same history/graded-novelty admission boundary as sequential proposals,
+                # and a broken backend must not make us materialize an unbounded iterable.
+                produced = list(islice(native(state, n) or (), n))
+
+                def _native_repropose():
+                    replacement = list(islice(native(state, 1) or (), 1))
+                    return replacement[0] if replacement else None
+
                 for idea in produced:
+                    if idea is None:
+                        continue
+                    idea = self._apply_novelty_gate(
+                        state,
+                        idea,
+                        repropose=_native_repropose,
+                        researcher=self.researcher,
+                    )
                     if idea is not None and not self._intra_batch_dup(idea, ideas):
                         ideas.append(idea)
                 if ideas:
