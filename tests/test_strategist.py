@@ -607,6 +607,51 @@ def test_native_batch_drops_same_action_but_accepts_distinct_params(tmp_path):
     assert [idea.params for idea in ideas] == [{"x": 1.0}, {"x": 2.0}]
 
 
+def test_native_batch_dedups_model_operators_that_execute_as_draft(tmp_path):
+    """Model-authored labels cannot distinguish actions the policy executes identically."""
+    eng = _engine(tmp_path / "batch-native-governed-operator")
+    eng._novelty_mode = "off"
+
+    class _BatchResearcher:
+        def propose_batch(self, state, n):
+            return [
+                Idea(operator="alpha", params={"x": 1}, eval_timeout=60, rationale="first"),
+                Idea(operator="beta", params={"x": 1}, eval_timeout=60, rationale="second"),
+            ][:n]
+
+        def propose(self, state, parent):
+            raise AssertionError("native batch should not fall back")
+
+    eng.researcher = _BatchResearcher()
+    ideas = eng._propose_batch(RunState(), 2)
+    assert [(idea.operator, idea.params, idea.eval_timeout) for idea in ideas] == [
+        ("draft", {"x": 1.0}, 60.0),
+    ]
+
+
+def test_native_batch_keeps_distinct_governed_eval_timeouts(tmp_path):
+    """A long-budget trial is distinct when its timeout override will really execute."""
+    eng = _engine(tmp_path / "batch-native-governed-timeout")
+    eng._novelty_mode = "off"
+
+    class _BatchResearcher:
+        def propose_batch(self, state, n):
+            return [
+                Idea(operator="alpha", params={"x": 1}, eval_timeout=60, rationale="same"),
+                Idea(operator="alpha", params={"x": 1}, eval_timeout=3600, rationale="same"),
+            ][:n]
+
+        def propose(self, state, parent):
+            raise AssertionError("native batch should not fall back")
+
+    eng.researcher = _BatchResearcher()
+    ideas = eng._propose_batch(RunState(), 2)
+    assert [(idea.operator, idea.eval_timeout) for idea in ideas] == [
+        ("draft", 60.0),
+        ("draft", 3600.0),
+    ]
+
+
 def test_intra_batch_action_identity_covers_operator_space_and_profile(tmp_path):
     eng = _engine(tmp_path / "batch-action-axes")
     base = Idea(operator="draft", params={"b": 2, "a": 1}, space={"lr": [0.1, 0.2]},
@@ -614,9 +659,23 @@ def test_intra_batch_action_identity_covers_operator_space_and_profile(tmp_path)
     reordered = Idea(operator="draft", params={"a": 1, "b": 2}, space={"lr": [0.1, 0.2]},
                      eval_profile="smoke", rationale="two")
     assert eng._intra_batch_dup(reordered, [base]) is True
-    assert eng._intra_batch_dup(base.model_copy(update={"operator": "improve"}), [base]) is False
+    assert eng._intra_batch_dup(base.model_copy(update={"operator": "improve"}), [base]) is True
     assert eng._intra_batch_dup(base.model_copy(update={"space": {"lr": [0.1, 0.3]}}), [base]) is False
     assert eng._intra_batch_dup(base.model_copy(update={"eval_profile": "full"}), [base]) is False
+    assert eng._intra_batch_dup(base.model_copy(update={"eval_timeout": 60}), [base]) is False
+
+
+def test_intra_batch_ignores_timeout_override_when_governance_or_executor_does(tmp_path):
+    eng = _engine(tmp_path / "batch-action-timeout-governance")
+    short = Idea(operator="draft", params={"x": 1}, eval_timeout=60, rationale="short")
+    long = Idea(operator="draft", params={"x": 1}, eval_timeout=3600, rationale="long")
+
+    eng._agent_control = {"timeout": ["strategist"]}
+    assert eng._intra_batch_dup(long, [short]) is True
+
+    eng._agent_control = {"timeout": ["researcher"]}
+    eng._eval_spec = {"command": ["python", "score.py"]}
+    assert eng._intra_batch_dup(long, [short]) is True
 
 
 def test_native_batch_novelty_receipts_use_unique_prospective_ids(tmp_path):

@@ -2150,7 +2150,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # Phase 2: the shared researcher already proposed + novelty-gated this idea in the
                     # batch pass; skip re-research (its complexity/novelty cues already ran on the shared
                     # researcher) and go straight to this build's own developer.implement below.
-                    idea = preproposed
+                    idea = self._canonicalize_draft_idea(preproposed)
                     # Restore THIS idea's own FOREAGENT telemetry (captured per-roll during the batch
                     # pass) onto this build's pooled researcher, so the hypothesis_ranked/foresight_selected
                     # emitters below stamp THIS node with ITS ranking — not the last batch roll's.
@@ -2164,12 +2164,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 else:
                     self._set_complexity_hint(state, None, researcher=researcher)   # A0d complexity cue
                     with self.tracer.span("propose"):
-                        idea = researcher.propose(state, None)
+                        idea = self._canonicalize_draft_idea(researcher.propose(state, None))
                     # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
                     idea = self._apply_novelty_gate(
-                        state, idea, repropose=lambda: researcher.propose(state, None),
+                        state, idea,
+                        repropose=lambda: self._canonicalize_draft_idea(
+                            researcher.propose(state, None)),
                         researcher=researcher)
-                idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
                     code = developer.implement(self._directed_idea(idea, state))

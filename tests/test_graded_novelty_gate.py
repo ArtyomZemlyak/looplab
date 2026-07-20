@@ -512,6 +512,7 @@ def test_default_llm_gate_prompt_preserves_bounded_candidate_and_prior_actions(
             "params": {"temperature": 0.1},
             "space": {"temperature": [0.1]},
             "eval_profile": "smoke",
+            "eval_timeout": 60,
             "rationale": prose,
         },
     })
@@ -521,10 +522,12 @@ def test_default_llm_gate_prompt_preserves_bounded_candidate_and_prior_actions(
         params={"temperature": 0.5},
         space={"temperature": [0.5, 0.7]},
         eval_profile="full",
+        eval_timeout=3600,
         rationale=prose,
     )
     engine = _GateEngine(store, graded=False, mode="llm")
     engine._reflect_client = object
+    engine._agent_may = lambda role, setting: (role, setting) == ("researcher", "timeout")
     captured = {}
 
     def _agentic(client, tools, messages, schema, **kwargs):
@@ -543,7 +546,26 @@ def test_default_llm_gate_prompt_preserves_bounded_candidate_and_prior_actions(
     assert '"entries":[["temperature",0.1]]' in prompt
     assert '"values":[0.5,0.7]' in prompt and '"values":[0.1]' in prompt
     assert '"eval_profile":"full"' in prompt and '"eval_profile":"smoke"' in prompt
+    assert '"eval_timeout":3600.0' in prompt and '"eval_timeout":60.0' in prompt
     assert len(prompt) < 10_000 and "chars omitted" in prompt
+
+
+@pytest.mark.parametrize(
+    ("researcher_may", "repo_eval", "expected"),
+    [(True, False, '"eval_timeout":3600.0'),
+     (False, False, '"eval_timeout":null'),
+     (True, True, '"eval_timeout":null')],
+)
+def test_llm_action_prompt_only_exposes_timeout_that_execution_honors(
+        tmp_path, researcher_may, repo_eval, expected):
+    engine = _GateEngine(EventStore(tmp_path / "events.jsonl"), graded=False, mode="llm")
+    engine._agent_may = lambda role, setting: (
+        researcher_may and (role, setting) == ("researcher", "timeout"))
+    engine._eval_spec = {"command": ["python", "score.py"]} if repo_eval else None
+
+    prompt_identity = engine._idea_prompt_identity(
+        Idea(operator="draft", params={"x": 1}, eval_timeout=3600), prose_chars=100)
+    assert expected in prompt_identity
 
 
 # --------------------------------------------------------------------------- #

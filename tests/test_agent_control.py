@@ -10,7 +10,7 @@ import anyio
 
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
-from looplab.core.models import Idea, RunState
+from looplab.core.models import Idea, Node, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
@@ -86,6 +86,38 @@ def test_no_eval_timeout_uses_run_default(tmp_path):
                   agent_control={"timeout": ["researcher"]}, sandbox=sb)
     anyio.run(eng.run)
     assert sb.timeouts == [42.0]
+
+
+def test_command_eval_ignores_researcher_timeout_override(tmp_path, monkeypatch):
+    """Repo/command eval executes its operator-owned timeout, not Idea.eval_timeout."""
+    eng = _engine(
+        tmp_path / "command-eval",
+        agent_control={"timeout": ["researcher"]},
+    )
+    eng._eval_spec = {
+        "command": ["python", "score.py"],
+        "metric": {"kind": "stdout_json", "key": "metric"},
+        "timeout": 17,
+    }
+    workdir = tmp_path / "eval-workdir"
+    workdir.mkdir()
+    seen = {}
+
+    def _record_command(_command, _cwd, timeout, _metric, *args, **kwargs):
+        seen["timeout"] = timeout
+        return RunResult(0, '{"metric": 1}', "", 1.0, False)
+
+    monkeypatch.setattr("looplab.runtime.command_eval.run_command_eval", _record_command)
+    node = Node(
+        id=0,
+        operator="draft",
+        idea=Idea(operator="draft", params={"x": 1}, eval_timeout=3600),
+        code="",
+    )
+
+    eng._run_eval(node, workdir)
+    assert eng._effective_researcher_eval_timeout(node.idea) is None
+    assert seen["timeout"] == 17.0
 
 
 # ----------------------------------------------------- strategist run-wide retune

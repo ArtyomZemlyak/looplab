@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.models import normalize_extra_metrics
+from looplab.engine.action_governance import effective_researcher_eval_timeout
 from looplab.events.replay import fold
 from looplab.events.types import EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED
 
@@ -191,9 +192,12 @@ class EvalDispatchMixin:
             # Researcher-sized per-node budget (e.g. a neural-net / large-ensemble idea that needs longer
             # than the run default) — honored ONLY when the governance matrix grants the researcher the
             # `timeout` setting; otherwise the run-wide budget stands. This is the "auto" per-node mode.
-            etv = getattr(node.idea, "eval_timeout", None) if node is not None else None
-            if etv and etv > 0 and self._agent_may("researcher", "timeout"):
-                timeout = float(etv)
+            # The same governed canonicalization feeds native-batch identity and execution. Keeping
+            # this as the single consumer prevents admission from fingerprinting a timeout we ignore.
+            etv = effective_researcher_eval_timeout(
+                self, node.idea if node is not None else None)
+            if etv is not None:
+                timeout = etv
             res = self.sandbox.run(node.code, str(workdir), timeout, env, cancel=cancel)
         # Intra-node sweep: if the solution reported a grid of trials, collapse them into the node's
         # scalar `metric` (the best feasible trial under the task direction) so fold/best-selection/

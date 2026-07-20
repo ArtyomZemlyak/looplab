@@ -11,7 +11,7 @@ test monkeypatching `looplab.tools.vectorstore._cosine` / `looplab.agents.agent.
 still intercepts them.
 
 Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never serve — only
-core, events and stdlib (the search/agent/tool deps are lazy, method-local imports)."""
+core, events, the pure action-governance helper and stdlib (search/agent/tool deps stay lazy)."""
 from __future__ import annotations
 
 import json
@@ -23,6 +23,7 @@ from typing import Optional
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState)
+from looplab.engine.action_governance import effective_researcher_eval_timeout
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
 
@@ -147,15 +148,16 @@ def _canonical_action_number(value) -> tuple[str, float | str]:
     return "number", 0.0 if number == 0.0 else number
 
 
-def _canonical_action_identity(idea) -> tuple[tuple, bool]:
-    """Canonical operator/params/space/eval-profile identity and whether it has a concrete axis."""
+def _canonical_action_identity(idea, *, operator: str,
+                               eval_timeout: Optional[float]) -> tuple[tuple, bool]:
+    """Canonical governed action identity and whether it has a concrete executable axis."""
     params = getattr(idea, "params", None)
     params = params if isinstance(params, dict) else {}
     space = getattr(idea, "space", None)
     space = space if isinstance(space, dict) else {}
     profile = getattr(idea, "eval_profile", None)
     identity = (
-        unicodedata.normalize("NFKC", str(getattr(idea, "operator", "") or "")).strip(),
+        unicodedata.normalize("NFKC", str(operator or "")).strip(),
         tuple(sorted((str(key), _canonical_action_number(value)) for key, value in params.items())),
         tuple(sorted(
             (str(key), tuple(_canonical_action_number(value) for value in values))
@@ -163,10 +165,11 @@ def _canonical_action_identity(idea) -> tuple[tuple, bool]:
             if isinstance(values, (list, tuple))
         )),
         (unicodedata.normalize("NFKC", str(profile)).strip() if profile is not None else None),
+        (_canonical_action_number(eval_timeout) if eval_timeout is not None else None),
     )
     # Operator alone is too coarse: repo drafts commonly have no structured knobs and are distinguished
-    # by their implementation claim. Once any action axis exists, structural inequality is authoritative.
-    return identity, bool(params or space or profile is not None)
+    # by their implementation claim. Once any executable axis exists, structural inequality is authoritative.
+    return identity, bool(params or space or profile is not None or eval_timeout is not None)
 
 
 class NoveltyGateMixin:
@@ -192,6 +195,19 @@ class NoveltyGateMixin:
                 pass
         return max(state.nodes, default=-1) + 1
 
+    @staticmethod
+    def _canonicalize_draft_idea(idea):
+        """Apply the policy-owned operator before novelty admission and implementation."""
+        if idea is None or getattr(idea, "operator", None) == "draft":
+            return idea
+        governed = idea.model_copy()
+        governed.operator = "draft"
+        return governed
+
+    def _effective_researcher_eval_timeout(self, idea) -> Optional[float]:
+        """Return the finite per-node timeout override that the evaluator will actually honor."""
+        return effective_researcher_eval_timeout(self, idea)
+
     def _idea_prompt_identity(self, idea, *, prose_chars: int) -> str:
         """A bounded claim + action identity for the live LLM novelty adjudicator."""
         # CODEX AGENT: rationale/hypothesis are not the experiment action. Keep every structural axis
@@ -204,6 +220,7 @@ class NoveltyGateMixin:
                 _bounded_prompt_text(getattr(idea, "eval_profile", ""), 160)
                 if getattr(idea, "eval_profile", None) is not None else None
             ),
+            "eval_timeout": self._effective_researcher_eval_timeout(idea),
         }
         return (
             f"claim={json.dumps(_bounded_prompt_text(self._idea_text(idea), prose_chars), ensure_ascii=False)}; "
@@ -332,8 +349,9 @@ class NoveltyGateMixin:
                              "actual experiments (read_experiment / read_code) when unsure. A rewording or a "
                              "trivially-close variant of a tried idea is a DUPLICATE; a genuinely different "
                              "approach, component, loss, data or direction is NOVEL. Compare both the claim "
-                             "and the bounded action identity: operator, params, search space and eval profile "
-                             "are part of what was tried. Prefer NOVEL unless clearly a repeat."},
+                             "and the bounded action identity: operator, params, search space, eval profile "
+                             "and the governed evaluation-timeout override are part of what was tried. "
+                             "Prefer NOVEL unless clearly a repeat."},
                  {"role": "user",
                   "content": f"PROPOSED idea: {self._idea_prompt_identity(idea, prose_chars=800)}"
                              f"\n\nAlready tried:\n{brief}\n\n"
@@ -395,7 +413,11 @@ class NoveltyGateMixin:
         first by canonical action, then (only when neither action has concrete structure) by idea text.
         This preserves distinct numeric/sweep/profile trials even when their prose is identical while a
         short rationale can no longer hide an identical executable action."""
-        action, has_action_axis = _canonical_action_identity(idea)
+        action, has_action_axis = _canonical_action_identity(
+            idea,
+            operator="draft",
+            eval_timeout=self._effective_researcher_eval_timeout(idea),
+        )
         raw = self._idea_text(idea)
         t = raw.strip().lower()
         # Semantic parity with the serial draft path (review finding #7): when a run actually uses the
@@ -406,10 +428,14 @@ class NoveltyGateMixin:
         _semantic = getattr(self, "_novelty_mode", "off") not in (None, "off")
         _vec = None
         for other in chosen:
-            other_action, other_has_action_axis = _canonical_action_identity(other)
-            # CODEX AGENT: structural action identity outranks prose. Equal params/space/profile are a
-            # duplicate even with one-character rationale; unequal params remain distinct trials even
-            # if a native backend repeats boilerplate rationale across the whole batch.
+            other_action, other_has_action_axis = _canonical_action_identity(
+                other,
+                operator="draft",
+                eval_timeout=self._effective_researcher_eval_timeout(other),
+            )
+            # CODEX AGENT: policy owns the batch operator (every accepted sibling executes as draft),
+            # while a governed finite timeout is a real budget axis. Compare that one canonical action
+            # before prose so model-authored labels cannot admit duplicate drafts or erase long trials.
             if has_action_axis or other_has_action_axis:
                 if action == other_action:
                     return True
@@ -467,11 +493,12 @@ class NoveltyGateMixin:
 
                 def _native_repropose():
                     replacement = list(islice(native(state, 1) or (), 1))
-                    return replacement[0] if replacement else None
+                    return self._canonicalize_draft_idea(replacement[0]) if replacement else None
 
                 for idea in produced:
                     if idea is None:
                         continue
+                    idea = self._canonicalize_draft_idea(idea)
                     idea = self._apply_novelty_gate(
                         state,
                         idea,
@@ -509,10 +536,13 @@ class NoveltyGateMixin:
                 idea = self.researcher.propose(state, None)
                 if idea is None:
                     continue
+                idea = self._canonicalize_draft_idea(idea)
                 # Normal vs-history novelty gate (one informed re-propose on a semantic hit), exactly as
                 # the serial draft path runs it — then drop an intra-batch near-duplicate.
                 idea = self._apply_novelty_gate(
-                    state, idea, repropose=lambda: self.researcher.propose(state, None),
+                    state, idea,
+                    repropose=lambda: self._canonicalize_draft_idea(
+                        self.researcher.propose(state, None)),
                     prospective_node_id=prospective_base + len(ideas))
                 if idea is None or self._intra_batch_dup(idea, ideas):
                     continue
