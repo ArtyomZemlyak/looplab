@@ -42,6 +42,9 @@ _MAX_RESEARCH_CLAIMS_PER_RUN = 256
 _MAX_RESEARCH_SOURCE_ITEMS = (1 << 31) - 1
 _CLAIM_READ_HEALTH_VERSION = 1
 _LESSON_OUTCOMES = frozenset((*_NEGATIVE, "supported", "noted", ""))
+_RESEARCH_SOURCE_RECEIPT_ROW_FIELDS = frozenset((
+    "v", "record_kind", "run_id", "task_id", "direction", "source_receipt",
+))
 
 
 def _empty_claim_read_segment() -> dict:
@@ -234,6 +237,20 @@ def _valid_node_source(raw) -> bool:
     return True
 
 
+def _indexable_research_claim(row) -> bool:
+    """Defense-in-depth discriminator for rows that may contribute claim semantics.
+
+    Validation remains the schema authority, but every assessment/index loop independently refuses a
+    current-schema sentinel (or another kinded row) so a validator regression cannot turn a producer
+    cardinality receipt into evidence. Unversioned/v0-v2 rows retain their historical empty-kind shape.
+    """
+    if not isinstance(row, dict):
+        return False
+    kind = row.get("record_kind")
+    return kind in (None, "", "claim") and (
+        row.get("v") != _RESEARCH_CLAIM_VERSION or kind == "claim")
+
+
 def _valid_claim_source_row(row, *, research: bool) -> bool:
     """Conservative schema fence for persisted lesson/research evidence rows."""
     if not isinstance(row, dict):
@@ -241,7 +258,11 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
     if research and row.get("record_kind") == "source_receipt":
         run_id, task_id, direction = row.get("run_id"), row.get("task_id"), row.get("direction")
         return (
-            row.get("v") == _RESEARCH_CLAIM_VERSION
+            # CODEX AGENT: a sentinel is an exact cardinality record, never an open claim envelope. If
+            # statement/evidence/verification fields hitch a ride, assessment code must not be able to
+            # index them while the same row advertises an authoritative retained count of zero.
+            set(row) == _RESEARCH_SOURCE_RECEIPT_ROW_FIELDS
+            and row.get("v") == _RESEARCH_CLAIM_VERSION
             and isinstance(run_id, str) and bool(run_id) and len(run_id) <= _MAX_SOURCE_ID
             and isinstance(task_id, str) and len(task_id) <= _MAX_SOURCE_ID
             and isinstance(direction, str) and direction in ("min", "max")
@@ -450,7 +471,7 @@ def _research_source_summary(rows) -> dict:
 
     partial = unknown = known_total = known_omitted = 0
     for members in groups.values():
-        claim_members = [row for row in members if row.get("record_kind") != "source_receipt"]
+        claim_members = [row for row in members if _indexable_research_claim(row)]
         # Direct pure-function callers already control the complete list they pass. Durable readers add a
         # version discriminator before this point, so absence cannot accidentally upgrade a legacy file.
         if all("v" not in row for row in members):
@@ -485,7 +506,7 @@ def _research_source_summary(rows) -> dict:
         "producer_unknown_runs": unknown,
         "producer_claims_total": known_total,
         "producer_claims_retained": sum(
-            row.get("record_kind") != "source_receipt" for row in source),
+            _indexable_research_claim(row) for row in source),
         "producer_claims_omitted": known_omitted,
         "read_health_v": _CLAIM_READ_HEALTH_VERSION,
         "read_complete": read_complete,
@@ -1434,6 +1455,8 @@ def _structured_assessments(lessons, research_claims, decisions, *,
         g["_ev"][_claim_text(lz.get("statement"))] += len(refs)
 
     for rc in research_claims or []:
+        if not _indexable_research_claim(rc):
+            continue
         g = _grp(rc.get("statement"), rc.get("task_id"), _metric_identity(rc))
         if g is None:
             continue
@@ -1606,6 +1629,8 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         # "noted"/unknown -> neutral: still registers the run/scope, but takes NO stance.
 
     for rc in research_claims or []:
+        if not _indexable_research_claim(rc):
+            continue
         g = _group(rc.get("statement"))
         if g is None:
             continue

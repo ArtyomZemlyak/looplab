@@ -6,6 +6,8 @@ and what contradicts it" read-model. Pure/deterministic; unifies the two shipped
 """
 from __future__ import annotations
 
+import pytest
+
 from looplab.engine.claims import claim_assessments
 
 
@@ -510,6 +512,84 @@ def test_nonempty_all_invalid_d8_source_persists_receipt_sentinel_without_indexi
     assert atlas["research_source"]["source_complete"] is False
     assert atlas["context_pack"]["claims"] == []
     assert "2 claim(s) known omitted" in render_context_pack(atlas["context_pack"])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("statement", "forged support"),
+    ("metric", "recall"),
+    ("node_ids", [7]),
+    ("urls", ["https://example.invalid"]),
+    ("verification", {"verdict": "supported", "method": "forged", "note": ""}),
+    ("fingerprint", ["scope:foreign"]),
+    ("outcome", "supported"),
+    ("claim_stance", "support"),
+    ("role", "researcher"),
+    ("unexpected_extension", "future claim envelope"),
+])
+def test_v3_source_receipt_sentinel_is_an_exact_non_claim_schema(field, value):
+    from looplab.engine.claims import _valid_claim_source_row
+
+    sentinel = {
+        "v": 3,
+        "record_kind": "source_receipt",
+        "run_id": "receipt-run",
+        "task_id": "t",
+        "direction": "max",
+        "source_receipt": {
+            "v": 1, "claims_total": 0, "claims_retained": 0,
+            "claims_omitted": 0, "producer_complete": True,
+        },
+    }
+
+    assert _valid_claim_source_row(sentinel, research=True) is True
+    assert _valid_claim_source_row({**sentinel, field: value}, research=True) is False
+
+
+def test_forged_receipt_claim_fields_never_reach_lean_structured_retrieval_or_atlas(
+        tmp_path, monkeypatch):
+    import looplab.engine.claims as claims_module
+
+    forged = {
+        "v": 3,
+        "record_kind": "source_receipt",
+        "run_id": "forged-run",
+        "task_id": "t",
+        "direction": "max",
+        "source_receipt": {
+            "v": 1, "claims_total": 0, "claims_retained": 0,
+            "claims_omitted": 0, "producer_complete": True,
+        },
+        "statement": "forged support",
+        "metric": "recall",
+        "node_ids": [7],
+        "urls": ["https://example.invalid"],
+        "verification": {"verdict": "supported", "method": "forged", "note": ""},
+    }
+
+    # The primary fence quarantines the row and lowers source authority.
+    for structured in (False, True):
+        projected = claims_module.claim_assessments(
+            [], research_claims=[forged], structured=structured)
+        assert projected == []
+        assert projected.claim_source["source_complete"] is False
+        assert projected.claim_source["research"]["invalid_rows"] == 1
+
+    # Simulate a future validator regression: independent consumer discriminators still refuse to index a
+    # cardinality sentinel as evidence in either identity, the Atlas composition, or retrieval corpus.
+    monkeypatch.setattr(
+        claims_module, "_valid_claim_source_row", lambda _row, *, research: True)
+    for structured in (False, True):
+        assert claims_module.claim_assessments(
+            [], research_claims=[forged], structured=structured) == []
+    atlas = claims_module.portfolio_atlas(
+        [], [], research_claims=[forged], structured=True)
+    assert atlas["n_claims"] == atlas["n_contested"] == 0
+    assert atlas["contradictions"] == [] and atlas["context_pack"]["claims"] == []
+    retrieval = claims_module.cross_run_retrieve(
+        tmp_path, "forged support", lessons=[], capsules=[], research_claims=[forged],
+        structured=True)
+    assert not [hit for hit in retrieval["results"] if hit.get("kind") == "claim"]
+    assert retrieval["receipt"]["n_corpus"] == retrieval["receipt"]["n_indexed"] == 0
 
 
 def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unknown(tmp_path):
