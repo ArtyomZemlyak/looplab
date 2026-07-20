@@ -149,7 +149,7 @@ def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     """Freeze one portfolio overview and its exact prompt digest before a durable paid claim."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import project_governed_sources
+    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
 
     base = Path(memory_dir) if memory_dir else None
@@ -163,7 +163,8 @@ def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
             source_names=("concept_capsules.jsonl",),
         )
     cp = base / "concept_capsules.jsonl" if base else None
-    caps = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    # CODEX AGENT: unreadable evidence is unknown, not an empty graph eligible for an empty paid verdict.
+    caps = ConceptCapsuleStore(cp).all() if cp and not observed_path_missing(cp) else []
     if aliases is None or splits is None:
         # CODEX AGENT: aliases and splits form one taxonomy. A mutation between two independent
         # reads could ask the paid steward to review a hybrid policy state that never existed.

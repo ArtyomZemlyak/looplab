@@ -152,7 +152,8 @@ class StrategyCadenceMixin:
                 )
             cp = base / "concept_capsules.jsonl"
             lessons = load_claim_lessons(base)
-            caps = ConceptCapsuleStore(cp).all() if cp.exists() else []
+            from looplab.engine.governance_health import observed_path_missing
+            caps = ConceptCapsuleStore(cp).all() if not observed_path_missing(cp) else []
             research = load_research_claims(base)
             task_id = str(getattr(state, "task_id", "") or "") if state is not None else ""
             run_id = str(getattr(state, "run_id", "") or "") if state is not None else ""

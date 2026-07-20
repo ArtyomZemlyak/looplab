@@ -428,6 +428,7 @@ def test_governed_source_projection_uses_one_canonical_lock_order(tmp_path, monk
             "concept_governance.lock",
             "claim_decisions.jsonl.lock",
             "concept_capsules.jsonl.lock",
+            "external_evidence.jsonl.lock",
             "lessons.jsonl.lock",
             "research_claims.jsonl.lock",
         ]
@@ -438,14 +439,172 @@ def test_governed_source_projection_uses_one_canonical_lock_order(tmp_path, monk
         # Deliberately unsorted: the transaction owns deterministic source ordering.
         source_names=(
             "research_claims.jsonl", "lessons.jsonl", "concept_capsules.jsonl"),
+        source_paths=(tmp_path / "external_evidence.jsonl",),
     )
 
     assert entered == [
         "concept_governance.lock", "claim_decisions.jsonl.lock",
-        "concept_capsules.jsonl.lock", "lessons.jsonl.lock",
+        "concept_capsules.jsonl.lock", "external_evidence.jsonl.lock", "lessons.jsonl.lock",
         "research_claims.jsonl.lock",
     ]
     assert snapshot["claim_revision"] == snapshot["concept_governance_revision"] == 0
+
+
+def test_governed_source_projection_rejects_external_and_policy_paths(tmp_path):
+    for source in (
+            tmp_path.parent / "outside.jsonl",
+            tmp_path / "claim_decisions.jsonl",
+            tmp_path / "nested" / "evidence.jsonl"):
+        with pytest.raises(ValueError, match="governed source path"):
+            project_governed_sources(
+                tmp_path, lambda governance: governance, source_paths=(source,))
+
+
+def test_cross_run_cli_payloads_are_built_inside_one_governed_source_snapshot(
+        tmp_path, monkeypatch):
+    import looplab.engine.claims as claims_module
+    import looplab.engine.memory as memory_module
+    import looplab.events.eventstore as eventstore_module
+
+    _seed_cross_run(tmp_path)
+    active: list[str] = []
+    phase = {"name": ""}
+    observed: list[str] = []
+    expected = {
+        "concepts": [
+            "concept_governance.lock", "claim_decisions.jsonl.lock",
+            "concept_capsules.jsonl.lock",
+        ],
+        "digest": [
+            "concept_governance.lock", "claim_decisions.jsonl.lock",
+            "concept_capsules.jsonl.lock",
+        ],
+        "atlas": [
+            "concept_governance.lock", "claim_decisions.jsonl.lock",
+            "concept_capsules.jsonl.lock", "lessons.jsonl.lock",
+            "research_claims.jsonl.lock",
+        ],
+        "pack": [
+            "concept_governance.lock", "claim_decisions.jsonl.lock",
+            "concept_capsules.jsonl.lock", "lessons.jsonl.lock",
+            "research_claims.jsonl.lock",
+        ],
+    }
+
+    @contextmanager
+    def observed_lock(path, *, required=False):
+        assert required is True
+        active.append(path.name)
+        try:
+            yield
+        finally:
+            assert active.pop() == path.name
+
+    monkeypatch.setattr(eventstore_module, "_interprocess_lock", observed_lock)
+
+    def wrap(target, name):
+        def checked(*args, **kwargs):
+            if phase["name"] == name:
+                assert active == expected[name]
+                observed.append(name)
+            return target(*args, **kwargs)
+        return checked
+
+    monkeypatch.setattr(
+        memory_module, "portfolio_concept_overview",
+        wrap(memory_module.portfolio_concept_overview, "concepts"))
+    monkeypatch.setattr(
+        memory_module, "portfolio_digest",
+        wrap(memory_module.portfolio_digest, "digest"))
+    monkeypatch.setattr(
+        claims_module, "portfolio_atlas",
+        wrap(claims_module.portfolio_atlas, "atlas"))
+    monkeypatch.setattr(
+        claims_module, "build_context_pack",
+        wrap(claims_module.build_context_pack, "pack"))
+
+    commands = {
+        "concepts": ["cross-run-concepts", str(tmp_path), "--json"],
+        "digest": ["cross-run-digest", str(tmp_path), "--json"],
+        "atlas": ["atlas", str(tmp_path), "--json"],
+        "pack": ["claims", str(tmp_path), "--pack", "--json"],
+    }
+    for name, command in commands.items():
+        phase["name"] = name
+        result = CliRunner().invoke(app, command)
+        assert result.exit_code == 0, result.output
+        assert active == []
+
+    assert observed == ["concepts", "digest", "atlas", "pack"]
+
+
+def test_claims_cli_locks_the_exact_explicit_evidence_file(tmp_path, monkeypatch):
+    import looplab.engine.claims as claims_module
+    import looplab.events.eventstore as eventstore_module
+
+    evidence = tmp_path / "custom-evidence.txt"
+    evidence.write_text(json.dumps({
+        "statement": "explicit evidence remains supported", "outcome": "supported",
+        "evidence": [1], "run_id": "r-explicit", "task_id": "t",
+    }) + "\n", encoding="utf-8")
+    active: list[str] = []
+    observed = []
+
+    @contextmanager
+    def observed_lock(path, *, required=False):
+        assert required is True
+        active.append(path.name)
+        try:
+            yield
+        finally:
+            assert active.pop() == path.name
+
+    monkeypatch.setattr(eventstore_module, "_interprocess_lock", observed_lock)
+    original = claims_module.claim_assessments
+
+    def checked(*args, **kwargs):
+        assert active == [
+            "claim_decisions.jsonl.lock", "custom-evidence.txt.lock",
+            "research_claims.jsonl.lock",
+        ]
+        observed.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(claims_module, "claim_assessments", checked)
+
+    result = CliRunner().invoke(app, ["claims", str(evidence), "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "explicit evidence remains supported" in result.output
+    assert observed == [True]
+    assert active == []
+
+
+def test_capsule_stat_failure_is_unknown_and_cli_surfaces_are_bounded(tmp_path, monkeypatch):
+    _seed_cross_run(tmp_path)
+    original_stat = Path.stat
+    secret = f"permission denied: {tmp_path / 'concept_capsules.jsonl'}"
+
+    def guarded_stat(path, *args, **kwargs):
+        if path.name == "concept_capsules.jsonl":
+            raise PermissionError(secret)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+
+    with pytest.raises(PermissionError, match="permission denied"):
+        atlas_for_memory(tmp_path)
+
+    for command in (
+            ["cross-run-concepts", str(tmp_path)],
+            ["cross-run-digest", str(tmp_path)],
+            ["atlas", str(tmp_path)],
+            ["claims", str(tmp_path), "--pack"]):
+        result = CliRunner().invoke(app, command)
+        assert result.exit_code == 2, result.output
+        assert "ledger=cross_run_sources" in result.output
+        assert "reason=storage_unreadable" in result.output
+        assert secret not in result.output and str(tmp_path) not in result.output
 
 
 def test_governed_source_projection_fences_policy_and_evidence_writers(tmp_path):

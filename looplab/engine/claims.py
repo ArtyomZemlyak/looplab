@@ -1431,7 +1431,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     claims/contradictions (mega-review)."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import project_governed_sources
+    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import (ConceptCapsuleStore, _dedup_valid_capsules,
                                        _filter_capsule_rows)
     if _governance is None:
@@ -1458,7 +1458,10 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     lessons = _valid_claim_source_rows(lessons, research=False)
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
-        capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+        # CODEX AGENT: Path.exists() can collapse permission/storage failures into false. Only a confirmed
+        # FileNotFound is an authoritative empty capsule source inside this governed snapshot.
+        capsules = (ConceptCapsuleStore(cp).all()
+                    if cp and not observed_path_missing(cp) else [])
     capsule_source = capsules if isinstance(capsules, (list, tuple)) else []
     capsules = _dedup_valid_capsules(capsule_source)
     research = load_research_claims(memory_dir) if research_claims is None else research_claims
@@ -2212,7 +2215,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     Operator-rejected claims never enter the corpus. Advisory; pure w.r.t. the passed/loaded stores."""
     from pathlib import Path
 
-    from looplab.engine.governance_health import project_governed_sources
+    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import (ConceptCapsuleStore, _filter_capsule_rows,
                                        _portfolio_concept_overview_data)
     if _governance is None:
@@ -2237,7 +2240,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     base = Path(memory_dir) if memory_dir else None
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
-        capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+        capsules = (ConceptCapsuleStore(cp).all()
+                    if cp and not observed_path_missing(cp) else [])
     if lessons is None:
         lessons = load_claim_lessons(memory_dir)
     lessons = _valid_claim_source_rows(lessons, research=False)

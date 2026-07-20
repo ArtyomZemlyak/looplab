@@ -766,21 +766,47 @@ def cross_run_concepts_cmd(
     """PART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
     `cross_run_concepts` is on. Shows which concepts have been explored across the portfolio and in which
     runs — each with its OWN outcome (raw metrics are NOT compared across tasks). Pure read; no endpoint."""
-    from looplab.engine.concept_registry import concept_governance_snapshot
+    import stat
+
+    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     p = Path(memory_dir)
-    path = p if p.is_file() else p / "concept_capsules.jsonl"
-    if not path.exists():
+
+    def _snapshot():
+        try:
+            mode = p.stat().st_mode
+        except FileNotFoundError:
+            path, base = p / "concept_capsules.jsonl", p
+        else:
+            if stat.S_ISREG(mode):
+                path, base = p, p.parent
+            elif stat.S_ISDIR(mode):
+                path, base = p / "concept_capsules.jsonl", p
+            else:
+                return p, None
+
+        canonical = path.absolute() == (base / "concept_capsules.jsonl").absolute()
+
+        def _project(governance):
+            if observed_path_missing(path):
+                return None
+            # CODEX AGENT: read capsules and apply taxonomy while both policy and evidence locks are held;
+            # separate reads can otherwise render a merge against a capsule generation that never coexisted.
+            return portfolio_concept_overview(
+                ConceptCapsuleStore(path).all(), aliases=governance["aliases"],
+                splits=governance["splits"])
+
+        overview = project_governed_sources(
+            base, _project, include_concepts=True,
+            source_names=(("concept_capsules.jsonl",) if canonical else ()),
+            source_paths=(() if canonical else (path.absolute(),)),
+        )
+        return path, overview
+
+    path, ov = _governance_cli_read(_snapshot)
+    if ov is None:
         typer.echo(f"no concept capsules at {path} (run with cross_run_concepts on to populate)")
         raise typer.Exit(1)
-    # Honor recorded operator/steward taxonomy governance (merge/purge/split), consistent with
-    # cross-run-digest, the Atlas and the agent tools — otherwise this inspector shows the STALE raw graph
-    # after a merge/split/purge (live-test finding). The alias/split ledgers live in the memory DIR.
-    base = str(p if p.is_dir() else p.parent)
-    governance = _governance_cli_read(lambda: concept_governance_snapshot(base))
-    ov = portfolio_concept_overview(
-        ConceptCapsuleStore(path).all(), aliases=governance["aliases"],
-        splits=governance["splits"])
     if as_json:
         typer.echo(orjson.dumps(ov, option=orjson.OPT_INDENT_2).decode())
         return
@@ -1145,17 +1171,38 @@ def cross_run_digest_cmd(
     """PART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
     into clusters with rollup counts. Deterministic inspector DATA; NOT wired into any prompt until it
     beats the flat baseline on the benchmark corpus (the hierarchy gate). Honors concept aliases. No LLM."""
-    from looplab.engine.concept_registry import concept_governance_snapshot
+    import stat
+
+    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_digest
-    caps_p = Path(memory_dir) / "concept_capsules.jsonl"
-    caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
-    if not caps and getattr(caps, "source_health", {}).get("source_store_complete") is not False:
+    base = Path(memory_dir)
+    caps_p = base / "concept_capsules.jsonl"
+
+    def _snapshot():
+        try:
+            if not stat.S_ISDIR(base.stat().st_mode):
+                return None
+        except FileNotFoundError:
+            pass
+
+        def _project(governance):
+            caps = [] if observed_path_missing(caps_p) else ConceptCapsuleStore(caps_p).all()
+            if (not caps
+                    and getattr(caps, "source_health", {}).get("source_store_complete") is not False):
+                return None
+            # CODEX AGENT: digest labels and capsule rows are one governed observation, not adjacent reads.
+            return portfolio_digest(
+                caps, aliases=governance["aliases"], splits=governance["splits"])
+
+        return project_governed_sources(
+            base, _project, include_concepts=True,
+            source_names=("concept_capsules.jsonl",),
+        )
+
+    dg = _governance_cli_read(_snapshot)
+    if dg is None:
         typer.echo(f"no concept capsules at {memory_dir}")
         raise typer.Exit(1)
-    governance = _governance_cli_read(
-        lambda: concept_governance_snapshot(str(memory_dir)))
-    dg = portfolio_digest(
-        caps, aliases=governance["aliases"], splits=governance["splits"])
     if as_json:
         typer.echo(orjson.dumps(dg, option=orjson.OPT_INDENT_2).decode())
         return
@@ -1235,20 +1282,18 @@ def atlas_cmd(
     Wire keys such as ``thin_coverage`` and ``contradictions`` are retained for compatibility; they
     do not establish a CoverageFrame, an untried gap, or a proposition-level contradiction verdict.
     """
-    from looplab.engine.claims import atlas_for_memory, load_claim_lessons, load_research_claims
-    from looplab.engine.memory import ConceptCapsuleStore
+    from looplab.engine.claims import atlas_for_memory
     base = Path(memory_dir)
-    caps_p = base / "concept_capsules.jsonl"
-    lessons = load_claim_lessons(base)
-    caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
-    research = load_research_claims(base)
-    atlas = _governance_cli_read(lambda: atlas_for_memory(
-        base, lessons=lessons, capsules=caps,
-        research_claims=research, max_items=max_items))
+    # CODEX AGENT: leaving every source argument unset delegates loading to atlas_for_memory's single
+    # policy+evidence transaction. Preloading here defeated that boundary and created hybrid Atlases.
+    atlas = _governance_cli_read(lambda: atlas_for_memory(base, max_items=max_items))
     claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
     concept_source_for_empty = (
         atlas.get("concept_source") if isinstance(atlas.get("concept_source"), dict) else {})
-    if (not lessons and not caps and not research
+    lesson_rows = ((claim_source.get("lessons") or {}).get("rows_total", 0))
+    research_rows = ((claim_source.get("research") or {}).get("rows_total", 0))
+    capsule_rows = concept_source_for_empty.get("source_rows_total", 0)
+    if (lesson_rows == research_rows == capsule_rows == 0
             and claim_source.get("source_complete") is True
             and concept_source_for_empty.get("source_complete") is True):
         typer.echo(f"no cross-run memory at {base} (need lessons, capsules, and/or research claims)")
@@ -1330,51 +1375,85 @@ def claims_cmd(
     from looplab.engine.claims import (
         _load_claim_source_path, _safe_claim_source_summary,
         _safe_research_source_summary, build_context_pack, claims_for_memory,
-        load_claim_lessons, load_research_claims, render_context_pack,
+        load_research_claims, render_context_pack,
     )
+    from looplab.engine.governance_health import observed_path_missing, project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
+    import stat
+
     p = Path(memory_dir)
-    if p.is_file():
-        path, base = p, p.parent
-        lessons = _load_claim_source_path(path, research=False)
-    elif p.is_dir():
-        path, base = p / "lessons.jsonl", p
-        # A memory directory may legitimately contain D8 research claims without distilled lessons.
-        lessons = load_claim_lessons(base)
-    else:
+
+    def _snapshot():
+        try:
+            mode = p.stat().st_mode
+        except FileNotFoundError:
+            return None
+        if stat.S_ISREG(mode):
+            path, base = p, p.parent
+        elif stat.S_ISDIR(mode):
+            path, base = p / "lessons.jsonl", p
+        else:
+            return None
+
+        canonical_lessons = path.absolute() == (base / "lessons.jsonl").absolute()
+        source_names = ["research_claims.jsonl"]
+        source_paths = []
+        if canonical_lessons:
+            source_names.append("lessons.jsonl")
+        else:
+            source_paths.append(path.absolute())
+        if pack:
+            source_names.append("concept_capsules.jsonl")
+
+        def _project(governance):
+            lessons = _load_claim_source_path(path, research=False)
+            research = load_research_claims(base)
+            claims = claims_for_memory(
+                base, lessons=lessons, research_claims=research,
+                decisions=governance["decisions"], fuzzy=fuzzy, structured=structured)
+            research_source = _safe_research_source_summary(
+                getattr(claims, "research_source", None)) or {}
+            claim_source = _safe_claim_source_summary(
+                getattr(claims, "claim_source", None)) or {}
+            context_pack = None
+            if pack:
+                caps_path = base / "concept_capsules.jsonl"
+                if observed_path_missing(caps_path):
+                    overview, concept_rows = None, None
+                else:
+                    overview, concept_rows = _portfolio_concept_overview_data(
+                        ConceptCapsuleStore(caps_path).all(), aliases=governance["aliases"],
+                        splits=governance["splits"])
+                # CODEX AGENT: build the pack before releasing any policy/source lock. Its claims,
+                # taxonomy, source receipts and decisions must all describe the same durable era.
+                context_pack = build_context_pack(
+                    claims, concept_overview=overview, max_claims=top,
+                    _concept_rows=concept_rows, _research_source=research_source)
+            return {
+                "path": path, "lessons": lessons, "research": research, "claims": claims,
+                "research_source": research_source, "claim_source": claim_source,
+                "context_pack": context_pack,
+            }
+
+        return project_governed_sources(
+            base, _project, include_concepts=pack,
+            source_names=source_names, source_paths=source_paths,
+        )
+
+    snapshot = _governance_cli_read(_snapshot)
+    if snapshot is None:
         # Reject before selecting a parent directory; otherwise an explicit missing file
         # silently reads an unrelated sibling research_claims.jsonl and reports success for the wrong input.
         typer.echo(f"cross-run memory path does not exist or is not a file/directory: {p}")
         raise typer.Exit(1)
-    research = load_research_claims(base)
-    governance = None
-    if pack:
-        from looplab.engine.governance_health import cross_run_governance_snapshot
-        governance = _governance_cli_read(lambda: cross_run_governance_snapshot(base))
-    claims = _governance_cli_read(lambda: claims_for_memory(
-        base, lessons=lessons, research_claims=research,
-        decisions=(governance["decisions"] if governance is not None else None),
-        fuzzy=fuzzy, structured=structured))
-    research_source = _safe_research_source_summary(
-        getattr(claims, "research_source", None)) or {}
-    claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
+    path = snapshot["path"]
+    lessons, research, claims = snapshot["lessons"], snapshot["research"], snapshot["claims"]
+    research_source, claim_source = snapshot["research_source"], snapshot["claim_source"]
     if (not lessons and not research and claim_source.get("source_complete") is True):
         typer.echo(f"no lessons at {path}")
         raise typer.Exit(1)
     if pack:
-        # compose with the concept overview (Step 3) from the same memory dir when present — honor the
-        # recorded taxonomy governance (aliases/splits), consistent with every other consumer (live-test).
-        base = p if p.is_dir() else p.parent
-        caps_path = base / "concept_capsules.jsonl"
-        if caps_path.exists():
-            overview, concept_rows = _portfolio_concept_overview_data(
-                ConceptCapsuleStore(caps_path).all(), aliases=governance["aliases"],
-                splits=governance["splits"])
-        else:
-            overview, concept_rows = None, None
-        cp = build_context_pack(
-            claims, concept_overview=overview, max_claims=top,
-            _concept_rows=concept_rows, _research_source=research_source)
+        cp = snapshot["context_pack"]
         typer.echo(orjson.dumps(cp, option=orjson.OPT_INDENT_2).decode() if as_json
                    else (render_context_pack(cp) or "(empty context pack)"))
         return

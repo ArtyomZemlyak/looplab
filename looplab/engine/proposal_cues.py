@@ -324,7 +324,8 @@ class ProposalCuesMixin:
                 )
             cp = base / "concept_capsules.jsonl"
             lessons = load_claim_lessons(base)
-            capsules = ConceptCapsuleStore(cp).all() if cp.exists() else []
+            from looplab.engine.governance_health import observed_path_missing
+            capsules = ConceptCapsuleStore(cp).all() if not observed_path_missing(cp) else []
             # Freeze one task-scoped view for this prompt. Exact task id is authoritative only after
             # direction provenance matches; related-task transfer uses the same fingerprint threshold as
             # lesson priors and never includes this run.

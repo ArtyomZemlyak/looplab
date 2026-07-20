@@ -609,7 +609,7 @@ def _read_governance_locked(base: Path, *, include_concepts: bool) -> dict:
 
 def project_governed_sources(
         memory_dir, project: Callable[[dict], _ProjectionT], *,
-        include_concepts: bool = False, source_names=(),
+        include_concepts: bool = False, source_names=(), source_paths=(),
         claim_locked: bool = False) -> _ProjectionT:
     """Project policy and mutable evidence at one canonical lock point.
 
@@ -618,16 +618,32 @@ def project_governed_sources(
     attached governance revisions describe one linearizable snapshot. A claim writer that already
     owns ``claim_decisions.jsonl.lock`` may pass ``claim_locked=True``; acquiring concept governance
     from that position is rejected because it would invert the global order.
+
+    ``source_names`` selects the three canonical stores. ``source_paths`` exists for CLI inputs that
+    explicitly name a noncanonical evidence file; each such path must be a direct, non-policy child of
+    the memory directory and joins the same sorted source-lock set.
     """
     if claim_locked and include_concepts:
         raise ValueError("claim-locked projection cannot acquire concept governance")
-    requested = tuple(source_names or ())
+    requested_names = tuple(source_names or ())
     if (any(not isinstance(name, str) or name not in _GOVERNED_SOURCE_NAMES
-            for name in requested)):
+            for name in requested_names)):
         raise ValueError("unknown governed source")
     if not memory_dir:
         return project(_empty_governance_snapshot())
-    base = Path(memory_dir)
+    base = Path(memory_dir).absolute()
+    requested_paths: list[Path] = []
+    for raw_path in tuple(source_paths or ()):
+        if not isinstance(raw_path, (str, Path)):
+            raise ValueError("invalid governed source path")
+        source = Path(raw_path)
+        source = (source if source.is_absolute() else base / source).absolute()
+        # CODEX AGENT: the CLI accepts an explicitly named lessons/capsule JSONL. Let the shared
+        # transaction lock that exact sibling while preventing path traversal or recursive policy locks.
+        if (source.parent != base
+                or source.name.casefold() in _GOVERNANCE_LEDGER_FILES):
+            raise ValueError("governed source path must be a non-policy file directly under memory_dir")
+        requested_paths.append(source)
     # Linearize an absent store at this observation point without creating lock artifacts on a read.
     if observed_path_missing(base):
         return project(_empty_governance_snapshot())
@@ -640,7 +656,10 @@ def project_governed_sources(
     claim_path = base / "claim_decisions.jsonl"
     claim_guard = (nullcontext() if claim_locked else _interprocess_lock(
         Path(str(claim_path) + ".lock"), required=True))
-    sources = sorted({base / name for name in requested}, key=lambda path: str(path))
+    sources = sorted(
+        {*(base / name for name in requested_names), *requested_paths},
+        key=lambda path: str(path),
+    )
     with concept_guard:
         with claim_guard:
             with ExitStack() as source_stack:
