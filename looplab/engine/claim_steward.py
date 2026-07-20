@@ -117,11 +117,27 @@ def claim_curation_input_digest(claims, *, max_proposals: int = _MAX_PROPOSALS) 
 
 
 def claim_curation_snapshot(memory_dir, *, lessons=None, structured: bool = True,
-                            max_proposals: int = _MAX_PROPOSALS) -> tuple[list[dict], str]:
+                            max_proposals: int = _MAX_PROPOSALS,
+                            _governance: dict | None = None) -> tuple[list[dict], str]:
     """Freeze one claim projection and its exact prompt digest before a durable paid claim."""
     from looplab.engine.claims import claims_for_memory
+    from looplab.engine.governance_health import project_governed_sources
 
-    claims = claims_for_memory(memory_dir, lessons=lessons, structured=structured)
+    if _governance is None:
+        source_names = ["research_claims.jsonl"]
+        if lessons is None:
+            source_names.append("lessons.jsonl")
+        return project_governed_sources(
+            memory_dir,
+            lambda governance: claim_curation_snapshot(
+                memory_dir, lessons=lessons, structured=structured,
+                max_proposals=max_proposals, _governance=governance),
+            source_names=source_names,
+        )
+
+    claims = claims_for_memory(
+        memory_dir, lessons=lessons, decisions=_governance["decisions"],
+        structured=structured)
     return claims, claim_curation_input_digest(claims, max_proposals=max_proposals)
 
 

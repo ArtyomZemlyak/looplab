@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 
 from looplab.core.models import RunState
-from looplab.engine.claim_steward import claim_curation_input_digest
+from looplab.engine.claim_steward import claim_curation_input_digest, claim_curation_snapshot
 from looplab.engine.concept_steward import (
     CONCEPT_CURATION_INPUT_SCHEMA,
     concept_curation_input_digest,
@@ -121,6 +123,80 @@ def test_same_snapshot_across_runs_bills_once_and_visible_change_reopens(tmp_pat
     assert client.calls == 2
     rows = _rows(tmp_path / "concept_curation_log.jsonl")
     assert len(rows) == 2 and len({row["curation_key"] for row in rows}) == 2
+
+
+def test_claim_paid_snapshot_fences_evidence_mutation_through_digest(tmp_path, monkeypatch):
+    import looplab.engine.claim_steward as steward_module
+    from looplab.events.eventstore import _interprocess_lock
+
+    _seed_claim(tmp_path, "evidence before snapshot")
+    path = tmp_path / "lessons.jsonl"
+    started, landed = Event(), Event()
+    original_digest = steward_module.claim_curation_input_digest
+
+    def mutate():
+        started.set()
+        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+            _seed_claim(tmp_path, "evidence after snapshot")
+            landed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        mutation = None
+
+        def observe_digest(claims, **kwargs):
+            nonlocal mutation
+            mutation = executor.submit(mutate)
+            assert started.wait(5)
+            assert not landed.wait(0.1)
+            return original_digest(claims, **kwargs)
+
+        monkeypatch.setattr(steward_module, "claim_curation_input_digest", observe_digest)
+        claims, digest = claim_curation_snapshot(tmp_path)
+        assert mutation is not None
+        mutation.result(timeout=5)
+
+    assert landed.is_set()
+    assert any(row["statement"] == "evidence before snapshot" for row in claims)
+    assert digest == original_digest(claims)
+
+
+def test_concept_paid_snapshot_fences_capsule_mutation_through_digest(tmp_path, monkeypatch):
+    import looplab.engine.concept_steward as steward_module
+    from looplab.events.eventstore import _interprocess_lock
+
+    _seed_concept(tmp_path, "retrieval/before")
+    path = tmp_path / "concept_capsules.jsonl"
+    started, landed = Event(), Event()
+    original_digest = steward_module.concept_curation_input_digest
+    later = build_concept_capsule(
+        run_id="later", task_id="task", fingerprint=["dataset"], direction="max",
+        concepts=["retrieval/after"], concept_outcomes={})
+
+    def mutate():
+        started.set()
+        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(later) + "\n")
+            landed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        mutation = None
+
+        def observe_digest(overview, **kwargs):
+            nonlocal mutation
+            mutation = executor.submit(mutate)
+            assert started.wait(5)
+            assert not landed.wait(0.1)
+            return original_digest(overview, **kwargs)
+
+        monkeypatch.setattr(steward_module, "concept_curation_input_digest", observe_digest)
+        overview, digest = concept_curation_snapshot(tmp_path)
+        assert mutation is not None
+        mutation.result(timeout=5)
+
+    assert landed.is_set()
+    assert {row["concept"] for row in overview["concepts"]} == {"retrieval/before"}
+    assert digest == original_digest(overview)
 
 
 def test_claim_snapshot_is_frozen_from_digest_through_proposal(tmp_path, monkeypatch):

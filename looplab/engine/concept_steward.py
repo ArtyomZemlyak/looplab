@@ -144,20 +144,30 @@ def concept_curation_input_digest(overview: dict, *,
 
 def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
                               splits: Optional[dict] = None,
-                              max_proposals: int = _MAX_PROPOSALS) -> tuple[dict, str]:
+                              max_proposals: int = _MAX_PROPOSALS,
+                              _governance: Optional[dict] = None) -> tuple[dict, str]:
     """Freeze one portfolio overview and its exact prompt digest before a durable paid claim."""
     from pathlib import Path
 
-    from looplab.engine.concept_registry import concept_governance_snapshot
+    from looplab.engine.governance_health import project_governed_sources
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
 
     base = Path(memory_dir) if memory_dir else None
+    if _governance is None:
+        return project_governed_sources(
+            memory_dir,
+            lambda governance: concept_curation_snapshot(
+                memory_dir, aliases=aliases, splits=splits,
+                max_proposals=max_proposals, _governance=governance),
+            include_concepts=aliases is None or splits is None,
+            source_names=("concept_capsules.jsonl",),
+        )
     cp = base / "concept_capsules.jsonl" if base else None
     caps = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
     if aliases is None or splits is None:
         # CODEX AGENT: aliases and splits form one taxonomy. A mutation between two independent
         # reads could ask the paid steward to review a hybrid policy state that never existed.
-        governance = concept_governance_snapshot(memory_dir)
+        governance = _governance
         aliases = governance["aliases"] if aliases is None else aliases
         splits = governance["splits"] if splits is None else splits
     overview = portfolio_concept_overview(caps, aliases=aliases, splits=splits)

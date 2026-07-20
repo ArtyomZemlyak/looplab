@@ -28,6 +28,18 @@ _TOOL_NAMES = frozenset({
     "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
     "cross_run_concept_map", "similar_runs", "find_concept_slugs", "concept_card",
 })
+_GOVERNED_TOOL_SOURCES = {
+    "cross_run_prior_attempts": (True, ("concept_capsules.jsonl",)),
+    "cross_run_claims": (False, ("lessons.jsonl", "research_claims.jsonl")),
+    "cross_run_atlas": (
+        True, ("concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl")),
+    "cross_run_search": (
+        True, ("concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl")),
+    "cross_run_concept_map": (True, ("concept_capsules.jsonl",)),
+    "similar_runs": (True, ("concept_capsules.jsonl",)),
+    "find_concept_slugs": (True, ("concept_capsules.jsonl",)),
+    "concept_card": (True, ("concept_capsules.jsonl", "lessons.jsonl")),
+}
 
 
 def _slug_norm(s: str) -> str:
@@ -408,10 +420,21 @@ class CrossRunTools:
                 pass
             return _TOOL_UNAVAILABLE
 
-    def _execute(self, name: str, args: dict) -> str:
+    def _execute(self, name: str, args: dict, *, _governance: dict | None = None) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
-        from looplab.engine.concept_registry import concept_governance_snapshot
+        snapshot_scope = _GOVERNED_TOOL_SOURCES.get(name)
+        if _governance is None and snapshot_scope is not None:
+            from looplab.engine.governance_health import project_governed_sources
+
+            include_concepts, source_names = snapshot_scope
+            return project_governed_sources(
+                self.dir,
+                lambda governance: self._execute(
+                    name, args, _governance=governance),
+                include_concepts=include_concepts,
+                source_names=source_names,
+            )
         from looplab.engine.memory import _portfolio_concept_overview_data
 
         if name == "cross_run_prior_attempts":
@@ -423,7 +446,7 @@ class CrossRunTools:
             qt = _toks(idea)
             scoped_capsules = self._scoped_capsules()
             scope_receipt = self._capsule_scope_receipt
-            governance = concept_governance_snapshot(self.dir)
+            governance = _governance
             ov, concept_rows = _portfolio_concept_overview_data(
                 scoped_capsules, aliases=governance["aliases"],
                 splits=governance["splits"])
@@ -466,7 +489,8 @@ class CrossRunTools:
                                                _safe_research_source_summary)
             claims = claims_for_memory(
                 self.dir, lessons=self._role_lessons(),
-                research_claims=self._role_research_claims(), structured=True)
+                research_claims=self._role_research_claims(),
+                decisions=_governance["decisions"], structured=True)
             claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
             research_source = _safe_research_source_summary(
                 getattr(claims, "research_source", None)) or {}
@@ -526,7 +550,8 @@ class CrossRunTools:
             scope_receipt = self._capsule_scope_receipt
             atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
                                      capsules=scoped_capsules,
-                                     research_claims=self._role_research_claims(), structured=True)
+                                     research_claims=self._role_research_claims(), structured=True,
+                                     _governance=_governance)
             lines = [f"Bounded live projection: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence."]
             claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
@@ -586,7 +611,7 @@ class CrossRunTools:
             from looplab.engine.memory import portfolio_concept_graph
             scoped_capsules = self._scoped_capsules()
             scope_receipt = self._capsule_scope_receipt
-            governance = concept_governance_snapshot(self.dir)
+            governance = _governance
             graph = portfolio_concept_graph(
                 scoped_capsules, aliases=governance["aliases"],
                 splits=governance["splits"])
@@ -665,7 +690,7 @@ class CrossRunTools:
                                    capsules=scoped_capsules,
                                    research_claims=self._role_research_claims(),
                                    intent=intent, structured=True,
-                                   scope_receipt=scope_receipt)
+                                   scope_receipt=scope_receipt, _governance=_governance)
             hits = r["results"][:8]
             rc = r.get("receipt") or {}
             source_complete = rc.get("source_complete") is True
@@ -732,13 +757,12 @@ class CrossRunTools:
             except (TypeError, ValueError):
                 limit = 10
             limit = max(1, min(limit, 50))
-            from looplab.engine.concept_registry import (canonicalize_concepts,
-                                                         concept_governance_snapshot)
+            from looplab.engine.concept_registry import canonicalize_concepts
 
             # CODEX AGENT: visibility and identity are one retrieval boundary. A bound model may compare
             # only `_scoped_capsules()` (task family + compatible direction), and both sides must use the
             # SAME locked taxonomy snapshot so an alias/split/purge cannot change just one Jaccard operand.
-            taxonomy = concept_governance_snapshot(self.dir)
+            taxonomy = _governance
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
             mine = set(canonicalize_concepts(
                 sorted(self._concepts), aliases=aliases, splits=splits))
@@ -757,7 +781,7 @@ class CrossRunTools:
                         f"eligible_capsules={len(prior_caps)} matched={matched} returned={returned} "
                         f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
                         f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
-                        f"taxonomy_revision={taxonomy['governance_revision']}]")
+                        f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
 
             if self._concept_projection_status == "unavailable":
                 return ("(current run concepts are UNAVAILABLE; similar_runs cannot infer overlap from "
@@ -850,14 +874,13 @@ class CrossRunTools:
             #   own    — in THIS run's concept set
             #   cross  — in a prior run that shares >=1 concept with this one (same direction)
             #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
-            from looplab.engine.concept_registry import (canonicalize_concepts,
-                                                         concept_governance_snapshot)
+            from looplab.engine.concept_registry import canonicalize_concepts
             from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
 
             # CODEX AGENT: identity, cross-run visibility, and display trust are one boundary. Resolve every
             # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
             # run "cross", while the explicitly requested global tier remains the broader synergy surface.
-            taxonomy = concept_governance_snapshot(self.dir)
+            taxonomy = _governance
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
             caps = self._all_capsules()
             prior_caps = _filter_capsule_rows(
@@ -919,7 +942,7 @@ class CrossRunTools:
                         f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
                         f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
                         f"candidates={candidates} returned={returned} "
-                        f"taxonomy_revision={taxonomy['governance_revision']}]")
+                        f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
 
             concept_dependent_scope = want in {"own", "cross"}
             capsule_scope_uncertain = (want in {"all", "cross", "global"}
@@ -1046,14 +1069,13 @@ class CrossRunTools:
                 return "(cross-run tool error: slug exceeds 256 characters)"
             slug_in = raw_slug.strip()
             from looplab.engine.concept_registry import (canonicalize_concepts,
-                                                         concept_governance_snapshot,
                                                          normalize_key, resolve_slug)
             from looplab.engine.memory import (_capsule_source_summary,
                                                _portfolio_concept_overview_data,
                                                _filter_capsule_rows, concept_profit_tendencies,
                                                portfolio_concept_graph)
 
-            taxonomy = concept_governance_snapshot(self.dir)
+            taxonomy = _governance
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
             caps = self._all_capsules()
             prior_caps = _filter_capsule_rows(
@@ -1251,7 +1273,7 @@ class CrossRunTools:
                          f"cooccurrence_source_complete="
                          f"{str(graph.get('edge_source_complete') is True).lower()} "
                          f"cooccurrence_nodes_pruned={graph.get('edge_source_nodes_pruned', 0)} "
-                         f"taxonomy_revision={taxonomy['governance_revision']}]")
+                         f"taxonomy_revision={taxonomy['concept_governance_revision']}]")
             return "\n".join(lines)
 
         return "(unknown cross-run tool)"

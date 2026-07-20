@@ -274,7 +274,8 @@ class ProposalCuesMixin:
                 "to check what was already tried and what the evidence supports — advisory only, it "
                 "never constrains your choice.")
 
-    def _cross_run_advisory_text(self, state: RunState) -> str:
+    def _cross_run_advisory_text(
+            self, state: RunState, *, _governance: dict | None = None) -> str:
         """§21.20 Step 5 (advisory): the bounded cross-run CONTEXT PACK for the Researcher prompt —
         evidence-grounded claims with BOTH support and counter-evidence (Step 4) plus a bounded live concept-
         observation line (Step 3), rendered as a short prose block. Folded into the prompt hint like the E4
@@ -302,7 +303,7 @@ class ProposalCuesMixin:
                 load_research_claims,
                 render_context_pack,
             )
-            from looplab.engine.governance_health import cross_run_governance_snapshot
+            from looplab.engine.governance_health import project_governed_sources
             from looplab.engine.memory import (
                 ConceptCapsuleStore,
                 _capsule_source_summary,
@@ -312,6 +313,15 @@ class ProposalCuesMixin:
                 _filter_capsule_rows,
             )
             base = Path(self.memory_dir)
+            if _governance is None:
+                return project_governed_sources(
+                    base,
+                    lambda governance: self._cross_run_advisory_text(
+                        state, _governance=governance),
+                    include_concepts=True,
+                    source_names=(
+                        "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
+                )
             cp = base / "concept_capsules.jsonl"
             lessons = load_claim_lessons(base)
             capsules = ConceptCapsuleStore(cp).all() if cp.exists() else []
@@ -393,7 +403,7 @@ class ProposalCuesMixin:
             )
             # Freeze all three operator-policy ledgers together. The live prompt must never combine
             # an alias map from before a split with a claim overlay from after it.
-            governance = cross_run_governance_snapshot(base)
+            governance = _governance
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
             capsule_source = _capsule_source_summary(capsules)

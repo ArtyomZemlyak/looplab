@@ -106,7 +106,9 @@ class StrategyCadenceMixin:
             cross_run_receipt=getattr(self, "_cross_run_note_receipt", {}),
         )
 
-    def _cross_run_note_for_ctx(self, state: Optional[RunState] = None) -> str:
+    def _cross_run_note_for_ctx(
+            self, state: Optional[RunState] = None, *,
+            _governance: Optional[dict] = None) -> str:
         """PART V §22 — a bounded live cross-run observation note for the Strategist's brief.
 
         It reports returned run/concept and mixed-evidence counts, not corpus coverage or proposition truth.
@@ -137,6 +139,17 @@ class StrategyCadenceMixin:
             from looplab.engine.memory import (ConceptCapsuleStore, _capsule_source_summary,
                                                _filter_capsule_rows)
             base = Path(self.memory_dir)
+            if _governance is None:
+                from looplab.engine.governance_health import project_governed_sources
+
+                return project_governed_sources(
+                    base,
+                    lambda governance: self._cross_run_note_for_ctx(
+                        state, _governance=governance),
+                    include_concepts=True,
+                    source_names=(
+                        "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
+                )
             cp = base / "concept_capsules.jsonl"
             lessons = load_claim_lessons(base)
             caps = ConceptCapsuleStore(cp).all() if cp.exists() else []
@@ -159,6 +172,7 @@ class StrategyCadenceMixin:
                 capsules=caps,
                 research_claims=research,
                 structured=getattr(self, "_cross_run_structured_claims", False),
+                _governance=_governance,
             )
             claim_source = _safe_claim_source_summary(a.get("claim_source"))
             if (not lessons and not caps and not research
