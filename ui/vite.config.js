@@ -47,7 +47,11 @@ export default defineConfig({
         // checker. Never capture dependencies recursively: that would pull React/core into a group.
         // Native ESM ordering avoids Rolldown's runtime ordering shim (about 4.2 KiB gzip here).
         // check:bundle rejects static manifest cycles, so an unsafe manual-chunk topology fails CI.
-        strictExecutionOrder: false,
+        // 2026-07-20: strictExecutionOrder:false PLUS chunkModulesOrder:'module-id' (above) produced a
+        // bundle that reordered module INIT so a helper (`p` in the scheduler region) was called before
+        // its initialization -> "Uncaught TypeError: p is not a function" -> blank UI. The gzip win is
+        // not worth shipping a bundle that crashes at load; force correct execution order.
+        strictExecutionOrder: true,
         codeSplitting: {
           groups: [
             {
