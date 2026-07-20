@@ -34,7 +34,7 @@ _COUNTER_KEYS = ("calls", "prompt_tokens", "completion_tokens", "total_tokens")
 _OUTBOX_DIRNAME = ".llm-usage-outbox"
 _OUTBOX_VERSION = 1
 _ROOT_ATTRS = ("researcher", "developer", "strategist", "deep_researcher",
-               "report_writer", "onboarder")
+               "report_writer", "onboarder", "_role_pool")
 _CHILD_ATTRS = (
     "client", "inner", "fallback", "researcher", "developer", "strategist", "tools",
     "_pilot_client", "summary_client", "loop_opts", "_loop_opts", "stage_clients", "providers",

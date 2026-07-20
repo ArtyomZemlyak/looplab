@@ -342,6 +342,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._parallel_build_opt = _opt("parallel_build")
         self.parallel_build = max(1, self._parallel_build_opt)   # provisional; re-resolved below
         self._role_pool: Optional[list] = None
+        # A successful live Developer swap owns every subsequent build worker too. None means the
+        # CLI factory's configured backend is still authoritative; a string means pooled developers
+        # must be rebuilt through developer_factory under that exact Strategist-selected backend.
+        self._pool_developer_override: Optional[str] = None
         # A0b/T8: "auto" resolves by Developer capability — code recombination is the verified
         # strongest merge (removing it costs ~9 pp), so it is the default wherever the Developer
         # actually GENERATES code (LLM/agent backends declare `is_code_generating`); templated/toy
@@ -2071,7 +2075,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 break
             if not (isinstance(pair, tuple) and len(pair) == 2):
                 break
+            if self._pool_developer_override is not None and self.developer_factory is not None:
+                try:
+                    pair = (pair[0], self.developer_factory(self._pool_developer_override))
+                except Exception:  # noqa: BLE001 - cap fan-out if the selected backend cannot be built
+                    break
             self._role_pool.append(pair)
+        # CODEX AGENT: workers are constructed lazily, after Engine.__init__ bound the primary role
+        # graph. Attach every newly reachable accountant before the first concurrent paid request.
+        bind_cost_accountants(self)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
 
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,

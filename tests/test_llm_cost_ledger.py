@@ -198,6 +198,58 @@ def test_dynamic_developer_swap_binds_replacement_before_first_call(tmp_path):
                       "completion_tokens": 1, "total_tokens": 5}]
 
 
+def test_lazy_parallel_role_pool_is_bound_before_first_paid_call(tmp_path):
+    pooled_research = CostAccountant()
+    pooled_develop = CostAccountant()
+    eng = _engine(
+        tmp_path / "parallel-pool",
+        role_factory=lambda: (_role(pooled_research), _role(pooled_develop)),
+    )
+
+    pairs = eng._build_role_pairs(2)
+    assert len(pairs) == 2
+    # CODEX AGENT: these roles did not exist during Engine.__init__; both lazy accountants must
+    # already have durable sinks before a parallel worker can make its first provider request.
+    pooled_research.add(.2, _usage(2, 1))
+    pooled_develop.add(.3, _usage(3, 1))
+
+    usage = [event.data for event in eng.store.read_all() if event.type == EV_LLM_USAGE]
+    assert len(usage) == 2
+    assert sum(event["cost"] for event in usage) == pytest.approx(.5)
+    assert sum(event["calls"] for event in usage) == 2
+
+
+def test_developer_swap_rebuilds_parallel_pool_with_selected_backend(tmp_path):
+    original_pool_developers = []
+    selected_pool_developers = []
+
+    def role_factory():
+        developer = _role(CostAccountant())
+        original_pool_developers.append(developer)
+        return _role(CostAccountant()), developer
+
+    def developer_factory(name):
+        developer = _role(CostAccountant(), backend=name)
+        selected_pool_developers.append(developer)
+        return developer
+
+    eng = _engine(
+        tmp_path / "parallel-swap",
+        developer_factory=developer_factory,
+        role_factory=role_factory,
+    )
+    old_worker = eng._build_role_pairs(2)[1][1]
+
+    eng._apply_strategy({"developer": "llm", "_pinned": ["developer"]})
+    new_pairs = eng._build_role_pairs(2)
+
+    assert old_worker is original_pool_developers[0]
+    assert new_pairs[0][1] is selected_pool_developers[0]
+    assert new_pairs[1][1] is selected_pool_developers[1]
+    assert new_pairs[1][1] is not old_worker
+    assert all(role.backend == "llm" for role in selected_pool_developers)
+
+
 def test_failed_sink_is_caught_up_without_repeating_the_paid_call(tmp_path):
     accountant = CostAccountant()
     eng = _engine(tmp_path / "sink-failure", researcher=_role(accountant))

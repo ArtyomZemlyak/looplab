@@ -490,6 +490,10 @@ class StrategyCadenceMixin:
                 and dev != self._developer_name and not self.unified_agent:
             try:
                 self.developer = self.developer_factory(dev)
+                # CODEX AGENT: cached parallel workers otherwise keep sending implementation calls
+                # through the previous backend after the primary Developer has visibly switched.
+                self._role_pool = None
+                self._pool_developer_override = dev
                 # Bind the replacement between calls, before its first implementation request.
                 bind_cost_accountants(self)
                 self._developer_name = dev
