@@ -153,6 +153,28 @@ def test_v2_curation_semantic_identity_fails_closed(tmp_path, mutation):
     assert exc.value.reason == "invalid_record"
 
 
+@pytest.mark.parametrize("row", [
+    {
+        "v": 1, "run_id": "legacy-run", "task_id": "task", "outcome": "proposed",
+        "auto": False, "auto_requested": False, "proposals": {}, "receipt": None,
+        "curation_key": "concept:v2:" + "a" * 64,
+    },
+    {
+        "v": 1, "action": "steward-invocation", "from": "concept",
+        "action_id": "http-action", "by": "operator", "at": "now", "outcome": "empty",
+        "proposals": {}, "receipt": None, "curation_key": "concept:v2:" + "a" * 64,
+    },
+])
+def test_v1_curation_rows_cannot_forge_v2_semantic_identity(tmp_path, row):
+    path = tmp_path / "concept_curation_log.jsonl"
+    _write_rows(path, [row])
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        read_curation_rows(path)
+
+    assert exc.value.reason == "invalid_record"
+
+
 def test_v2_curation_accepts_distinct_unavailable_sources_then_one_terminal(tmp_path):
     path = tmp_path / "task_facets_curation_log.jsonl"
     rows = [

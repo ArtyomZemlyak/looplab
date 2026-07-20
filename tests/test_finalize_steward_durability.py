@@ -238,6 +238,65 @@ def test_concurrent_finalize_stewards_are_single_flight(tmp_path, monkeypatch):
     assert len(rows) == 1
 
 
+@pytest.mark.parametrize(("method_name", "has_input_target"), [
+    ("store_concept_curation", "looplab.engine.concept_steward.concept_curation_has_input"),
+    ("store_claim_curation", "looplab.engine.claim_steward.claim_curation_has_input"),
+])
+@pytest.mark.parametrize("fast_path", ["empty", "unavailable"])
+def test_finalize_fast_terminal_is_inside_semantic_decision_lock(
+        tmp_path, monkeypatch, method_name, has_input_target, fast_path):
+    memory = _memory(tmp_path)
+    original_lock = memory._curation_decision_lock
+    original_append = memory._append_curation_once
+    lock_depth = 0
+    observed_depths: list[int] = []
+
+    @contextmanager
+    def observed_lock(*args, **kwargs):
+        nonlocal lock_depth
+        with original_lock(*args, **kwargs):
+            lock_depth += 1
+            try:
+                yield
+            finally:
+                lock_depth -= 1
+
+    def observed_append(*args, **kwargs):
+        # CODEX AGENT: this lifetime assertion is the deterministic form of the interprocess race:
+        # no terminal fast path may land while a sibling process owns the paid-attempt decision.
+        observed_depths.append(lock_depth)
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(memory, "_curation_decision_lock", observed_lock)
+    monkeypatch.setattr(memory, "_append_curation_once", observed_append)
+    if fast_path == "empty":
+        monkeypatch.setattr(has_input_target, lambda _snapshot: False)
+    else:
+        memory.reflect_client = lambda: None
+
+    getattr(memory, method_name)(RunState(run_id="fast", task_id="task", goal="goal"))
+
+    assert observed_depths == [1]
+
+
+@pytest.mark.parametrize("field", ["run_id", "task_id"])
+def test_paid_finalize_rejects_unwritable_source_identity_before_provider(
+        tmp_path, monkeypatch, field):
+    calls: list[int] = []
+
+    def paid(*_args, **_kwargs):
+        calls.append(1)
+        return {"merges": [], "splits": [], "purges": []}
+
+    monkeypatch.setattr("looplab.engine.concept_steward.propose_concept_curation", paid)
+    values = {"run_id": "run", "task_id": "task"}
+    values[field] = "x" * 501
+    _memory(tmp_path).store_concept_curation(RunState(**values))
+
+    assert calls == []
+    assert not list((tmp_path / ".curation_invocations").glob("*.json"))
+
+
 @pytest.mark.parametrize("fast_path", ["empty", "already-governed"])
 def test_facets_fast_terminal_cannot_discard_inflight_paid_result(
         tmp_path, monkeypatch, fast_path):

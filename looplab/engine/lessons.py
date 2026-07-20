@@ -365,7 +365,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if not p.exists():
             return False
         return any(
-            str(r.get("curation_key") or "") == curation_key
+            r.get("v") == 2 and not isinstance(r.get("v"), bool)
+            and r.get("action") is None
+            and str(r.get("curation_key") or "") == curation_key
             and str(r.get("outcome") or "") != "unavailable"
             for r in read_curation_rows(p)
         )
@@ -459,10 +461,18 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                               provenance: dict, incomplete: dict) -> None:
         """Create and strictly sync the one-way claim that gates a paid finalize invocation."""
         from looplab.core.atomicio import strict_fsync, strict_fsync_parent
+        from looplab.engine.governance_health import CURATION_ID_MAX_CHARS
 
         auto_requested = incomplete.get("auto_requested")
         if not isinstance(auto_requested, bool):
             raise ValueError("paid curation claim requires boolean auto_requested")
+        run_id, task_id = str(final.run_id or ""), str(final.task_id or "")
+        if (len(run_id) > CURATION_ID_MAX_CHARS or any(ord(ch) < 32 for ch in run_id)
+                or len(task_id) > CURATION_ID_MAX_CHARS
+                or any(ord(ch) < 32 for ch in task_id)):
+            # The terminal ledger uses the same bounds. Validate before the irreversible provider
+            # boundary so a claim can never be durable while every matching terminal is unwritable.
+            raise ValueError("invalid paid curation source identity")
         claim_dir = path.parent
         created_dir = not claim_dir.exists()
         claim_dir.mkdir(parents=True, exist_ok=True)
@@ -475,8 +485,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             "log": log_name,
             "curation_key": curation_key,
             "source_key": self._curation_source_key(final),
-            "run_id": str(final.run_id or ""),
-            "task_id": str(final.task_id or ""),
+            "run_id": run_id,
+            "task_id": task_id,
             "finish_seq": self._curation_finish_seq(final),
             "auto": False,
             "auto_requested": auto_requested,
@@ -495,6 +505,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
     def _read_curation_claim(self, path: Path, log_name: str, kind: str,
                              curation_key: str) -> tuple[RunState, dict, bool]:
         """Read an existing v2 paid claim without borrowing identity from the retrying run."""
+        from looplab.engine.governance_health import CURATION_ID_MAX_CHARS
 
         def _unique_object(pairs):
             obj = {}
@@ -538,8 +549,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             raise ValueError("invalid curation claim invocation mode")
 
         bounded_strings = {
-            "run_id": 1000,
-            "task_id": 1000,
+            "run_id": CURATION_ID_MAX_CHARS,
+            "task_id": CURATION_ID_MAX_CHARS,
             "source_key": 80,
             "curation_key": 100,
             "input_digest": 64,
@@ -550,7 +561,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         for field, maximum in bounded_strings.items():
             value = claim.get(field)
             if (not isinstance(value, str) or not value or len(value) > maximum
-                    or "\n" in value or "\r" in value):
+                    or any(ord(ch) < 32 for ch in value)):
                 # Run ids may be empty in historical state, but a durable claim still binds the exact
                 # empty value. Handle those two identity fields separately below.
                 if field not in {"run_id", "task_id"} or value != "":
@@ -800,43 +811,48 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 if self._curation_attempt_already_resolved_locked(
                         log_name, steward_kind, final, curation_key, incomplete):
                     return
-            if not concept_curation_has_input(overview):
+                # CODEX AGENT: the semantic decision lock covers every fast path and the paid attempt.
+                # Otherwise a stale empty/unavailable observer can commit while another process is
+                # paying, then suppress that provider's terminal result at append time.
+                if not concept_curation_has_input(overview):
+                    provenance = self._curation_provenance(
+                        input_digest=input_digest, input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
+                        client=None)
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
+                        "outcome": "empty", "auto": False, "auto_requested": auto_requested,
+                        "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
+                    return
+                client = self.reflect_client()
                 provenance = self._curation_provenance(
                     input_digest=input_digest, input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
-                    client=None)
-                self._append_curation_once(log_name, final, curation_key, provenance, {
-                    "outcome": "empty", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
-                return
-            client = self.reflect_client()
-            provenance = self._curation_provenance(
-                input_digest=input_digest, input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
-                client=client)
-            if client is None:
-                self._append_curation_once(log_name, final, curation_key, provenance, {
-                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
-                return
-            # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag cannot mutate
-            # taxonomy before a durable receipt; only an explicit operator command may apply.
-            with self._paid_curation_attempt(
-                    log_name, steward_kind, final, curation_key, provenance, incomplete) as invoke:
-                if not invoke:
-                    return
-                try:
-                    proposals = propose_concept_curation(
-                        overview, client, parser=_FINALIZE_STEWARD_PARSER,
-                        raise_on_failure=True)
+                    client=client)
+                if client is None:
                     self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "empty" if curation_is_empty(proposals) else "proposed",
-                        "auto": False, "auto_requested": auto_requested,
-                        "proposals": proposals, "receipt": None}, require_durable=True)
-                except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
-                    self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                        "outcome": "unavailable", "auto": False,
                         "auto_requested": auto_requested,
-                        "proposals": {"merges": [], "splits": [], "purges": []},
-                        "receipt": None}, require_durable=True)
+                        "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
+                    return
+                # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag cannot
+                # mutate taxonomy before a durable receipt; only an explicit operator command may apply.
+                with self._paid_curation_attempt_locked(
+                        log_name, steward_kind, final, curation_key,
+                        provenance, incomplete) as invoke:
+                    if not invoke:
+                        return
+                    try:
+                        proposals = propose_concept_curation(
+                            overview, client, parser=_FINALIZE_STEWARD_PARSER,
+                            raise_on_failure=True)
+                        self._append_curation_once(log_name, final, curation_key, provenance, {
+                            "outcome": "empty" if curation_is_empty(proposals) else "proposed",
+                            "auto": False, "auto_requested": auto_requested,
+                            "proposals": proposals, "receipt": None}, require_durable=True)
+                    except Exception as exc:  # noqa: BLE001 - close while decision lock is held
+                        self._append_curation_once(log_name, final, curation_key, provenance, {
+                            "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                            "auto_requested": auto_requested,
+                            "proposals": {"merges": [], "splits": [], "purges": []},
+                            "receipt": None}, require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
             try:
                 self._append_curation_once(
@@ -881,40 +897,42 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 if self._curation_attempt_already_resolved_locked(
                         log_name, steward_kind, final, curation_key, incomplete):
                     return
-            if not claim_curation_has_input(claims):
+                if not claim_curation_has_input(claims):
+                    provenance = self._curation_provenance(
+                        input_digest=input_digest, input_schema=CLAIM_CURATION_INPUT_SCHEMA,
+                        client=None)
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
+                        "outcome": "empty", "auto": False, "auto_requested": auto_requested,
+                        "proposals": {"decisions": []}, "receipt": None})
+                    return
+                client = self.reflect_client()
                 provenance = self._curation_provenance(
                     input_digest=input_digest, input_schema=CLAIM_CURATION_INPUT_SCHEMA,
-                    client=None)
-                self._append_curation_once(log_name, final, curation_key, provenance, {
-                    "outcome": "empty", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"decisions": []}, "receipt": None})
-                return
-            client = self.reflect_client()
-            provenance = self._curation_provenance(
-                input_digest=input_digest, input_schema=CLAIM_CURATION_INPUT_SCHEMA,
-                client=client)
-            if client is None:
-                self._append_curation_once(log_name, final, curation_key, provenance, {
-                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"decisions": []}, "receipt": None})
-                return
-            with self._paid_curation_attempt(
-                    log_name, steward_kind, final, curation_key, provenance, incomplete) as invoke:
-                if not invoke:
+                    client=client)
+                if client is None:
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
+                        "outcome": "unavailable", "auto": False,
+                        "auto_requested": auto_requested,
+                        "proposals": {"decisions": []}, "receipt": None})
                     return
-                try:
-                    proposals = propose_claim_curation(
-                        claims, client, parser=_FINALIZE_STEWARD_PARSER,
-                        raise_on_failure=True)
-                    self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "empty" if curation_is_empty(proposals) else "proposed",
-                        "auto": False, "auto_requested": auto_requested,
-                        "proposals": proposals, "receipt": None}, require_durable=True)
-                except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
-                    self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                        "auto_requested": auto_requested, "proposals": {"decisions": []},
-                        "receipt": None}, require_durable=True)
+                with self._paid_curation_attempt_locked(
+                        log_name, steward_kind, final, curation_key,
+                        provenance, incomplete) as invoke:
+                    if not invoke:
+                        return
+                    try:
+                        proposals = propose_claim_curation(
+                            claims, client, parser=_FINALIZE_STEWARD_PARSER,
+                            raise_on_failure=True)
+                        self._append_curation_once(log_name, final, curation_key, provenance, {
+                            "outcome": "empty" if curation_is_empty(proposals) else "proposed",
+                            "auto": False, "auto_requested": auto_requested,
+                            "proposals": proposals, "receipt": None}, require_durable=True)
+                    except Exception as exc:  # noqa: BLE001 - close while decision lock is held
+                        self._append_curation_once(log_name, final, curation_key, provenance, {
+                            "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                            "auto_requested": auto_requested, "proposals": {"decisions": []},
+                            "receipt": None}, require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
             try:
                 self._append_curation_once(

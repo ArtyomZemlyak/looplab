@@ -233,6 +233,11 @@ _V2_CURATION_FIELDS = frozenset((
 _V2_CURATION_REQUIRED_FIELDS = _V2_CURATION_FIELDS - frozenset((
     "revision", "error_type", "ambiguity",
 ))
+_V2_CURATION_IDENTITY_FIELDS = frozenset((
+    "curation_key", "source_key", "finish_seq", "input_digest",
+    "input_schema", "model", "parser", "ambiguity",
+))
+CURATION_ID_MAX_CHARS = 500
 
 
 def _semantic_digest(payload: dict) -> str:
@@ -270,8 +275,10 @@ def _validate_v2_curation_row(row: dict, *, kind: str) -> str | None:
         return "invalid_record"
 
     run_id, task_id = row.get("run_id"), row.get("task_id")
-    if (not isinstance(run_id, str) or len(run_id) > 500
-            or not isinstance(task_id, str) or len(task_id) > 500):
+    if (not isinstance(run_id, str) or len(run_id) > CURATION_ID_MAX_CHARS
+            or any(ord(ch) < 32 for ch in run_id)
+            or not isinstance(task_id, str) or len(task_id) > CURATION_ID_MAX_CHARS
+            or any(ord(ch) < 32 for ch in task_id)):
         return "invalid_record"
     finish_seq = row.get("finish_seq")
     if finish_seq is not None and (
@@ -372,12 +379,18 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
     if version == 2 and action is None:
         return _validate_v2_curation_row(row, kind=kind)
 
+    # CODEX AGENT: v1 finalize/HTTP rows predate semantic paid-work identity.  Reject, rather
+    # than ignore, v2-only members so old schemas cannot forge a key that suppresses a paid v2 run.
+    if set(row) & _V2_CURATION_IDENTITY_FIELDS:
+        return "invalid_record"
+
     # Known pre-v2 finalize rows are run-keyed. Their absence of an HTTP action id means they are
     # audit/proposal history only; they never satisfy a new on-demand paid action-id lookup.
     if action is None and not row.get("action_id"):
         if version not in (None, 1):
             return "unsupported_schema"
-        for field, maximum in (("run_id", 500), ("task_id", 500)):
+        for field, maximum in (
+                ("run_id", CURATION_ID_MAX_CHARS), ("task_id", CURATION_ID_MAX_CHARS)):
             if reason := validate_optional_text(row, field, maximum):
                 return reason
         outcomes = {"unavailable", "empty", "proposed", "error"}

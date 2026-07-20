@@ -505,6 +505,18 @@ def test_source_identity_never_falls_back_between_run_task_or_finish():
     assert len(keys) == len(states)
 
 
+def test_legacy_row_cannot_satisfy_semantic_paid_identity(tmp_path, monkeypatch):
+    key = "concept:v2:" + "a" * 64
+    memory = LessonMemory(_engine(tmp_path))
+    monkeypatch.setattr(
+        "looplab.engine.governance_health.read_curation_rows",
+        lambda _path: [{"v": 1, "curation_key": key, "outcome": "proposed"}],
+    )
+    (tmp_path / "concept_curation_log.jsonl").write_text("placeholder\n", encoding="utf-8")
+
+    assert memory._already_curated("concept_curation_log.jsonl", key) is False
+
+
 def test_v2_run_never_creates_a_run_keyed_legacy_lock(tmp_path):
     # Regression: `_interprocess_lock` opens (creates) a `<name>.lock` and never unlinks it. The legacy
     # (v1) claim path is keyed by the UNIQUE run_id, so acquiring its lock unconditionally accreted one
