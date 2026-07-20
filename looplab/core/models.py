@@ -230,6 +230,13 @@ class Idea(BaseModel):
     # node_created -> Idea(**d["idea"]) for free and old logs fold identically. Layer 1a leaves this None
     # (the engine mints it in a later increment); it is audit-only until Layer 3 reads the card queue.
     card_id: Optional[str] = None
+    # Hypothesis-card Kanban (docs/23, Layer 1b): the Researcher-PROPOSED resource footprint for this
+    # experiment — {gpus, gpu_mem_mib, ...}. Audit-only in Layer 1 (surfaced on the card as proposed_by=
+    # 'researcher'); the Developer FINALIZES it and the bin-packing scheduler CONSUMES it only in Layer 4.
+    # Additive + nullable, rides durable_idea_payload -> node_created -> Idea(**d["idea"]) for free (like
+    # eval_profile); None => today's behavior. Timeout is NOT here — it stays the single canonical
+    # eval_timeout, clamped to a Settings ceiling (docs/23 owner decision 3).
+    footprint: Optional[dict] = None
 
     @property
     def is_sweep(self) -> bool:
@@ -1094,6 +1101,12 @@ class RunState(BaseModel):
     cards_added: list[dict] = Field(default_factory=list)
     cards_merged: list[dict] = Field(default_factory=list)
     cards_dropped: list[dict] = Field(default_factory=list)
+    # Layer 1b enrichment channel. `cards_enriched`: engine/operator card_enriched deltas (novelty verdict,
+    # cross-run prior, footprint-finalize, steering cues), applied last-write-by-seq in `_derive_cards`.
+    # `card_ranking`: the latest `card_ranked` event {order:[card ids], confidence, reason}; stamps each
+    # open card's `priority` (falls back to `hypothesis_ranking` while the engine still ranks hypotheses).
+    cards_enriched: list[dict] = Field(default_factory=list)
+    card_ranking: Optional[dict] = None
     # Operator-override maps — RESERVED in Layer 1a, filled by Layer 6 control events. `_derive_cards`
     # overlays them in a FIXED LAST phase so the operator always wins regardless of event arrival order
     # (docs/23 decision 27). Empty {} in Layer 1 -> the overlay is a no-op; reserving them now means Layer

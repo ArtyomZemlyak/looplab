@@ -41,7 +41,7 @@ from looplab.events.types import (
     EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
-    EV_CARD_ADDED, EV_CARD_DROPPED, EV_CARD_MERGED,
+    EV_CARD_ADDED, EV_CARD_DROPPED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
@@ -2064,6 +2064,19 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if d.get("id"):
         st.cards_dropped.append(d)
 
+def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 1b: a delta onto a card (novelty verdict, cross-run prior, footprint-finalize, steering cues).
+    # Collected here; APPLIED last-write-by-seq in `_derive_cards` (all card events are main-task-written,
+    # so seq order is a total order). Stamp the seq so the derive pass can order concurrent enrichments.
+    if d.get("id"):
+        rec = dict(d)
+        rec.setdefault("_seq", e.seq)
+        st.cards_enriched.append(rec)
+
+def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 1b: FOREAGENT board prioritization for cards — latest wins (mirrors `_on_hypothesis_ranked`).
+    st.card_ranking = d
+
 def _on_hypothesis_updated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Carries a status override (human/agent drops — or reopens — a line of inquiry).
     # Last write wins: "deleted" removes the card entirely (sticky); "abandoned" adds the
@@ -2678,6 +2691,8 @@ _HANDLERS = {
     EV_CARD_ADDED: _on_card_added,
     EV_CARD_MERGED: _on_card_merged,
     EV_CARD_DROPPED: _on_card_dropped,
+    EV_CARD_ENRICHED: _on_card_enriched,
+    EV_CARD_RANKED: _on_card_ranked,
     EV_PROXY_SCORED: _on_proxy_scored,
     EV_BEST_CONFIRMED: _on_best_confirmed,
     EV_RUN_FINISHED: _on_run_finished,
@@ -3234,6 +3249,97 @@ def _derive_cards(st: RunState) -> None:
             c.status = "gated"
         else:
             c.status = "evaluated"
+
+    # 6b) LAYER-1b ENRICHMENT — re-home the folded "homeless" signals onto the card + apply explicit
+    #     card_enriched deltas. Every source is ALREADY folded (the linking node's Idea, the novelty/
+    #     cross-run sidecars) or a main-task card event, so this stays pure/deterministic. Operator
+    #     overrides (step 7) run AFTER, so an operator pin always wins over an engine enrichment.
+    node_to_card: dict[int, str] = {}
+    for cid, c in cards.items():
+        for nid in c.evidence:
+            node_to_card.setdefault(nid, cid)   # first card claiming a node wins (evidence is per-card)
+
+    # Researcher-proposed footprint + research origin ride the linking node's Idea/Node (earliest wins).
+    for c in cards.values():
+        for nid in c.evidence:
+            n = st.nodes.get(nid)
+            if n is None or n.idea is None:
+                continue
+            if c.footprint is None and n.idea.footprint:
+                c.footprint = {**n.idea.footprint, "proposed_by": "researcher"}
+            if c.research_origin is None and isinstance(n.research_origin, dict):
+                # Node.research_origin is the deep-research provenance {at_node, trigger} (orchestrator
+                # stamps it; models.py:530). Ref-shaped by the node it was triggered at (docs/23 dec 23).
+                _at = n.research_origin.get("at_node")
+                if _at is not None:
+                    c.research_origin = f"node:{_at}"
+            if c.footprint is not None and c.research_origin is not None:
+                break
+
+    # Novelty verdict + cross-run prior — the sidecar signals, keyed by the (prospective -> actual) node
+    # id they were emitted for. Last write per node wins; ref-shaped (no verbatim capture on the card).
+    # `novelty_events` (near-duplicate rejects — no grade) go FIRST so a richer `novelty_grades` entry
+    # for the same node wins on collision instead of being clobbered by the sparse reject.
+    for d in list(st.novelty_events) + list(st.novelty_grades):
+        try:
+            cid = node_to_card.get(int(d.get("node_id")))
+        except (TypeError, ValueError):
+            cid = None
+        if cid:
+            cards[cid].novelty_verdict = {"grade": d.get("grade"), "level": d.get("level"),
+                                          "near_node": d.get("near_node"),
+                                          "recommendation": d.get("recommendation")}
+    for d in st.cross_run_priors:
+        try:
+            cid = node_to_card.get(int(d.get("node_id")))
+        except (TypeError, ValueError):
+            cid = None
+        if cid:
+            cards[cid].cross_run_prior = {"matched_concepts": d.get("matched_concepts") or [],
+                                          "prior_runs": d.get("prior_runs") or []}
+
+    # Explicit card_enriched deltas — last-write-by-seq. An ALLOW-LIST is the ONLY thing that protects the
+    # shadow: a field NOT listed here (id/statement/verdict/status/evidence/best_delta/...) is never
+    # touched, so a malformed/hostile delta cannot overwrite a shadow-load-bearing field. Each field is
+    # type-guarded and the two numeric coercions are guarded INDIVIDUALLY, so a bad numeric field can
+    # never drop a valid sibling field that appears after it in the delta (key-order-independent apply).
+    _ENRICH_DICT = {"novelty_verdict", "cross_run_prior", "footprint"}
+    _ENRICH_LIST = {"steering_context", "concept_tags", "lesson_refs", "claim_refs"}
+    _ENRICH_STR = {"research_origin", "provenance_tier"}
+    for d in sorted(st.cards_enriched, key=lambda r: r.get("_seq", 0)):
+        try:
+            c = cards.get(str(d.get("id") or "").strip())
+        except Exception:  # noqa: BLE001 — a malformed id must not brick the fold
+            c = None
+        if c is None:
+            continue
+        for k, v in d.items():
+            if k in _ENRICH_DICT and isinstance(v, dict):
+                setattr(c, k, v)
+            elif k in _ENRICH_LIST and isinstance(v, list):
+                setattr(c, k, v)
+            elif k in _ENRICH_STR and v is not None:
+                setattr(c, k, str(v)[:400])
+            elif k == "foresight_rank" and v is not None:
+                try:
+                    c.foresight_rank = int(v)
+                except (TypeError, ValueError):
+                    pass
+            elif k == "confidence" and v is not None:
+                try:
+                    c.confidence = float(v)
+                except (TypeError, ValueError):
+                    pass
+
+    # Board priority — the explicit `card_ranked` order, else the `hypothesis_ranking` shadow (both stamp
+    # the OPEN lane's 0-based position, mirroring `_derive_hypotheses`; None once a card resolves).
+    order = (st.card_ranking or st.hypothesis_ranking or {}).get("order") or []
+    for rank_i, cid in enumerate(order):
+        c = cards.get(str(cid))
+        if c is not None and c.verdict == "open":
+            c.priority = rank_i
+            if c.foresight_rank is None:
+                c.foresight_rank = rank_i
 
     # 7) operator-override overlay — RESERVED FINAL PHASE (docs/23 decision 27: the operator wins
     #    regardless of event arrival order). The maps are empty until Layer 6 fills them, so this is a

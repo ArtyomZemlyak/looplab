@@ -204,3 +204,121 @@ def test_gated_lane_for_infeasible_only_evidence():
     ]))
     c = st.cards[hypothesis_id("constraint-breaking idea")]
     assert c.status == "gated" and c.verdict == "open"
+
+
+# --- Layer 1b: enrichment ------------------------------------------------------------------------
+
+def test_footprint_rides_the_idea_onto_the_card():
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "big model",
+                                   "footprint": {"gpus": 4, "gpu_mem_mib": 16000}}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.9}),
+    ]))
+    c = st.cards[hypothesis_id("big model")]
+    assert c.footprint == {"gpus": 4, "gpu_mem_mib": 16000, "proposed_by": "researcher"}
+
+
+def test_novelty_and_cross_run_signals_are_rehomed_by_node_id():
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "novel idea"}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.7}),
+        ("novelty_graded", {"node_id": 1, "grade": "REOPEN", "level": 5, "near_node": 0,
+                            "recommendation": "allow"}),
+        ("cross_run_prior", {"node_id": 1, "matched_concepts": ["loss/contrastive"],
+                             "prior_runs": [{"run": "x", "metric": 0.6}]}),
+    ]))
+    c = st.cards[hypothesis_id("novel idea")]
+    assert c.novelty_verdict == {"grade": "REOPEN", "level": 5, "near_node": 0, "recommendation": "allow"}
+    assert c.cross_run_prior == {"matched_concepts": ["loss/contrastive"],
+                                 "prior_runs": [{"run": "x", "metric": 0.6}]}
+
+
+def test_card_ranked_stamps_priority_on_open_cards_only():
+    a = "an open direction with no evidence"
+    st = _run(extra=[
+        ("hypothesis_added", {"statement": a, "source": "deep_research"}),  # open, no node
+        ("card_ranked", {"order": [hypothesis_id(a), hypothesis_id("interaction features help")]}),
+    ])
+    assert st.cards[hypothesis_id(a)].priority == 0                 # open -> ranked
+    assert st.cards[hypothesis_id("interaction features help")].priority is None  # supported -> not
+
+
+def test_card_enriched_applies_allow_listed_fields_and_tolerates_malformed():
+    cid = hypothesis_id("interaction features help")
+    st = _run(extra=[
+        ("card_enriched", {"id": cid, "research_origin": "memo-9", "provenance_tier": "authored",
+                           "footprint": {"gpus": 2}, "evil_field": "should be ignored"}),
+        ("card_enriched", {"id": cid, "footprint": "not-a-dict"}),        # malformed -> skipped, no crash
+        ("card_enriched", {"id": "no-such-card", "research_origin": "x"}),  # unknown id -> skipped
+    ])
+    c = st.cards[cid]
+    assert c.research_origin == "memo-9" and c.provenance_tier == "authored"
+    assert c.footprint == {"gpus": 2}                              # dict delta applied, string one skipped
+
+
+def test_card_enriched_cannot_overwrite_shadow_load_bearing_fields():
+    # The allow-list is the ONLY thing protecting the shadow: a delta naming a REAL Card field that is
+    # NOT in the allow-list (verdict/status/evidence/best_delta/id/statement) must be a no-op — otherwise
+    # a hostile/buggy enrichment could silently corrupt the card away from its hypothesis.
+    cid = hypothesis_id("interaction features help")
+    st = _run(extra=[("card_enriched", {"id": cid, "verdict": "abandoned", "status": "dropped",
+                                        "evidence": [], "best_delta": 99.0, "statement": "HIJACK"})])
+    c, h = st.cards[cid], st.hypotheses[cid]
+    assert c.verdict == h.status and c.evidence == h.evidence and c.best_delta == h.best_delta
+    assert c.status == "evaluated" and c.statement == "interaction features help"
+
+
+def test_card_enriched_bad_numeric_does_not_drop_sibling_fields():
+    # The numeric coercions (foresight_rank/confidence) are guarded PER FIELD, so a malformed numeric
+    # ordered BEFORE valid string fields must not abort the rest of the delta (key-order independence).
+    cid = hypothesis_id("interaction features help")
+    st = _run(extra=[("card_enriched", {"id": cid, "confidence": "not-a-float",
+                                        "research_origin": "memo-1", "provenance_tier": "authored"})])
+    c = st.cards[cid]
+    assert c.research_origin == "memo-1" and c.provenance_tier == "authored" and c.confidence is None
+
+
+def test_research_origin_is_rehomed_from_the_node_provenance():
+    # Node.research_origin is the deep-research provenance {at_node, trigger}; the card carries a ref to it.
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "researched idea"},
+                          "research_origin": {"at_node": 4, "trigger": "cadence"}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.6}),
+    ]))
+    assert st.cards[hypothesis_id("researched idea")].research_origin == "node:4"
+
+
+def test_priority_falls_back_to_hypothesis_ranking_and_matches_the_shadow():
+    # No card_ranked producer exists yet, so hypothesis_ranking is the SOLE live card-priority path in
+    # Layer 1b. The shadow requires card.priority == hypothesis.priority wherever both derive from it.
+    a = "an open direction with no evidence"
+    order = [hypothesis_id(a), hypothesis_id("interaction features help")]
+    st = _run(extra=[
+        ("hypothesis_added", {"statement": a, "source": "deep_research"}),   # open, no node
+        ("hypothesis_ranked", {"order": order}),                              # NOT card_ranked
+    ])
+    for cid, h in st.hypotheses.items():
+        assert st.cards[cid].priority == h.priority                          # fallback == shadow
+    assert st.cards[hypothesis_id(a)].priority == 0                          # open card ranked first
+
+
+def test_operator_pin_wins_over_engine_enrichment():
+    # The reserved operator overlay runs AFTER 1b enrichment, so an operator resource pin overrides a
+    # researcher-proposed footprint (docs/23 decision 27: operator wins).
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "h", "footprint": {"gpus": 8}}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.5}),
+    ]))
+    cid = hypothesis_id("h")
+    assert st.cards[cid].footprint == {"gpus": 8, "proposed_by": "researcher"}
+    st.card_resource_pins = {cid: {"gpus": 1}}
+    _derive_cards(st)
+    assert st.cards[cid].footprint["gpus"] == 1 and st.cards[cid].footprint["pinned_by"] == "operator"

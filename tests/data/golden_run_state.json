@@ -88,10 +88,12 @@
   "buildings": {},
   "card_operator_edits": {},
   "card_priority_pins": {},
+  "card_ranking": null,
   "card_resource_pins": {},
   "cards": {},
   "cards_added": [],
   "cards_dropped": [],
+  "cards_enriched": [],
   "cards_merged": [],
   "champion": null,
   "comments_revision": -1,
@@ -314,6 +316,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "draft",
         "params": {
@@ -365,6 +368,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "draft",
         "params": {
@@ -416,6 +420,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "draft",
         "params": {
@@ -470,6 +475,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "improve",
         "params": {
@@ -526,6 +532,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "improve",
         "params": {
@@ -579,6 +586,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "improve",
         "params": {
@@ -635,6 +643,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "merge",
         "params": {
@@ -692,6 +701,7 @@
         "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
+        "footprint": null,
         "hypothesis": null,
         "operator": "improve",
         "params": {
