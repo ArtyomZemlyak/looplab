@@ -247,6 +247,28 @@ def test_unknown_or_partial_governance_schema_fails_closed(
     assert exc.value.reason == reason
 
 
+@pytest.mark.parametrize("mutation", [
+    {"statement": "x\n improves recall"},
+    {"scope": "task\nscope"},
+    {"metric": "recall\tmetric"},
+    {"key": "forged-key"},
+    {"claim_uid": "clm_" + "0" * 32},
+])
+def test_current_claim_decision_identity_must_be_exactly_canonical(tmp_path, mutation):
+    path = tmp_path / "claim_decisions.jsonl"
+    record_claim_decision(
+        tmp_path, statement="x improves recall", decision="pinned",
+        scope="task", metric="recall", action_id="canonical")
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row.update(mutation)
+    _write_rows(path, [row])
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        load_claim_decisions(tmp_path)
+
+    assert exc.value.reason == "invalid_record"
+
+
 @pytest.mark.parametrize("collision", [False, True])
 def test_duplicate_action_id_is_unavailable_even_when_payload_is_identical(tmp_path, collision):
     first = {

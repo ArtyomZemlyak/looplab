@@ -903,7 +903,7 @@ class ClaimDecisionIdempotencyConflict(ValueError):
 
 def _validate_claim_decision_row(row: dict) -> str | None:
     """Strict schema fence for rows whose omission changes live claim policy."""
-    from looplab.engine.claim_key import CLAIM_KEY_VERSION
+    from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
 
     decision = row.get("decision")
     if not isinstance(decision, str) or decision not in CLAIM_DECISION_ACTIONS:
@@ -931,6 +931,18 @@ def _validate_claim_decision_row(row: dict) -> str | None:
             return reason
     if "action_id" in row and not row["action_id"].strip():
         return "invalid_record"
+    if version == CLAIM_KEY_VERSION:
+        scope = _identity_text(row.get("scope"), _MAX_DECISION_SCOPE)
+        metric = _identity_text(row.get("metric"), _MAX_DECISION_METRIC)
+        canonical_statement = _claim_text(statement, _MAX_DECISION_STATEMENT)
+        # CODEX AGENT: current-version rows are writer receipts, not migration input. Replay must
+        # never sanitize one durable identity and then expose/apply it under another key.
+        if (statement != canonical_statement
+                or row.get("scope") != scope or row.get("metric") != metric
+                or row.get("key") != normalize_statement(canonical_statement)
+                or row.get("claim_uid") != claim_uid(
+                    canonical_statement, scope=scope, metric=metric)):
+            return "invalid_record"
     return validate_revision_fields(row)
 
 
