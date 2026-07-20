@@ -24,6 +24,48 @@ from pathlib import Path
 # VALUES are free-form (the LLM's short slug), but the axes are fixed (an unknown axis is dropped).
 FACET_AXES = ("domain", "language", "modality", "interaction", "objective")
 TASK_FACETS_INPUT_SCHEMA = "finalize-task-facets/v1"
+_MAX_TASK_ID = 500
+_MAX_FACET = 60
+_MAX_ACTOR = 120
+_MAX_AT = 120
+
+
+def _contains_control(value: str) -> bool:
+    return any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+
+
+def _validate_task_facet_row(row: dict) -> str | None:
+    from looplab.engine.governance_health import validate_revision_fields
+
+    required = {"task_id", "facets", "by", "at"}
+    if not required.issubset(row) or set(row) - (required | {"revision"}):
+        return "unsupported_schema"
+    if reason := validate_revision_fields(row):
+        return reason
+    task_id, actor, at = row.get("task_id"), row.get("by"), row.get("at")
+    for value, maximum, required_text in (
+            (task_id, _MAX_TASK_ID, True), (actor, _MAX_ACTOR, True), (at, _MAX_AT, False)):
+        if (not isinstance(value, str) or len(value) > maximum or _contains_control(value)
+                or (required_text and not value.strip())):
+            return "invalid_record"
+    facets = row.get("facets")
+    if (not isinstance(facets, dict) or set(facets) - set(FACET_AXES)
+            or any(not isinstance(value, str) or not value or len(value) > _MAX_FACET
+                   or _contains_control(value) for value in facets.values())):
+        return "invalid_record"
+    return None
+
+
+def _read_task_facet_rows(path: Path) -> list[dict]:
+    from looplab.engine.governance_health import (
+        read_governance_rows,
+        validate_local_revisions,
+    )
+
+    rows = read_governance_rows(
+        path, ledger="task_facets", validate=_validate_task_facet_row)
+    validate_local_revisions(rows, ledger="task_facets")
+    return rows
 
 
 def _task_facets_prompt_payload(goal: str, kind: str) -> dict:
@@ -101,34 +143,44 @@ def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "ste
     known FACET_AXES with a non-empty value are kept. Returns the stored record. Raises on no task_id/dir."""
     from looplab.engine.concept_registry import _append_governance, normalize_key
     tid = str(task_id or "").strip()
-    if not tid:
-        raise ValueError("empty task_id")
+    actor, recorded_at = str(by or "steward"), str(at or "")
+    if not tid or len(tid) > _MAX_TASK_ID or _contains_control(tid):
+        raise ValueError("task_id must be non-empty, bounded, and free of control characters")
+    if (not actor or len(actor) > _MAX_ACTOR or _contains_control(actor)
+            or len(recorded_at) > _MAX_AT or _contains_control(recorded_at)):
+        raise ValueError("facet provenance is invalid")
     if not memory_dir:
         raise ValueError("no memory_dir")
-    clean = {ax: normalize_key((facets or {}).get(ax))[:60] for ax in FACET_AXES
-             if normalize_key((facets or {}).get(ax))}
-    rec = {"task_id": tid, "facets": clean, "by": str(by or "steward"), "at": str(at or "")}
+    if not isinstance(facets, dict):
+        raise ValueError("facets must be an object")
+    clean = {}
+    for axis in FACET_AXES:
+        value = normalize_key(facets.get(axis))
+        if len(value) > _MAX_FACET:
+            raise ValueError(f"facet {axis} exceeds {_MAX_FACET} characters")
+        if value:
+            clean[axis] = value
+    rec = {"task_id": tid, "facets": clean, "by": actor, "at": recorded_at}
     path = Path(memory_dir) / "task_facets.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _append_governance(path, rec)
-    return rec
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except (OSError, TimeoutError, RuntimeError) as exc:
+        from looplab.engine.governance_health import raise_governance_storage_unavailable
+        raise_governance_storage_unavailable(path, exc)
+    # CODEX AGENT: facets are operator meaning too. Refuse an append when any historical row is unknown;
+    # a fresh last-write-wins record must never make a torn/corrupt decision appear repaired.
+    return _append_governance(
+        path, rec, read_rows=_read_task_facet_rows, require_durable=True)
 
 
 def load_task_facets(memory_dir) -> dict:
-    """`{task_id -> {axis: value}}` from `task_facets.jsonl` (last write per task wins). {} when none."""
-    import json
-
-    from looplab.events.eventstore import read_jsonl_lenient
+    """Strict `{task_id -> facets}` replay; unknown operator history fails closed."""
     if not memory_dir:
         return {}
     path = Path(memory_dir) / "task_facets.jsonl"
-    if not path.exists():
-        return {}
     out: dict = {}
-    for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
-        tid = str(r.get("task_id") or "").strip()
-        if tid and isinstance(r.get("facets"), dict):
-            out[tid] = {ax: str(v) for ax, v in r["facets"].items() if ax in FACET_AXES and v}
+    for row in _read_task_facet_rows(path):
+        out[row["task_id"]] = dict(row["facets"])
     return out
 
 

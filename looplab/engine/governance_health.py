@@ -18,7 +18,7 @@ _ProjectionT = TypeVar("_ProjectionT")
 _PUBLIC_LEDGERS = frozenset((
     "concept_aliases", "concept_splits", "claim_decisions", "concept_governance",
     "concept_capsules", "cross_run_sources", "concept_curation", "claim_curation",
-    "task_facets_curation",
+    "task_facets", "task_facets_curation",
 ))
 _PUBLIC_REASONS = frozenset((
     "storage_unreadable", "torn_tail", "blank_row", "malformed_json", "non_object",
@@ -173,6 +173,7 @@ _GOVERNANCE_LEDGER_FILES = {
     "concept_aliases.jsonl": "concept_aliases",
     "concept_splits.jsonl": "concept_splits",
     "claim_decisions.jsonl": "claim_decisions",
+    "task_facets.jsonl": "task_facets",
     **{name: ledger for name, (_kind, ledger) in _CURATION_LEDGER_SCOPES.items()},
 }
 

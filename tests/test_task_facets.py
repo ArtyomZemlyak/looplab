@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import orjson
+import pytest
 
 from looplab.engine.task_facets import (
     FACET_AXES, facet_overlap, load_task_facets, propose_task_facets, record_task_facets, steward_task_facets,
@@ -67,6 +68,33 @@ def test_record_and_load_last_write_wins(tmp_path):
     record_task_facets(str(tmp_path), task_id="t1", facets={"domain": "ir", "language": "en"})
     got = load_task_facets(str(tmp_path))
     assert got["t1"] == {"domain": "ir", "language": "en"}
+
+
+def test_task_facet_policy_corruption_fails_reads_writes_and_cli_closed(tmp_path):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.engine.governance_health import GovernanceLedgerUnavailable
+
+    path = tmp_path / "task_facets.jsonl"
+    record_task_facets(str(tmp_path), task_id="t1", facets={"domain": "ir"})
+    path.write_bytes(path.read_bytes() + b"SECRET_BROKEN_FACET_ROW\n")
+    before = path.read_bytes()
+
+    with pytest.raises(GovernanceLedgerUnavailable) as read_error:
+        load_task_facets(str(tmp_path))
+    with pytest.raises(GovernanceLedgerUnavailable) as write_error:
+        record_task_facets(str(tmp_path), task_id="t2", facets={"domain": "vision"})
+
+    assert read_error.value.ledger == write_error.value.ledger == "task_facets"
+    assert read_error.value.reason == write_error.value.reason == "malformed_json"
+    assert path.read_bytes() == before
+
+    result = CliRunner().invoke(app, [
+        "task-facets-set", str(tmp_path), "t2", "--domain", "vision"])
+    assert result.exit_code == 2
+    assert "ledger=task_facets" in result.output
+    assert "SECRET_BROKEN_FACET_ROW" not in result.output and str(tmp_path) not in result.output
 
 
 def test_facet_overlap_counts_shared_axes():
@@ -137,6 +165,28 @@ def test_cli_task_facets_is_proposal_only(tmp_path, monkeypatch):
     # --apply is deprecated/rejected before any paid call
     r2 = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval", "--apply"])
     assert r2.exit_code == 2 and "deprecated" in r2.stdout
+
+
+def test_cli_task_facets_refuses_poisoned_paid_history_before_client(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    import looplab.cli.inspect_cmds as inspect_cmds
+
+    poisoned = "SECRET_PAID_FACET_HISTORY_MUST_NOT_LEAK"
+    (tmp_path / "task_facets_curation_log.jsonl").write_text(poisoned + "\n", encoding="utf-8")
+    clients = []
+    monkeypatch.setattr(
+        inspect_cmds, "_make_llm_client",
+        lambda _settings: clients.append("created") or object(),
+    )
+
+    result = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval"])
+
+    assert result.exit_code == 2
+    assert "ledger=task_facets_curation" in result.output
+    assert clients == []
+    assert poisoned not in result.output and str(tmp_path) not in result.output
 
 
 def test_cli_task_facets_set_is_the_operator_write(tmp_path):

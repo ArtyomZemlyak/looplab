@@ -1053,12 +1053,17 @@ def task_facets_cmd(
     only proposes; it never writes cross-run state): review the classification, then record it deterministically
     with `task-facets-set` (or let the engine record it at finalize under `cross_run_curation`)."""
     from looplab.core.config import Settings
+    from looplab.engine.governance_health import read_curation_rows
     from looplab.engine.task_facets import steward_task_facets
     if apply:
         typer.echo("error: --apply is deprecated and disabled; task-facets is proposal-only. Review the "
                    "classification, then record it with `task-facets-set MEMORY TASK_ID --domain ... "
                    "--language ...`.")
         raise typer.Exit(2)
+    # CODEX AGENT: task faceting is the third paid steward. Its audit history gets the same pre-client
+    # fail-closed boundary as concept/claim stewardship, even though this CLI remains proposal-only.
+    _governance_cli_read(
+        lambda: read_curation_rows(Path(memory_dir) / "task_facets_curation_log.jsonl"))
     settings = Settings()
     if model:
         settings.llm_model = model
@@ -1100,6 +1105,8 @@ def task_facets_set_cmd(
     try:
         rec = record_task_facets(str(memory_dir), task_id=task_id, facets=facets, by="operator",
                                  at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
+        _governance_cli_error(e)
     except ValueError as e:
         typer.echo(f"error: {e}")
         raise typer.Exit(2)
