@@ -6,6 +6,7 @@ the strategist cadence (so a resume never re-records or duplicates a snapshot)."
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 
@@ -183,6 +184,27 @@ def test_already_covered_at_gate():
     assert not Engine._already_covered_at(st, 6)
 
 
+def test_same_node_count_abort_refreshes_flat_coverage_snapshot(tmp_path):
+    store = _store(tmp_path, [("old", {"x": 1.0}, 1.0), ("live", {"x": 2.0}, 2.0)])
+    eng = SimpleNamespace(
+        _coverage_context=True,
+        _should_consult=lambda state: True,
+        _already_covered_at=lambda state, n: Engine._already_covered_at(state, n),
+        archive_resolution=1.0,
+        store=store,
+    )
+    first = Engine._maybe_snapshot_coverage(eng, fold(store.read_all()))
+    store.append("node_abort", {"node_id": 0, "generation": 0})
+
+    refreshed = Engine._maybe_snapshot_coverage(eng, fold(store.read_all()))
+
+    assert len(refreshed.coverage_snapshots) == 2
+    assert refreshed.coverage_snapshots[0]["projection_token"] != (
+        refreshed.coverage_snapshots[-1]["projection_token"])
+    assert first.coverage_snapshots[-1]["nodes"] == 2
+    assert refreshed.coverage_snapshots[-1]["nodes"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # End-to-end cadence (offline toy run)
 # --------------------------------------------------------------------------- #
@@ -203,7 +225,8 @@ def test_toy_run_emits_coverage_at_cadence_no_dupes(tmp_path):
     assert snaps, "expected coverage snapshots at the strategist cadence"
     at_nodes = [e.data["at_node"] for e in snaps]
     assert at_nodes == sorted(set(at_nodes))          # one per node-count, strictly increasing
-    assert all(k in snaps[0].data for k in ("themes", "theme_entropy", "dominant_theme_frac"))
+    assert all(k in snaps[0].data for k in (
+        "themes", "theme_entropy", "dominant_theme_frac", "projection_token"))
 
 
 def test_coverage_survives_replay(tmp_path):

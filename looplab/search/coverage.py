@@ -20,12 +20,87 @@ gives the controller eyes on the space it is (or isn't) covering.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import Counter
 
 from looplab.core.models import RunState
 from looplab.events.digest import node_axes, node_theme, theme_rollup
 from looplab.search.archive import DiversityArchive
+
+
+def _projection_value(value):
+    """Canonical JSON-safe value for the bounded current-analytics identity."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, dict):
+        return [[str(key), _projection_value(item)]
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))]
+    if isinstance(value, (list, tuple)):
+        return [_projection_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_projection_value(item) for item in value), key=repr)
+    raw = getattr(value, "value", value)
+    return raw if raw is not value else str(value)
+
+
+def analytics_projection_token(state: RunState) -> str:
+    """Stable digest of every current input that Part-IV coverage/lock-in snapshots can summarize."""
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
+    memberships = getattr(state, "node_concepts", None)
+    memberships = memberships if isinstance(memberships, dict) else {}
+    rows = []
+    for node in sorted((getattr(state, "nodes", None) or {}).values(), key=lambda item: item.id):
+        idea = getattr(node, "idea", None)
+        if idea is None or node.id in aborted or getattr(node, "tombstoned", False):
+            continue
+        rows.append({
+            "id": node.id,
+            "attempt": getattr(node, "attempt", 0),
+            "status": _projection_value(getattr(node, "status", None)),
+            "feasible": getattr(node, "feasible", True),
+            "metric": _projection_value(getattr(node, "robust_metric", None)),
+            "operator": str(getattr(node, "operator", "") or ""),
+            "theme": str(getattr(idea, "theme", "") or ""),
+            "rationale": str(getattr(idea, "rationale", "") or ""),
+            "hypothesis": str(getattr(idea, "hypothesis", "") or ""),
+            "eval_profile": str(getattr(idea, "eval_profile", "") or ""),
+            "params": _projection_value(getattr(idea, "params", None) or {}),
+            "space": _projection_value(getattr(idea, "space", None) or {}),
+            "authored_concepts": _projection_value(getattr(idea, "concepts", None) or []),
+            "folded_concepts": _projection_value(memberships.get(node.id, [])),
+        })
+    payload = {
+        "v": 1,
+        "nodes": rows,
+        "consolidation": _projection_value(getattr(state, "concept_consolidation", None) or {}),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def snapshot_matches_analytics_projection(state: RunState, snapshot: object) -> bool:
+    """Whether a snapshot describes the exact current live projection rather than audit history."""
+    if not isinstance(snapshot, dict):
+        return False
+    token = snapshot.get("projection_token")
+    if token is None:
+        # Pre-token snapshots remain readable on an untouched legacy run. Once lifecycle identity changes,
+        # their source boundary is unknowable and they must not steer a proposal.
+        aborted = getattr(state, "aborted_nodes", None) or []
+        return (not aborted
+                and not any(getattr(node, "tombstoned", False)
+                            or int(getattr(node, "attempt", 0) or 0) > 0
+                            for node in (getattr(state, "nodes", None) or {}).values()))
+    if (not isinstance(token, str) or len(token) != 64
+            or snapshot.get("at_node") != len((getattr(state, "nodes", None) or {}))):
+        return False
+    # CODEX AGENT: node count is not lifecycle identity. Abort/reset/tag edits can change live steering
+    # inputs without allocating a node, so every behavioral snapshot is bound to this exact projection.
+    return token == analytics_projection_token(state)
 
 
 def _node_theme(node):

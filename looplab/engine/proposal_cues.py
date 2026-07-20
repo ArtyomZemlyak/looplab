@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 
 from looplab.core.models import NodeStatus, RunState
+from looplab.search.coverage import snapshot_matches_analytics_projection
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
 
@@ -457,10 +458,10 @@ class ProposalCuesMixin:
         node (no stale hint bleeds from a prior operator into a later one)."""
         nov_hint = ""
         if stance == "explore":
-            # Reuse the breadth snapshot the strategist cadence already recorded (its most recent view)
-            # instead of recomputing the O(nodes) signal on this per-proposal hot path — the hint is
-            # prose, so the last snapshot is fresh enough. Falls back to {} before the first snapshot.
-            cov = state.coverage_snapshots[-1] if state.coverage_snapshots else {}
+            # Reuse the exact current snapshot; a lifecycle edit at the same node count invalidates its
+            # behavioral authority and falls back to the generic explore cue.
+            candidate = state.coverage_snapshots[-1] if state.coverage_snapshots else {}
+            cov = candidate if snapshot_matches_analytics_projection(state, candidate) else {}
             top = cov.get("top_themes") or []
             spread = (f" So far the search concentrates on '{top[0][0]}' "
                       f"({cov.get('dominant_theme_frac', 0.0):.0%} of experiments); "
@@ -473,7 +474,8 @@ class ProposalCuesMixin:
             pivot = ""
             if getattr(self, "_concept_pivot", False):
                 csnaps = state.concept_coverage_snapshots
-                cs = csnaps[-1] if csnaps else {}
+                candidate = csnaps[-1] if csnaps else {}
+                cs = candidate if snapshot_matches_analytics_projection(state, candidate) else {}
                 if cs.get("fired") and cs.get("directive"):
                     pivot = ("\nConcept-graph pivot — " + cs["directive"] +
                              " Propose an experiment in one of those uncovered regions.")

@@ -62,7 +62,9 @@ print(json.dumps(Engine._concept_coverage_snapshot(None, st), sort_keys=True))
 
 
 def test_snapshot_is_hashseed_independent(tmp_path):
-    import os, subprocess, sys
+    import os
+    import subprocess
+    import sys
     _dr_store(tmp_path, _DCL)                             # writes events.jsonl (read-only in the subprocs)
     p = str(tmp_path / "events.jsonl")
     def _emit(seed: str) -> str:
@@ -105,6 +107,21 @@ def test_cadence_is_at_node_idempotent(tmp_path):
     assert len(st3.concept_coverage_snapshots) == 1
 
 
+def test_same_node_count_abort_refreshes_concept_snapshot(tmp_path):
+    store = _dr_store(tmp_path, _DCL)
+    eng = _snap_engine(store)
+    first = Engine._maybe_snapshot_concept_coverage(eng, fold(store.read_all()))
+    first_token = first.concept_coverage_snapshots[-1]["projection_token"]
+    store.append("node_abort", {"node_id": 0, "generation": 0})
+
+    refreshed = Engine._maybe_snapshot_concept_coverage(eng, fold(store.read_all()))
+    snaps = refreshed.concept_coverage_snapshots
+
+    assert len(snaps) == 2 and snaps[-1]["at_node"] == snaps[0]["at_node"] == 5
+    assert snaps[-1]["projection_token"] != first_token
+    assert snaps[-1]["experiments"] == 4
+
+
 def test_flag_off_emits_no_snapshot(tmp_path):
     store = _dr_store(tmp_path, _DCL)
     Engine._maybe_snapshot_concept_coverage(_snap_engine(store, concept_pivot=False),
@@ -123,8 +140,9 @@ def test_concept_cadence_decoupled_from_strategist_every():
     # strategist_every=3 (would fire at 3,6,9…) but concept_retag_every=10, the concept snapshot fires only
     # at the seed boundary and every 10th node — independent of the strategy consult cadence.
     eng = SimpleNamespace(n_seeds=2, strategist_every=3, concept_retag_every=10)
-    fire = lambda k: Engine._should_consult_concepts(
-        eng, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
+    def fire(k):
+        return Engine._should_consult_concepts(
+            eng, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
     assert fire(2) is True           # seed boundary
     assert fire(3) is False          # a strategist consult point, but NOT a concept one (decoupled)
     assert fire(6) is False
@@ -133,8 +151,9 @@ def test_concept_cadence_decoupled_from_strategist_every():
     assert fire(12) is False
     # falls back to strategist_every when the knob is unset/zero (back-compat)
     eng0 = SimpleNamespace(n_seeds=2, strategist_every=3, concept_retag_every=0)
-    fire0 = lambda k: Engine._should_consult_concepts(
-        eng0, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
+    def fire0(k):
+        return Engine._should_consult_concepts(
+            eng0, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
     assert fire0(3) is True and fire0(6) is True and fire0(4) is False
 
 
@@ -182,6 +201,23 @@ def test_explore_hint_pivots_to_uncovered_regions(tmp_path):
     hint = eng.researcher._novelty_hint
     assert "Concept-graph pivot" in hint and "0 coverage in {" in hint
     assert "broaden the space" not in hint       # the specific directive REPLACES the vague one
+
+
+def test_explore_hint_rejects_snapshot_after_same_count_lifecycle_edit(tmp_path):
+    from looplab.search.coverage import analytics_projection_token
+
+    st = fold(_dr_store(tmp_path, _DCL).read_all())
+    st.concept_coverage_snapshots.append({
+        "at_node": 5, "projection_token": analytics_projection_token(st),
+        "fired": True, "directive": "0 coverage in {negatives/external-mining} — go there",
+    })
+    st.aborted_nodes = [0]
+    eng = _fake_engine(concept_pivot=True)
+
+    Engine._stamp_novelty_hint(eng, st, "explore")
+
+    assert "Concept-graph pivot" not in eng.researcher._novelty_hint
+    assert "broaden the space" in eng.researcher._novelty_hint
 
 
 def test_explore_hint_falls_back_to_broaden_when_pivot_off(tmp_path):

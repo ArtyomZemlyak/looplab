@@ -31,7 +31,8 @@ from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_
                                   EV_CONCEPT_EDGE, EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS,
                                   EV_NODE_CONCEPTS, EV_RUN_CONCEPTS, EV_STRATEGY_DECISION,
                                   EV_VERIFIER_GROUP_SCORED)
-from looplab.search.coverage import coverage_signal
+from looplab.search.coverage import (analytics_projection_token, coverage_signal,
+                                     snapshot_matches_analytics_projection)
 from looplab.search.policy import available_policies, make_policy, operator_yields
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
@@ -290,8 +291,8 @@ class StrategyCadenceMixin:
         if not self._coverage_context:
             return {}
         snaps = state.coverage_snapshots
-        if snaps and snaps[-1].get("at_node") == len(state.nodes):
-            return {k: v for k, v in snaps[-1].items() if k != "at_node"}
+        if snaps and snapshot_matches_analytics_projection(state, snaps[-1]):
+            return {k: v for k, v in snaps[-1].items() if k not in {"at_node", "projection_token"}}
         return coverage_signal(state, resolution=self.archive_resolution)
 
     def _should_consult(self, state: RunState) -> bool:
@@ -475,7 +476,9 @@ class StrategyCadenceMixin:
 
     @staticmethod
     def _already_covered_at(state: RunState, n: int) -> bool:
-        return any((c or {}).get("at_node") == n for c in state.coverage_snapshots)
+        return any((c or {}).get("at_node") == n
+                   and snapshot_matches_analytics_projection(state, c)
+                   for c in state.coverage_snapshots)
 
     @staticmethod
     def _autonomous_strategy_already_recorded_at(state: RunState, n: int) -> bool:
@@ -515,7 +518,9 @@ class StrategyCadenceMixin:
                 or self._already_covered_at(state, n)):
             return state
         self.store.append(EV_COVERAGE_SNAPSHOT, {
-            "at_node": n, **coverage_signal(state, resolution=self.archive_resolution)})
+            "at_node": n,
+            "projection_token": analytics_projection_token(state),
+            **coverage_signal(state, resolution=self.archive_resolution)})
         return fold(self.store.read_all())
 
     def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
@@ -528,16 +533,22 @@ class StrategyCadenceMixin:
         if not getattr(self, "_concept_pivot", False) or not self._should_consult_concepts(state):
             return state
         n = len(state.nodes)
-        # `at_node == n` is a monotonic-progress gate, not a lifecycle identity: node records are
-        # append-only (a reset/abort reopens but never REMOVES nodes from the log/fold), so len(state.nodes)
-        # only grows. Skipping a cadence whose n already has a snapshot is therefore self-healing — the very
-        # next node bumps n and refreshes the snapshot; it can never leave one "permanently stale".
-        if any((c or {}).get("at_node") == n for c in state.concept_coverage_snapshots):
+        if any((c or {}).get("at_node") == n
+               and snapshot_matches_analytics_projection(state, c)
+               for c in state.concept_coverage_snapshots):
             return state
         snap = self._concept_coverage_snapshot(state)
         if snap is None:
             return state
-        self.store.append(EV_CONCEPT_COVERAGE_SNAPSHOT, {"at_node": n, **snap})
+        # The agentic producer may have persisted fresh tags/consolidation while building ``snap``. Bind the
+        # snapshot to that post-write projection, not the stale state object passed into the cadence.
+        current = fold(self.store.read_all())
+        if any((c or {}).get("at_node") == n
+               and snapshot_matches_analytics_projection(current, c)
+               for c in current.concept_coverage_snapshots):
+            return current
+        self.store.append(EV_CONCEPT_COVERAGE_SNAPSHOT, {
+            "at_node": n, "projection_token": analytics_projection_token(current), **snap})
         return fold(self.store.read_all())
 
     def _maybe_seed_run_base_concepts(self, state: RunState) -> RunState:

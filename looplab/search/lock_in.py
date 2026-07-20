@@ -27,6 +27,7 @@ from typing import Optional
 
 from looplab.core.models import RunState
 from looplab.search.concept_graph import ConceptGraph, _experiment_nodes, tag_nodes_heuristic
+from looplab.search.coverage import snapshot_matches_analytics_projection
 
 
 def _node_axes(graph: ConceptGraph, cids) -> frozenset[str]:
@@ -45,6 +46,8 @@ def capability_expansion_due(state, *, streak_threshold: int) -> tuple:
     gates on the `capability_expansion` flag (this reads only the recorded audit snapshot, never selection)."""
     snaps = getattr(state, "concept_coverage_snapshots", None) or []
     cs = snaps[-1] if snaps else {}
+    if not snapshot_matches_analytics_projection(state, cs):
+        return False, None, 0
     try:
         streak = int(cs.get("current_streak", 0) or 0)
     except (TypeError, ValueError):
