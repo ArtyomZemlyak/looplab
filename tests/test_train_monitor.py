@@ -7,6 +7,7 @@ import json
 import threading
 
 import anyio
+import pytest
 
 from looplab.core.tracing import JsonlSpanExporter, Tracer
 from looplab.core.models import Event
@@ -411,6 +412,38 @@ def test_watch_verdict_alerts_and_confidence_is_clamped(tmp_path):
     assert alerts[0]["confidence"] == 1.0                  # out-of-range confidence clamped into [0, 1]
 
 
+@pytest.mark.parametrize(
+    "confidence",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "positive-infinity", "negative-infinity"],
+)
+def test_non_finite_broken_confidence_stays_observable_but_cannot_kill(tmp_path, confidence):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("loss: nan\n")
+    client = _FakeClient({"status": "broken", "reason": "loss diverged", "confidence": confidence})
+
+    host, spans = _run_verdict_monitor(
+        tmp_path,
+        workdir=wd,
+        developer=_FakeDeveloper(client),
+        kill=True,
+        kill_confidence=0.0,
+    )
+
+    # A zero action threshold proves invalid confidence is rejected by validity, not merely mapped below
+    # the usual 0.8 boundary. The diagnostic remains durable and explicitly marks the sanitization.
+    assert host.kill_signal.get("kill") is None
+    assert not host.cancel.is_set()
+    alerts = [data for event_type, data in host.store.events
+              if event_type == EV_TRAIN_MONITOR_ALERT]
+    assert alerts and alerts[0]["confidence"] == 0.0
+    assert alerts[0]["confidence_valid"] is False
+    monitor_spans = [span for span in spans if span.get("name") == "train_monitor"]
+    assert monitor_spans and monitor_spans[0]["attributes"]["confidence"] == 0.0
+    assert monitor_spans[0]["attributes"]["confidence_valid"] is False
+
+
 def test_reason_is_redacted_before_storage(tmp_path):
     wd = tmp_path / "node_0"
     wd.mkdir()
@@ -484,11 +517,27 @@ def test_should_monitor_kill_decision():
     watch = TrainingVerdict(status="watch", reason="slow", confidence=0.99)
     healthy = TrainingVerdict(status="healthy", reason="ok", confidence=0.99)
     assert kill(broken, enabled=True, threshold=0.8) is True
+    assert kill(TrainingVerdict(status="broken", reason="boundary", confidence=0.8),
+                enabled=True, threshold=0.8) is True                 # inclusive configured boundary
+    assert kill(TrainingVerdict(status="broken", reason="below", confidence=0.799999),
+                enabled=True, threshold=0.8) is False
     assert kill(broken, enabled=False, threshold=0.8) is False        # opt-in: off by default
     assert kill(broken, enabled=True, threshold=0.95) is False        # below the confidence bar
     assert kill(watch, enabled=True, threshold=0.5) is False          # a plateau/'watch' is never killed
     assert kill(healthy, enabled=True, threshold=0.5) is False
     assert kill(None, enabled=True, threshold=0.5) is False
+
+
+@pytest.mark.parametrize(
+    "confidence",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "positive-infinity", "negative-infinity"],
+)
+def test_should_monitor_kill_rejects_non_finite_confidence_at_zero_threshold(confidence):
+    from looplab.engine.train_monitor import TrainingVerdict, should_monitor_kill
+
+    verdict = TrainingVerdict(status="broken", reason="invalid model confidence", confidence=confidence)
+    assert should_monitor_kill(verdict, enabled=True, threshold=0.0) is False
 
 
 def test_watchdog_kill_claim_is_first_writer_wins():

@@ -21,6 +21,7 @@ Design constraints this file must keep (engine invariants):
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,6 +113,23 @@ def next_monitor_sleep(base: float, *, status: Optional[str] = None,
     return base
 
 
+def _normalize_monitor_confidence(value: object) -> tuple[float, bool]:
+    """Return a bounded confidence plus whether the input was finite.
+
+    The safe numeric fallback keeps alerts and traces serializable/observable; callers making an
+    intervention decision must additionally require the validity bit.
+    """
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, False
+    # CODEX AGENT: max/min is not a validity check: ``min(1.0, NaN)`` evaluates to 1.0 in Python.
+    # Treat every non-finite model value as invalid and observable-at-zero, never as kill authority.
+    if not math.isfinite(confidence):
+        return 0.0, False
+    return max(0.0, min(1.0, confidence)), True
+
+
 def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, threshold: float) -> bool:
     """Whether a verdict warrants an EARLY KILL (Phase 3). Pure/deterministic. Kills only on a 'broken'
     verdict (the prompt makes a slow/plateauing-but-progressing run 'watch', never 'broken') with
@@ -119,11 +137,8 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
     never kill — the monitor stays advisory for them."""
     if not enabled or verdict is None or verdict.status != "broken":
         return False
-    try:
-        conf = max(0.0, min(1.0, float(verdict.confidence)))
-    except (TypeError, ValueError):
-        return False
-    return conf >= threshold
+    confidence, confidence_valid = _normalize_monitor_confidence(verdict.confidence)
+    return confidence_valid and confidence >= threshold
 
 
 def claim_watchdog_kill(kill_signal: dict, cancel, *, reason: str, terminal_reason: str,
@@ -451,7 +466,7 @@ class TrainingMonitorMixin:
                             self._training_verdict, tail, context, abandon_on_cancel=False)
                         llm_calls += 1
                     if verdict is not None:
-                        conf = max(0.0, min(1.0, float(verdict.confidence)))
+                        conf, confidence_valid = _normalize_monitor_confidence(verdict.confidence)
                         # The reason is LLM text derived from the raw log; redact it before it lands in the
                         # trace / event log / attention feed, matching how `_evaluate` stores stderr tails.
                         _redact = getattr(self, "_redact", None)
@@ -460,6 +475,8 @@ class TrainingMonitorMixin:
                         # The durable event keeps the fuller reason (300); the trace span carries a shorter
                         # preview (200) — spans are a high-volume sidecar, the event is the authoritative record.
                         sp.set_many(status=verdict.status, confidence=round(conf, 3), reason=reason[:200])
+                        if not confidence_valid:
+                            sp.set("confidence_valid", False)
                         healthy_streak = healthy_streak + 1 if verdict.status == "healthy" else 0
                         next_sleep = next_monitor_sleep(
                             base, status=verdict.status, recheck_after_s=verdict.recheck_after_s,
@@ -472,10 +489,13 @@ class TrainingMonitorMixin:
                             # old bad verdict and keep warning after the live curve has recovered.
                             assert EV_TRAIN_MONITOR_ALERT in DIAGNOSTIC_EVENTS
                             async with self._write_lock:
-                                self.store.append(EV_TRAIN_MONITOR_ALERT, {
+                                alert = {
                                     "node_id": node_id, "generation": generation,
                                     "status": verdict.status, "reason": reason,
-                                    "confidence": round(conf, 3)})
+                                    "confidence": round(conf, 3)}
+                                if not confidence_valid:
+                                    alert["confidence_valid"] = False
+                                self.store.append(EV_TRAIN_MONITOR_ALERT, alert)
                         last_event_status = verdict.status
                         # Phase 3 intervention (opt-in): a confident 'broken' run is tree-killed EARLY. Hand
                         # the reason to `_evaluate` via `kill_signal`, set `cancel` (same path as an operator
