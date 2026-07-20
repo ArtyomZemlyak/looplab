@@ -2,10 +2,10 @@
 advisory-only unless `_asha_live_kill`, appends only the fold-IGNORED EV_ASHA_RANK, and reuses the
 training monitor's kill_signal — so none of this touches folded selection or replay."""
 import threading
-import types
 
 import anyio
 
+from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.asha_monitor import (
     AshaMonitorMixin, asha_underperforming, latest_intermediate, sibling_final_metrics,
 )
@@ -39,14 +39,16 @@ def test_latest_intermediate_only_reads_stdout_kinds():
 # --------------------------------------------------------------------- sibling_final_metrics (pure)
 
 def test_sibling_final_metrics_excludes_self_and_non_finite():
-    state = types.SimpleNamespace(nodes={
-        0: types.SimpleNamespace(metric=None),          # this node (pending) — excluded anyway
-        1: types.SimpleNamespace(metric=0.8),
-        2: types.SimpleNamespace(metric=0.6),
-        3: types.SimpleNamespace(metric=float("inf")),  # non-finite — dropped
-        4: types.SimpleNamespace(metric=None),          # not evaluated — dropped
-    })
+    state = _fake_state([0.8, 0.6, float("inf")])
     assert sorted(sibling_final_metrics(state, node_id=0)) == [0.6, 0.8]
+
+
+def test_sibling_final_metrics_excludes_discarded_selection_evidence():
+    state = _fake_state([0.8, 0.7, 0.6])
+    state.nodes[1].tombstoned = True
+    state.nodes[2].feasible = False
+    state.aborted_nodes.append(3)
+    assert sibling_final_metrics(state, node_id=0) == []
 
 
 # --------------------------------------------------------------------- asha_underperforming (pure)
@@ -123,10 +125,19 @@ class _AshaStub(AshaMonitorMixin):
 
 
 def _fake_state(finals, self_id=0):
-    nodes = {self_id: types.SimpleNamespace(metric=None)}
+    idea = Idea(operator="draft", params={}, rationale="asha test")
+    nodes = {
+        self_id: Node(id=self_id, operator="draft", idea=idea, status=NodeStatus.pending),
+    }
     for i, m in enumerate(finals, start=1):
-        nodes[i] = types.SimpleNamespace(metric=m)
-    return types.SimpleNamespace(nodes=nodes)
+        nodes[i] = Node(
+            id=i,
+            operator="draft",
+            idea=idea,
+            metric=m,
+            status=NodeStatus.evaluated,
+        )
+    return RunState(nodes=nodes)
 
 
 def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, *, window=0.12):

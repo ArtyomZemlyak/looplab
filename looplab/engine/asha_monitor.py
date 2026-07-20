@@ -59,11 +59,17 @@ def latest_intermediate(log_tail: str, workdir, metric_spec: dict) -> Optional[f
 
 
 def sibling_final_metrics(state, node_id: int) -> list[float]:
-    """Final metrics of the OTHER evaluated nodes (this run's completed population), excluding this node
-    and any non-finite value. The ranking baseline. Pure."""
+    """Final metrics of OTHER promotion-eligible nodes in this run.
+
+    Tombstoned, aborted, infeasible and trust-gated outcomes are audit evidence, not a population that
+    may stop fresh compute. Reuse the selector's eligibility boundary so ASHA cannot be stricter than
+    the search policy merely because a discarded sibling retained an attractive metric.
+    """
+    from looplab.events.replay import promotion_eligible_nodes
+
     out: list[float] = []
-    for nid, node in getattr(state, "nodes", {}).items():
-        if nid == node_id:
+    for node in promotion_eligible_nodes(state):
+        if node.id == node_id:
             continue
         m = getattr(node, "metric", None)
         if isinstance(m, bool) or not isinstance(m, (int, float)):
