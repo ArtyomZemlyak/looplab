@@ -323,24 +323,74 @@ function collectThinking(trace, nid) {
 // most recent LLM thoughts + tool calls (with args), so you can see WHAT the agent is doing, not just
 // a coarse label. Polls /trace/tail only while OPEN + live (cheap when collapsed). Both this feed and
 // per-observation detail are bounded/redacted projections with explicit omission receipts.
+// Live-trace paging: the Dock polls a small window; "load earlier spans" raises the requested tail
+// limit toward the server ceiling so a user can page back through history on demand instead of just
+// reading a dead "projection is partial" notice. TRACE_LIMIT_MAX matches the /trace/tail server cap.
+const TRACE_LIMIT_DEFAULT = 40
+const TRACE_LIMIT_STEP = 80
+const TRACE_LIMIT_MAX = 400
+
 function LiveTrace({ runId, generation, active }) {
   const scope = `${runId}:${generation || 'pending'}`
   const [tailState, setTailState] = useState({ scope, items: [], projection: {}, loaded: false })
   const [open, setOpen] = useState(false)
+  const [limit, setLimit] = useState(TRACE_LIMIT_DEFAULT)
   const bodyRef = useRef(null)
-  usePoll((alive) => get(runApiPath(runId, '/trace/tail?limit=40'))
+  // stick: follow the newest span while the user is parked at the bottom; released when they scroll up
+  // to read history. preserve: when "load earlier" grows the feed UPWARD, hold the viewport on the same
+  // rows instead of letting follow-newest jump to the bottom.
+  const stickRef = useRef(true)
+  const preserveRef = useRef(null)
+  // A new run/generation resets the paging window so a long prior scope doesn't over-fetch here.
+  useEffect(() => {
+    setLimit(TRACE_LIMIT_DEFAULT); stickRef.current = true; preserveRef.current = null
+  }, [scope])
+  usePoll((alive) => get(runApiPath(runId, `/trace/tail?limit=${limit}`))
     .then(r => { if (alive()) setTailState({
       scope, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {}, loaded: true,
     }) })
     .catch(() => { if (alive()) setTailState({
       scope, items: [], projection: { unavailable: true }, loaded: true,
     }) }),
-    3000, [runId, generation, active, open], { enabled: active && open })
+    3000, [runId, generation, active, open, limit], { enabled: active && open })
   const current = tailState.scope === scope ? tailState : { items: [], projection: {}, loaded: false }
   const tail = current.items
   const unavailable = traceUnavailable(current.projection)
   const partial = tracePartial(current.projection)
-  useEffect(() => { if (open && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [tail, open])
+  const omitted = Number(current.projection?.omitted_spans) || 0
+  const canLoadEarlier = partial && limit < TRACE_LIMIT_MAX
+  const loadEarlier = () => {
+    const el = bodyRef.current
+    preserveRef.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null
+    setLimit(l => Math.min(l + TRACE_LIMIT_STEP, TRACE_LIMIT_MAX))
+  }
+  const onScroll = () => {
+    const el = bodyRef.current
+    if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8
+  }
+  // A "load earlier" button at the TOP of the feed (replaces the dead partial notice); a terminal note
+  // only when partial but the server ceiling is reached (older spans live in the node's full trace).
+  const loadEarlierBtn = (
+    <button type="button" className="lt-loadmore disclosure-button" onClick={loadEarlier}>
+      ↑ load earlier spans{omitted > 0 ? ` (${omitted}+ earlier)` : ''}
+    </button>
+  )
+  const maxedNote = (
+    <div className="lt-note" role="status">
+      Showing the most recent {tail.length || limit} observations — older history is in the node's full trace.
+    </div>
+  )
+  const partialControl = canLoadEarlier ? loadEarlierBtn : partial ? maxedNote : null
+  useLayoutEffect(() => {
+    const el = bodyRef.current
+    if (!el || !open) return
+    if (preserveRef.current) {            // just loaded earlier: keep the viewport on the same rows
+      el.scrollTop = el.scrollHeight - preserveRef.current.height + preserveRef.current.top
+      preserveRef.current = null
+    } else if (stickRef.current) {        // parked at the bottom: follow the newest span
+      el.scrollTop = el.scrollHeight
+    }
+  }, [tail, open])
   return (
     <div className={'live-trace' + (open ? ' open' : '')}>
       {/* Standard inline disclosure — caret ▸ left of the label, expands IN PLACE (not a popup). */}
@@ -348,16 +398,18 @@ function LiveTrace({ runId, generation, active }) {
            onClick={() => setOpen(o => !o)} title="stream the agent's thoughts + tool calls">
         <span className="lt-caret">{open ? '▾' : '▸'}</span>trace
       </button>
-      {open && <div className="lt-body" ref={bodyRef}>
+      {open && <div className="lt-body" ref={bodyRef} onScroll={onScroll}>
         {!current.loaded
           ? <div className="muted lt-empty" role="status">loading trace…</div>
           : unavailable
           ? <TraceUnavailable label="Trace unavailable; retrying automatically." />
-          : partial && tail.length === 0
-          ? <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
           : tail.length === 0
-          ? <div className="muted lt-empty">waiting for the next agent step…</div>
-          : <>{partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
+          ? (canLoadEarlier
+             ? loadEarlierBtn
+             : partial
+             ? <div className="lt-note" role="status">No recent observations to show — older history is in the node's full trace.</div>
+             : <div className="muted lt-empty">waiting for the next agent step…</div>)
+          : <>{partialControl}
             {tail.map((it, i) => it.kind === 'generation'
             ? <div key={it.span_id || i} className="lt-row lt-gen">
                 <span className="lt-ic">🧠</span>

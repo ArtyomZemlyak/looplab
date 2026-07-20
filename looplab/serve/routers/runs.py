@@ -1862,7 +1862,11 @@ def build_router(srv) -> APIRouter:
         of only seeing the label. Reads just the TAIL of spans.jsonl (bounded regardless of run length);
         text is capped here; /spans/{sid} exposes a larger bounded/redacted detail projection."""
         rd = _run_dir(run_id)
-        limit = max(1, min(int(limit or 30), 100))
+        # Default poll stays small (the Dock polls limit=40); the ceiling is raised so the UI's
+        # "load earlier spans" control can page further back through history on explicit demand. The
+        # backward scan below is still bounded by _MAX_TAIL (8 MiB), so a larger limit never re-reads
+        # an unbounded file — it just surfaces more of the already-bounded tail window.
+        limit = max(1, min(int(limit or 30), 400))
         # Read BACKWARD from EOF until we have `limit` complete lines (or hit a hard ceiling), instead of
         # a fixed 256KB window: a single span line can be 100KB+ (a repo-Developer generation carries the
         # whole prompt+output on it), so a fixed window could land ENTIRELY inside one line and return an

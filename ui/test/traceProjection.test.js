@@ -76,10 +76,12 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'node trace must pass its projection metadata to the shared renderer')
   assert.match(dock, /const unavailable = traceUnavailable\(current\.projection\)[\s\S]*?<TraceUnavailable label="Trace unavailable; retrying automatically\." \/>/,
     'live tail transport/unavailable state must not look like an empty waiting feed')
-  assert.match(dock, /3000, \[runId, generation, active, open\], \{ enabled: active && open \}/,
-    'the open live tail must automatically recover from a transient unavailable state')
-  assert.match(dock, /!current\.loaded[\s\S]*?loading trace…[\s\S]*?partial && tail\.length === 0[\s\S]*?no observations were included[\s\S]*?waiting for the next agent step/,
-    'an empty partial live tail must not look like a complete waiting feed')
+  assert.match(dock, /3000, \[runId, generation, active, open, limit\], \{ enabled: active && open \}/,
+    'the open live tail must automatically recover from a transient unavailable state (limit paging keeps enabled intact)')
+  assert.match(dock, /!current\.loaded[\s\S]*?loading trace…[\s\S]*?tail\.length === 0[\s\S]*?canLoadEarlier[\s\S]*?older history is in the node's full trace[\s\S]*?waiting for the next agent step/,
+    'an empty partial live tail must offer load-earlier / older-history, never a plain waiting feed')
+  assert.match(dock, /const canLoadEarlier = partial && limit < TRACE_LIMIT_MAX[\s\S]*?setLimit\(l => Math\.min\(l \+ TRACE_LIMIT_STEP, TRACE_LIMIT_MAX\)\)/,
+    '"load earlier spans" must raise the tail limit toward the server ceiling')
   assert.match(dock, /function OpTrace[\s\S]*?\[runId, traceId, retryNonce\][\s\S]*?onRetry=\{retry\}/,
     'operation trace HTTP-200 unavailable must be retryable')
   assert.match(dock, /const retryNodeTrace = \(\) => \{[\s\S]*?setNodeTrace\(null\)[\s\S]*?setNodeTraceError\(false\)[\s\S]*?setNodeTraceNonce/,

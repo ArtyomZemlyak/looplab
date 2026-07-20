@@ -1286,6 +1286,13 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .live-trace .lt-tool-name { color: var(--accent); font-weight: 600; flex: none; }
 .live-trace .lt-arg { color: var(--fg-dim); opacity: .85; word-break: break-all; }
 .live-trace .lt-empty { padding: 4px 2px; }
+.live-trace .lt-loadmore { display: block; width: 100%; padding: 4px 2px; margin: 0 0 3px; font-size: 11px;
+  color: var(--accent); background: transparent; border: 0; border-bottom: 1px dashed var(--line-2);
+  cursor: pointer; text-align: center; font-family: inherit; }
+.live-trace .lt-loadmore:hover { color: var(--fg); background: var(--bg-1); }
+.live-trace .lt-loadmore:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.live-trace .lt-note { padding: 4px 2px; margin: 0 0 3px; font-size: 11px; color: var(--fg-dim);
+  border-bottom: 1px dashed var(--line-2); }
 
 /* Node Trace tab: live "what's the LLM doing now" status + scroll nav. */
 .trace-live-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); margin-bottom: 8px; }

@@ -259,6 +259,41 @@ def test_trace_routes_bound_large_trace_and_redact_secret_url_path(tmp_path):
     assert tail["projection"]["visible_spans"] <= 5
 
 
+def test_trace_tail_limit_pages_further_back_up_to_the_raised_ceiling(tmp_path):
+    # The Dock's "load earlier spans" control raises the tail limit; the server must honor limits well
+    # past the old 100 cap (so paging back is meaningful) yet still clamp at the 400 ceiling.
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    total = 260
+    spans = [_span(index, trace_id="one-trace", kind="tool") for index in range(total)]
+    (run_dir / "spans.jsonl").write_text(
+        "".join(json.dumps(span) + "\n" for span in spans), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    # A limit past the old cap of 100 returns that many rows (pages further back than before); the feed
+    # is still truncated, so the UI keeps offering "load earlier". (The backward scan stops once it has
+    # `limit` lines, so omitted_spans reflects the scan window, not the whole file — assert the window.)
+    wide = client.get("/api/runs/demo/trace/tail", params={"limit": 200}).json()
+    assert 100 < wide["projection"]["visible_spans"] <= 200        # >100: cap raised, pages back further
+    assert wide["projection"]["truncated"] is True                 # more history remains
+    assert SECRET not in json.dumps(wide)                          # redaction holds at the larger window
+
+    # Above the 400 ceiling the request clamps to 400; here the 260 available rows all fit within it, and
+    # the scan reaches BOF (< _MAX_TAIL), so every row is shown with nothing omitted or truncated.
+    maxed = client.get("/api/runs/demo/trace/tail", params={"limit": 100000}).json()
+    assert maxed["projection"]["visible_spans"] == total
+    assert maxed["projection"]["omitted_spans"] == 0
+    assert maxed["projection"]["truncated"] is False
+
+
 def test_trace_route_read_failures_are_not_reported_as_complete_empty_data(tmp_path, monkeypatch):
     """I/O failure has unknown cardinality; it must differ from a successful empty sidecar read."""
     pytest.importorskip("fastapi")
