@@ -232,6 +232,25 @@ def test_v1_curation_rows_cannot_forge_v2_semantic_identity(tmp_path, row):
     assert exc.value.reason == "invalid_record"
 
 
+def test_on_demand_steward_begin_and_terminal_must_bind_the_same_request(tmp_path):
+    path = tmp_path / "concept_curation_log.jsonl"
+    _write_rows(path, [{
+        "v": 1, "action": "steward-invocation-begun", "from": "concept",
+        "invocation_id": "paid-review", "request_digest": "a" * 64,
+        "by": "operator", "at": "now", "outcome": "begun", "revision": 1,
+    }, {
+        "v": 1, "action": "steward-invocation", "from": "concept",
+        "action_id": "paid-review", "request_digest": "b" * 64,
+        "by": "operator", "at": "now", "outcome": "empty",
+        "proposals": {}, "receipt": None, "begun_revision": 1, "revision": 2,
+    }])
+
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        read_curation_rows(path)
+
+    assert exc.value.reason == "revision_mismatch"
+
+
 def test_v2_curation_accepts_distinct_unavailable_sources_then_one_terminal(tmp_path):
     path = tmp_path / "task_facets_curation_log.jsonl"
     rows = [

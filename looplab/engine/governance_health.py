@@ -385,6 +385,12 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
     if not isinstance(proposals, dict) or (receipt is not None and not isinstance(receipt, dict)):
         return "invalid_record"
 
+    request_digest = row.get("request_digest")
+    if (request_digest is not None
+            and (not isinstance(request_digest, str) or len(request_digest) != 64
+                 or any(ch not in "0123456789abcdef" for ch in request_digest))):
+        return "invalid_record"
+
     # Modern finalize rows are semantic input-digest receipts, not HTTP action-id receipts. All
     # three paid finalize stewards share this schema; facets additionally has a governed fast path.
     if version == 2 and action is None:
@@ -494,7 +500,7 @@ def read_curation_rows(
         else:
             normalized.append(row)
 
-    beginnings: dict[str, int] = {}
+    beginnings: dict[str, tuple[int, str | None]] = {}
     outcomes: set[str] = set()
     v2_sequences: dict[str, dict] = {}
     for position, row in enumerate(normalized, start=1):
@@ -523,7 +529,7 @@ def read_curation_rows(
             if invocation_id in beginnings or invocation_id in outcomes:
                 raise GovernanceLedgerUnavailable(
                     ledger, "duplicate_action_id", line=position)
-            beginnings[invocation_id] = position
+            beginnings[invocation_id] = (position, row.get("request_digest"))
             continue
         action_id = row["action_id"]
         if action_id in outcomes:
@@ -532,7 +538,9 @@ def read_curation_rows(
         outcomes.add(action_id)
         begun_revision = row.get("begun_revision")
         if action_id in beginnings:
-            if begun_revision != beginnings[action_id]:
+            begun_position, begun_request_digest = beginnings[action_id]
+            if (begun_revision != begun_position
+                    or row.get("request_digest") != begun_request_digest):
                 raise GovernanceLedgerUnavailable(
                     ledger, "revision_mismatch", line=position)
         elif begun_revision is not None:

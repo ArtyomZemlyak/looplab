@@ -564,7 +564,7 @@ looplab concept-steward MEMORY_DIR --action-id ID [--apply] [--model M] [--max-p
 | `--apply` | off | **Deprecated and disabled.** Exits 2 before any LLM call or write. Run without it, review the exact proposal, then use typed `concept-merge` / `concept-split` or owner HTTP governance |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `12` | Cap the total merge/split/purge proposals per pass |
-| `--action-id` | *(required)* | Stable paid invocation identity. Reuse only to reconcile/replay that exact invocation; choose a new id for an intentional new review |
+| `--action-id` | *(required)* | Stable paid invocation identity. Reuse only to reconcile/replay that exact model/proposal-budget request; a changed request or CLI/HTTP surface is rejected before client construction |
 | `--json` | off | Emit `{proposals, receipt, invocation}` as JSON; `invocation` carries the durable action id/revision/outcome and whether this was a replay |
 
 ---
@@ -732,7 +732,7 @@ looplab claim-steward MEMORY_DIR --action-id ID [--apply] [--model M] [--max-pro
 | `--apply` | off | **Deprecated and disabled.** Exits 2 before any LLM call or write. Run without it, review the exact proposal, then use typed `claim-decide` or owner HTTP governance |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `10` | Cap the total ratify/reject/pin proposals per pass |
-| `--action-id` | *(required)* | Stable paid invocation identity used for crash-safe at-most-once reconciliation |
+| `--action-id` | *(required)* | Stable paid invocation identity used for crash-safe at-most-once reconciliation; reuse with another model/proposal budget or CLI/HTTP surface is rejected before client construction |
 | `--json` | off | Emit `{proposals, receipt, invocation}` including the durable action receipt |
 
 ---
@@ -762,7 +762,7 @@ looplab task-facets-set MEMORY_DIR TASK_ID --domain … --language … …     #
 | `--kind` | `""` | Task kind (dataset/repo/…) — a hint for the classifier |
 | `--apply` | off | **Deprecated and disabled.** Exits before client construction or paid work; record reviewed facets with `task-facets-set` |
 | `--model` | *(config)* | Override the LLM model id |
-| `--action-id` | *(required)* | Stable paid invocation identity used for crash-safe at-most-once reconciliation |
+| `--action-id` | *(required)* | Stable paid invocation identity used for crash-safe at-most-once reconciliation; reuse with another goal/kind/model is rejected before client construction |
 
 ---
 

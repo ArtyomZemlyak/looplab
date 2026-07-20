@@ -178,6 +178,33 @@ def test_cli_task_facets_is_proposal_only(tmp_path, monkeypatch):
     assert r2.exit_code == 2 and "deprecated" in r2.stdout
 
 
+def test_cli_task_facets_action_id_cannot_replay_a_different_goal(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    import looplab.cli as cli
+
+    clients = []
+    monkeypatch.setattr(
+        cli, "make_llm_client",
+        lambda *a, **k: clients.append(1) or _Client({"domain": "ir"}),
+    )
+    action = ["--action-id", "one-paid-classification"]
+    first = CliRunner().invoke(
+        app, ["task-facets", str(tmp_path), "dense retrieval", *action])
+    changed = CliRunner().invoke(
+        app, ["task-facets", str(tmp_path), "image classification", *action])
+
+    assert first.exit_code == 0
+    assert changed.exit_code == 2
+    assert "different paid steward request" in changed.output
+    assert clients == [1]
+    from looplab.engine.governance_health import read_curation_rows
+    rows = read_curation_rows(tmp_path / "task_facets_curation_log.jsonl")
+    assert len(rows[0]["request_digest"]) == 64
+    assert rows[0]["request_digest"] == rows[1]["request_digest"]
+
+
 def test_cli_task_facets_refuses_poisoned_paid_history_before_client(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 

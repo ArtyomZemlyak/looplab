@@ -179,8 +179,11 @@ independent of whichever run happened to trigger finalize:
   and `already-governed` are terminal for that key. The durable begun claim is written before provider I/O;
 - a legacy v1 exact-run receipt or begun claim suppresses replay for that exact run only. Because its model
   input cannot be reconstructed, it is never promoted into a portfolio-wide v2 semantic receipt;
-- on-demand owner-HTTP steward requests use an explicit `action_id`; they are a separate manual invocation
-  path and remain proposal-only.
+- on-demand CLI/owner-HTTP steward requests use an explicit `action_id`; new invocation rows bind it to a
+  canonical request digest (never the raw request) before client construction. Reusing an id with another CLI goal, model,
+  proposal budget or surface is rejected before paid work or replay. Legacy rows without this additive v1
+  field remain replay-only because their original request cannot be reconstructed safely;
+- these on-demand requests are a separate manual invocation path and remain proposal-only.
 
 The three curation files are mixed-version invocation ledgers, not uniform lists of semantic receipts
 (concept and claim additionally contain the on-demand HTTP rows):
@@ -188,7 +191,7 @@ The three curation files are mixed-version invocation ledgers, not uniform lists
 | Row family | Identity and interpretation |
 |---|---|
 | legacy finalize v1 | exact `run_id`/`task_id` compatibility evidence with no reconstructable model-input digest; it suppresses only that run |
-| on-demand HTTP v1 | `steward-invocation-begun` uses `invocation_id` and its terminal row uses the requested `action_id`; this is manual request idempotency, not finalize semantic identity |
+| on-demand CLI/HTTP v1 | `steward-invocation-begun` uses `invocation_id` and its terminal row uses the requested `action_id`; new rows repeat one private `request_digest` across both halves, while legacy rows remain replay-only without it. This is manual request idempotency, not finalize semantic identity |
 | finalize diagnostic v2 | a source-keyed `*:diagnostic:v2:*` row records a failure before an exact model-input digest/key can be established; `input_digest` is empty, so this audit row is not a semantic portfolio receipt |
 | finalize semantic v2 | concept/claim `curation_key` is the exact input digest; facets use the exact-task key and retain the input digest as provenance |
 

@@ -6,6 +6,8 @@ intentionally ambiguous: retrying the same id reports the claim and never purcha
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -17,6 +19,15 @@ from looplab.trust.cross_run import cross_run_identity_text, cross_run_text, san
 
 _THREAD_LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
+_REQUEST_SCHEMA = "on-demand-paid-steward/v1"
+_MAX_REQUEST_BYTES = 32_000
+
+
+class StewardInvocationIdempotencyConflict(ValueError):
+    """An action id was already claimed for a different on-demand steward request."""
+
+    def __init__(self):
+        super().__init__("action_id already exists for a different paid steward request")
 
 
 def _thread_lock(path: Path) -> threading.Lock:
@@ -46,6 +57,24 @@ def _action_id(value: str) -> str:
     if not bounded or bounded != raw:
         raise ValueError("action_id must be a non-empty bounded identity")
     return bounded
+
+
+def _request_digest(kind: str, request: dict | None) -> str:
+    """Hash the caller-controlled request fields without persisting their raw values."""
+    if kind not in {"concept", "claim", "facets"}:
+        raise ValueError("unknown steward kind")
+    if request is not None and not isinstance(request, dict):
+        raise ValueError("steward request identity must be an object")
+    try:
+        encoded = json.dumps(
+            {"schema": _REQUEST_SCHEMA, "kind": kind, "request": request or {}},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("steward request identity is not canonical JSON") from exc
+    if len(encoded) > _MAX_REQUEST_BYTES:
+        raise ValueError("steward request identity is too large")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _public_text(value, maximum: int) -> str:
@@ -91,23 +120,26 @@ def _has_proposals(kind: str, proposals: dict) -> bool:
     return bool(proposals.get("facets"))
 
 
-def _begin(path: Path, *, kind: str, action_id: str, actor: str, at: str) -> dict:
+def _begin(path: Path, *, kind: str, action_id: str, request_digest: str,
+           actor: str, at: str) -> dict:
     return _append(path, kind=kind, record={
         "v": 1, "action": "steward-invocation-begun", "from": kind,
         # ``action_id`` is reserved for the terminal row; the validator binds this invocation id to
         # exactly one later terminal ``begun_revision``.
-        "invocation_id": action_id, "by": actor, "at": at, "outcome": "begun",
+        "invocation_id": action_id, "request_digest": request_digest,
+        "by": actor, "at": at, "outcome": "begun",
     })
 
 
 def _finish(path: Path, *, kind: str, action_id: str, actor: str, at: str,
+            request_digest: str,
             proposals: dict | None = None, receipt: dict | None = None,
             error: str = "", begun_revision: int | None = None) -> dict:
     safe_proposals = sanitize_cross_run_projection(
         proposals or {}, max_chars=64_000, max_items=128, max_total_items=2_048)
     record = {
         "v": 1, "action": "steward-invocation", "from": kind,
-        "action_id": action_id, "by": actor, "at": at,
+        "action_id": action_id, "request_digest": request_digest, "by": actor, "at": at,
         "outcome": ("error" if error else
                     ("proposed" if _has_proposals(kind, safe_proposals) else "empty")),
         "proposals": safe_proposals,
@@ -135,7 +167,8 @@ def _invocation_guard(path: Path):
 def run_steward_invocation(
         memory_dir, kind: str, action_id: str, *, actor: str, at: str,
         prepare: Callable[[], Any], invoke: Callable[[Any], dict],
-        safe_error: Callable[[Exception, str], str]) -> tuple[dict, bool]:
+        safe_error: Callable[[Exception, str], str],
+        request: dict | None = None) -> tuple[dict, bool]:
     """Run or replay one paid steward action, returning ``(durable_record, replayed)``.
 
     ``prepare`` constructs the provider client and runs before the begun claim because construction itself
@@ -144,11 +177,18 @@ def run_steward_invocation(
     """
     path = _log_path(memory_dir, kind)
     action_id = _action_id(action_id)
+    request_digest = _request_digest(kind, request)
     actor = _public_text(actor or "operator", 120)
     at = cross_run_identity_text(str(at or ""), max_chars=120)
     with _invocation_guard(path):
         existing = _cached(path, kind=kind, action_id=action_id)
         if existing is not None:
+            # CODEX AGENT: a paid action id is scoped to one caller-controlled request. Without this
+            # binding, task-facets could replay goal A's proposal as the apparent result for goal B, and
+            # the shared CLI/HTTP ledgers could silently cross-replay different manual invocations.
+            prior_digest = existing.get("request_digest")
+            if prior_digest is not None and prior_digest != request_digest:
+                raise StewardInvocationIdempotencyConflict()
             # CODEX AGENT: terminal replay happens before provider setup; an unresolved begun claim is
             # equally final for this identity because replacing an unknown paid outcome can double-charge.
             # Reconfirm the file and its directory before acknowledging a row whose original response may
@@ -161,9 +201,11 @@ def run_steward_invocation(
         except Exception as exc:  # noqa: BLE001 - persisted only through caller's redacted classifier
             return _finish(
                 path, kind=kind, action_id=action_id, actor=actor, at=at,
+                request_digest=request_digest,
                 error=safe_error(exc, "client")), False
         begun = _begin(
-            path, kind=kind, action_id=action_id, actor=actor, at=at)
+            path, kind=kind, action_id=action_id, request_digest=request_digest,
+            actor=actor, at=at)
         try:
             output = invoke(prepared)
             if not isinstance(output, dict):
@@ -171,9 +213,11 @@ def run_steward_invocation(
         except Exception as exc:  # noqa: BLE001 - persisted only through caller's redacted classifier
             return _finish(
                 path, kind=kind, action_id=action_id, actor=actor, at=at,
+                request_digest=request_digest,
                 error=safe_error(exc, "steward"),
                 begun_revision=begun.get("revision")), False
         return _finish(
             path, kind=kind, action_id=action_id, actor=actor, at=at,
+            request_digest=request_digest,
             proposals=output.get("proposals"), receipt=output.get("receipt"),
             begun_revision=begun.get("revision")), False

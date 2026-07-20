@@ -57,7 +57,8 @@ def _safe_steward_error(exc: Exception, phase: str) -> str:
     return f"{phase}:{safe_assistant_failure(exc)['error_kind']}"
 
 
-def _run_cli_steward(memory_dir: Path, kind: str, action_id: str, *, prepare, invoke) -> dict:
+def _run_cli_steward(memory_dir: Path, kind: str, action_id: str, *, prepare, invoke,
+                     request: Optional[dict] = None) -> dict:
     """Run/replay the shared durable paid-steward transaction and map its closed states to CLI errors."""
     from datetime import datetime, timezone
 
@@ -70,7 +71,7 @@ def _run_cli_steward(memory_dir: Path, kind: str, action_id: str, *, prepare, in
         record, replayed = _governance_cli_read(lambda: run_steward_invocation(
             memory_dir, kind, action_id, actor="local-operator",
             at=datetime.now(timezone.utc).isoformat(), prepare=prepare, invoke=invoke,
-            safe_error=_safe_steward_error,
+            safe_error=_safe_steward_error, request=request,
         ))
     except ValueError as exc:
         typer.echo(f"error: {exc}")
@@ -1039,6 +1040,9 @@ def concept_steward_cmd(
         invoke=lambda client: steward_concepts(
             str(memory_dir), client, apply=False, max_proposals=max_proposals,
             raise_on_failure=True),
+        request={
+            "surface": "cli", "model": model or "", "max_proposals": max_proposals,
+        },
     )
     if as_json:
         typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
@@ -1135,7 +1139,7 @@ def task_facets_cmd(
     action id durably fences its paid call across crash/retry."""
     from looplab.core.config import Settings
     from looplab.engine.governance_health import read_curation_rows
-    from looplab.engine.task_facets import steward_task_facets
+    from looplab.engine.task_facets import steward_task_facets, task_facets_input_digest
     if apply:
         typer.echo("error: --apply is deprecated and disabled; task-facets is proposal-only. Review the "
                    "classification, then record it with `task-facets-set MEMORY TASK_ID --domain ... "
@@ -1159,6 +1163,10 @@ def task_facets_cmd(
                     apply=False, raise_on_failure=True)["facets"],
             },
             "receipt": None,
+        },
+        request={
+            "surface": "cli", "model": model or "",
+            "input_digest": task_facets_input_digest(goal, kind),
         },
     )
     facets = out["proposals"].get("facets") or {}
@@ -1247,6 +1255,9 @@ def claim_steward_cmd(
         invoke=lambda client: steward_claims(
             str(memory_dir), client, apply=False, max_proposals=max_proposals,
             raise_on_failure=True),
+        request={
+            "surface": "cli", "model": model or "", "max_proposals": max_proposals,
+        },
     )
     if as_json:
         typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())

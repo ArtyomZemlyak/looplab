@@ -91,6 +91,7 @@ def build_router(srv) -> APIRouter:
             ConceptGovernanceIdempotencyConflict,
         )
         from looplab.engine.governance_health import GovernanceLedgerUnavailable
+        from looplab.engine.steward_invocation import StewardInvocationIdempotencyConflict
         from looplab.events.eventstore import EventStoreLockError
 
         if isinstance(exc, GovernanceLedgerUnavailable):
@@ -122,7 +123,8 @@ def build_router(srv) -> APIRouter:
                 "current_governance_revision": exc.actual,
             }) from exc
         if isinstance(exc, (ClaimDecisionIdempotencyConflict,
-                            ConceptGovernanceIdempotencyConflict)):
+                            ConceptGovernanceIdempotencyConflict,
+                            StewardInvocationIdempotencyConflict)):
             raise HTTPException(409, detail={
                 "code": "action_id_reused",
                 "message": cross_run_text(
@@ -456,6 +458,7 @@ def build_router(srv) -> APIRouter:
                 invoke=lambda client: steward_concepts(
                     _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True),
                 safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
+                request={"surface": "owner-http"},
             )
         except Exception as exc:
             _raise_governance_error(exc)
@@ -479,6 +482,7 @@ def build_router(srv) -> APIRouter:
                 invoke=lambda client: steward_claims(
                     _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True),
                 safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
+                request={"surface": "owner-http"},
             )
         except Exception as exc:
             _raise_governance_error(exc)
