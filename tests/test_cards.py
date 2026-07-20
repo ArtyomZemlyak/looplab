@@ -9,7 +9,7 @@ operator-override overlay phase (filled by Layer 6, a no-op here)."""
 from __future__ import annotations
 
 from looplab.core.models import Event, hypothesis_id
-from looplab.events.replay import _derive_cards, fold
+from looplab.events.replay import FoldCursor, _derive_cards, fold
 
 
 def _mk(evs):
@@ -36,6 +36,18 @@ def _run(direction="max", extra=None):
 
 def _cards_by_stmt(st):
     return {c.statement: c for c in st.cards.values()}
+
+
+def _fold_with_cursor(events):
+    expected = fold(events)
+    cursor = FoldCursor()
+    midpoint = len(events) // 2
+    cursor.extend(events[:midpoint])
+    cursor.snapshot()  # finalizing a prefix must not mutate the raw incremental accumulator
+    cursor.extend(events[midpoint:])
+    actual = cursor.snapshot()
+    assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
+    return expected
 
 
 def test_card_is_a_byte_identical_shadow_of_the_hypothesis():
@@ -79,6 +91,39 @@ def test_card_added_seeds_a_proposed_card_with_no_evidence():
     assert c.evidence == [] and c.source == "operator" and c.seed_statement == "external data helps"
 
 
+def test_node_less_card_added_preserves_one_tolerant_atomic_action_snapshot():
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {
+            "id": "card-ready", "statement": "ready to build", "source": "foresight",
+            "idea": {"operator": "improve", "params": {"lr": 0.2, "bad": "x"},
+                     "space": {"depth": [2, "bad", 4]}, "eval_profile": "smoke",
+                     "concept_tags": ["model/tree", {"bad": True}]},
+            "parent_id": 3, "parent_ids": [3, "bad", 3], "scored_against": 9,
+            "footprint": {"gpus": 2, "gpu_mem_mib": 8_000},
+            "steering_context": [1, {"kind": "coverage", "ref": "axis/model"}],
+        }),
+    ]))
+    card = st.cards["card-ready"]
+    assert card.evidence == [] and card.operator == "improve"
+    assert card.params == {"lr": 0.2} and card.space == {"depth": [2.0, 4.0]}
+    assert card.eval_profile == "smoke" and card.concept_tags == ["model/tree"]
+    assert card.parent_id == 3 and card.parent_ids == [3] and card.scored_against == 9
+    assert card.footprint == {"gpus": 2, "gpu_mem_mib": 8_000}
+    assert card.steering_context == [{"kind": "coverage", "ref": "axis/model"}]
+
+
+def test_invalid_non_string_card_id_falls_back_to_statement_hash():
+    statement = "invalid id does not become string seven"
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": 7, "statement": statement}),
+        ("hypothesis_added", {"statement": statement}),
+    ]))
+    assert set(st.cards) == {hypothesis_id(statement)}
+    assert "7" not in st.cards
+
+
 def test_card_merged_unions_evidence_into_the_canonical():
     a, b = "interaction features help", "a linear baseline is enough"
     st = _run(extra=[("card_merged", {"canonical": hypothesis_id(b), "aliases": [hypothesis_id(a)]})])
@@ -88,6 +133,26 @@ def test_card_merged_unions_evidence_into_the_canonical():
     canon = st.cards[hypothesis_id(b)]
     assert canon.evidence == [1, 2]
     assert hypothesis_id(a) in canon.aliases
+
+
+def test_alias_enrichment_and_drop_resolve_to_the_canonical_card():
+    alias = hypothesis_id("interaction features help")
+    canonical = hypothesis_id("a linear baseline is enough")
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "a linear baseline is enough"}}),
+        ("node_created", {"node_id": 2, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "interaction features help"}}),
+        ("card_merged", {"canonical": canonical, "aliases": [alias]}),
+        ("card_enriched", {"id": alias, "research_origin": "memo-alias"}),
+        ("card_dropped", {"id": alias, "reason": "merged duplicate", "dropped_by": "engine"}),
+    ])
+    st = _fold_with_cursor(events)
+    assert set(st.cards) == {canonical}
+    assert st.cards[canonical].research_origin == "memo-alias"
+    assert st.cards[canonical].status == "dropped"
+    assert st.cards[canonical].dropped_reason == "merged duplicate"
 
 
 def test_card_dropped_sets_dropped_status_and_provenance():
@@ -193,6 +258,17 @@ def test_malformed_records_do_not_brick_the_fold():
     assert st.cards["card-x"].status == "dropped"
 
 
+def test_string_merge_aliases_are_not_iterated_as_card_ids():
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("hypothesis_added", {"id": "a", "statement": "first"}),
+        ("hypothesis_added", {"id": "b", "statement": "second"}),
+        ("hypothesis_merged", {"canonical": "b", "aliases": "a"}),
+    ]))
+    assert set(st.cards) == {"a", "b"}
+    assert set(st.hypotheses) == {"a", "b"}
+
+
 def test_gated_lane_for_infeasible_only_evidence():
     # A card whose sole evidence node is INFEASIBLE (constraint violations) -> lifecycle 'gated', and the
     # verdict is 'open' (no usable evidence). Distinguishes an excluded card from a fresh 'proposed' one.
@@ -280,6 +356,219 @@ def test_card_enriched_bad_numeric_does_not_drop_sibling_fields():
                                         "research_origin": "memo-1", "provenance_tier": "authored"})])
     c = st.cards[cid]
     assert c.research_origin == "memo-1" and c.provenance_tier == "authored" and c.confidence is None
+
+
+def test_card_enriched_deep_values_and_numeric_fields_are_bounded():
+    cid = "card-bounded"
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": cid, "statement": "bounded"}),
+        ("card_enriched", {
+            "id": cid,
+            "aaa_unknown": {f"unknown-{i}": ["x" * 1_000] for i in range(1_000)},
+            "steering_context": [1, {"note": "x" * 1_000}, ["invalid"]],
+            "concept_tags": ["model/tree", {"invalid": True}, ["invalid"], "model/tree"],
+            "lesson_refs": ["lesson-1", {"invalid": True}],
+            "claim_refs": [["invalid"], "claim-1"],
+            "cross_run_prior": {f"key-{i}": {"nested": [i]} for i in range(100)},
+            "research_origin": "survives-unknown-budget",
+            "confidence": float("nan"),
+            "foresight_rank": 10_000,
+        }),
+    ]))
+    card = st.cards[cid]
+    assert card.steering_context == [{"note": "x" * 400}]
+    assert card.concept_tags == ["model/tree"]
+    assert card.lesson_refs == ["lesson-1"] and card.claim_refs == ["claim-1"]
+    assert len(card.cross_run_prior) <= 64
+    assert card.research_origin == "survives-unknown-budget"
+    assert card.confidence is None and card.foresight_rank is None
+    assert "aaa_unknown" not in st.cards_enriched[0]
+
+
+def test_card_enriched_order_comes_only_from_envelope_and_never_payload_seq():
+    cid = hypothesis_id("ordered")
+    events = [
+        Event(seq=1, type="run_started", data={"run_id": "r", "task_id": "t", "direction": "max"}),
+        Event(seq=2, type="card_added", data={"id": cid, "statement": "ordered"}),
+        Event(seq=10, type="card_enriched",
+              data={"id": cid, "research_origin": "older", "_seq": 10_000}),
+        Event(seq=11, type="card_enriched",
+              data={"id": cid, "research_origin": "newer", "_seq": "not-an-int"}),
+    ]
+    st = _fold_with_cursor(events)
+    assert st.cards[cid].research_origin == "newer"
+    assert [row["_seq"] for row in st.cards_enriched] == [10, 11]
+
+
+def test_card_ranked_malformed_order_is_bounded_deduplicated_and_owns_rank():
+    first, second = "card-first", "card-second"
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": first, "statement": "first"}),
+        ("card_added", {"id": second, "statement": "second"}),
+        ("card_enriched", {"id": second, "foresight_rank": 99}),
+        ("card_ranked", {"order": [first, first, 7, second]}),
+    ])
+    st = _fold_with_cursor(events)
+    assert st.card_ranking["order"] == [first, second]
+    assert st.cards[first].foresight_rank == 0
+    assert st.cards[second].foresight_rank == 1
+
+    malformed = _fold_with_cursor(events + _mk([("card_ranked", {"order": 1})]))
+    assert malformed.card_ranking["order"] == []
+    assert malformed.cards[first].foresight_rank is None
+    assert malformed.cards[second].foresight_rank is None
+
+
+def test_huge_card_confidence_is_ignored_without_overflowing_fold():
+    huge = 10 ** 400
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-huge", "statement": "huge confidence"}),
+        ("card_enriched", {"id": "card-huge", "confidence": huge,
+                           "research_origin": "still-applies"}),
+        ("card_ranked", {"order": ["card-huge"], "confidence": huge}),
+    ]))
+    assert st.cards["card-huge"].confidence is None
+    assert st.cards["card-huge"].research_origin == "still-applies"
+    assert "confidence" not in st.card_ranking
+
+
+def test_staged_native_card_suppresses_hash_twin_backfills_action_and_bridges_controls():
+    statement = "one queued direction"
+    legacy_id = hypothesis_id(statement)
+    ranked = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-7", "statement": statement, "source": "engine"}),
+        ("hypothesis_added", {"statement": statement, "source": "deep_research"}),
+        ("card_ranked", {"order": [legacy_id, "card-7", "card-7"]}),
+    ]))
+    assert ranked.cards["card-7"].foresight_rank == 0
+
+    base_events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-7", "statement": statement, "source": "engine"}),
+        ("hypothesis_added", {"statement": statement, "source": "deep_research"}),
+        ("node_created", {"node_id": 3, "operator": "draft",
+                          "idea": {"operator": "draft"}}),
+        ("node_created", {"node_id": 7, "operator": "improve", "parent_ids": [3],
+                          "idea": {"operator": "improve", "hypothesis": statement,
+                                   "card_id": "card-7", "params": {"lr": 0.1},
+                                   "space": {"depth": [2, 4]}, "eval_profile": "smoke",
+                                   "concepts": ["model/tree"]}}),
+        ("card_ranked", {"order": [legacy_id, "card-7", "card-7"]}),
+    ])
+    events = base_events + _mk([
+        ("hypothesis_updated", {"id": legacy_id, "status": "abandoned"}),
+    ])
+    st = _fold_with_cursor(events)
+    assert set(st.cards) == {"card-7"}
+    card = st.cards["card-7"]
+    assert card.evidence == [7] and card.operator == "improve"
+    assert card.params == {"lr": 0.1} and card.space == {"depth": [2.0, 4.0]}
+    assert card.eval_profile == "smoke" and card.concept_tags == ["model/tree"]
+    assert card.parent_id == 3 and card.parent_ids == [3]
+    assert card.verdict == "abandoned" and card.actionable is False
+
+    deleted = _fold_with_cursor(base_events + _mk([
+        ("hypothesis_updated", {"id": legacy_id, "status": "deleted"}),
+    ]))
+    assert deleted.cards == {}
+
+
+def test_thin_card_action_backfill_is_one_atomic_earliest_node_snapshot():
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-one", "statement": "one card"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "one card",
+                                   "card_id": "card-one"}}),
+        ("node_created", {"node_id": 2, "operator": "improve", "parent_ids": [1],
+                          "idea": {"operator": "improve", "hypothesis": "one card",
+                                   "card_id": "card-one", "params": {"x": 2},
+                                   "space": {"depth": [3, 5]}, "eval_profile": "full",
+                                   "concepts": ["model/tree"]}}),
+    ])
+    card = _fold_with_cursor(events).cards["card-one"]
+    assert card.evidence == [1, 2]
+    assert card.operator == "draft"
+    assert card.params == {} and card.space == {} and card.eval_profile is None
+    assert card.concept_tags == [] and card.parent_id is None and card.parent_ids == []
+
+
+def test_native_seed_bridge_composes_with_legacy_merge_and_alias_controls():
+    a, b = "native direction A", "native direction B"
+    ha, hb = hypothesis_id(a), hypothesis_id(b)
+    base = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-a", "statement": a}),
+        ("card_added", {"id": "card-b", "statement": b}),
+        ("hypothesis_added", {"statement": a}),
+        ("hypothesis_added", {"statement": b}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": a, "card_id": "card-a"}}),
+        ("node_created", {"node_id": 2, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": b, "card_id": "card-b"}}),
+        ("hypothesis_merged", {"canonical": hb, "aliases": [ha]}),
+        ("card_enriched", {"id": ha, "research_origin": "memo-through-alias"}),
+        ("card_dropped", {"id": ha, "reason": "merged", "dropped_by": "engine"}),
+        ("hypothesis_updated", {"id": ha, "status": "abandoned"}),
+    ])
+    st = _fold_with_cursor(base)
+    assert set(st.hypotheses) == {hb}
+    assert set(st.cards) == {"card-b"}
+    assert st.hypotheses[hb].evidence == st.cards["card-b"].evidence == [1, 2]
+    assert st.hypotheses[hb].status == st.cards["card-b"].verdict == "abandoned"
+    assert st.cards["card-b"].research_origin == "memo-through-alias"
+    assert st.cards["card-b"].status == "dropped"
+
+    deleted = _fold_with_cursor(base + _mk([
+        ("hypothesis_updated", {"id": ha, "status": "deleted"}),
+    ]))
+    assert deleted.hypotheses == {} and deleted.cards == {}
+
+
+def test_ambiguous_native_ids_preserve_both_and_do_not_guess_legacy_hash_binding():
+    legacy_id = hypothesis_id("same seed")
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-first", "statement": "same seed"}),
+        ("card_added", {"id": "card-second", "statement": "same seed"}),
+        ("hypothesis_added", {"statement": "same seed"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "same seed",
+                                   "card_id": "card-second"}}),
+        ("card_enriched", {"id": "card-second", "research_origin": "memo-1"}),
+        ("card_enriched", {"id": legacy_id, "research_origin": "must-not-guess"}),
+        ("hypothesis_updated", {"id": legacy_id, "status": "abandoned"}),
+        ("card_ranked", {"order": [legacy_id]}),
+    ])
+    st = _fold_with_cursor(events)
+    assert set(st.cards) == {"card-first", "card-second"}
+    assert st.cards["card-first"].evidence == []
+    assert st.cards["card-second"].evidence == [1]
+    assert st.cards["card-second"].research_origin == "memo-1"
+    assert all(card.verdict != "abandoned" and card.actionable for card in st.cards.values())
+    assert all(card.foresight_rank is None for card in st.cards.values())
+
+
+def test_native_id_reused_for_two_seeds_fails_closed_instead_of_conflating_cards():
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-shared", "statement": "seed A"}),
+        ("card_added", {"id": "card-shared", "statement": "seed B"}),
+        ("hypothesis_added", {"statement": "seed A"}),
+        ("hypothesis_added", {"statement": "seed B"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "seed A",
+                                   "card_id": "card-shared"}}),
+        ("node_created", {"node_id": 2, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "seed B",
+                                   "card_id": "card-shared"}}),
+    ]))
+    assert st.cards == {}  # both raw card_added rows remain the audit receipt; no identity is guessed
+    assert set(st.hypotheses) == {hypothesis_id("seed A"), hypothesis_id("seed B")}
 
 
 def test_research_origin_is_rehomed_from_the_node_provenance():

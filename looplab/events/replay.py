@@ -2066,16 +2066,64 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: a delta onto a card (novelty verdict, cross-run prior, footprint-finalize, steering cues).
-    # Collected here; APPLIED last-write-by-seq in `_derive_cards` (all card events are main-task-written,
-    # so seq order is a total order). Stamp the seq so the derive pass can order concurrent enrichments.
-    if d.get("id"):
-        rec = dict(d)
-        rec.setdefault("_seq", e.seq)
+    # Collected here; APPLIED last-write-by-envelope-order in `_derive_cards`.
+    raw_id = d.get("id")
+    if isinstance(raw_id, str) and raw_id.strip() and len(raw_id.strip()) <= 256:
+        rec = {"id": raw_id.strip()}
+        allowed = (
+            "novelty_verdict", "cross_run_prior", "footprint", "steering_context",
+            "concept_tags", "lesson_refs", "claim_refs", "research_origin", "provenance_tier",
+            "foresight_rank", "confidence",
+        )
+        # CODEX AGENT: bound each allow-listed sibling independently. A huge lexically-early unknown
+        # field must not consume a shared budget and erase id or a later valid field.
+        for key in allowed:
+            if key not in d:
+                continue
+            valid, bounded = _bounded_card_enrichment(d[key])
+            if valid:
+                rec[key] = bounded
+        # CODEX AGENT: envelope seq is authoritative; physical order is the deterministic tie-break for
+        # legacy/default envelopes. Assign both after copying so payload fields can never spoof ordering.
+        rec["_seq"] = e.seq if type(e.seq) is int else -1
+        rec["_event_index"] = ctx.event_index if type(ctx.event_index) is int else -1
         st.cards_enriched.append(rec)
 
 def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: FOREAGENT board prioritization for cards — latest wins (mirrors `_on_hypothesis_ranked`).
-    st.card_ranking = d
+    raw_order = d.get("order")
+    order: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_order, list):
+        for raw in raw_order[:256]:
+            if not isinstance(raw, str):
+                continue
+            cid = raw.strip()
+            if not cid or len(cid) > 256 or cid in seen:
+                continue
+            seen.add(cid)
+            order.append(cid)
+    # CODEX AGENT: a malformed/future order is an honest empty ranking, never an iterable assumption
+    # that can brick replay. Preserve metadata while replacing only the bounded, deduplicated order.
+    metadata: dict = {"order": order}
+    raw_at_node = d.get("at_node")
+    if type(raw_at_node) is int and 0 <= raw_at_node <= (1 << 31) - 1:
+        metadata["at_node"] = raw_at_node
+    raw_confidence = d.get("confidence")
+    try:
+        confidence = float(raw_confidence)
+    except (TypeError, ValueError, OverflowError):
+        confidence = math.nan
+    if (not isinstance(raw_confidence, bool) and math.isfinite(confidence)
+            and 0.0 <= confidence <= 1.0):
+        metadata["confidence"] = confidence
+    if isinstance(d.get("reason"), str):
+        metadata["reason"] = d["reason"][:400]
+    if isinstance(d.get("ranked"), list):
+        valid, ranked = _bounded_card_enrichment(d["ranked"])
+        if valid:
+            metadata["ranked"] = ranked
+    st.card_ranking = metadata
 
 def _on_hypothesis_updated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Carries a status override (human/agent drops — or reopens — a line of inquiry).
@@ -3036,14 +3084,19 @@ def _derive_hypotheses(st: RunState) -> None:
         # the node_created / hypotheses_added handlers and the "malformed entry is tolerated" promise.
         try:
             canon = str(d.get("canonical") or "").strip()
-            if not canon:
+            raw_aliases = d.get("aliases")
+            if not canon or len(canon) > 256 or not isinstance(raw_aliases, list):
                 continue
             s = str(d.get("statement", "")).strip()
             if s:
                 merged_stmt[canon] = s
-            for a in (d.get("aliases") or []):
-                a = str(a).strip()
-                if a and a != canon:
+            seen_aliases: set[str] = set()
+            for raw_alias in raw_aliases[:256]:
+                if not isinstance(raw_alias, str):
+                    continue
+                a = raw_alias.strip()
+                if a and len(a) <= 256 and a != canon and a not in seen_aliases:
+                    seen_aliases.add(a)
                     alias[a] = canon
         except Exception:  # noqa: BLE001 — one bad merge record must not brick the whole fold
             continue
@@ -3055,10 +3108,13 @@ def _derive_hypotheses(st: RunState) -> None:
             x = alias[x]
         return x
 
+    control_ids: dict[str, set[str]] = {hid: {hid} for hid in hyps}
     if alias:
         folded: dict[str, Hypothesis] = {}
+        folded_control_ids: dict[str, set[str]] = {}
         for hid in list(hyps):
             cid = _canon(hid)
+            folded_control_ids.setdefault(cid, {cid}).update(control_ids.get(hid, {hid}))
             tgt = folded.get(cid)
             if tgt is None:
                 base = hyps.get(cid, hyps[hid])     # seed from the canonical row if it exists, else this
@@ -3071,7 +3127,12 @@ def _derive_hypotheses(st: RunState) -> None:
                     tgt.evidence.append(e)
         for tgt in folded.values():
             tgt.evidence.sort()
+        for alias_id in alias:
+            canonical_id = _canon(alias_id)
+            if canonical_id in folded and alias_id != canonical_id:
+                folded_control_ids.setdefault(canonical_id, {canonical_id}).add(alias_id)
         hyps = folded
+        control_ids = folded_control_ids
 
     # A node "supported" its hypothesis by ADVANCING the run's SOTA — and a record it set STAYS a support
     # even after a later node overtakes it (extracted to `_record_setter_ids`, Layer 1a, reused by
@@ -3083,7 +3144,9 @@ def _derive_hypotheses(st: RunState) -> None:
     #    hash-joined hypothesis wherever their evidence coincides. Never mutates the evidence nodes.
     for h in hyps.values():
         h.best_delta, h.status, _ = _evidence_verdict(
-            h.evidence, st.nodes, st.direction, _record_setters, h.id in st.hypotheses_abandoned)
+            h.evidence, st.nodes, st.direction, _record_setters,
+            any(control_id in st.hypotheses_abandoned
+                for control_id in control_ids.get(h.id, {h.id})))
 
     # FOREAGENT board prioritization: stamp each ranked card's `priority` (0-based position in the
     # latest `hypothesis_ranked` order) so the UI kanban sorts open cards by predicted payoff. Derived,
@@ -3094,7 +3157,126 @@ def _derive_hypotheses(st: RunState) -> None:
         if h is not None and h.status == "open":   # priority is the OPEN lane's ordering; None once resolved
             h.priority = rank_i
 
-    st.hypotheses = {k: v for k, v in hyps.items() if k not in st.hypotheses_deleted}
+    st.hypotheses = {
+        hid: hypothesis for hid, hypothesis in hyps.items()
+        if not any(control_id in st.hypotheses_deleted
+                   for control_id in control_ids.get(hid, {hid}))
+    }
+
+
+def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None = None):
+    """Return a bounded JSON-shaped enrichment value, or ``(False, None)`` when unusable."""
+    if budget is None:
+        budget = [256]
+    if budget[0] <= 0 or depth > 4:
+        return False, None
+    budget[0] -= 1
+    if value is None or isinstance(value, bool):
+        return True, value
+    if isinstance(value, int):
+        return (True, value) if abs(value) <= (1 << 53) - 1 else (False, None)
+    if isinstance(value, float):
+        return (True, value) if math.isfinite(value) else (False, None)
+    if isinstance(value, str):
+        return True, value[:400]
+    if isinstance(value, list):
+        out = []
+        for item in value[:64]:
+            valid, bounded = _bounded_card_enrichment(item, depth=depth + 1, budget=budget)
+            if valid:
+                out.append(bounded)
+        return True, out
+    if isinstance(value, dict):
+        out = {}
+        rows = sorted(
+            ((key, item) for key, item in value.items()
+             if isinstance(key, str) and key and len(key) <= 128),
+            key=lambda row: row[0],
+        )
+        for key, item in rows[:64]:
+            valid, bounded = _bounded_card_enrichment(item, depth=depth + 1, budget=budget)
+            if valid:
+                out[key] = bounded
+        return True, out
+    return False, None
+
+
+def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
+    """Tolerantly decode one atomic, node-less card action snapshot."""
+    idea = d.get("idea") if isinstance(d.get("idea"), dict) else d
+    snapshot: dict = {}
+    owns_action = False
+    operator = idea.get("operator")
+    if isinstance(operator, str) and operator.strip() and len(operator.strip()) <= 64:
+        snapshot["operator"] = operator.strip()
+        owns_action = True
+    if isinstance(idea.get("params"), dict):
+        snapshot["params"] = normalize_extra_metrics(idea["params"], max_items=64)
+        owns_action = True
+    if isinstance(idea.get("space"), dict):
+        space: dict[str, list[float]] = {}
+        for raw_key, raw_values in sorted(idea["space"].items(), key=lambda row: str(row[0]))[:64]:
+            if not isinstance(raw_key, str) or not raw_key or len(raw_key) > 200:
+                continue
+            if not isinstance(raw_values, list):
+                continue
+            values: list[float] = []
+            for value in raw_values[:64]:
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(number):
+                    values.append(number)
+            space[raw_key] = values
+        snapshot["space"] = space
+        owns_action = True
+    profile = idea.get("eval_profile")
+    if isinstance(profile, str) and len(profile) <= 256:
+        snapshot["eval_profile"] = profile
+        owns_action = True
+    raw_concepts = idea.get("concept_tags", idea.get("concepts"))
+    if isinstance(raw_concepts, list):
+        # Reuse the tolerant durable Idea boundary so card_added and node_created normalize tags alike.
+        snapshot["concept_tags"] = Idea(operator=operator or "draft", concepts=raw_concepts).concepts
+        owns_action = True
+
+    raw_parent_ids = d.get("parent_ids", idea.get("parent_ids"))
+    if isinstance(raw_parent_ids, list):
+        parent_ids: list[int] = []
+        for raw in raw_parent_ids[:64]:
+            nid = _coerce_node_id({"node_id": raw})
+            if nid is not None and 0 <= nid <= (1 << 31) - 1 and nid not in parent_ids:
+                parent_ids.append(nid)
+        snapshot["parent_ids"] = parent_ids
+        owns_action = True
+    raw_parent_id = d.get("parent_id", idea.get("parent_id"))
+    parent_id = _coerce_node_id({"node_id": raw_parent_id})
+    if parent_id is not None and 0 <= parent_id <= (1 << 31) - 1:
+        snapshot["parent_id"] = parent_id
+        owns_action = True
+    elif snapshot.get("parent_ids"):
+        snapshot["parent_id"] = snapshot["parent_ids"][0]
+
+    scored_against = _coerce_node_id({"node_id": d.get("scored_against")})
+    if scored_against is not None and 0 <= scored_against <= (1 << 31) - 1:
+        snapshot["scored_against"] = scored_against
+    if isinstance(d.get("footprint"), dict):
+        valid, footprint = _bounded_card_enrichment(d["footprint"])
+        if valid and isinstance(footprint, dict):
+            snapshot["footprint"] = footprint
+    if isinstance(d.get("steering_context"), list):
+        steering: list[dict] = []
+        for item in d["steering_context"][:64]:
+            if not isinstance(item, dict):
+                continue
+            valid, bounded = _bounded_card_enrichment(item)
+            if valid and isinstance(bounded, dict):
+                steering.append(bounded)
+        snapshot["steering_context"] = steering
+    return snapshot, owns_action
 
 
 def _derive_cards(st: RunState) -> None:
@@ -3111,25 +3293,82 @@ def _derive_cards(st: RunState) -> None:
     operator-overlay (reserved, empty in L1) -> status."""
     cards: dict[str, Card] = {}
 
+    # A legacy hypothesis shadow uses hypothesis_id(statement), while a staged card has an independent
+    # stable id. Bridge the hash only when there is exactly one native id for that seed. Two different
+    # native ids may carry different action blocks; guessing an owner would silently lose work, so the
+    # ambiguous hash row stays audit-only and neither native card inherits hash-addressed controls.
+    native_ids_by_seed: dict[str, list[str]] = {}
+    seeds_by_native_id: dict[str, list[str]] = {}
+    for d in st.cards_added:
+        try:
+            statement = str(d.get("statement") or "").strip()
+            raw_id = d.get("id")
+            if not statement or not isinstance(raw_id, str):
+                continue
+            cid = raw_id.strip()
+            seed_id = hypothesis_id(statement)
+            if not cid or len(cid) > 256 or cid == seed_id:
+                continue
+            native_ids = native_ids_by_seed.setdefault(seed_id, [])
+            if cid not in native_ids:
+                native_ids.append(cid)
+            native_seeds = seeds_by_native_id.setdefault(cid, [])
+            if seed_id not in native_seeds:
+                native_seeds.append(seed_id)
+        except Exception:  # noqa: BLE001 - malformed staging rows remain audit-only
+            continue
+    seed_owner = {
+        seed_id: native_ids[0]
+        for seed_id, native_ids in native_ids_by_seed.items()
+        if len(native_ids) == 1 and len(seeds_by_native_id.get(native_ids[0], ())) == 1
+    }
+    ambiguous_seeds = {
+        seed_id for seed_id, native_ids in native_ids_by_seed.items()
+        if len(native_ids) != 1 or len(seeds_by_native_id.get(native_ids[0], ())) != 1
+    }
+    conflicted_native_ids = {
+        cid for cid, seed_ids in seeds_by_native_id.items() if len(seed_ids) > 1
+    }
+    action_owned_cards: set[str] = set()
+
     # 1) explicitly-added cards — may start with no evidence. Coerce defensively (engine/control events
     #    arrive verbatim; one malformed entry must not brick every fold). Until the engine mints `card_*`
     #    events (a later increment), Layer 1a MIRRORS `_derive_hypotheses` by ALSO seeding from the
     #    engine-populated `hypotheses_added` (deep-research/human directions), so a node-less hypothesis
     #    still becomes a card and `st.cards` stays a faithful shadow of `st.hypotheses`. `card_*` first so
     #    a real card_added (explicit id/source) wins the id over its hypothesis twin (dedup = first wins).
-    for d in list(st.cards_added) + list(st.hypotheses_added):
+    for native_row, d in (
+            [(True, row) for row in st.cards_added]
+            + [(False, row) for row in st.hypotheses_added]):
         try:
             stmt = str(d.get("statement", "")).strip()
-            cid = str(d.get("id") or (hypothesis_id(stmt) if stmt else "")).strip()
-            if not cid or cid in cards:
+            seed_id = hypothesis_id(stmt) if stmt else ""
+            raw_id = d.get("id")
+            raw_cid = raw_id.strip() if isinstance(raw_id, str) else ""
+            if not raw_cid or len(raw_cid) > 256:
+                raw_cid = seed_id
+            if raw_cid in conflicted_native_ids:
+                continue
+            # CODEX AGENT: never materialize a third, hash-addressed queue item beside ambiguous native
+            # cards. The raw hypothesis/card event remains the durable audit receipt.
+            if seed_id in ambiguous_seeds and (not native_row or raw_cid == seed_id):
+                continue
+            cid = seed_owner.get(seed_id, raw_cid) if raw_cid == seed_id else raw_cid
+            if not cid or len(cid) > 256 or cid in cards:
                 continue
             try:
                 at_node = int(d.get("at_node", 0) or 0)
             except (TypeError, ValueError):
                 at_node = 0
-            cards[cid] = Card(id=cid, statement=stmt, seed_statement=stmt,
-                              source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
-                              rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node)
+            snapshot, owns_action = _card_added_snapshot(d) if native_row else ({}, False)
+            cards[cid] = Card(
+                id=cid, statement=stmt, seed_statement=stmt,
+                source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
+                rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node,
+                **snapshot,
+            )
+            if owns_action:
+                action_owned_cards.add(cid)
         except Exception:  # noqa: BLE001 — one bad record must not brick the fold
             continue
 
@@ -3141,7 +3380,14 @@ def _derive_cards(st: RunState) -> None:
         if n.idea is None:
             continue
         stmt = (n.idea.hypothesis or "").strip()
-        cid = (n.idea.card_id or "").strip() or (hypothesis_id(stmt) if stmt else "")
+        seed_id = hypothesis_id(stmt) if stmt else ""
+        explicit_card_id = (n.idea.card_id or "").strip()
+        raw_cid = explicit_card_id or seed_id
+        if explicit_card_id in conflicted_native_ids:
+            continue
+        if not explicit_card_id and seed_id in ambiguous_seeds:
+            continue  # no exact native identity: attaching legacy evidence would be an arbitrary guess
+        cid = seed_owner.get(seed_id, raw_cid) if raw_cid == seed_id else raw_cid
         if not cid:
             continue
         c = cards.get(cid)
@@ -3154,6 +3400,19 @@ def _derive_cards(st: RunState) -> None:
                      parent_id=(n.parent_ids[0] if n.parent_ids else None),
                      parent_ids=list(n.parent_ids or []))
             cards[cid] = c
+        elif not c.evidence and cid not in action_owned_cards:
+            # CODEX AGENT: card_added is intentionally thin. Backfill its missing action block from the
+            # earliest linked node; otherwise the normal card_added -> node_created staging path leaves a
+            # permanently substance-free card. Copy the whole block atomically (including legitimate
+            # empties) so later evidence cannot synthesize a chimera from several proposals.
+            c.operator = n.idea.operator
+            c.params = dict(n.idea.params or {})
+            c.space = {k: list(v) for k, v in (n.idea.space or {}).items()}
+            c.eval_profile = n.idea.eval_profile
+            c.concept_tags = list(n.idea.concepts or [])
+            c.parent_id = n.parent_ids[0] if n.parent_ids else None
+            c.parent_ids = list(n.parent_ids or [])
+            action_owned_cards.add(cid)
         if n.id not in c.evidence:
             c.evidence.append(n.id)
 
@@ -3161,19 +3420,34 @@ def _derive_cards(st: RunState) -> None:
     #     DETERMINISTIC (no LLM; the decision was recorded by the engine), order-tolerant, cycle-safe.
     #     Mirrors `_derive_hypotheses` 2b exactly, reusing the same `_canon` alias-chain resolution.
     alias: dict[str, str] = {}
+    for seed_id, owner in seed_owner.items():
+        if seed_id != owner:
+            alias[seed_id] = owner
     merged_stmt: dict[str, str] = {}
     for d in list(st.cards_merged) + list(st.hypotheses_merged):   # mirror the hypothesis board in L1a
         try:
-            canon = str(d.get("canonical") or "").strip()
-            if not canon:
+            raw_canon = str(d.get("canonical") or "").strip()
+            raw_aliases = d.get("aliases")
+            if (not raw_canon or len(raw_canon) > 256 or not isinstance(raw_aliases, list)
+                    or raw_canon in ambiguous_seeds):
                 continue
+            canon = seed_owner.get(raw_canon, raw_canon)
             s = str(d.get("statement", "")).strip()
             if s:
                 merged_stmt[canon] = s
-            for a in (d.get("aliases") or []):
-                a = str(a).strip()
-                if a and a != canon:
-                    alias[a] = canon
+            seen_aliases: set[str] = set()
+            for raw_alias in raw_aliases[:256]:
+                if not isinstance(raw_alias, str):
+                    continue
+                a = raw_alias.strip()
+                if not a or len(a) > 256 or a in ambiguous_seeds:
+                    continue
+                resolved_alias = seed_owner.get(a, a)
+                if resolved_alias != canon and resolved_alias not in seen_aliases:
+                    seen_aliases.add(resolved_alias)
+                    # Preserve hash -> native ownership and compose native -> canonical. Overwriting the
+                    # first edge would strand the stable card beside its merged hypothesis shadow.
+                    alias[resolved_alias] = canon
         except Exception:  # noqa: BLE001 — one bad merge record must not brick the fold
             continue
 
@@ -3184,10 +3458,20 @@ def _derive_cards(st: RunState) -> None:
             x = alias[x]
         return x
 
+    # Legacy hypothesis controls name a statement hash while a modern card may have a stable independent
+    # id. Carry every pre-merge id and seed hash forward to the final canonical card.
+    control_ids: dict[str, set[str]] = {
+        cid: ({cid, hypothesis_id(c.seed_statement)}
+              if c.seed_statement and hypothesis_id(c.seed_statement) not in ambiguous_seeds else {cid})
+        for cid, c in cards.items()
+    }
+
     if alias:
         folded: dict[str, Card] = {}
+        folded_control_ids: dict[str, set[str]] = {}
         for cid in list(cards):
             tid = _canon(cid)
+            folded_control_ids.setdefault(tid, {tid}).update(control_ids.get(cid, {cid}))
             tgt = folded.get(tid)
             if tgt is None:
                 base = cards.get(tid, cards[cid])   # seed from the canonical row if it exists, else this
@@ -3206,7 +3490,15 @@ def _derive_cards(st: RunState) -> None:
         for tgt in folded.values():
             tgt.evidence.sort()
             tgt.aliases.sort()
+        for alias_id in alias:
+            target_id = _canon(alias_id)
+            target = folded.get(target_id)
+            if target is not None and alias_id != target_id and alias_id not in target.aliases:
+                target.aliases.append(alias_id)
+                target.aliases.sort()
+                folded_control_ids.setdefault(target_id, {target_id}).add(alias_id)
         cards = folded
+        control_ids = folded_control_ids
 
     # 3) record-setters (sticky SOTA advancers) — the SAME pure helper the hypotheses use, so a card's
     #    verdict is byte-identical to its hash-joined hypothesis.
@@ -3216,13 +3508,15 @@ def _derive_cards(st: RunState) -> None:
     #    mirrors the hypothesis: a shadow card keyed by the hypothesis id inherits the abandoned override.
     for c in cards.values():
         c.best_delta, c.verdict, _ = _evidence_verdict(
-            c.evidence, st.nodes, st.direction, _record_setters, c.id in st.hypotheses_abandoned)
+            c.evidence, st.nodes, st.direction, _record_setters,
+            any(control_id in st.hypotheses_abandoned
+                for control_id in control_ids.get(c.id, {c.id})))
 
     # 5) apply `card_dropped` overrides (engine/operator). The card STAYS visible (like an abandoned
     #    hypothesis) — the lifecycle `status` below reads this to show the 'dropped' lane. Last write wins.
     dropped: dict[str, dict] = {}
     for d in st.cards_dropped:
-        cid = str(d.get("id") or "").strip()
+        cid = _canon(str(d.get("id") or "").strip())
         if cid:
             dropped[cid] = d
     for cid, d in dropped.items():
@@ -3304,41 +3598,80 @@ def _derive_cards(st: RunState) -> None:
     # type-guarded and the two numeric coercions are guarded INDIVIDUALLY, so a bad numeric field can
     # never drop a valid sibling field that appears after it in the delta (key-order-independent apply).
     _ENRICH_DICT = {"novelty_verdict", "cross_run_prior", "footprint"}
-    _ENRICH_LIST = {"steering_context", "concept_tags", "lesson_refs", "claim_refs"}
+    _ENRICH_REFS = {"concept_tags", "lesson_refs", "claim_refs"}
     _ENRICH_STR = {"research_origin", "provenance_tier"}
-    for d in sorted(st.cards_enriched, key=lambda r: r.get("_seq", 0)):
+    for d in sorted(st.cards_enriched, key=lambda r: (
+            r.get("_seq") if type(r.get("_seq")) is int else -1,
+            r.get("_event_index") if type(r.get("_event_index")) is int else -1)):
         try:
-            c = cards.get(str(d.get("id") or "").strip())
+            c = cards.get(_canon(str(d.get("id") or "").strip()))
         except Exception:  # noqa: BLE001 — a malformed id must not brick the fold
             c = None
         if c is None:
             continue
         for k, v in d.items():
             if k in _ENRICH_DICT and isinstance(v, dict):
-                setattr(c, k, v)
-            elif k in _ENRICH_LIST and isinstance(v, list):
-                setattr(c, k, v)
+                valid, bounded = _bounded_card_enrichment(v)
+                if valid:
+                    setattr(c, k, bounded)
+            elif k in _ENRICH_REFS and isinstance(v, list):
+                refs: list[str] = []
+                for item in v[:64]:
+                    if not isinstance(item, str):
+                        continue
+                    ref = item.strip()[:400]
+                    if ref and ref not in refs:
+                        refs.append(ref)
+                setattr(c, k, refs)
+            elif k == "steering_context" and isinstance(v, list):
+                context: list[dict] = []
+                for item in v[:64]:
+                    if not isinstance(item, dict):
+                        continue
+                    valid, bounded = _bounded_card_enrichment(item)
+                    if valid and isinstance(bounded, dict):
+                        context.append(bounded)
+                c.steering_context = context
             elif k in _ENRICH_STR and v is not None:
                 setattr(c, k, str(v)[:400])
             elif k == "foresight_rank" and v is not None:
                 try:
-                    c.foresight_rank = int(v)
+                    rank = int(v)
                 except (TypeError, ValueError):
                     pass
+                else:
+                    if not isinstance(v, bool) and 0 <= rank < 256:
+                        c.foresight_rank = rank
             elif k == "confidence" and v is not None:
                 try:
-                    c.confidence = float(v)
-                except (TypeError, ValueError):
+                    confidence = float(v)
+                except (TypeError, ValueError, OverflowError):
                     pass
+                else:
+                    if (not isinstance(v, bool) and math.isfinite(confidence)
+                            and 0.0 <= confidence <= 1.0):
+                        c.confidence = confidence
 
     # Board priority — the explicit `card_ranked` order, else the `hypothesis_ranking` shadow (both stamp
     # the OPEN lane's 0-based position, mirroring `_derive_hypotheses`; None once a card resolves).
+    native_card_ranking = st.card_ranking is not None
     order = (st.card_ranking or st.hypothesis_ranking or {}).get("order") or []
-    for rank_i, cid in enumerate(order):
-        c = cards.get(str(cid))
+    if native_card_ranking:
+        # A native card_ranked event owns the foresight projection, including clearing a prior explicit
+        # enrichment for cards it no longer ranks.
+        for c in cards.values():
+            c.foresight_rank = None
+    ranked_cards: set[str] = set()
+    for cid in order:
+        canonical_id = _canon(str(cid))
+        if canonical_id in ranked_cards:
+            continue
+        rank_i = len(ranked_cards)
+        ranked_cards.add(canonical_id)
+        c = cards.get(canonical_id)
         if c is not None and c.verdict == "open":
             c.priority = rank_i
-            if c.foresight_rank is None:
+            if native_card_ranking or c.foresight_rank is None:
                 c.foresight_rank = rank_i
 
     # 7) operator-override overlay — RESERVED FINAL PHASE (docs/23 decision 27: the operator wins
@@ -3378,4 +3711,8 @@ def _derive_cards(st: RunState) -> None:
     # A hypothesis DELETED by the operator (hypothesis_updated status=deleted) is removed from the board
     # entirely; the shadow card must vanish with it (mirrors `_derive_hypotheses`' final filter). Until a
     # card-native delete exists, reuse `hypotheses_deleted`; card ids == hypothesis ids in Layer 1a.
-    st.cards = {k: v for k, v in cards.items() if k not in st.hypotheses_deleted}
+    st.cards = {
+        cid: card for cid, card in cards.items()
+        if not any(control_id in st.hypotheses_deleted
+                   for control_id in control_ids.get(cid, {cid}))
+    }
