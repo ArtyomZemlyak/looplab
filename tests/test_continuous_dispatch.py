@@ -82,3 +82,35 @@ def test_eval_budget_guard_admits_nothing_once_spent(monkeypatch):
     _drive(stub, [{"node_id": 0}, {"node_id": 1}], 1.0, monkeypatch, total_eval_seconds=100.0)
     assert stub.ran == []                             # budget spent -> nothing admitted
     assert stub.peak == 0
+
+
+def test_refill_rechecks_budget_after_waiting_for_a_slot(monkeypatch):
+    # Node 2 reaches the producer while both slots are occupied. Node 0 then finishes and crosses the
+    # budget while the producer is asleep in slots.acquire(); the freed slot must NOT admit node 2 from
+    # the stale pre-wait fold.
+    stub = _DispatchStub(max_parallel=2, durations={0: 0.02, 1: 0.15, 2: 0.01})
+    stub.total_eval_seconds = 0.0
+    original_evaluate = stub._evaluate
+
+    async def _evaluate_and_charge(node_id, limiter, max_es):
+        await original_evaluate(node_id, limiter, max_es)
+        if node_id == 0:
+            stub.total_eval_seconds = 100.0
+
+    stub._evaluate = _evaluate_and_charge
+    monkeypatch.setattr(
+        "looplab.engine.orchestrator.fold",
+        lambda events: types.SimpleNamespace(
+            total_eval_seconds=stub.total_eval_seconds, aborted_nodes=set(), nodes={}),
+    )
+    from looplab.engine.orchestrator import Engine
+
+    anyio.run(
+        Engine._dispatch_evals,
+        stub,
+        [{"node_id": 0}, {"node_id": 1}, {"node_id": 2}],
+        None,
+        50.0,
+    )
+    assert sorted(stub.ran) == [0, 1]
+    assert stub.peak == 2

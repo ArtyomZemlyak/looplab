@@ -1796,6 +1796,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if (max_es is not None and cur.total_eval_seconds >= max_es):
                                 break
                             await slots.acquire()     # blocks only when the pool is full -> the refill point
+                            # CODEX AGENT: the pre-check above may be minutes old after a genuine refill
+                            # wait. Re-fold while owning the freed slot so a sibling that crossed the hard
+                            # eval budget (or an operator abort) cannot be followed by one more admission.
+                            cur = fold(self.store.read_all())
+                            if self._skip_if_aborted(a, cur):
+                                slots.release()
+                                continue
+                            if max_es is not None and cur.total_eval_seconds >= max_es:
+                                slots.release()
+                                break
                             tg.start_soon(_eval_in_slot, a["node_id"])
             finally:
                 # Evals have joined (or errored out) — stop the repeating research loop. One-shot
