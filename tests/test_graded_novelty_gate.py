@@ -2,9 +2,9 @@
 forced-jump directive.
 
 Locks in that: with `graded_novelty` on, the live gate GRADES a proposal over the concept graph and
-ALLOWS a level-4 "same direction, different implementation" or a level-5 "re-opens a wrongly-abandoned
-FAILED direction" — the two the flat LLM/semantic dedup gate gets wrong — short-circuiting the flat gate
-and recording a `novelty_graded` audit event; levels 0/1/2/3 defer unchanged. And that, with
+ALLOWS a level-4 "same direction, different implementation" or a grounded, repeatedly verified level-5
+"re-opens a wrongly-abandoned FAILED direction" — the two the flat LLM/semantic dedup gate gets wrong —
+short-circuiting the flat gate and recording a `novelty_graded` audit event; levels 0/1/2/3 defer unchanged. And that, with
 `capability_expansion` on, an `explore`-stance hint ESCALATES to "expand the action space / build infra"
 once the concept cadence reports action-space lock-in. Both are opt-in, deterministic, and never touch
 selection (the audit event folds audit-only; no-op for a task with no curated concept skeleton)."""
@@ -76,15 +76,73 @@ def test_level4_same_direction_new_impl_is_allowed_and_audited(tmp_path):
     assert g["level"] == 4 and g["grade"] == "same_direction_new_impl" and g["recommendation"] == "allow"
 
 
-def test_level5_wrongly_abandoned_is_allowed_and_audited(tmp_path):
+def test_level5_wrongly_abandoned_requires_grounded_repeated_ratification(tmp_path, monkeypatch):
     store = _run(tmp_path)
     eng = _GateEngine(store, graded=True)
+    client = object()
+    eng._reflect_client = lambda: client
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    eng._repo_spec = {"editables": [{"name": ".", "path": str(repo)}]}
+    seen = {}
+
+    def _reexamine(state, node_id, graph, **kwargs):
+        seen.update(node_id=node_id, **kwargs)
+        return {"available": True, "recommendation": "reexamine", "agreement": 1.0,
+                "n_samples": 3, "requested_samples": 3}
+
+    monkeypatch.setattr("looplab.search.graded_novelty.reexamine_failed_direction", _reexamine)
+    monkeypatch.setattr(
+        "looplab.tools.asset_brief.asset_brief",
+        lambda root, **kwargs: "repo evidence: the data-side false-negative path is implemented",
+    )
     out = eng._graded_novelty_precheck(fold(store.read_all()), _LEVEL5)
     assert out is _LEVEL5
+    assert seen["node_id"] == 1 and seen["client"] is client
+    assert seen["samples"] == 3 and "repo evidence" in seen["asset_brief"]
     st = fold(store.read_all())
     assert len(st.novelty_grades) == 1 and st.novelty_grades[0]["level"] == 5
     assert st.novelty_grades[0]["grade"] == "wrongly_abandoned"
     assert "negatives/false-neg-handling" in st.novelty_grades[0]["shared_concepts"]
+
+
+@pytest.mark.parametrize("verdict", [
+    {"available": False, "recommendation": "unavailable", "agreement": 1.0,
+     "n_samples": 3, "requested_samples": 3},
+    {"available": True, "recommendation": "leave_closed", "agreement": 1.0,
+     "n_samples": 3, "requested_samples": 3},
+    {"available": True, "recommendation": "reexamine", "agreement": 0.5,
+     "n_samples": 3, "requested_samples": 3},
+    {"available": True, "recommendation": "reexamine", "agreement": 1.0,
+     "n_samples": 1, "requested_samples": 3},
+])
+def test_level5_unavailable_closed_or_unstable_verdict_defers(tmp_path, monkeypatch, verdict):
+    store = _run(tmp_path)
+    eng = _GateEngine(store, graded=True)
+    eng._reflect_client = object
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    eng._repo_spec = {"editables": [{"name": ".", "path": str(repo)}]}
+    monkeypatch.setattr(
+        "looplab.search.graded_novelty.reexamine_failed_direction",
+        lambda *args, **kwargs: verdict,
+    )
+
+    assert eng._graded_novelty_precheck(fold(store.read_all()), _LEVEL5) is None
+    assert fold(store.read_all()).novelty_grades == []
+
+
+def test_level5_without_grounding_defers_before_the_paid_verifier(tmp_path, monkeypatch):
+    store = _run(tmp_path)
+    eng = _GateEngine(store, graded=True)
+    eng._reflect_client = object
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("an ungrounded L5 must not invoke or trust the verifier")
+
+    monkeypatch.setattr("looplab.search.graded_novelty.reexamine_failed_direction", _must_not_run)
+    assert eng._graded_novelty_precheck(fold(store.read_all()), _LEVEL5) is None
+    assert fold(store.read_all()).novelty_grades == []
 
 
 class _IdeaReflectClient:
@@ -439,6 +497,55 @@ def test_apply_gate_short_circuits_on_a_level4(tmp_path):
     assert eng._apply_novelty_gate(fold(store.read_all()), _LEVEL4) is _LEVEL4
 
 
+def test_default_llm_gate_prompt_preserves_bounded_candidate_and_prior_actions(
+        tmp_path, monkeypatch):
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "structural", "task_id": "t", "goal": "g", "direction": "max"})
+    prose = "the same research claim " + "x" * 50_000
+    store.append("node_created", {
+        "node_id": 0,
+        "parent_ids": [],
+        "operator": "refine",
+        "idea": {
+            "operator": "draft",
+            "params": {"temperature": 0.1},
+            "space": {"temperature": [0.1]},
+            "eval_profile": "smoke",
+            "rationale": prose,
+        },
+    })
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    candidate = Idea(
+        operator="improve",
+        params={"temperature": 0.5},
+        space={"temperature": [0.5, 0.7]},
+        eval_profile="full",
+        rationale=prose,
+    )
+    engine = _GateEngine(store, graded=False, mode="llm")
+    engine._reflect_client = object
+    captured = {}
+
+    def _agentic(client, tools, messages, schema, **kwargs):
+        captured["messages"] = messages
+        return schema(is_duplicate=False)
+
+    monkeypatch.setattr("looplab.agents.agent.agentic_struct", _agentic)
+    assert engine._apply_novelty_gate(fold(store.read_all()), candidate) is candidate
+
+    prompt = captured["messages"][1]["content"]
+    # CODEX AGENT: prose alone is not an experiment identity. Both sides of the adjudication must expose
+    # their bounded action, or the default LLM mode collapses different sweeps/eval depths into one repeat.
+    assert '"operator":"improve"' in prompt and '"operator":"draft"' in prompt
+    assert 'node_operator="refine"' in prompt
+    assert '"entries":[["temperature",0.5]]' in prompt
+    assert '"entries":[["temperature",0.1]]' in prompt
+    assert '"values":[0.5,0.7]' in prompt and '"values":[0.1]' in prompt
+    assert '"eval_profile":"full"' in prompt and '"eval_profile":"smoke"' in prompt
+    assert len(prompt) < 10_000 and "chars omitted" in prompt
+
+
 # --------------------------------------------------------------------------- #
 # Replay-safety of the audit event
 # --------------------------------------------------------------------------- #
@@ -461,7 +568,7 @@ def test_recorded_grade_payload_is_sorted(tmp_path):
     # the persisted shared_concepts must be deterministically ordered (sorted) — the ONLY place a
     # frozenset iteration order could leak into the event bytes. Inspect the actual recorded payload.
     store = _run(tmp_path)
-    _GateEngine(store, graded=True)._graded_novelty_precheck(fold(store.read_all()), _LEVEL5)
+    _GateEngine(store, graded=True)._graded_novelty_precheck(fold(store.read_all()), _LEVEL4)
     sc = fold(store.read_all()).novelty_grades[0]["shared_concepts"]
     assert sc == sorted(sc) and sc                       # sorted, non-empty
 
@@ -481,8 +588,8 @@ class E(NoveltyGateMixin):
 
 store = EventStore({path!r})
 eng = E(store)
-idea = Idea(operator="improve", params={{"seed": 9.0}},
-            rationale="data-side false negative filtering (nv-0.95)")
+idea = Idea(operator="improve", params={{"temperature": 0.5}},
+            rationale="decoupled contrastive with a listwise KL term")
 eng._graded_novelty_precheck(fold(store.read_all()), idea)
 print(json.dumps(fold(store.read_all()).novelty_grades[0], sort_keys=True))
 """

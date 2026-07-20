@@ -117,6 +117,7 @@ def test_reexamine_is_grounded_and_repeated(tmp_path):
     assert res["available"] is True
     assert res["implementation_bound"] == 1.0 and res["reexamine"] == 0.75
     assert res["recommendation"] == "reexamine"
+    assert res["n_samples"] == res["requested_samples"] == 3 and res["agreement"] == 1.0
     assert "negatives/false-neg-handling" in res["concepts"]
 
 
@@ -124,6 +125,7 @@ def test_reexamine_degrades_without_client(tmp_path):
     st = _run(tmp_path)
     res = reexamine_failed_direction(st, 1, skeleton_for("dense-retrieval"), client=None)
     assert res["available"] is False and res["recommendation"] == "unavailable"
+    assert res["n_samples"] == 0 and res["requested_samples"] == 3 and res["agreement"] == 0.0
 
 
 def test_tag_idea_pins_the_concept_set(tmp_path):

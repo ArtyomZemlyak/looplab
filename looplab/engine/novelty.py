@@ -14,7 +14,9 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 core, events and stdlib (the search/agent/tool deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import json
 import logging
+import math
 import unicodedata
 from typing import Optional
 
@@ -28,6 +30,13 @@ _IDEA_IDENTITY_MAX_SOURCE_CHARS = 16_384
 _IDEA_IDENTITY_MAX_NORMALIZED_CHARS = 32_768
 _IDEA_IDENTITY_MAX_TOKENS = 2_048
 _IDEA_IDENTITY_CACHE_MAX = 1_024
+_IDEA_PROMPT_ATOM_CHARS = 80
+_IDEA_PROMPT_MAPPING_CHARS = 1_200
+_IDEA_PROMPT_PRIOR_CHARS = 24_000
+_IDEA_PROMPT_PRIOR_COUNT = 25
+_REEXAMINATION_BRIEF_CHARS = 1_500
+_REEXAMINATION_MAX_ROOTS = 4
+_REEXAMINATION_SAMPLES = 3
 _LOG = logging.getLogger(__name__)
 
 
@@ -86,6 +95,45 @@ def _same_canonical_idea_identity(
     return left_tokens == right_tokens or "".join(left_tokens) == "".join(right_tokens)
 
 
+def _bounded_prompt_text(value, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}... <{len(text) - max_chars} chars omitted>"
+
+
+def _prompt_scalar(value):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return value
+    return _bounded_prompt_text(value, _IDEA_PROMPT_ATOM_CHARS)
+
+
+def _bounded_action_mapping(raw, *, sequence_values: bool) -> dict:
+    """Return a deterministic, receipt-bearing mapping small enough for an LLM admission prompt."""
+    values = raw if isinstance(raw, dict) else {}
+    rows = sorted(((str(key), value) for key, value in values.items()), key=lambda item: item[0])
+    kept: list = []
+    for key, value in rows:
+        bounded_key = _bounded_prompt_text(key, _IDEA_PROMPT_ATOM_CHARS)
+        if sequence_values:
+            source = list(value) if isinstance(value, (list, tuple)) else [value]
+            entry = {
+                "key": bounded_key,
+                "values": [_prompt_scalar(item) for item in source[:16]],
+                "values_omitted": max(0, len(source) - 16),
+            }
+        else:
+            entry = [bounded_key, _prompt_scalar(value)]
+        candidate = {"entries": [*kept, entry], "entries_omitted": len(rows) - len(kept) - 1}
+        encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) > _IDEA_PROMPT_MAPPING_CHARS:
+            break
+        kept.append(entry)
+    return {"entries": kept, "entries_omitted": len(rows) - len(kept)}
+
+
 class NoveltyGateMixin:
     """The engine's novelty/dedup gate cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -96,6 +144,24 @@ class NoveltyGateMixin:
         """The semantic identity of a proposal: what it claims to try + why."""
         return " ".join(filter(None, [getattr(idea, "rationale", "") or "",
                                       getattr(idea, "hypothesis", "") or ""])).strip()
+
+    def _idea_prompt_identity(self, idea, *, prose_chars: int) -> str:
+        """A bounded claim + action identity for the live LLM novelty adjudicator."""
+        # CODEX AGENT: rationale/hypothesis are not the experiment action. Keep every structural axis
+        # independently bounded and receipt-bearing so a huge params map cannot hide space/eval_profile.
+        action = {
+            "operator": _bounded_prompt_text(getattr(idea, "operator", ""), 160),
+            "params": _bounded_action_mapping(getattr(idea, "params", None), sequence_values=False),
+            "space": _bounded_action_mapping(getattr(idea, "space", None), sequence_values=True),
+            "eval_profile": (
+                _bounded_prompt_text(getattr(idea, "eval_profile", ""), 160)
+                if getattr(idea, "eval_profile", None) is not None else None
+            ),
+        }
+        return (
+            f"claim={json.dumps(_bounded_prompt_text(self._idea_text(idea), prose_chars), ensure_ascii=False)}; "
+            f"action={json.dumps(action, ensure_ascii=False, separators=(',', ':'))}"
+        )
 
     def _idea_vec(self, text: str):
         # Key on the TEXT (not a node_id): the embedding is a pure function of the text, and a
@@ -190,19 +256,41 @@ class NoveltyGateMixin:
             near_node_id: Optional[int] = None
             reason: str = ""
 
-        brief = "; ".join(f"#{n.id} {n.operator}: {self._idea_text(n.idea)[:80]}"
-                          for n in list(state.nodes.values())[-25:])
+        prior_nodes = list(state.nodes.values())[-_IDEA_PROMPT_PRIOR_COUNT:]
+        prior_rows: list[str] = []
+        used = 0
+        omitted = 0
+        # Newest experiments carry the most current action space. Fit whole rows newest-first, then restore
+        # chronological presentation; never cut a row halfway through one of its structural dimensions.
+        for node in reversed(prior_nodes):
+            node_operator = json.dumps(
+                _bounded_prompt_text(getattr(node, "operator", ""), 160), ensure_ascii=False)
+            row = (
+                f"#{node.id} node_operator={node_operator}: "
+                f"{self._idea_prompt_identity(node.idea, prose_chars=240)}"
+            )
+            if used + len(row) + (1 if prior_rows else 0) > _IDEA_PROMPT_PRIOR_CHARS:
+                omitted += 1
+                continue
+            prior_rows.append(row)
+            used += len(row) + (1 if len(prior_rows) > 1 else 0)
+        prior_rows.reverse()
+        brief = "\n".join(prior_rows)
+        if omitted:
+            brief += f"\n[{omitted} older bounded action row(s) omitted by the prompt budget]"
         msgs = [{"role": "system",
-                 "content": "You judge experiment NOVELTY for an ML research loop. Decide if a PROPOSED "
-                            "idea is a near-duplicate of an experiment already tried in THIS run. Read the "
-                            "actual experiments (read_experiment / read_code) when unsure. A rewording or a "
-                            "trivially-close variant of a tried idea is a DUPLICATE; a genuinely different "
-                            "approach, component, loss, data or direction is NOVEL. Prefer NOVEL unless "
-                            "clearly a repeat."},
-                {"role": "user",
-                 "content": f"PROPOSED idea: {self._idea_text(idea)}\n\nAlready tried: {brief}\n\n"
-                            "Emit is_duplicate, near_node_id (the tried experiment it duplicates, or null), "
-                            "and a one-line reason."}]
+                  "content": "You judge experiment NOVELTY for an ML research loop. Decide if a PROPOSED "
+                             "idea is a near-duplicate of an experiment already tried in THIS run. Read the "
+                             "actual experiments (read_experiment / read_code) when unsure. A rewording or a "
+                             "trivially-close variant of a tried idea is a DUPLICATE; a genuinely different "
+                             "approach, component, loss, data or direction is NOVEL. Compare both the claim "
+                             "and the bounded action identity: operator, params, search space and eval profile "
+                             "are part of what was tried. Prefer NOVEL unless clearly a repeat."},
+                 {"role": "user",
+                  "content": f"PROPOSED idea: {self._idea_prompt_identity(idea, prose_chars=800)}"
+                             f"\n\nAlready tried:\n{brief}\n\n"
+                             "Emit is_duplicate, near_node_id (the tried experiment it duplicates, or null), "
+                             "and a one-line reason."}]
         try:
             rt = RunTools()
             rt.bind_state(state, None)
@@ -377,6 +465,90 @@ class NoveltyGateMixin:
         val = getattr(self.researcher, attr, None)
         return dict(val) if isinstance(val, dict) else None
 
+    def _failed_direction_asset_brief(self, state: RunState) -> str:
+        """Load a bounded D1 brief from the actual editable repositories, or return no proof."""
+        try:
+            from pathlib import Path
+
+            roots = tuple(sorted({
+                str(Path(str(editable.get("path"))).resolve())
+                for editable in (getattr(self, "_repo_spec", None) or {}).get("editables", [])
+                if isinstance(editable, dict) and editable.get("path")
+                and Path(str(editable.get("path"))).is_dir()
+            }))
+        except (OSError, TypeError, ValueError):
+            return ""
+        # A partial repository sample cannot justify overriding the ordinary novelty gate.
+        if not roots or len(roots) > _REEXAMINATION_MAX_ROOTS:
+            return ""
+        key = (state.task_id or "", roots)
+        cache = getattr(self, "_failed_direction_brief_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._failed_direction_brief_cache = cache
+        if key in cache:
+            return cache[key]
+        try:
+            from looplab.tools.asset_brief import asset_brief
+
+            per_root = max(1, _REEXAMINATION_BRIEF_CHARS // len(roots))
+            parts = [
+                f"EDITABLE {index}:\n{asset_brief(root, client=None, task_type=state.task_id)[:per_root]}"
+                for index, root in enumerate(roots, start=1)
+            ]
+            brief = "\n\n".join(parts)[:_REEXAMINATION_BRIEF_CHARS].strip()
+        except Exception:  # noqa: BLE001 -- unavailable grounding must defer, never block proposing
+            brief = ""
+        cache[key] = brief
+        return brief
+
+    def _verified_failed_direction_reopen(self, state: RunState, graph, node_id, client) -> bool:
+        """Require grounded, repeated and stable evidence before a level-5 admission override."""
+        if client is None or not isinstance(node_id, int):
+            return False
+        brief = self._failed_direction_asset_brief(state)
+        if not brief:
+            return False
+        try:
+            from looplab.search.graded_novelty import reexamine_failed_direction
+
+            researcher = getattr(self, "researcher", None)
+            parser = next((value for owner in (
+                researcher,
+                getattr(researcher, "inner", None),
+                getattr(researcher, "fallback", None),
+                getattr(self, "developer", None),
+            ) if (value := getattr(owner, "parser", None))), "tool_call")
+            verdict = reexamine_failed_direction(
+                state,
+                node_id,
+                graph,
+                client=client,
+                asset_brief=brief,
+                samples=_REEXAMINATION_SAMPLES,
+                parser=parser,
+            )
+        except Exception:  # noqa: BLE001 -- verifier failures preserve the ordinary flat gate
+            return False
+        if not isinstance(verdict, dict):
+            return False
+        agreement = verdict.get("agreement")
+        n_samples = verdict.get("n_samples")
+        requested = verdict.get("requested_samples")
+        # CODEX AGENT: L5 changes admission, so one lucky parse or an unstable split verdict is not
+        # "repeated verification". Require a strict parsed majority and a strict modal majority; every
+        # unavailable, closed, malformed or low-agreement result falls through to the ordinary flat gate.
+        return bool(
+            verdict.get("available") is True
+            and verdict.get("recommendation") == "reexamine"
+            and requested == _REEXAMINATION_SAMPLES
+            and isinstance(n_samples, int) and not isinstance(n_samples, bool)
+            and n_samples <= _REEXAMINATION_SAMPLES
+            and n_samples * 2 > _REEXAMINATION_SAMPLES
+            and isinstance(agreement, (int, float)) and not isinstance(agreement, bool)
+            and 0.5 < float(agreement) <= 1.0
+        )
+
     def _graded_novelty_precheck(self, state: RunState, idea: Idea):
         """PART IV D3 (§21.4, Phase 2b): a concept-graph-aware PRE-gate. When `graded_novelty` is on and
         the task has a curated concept skeleton, grade the proposal over the concept graph BEFORE the flat
@@ -385,8 +557,8 @@ class NoveltyGateMixin:
           * level 4 `same_direction_new_impl` — shares a concept BRANCH with a tried node but is a
             materially different implementation. The flat gate can't tell "this DCL tweak" from "the whole
             DCL branch" and would wrongly reject/repropose a legitimate variant.
-          * level 5 `wrongly_abandoned` — re-opens a FAILED direction (every experiment touching it failed).
-            The flat gate has NO re-open path; it would treat a sound-but-killed direction as a dead end.
+          * level 5 `wrongly_abandoned` — re-opens a FAILED direction only after the grounded, repeated
+            verifier confirms a stable implementation-bound failure. The flat gate has no re-open path.
         Returns None (defer to the flat gate, UNCHANGED behavior) for every other grade: level 0 (novel,
         the flat gate passes it anyway) and levels 1/2/3 (identical / near-dup / prior-run, which the flat
         gate legitimately dedups). Audit-only: the allow is recorded as a `novelty_graded` event, never a
@@ -488,7 +660,8 @@ class NoveltyGateMixin:
             matched = idea_concepts & prior_set
             if matched:
                 self._record_cross_run_prior(state, matched, prior_caps)
-        # Only levels 4/5 are ALLOW-overrides of the flat gate. Level 0 (novel) and 1/2/3 (dedup) defer.
+        # Level 4 is an ALLOW override; level 5 is only a candidate override until the grounded repeated
+        # verifier below ratifies reopening it. Level 0 (novel) and 1/2/3 (dedup) defer.
         if grade.level not in (4, 5):
             return None
         # grade_novelty's own dedup (levels 1/2) is PARAM-based, so empty/key-disjoint params can skip it
@@ -521,6 +694,9 @@ class NoveltyGateMixin:
         # implementation/patch identity exists, only an explicit param or search-space delta can justify
         # skipping the ordinary semantic/LLM duplicate gate; prose-only variants must still pass it.
         if not any(candidate_change) or candidate_change == prior_change:
+            return None
+        if grade.level == 5 and not self._verified_failed_direction_reopen(
+                state, graph, grade.near_node, client):
             return None
         self.store.append(EV_NOVELTY_GRADED, {
             # prospective id = max+1, not len() (gap-safe; audit only) — matches the reject events below.
@@ -729,15 +905,16 @@ class NoveltyGateMixin:
         one informed re-propose even when the static gate is off, so novelty pressure follows the
         meta-controller. "balanced"/"exploit" (and gate off) leave this a no-op — exactly as before."""
         # PART IV D3 (Phase 2b): the concept-graph pre-gate runs FIRST. When it recognizes a legitimate
-        # same-direction-new-implementation (level 4) or a re-open of a wrongly-abandoned failed direction
-        # (level 5), it SHORT-CIRCUITS — the flat gate below can't make that distinction and would wrongly
-        # reject the proposal. Every other grade (and the flag being off) falls through UNCHANGED.
+        # same-direction-new-implementation (level 4), or RATIFIES a re-open of a wrongly-abandoned failed
+        # direction (level 5) with grounded repeated evidence, it SHORT-CIRCUITS. Every other grade (and the
+        # flag being off) falls through UNCHANGED.
         graded = self._graded_novelty_precheck(state, idea)
         if graded is not None:
             # The graded pre-gate is a DELIBERATE short-circuit (Phase-2b, behind `_novelty_mode`): only
             # levels 4/5 return here, and only to ADMIT a proposal the flat gate would wrongly reject (a
-            # legitimate same-direction-new-implementation, or the re-open of a wrongly-abandoned failed
-            # direction). It never ADMITS a true duplicate: `_graded_novelty_precheck` runs a verbatim-dup
+            # legitimate same-direction-new-implementation, or a verifier-ratified re-open of a
+            # wrongly-abandoned failed direction). It never ADMITS a true duplicate:
+            # `_graded_novelty_precheck` runs a verbatim-dup
             # guard scanning ALL prior nodes (B1 fix), so a punctuation-only paraphrase can't reach here —
             # it falls through to the stronger `_llm_novelty_gate` below like every other grade.
             return graded

@@ -231,7 +231,9 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
     reopen = [c for c in idea_concepts if c in failed]
     if reopen:
         fd = failed[sorted(reopen)[0]]
-        return NoveltyGrade(5, _LEVELS[5], _RECO[5], (fd.node_ids[0] if fd.node_ids else None),
+        failed_ids = [node_id for node_id in fd.node_ids
+                      if state.nodes[node_id].status is NodeStatus.failed]
+        return NoveltyGrade(5, _LEVELS[5], _RECO[5], (failed_ids[0] if failed_ids else None),
                             sorted(idea_concepts),
                             f"re-opens wrongly-abandoned direction '{fd.concept}' ({fd.reason})")
 
@@ -271,13 +273,17 @@ def reexamine_failed_direction(state: RunState, node_id: int, graph: ConceptGrap
       implementation_bound - verifier score in [0,1]: high = the IMPLEMENTATION failed, not the direction
       reexamine            - verifier score in [0,1]: high = worth re-opening with a different impl
       agreement            - cross-sample stability (low => still too noisy to act on)
+      n_samples            - usable verifier samples (a caller can require a strict parsed majority)
+      requested_samples    - requested repetition count
       recommendation       - 'reexamine' | 'leave_closed' | 'unavailable'
 
     Advisory / best-effort — never raises."""
     from looplab.trust.verifier import reexamination_criteria, verify
+    requested_samples = samples if type(samples) is int else 1
     n = state.nodes.get(node_id)
     if n is None:
-        return {"available": False, "recommendation": "unavailable", "reason": f"no node #{node_id}"}
+        return {"available": False, "recommendation": "unavailable", "reason": f"no node #{node_id}",
+                "n_samples": 0, "requested_samples": requested_samples, "agreement": 0.0}
     concepts = sorted(tag_idea(n.idea, graph)) if n.idea else []
     outcome = (f"FAILED ({n.error_reason or 'error'})" if n.status is NodeStatus.failed
                else f"metric={n.metric}")
@@ -290,7 +296,8 @@ def reexamine_failed_direction(state: RunState, node_id: int, graph: ConceptGrap
         evidence += f"\n\nPRIOR ART / AVAILABLE ASSETS:\n{asset_brief[:1500]}"
     if client is None:
         return {"available": False, "recommendation": "unavailable", "node_id": node_id,
-                "concepts": concepts}
+                "concepts": concepts, "n_samples": 0, "requested_samples": requested_samples,
+                "agreement": 0.0}
     rep = verify(subject, evidence, reexamination_criteria(), client=client, samples=samples,
                  parser=parser)
     ib = rep.per_criterion.get("implementation_bound", {}).get("mean")
@@ -300,4 +307,5 @@ def reexamine_failed_direction(state: RunState, node_id: int, graph: ConceptGrap
         reco = "reexamine" if (ib >= 0.6 and rx >= 0.6) else "leave_closed"
     return {"available": True, "node_id": node_id, "concepts": concepts,
             "implementation_bound": ib, "reexamine": rx, "agreement": rep.agreement,
+            "n_samples": rep.n_samples, "requested_samples": rep.requested_samples,
             "recommendation": reco}
