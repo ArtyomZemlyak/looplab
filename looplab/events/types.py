@@ -256,11 +256,11 @@ EV_RUN_SETUP_FINISHED = "run_setup_finished"
 # appended from the concurrent monitor task), so it never touches node selection or replay; it exists for
 # the owner attention feed + audit trail. Healthy verdicts stay trace-only (no event) to keep the log clean.
 EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
-# ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric already
-# ranks below the configured quantile of its completed siblings' FINALS. DIAGNOSTIC / fold-ignored
-# (advisory rank signal; the opt-in kill records its effect as the node's single `node_failed` terminal
-# with reason=asha_underperforming, NOT via this event) — so appending it from the concurrent watchdog is
-# splice-neutral and replay-safe by construction.
+# ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric ranks below
+# completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;
+# only enough underperforming same-resource evidence may trigger the opt-in kill. DIAGNOSTIC / fold-
+# ignored; intervention is recorded by the node's single `node_failed` terminal, so concurrent append
+# remains splice-neutral and replay-safe.
 EV_ASHA_RANK = "asha_rank"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(

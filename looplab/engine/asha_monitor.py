@@ -1,10 +1,10 @@
 """ASHA live-curve early-stop watchdog (advisory + opt-in kill) — a sibling of `train_monitor.py`.
 
-Where the training monitor judges the run's HEALTH from the log, this watchdog judges its RANK: it
-reads the latest INTERMEDIATE value of the run's objective metric off the live log and compares it to
-the FINAL metrics of already-completed sibling nodes. A node whose intermediate value is already worse
-than a configured quantile (default the median) of its siblings' finals is very unlikely to catch up —
-successive-halving's core idea, applied to the live curve while the node is still training.
+Where the training monitor judges the run's HEALTH from the log, this watchdog judges its RANK. The
+historical intermediate-vs-finished-endpoint comparison remains an ADVISORY signal. An opt-in kill is
+stricter: the metric spec must explicitly name ``resource_key`` and enough completed siblings must
+retain metric observations at exactly the same resource value. An early point is never treated as
+comparable to a finished endpoint merely because both contain the objective metric.
 
 Advisory by default: a non-healthy rank records a fold-IGNORED `EV_ASHA_RANK` diagnostic event (so its
 thread-schedule-dependent position never touches replay/selection — splice-neutral by construction) and
@@ -19,16 +19,17 @@ Fragility is contained by construction:
  - a min-siblings floor means it never ranks against too little evidence;
  - a grace period (`_ASHA_GRACE_TICKS`) protects a slow start — a kill never fires on the first acting
    ticks, only after the underperformance persists;
- - comparing an INTERMEDIATE value to sibling FINALS is deliberately optimistic-biased AGAINST stopping
-   for direction-min-vs-max symmetry: the node has to be worse than a *finished* peer to even flag, and
-   the quantile is the operator's dial (lower = only stop the truly doomed).
+ - endpoint comparison remains useful diagnostics but cannot kill; missing same-resource evidence
+   degrades safely to advisory-only observation.
 """
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from typing import Optional
 
 # A kill never fires until the node has been flagged underperforming on this many CONSECUTIVE acting
-# ticks (ticks where a metric parsed AND enough siblings exist). Protects a slow-but-recovering start:
+# ticks (a metric and enough same-resource sibling observations exist). Protects a recovering start:
 # a transient dip below the bar that recovers within the grace window never stops the run.
 _ASHA_GRACE_TICKS = 2
 
@@ -58,6 +59,66 @@ def latest_intermediate(log_tail: str, workdir, metric_spec: dict) -> Optional[f
     return float(val) if val == val and abs(val) != float("inf") else None   # drop NaN/inf
 
 
+@dataclass(frozen=True)
+class IntermediateSample:
+    """A live metric plus optional operator-declared resource evidence from the same JSON record."""
+
+    value: float
+    resource_key: Optional[str] = None
+    resource: Optional[float] = None
+
+
+def _finite_number(value) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if value == value and abs(value) != float("inf") else None
+
+
+def _declared_resource_key(metric_spec: dict) -> Optional[str]:
+    key = metric_spec.get("resource_key") if isinstance(metric_spec, dict) else None
+    metric_key = metric_spec.get("key", "metric") if isinstance(metric_spec, dict) else "metric"
+    return key if (isinstance(key, str) and 0 < len(key) <= 128 and key != metric_key) else None
+
+
+def _json_objects_newest_first(log_tail: str):
+    for line in reversed(log_tail.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, RecursionError):
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def latest_intermediate_sample(log_tail: str, workdir, metric_spec: dict) -> Optional[IntermediateSample]:
+    """Return the latest metric and resource only when both occur in the same JSON record.
+
+    ``resource_key`` is operator-owned eval configuration. We deliberately do not guess that arbitrary
+    ``step``/``epoch``-looking output is fidelity: without an explicit declaration the sample remains
+    useful for endpoint diagnostics but is ineligible for an early kill.
+    """
+    value = latest_intermediate(log_tail, workdir, metric_spec)
+    if value is None:
+        return None
+    resource_key = _declared_resource_key(metric_spec)
+    if metric_spec.get("kind", "stdout_json") != "stdout_json" or resource_key is None:
+        return IntermediateSample(value=value)
+    metric_key = metric_spec.get("key", "metric")
+    for obj in _json_objects_newest_first(log_tail):
+        if metric_key not in obj:
+            continue
+        record_value = _finite_number(obj.get(metric_key))
+        resource = _finite_number(obj.get(resource_key))
+        if record_value == value and resource is not None:
+            return IntermediateSample(value=value, resource_key=resource_key, resource=resource)
+        return IntermediateSample(value=value)
+    return IntermediateSample(value=value)
+
+
 def sibling_final_metrics(state, node_id: int) -> list[float]:
     """Final metrics of OTHER promotion-eligible nodes in this run.
 
@@ -80,10 +141,43 @@ def sibling_final_metrics(state, node_id: int) -> list[float]:
     return out
 
 
+def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
+                                sample: IntermediateSample) -> list[float]:
+    """Sibling curve values observed at exactly the live sample's declared resource coordinate.
+
+    Completed nodes retain a bounded stdout tail. Missing/truncated/malformed curve evidence simply
+    removes that sibling from the comparable population; its final endpoint is never substituted.
+    """
+    if sample.resource_key is None or sample.resource is None:
+        return []
+    if _declared_resource_key(metric_spec) != sample.resource_key:
+        return []
+    if metric_spec.get("kind", "stdout_json") != "stdout_json":
+        return []
+    metric_key = metric_spec.get("key", "metric")
+
+    from looplab.events.replay import promotion_eligible_nodes
+
+    out: list[float] = []
+    for node in promotion_eligible_nodes(state):
+        if node.id == node_id:
+            continue
+        for obj in _json_objects_newest_first(getattr(node, "stdout_tail", "") or ""):
+            if _finite_number(obj.get(sample.resource_key)) != sample.resource:
+                continue
+            value = _finite_number(obj.get(metric_key))
+            if value is not None:
+                out.append(value)
+                break
+    return out
+
+
 def asha_underperforming(value: Optional[float], population: list[float], direction: str, *,
                          quantile: float = 0.5) -> Optional[bool]:
-    """Is `value` (an intermediate metric) already WORSE than the `quantile` of the completed
-    `population` finals, given the optimization `direction`? Pure/deterministic.
+    """Is `value` already WORSE than the `quantile` of `population`, given `direction`?
+
+    The caller may supply completed endpoints for an advisory rank or same-resource curve values for
+    an intervention decision; this pure ordering helper deliberately has no resource semantics.
 
     Returns None when it cannot decide (no value, empty population, or a bad quantile) so the caller
     treats "unknown" as "do not act". The population is ordered WORST->BEST and the bar sits at fraction
@@ -130,11 +224,11 @@ class AshaMonitorMixin:
 
     async def _monitor_asha(self, node_id: int, generation: int, workdir, cancel,
                             metric_spec: dict, direction: str,
-                            kill_signal: Optional[dict] = None) -> None:
+                            kill_signal: Optional[dict] = None, log_snapshot=None) -> None:
         """Tail the live log on a timer, extract the intermediate objective metric, rank it against the
-        completed siblings, record an advisory `EV_ASHA_RANK` when it underperforms, and (opt-in) tree-
-        kill a persistently-underperforming node. See the module docstring for the safety rails. Exits
-        when the eval finishes (`cancel` / task-group cancel); a per-tick hiccup skips the tick."""
+        completed sibling endpoints for diagnostics, and (opt-in) tree-kill only when it persistently
+        underperforms enough sibling observations at the same declared resource. See the module docstring
+        for the safety rails. Exits with the eval; a per-tick hiccup skips only that tick."""
         import anyio
 
         from looplab.engine.train_monitor import read_training_tail_raw
@@ -148,52 +242,78 @@ class AshaMonitorMixin:
         quantile = float(_q) if isinstance(_q, (int, float)) and not isinstance(_q, bool) else 0.5
         _ms = getattr(self, "_asha_live_min_siblings", 3)
         min_siblings = max(1, int(_ms)) if isinstance(_ms, (int, float)) and not isinstance(_ms, bool) else 3
-        last_flag: Optional[bool] = None
+        last_flag: Optional[tuple[bool, Optional[bool]]] = None
         under_streak = 0
         while True:
             await anyio.sleep(base)
             if cancel.is_set():
                 return
             try:
-                tail = await anyio.to_thread.run_sync(read_training_tail_raw, workdir)
-                value = latest_intermediate(tail, workdir, metric_spec)
-                if value is None:
+                tail = await anyio.to_thread.run_sync(
+                    lambda: read_training_tail_raw(workdir, snapshot=log_snapshot))
+                sample = latest_intermediate_sample(tail, workdir, metric_spec)
+                if sample is None:
                     continue
+                value = sample.value
                 state = await anyio.to_thread.run_sync(lambda: fold(self.store.read_all()))
                 population = sibling_final_metrics(state, node_id)
                 if len(population) < min_siblings:
                     continue                    # not enough finished peers to rank against yet
-                under = asha_underperforming(value, population, direction, quantile=quantile)
-                if under is None:
+                endpoint_under = asha_underperforming(
+                    value, population, direction, quantile=quantile)
+                if endpoint_under is None:
                     continue
-                under_streak = under_streak + 1 if under else 0
+                comparable_population = sibling_metrics_at_resource(
+                    state, node_id, metric_spec, sample)
+                comparable_under = (
+                    asha_underperforming(value, comparable_population, direction, quantile=quantile)
+                    if len(comparable_population) >= min_siblings else None)
+                under_streak = under_streak + 1 if comparable_under is True else 0
+                diagnostic_key = (endpoint_under, comparable_under)
                 # ADVISORY record — only when the verdict CHANGES (no log/feed spam), kept separate from
                 # the kill decision below so a persistent-underperform streak still reaches the kill check.
-                if under != last_flag:
-                    last_flag = under
+                if diagnostic_key != last_flag:
+                    last_flag = diagnostic_key
                     with self.tracer.span("asha_monitor", node_id=node_id) as sp:
                         sp.set_many(generation=generation, intermediate=round(value, 6),
-                                    underperforming=bool(under), population=len(population),
-                                    quantile=round(quantile, 3))
-                        if under:
+                                    underperforming=bool(endpoint_under), population=len(population),
+                                    quantile=round(quantile, 3),
+                                    kill_comparable=comparable_under is not None,
+                                    comparable_population=len(comparable_population))
+                        if sample.resource_key is not None and sample.resource is not None:
+                            sp.set_many(resource_key=sample.resource_key, resource=sample.resource)
+                        if endpoint_under or comparable_under is True:
                             # DIAGNOSTIC => the fold never reads it, so appending it from this concurrent
                             # watchdog is splice-neutral and replay-safe by construction.
                             assert EV_ASHA_RANK in DIAGNOSTIC_EVENTS
+                            event = {
+                                "node_id": node_id, "generation": generation,
+                                "intermediate": round(value, 6), "quantile": round(quantile, 3),
+                                "population": len(population), "direction": str(direction),
+                                "endpoint_underperforming": bool(endpoint_under),
+                                "kill_comparable": comparable_under is not None,
+                                "comparable_population": len(comparable_population),
+                                "resource_underperforming": comparable_under,
+                            }
+                            if sample.resource_key is not None and sample.resource is not None:
+                                event.update({"resource_key": sample.resource_key,
+                                              "resource": sample.resource})
                             async with self._write_lock:
-                                self.store.append(EV_ASHA_RANK, {
-                                    "node_id": node_id, "generation": generation,
-                                    "intermediate": round(value, 6), "quantile": round(quantile, 3),
-                                    "population": len(population), "direction": str(direction)})
+                                self.store.append(EV_ASHA_RANK, event)
                 # OPT-IN kill — independent of the advisory dedup: fires once the underperformance has
                 # PERSISTED past the grace window (a transient early dip that recovers resets the streak
                 # to 0 and is never stopped). Reuses the monitor's kill_signal + cancel; `_evaluate`
                 # writes the single terminal (reason=asha_underperforming).
-                if (kill_signal is not None and under and under_streak > _ASHA_GRACE_TICKS
+                if (kill_signal is not None and comparable_under is True
+                        and under_streak > _ASHA_GRACE_TICKS
                         and getattr(self, "_asha_live_kill", False)):
+                    # CODEX AGENT: never promote a finished endpoint into a fake peer at the live
+                    # resource. Without explicit same-resource curve evidence this is unreachable.
                     kill_signal["kill"] = True
                     kill_signal["reason"] = (
-                        f"intermediate metric {value:.4g} is below the "
-                        f"{quantile:.0%} bar of {len(population)} finished siblings")
+                        f"intermediate metric {value:.4g} at {sample.resource_key}={sample.resource:g} "
+                        f"is worse than the {quantile:.0%} bar of "
+                        f"{len(comparable_population)} sibling observations at the same resource")
                     kill_signal["terminal_reason"] = "asha_underperforming"
                     cancel.set()
                     return

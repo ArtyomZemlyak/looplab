@@ -249,10 +249,10 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             "node_generation": gen,
         })
 
-    # ASHA live-curve watchdog: surface a node whose latest intermediate metric ranked BELOW its
-    # already-finished siblings (successive-halving's "unlikely to catch up") as an owner FYI while it
-    # is still evaluating — so a multi-hour parallel run's weak experiments are visible to STOP early
-    # (freeing a GPU) instead of running to the end unnoticed. EV_ASHA_RANK is a DIAGNOSTIC event
+    # ASHA live-curve watchdog: surface a node whose latest intermediate triggered an endpoint and/or
+    # same-resource rank warning as an owner FYI while it is still evaluating. Endpoint comparison is
+    # curve context, not sufficient stop evidence; automatic kill requires same-resource peers.
+    # EV_ASHA_RANK is a DIAGNOSTIC event
     # (fold-ignored), recorded once when the node FLIPS to underperforming (deduped at source); read it
     # off the raw rows and keep the LATEST per (node, generation) with a node-keyed STABLE opaque id (a
     # fresh underperform episode after a reset/rerun bumps the generation -> a new id). This is a SOFTER
@@ -287,9 +287,9 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             "id": _opaque_id(rid, generation, nid, f"asha:{gen}"),
             "kind": "asha",
             "severity": "warning",
-            "title": "Underperforming vs finished experiments",
-            "detail": (f"Experiment #{nid}'s live metric ranks below its finished siblings and is unlikely "
-                       "to catch up. Open the run to inspect its training curve, or stop it to free the GPU."),
+            "title": "ASHA rank warning",
+            "detail": (f"Inspect experiment #{nid}'s live curve. Automatic stopping requires peers "
+                       "at the same declared progress."),
             "run_id": rid,
             "generation": generation,
             "seq": _integer(event.seq),

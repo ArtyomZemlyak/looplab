@@ -21,6 +21,8 @@ Design constraints this file must keep (engine invariants):
 """
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -149,27 +151,141 @@ def active_training_log(workdir) -> Optional[Path]:
         return None
 
 
-def read_training_tail_raw(workdir, *, max_read_bytes: int = 131_072) -> str:
+@dataclass(frozen=True)
+class TrainingLogCursor:
+    """The immutable boundary between two eval attempts for one existing log file."""
+
+    offset: Optional[int]
+    identity: Optional[tuple[int, int]]
+    probe_start: int = 0
+    probe: Optional[bytes] = None
+
+
+@dataclass(frozen=True)
+class TrainingLogSnapshot:
+    """Best-effort cursors for every ``*.log`` that existed before an eval attempt started."""
+
+    cursors: dict[str, TrainingLogCursor]
+    complete: bool = True
+
+
+_CURSOR_PROBE_BYTES = 64
+
+
+def _log_path_key(path: Path) -> str:
+    """Stable-enough process-local path identity, including Windows case folding."""
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _file_identity(stat_result) -> Optional[tuple[int, int]]:
+    """Return an OS file identity when the filesystem exposes one (Windows does via ``st_ino`` too)."""
+    try:
+        device = int(stat_result.st_dev)
+        inode = int(stat_result.st_ino)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    return (device, inode) if inode else None
+
+
+def snapshot_training_logs(workdir) -> TrainingLogSnapshot:
+    """Capture attempt-start byte cursors for the workdir's existing stage logs.
+
+    The small boundary probe distinguishes append from truncate-and-regrow even when a filesystem does
+    not expose a useful inode. A path that cannot be snapshotted is retained as an unreadable cursor so
+    a transient permission/stat failure cannot make a later monitor consume prior-attempt bytes.
+    """
+    try:
+        paths = list(Path(workdir).glob("*.log"))
+    except OSError:
+        return TrainingLogSnapshot({}, complete=False)
+    cursors: dict[str, TrainingLogCursor] = {}
+    for path in paths:
+        key = _log_path_key(path)
+        try:
+            with open(path, "rb") as fh:
+                stat_result = os.fstat(fh.fileno())
+                size = max(0, int(stat_result.st_size))
+                probe_start = max(0, size - _CURSOR_PROBE_BYTES)
+                fh.seek(probe_start)
+                probe = fh.read(size - probe_start)
+            cursors[key] = TrainingLogCursor(
+                offset=size,
+                identity=_file_identity(stat_result),
+                probe_start=probe_start,
+                probe=probe,
+            )
+        except (OSError, TypeError, ValueError, OverflowError):
+            cursors[key] = TrainingLogCursor(offset=None, identity=None, probe=None)
+    return TrainingLogSnapshot(cursors)
+
+
+def read_training_tail_raw(workdir, *, max_read_bytes: int = 131_072,
+                           snapshot: Optional[TrainingLogSnapshot] = None) -> str:
     """The RAW (un-digested) utf-8 tail of the active stage log — the last `max_read_bytes`. Bounded
     seek-to-tail read so a multi-GB log never loads into memory; a torn leading line is dropped by the
     'replace' decode. '' when there is no log yet. Used by the ASHA watchdog, which feeds it to the
-    eval's own metric reader (digesting first would collapse the very metric lines it must parse)."""
+    eval's own metric reader (digesting first would collapse the very metric lines it must parse).
+
+    With an attempt-start ``snapshot``, bytes that predate the current eval are excluded. Replacement,
+    rotation, and truncation start a fresh file at byte zero; an unreadable/ambiguous old boundary fails
+    closed to an empty tail rather than reusing a stale metric.
+    """
     path = active_training_log(workdir)
     if path is None:
         return ""
+    limit = max(0, int(max_read_bytes))
+    if limit == 0:
+        return ""
+    key = _log_path_key(path)
+    cursor = snapshot.cursors.get(key) if snapshot is not None else None
+    if snapshot is not None and not snapshot.complete:
+        return ""
     try:
-        size = path.stat().st_size
         with open(path, "rb") as fh:
-            if size > max_read_bytes:
-                fh.seek(size - max_read_bytes)
-            raw = fh.read()
-    except OSError:
+            stat_result = os.fstat(fh.fileno())
+            size = max(0, int(stat_result.st_size))
+            current_identity = _file_identity(stat_result)
+            if cursor is None and snapshot is not None and current_identity is not None:
+                # A rotation can rename the old file to another ``*.log`` path. Follow identity across
+                # that rename so the renamed prior-attempt bytes are not mistaken for a brand-new log.
+                cursor = next((old for old in snapshot.cursors.values()
+                               if old.identity == current_identity), None)
+            if cursor is None and snapshot is not None:
+                # Some filesystems expose no stable inode. A matching old EOF probe is sufficient to
+                # classify an unknown path as a renamed old log; a false match only suppresses advisory
+                # evidence (safe), whereas treating it as new could resurrect a stale kill metric.
+                for old in snapshot.cursors.values():
+                    if old.offset is None or old.probe is None or size < old.offset:
+                        continue
+                    fh.seek(old.probe_start)
+                    if fh.read(len(old.probe)) == old.probe:
+                        cursor = old
+                        break
+            floor = 0
+            if cursor is not None:
+                if cursor.offset is None or cursor.probe is None:
+                    return ""
+                replaced = (cursor.identity is not None and current_identity is not None
+                            and cursor.identity != current_identity)
+                truncated = size < cursor.offset
+                boundary_changed = False
+                if not replaced and not truncated:
+                    fh.seek(cursor.probe_start)
+                    boundary_changed = fh.read(len(cursor.probe)) != cursor.probe
+                # CODEX AGENT: only a proven append may inherit the old EOF. Rotation/replacement or a
+                # truncate-and-regrow (including past the old size before the first watchdog tick) starts
+                # at zero; if identity is unavailable, the boundary probe supplies the same protection.
+                floor = 0 if (replaced or truncated or boundary_changed) else cursor.offset
+            fh.seek(max(floor, size - limit))
+            raw = fh.read(limit)
+    except (OSError, TypeError, ValueError, OverflowError):
         return ""
     return raw.decode("utf-8", "replace")
 
 
 def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
-                       max_lines: int = 40, max_chars: int = 4000) -> str:
+                       max_lines: int = 40, max_chars: int = 4000,
+                       snapshot: Optional[TrainingLogSnapshot] = None) -> str:
     """Read only the LAST `max_read_bytes` of the active stage log and digest it (collapse tqdm
     re-renders, keep the recent trajectory). '' when there is no log yet.
 
@@ -177,7 +293,7 @@ def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
     appears inline in `serve/routers/runs.py::_tail` and `events/eventstore.py::_disk_last_seq`. Each copy
     differs in its line-boundary handling (and there is no existing shared helper — `sandbox._clamp_tail_bytes`
     clamps an in-memory STRING, not a file), so a 3-call-site extraction is deferred as not worth the churn."""
-    raw = read_training_tail_raw(workdir, max_read_bytes=max_read_bytes)
+    raw = read_training_tail_raw(workdir, max_read_bytes=max_read_bytes, snapshot=snapshot)
     if not raw:
         return ""
     return training_log_digest(raw, max_lines=max_lines, max_chars=max_chars)
@@ -229,7 +345,8 @@ class TrainingMonitorMixin:
             return None
 
     async def _monitor_training(self, node_id: int, generation: int, workdir, cancel,
-                                context: str = "", kill_signal: Optional[dict] = None) -> None:
+                                context: str = "", kill_signal: Optional[dict] = None,
+                                log_snapshot: Optional[TrainingLogSnapshot] = None) -> None:
         """Tail the live training log every `train_monitor_interval_s`, ask the Developer to judge its
         health, record the verdict, and (opt-in) kill a broken run early.
 
@@ -263,7 +380,8 @@ class TrainingMonitorMixin:
             if cancel.is_set():
                 return
             try:
-                tail = await anyio.to_thread.run_sync(read_training_tail, workdir)
+                tail = await anyio.to_thread.run_sync(
+                    lambda: read_training_tail(workdir, snapshot=log_snapshot))
                 if not tail or tail == last_digest:
                     continue                 # no live log yet, or nothing new since last tick -> no LLM call
                 last_digest = tail

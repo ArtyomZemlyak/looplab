@@ -115,7 +115,11 @@ def test_node_repaired_after_terminal_is_noop(tmp_path):
 
 
 # --------------------------------------------------------------------------- engine: happy path
-def test_inline_repair_fixes_in_place_without_new_node(tmp_path):
+def test_inline_repair_fixes_in_place_without_new_node(tmp_path, monkeypatch):
+    def _monitor_off_snapshot(_workdir):
+        raise AssertionError("monitor-off eval must not scan training logs")
+
+    monkeypatch.setattr("looplab.engine.evaluate.snapshot_training_logs", _monitor_off_snapshot)
     dev = _MechCrashThenFixed()
     eng = _engine(tmp_path / "on", dev, inline_repair=True, inline_repair_attempts=1)
     anyio.run(eng.run)
@@ -190,8 +194,8 @@ def test_agent_triage_runs_under_its_own_span_not_evaluate(tmp_path):
                  auto_install_deps=False, inline_repair=True)
     anyio.run(eng.run)
     assert seen.get("phase") == "triage"         # triage_crash saw its OWN phase, not 'evaluate'
-    names = [json.loads(l).get("name") for l in
-             (tmp_path / "run" / "spans.jsonl").read_text().splitlines() if l.strip()]
+    names = [json.loads(line).get("name") for line in
+             (tmp_path / "run" / "spans.jsonl").read_text().splitlines() if line.strip()]
     assert "triage" in names                     # the span is on disk for the trace view
 
 

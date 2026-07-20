@@ -5,10 +5,13 @@ import threading
 
 import anyio
 
+from looplab.adapters.tasks import normalize_task
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.asha_monitor import (
-    AshaMonitorMixin, asha_underperforming, latest_intermediate, sibling_final_metrics,
+    AshaMonitorMixin, IntermediateSample, asha_underperforming, latest_intermediate,
+    latest_intermediate_sample, sibling_final_metrics, sibling_metrics_at_resource,
 )
+from looplab.engine.train_monitor import snapshot_training_logs
 from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK
 
 
@@ -36,6 +39,35 @@ def test_latest_intermediate_only_reads_stdout_kinds():
                                                 "path": "m.json", "pattern": "x"}) is None
 
 
+def test_intermediate_resource_requires_an_explicit_key_on_the_same_record():
+    log = '{"recall": 0.20, "step": 1}\n{"recall": 0.42, "step": 2}\n'
+    implicit = latest_intermediate_sample(
+        log, "/wd", {"kind": "stdout_json", "key": "recall"})
+    explicit = latest_intermediate_sample(
+        log, "/wd", {"kind": "stdout_json", "key": "recall", "resource_key": "step"})
+    missing = latest_intermediate_sample(
+        '{"recall": 0.42}\n', "/wd",
+        {"kind": "stdout_json", "key": "recall", "resource_key": "step"})
+    same_key = latest_intermediate_sample(
+        log, "/wd", {"kind": "stdout_json", "key": "recall", "resource_key": "recall"})
+
+    assert implicit == IntermediateSample(value=0.42)
+    assert explicit == IntermediateSample(value=0.42, resource_key="step", resource=2.0)
+    assert missing == IntermediateSample(value=0.42)
+    assert same_key == IntermediateSample(value=0.42)
+
+
+def test_metric_resource_key_survives_composable_normalization():
+    normalized = normalize_task({
+        "goal": "opt", "direction": "max", "repo": "/repo",
+        "cmd": {"command": ["python", "t.py"],
+                "metric": {"reader": "stdout_json", "key": "score", "resource_key": "step"}},
+    })
+    assert normalized["eval"]["metric"] == {
+        "kind": "stdout_json", "key": "score", "resource_key": "step",
+    }
+
+
 # --------------------------------------------------------------------- sibling_final_metrics (pure)
 
 def test_sibling_final_metrics_excludes_self_and_non_finite():
@@ -49,6 +81,23 @@ def test_sibling_final_metrics_excludes_discarded_selection_evidence():
     state.nodes[2].feasible = False
     state.aborted_nodes.append(3)
     assert sibling_final_metrics(state, node_id=0) == []
+
+
+def test_sibling_resource_metrics_never_substitute_finished_endpoints():
+    state = _fake_state(
+        [0.90, 0.85, 0.80],
+        tails=[
+            '{"recall": 0.10, "step": 1}\n{"recall": 0.90, "step": 10}\n',
+            '{"recall": 0.08, "step": 1}\n{"recall": 0.85, "step": 10}\n',
+            '{"recall": 0.09, "step": 1}\n{"recall": 0.80, "step": 10}\n',
+        ],
+    )
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    same_step = IntermediateSample(value=0.11, resource_key="step", resource=1.0)
+    absent_step = IntermediateSample(value=0.11, resource_key="step", resource=2.0)
+
+    assert sorted(sibling_metrics_at_resource(state, 0, spec, same_step)) == [0.08, 0.09, 0.10]
+    assert sibling_metrics_at_resource(state, 0, spec, absent_step) == []
 
 
 # --------------------------------------------------------------------- asha_underperforming (pure)
@@ -124,7 +173,7 @@ class _AshaStub(AshaMonitorMixin):
         return self._cadence
 
 
-def _fake_state(finals, self_id=0):
+def _fake_state(finals, self_id=0, tails=None):
     idea = Idea(operator="draft", params={}, rationale="asha test")
     nodes = {
         self_id: Node(id=self_id, operator="draft", idea=idea, status=NodeStatus.pending),
@@ -136,18 +185,21 @@ def _fake_state(finals, self_id=0):
             idea=idea,
             metric=m,
             status=NodeStatus.evaluated,
+            stdout_tail=(tails[i - 1] if tails else ""),
         )
     return RunState(nodes=nodes)
 
 
-def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, *, window=0.12):
-    monkeypatch.setattr("looplab.events.replay.fold", lambda events: _fake_state(finals))
+def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, *,
+              tails=None, log_snapshot=None, window=0.12):
+    monkeypatch.setattr(
+        "looplab.events.replay.fold", lambda events: _fake_state(finals, tails=tails))
 
     async def drive():
         cancel = threading.Event()
         async with anyio.create_task_group() as tg:
             tg.start_soon(AshaMonitorMixin._monitor_asha, stub, 0, 0, str(workdir), cancel,
-                          spec, direction, kill_signal)
+                          spec, direction, kill_signal, log_snapshot)
             await anyio.sleep(window)
             tg.cancel_scope.cancel()
 
@@ -183,24 +235,81 @@ def test_loop_stays_quiet_when_on_track_or_too_few_siblings(tmp_path, monkeypatc
     assert not [t for (t, _d) in stub2.store.events if t == EV_ASHA_RANK]
 
 
-def test_loop_opt_in_kill_fires_only_when_enabled_and_past_grace(tmp_path, monkeypatch):
+def test_loop_opt_in_kill_requires_comparable_resource_evidence(tmp_path, monkeypatch):
     wd = tmp_path / "node_0"
     wd.mkdir()
-    (wd / "train.log").write_text('{"recall": 0.10}\n', encoding="utf-8")
+    (wd / "train.log").write_text('{"recall": 0.10, "step": 1}\n', encoding="utf-8")
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
 
     # kill OFF -> advisory only, no kill signal even though it underperforms.
     off = {}
-    _run_loop(_AshaStub(kill=False, min_siblings=3), wd, {"kind": "stdout_json", "key": "recall"},
-              "max", off, monkeypatch, finals=[0.8, 0.7, 0.6])
+    _run_loop(_AshaStub(kill=False, min_siblings=3), wd, spec, "max", off, monkeypatch,
+              finals=[0.8, 0.7, 0.6])
     assert off.get("kill") is not True
 
-    # kill ON -> after the underperformance persists past the grace window, it tree-kills.
+    # Even with intervention enabled, an ordinary metric contract has no declared notion of progress.
+    # Keep the endpoint rank as an audit signal, but never invent a resource and kill from it.
+    endpoint_only = {}
+    endpoint_stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01)
+    _run_loop(endpoint_stub, wd, {"kind": "stdout_json", "key": "recall"}, "max",
+              endpoint_only, monkeypatch, finals=[0.8, 0.7, 0.6], window=0.2)
+    assert endpoint_only.get("kill") is not True
+    endpoint_alerts = [d for event, d in endpoint_stub.store.events if event == EV_ASHA_RANK]
+    assert endpoint_alerts and endpoint_alerts[0]["kill_comparable"] is False
+
+    # The live curve is already better than peers were at the SAME step, even though it is naturally
+    # below their finished endpoints. The old endpoint-only comparison killed this healthy improving run.
+    improving = {}
+    peer_curves = [
+        '{"recall": 0.05, "step": 1}\n{"recall": 0.80, "step": 10}\n',
+        '{"recall": 0.07, "step": 1}\n{"recall": 0.70, "step": 10}\n',
+        '{"recall": 0.09, "step": 1}\n{"recall": 0.60, "step": 10}\n',
+    ]
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01)
+    _run_loop(stub, wd, spec, "max", improving, monkeypatch,
+              finals=[0.8, 0.7, 0.6], tails=peer_curves, window=0.2)
+    assert improving.get("kill") is not True
+    alerts = [d for event, d in stub.store.events if event == EV_ASHA_RANK]
+    assert alerts and alerts[0]["kill_comparable"] is True  # endpoint warning remains diagnostic
+    assert alerts[0]["endpoint_underperforming"] is True
+    assert alerts[0]["resource_underperforming"] is False
+
+    # With enough truly same-resource evidence, persistent underperformance can still free compute.
+    (wd / "train.log").write_text('{"recall": 0.01, "step": 1}\n', encoding="utf-8")
     on = {}
-    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01), wd,
-              {"kind": "stdout_json", "key": "recall"}, "max", on, monkeypatch,
-              finals=[0.8, 0.7, 0.6], window=0.2)
+    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01), wd, spec, "max", on,
+              monkeypatch, finals=[0.8, 0.7, 0.6], tails=peer_curves, window=0.2)
     assert on.get("kill") is True
     assert on.get("terminal_reason") == "asha_underperforming"
+
+
+def test_loop_endpoint_warning_cannot_kill_without_same_resource_or_with_old_attempt_log(
+        tmp_path, monkeypatch):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    log = wd / "train.log"
+    log.write_text('{"recall": 0.01, "step": 1}\n', encoding="utf-8")
+    snapshot = snapshot_training_logs(wd)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("new attempt started; no metric yet\n")
+
+    signal = {}
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01)
+    _run_loop(
+        stub, wd,
+        {"kind": "stdout_json", "key": "recall", "resource_key": "step"},
+        "max", signal, monkeypatch, finals=[0.8, 0.7, 0.6],
+        tails=[
+            '{"recall": 0.8, "step": 10}\n',
+            '{"recall": 0.7, "step": 10}\n',
+            '{"recall": 0.6, "step": 10}\n',
+        ],
+        log_snapshot=snapshot,
+        window=0.15,
+    )
+
+    assert signal.get("kill") is not True
+    assert not [event for event, _data in stub.store.events if event == EV_ASHA_RANK]
 
 
 def test_asha_rank_is_diagnostic():

@@ -219,15 +219,14 @@ class Settings(BaseSettings):
     train_monitor_kill: bool = False
     train_monitor_kill_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
-    # the objective metric off the live log (reusing the eval's OWN metric reader) and RANKS it against the
-    # FINAL metrics of completed siblings — a node already worse than the `_quantile` of finished peers is
-    # unlikely to catch up (successive-halving on the live curve). Advisory in the product surface (records
-    # a fold-ignored `asha_rank` diagnostic + trace span); the library default is OFF (off == today). Needs
-    # the command-eval path (a live log to read) + enough finished siblings to rank against.
+    # the objective metric off the live log (reusing the eval's OWN metric reader). Finished-endpoint rank
+    # remains advisory. An opt-in KILL additionally requires an operator-declared metric.resource_key and
+    # enough sibling observations at exactly that resource; absent comparable evidence cannot stop a run.
+    # Records a fold-ignored `asha_rank` diagnostic + trace span; the library default is OFF (off == today).
     asha_live: bool = True
     # Opt-in INTERVENTION (separate from the advisory signal): let the watchdog tree-kill a node whose
-    # intermediate metric stays below the bar past a short grace window. Off by default — it only SURFACES
-    # the rank unless this is on. A kill fails the node normally (reason='asha_underperforming').
+    # intermediate metric stays below the SAME-RESOURCE bar past a short grace window. Off by default —
+    # it only surfaces endpoint rank unless this is on. A kill fails normally (asha_underperforming).
     asha_live_kill: bool = False
     # The bar sits at `asha_live_quantile` along a WORST->BEST ordering of the finished siblings' finals:
     # 0.5 = the median (a node worse than the median peer flags); a SMALLER value is more conservative —

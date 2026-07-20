@@ -216,7 +216,7 @@ test('an ASHA underperform advisory is allow-listed and copy-complete but soft (
     browser: false, derived: false,
   }))
   assert.ok(item, 'asha must survive the client allow-list')
-  assert.equal(item.title, 'Underperforming vs finished experiments')
+  assert.equal(item.title, 'ASHA rank warning')
   assert.ok(item.detail && item.actionLabel, 'COPY must supply title/detail/action')
   assert.equal(item.notifyEligible, false, 'browser=false → no desktop notification (soft advisory)')
   assert.equal(item.needsAction, false, 'advisory FYI, not action-required')

@@ -468,10 +468,11 @@ def test_asha_underperform_surfaces_a_soft_node_keyed_inbox_item(tmp_path):
     ash = [i for i in second if i["kind"] == "asha"]
     assert len(ash) == 1
     assert ash[0]["severity"] == "warning" and ash[0]["node_id"] == 0
+    assert ash[0]["title"] == "ASHA rank warning"
     assert ash[0]["browser"] is False                 # inbox-only -> never desktop-notified
     # Backend detail is the API-shape sentence (the web client renders from its own COPY table, not
     # this text); it is #node-anchored and carries no per-event numbers.
-    assert "#0" in ash[0]["detail"] and "unlikely" in ash[0]["detail"]
+    assert "#0" in ash[0]["detail"] and "same declared progress" in ash[0]["detail"]
 
     # A later flag on the same lifecycle updates in place — same stable id (no duplicate / spam).
     store.append(EV_ASHA_RANK, {

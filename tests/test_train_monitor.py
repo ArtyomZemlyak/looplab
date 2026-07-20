@@ -13,6 +13,8 @@ from looplab.engine.train_monitor import (
     TrainingMonitorMixin,
     active_training_log,
     read_training_tail,
+    read_training_tail_raw,
+    snapshot_training_logs,
     training_log_digest,
 )
 
@@ -73,6 +75,50 @@ def test_read_tail_is_bounded_and_digested(tmp_path):
     assert "HEADER-should-be-dropped" not in tail           # only the tail bytes were read
     assert "step 4999" in tail                              # the most recent lines survive
     assert read_training_tail(tmp_path / "nonexistent-dir") == ""
+
+
+def test_attempt_snapshot_excludes_old_bytes_and_reads_only_crlf_append(tmp_path):
+    log = tmp_path / "train.log"
+    log.write_bytes(b'{"metric": 0.01, "step": 1}\r\n')
+    snapshot = snapshot_training_logs(tmp_path)
+
+    assert read_training_tail_raw(tmp_path, snapshot=snapshot) == ""
+    with open(log, "ab") as fh:
+        fh.write(b'{"metric": 0.75, "step": 2}\r\n')
+
+    assert read_training_tail_raw(tmp_path, snapshot=snapshot) == (
+        '{"metric": 0.75, "step": 2}\r\n')
+
+    empty_dir = tmp_path / "fresh"
+    empty_dir.mkdir()
+    empty_snapshot = snapshot_training_logs(empty_dir)
+    (empty_dir / "train.log").write_bytes(b"current attempt\n")
+    assert read_training_tail_raw(empty_dir, snapshot=empty_snapshot) == "current attempt\n"
+
+
+def test_attempt_snapshot_detects_truncate_regrow_and_rotation(tmp_path):
+    log = tmp_path / "train.log"
+    log.write_bytes(b"OLD-ATTEMPT\n" * 12)
+    snapshot = snapshot_training_logs(tmp_path)
+
+    # Same path/inode can be truncated and regrow past its old offset before the first poll. The
+    # boundary probe must still identify it as a fresh file and read from byte zero.
+    fresh = "NEW-ATTEMPT\n" * 20
+    log.write_bytes(fresh.encode("utf-8"))
+    assert read_training_tail_raw(tmp_path, snapshot=snapshot) == fresh
+
+    # Rotation that only renames the old inode to another *.log path must not make those old bytes look
+    # like a newly-created current-attempt file.
+    second_snapshot = snapshot_training_logs(tmp_path)
+    rotated = tmp_path / "rotated.log"
+    log.rename(rotated)
+    assert read_training_tail_raw(tmp_path, snapshot=second_snapshot) == ""
+
+    # A replacement at the original path has a new identity and must be read from byte zero.
+    log.write_bytes(b"REPLACEMENT\n")
+    import os
+    os.utime(rotated, (1, 1))
+    assert read_training_tail_raw(tmp_path, snapshot=second_snapshot) == "REPLACEMENT\n"
 
 
 # --------------------------------------------------------------------------- the observer coroutine

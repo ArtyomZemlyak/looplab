@@ -28,7 +28,7 @@ const COPY = Object.freeze({
   finalization_stalled: ['Finalization needs recovery', 'The engine stopped before durable wrap-up completed.', 'Open Events'],
   stalled: ['Run engine stopped', 'No engine process is advancing this run.', 'Open Events'],
   train_monitor: ['Training looks broken', 'The live-log monitor judged this training likely wasted. Open the run to inspect the log and verdict.', 'Inspect training'],
-  asha: ['Underperforming vs finished experiments', 'This experiment ranks below its finished siblings and is unlikely to catch up. Open the run to inspect its curve, or stop it.', 'Inspect experiment'],
+  asha: ['ASHA rank warning', 'Inspect the live curve. Automatic stopping requires peers at the same declared progress.', 'Inspect experiment'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
 })
 

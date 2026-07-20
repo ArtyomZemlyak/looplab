@@ -132,7 +132,7 @@ const NARR = {
   stage_finished: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
   lessons_reconciled: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}`,
   train_monitor_alert: (d) => `training monitor: #${d.node_id} looks ${d.status}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
-  asha_rank: (d) => `ASHA: #${d.node_id} intermediate ${fmt(d.intermediate)} ranks below the ${Math.round((d.quantile ?? 0.5) * 100)}% bar of ${d.population ?? '?'} finished siblings`,
+  asha_rank: (d) => `ASHA: #${d.node_id} ${fmt(d.intermediate)} ${d.endpoint_underperforming === false ? 'same-resource' : 'endpoint'} rank warning`,
   restart: () => 'run restart requested (pause-and-resume handoff)',
 }
 

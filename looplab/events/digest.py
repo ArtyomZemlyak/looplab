@@ -347,17 +347,38 @@ def watchdog_reflection(events, max_shown: int = 2) -> str:
             seg = "intermediate metric"
             if isinstance(val, (int, float)) and not isinstance(val, bool):
                 seg += f" {val:.4g}"
+            comparable = a.get("resource_underperforming")
+            comparable_pop = a.get("comparable_population")
+            endpoint_under = a.get("endpoint_underperforming") is not False  # missing = legacy endpoint row
             seg += " ranked below"
             if isinstance(q, (int, float)) and not isinstance(q, bool):
                 seg += f" the {q:.0%} bar of"
-            seg += (f" {pop} finished sibling(s)" if isinstance(pop, int) and not isinstance(pop, bool)
-                    else " finished siblings")
+            if endpoint_under:
+                seg += (f" {pop} finished sibling(s)"
+                        if isinstance(pop, int) and not isinstance(pop, bool)
+                        else " finished siblings")
+            else:
+                seg += (f" {comparable_pop} same-resource sibling(s)"
+                        if isinstance(comparable_pop, int) and not isinstance(comparable_pop, bool)
+                        else " same-resource siblings")
+            # CODEX AGENT: an endpoint rank is still useful curve context, but must not be narrated to
+            # the next proposer as proof of a doomed run when same-progress peers say it is on track.
+            if endpoint_under and comparable is False:
+                seg += (f"; on track against {comparable_pop} same-resource sibling(s)"
+                        if isinstance(comparable_pop, int) and not isinstance(comparable_pop, bool)
+                        else "; on track against same-resource siblings")
+            elif endpoint_under and comparable is True:
+                seg += (f"; also below {comparable_pop} same-resource sibling(s)"
+                        if isinstance(comparable_pop, int) and not isinstance(comparable_pop, bool)
+                        else "; also below same-resource siblings")
+            elif endpoint_under:
+                seg += "; comparable-resource evidence unavailable"
             parts.append(seg)
         if parts:
             lines.append(f"node {nid}: " + "; ".join(parts))
     if not lines:
         return ""
-    return ("\nLive-watchdog signals — a recent experiment's training was observed to be weak; avoid "
+    return ("\nLive-watchdog signals — account for these advisory training observations before "
             "re-proposing the same configuration: " + "; ".join(lines) + ".")
 
 

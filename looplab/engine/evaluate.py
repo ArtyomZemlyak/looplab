@@ -21,6 +21,7 @@ import anyio
 
 from looplab.core.models import NodeStatus, normalize_extra_metrics
 from looplab.engine.options import _UNSET
+from looplab.engine.train_monitor import snapshot_training_logs
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
 from looplab.events.replay import fold
 from looplab.events.types import (EV_DEPS_INSTALLED, EV_NODE_ABORT, EV_NODE_EVALUATED,
@@ -137,7 +138,8 @@ class EvaluateMixin:
             triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
             err = ""
             reason = "crash"
-            stuck_sig = None; stuck_n = 0    # anti-stuck: consecutive identical-error signatures
+            stuck_sig = None                 # anti-stuck: consecutive identical-error signatures
+            stuck_n = 0
             # Multi-stage reuse across repair attempts: `next_start` is the stage to run FROM on the next
             # eval — _UNSET on the first eval (derives node.rerun_stage), then set by the safe-reuse
             # predicate after each repair (a stage name = reuse the completed earlier stages, e.g. skip
@@ -147,6 +149,15 @@ class EvaluateMixin:
             full_retrains = 0
             while True:
                 _t0 = time.time()
+                # CODEX AGENT: repair/retry attempts reuse the workdir and sandbox stage logs append.
+                # When either watchdog is enabled, snapshot every existing log before this attempt
+                # starts so it cannot rank/classify prior-attempt bytes. Keep the monitor-off path free
+                # of extra filesystem work (`off == today`).
+                _eval_spec = getattr(self, "_eval_spec", None)
+                _watching_logs = (
+                    (getattr(self, "_train_monitor", False) and bool(_eval_spec))
+                    or (getattr(self, "_asha_live", False) and isinstance(_eval_spec, dict)))
+                _log_snapshot = snapshot_training_logs(workdir) if _watching_logs else None
                 # Mid-eval per-node intervention (v2): a watcher polls the log while the eval runs in a
                 # worker thread; if the operator appends `node_abort` for THIS node, it sets the cancel
                 # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). v1's pre-eval
@@ -212,14 +223,14 @@ class EvaluateMixin:
                         _mon_ctx = f"Optimizing metric {_mkey!r}." + (
                             f" Experiment: {_rationale}" if _rationale else "")
                         _tg.start_soon(self._monitor_training, node_id, generation, workdir, cancel,
-                                       _mon_ctx, kill_signal)
+                                       _mon_ctx, kill_signal, _log_snapshot)
                     # ASHA live-curve rank watchdog (off by default): a sibling task that reads the live
                     # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
                     # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
                     if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):
                         _mspec = self._eval_spec.get("metric") or {}
                         _tg.start_soon(self._monitor_asha, node_id, generation, workdir, cancel,
-                                       _mspec, state.direction, kill_signal)
+                                       _mspec, state.direction, kill_signal, _log_snapshot)
                     # Pin this eval to a distinct GPU when running in parallel, so concurrent nodes use
                     # separate GPUs (CUDA_VISIBLE_DEVICES remaps the agent's cuda:0 onto the reserved
                     # device — transparent to the config). Unpinned (eval_env=None) on a single-experiment

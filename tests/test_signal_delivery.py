@@ -230,6 +230,29 @@ def test_watchdog_reflection_bounds_to_most_recent_nodes():
     assert "node 3:" not in out and "node 1:" not in out              # ...older ones are bounded out
 
 
+def test_watchdog_reflection_distinguishes_endpoint_warning_from_same_resource_rank():
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_ASHA_RANK
+    event = _wd_event(
+        1, EV_ASHA_RANK, node_id=4, generation=0, intermediate=0.2,
+        quantile=0.5, population=3, direction="max",
+        comparable_population=3, resource_underperforming=False,
+    )
+
+    out = watchdog_reflection([event])
+    assert "ranked below" in out                         # endpoint comparison remains visible
+    assert "on track against 3 same-resource" in out    # but is not narrated as doomed
+
+    comparable_only = _wd_event(
+        2, EV_ASHA_RANK, node_id=5, generation=0, intermediate=0.2,
+        quantile=0.5, population=3, direction="max", endpoint_underperforming=False,
+        comparable_population=3, resource_underperforming=True,
+    )
+    comparable_out = watchdog_reflection([comparable_only])
+    assert "3 same-resource sibling(s)" in comparable_out
+    assert "finished sibling" not in comparable_out
+
+
 def test_trust_reflection_names_a_hardcoded_metric_flag():
     """A node hard-flagged ONLY by `critic:hardcoded_metric` must render its reason, not "node N ()":
     `hard_flagged_ids` promotes that signal to hard, so the display filter must use the SAME shared
