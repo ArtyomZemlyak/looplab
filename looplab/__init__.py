@@ -66,6 +66,7 @@ _LAYOUT = {
     "cross_run_index": "engine", # PART IV cross-run Step 1/CR0: run passport + facts, deterministic rebuild
     "task_facets": "engine",     # PART IV cross-run §21.20.2: agentic task faceting overlay (off the index)
     "governance_health": "engine",  # PART IV cross-run: paid-curation ledger health / fail-closed gates
+    "steward_invocation": "engine",  # PART IV cross-run: agentic steward invocation/session bookkeeping
     "concept_tools": "tools",    # PART V Phase 2a: assistant-editable cross-run concept taxonomy (merge/purge/split, gated)
     "cross_run_tools": "tools",  # PART V §22: read-only cross-run knowledge tool for the agent tool-loop
     "assistant": "serve",
