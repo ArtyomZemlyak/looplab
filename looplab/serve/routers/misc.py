@@ -14,10 +14,10 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.core.config import Settings
 from looplab.serve.assistant import safe_provider_failure
@@ -34,6 +34,123 @@ _MEMORY_TIER_LIMIT = 200
 _MEMORY_SOURCE_BYTES = 2 * 1024 * 1024
 _MEMORY_SOURCE_ROWS = 1000
 _ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
+_SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_ENV))})$"
+
+
+class SettingsUIField(BaseModel):
+    """One inert editor-field descriptor served to the React settings surfaces."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    label: str
+    type: str
+    options: list[str] | None = None
+    help: str | None = None
+    placeholder: str | int | float | None = None
+    warning: str | None = None
+    warningTitle: str | None = None
+    warningTone: str | None = None
+    agents: list[str] | None = None
+    minimum: int | float | None = None
+    exclusiveMinimum: int | float | None = None
+    maximum: int | float | None = None
+    nullable: bool
+
+
+class SettingsUIGroup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    sub: str
+    fields: list[SettingsUIField]
+
+
+class SettingsUIRolePill(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    short: str
+    title: str
+
+
+class SettingsUISchemaResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_version: int = Field(alias="schema")
+    groups: list[SettingsUIGroup]
+    agent_role_pills: dict[str, SettingsUIRolePill]
+    revision: str
+
+
+class SettingsSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    settings: dict[str, Any]
+    overrides: dict[str, Any]
+    defaults: dict[str, Any]
+    settings_revision: str
+    secret_revision: str
+
+
+class SettingsUpdateRequest(BaseModel):
+    """Preferred CAS-aware request envelope; legacy flat dictionaries remain accepted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    settings: dict[str, Any]
+    expected_revision: Annotated[str, Field(min_length=1, max_length=256)] = None
+
+
+class LegacySettingsUpdateRequest(BaseModel):
+    """Compatibility body with setting keys directly at the top level."""
+
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={"not": {"required": ["settings"]}},
+    )
+
+    expected_revision: Annotated[str, Field(min_length=1, max_length=256)] = None
+
+
+class SettingsUpdateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    settings: dict[str, Any]
+    overrides: dict[str, Any]
+    settings_revision: str
+
+
+class SecretUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(pattern=_SECRET_KEY_PATTERN)
+    value: str | None = None
+    expected_revision: Annotated[str, Field(min_length=1, max_length=256)] = None
+
+
+class SecretUpdateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    key: str
+    set: bool
+    secret_revision: str
+
+
+def _request_body_contract(*models: type[BaseModel]) -> dict[str, Any]:
+    """Publish raw-Request bodies without changing the established 400/legacy runtime semantics."""
+    # CODEX AGENT: making these Pydantic body parameters would turn established malformed-JSON 400s
+    # into framework 422s. The strict schemas therefore document the wire while the handler retains
+    # its compatibility parser; the legacy branch explicitly excludes the reserved `settings` key.
+    variants = [model.model_json_schema() for model in models]
+    schema = variants[0] if len(variants) == 1 else {"anyOf": variants}
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": schema}},
+        }
+    }
 
 
 def _if_none_match(value: str | None, current: str) -> bool:
@@ -262,8 +379,13 @@ def build_router(srv) -> APIRouter:
     # ------------------------------------------------------------------ settings (UI defaults)
     # The engine has no settings server (ADR-18); these are UI-chosen DEFAULTS for new runs,
     # persisted at <run-root>/ui_settings.json and applied to a spawned run as LOOPLAB_* env.
-    @router.get("/api/settings/schema/{version}")
-    def get_settings_schema(version: int, request: Request):
+    @router.get(
+        "/api/settings/schema/{version}",
+        response_model=SettingsUISchemaResponse,
+        response_model_exclude_unset=True,
+        responses={304: {"description": "The cached semantic schema revision is still current."}},
+    )
+    def get_settings_schema(version: int, request: Request, response: Response):
         """Revalidated display metadata for the versioned Settings/Config form contract.
 
         The envelope version describes the wire format. Labels and bounds are derived from the
@@ -279,9 +401,11 @@ def build_router(srv) -> APIRouter:
         }
         if _if_none_match(request.headers.get("if-none-match"), SETTINGS_UI_SCHEMA_ETAG):
             return Response(status_code=304, headers=headers)
-        return JSONResponse(SETTINGS_UI_SCHEMA, headers=headers)
+        for name, value in headers.items():
+            response.headers[name] = value
+        return SETTINGS_UI_SCHEMA
 
-    @router.get("/api/settings")
+    @router.get("/api/settings", response_model=SettingsSnapshotResponse)
     def get_settings():
         # Bind each returned resource snapshot to the revision checked by its next PUT. The locks
         # prevent a concurrent rename (or secret env mutation) between payload and token reads.
@@ -299,7 +423,11 @@ def build_router(srv) -> APIRouter:
             }
         return response
 
-    @router.put("/api/settings")
+    @router.put(
+        "/api/settings",
+        response_model=SettingsUpdateResponse,
+        openapi_extra=_request_body_contract(SettingsUpdateRequest, LegacySettingsUpdateRequest),
+    )
     async def put_settings(request: Request):
         try:
             body = await request.json()
@@ -375,7 +503,11 @@ def build_router(srv) -> APIRouter:
             return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides,
                     "settings_revision": revision}
 
-    @router.put("/api/settings/secret")
+    @router.put(
+        "/api/settings/secret",
+        response_model=SecretUpdateResponse,
+        openapi_extra=_request_body_contract(SecretUpdateRequest),
+    )
     async def put_secret(request: Request):
         """Store (or clear) a secret credential securely. The value is written owner-only to
         secrets.json (never ui_settings.json / a run snapshot) and applied to the server + spawned

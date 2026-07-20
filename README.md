@@ -54,8 +54,9 @@ pip install -e ".[otel]"         # + OpenTelemetry span export
 pip install -e ".[dev]"          # + test deps (pytest, httpx, FastAPI/uvicorn)
 ```
 
-Requires **Python ≥ 3.11**. Core dependencies are small and pure-Python (`pydantic`, `orjson`,
-`anyio`, `typer`). Installing exposes a `looplab` command; you can also run `python -m looplab.cli`.
+Requires **Python ≥ 3.11**. The core dependency set is small and ships prebuilt wheels on common
+platforms (`pydantic`, `orjson`, `anyio`, `typer`). Installing exposes a `looplab` command; you can
+also run `python -m looplab.cli`.
 
 ## Quick start
 

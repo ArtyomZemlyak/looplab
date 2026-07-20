@@ -12,11 +12,12 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Any, Optional
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
@@ -88,6 +89,71 @@ _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
     "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
     "capacity", "internal",
 })
+
+
+class RunConfigMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_start_pinned_fields: list[str]
+    snapshot_mismatch_fields: list[str]
+    run_read_only_fields: list[str]
+
+
+class RunConfigResponse(BaseModel):
+    """Flat compatibility payload with one typed metadata member and arbitrary Settings keys."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    metadata: RunConfigMetadata = Field(alias="_looplab_config_meta")
+
+
+class RunConfigUpdateRequest(BaseModel):
+    """Preferred CAS-aware request envelope; legacy flat dictionaries remain accepted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    settings: dict[str, Any]
+    expected_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = None
+
+
+class LegacyRunConfigUpdateRequest(BaseModel):
+    """Compatibility body with setting keys directly at the top level."""
+
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={"not": {"required": ["settings"]}},
+    )
+
+    expected_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = None
+
+
+class RunConfigUpdateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    config: RunConfigResponse
+    changed: list[str]
+    normalized_pinned: list[str]
+    trust_gate_event_appended: bool
+    engine_running: bool | None
+
+
+def _run_config_request_body_contract() -> dict[str, Any]:
+    """Describe both bodies while retaining raw-Request error and compatibility behavior."""
+    # CODEX AGENT: parsing these routes as a Pydantic union would silently change malformed JSON
+    # from the established 400 response to FastAPI's 422, so models drive OpenAPI while the handler
+    # continues to perform the compatibility-preserving runtime parse below.
+    variants = [
+        RunConfigUpdateRequest.model_json_schema(),
+        LegacyRunConfigUpdateRequest.model_json_schema(),
+    ]
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": {"anyOf": variants}}},
+        }
+    }
 
 
 def _run_config_revision(snapshot: dict) -> str:
@@ -2166,7 +2232,7 @@ def build_router(srv) -> APIRouter:
                 "wasAssociatedWith": waw,
                 "wasDerivedFrom": {f"wdf:{i}": d for i, d in enumerate(wdf)}}
 
-    @router.get("/api/runs/{run_id}/config")
+    @router.get("/api/runs/{run_id}/config", response_model=RunConfigResponse)
     def run_config(run_id: str):
         rd = _run_dir(run_id)
         snap = rd / "config.snapshot.json"
@@ -2310,7 +2376,11 @@ def build_router(srv) -> APIRouter:
             "engine_running": _engine_liveness(rd),
         }
 
-    @router.put("/api/runs/{run_id}/config")
+    @router.put(
+        "/api/runs/{run_id}/config",
+        response_model=RunConfigUpdateResponse,
+        openapi_extra=_run_config_request_body_contract(),
+    )
     async def put_run_config(run_id: str, request: Request):
         """Per-run settings edit: rewrite THIS run's config.snapshot.json so a later RESUME re-enters
         the loop with the new values. Resume reads the snapshot via `Settings(**data)` (cli.py) — it

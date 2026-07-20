@@ -1590,6 +1590,98 @@ def _write_snapshot(rd: Path, **overrides):
         json.dumps(Settings(**overrides).masked_snapshot(), indent=2), encoding="utf-8")
 
 
+def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_path):
+    """Editor-v2/CAS endpoints must be discoverable without breaking their flat-body clients."""
+    from looplab.serve.settings_ui_schema import SETTINGS_UI_SCHEMA_VERSION
+
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0)
+    app = make_app(tmp_path)
+    spec = app.openapi()
+    paths = spec["paths"]
+    components = spec["components"]["schemas"]
+
+    def response_ref(path, method):
+        return paths[path][method]["responses"]["200"]["content"][
+            "application/json"]["schema"]["$ref"]
+
+    assert response_ref("/api/settings/schema/{version}", "get").endswith(
+        "/SettingsUISchemaResponse")
+    assert response_ref("/api/settings", "get").endswith("/SettingsSnapshotResponse")
+    assert response_ref("/api/settings", "put").endswith("/SettingsUpdateResponse")
+    assert response_ref("/api/settings/secret", "put").endswith("/SecretUpdateResponse")
+    assert response_ref("/api/runs/{run_id}/config", "get").endswith("/RunConfigResponse")
+    assert response_ref("/api/runs/{run_id}/config", "put").endswith(
+        "/RunConfigUpdateResponse")
+
+    # CODEX AGENT: canonical envelopes are strict, while the second documented variant preserves
+    # pre-editor-v2 flat dictionaries; both paths still reach the same manual 400/CAS parser.
+    settings_body = paths["/api/settings"]["put"]["requestBody"]["content"][
+        "application/json"]["schema"]
+    settings_variants = {variant["title"]: variant for variant in settings_body["anyOf"]}
+    canonical_settings = settings_variants["SettingsUpdateRequest"]
+    assert canonical_settings["required"] == ["settings"]
+    assert canonical_settings["additionalProperties"] is False
+    assert canonical_settings["properties"]["expected_revision"]["type"] == "string"
+    legacy_settings = settings_variants["LegacySettingsUpdateRequest"]
+    assert legacy_settings["additionalProperties"] is True
+    assert legacy_settings["not"] == {"required": ["settings"]}
+    assert legacy_settings["properties"]["expected_revision"]["type"] == "string"
+    # An invalid reserved envelope matches neither branch: canonical requires an object, while the
+    # legacy branch explicitly excludes every body carrying the reserved `settings` member.
+    invalid_envelope = {"settings": []}
+    assert not isinstance(invalid_envelope["settings"], dict)
+    assert all(key in invalid_envelope for key in legacy_settings["not"]["required"])
+
+    secret_body = paths["/api/settings/secret"]["put"]["requestBody"]["content"][
+        "application/json"]["schema"]
+    assert secret_body["required"] == ["key"]
+    assert secret_body["additionalProperties"] is False
+    assert secret_body["properties"]["key"]["pattern"] == r"^(?:llm_api_key)$"
+    assert secret_body["properties"]["expected_revision"]["type"] == "string"
+
+    run_body = paths["/api/runs/{run_id}/config"]["put"]["requestBody"]["content"][
+        "application/json"]["schema"]
+    run_variants = {variant["title"]: variant for variant in run_body["anyOf"]}
+    canonical_run = run_variants["RunConfigUpdateRequest"]
+    assert canonical_run["required"] == ["settings"]
+    assert canonical_run["additionalProperties"] is False
+    assert canonical_run["properties"]["expected_revision"]["pattern"] == r"^[0-9a-f]{64}$"
+    legacy_run = run_variants["LegacyRunConfigUpdateRequest"]
+    assert legacy_run["additionalProperties"] is True
+    assert legacy_run["not"] == {"required": ["settings"]}
+    assert legacy_run["properties"]["expected_revision"]["pattern"] == r"^[0-9a-f]{64}$"
+    assert components["RunConfigResponse"]["additionalProperties"] is True
+    assert "_looplab_config_meta" in components["RunConfigResponse"]["required"]
+    assert components["RunConfigMetadata"]["properties"]["config_revision"][
+        "pattern"] == r"^[0-9a-f]{64}$"
+
+    client = TestClient(app)
+    ui_schema = client.get(f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION}")
+    assert ui_schema.status_code == 200 and ui_schema.json()["revision"]
+    settings = client.get("/api/settings").json()
+    saved = client.put("/api/settings", json={
+        "max_nodes": 91,
+        "expected_revision": settings["settings_revision"],
+    })
+    assert saved.status_code == 200
+    assert saved.json()["overrides"]["max_nodes"] == 91
+    cleared_secret = client.put("/api/settings/secret", json={"key": "llm_api_key"})
+    assert cleared_secret.status_code == 200 and cleared_secret.json()["set"] is False
+
+    run_config = client.get("/api/runs/demo/config").json()
+    updated = client.put("/api/runs/demo/config", json={
+        "timeout": 47.0,
+        "expected_revision": run_config["_looplab_config_meta"]["config_revision"],
+    })
+    assert updated.status_code == 200
+    assert updated.json()["config"]["timeout"] == 47.0
+    assert updated.json()["config"]["_looplab_config_meta"]["config_revision"]
+    assert client.put("/api/settings", json={"settings": []}).status_code == 400
+    assert client.put("/api/runs/demo/config", json={"settings": []}).status_code == 400
+
+
 def test_put_run_config_edits_snapshot_for_resume(tmp_path):
     import json
     from looplab.core.config import Settings
@@ -1827,6 +1919,7 @@ def test_put_run_config_preserves_secret_and_unknown_keys(tmp_path):
     assert out["timeout"] == 77.0
     assert out["llm_api_key"] == "***"            # secret never overwritten via this endpoint
     assert out["some_future_key"] == "keepme"     # unknown key preserved verbatim
+    assert r.json()["config"]["some_future_key"] == "keepme"  # response model is forward-compatible
     assert "llm_api_key" not in r.json()["changed"]
 
 

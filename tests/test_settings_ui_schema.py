@@ -120,6 +120,13 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert "delay finalization" in by_key["cross_run_curation"]["help"]
     assert "paid model cost" in by_key["cross_run_curation"]["warning"]
     assert "never applies" in by_key["cross_run_curation_auto"]["warning"]
+    # CODEX AGENT: placeholders/default copy are executable UI behavior, not decoration; pin the two
+    # defaults that previously instructed operators to configure the opposite of the product policy.
+    assert Settings.model_fields["concurrent_research"].default is True
+    assert "on by default" in by_key["concurrent_research"]["help"]
+    assert "off by default" not in by_key["concurrent_research"]["help"]
+    assert by_key["deep_research_every"]["placeholder"] == str(
+        Settings.model_fields["deep_research_every"].default)
     assert packaged["agent_role_pills"]["researcher"]["short"] == "R"
 
     served_fields = {

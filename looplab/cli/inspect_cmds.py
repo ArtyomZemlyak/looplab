@@ -1381,8 +1381,11 @@ def cross_run_search_cmd(
 
 @app.command(name="atlas")
 def atlas_cmd(
-    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl + "
-                                                "concept_capsules.jsonl)."),
+    memory_dir: Path = typer.Argument(
+        ...,
+        help="Cross-run memory dir (holds lessons.jsonl and/or research_claims.jsonl; "
+             "concept_capsules.jsonl supplies concept coverage).",
+    ),
     max_items: int = typer.Option(8, help="Cap per section (explored/contested/thin)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full Atlas payload as JSON."),
 ):
@@ -1467,8 +1470,11 @@ def atlas_cmd(
 
 @app.command(name="claims")
 def claims_cmd(
-    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl), or the "
-                                                "lessons file itself."),
+    memory_dir: Path = typer.Argument(
+        ...,
+        help="Cross-run memory dir (lessons.jsonl, research_claims.jsonl, and governance logs), "
+             "or a lessons file itself.",
+    ),
     top: int = typer.Option(20, help="How many most-evidenced claims to show."),
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
@@ -1485,8 +1491,9 @@ def claims_cmd(
     ``refuted`` mean support-only and opposition-only evidence here, not proposition verdicts;
     ``mixed`` means both kinds of reference, and ``inconclusive`` means insufficient evidence.
     ``--pack`` renders the hard-capped agent context pack (pinned → ratified → mixed → support-only
-    → opposition-only → insufficient; a caveat may replace the weakest non-pinned positive). Pure read of
-    `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
+    → opposition-only → insufficient; a caveat may replace the weakest non-pinned positive).
+    Reads lessons plus D8 research claims and governance decisions; ``--pack`` additionally joins
+    concept capsules, aliases, and splits. No LLM/endpoint."""
     from looplab.engine.claims import (
         _load_claim_source_path, _safe_claim_source_summary,
         _safe_research_source_summary, build_context_pack, claims_for_memory,
