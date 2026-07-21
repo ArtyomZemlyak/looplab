@@ -1640,7 +1640,11 @@ def test_start_record_malformed_and_symlink_evidence_fail_closed(tmp_path):
 def test_monitor_reensures_dead_preexisting_driver_and_heartbeats_long_pause(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
-    client, srv = _client(tmp_path, driver, timeout=0.10)
+    # CODEX AGENT: this case observes several heartbeat periods, so its absolute lease must be wider
+    # than the deliberately tiny sliding timeout.  Under a loaded CI runner the old implicit 300 ms
+    # ceiling could expire while the test thread was descheduled, correctly retiring the claim before
+    # the assertion and turning a scheduling delay into a false lifecycle failure.
+    client, srv = _client(tmp_path, driver, timeout=0.10, observation=1.5)
 
     command = _post(client, "set_strategy", {"strategy": {"policy": "mcts"}}, key="dies").json()
     _wait_for_intent(rd, command["id"])
