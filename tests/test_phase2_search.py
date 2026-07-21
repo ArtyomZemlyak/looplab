@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from looplab.core.errors import BudgetExceeded
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.agents.strategist import RuleStrategist, StrategyContext
 from looplab.engine.orchestrator import Engine, _normalize_error_sig
@@ -145,7 +146,9 @@ def test_normalize_error_sig_matches_semantically_identical_errors():
 # --------------------------------------------------------------------------- #
 
 class _T:
-    id = "t"; goal = "g"; direction = "max"
+    id = "t"
+    goal = "g"
+    direction = "max"
     def model_dump(self, mode="json"):
         return {"id": "t"}
 
@@ -191,6 +194,41 @@ def test_semantic_duplicate_detected_and_reproposed(tmp_path):
     assert "near-duplicate" in called["fb"] and "FAILED" in called["fb"]
     ev = [e for e in eng.store.read_all() if e.type == "novelty_rejected"]
     assert ev and ev[0].data["kind"] == "semantic" and ev[0].data["action"] == "reproposed"
+
+
+def test_semantic_reproposal_action_reports_the_actual_same_proposal_result(tmp_path):
+    eng = _mk_engine(tmp_path, novelty_semantic=True)
+    eng._novelty_mode = "algo"
+    dup = _node(0, metric=0.4, rationale="a prior sufficiently long duplicate proposal")
+    st = _state([dup])
+    idea = Idea(operator="improve", params={"x": 99.0},
+                rationale="a candidate sufficiently long duplicate proposal")
+    eng._semantic_duplicate = lambda state, proposal: (dup, 0.99)
+
+    out = eng._apply_novelty_gate(st, idea, repropose=lambda: idea.model_copy(deep=True))
+    receipt = [event for event in eng.store.read_all() if event.type == "novelty_rejected"][0]
+    assert out == idea and receipt.data["action"] == "kept"
+
+
+def test_budget_exceeded_during_reproposal_records_an_honest_terminal_receipt(tmp_path):
+    eng = _mk_engine(tmp_path, novelty_semantic=True)
+    eng._novelty_mode = "algo"
+    dup = _node(0, metric=0.4, rationale="a prior sufficiently long duplicate proposal")
+    st = _state([dup])
+    idea = Idea(operator="improve", params={"x": 99.0},
+                rationale="a candidate sufficiently long duplicate proposal")
+    eng._semantic_duplicate = lambda state, proposal: (dup, 0.99)
+
+    def _exhausted():
+        raise BudgetExceeded("test budget exhausted")
+
+    with pytest.raises(BudgetExceeded, match="test budget exhausted"):
+        eng._apply_novelty_gate(st, idea, repropose=_exhausted, prospective_node_id=7)
+    receipt = [event for event in eng.store.read_all() if event.type == "novelty_rejected"][0]
+    assert receipt.data["action"] == "budget_exceeded"
+    assert receipt.data["node_id"] == 7 and receipt.data["generation"] == 0
+    assert receipt.data["near_node"] == 0 and receipt.data["near_generation"] == 0
+    assert receipt.data["proposal_ref"] == eng._proposal_binding(st, idea, 7)["proposal_ref"]
 
 
 def test_semantic_gate_skips_short_toy_rationales(tmp_path):

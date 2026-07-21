@@ -6,7 +6,9 @@ from pathlib import Path
 
 import anyio
 
-from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
+from looplab.core.models import (
+    Event, Idea, Node, NodeStatus, RunState, idea_proposal_digest, idea_proposal_ref,
+)
 from looplab.core.config import Settings
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import ASHAPolicy, GreedyTree, available_policies, make_policy
@@ -702,6 +704,113 @@ def test_native_batch_novelty_receipts_use_unique_prospective_ids(tmp_path):
     receipts = [event for event in eng.store.read_all() if event.type == EV_NOVELTY_REJECTED]
     assert len(ideas) == 3
     assert [event.data["node_id"] for event in receipts] == [1, 2, 3]
+    assert [event.data["proposal_ref"] for event in receipts] == [
+        idea_proposal_ref(idea) for idea in ideas
+    ]
+    assert all(event.data["generation"] == 0 and event.data["near_generation"] == 0
+               for event in receipts)
+
+
+def test_serial_draft_improve_and_batch_bind_the_exact_persisted_idea(tmp_path):
+    class _Researcher:
+        def __init__(self, idea, *, native=False):
+            self.idea = idea
+            self.native = native
+
+        def propose(self, state, parent):
+            return self.idea.model_copy(deep=True)
+
+        def propose_batch(self, state, n):
+            if not self.native:
+                raise AssertionError("non-native case must use propose")
+            return [self.idea.model_copy(deep=True)][:n]
+
+    def _capture(eng):
+        bindings = []
+
+        def _gate(state, idea, repropose=None, researcher=None, prospective_node_id=None):
+            bindings.append(eng._proposal_binding(state, idea, prospective_node_id))
+            return idea
+
+        eng._apply_novelty_gate = _gate
+        return bindings
+
+    draft = _engine(tmp_path / "serial-draft-binding")
+    draft.store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    draft.researcher = _Researcher(Idea(operator="model-label", params={"x": 0.25}))
+    draft_bindings = _capture(draft)
+    draft._create_node({"kind": "draft"})
+    draft_node = fold(draft.store.read_all()).nodes[0]
+    assert draft_node.idea.operator == "draft"
+    assert draft_bindings == [{
+        "node_id": draft_node.id, "generation": draft_node.attempt,
+        "proposal_ref": idea_proposal_ref(draft_node.idea),
+    }]
+    assert draft_bindings[0]["proposal_ref"]["digest"] == idea_proposal_digest(draft_node.idea)
+
+    improve = _engine(tmp_path / "serial-improve-binding")
+    improve.store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    improve.store.append("node_created", {
+        "node_id": 0, "generation": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 0.5}}, "code": "",
+    })
+    improve.researcher = _Researcher(Idea(operator="model-label", params={"x": 0.2}))
+    improve_bindings = _capture(improve)
+    improve._create_node({"kind": "improve", "parent_id": 0})
+    improve_node = fold(improve.store.read_all()).nodes[1]
+    assert improve_node.idea.operator == "improve"
+    assert improve_bindings == [{
+        "node_id": improve_node.id, "generation": improve_node.attempt,
+        "proposal_ref": idea_proposal_ref(improve_node.idea),
+    }]
+
+    batch = _engine(tmp_path / "batch-binding")
+    batch.store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    batch.researcher = _Researcher(
+        Idea(operator="model-batch-label", params={"x": 0.125}), native=True)
+    batch_bindings = _capture(batch)
+    ideas = batch._propose_batch(fold(batch.store.read_all()), 1)
+    batch._create_node({"kind": "draft"}, preproposed=ideas[0])
+    batch_node = fold(batch.store.read_all()).nodes[0]
+    assert batch_node.idea.operator == "draft"
+    assert batch_bindings == [{
+        "node_id": batch_node.id, "generation": batch_node.attempt,
+        "proposal_ref": idea_proposal_ref(batch_node.idea),
+    }]
+
+
+def test_capability_expand_operator_is_bound_before_improve_novelty(tmp_path, monkeypatch):
+    eng = _engine(tmp_path / "expand-binding", capability_expansion=True)
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "generation": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 0.5}}, "code": "",
+    })
+    eng._novelty_stance = "explore"
+    monkeypatch.setattr(
+        "looplab.search.lock_in.capability_expansion_due",
+        lambda state, *, streak_threshold: (True, "model", streak_threshold),
+    )
+
+    class _Researcher:
+        def propose(self, state, parent):
+            return Idea(operator="model-label", params={"x": 0.2})
+
+    eng.researcher = _Researcher()
+    seen = []
+
+    def _gate(state, idea, repropose=None, researcher=None, prospective_node_id=None):
+        seen.append((idea.operator, eng._proposal_binding(state, idea, prospective_node_id)))
+        return idea
+
+    eng._apply_novelty_gate = _gate
+    eng._create_node({"kind": "improve", "parent_id": 0})
+    node = fold(eng.store.read_all()).nodes[1]
+    assert node.idea.operator == "expand"
+    assert seen == [("expand", {
+        "node_id": node.id, "generation": node.attempt,
+        "proposal_ref": idea_proposal_ref(node.idea),
+    })]
 
 
 def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):

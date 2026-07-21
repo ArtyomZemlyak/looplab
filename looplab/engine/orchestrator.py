@@ -2184,7 +2184,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         state, idea,
                         repropose=lambda: self._canonicalize_draft_idea(
                             researcher.propose(state, None)),
-                        researcher=researcher)
+                        researcher=researcher, prospective_node_id=node_id)
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
                     code = developer.implement(self._directed_idea(idea, state))
@@ -2246,26 +2246,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
-                with self.tracer.span("propose"):
-                    idea = self.researcher.propose(state, parent)
-                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
-                idea = self._apply_novelty_gate(
-                    state, idea, repropose=lambda p=parent: self.researcher.propose(state, p))
-                idea.operator = "improve"
-                # PART IV D7 (§21.8): under action-space LOCK-IN with the capability_expansion lever on, this
-                # improve proposal was already steered by the "build a new capability" directive — stamp it
-                # as its OWN `expand` operator so operator_yields MEASURES whether expanding paid off (scored,
-                # SearchFitness-competing as its own lineage), not silently as another `improve`. The relabel
-                # must fire on the EXACT SAME condition as the directive (proposal_cues `_stamp_novelty_hint`):
-                # flag on + `capability_expansion_due` + the EXPLORE stance. Without the stance gate, a
-                # balanced/exploit improve (which got NO expand directive) would be mislabeled `expand` and
-                # contaminate the expand yield (CODEX P1). Off (flag default) -> stays `improve`, byte-identical.
+                authoritative_operator = "improve"
+                # PART IV D7 (§21.8): the expansion operator is its own measured lineage only on the
+                # same lock-in/explore condition that delivered the expansion directive. Resolve that
+                # policy-owned label before novelty writes its proposal digest: the same operator must
+                # reach the gate, any re-proposal, implementation and node_created.
                 if (getattr(self, "_capability_expansion", False)
                         and getattr(self, "_novelty_stance", None) == "explore"):
                     from looplab.engine.proposal_cues import _LOCK_IN_STREAK
                     from looplab.search.lock_in import capability_expansion_due
                     if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
-                        idea.operator = KIND_EXPAND
+                        authoritative_operator = KIND_EXPAND
+                with self.tracer.span("propose"):
+                    idea = self._canonicalize_idea_operator(
+                        self.researcher.propose(state, parent), authoritative_operator)
+                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
+                idea = self._apply_novelty_gate(
+                    state, idea,
+                    repropose=lambda p=parent: self._canonicalize_idea_operator(
+                        self.researcher.propose(state, p), authoritative_operator),
+                    prospective_node_id=node_id)
                 parents = [parent.id]
                 with self.tracer.span("implement"):
                     code = self._implement(self._directed_idea(idea, state), parent)

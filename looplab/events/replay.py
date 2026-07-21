@@ -31,7 +31,8 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      node_concept_event_provenance,
                      Card, Event, Hypothesis, Idea, Node, NodeStatus,
-                     RunState, Trial, hypothesis_id, normalize_extra_metrics, run_setup_key)
+                     RunState, Trial, hypothesis_id, hypothesis_statement_digest, idea_proposal_digest,
+                     normalize_extra_metrics, normalize_researcher_footprint, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
@@ -2055,13 +2056,16 @@ def _on_card_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_card_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Engine-written agentic merge — fold alias cards into a canonical. Collected here, APPLIED
     # deterministically in `_derive_cards` (no LLM in the fold), order-tolerant, back-compat on old logs.
-    if d.get("canonical") and d.get("aliases"):
+    canonical = d.get("canonical")
+    if (isinstance(canonical, str) and canonical.strip() and len(canonical.strip()) <= 256
+            and isinstance(d.get("aliases"), list) and d["aliases"]):
         st.cards_merged.append(d)
 
 def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Engine/operator drop of a card: {id, reason, dropped_by}. Lifecycle override applied in
     # `_derive_cards` (the card stays visible with status='dropped', like an abandoned hypothesis).
-    if d.get("id"):
+    card_id = d.get("id")
+    if isinstance(card_id, str) and card_id.strip() and len(card_id.strip()) <= 256:
         st.cards_dropped.append(d)
 
 def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -3083,9 +3087,12 @@ def _derive_hypotheses(st: RunState) -> None:
         # brick EVERY subsequent fold of the run (no replay/resume/view). Tolerate it here, matching
         # the node_created / hypotheses_added handlers and the "malformed entry is tolerated" promise.
         try:
-            canon = str(d.get("canonical") or "").strip()
+            raw_canonical = d.get("canonical")
             raw_aliases = d.get("aliases")
-            if not canon or len(canon) > 256 or not isinstance(raw_aliases, list):
+            if not isinstance(raw_canonical, str) or not isinstance(raw_aliases, list):
+                continue
+            canon = raw_canonical.strip()
+            if not canon or len(canon) > 256:
                 continue
             s = str(d.get("statement", "")).strip()
             if s:
@@ -3240,7 +3247,8 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     raw_concepts = idea.get("concept_tags", idea.get("concepts"))
     if isinstance(raw_concepts, list):
         # Reuse the tolerant durable Idea boundary so card_added and node_created normalize tags alike.
-        snapshot["concept_tags"] = Idea(operator=operator or "draft", concepts=raw_concepts).concepts
+        snapshot["concept_tags"] = Idea(
+            operator=snapshot.get("operator") or "draft", concepts=raw_concepts).concepts
         owns_action = True
 
     raw_parent_ids = d.get("parent_ids", idea.get("parent_ids"))
@@ -3264,8 +3272,8 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     if scored_against is not None and 0 <= scored_against <= (1 << 31) - 1:
         snapshot["scored_against"] = scored_against
     if isinstance(d.get("footprint"), dict):
-        valid, footprint = _bounded_card_enrichment(d["footprint"])
-        if valid and isinstance(footprint, dict):
+        footprint = normalize_researcher_footprint(d["footprint"])
+        if footprint is not None:
             snapshot["footprint"] = footprint
     if isinstance(d.get("steering_context"), list):
         steering: list[dict] = []
@@ -3277,6 +3285,136 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
                 steering.append(bounded)
         snapshot["steering_context"] = steering
     return snapshot, owns_action
+
+
+def _card_sidecar_subject(st: RunState, d: dict, node_to_card: dict[int, str], *,
+                          legacy_reproposed_nodes: set[int] | None = None,
+                          cross_run: bool = False) -> str | None:
+    """Resolve one sidecar only when its exact proposal/lifecycle subject still owns the node."""
+    raw_node_id = d.get("node_id")
+    if type(raw_node_id) is not int or raw_node_id < 0:
+        return None
+    node = st.nodes.get(raw_node_id)
+    card_id = node_to_card.get(raw_node_id)
+    if node is None or card_id is None or node.idea is None:
+        return None
+    if node.tombstoned or node.id in st.aborted_nodes:
+        return None
+
+    has_ref = "proposal_ref" in d
+    has_generation = "generation" in d
+    if not has_ref and not has_generation:
+        # Historical rows predate exact bindings. Preserve only their original generation-0 behavior;
+        # a reproposed rejection explicitly refers to the discarded proposal, and its sibling legacy
+        # cross-run row is equally ambiguous for the replacement occupying that slot.
+        if node.attempt != 0 or d.get("action") == "reproposed":
+            return None
+        if cross_run and legacy_reproposed_nodes and raw_node_id in legacy_reproposed_nodes:
+            return None
+        return card_id
+
+    ref = d.get("proposal_ref")
+    generation = d.get("generation")
+    if (type(generation) is not int or generation < 0 or generation != node.attempt
+            or not isinstance(ref, dict) or set(ref) != {"v", "digest"}
+            or ref.get("v") != 1 or not isinstance(ref.get("digest"), str)):
+        return None
+    expected = idea_proposal_digest(node.idea)
+    if expected is None or ref["digest"] != expected:
+        return None
+    # A modern `reproposed` rejection is deliberately bound to the discarded original. Even if a buggy
+    # writer duplicated the digest, never annotate the replacement card with that negative verdict.
+    if d.get("action") == "reproposed":
+        return None
+    return card_id
+
+
+def _card_novelty_projection(st: RunState, d: dict) -> dict:
+    def _text(key: str) -> str | None:
+        value = d.get(key)
+        return value[:200] if isinstance(value, str) else None
+
+    near_node = d.get("near_node")
+    if type(near_node) is not int or near_node < 0:
+        near_node = None
+    projection = {
+        "grade": _text("grade"),
+        "level": d.get("level") if type(d.get("level")) is int and 0 <= d["level"] <= 16 else None,
+        "near_node": near_node,
+        "recommendation": _text("recommendation"),
+    }
+    near_generation = d.get("near_generation")
+    if type(near_generation) is int and near_generation >= 0:
+        projection["near_generation"] = near_generation
+    if "proposal_ref" in d or "generation" in d:
+        # CODEX AGENT: a modern near-node reference names a lifecycle, not a reusable numeric slot.
+        # Never let a reset, tombstone, abort, absent row, or malformed generation re-home the verdict
+        # onto whichever proposal happens to occupy that id at the end of replay.
+        near = st.nodes.get(near_node) if near_node is not None else None
+        if (near is None or type(near_generation) is not int or near_generation < 0
+                or near.attempt != near_generation or near.tombstoned
+                or near.id in st.aborted_nodes):
+            projection["near_node"] = None
+    return projection
+
+
+def _card_cross_run_projection(d: dict) -> dict:
+    matched = []
+    for item in (d.get("matched_concepts") if isinstance(d.get("matched_concepts"), list) else [])[:64]:
+        if isinstance(item, str) and item and len(item) <= 256 and item not in matched:
+            matched.append(item)
+    raw_runs = d.get("prior_runs") if isinstance(d.get("prior_runs"), list) else []
+    prior_runs = []
+    runs_lossy = len(raw_runs) > 64
+    for item in raw_runs[:64]:
+        if not isinstance(item, dict):
+            runs_lossy = True
+            continue
+        valid, bounded = _bounded_card_enrichment(item)
+        if valid and isinstance(bounded, dict):
+            prior_runs.append(bounded)
+            runs_lossy = runs_lossy or bounded != item
+        else:
+            runs_lossy = True
+
+    def _count(key):
+        value = d.get(key)
+        return value if type(value) is int and 0 <= value <= (1 << 53) - 1 else None
+
+    total = _count("prior_runs_total")
+    omitted = _count("prior_runs_omitted")
+    projection_drops = max(0, len(raw_runs) - len(prior_runs))
+    if total is not None:
+        # A bounded card can retain fewer rows than the durable receipt. Never project the producer's
+        # pre-projection zero as if this now-truncated view were exact.
+        omitted = max(omitted or 0, max(0, total - len(prior_runs)))
+    elif omitted is not None and projection_drops:
+        omitted = min((1 << 53) - 1, omitted + projection_drops)
+    declared_complete = d.get("prior_runs_complete") is True
+    complete = bool(
+        declared_complete and not runs_lossy and len(prior_runs) == len(raw_runs)
+        and total == len(prior_runs) and omitted == 0
+    )
+    raw_source = d.get("concept_source")
+    valid, concept_source = _bounded_card_enrichment(raw_source) if isinstance(raw_source, dict) else (False, {})
+    if not valid or not isinstance(concept_source, dict):
+        concept_source = {}
+    # Completeness is affirmative evidence. Any malformed/truncated source receipt becomes explicitly
+    # partial rather than looking exact merely because the retained runs are well formed.
+    if (not isinstance(raw_source, dict) or len(raw_source) > 64 or concept_source != raw_source
+            or raw_source.get("source_complete") is not True):
+        concept_source["source_complete"] = False
+    else:
+        concept_source["source_complete"] = True
+    return {
+        "v": d.get("v") if type(d.get("v")) is int else None,
+        "matched_concepts": matched,
+        "prior_runs": prior_runs,
+        "prior_runs_total": total,
+        "prior_runs_omitted": omitted,
+        "prior_runs_complete": complete,
+        "concept_source": concept_source,
+    }
 
 
 def _derive_cards(st: RunState) -> None:
@@ -3297,38 +3435,87 @@ def _derive_cards(st: RunState) -> None:
     # stable id. Bridge the hash only when there is exactly one native id for that seed. Two different
     # native ids may carry different action blocks; guessing an owner would silently lose work, so the
     # ambiguous hash row stays audit-only and neither native card inherits hash-addressed controls.
-    native_ids_by_seed: dict[str, list[str]] = {}
-    seeds_by_native_id: dict[str, list[str]] = {}
+    native_ids_by_statement: dict[str, list[str]] = {}
+    statements_by_native_id: dict[str, list[str]] = {}
+    statements_by_seed_hash: dict[str, list[str]] = {}
+    seed_hash_by_statement: dict[str, str] = {}
+
+    def _card_id(value) -> str | None:
+        if not isinstance(value, str):
+            return None
+        bounded = value.strip()
+        return bounded if bounded and len(bounded) <= 256 and bounded.isprintable() else None
+
+    def _register_card_identity(statement: str, raw_native_id=None) -> None:
+        if not statement:
+            return
+        seed_id = hypothesis_id(statement)
+        statement_id = hypothesis_statement_digest(statement)
+        seed_hash_by_statement[statement_id] = seed_id
+        seed_statements = statements_by_seed_hash.setdefault(seed_id, [])
+        if statement_id not in seed_statements:
+            seed_statements.append(statement_id)
+        cid = _card_id(raw_native_id)
+        if cid is None or cid == seed_id:
+            return
+        native_ids = native_ids_by_statement.setdefault(statement_id, [])
+        if cid not in native_ids:
+            native_ids.append(cid)
+        native_statements = statements_by_native_id.setdefault(cid, [])
+        if statement_id not in native_statements:
+            native_statements.append(statement_id)
+
+    # CODEX AGENT: identity conflicts can enter through a staged card, a legacy hypothesis, or a node
+    # whose Idea already carries card_id. Scan all three durable sources before creating any card; only
+    # scanning card_added would let node-only logs reuse one stable id and silently conflate evidence.
     for d in st.cards_added:
         try:
             statement = str(d.get("statement") or "").strip()
-            raw_id = d.get("id")
-            if not statement or not isinstance(raw_id, str):
-                continue
-            cid = raw_id.strip()
-            seed_id = hypothesis_id(statement)
-            if not cid or len(cid) > 256 or cid == seed_id:
-                continue
-            native_ids = native_ids_by_seed.setdefault(seed_id, [])
-            if cid not in native_ids:
-                native_ids.append(cid)
-            native_seeds = seeds_by_native_id.setdefault(cid, [])
-            if seed_id not in native_seeds:
-                native_seeds.append(seed_id)
+            _register_card_identity(statement, d.get("id"))
         except Exception:  # noqa: BLE001 - malformed staging rows remain audit-only
             continue
+    for d in st.hypotheses_added:
+        try:
+            _register_card_identity(str(d.get("statement") or "").strip())
+        except Exception:  # noqa: BLE001 - malformed legacy rows remain audit-only
+            continue
+    for node in st.nodes.values():
+        try:
+            statement = str(node.idea.hypothesis or "").strip() if node.idea is not None else ""
+            _register_card_identity(
+                statement, node.idea.card_id if node.idea is not None else None)
+        except Exception:  # noqa: BLE001 - malformed historical nodes remain independently visible
+            continue
+    namespace_conflicts = {
+        cid for cid, statement_ids in statements_by_native_id.items()
+        if any(target not in statement_ids for target in statements_by_seed_hash.get(cid, ()))
+    }
+    # Reusing one explicit id for two full statements is unrepresentable and must be suppressed. A
+    # different case is an explicit id that merely happens to equal another statement's legacy short
+    # hash: both explicit cards can still be preserved, but that shared spelling is unsafe for controls.
+    conflicted_native_ids = {
+        cid for cid, statement_ids in statements_by_native_id.items() if len(statement_ids) > 1
+    }
+    ambiguous_statement_ids = {
+        statement_id for statement_id, native_ids in native_ids_by_statement.items()
+        if (len(native_ids) != 1 or native_ids[0] in conflicted_native_ids
+            or seed_hash_by_statement[statement_id] in namespace_conflicts
+            or len(statements_by_seed_hash.get(seed_hash_by_statement[statement_id], ())) != 1)
+    }
+    owner_by_statement = {
+        statement_id: native_ids[0]
+        for statement_id, native_ids in native_ids_by_statement.items()
+        if statement_id not in ambiguous_statement_ids
+    }
     seed_owner = {
-        seed_id: native_ids[0]
-        for seed_id, native_ids in native_ids_by_seed.items()
-        if len(native_ids) == 1 and len(seeds_by_native_id.get(native_ids[0], ())) == 1
+        seed_hash_by_statement[statement_id]: owner
+        for statement_id, owner in owner_by_statement.items()
     }
     ambiguous_seeds = {
-        seed_id for seed_id, native_ids in native_ids_by_seed.items()
-        if len(native_ids) != 1 or len(seeds_by_native_id.get(native_ids[0], ())) != 1
-    }
-    conflicted_native_ids = {
-        cid for cid, seed_ids in seeds_by_native_id.items() if len(seed_ids) > 1
-    }
+        seed_hash_by_statement[statement_id] for statement_id in ambiguous_statement_ids
+    } | {
+        seed_id for seed_id, statement_ids in statements_by_seed_hash.items() if len(statement_ids) > 1
+    } | namespace_conflicts
     action_owned_cards: set[str] = set()
 
     # 1) explicitly-added cards — may start with no evidence. Coerce defensively (engine/control events
@@ -3343,22 +3530,23 @@ def _derive_cards(st: RunState) -> None:
         try:
             stmt = str(d.get("statement", "")).strip()
             seed_id = hypothesis_id(stmt) if stmt else ""
+            statement_id = hypothesis_statement_digest(stmt) if stmt else ""
             raw_id = d.get("id")
-            raw_cid = raw_id.strip() if isinstance(raw_id, str) else ""
-            if not raw_cid or len(raw_cid) > 256:
-                raw_cid = seed_id
+            raw_cid = _card_id(raw_id) or seed_id
             if raw_cid in conflicted_native_ids:
                 continue
             # CODEX AGENT: never materialize a third, hash-addressed queue item beside ambiguous native
             # cards. The raw hypothesis/card event remains the durable audit receipt.
             if seed_id in ambiguous_seeds and (not native_row or raw_cid == seed_id):
                 continue
-            cid = seed_owner.get(seed_id, raw_cid) if raw_cid == seed_id else raw_cid
+            cid = owner_by_statement.get(statement_id, raw_cid) if raw_cid == seed_id else raw_cid
             if not cid or len(cid) > 256 or cid in cards:
                 continue
             try:
                 at_node = int(d.get("at_node", 0) or 0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                at_node = 0
+            if not 0 <= at_node <= (1 << 31) - 1:
                 at_node = 0
             snapshot, owns_action = _card_added_snapshot(d) if native_row else ({}, False)
             cards[cid] = Card(
@@ -3381,13 +3569,14 @@ def _derive_cards(st: RunState) -> None:
             continue
         stmt = (n.idea.hypothesis or "").strip()
         seed_id = hypothesis_id(stmt) if stmt else ""
+        statement_id = hypothesis_statement_digest(stmt) if stmt else ""
         explicit_card_id = (n.idea.card_id or "").strip()
         raw_cid = explicit_card_id or seed_id
         if explicit_card_id in conflicted_native_ids:
             continue
         if not explicit_card_id and seed_id in ambiguous_seeds:
             continue  # no exact native identity: attaching legacy evidence would be an arbitrary guess
-        cid = seed_owner.get(seed_id, raw_cid) if raw_cid == seed_id else raw_cid
+        cid = owner_by_statement.get(statement_id, raw_cid) if raw_cid == seed_id else raw_cid
         if not cid:
             continue
         c = cards.get(cid)
@@ -3424,12 +3613,16 @@ def _derive_cards(st: RunState) -> None:
         if seed_id != owner:
             alias[seed_id] = owner
     merged_stmt: dict[str, str] = {}
-    for d in list(st.cards_merged) + list(st.hypotheses_merged):   # mirror the hypothesis board in L1a
+    for native_merge, d in (
+            [(True, row) for row in st.cards_merged]
+            + [(False, row) for row in st.hypotheses_merged]):
         try:
-            raw_canon = str(d.get("canonical") or "").strip()
+            raw_canonical = d.get("canonical")
             raw_aliases = d.get("aliases")
-            if (not raw_canon or len(raw_canon) > 256 or not isinstance(raw_aliases, list)
-                    or raw_canon in ambiguous_seeds):
+            if not isinstance(raw_aliases, list):
+                continue
+            raw_canon = _card_id(raw_canonical)
+            if raw_canon is None or (not native_merge and raw_canon in ambiguous_seeds):
                 continue
             canon = seed_owner.get(raw_canon, raw_canon)
             s = str(d.get("statement", "")).strip()
@@ -3437,10 +3630,8 @@ def _derive_cards(st: RunState) -> None:
                 merged_stmt[canon] = s
             seen_aliases: set[str] = set()
             for raw_alias in raw_aliases[:256]:
-                if not isinstance(raw_alias, str):
-                    continue
-                a = raw_alias.strip()
-                if not a or len(a) > 256 or a in ambiguous_seeds:
+                a = _card_id(raw_alias)
+                if a is None or (not native_merge and a in ambiguous_seeds):
                     continue
                 resolved_alias = seed_owner.get(a, a)
                 if resolved_alias != canon and resolved_alias not in seen_aliases:
@@ -3460,18 +3651,23 @@ def _derive_cards(st: RunState) -> None:
 
     # Legacy hypothesis controls name a statement hash while a modern card may have a stable independent
     # id. Carry every pre-merge id and seed hash forward to the final canonical card.
-    control_ids: dict[str, set[str]] = {
-        cid: ({cid, hypothesis_id(c.seed_statement)}
-              if c.seed_statement and hypothesis_id(c.seed_statement) not in ambiguous_seeds else {cid})
-        for cid, c in cards.items()
-    }
+    control_ids: dict[str, set[str]] = {}
+    for cid, c in cards.items():
+        ids = {cid}
+        if c.seed_statement:
+            ids.add(hypothesis_id(c.seed_statement))
+        # A spelling shared by a native id and another statement's legacy hash cannot identify which
+        # card an old control intended. Preserve both cards, but apply no ambiguous control by guessing.
+        control_ids[cid] = {control_id for control_id in ids if control_id not in ambiguous_seeds}
 
     if alias:
         folded: dict[str, Card] = {}
         folded_control_ids: dict[str, set[str]] = {}
         for cid in list(cards):
             tid = _canon(cid)
-            folded_control_ids.setdefault(tid, {tid}).update(control_ids.get(cid, {cid}))
+            folded_control_ids.setdefault(
+                tid, {tid} if tid not in ambiguous_seeds else set(),
+            ).update(control_ids.get(cid, set()))
             tgt = folded.get(tid)
             if tgt is None:
                 base = cards.get(tid, cards[cid])   # seed from the canonical row if it exists, else this
@@ -3496,7 +3692,11 @@ def _derive_cards(st: RunState) -> None:
             if target is not None and alias_id != target_id and alias_id not in target.aliases:
                 target.aliases.append(alias_id)
                 target.aliases.sort()
-                folded_control_ids.setdefault(target_id, {target_id}).add(alias_id)
+                target_controls = folded_control_ids.setdefault(
+                    target_id, {target_id} if target_id not in ambiguous_seeds else set(),
+                )
+                if alias_id not in ambiguous_seeds:
+                    target_controls.add(alias_id)
         cards = folded
         control_ids = folded_control_ids
 
@@ -3516,7 +3716,11 @@ def _derive_cards(st: RunState) -> None:
     #    hypothesis) — the lifecycle `status` below reads this to show the 'dropped' lane. Last write wins.
     dropped: dict[str, dict] = {}
     for d in st.cards_dropped:
-        cid = _canon(str(d.get("id") or "").strip())
+        raw_id = d.get("id")
+        bounded_id = _card_id(raw_id)
+        if bounded_id is None:
+            continue
+        cid = _canon(bounded_id)
         if cid:
             dropped[cid] = d
     for cid, d in dropped.items():
@@ -3574,23 +3778,20 @@ def _derive_cards(st: RunState) -> None:
     # id they were emitted for. Last write per node wins; ref-shaped (no verbatim capture on the card).
     # `novelty_events` (near-duplicate rejects — no grade) go FIRST so a richer `novelty_grades` entry
     # for the same node wins on collision instead of being clobbered by the sparse reject.
+    legacy_reproposed_nodes = {
+        d["node_id"] for d in st.novelty_events
+        if type(d.get("node_id")) is int and d.get("action") == "reproposed"
+        and "proposal_ref" not in d and "generation" not in d
+    }
     for d in list(st.novelty_events) + list(st.novelty_grades):
-        try:
-            cid = node_to_card.get(int(d.get("node_id")))
-        except (TypeError, ValueError):
-            cid = None
+        cid = _card_sidecar_subject(st, d, node_to_card)
         if cid:
-            cards[cid].novelty_verdict = {"grade": d.get("grade"), "level": d.get("level"),
-                                          "near_node": d.get("near_node"),
-                                          "recommendation": d.get("recommendation")}
+            cards[cid].novelty_verdict = _card_novelty_projection(st, d)
     for d in st.cross_run_priors:
-        try:
-            cid = node_to_card.get(int(d.get("node_id")))
-        except (TypeError, ValueError):
-            cid = None
+        cid = _card_sidecar_subject(
+            st, d, node_to_card, legacy_reproposed_nodes=legacy_reproposed_nodes, cross_run=True)
         if cid:
-            cards[cid].cross_run_prior = {"matched_concepts": d.get("matched_concepts") or [],
-                                          "prior_runs": d.get("prior_runs") or []}
+            cards[cid].cross_run_prior = _card_cross_run_projection(d)
 
     # Explicit card_enriched deltas — last-write-by-seq. An ALLOW-LIST is the ONLY thing that protects the
     # shadow: a field NOT listed here (id/statement/verdict/status/evidence/best_delta/...) is never
@@ -3604,7 +3805,11 @@ def _derive_cards(st: RunState) -> None:
             r.get("_seq") if type(r.get("_seq")) is int else -1,
             r.get("_event_index") if type(r.get("_event_index")) is int else -1)):
         try:
-            c = cards.get(_canon(str(d.get("id") or "").strip()))
+            raw_id = d.get("id")
+            bounded_id = _card_id(raw_id)
+            if bounded_id is None:
+                continue
+            c = cards.get(_canon(bounded_id))
         except Exception:  # noqa: BLE001 — a malformed id must not brick the fold
             c = None
         if c is None:
@@ -3662,8 +3867,11 @@ def _derive_cards(st: RunState) -> None:
         for c in cards.values():
             c.foresight_rank = None
     ranked_cards: set[str] = set()
-    for cid in order:
-        canonical_id = _canon(str(cid))
+    for raw_id in order:
+        bounded_id = _card_id(raw_id)
+        if bounded_id is None or (not native_card_ranking and bounded_id in ambiguous_seeds):
+            continue
+        canonical_id = _canon(bounded_id)
         if canonical_id in ranked_cards:
             continue
         rank_i = len(ranked_cards)

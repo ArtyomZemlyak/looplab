@@ -1,6 +1,8 @@
 """Domain models + event envelope (I0). Pydantic v2; JSON Schemas derive from these."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from enum import Enum
 from typing import Any, Literal, Optional
@@ -238,6 +240,23 @@ class Idea(BaseModel):
     # eval_timeout, clamped to a Settings ceiling (docs/23 owner decision 3).
     footprint: Optional[dict] = None
 
+    @field_validator("card_id", mode="before")
+    @classmethod
+    def _read_bounded_card_id(cls, value):
+        # CODEX AGENT: card linkage is advisory. A future/corrupt scalar must not reject node_created and
+        # thereby change best-selection; only a bounded, printable string can participate in the join.
+        if value is None or not isinstance(value, str):
+            return None
+        card_id = value.strip()
+        if not card_id or len(card_id) > 256 or not card_id.isprintable():
+            return None
+        return card_id
+
+    @field_validator("footprint", mode="before")
+    @classmethod
+    def _read_researcher_footprint(cls, value):
+        return normalize_researcher_footprint(value)
+
     @property
     def is_sweep(self) -> bool:
         return bool(self.space)
@@ -350,6 +369,15 @@ class IdeaEmission(Idea):
     def _strict_raw_concept_envelope(cls, value):
         if not isinstance(value, dict):
             raise ValueError("Idea emission must be an object")
+        raw_card_id = value.get("card_id")
+        if raw_card_id is not None:
+            if (not isinstance(raw_card_id, str) or raw_card_id != raw_card_id.strip()
+                    or not raw_card_id or len(raw_card_id) > 256
+                    or not raw_card_id.isprintable()):
+                raise ValueError("card_id must be a bounded printable string")
+        raw_footprint = value.get("footprint")
+        if raw_footprint is not None and not valid_researcher_footprint(raw_footprint):
+            raise ValueError("footprint must contain only bounded integer gpus/gpu_mem_mib")
         for field in ("concepts", "concepts_added", "concepts_removed"):
             raw = value.get(field, [])
             if not isinstance(raw, list):
@@ -408,6 +436,135 @@ def durable_idea_payload(idea: Idea) -> dict[str, Any]:
             if field not in idea.model_fields_set:
                 payload.pop(field, None)
     return payload
+
+
+_RESOURCE_INT_MAX = (1 << 31) - 1
+
+
+def _resource_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        number = int(value)
+    else:
+        return None
+    return number if 0 <= number <= _RESOURCE_INT_MAX else None
+
+
+def normalize_researcher_footprint(value) -> dict | None:
+    """Tolerant durable reader for the researcher-owned quantitative resource declaration."""
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, int | None] = {}
+    if "gpus" in value and (gpus := _resource_int(value.get("gpus"))) is not None:
+        out["gpus"] = gpus
+    if "gpu_mem_mib" in value:
+        raw_mem = value.get("gpu_mem_mib")
+        if raw_mem is None:
+            out["gpu_mem_mib"] = None
+        elif (memory := _resource_int(raw_mem)) is not None:
+            out["gpu_mem_mib"] = memory
+    # Authority fields (`pinned_by`/`finalized_by`) belong to later operator/developer events. Dropping
+    # every non-quantitative key prevents a researcher-authored Idea from forging that provenance.
+    return out or None
+
+
+def valid_researcher_footprint(value) -> bool:
+    if not isinstance(value, dict) or not value or not set(value) <= {"gpus", "gpu_mem_mib"}:
+        return False
+    if "gpus" in value and (type(value["gpus"]) is not int
+                            or not 0 <= value["gpus"] <= _RESOURCE_INT_MAX):
+        return False
+    raw_mem = value.get("gpu_mem_mib")
+    if ("gpu_mem_mib" in value and raw_mem is not None
+            and (type(raw_mem) is not int or not 0 <= raw_mem <= _RESOURCE_INT_MAX)):
+        return False
+    return True
+
+
+IDEA_PROPOSAL_DIGEST_V1_FIELDS = (
+    "operator", "params", "rationale", "eval_profile", "eval_timeout", "theme",
+    "concepts", "concept_mode", "concepts_added", "concepts_removed", "space",
+    "hypothesis", "card_id", "footprint",
+)
+
+
+def idea_proposal_digest(idea: Idea) -> str | None:
+    """Versioned exact digest of one bounded normalized durable Idea, or None when it is oversized."""
+    try:
+        # CODEX AGENT: V1 is a frozen semantic field set. Hashing the whole model dump would make a
+        # future additive Idea default invalidate every already-stamped event when an old log is replayed.
+        # Start at the durable boundary as well: an absent legacy concept envelope and an explicitly
+        # authored empty envelope replay differently, so model defaults must not collapse their identity.
+        durable = durable_idea_payload(idea)
+        payload = {
+            field: durable[field]
+            for field in IDEA_PROPOSAL_DIGEST_V1_FIELDS
+            if field in durable
+        }
+    except Exception:  # noqa: BLE001 - an advisory binding must never block proposal admission
+        return None
+    budget = [4_096, 65_536]  # total JSON atoms, total string/key characters
+
+    def _complete(value, depth=0):
+        if depth > 8 or budget[0] <= 0:
+            raise ValueError("idea identity exceeds structural budget")
+        budget[0] -= 1
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if abs(value) > (1 << 53) - 1:
+                raise ValueError("idea identity integer is outside JSON-safe range")
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("idea identity contains a non-finite number")
+            return 0.0 if value == 0.0 else value
+        if isinstance(value, str):
+            budget[1] -= len(value)
+            if budget[1] < 0:
+                raise ValueError("idea identity exceeds text budget")
+            return value
+        if isinstance(value, list):
+            if len(value) > 256:
+                raise ValueError("idea identity list is oversized")
+            return [_complete(item, depth + 1) for item in value]
+        if isinstance(value, dict):
+            if len(value) > 256 or any(not isinstance(key, str) for key in value):
+                raise ValueError("idea identity mapping is oversized or malformed")
+            key_chars = 0
+            for key in value:
+                # Reject attacker-sized keys before ordering them. Sorting up to 256 huge strings would
+                # otherwise pay comparison cost even though the digest must fail its text budget anyway.
+                if len(key) > 512:
+                    raise ValueError("idea identity key exceeds text budget")
+                key_chars += len(key)
+                if key_chars > budget[1]:
+                    raise ValueError("idea identity exceeds text budget")
+            budget[1] -= key_chars
+            out = {}
+            for key in sorted(value):
+                out[key] = _complete(value[key], depth + 1)
+            return out
+        raise ValueError("idea identity contains a non-JSON value")
+
+    try:
+        bounded = _complete(payload)
+        encoded = json.dumps(
+            bounded, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return None
+    if len(encoded) > 131_072:
+        return None
+    return "idea:v1:" + hashlib.sha256(encoded).hexdigest()
+
+
+def idea_proposal_ref(idea: Idea) -> dict | None:
+    digest = idea_proposal_digest(idea)
+    return {"v": 1, "digest": digest} if digest is not None else None
 
 
 class Trial(BaseModel):
@@ -544,14 +701,23 @@ class Node(BaseModel):
         return self.confirmed_mean if self.confirmed_mean is not None else self.metric
 
 
+def normalized_hypothesis_statement(statement: str) -> str:
+    import re
+    return re.sub(r"\s+", " ", (statement or "").strip().lower())
+
+
+def hypothesis_statement_digest(statement: str) -> str:
+    """Collision-resistant identity behind the short human-readable hypothesis id."""
+    return hashlib.sha256(normalized_hypothesis_statement(statement).encode("utf-8")).hexdigest()
+
+
 def hypothesis_id(statement: str) -> str:
     """Stable id for a hypothesis statement so the same claim (from different ideas / a human /
     a deep-research direction) links to ONE ledger entry that accumulates evidence. A normalized
     slug + short hash: readable in the log, collision-resistant across paraphrases-of-the-exact-same
     wording (paraphrase *variation* is intentionally a new hypothesis — dedup is by exact intent)."""
-    import hashlib
     import re
-    norm = re.sub(r"\s+", " ", (statement or "").strip().lower())
+    norm = normalized_hypothesis_statement(statement)
     slug = re.sub(r"[^a-z0-9]+", "-", norm).strip("-")[:48] or "hypothesis"
     return f"{slug}-{hashlib.md5(norm.encode('utf-8')).hexdigest()[:6]}"
 

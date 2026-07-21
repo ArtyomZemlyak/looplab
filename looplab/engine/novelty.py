@@ -22,7 +22,8 @@ from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-                                  NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState)
+                                  NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
+                                  idea_proposal_digest, idea_proposal_ref)
 from looplab.engine.action_governance import effective_researcher_eval_timeout
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
@@ -196,17 +197,39 @@ class NoveltyGateMixin:
         return max(state.nodes, default=-1) + 1
 
     @staticmethod
-    def _canonicalize_draft_idea(idea):
-        """Apply the policy-owned operator before novelty admission and implementation."""
-        if idea is None or getattr(idea, "operator", None) == "draft":
+    def _canonicalize_idea_operator(idea, operator: str):
+        """Apply a policy-owned operator before novelty admission and implementation."""
+        if idea is None or getattr(idea, "operator", None) == operator:
             return idea
         governed = idea.model_copy()
-        governed.operator = "draft"
+        governed.operator = operator
         return governed
+
+    @classmethod
+    def _canonicalize_draft_idea(cls, idea):
+        """Apply the draft policy's operator before novelty admission and implementation."""
+        return cls._canonicalize_idea_operator(idea, "draft")
 
     def _effective_researcher_eval_timeout(self, idea) -> Optional[float]:
         """Return the finite per-node timeout override that the evaluator will actually honor."""
         return effective_researcher_eval_timeout(self, idea)
+
+    def _proposal_binding(self, state: RunState, idea: Idea, prospective_node_id=None) -> dict:
+        """Exact card-sidecar subject: reserved slot, lifecycle, and normalized durable Idea."""
+        node_id = self._prospective_node_id(state, prospective_node_id)
+        current = state.nodes.get(node_id)
+        binding = {"node_id": node_id, "generation": current.attempt if current is not None else 0}
+        proposal_ref = idea_proposal_ref(idea)
+        if proposal_ref is not None:
+            binding["proposal_ref"] = proposal_ref
+        return binding
+
+    @staticmethod
+    def _near_binding(state: RunState, node_id) -> dict:
+        node = state.nodes.get(node_id) if isinstance(node_id, int) and not isinstance(node_id, bool) else None
+        if node is None:
+            return {"near_node": node_id}
+        return {"near_node": node.id, "near_generation": node.attempt}
 
     def _idea_prompt_identity(self, idea, *, prose_chars: int) -> str:
         """A bounded claim + action identity for the live LLM novelty adjudicator."""
@@ -370,18 +393,29 @@ class NoveltyGateMixin:
         dup = state.nodes[v.near_node_id]
         outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
                    else f"it scored {dup.metric}")
-        self.store.append(EV_NOVELTY_REJECTED, {
-            # The exact prospective slot supplied by batch admission (or the durable id ceiling on a
-            # serial call); siblings must not collapse onto one audit identity.
-            "node_id": self._prospective_node_id(state, prospective_node_id),
-            "near_node": dup.id, "kind": "llm",
-            "reason": str(v.reason)[:200], "stance": self._novelty_stance,
-            "action": "reproposed" if callable(repropose) else "kept"})
+        original = idea
+        original_digest = idea_proposal_digest(original)
         if callable(repropose):
             hint = (f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
                     f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
                     "(another approach, component or direction), not a rewording.")
-            idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
+            try:
+                idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
+            except BudgetExceeded:
+                self.store.append(EV_NOVELTY_REJECTED, {
+                    **self._proposal_binding(state, original, prospective_node_id),
+                    **self._near_binding(state, dup.id), "kind": "llm",
+                    "reason": str(v.reason)[:200], "stance": self._novelty_stance,
+                    "action": "budget_exceeded"})
+                raise
+        final_digest = idea_proposal_digest(idea)
+        action = ("reproposed" if original_digest is not None and final_digest is not None
+                  and original_digest != final_digest else "kept")
+        self.store.append(EV_NOVELTY_REJECTED, {
+            **self._proposal_binding(state, original, prospective_node_id),
+            **self._near_binding(state, dup.id), "kind": "llm",
+            "reason": str(v.reason)[:200], "stance": self._novelty_stance,
+            "action": action})
         return idea
 
     def _repropose_with_feedback(self, repropose, hint: str, idea: Idea, researcher=None) -> Idea:
@@ -768,7 +802,7 @@ class NoveltyGateMixin:
             matched = idea_concepts & prior_set
             if matched:
                 self._record_cross_run_prior(
-                    state, matched, prior_caps, prospective_node_id=prospective_node_id)
+                    state, idea, matched, prior_caps, prospective_node_id=prospective_node_id)
         # Level 4 is an ALLOW override; level 5 is only a candidate override until the grounded repeated
         # verifier below ratifies reopening it. Level 0 (novel) and 1/2/3 (dedup) defer.
         if grade.level not in (4, 5):
@@ -808,10 +842,10 @@ class NoveltyGateMixin:
                 state, graph, grade.near_node, client):
             return None
         self.store.append(EV_NOVELTY_GRADED, {
-            # Exact prospective slot (gap-safe, audit only), shared with the reject events below.
-            "node_id": self._prospective_node_id(state, prospective_node_id),
+            **self._proposal_binding(state, idea, prospective_node_id),
             "level": grade.level, "grade": grade.name,
-            "recommendation": grade.recommendation, "near_node": grade.near_node,
+            "recommendation": grade.recommendation,
+            **self._near_binding(state, grade.near_node),
             "shared_concepts": list(grade.shared_concepts), "stance": self._novelty_stance,
             "rationale": str(grade.rationale)[:200]})
         return idea
@@ -906,7 +940,7 @@ class NoveltyGateMixin:
         except Exception:  # noqa: BLE001 — cross-run read is advisory; a hiccup just yields no priors
             return set(), [], {}, {}
 
-    def _record_cross_run_prior(self, state: RunState, matched: set, prior_caps, *,
+    def _record_cross_run_prior(self, state: RunState, idea: Idea, matched: set, prior_caps, *,
                                 prospective_node_id=None) -> None:
         """SURFACE (never gate) the cross-run prior: which of the idea's OWN concepts were tried before, in
         which runs, with each matched concept's retained outcome and the explicitly run-level best metric —
@@ -1004,7 +1038,7 @@ class NoveltyGateMixin:
             }
             self.store.append(EV_CROSS_RUN_PRIOR, {
                 "v": 2,
-                "node_id": self._prospective_node_id(state, prospective_node_id),
+                **self._proposal_binding(state, idea, prospective_node_id),
                 "matched_concepts": matched, "prior_runs": returned_runs,
                 "prior_runs_total": len(runs),
                 "prior_runs_omitted": len(runs) - len(returned_runs),
@@ -1068,18 +1102,31 @@ class NoveltyGateMixin:
                 outcome = (f"it FAILED ({dup.error_reason}: {(dup.error or '')[:80]})"
                            if dup.status is NodeStatus.failed
                            else f"it scored {dup.metric}")
-                self.store.append(EV_NOVELTY_REJECTED, {
-                    # Exact prospective slot (gap-safe, audit only) — see the LLM gate above.
-                    "node_id": self._prospective_node_id(state, prospective_node_id),
-                    "near_node": dup.id, "kind": "semantic",
-                    "similarity": round(sim, 4), "stance": self._novelty_stance,
-                    "action": "reproposed" if callable(repropose) else "kept"})
+                original = idea
+                original_digest = idea_proposal_digest(original)
                 if callable(repropose):
                     hint = (f"\nNOVELTY GATE: your proposal is a near-duplicate of experiment "
                             f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
                             "Propose something MEANINGFULLY DIFFERENT (another approach, "
                             "component or direction), not a rewording.")
-                    idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
+                    try:
+                        idea = self._repropose_with_feedback(
+                            repropose, hint, idea, researcher=researcher)
+                    except BudgetExceeded:
+                        self.store.append(EV_NOVELTY_REJECTED, {
+                            **self._proposal_binding(state, original, prospective_node_id),
+                            **self._near_binding(state, dup.id), "kind": "semantic",
+                            "similarity": round(sim, 4), "stance": self._novelty_stance,
+                            "action": "budget_exceeded"})
+                        raise
+                final_digest = idea_proposal_digest(idea)
+                action = ("reproposed" if original_digest is not None and final_digest is not None
+                          and original_digest != final_digest else "kept")
+                self.store.append(EV_NOVELTY_REJECTED, {
+                    **self._proposal_binding(state, original, prospective_node_id),
+                    **self._near_binding(state, dup.id), "kind": "semantic",
+                    "similarity": round(sim, 4), "stance": self._novelty_stance,
+                    "action": action})
 
         params = numeric_params(idea.params)
         if not params:
@@ -1098,11 +1145,12 @@ class NoveltyGateMixin:
         for k in params:
             scale = max(abs(params[k]), 1.0) * 0.1
             nudged[k] = round(params[k] + rng.uniform(-1.0, 1.0) * scale, 4)
-        self.store.append(EV_NOVELTY_REJECTED, {
-            "node_id": nid, "near_node": nearest, "distance": round(mind, 4),
-            "stance": self._novelty_stance,
-            "original": idea.params, "nudged": nudged})
         out = idea.model_copy()
         out.params = nudged
         out.rationale = (idea.rationale + " [novelty-gate: nudged off a near-duplicate]").strip()
+        self.store.append(EV_NOVELTY_REJECTED, {
+            **self._proposal_binding(state, out, prospective_node_id),
+            **self._near_binding(state, nearest), "distance": round(mind, 4),
+            "stance": self._novelty_stance, "action": "nudged",
+            "original": idea.params, "nudged": nudged})
         return out

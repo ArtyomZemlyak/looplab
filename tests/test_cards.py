@@ -8,7 +8,19 @@ hash join, card_added/merged/dropped, the derived lifecycle lanes, empty-on-old-
 operator-override overlay phase (filled by Layer 6, a no-op here)."""
 from __future__ import annotations
 
-from looplab.core.models import Event, hypothesis_id
+import pytest
+
+from looplab.core.models import (
+    IDEA_PROPOSAL_DIGEST_V1_FIELDS,
+    Event,
+    Idea,
+    IdeaEmission,
+    durable_idea_payload,
+    hypothesis_id,
+    hypothesis_statement_digest,
+    idea_proposal_digest,
+    idea_proposal_ref,
+)
 from looplab.events.replay import FoldCursor, _derive_cards, fold
 
 
@@ -296,6 +308,98 @@ def test_footprint_rides_the_idea_onto_the_card():
     assert c.footprint == {"gpus": 4, "gpu_mem_mib": 16000, "proposed_by": "researcher"}
 
 
+def test_idea_advisory_fields_are_tolerant_on_replay_but_strict_at_emission():
+    tolerant = Idea(
+        operator="draft", card_id=7,
+        footprint={"gpus": 2, "gpu_mem_mib": 8_000, "pinned_by": "researcher"},
+    )
+    assert tolerant.card_id is None
+    assert tolerant.footprint == {"gpus": 2, "gpu_mem_mib": 8_000}
+
+    with pytest.raises(ValueError, match="card_id"):
+        IdeaEmission(operator="draft", concept_mode="full", card_id=7)
+    with pytest.raises(ValueError, match="footprint"):
+        IdeaEmission(
+            operator="draft", concept_mode="full",
+            footprint={"gpus": 2, "pinned_by": "researcher"},
+        )
+
+
+def test_corrupt_advisory_idea_fields_do_not_drop_the_best_node():
+    statement = "the winning proposal survives advisory corruption"
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 0, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "baseline"}}),
+        ("node_evaluated", {"node_id": 0, "metric": 0.2}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": statement,
+                                   "card_id": 7, "footprint": []}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.9}),
+    ]))
+    assert st.best_node_id == 1 and set(st.nodes) == {0, 1}
+    assert st.nodes[1].idea.card_id is None and st.nodes[1].idea.footprint is None
+    assert st.cards[hypothesis_id(statement)].evidence == [1]
+
+
+def test_card_added_sanitizes_footprint_authority_and_keeps_concepts_with_bad_operator():
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {
+            "id": "card-safe", "statement": "safe staged action",
+            "idea": {"operator": 7, "concepts": ["model/tree"]},
+            "footprint": {
+                "gpus": 2, "gpu_mem_mib": 8_000,
+                "pinned_by": "researcher", "finalized_by": "researcher",
+            },
+        }),
+    ]))
+    card = st.cards["card-safe"]
+    assert card.operator is None and card.concept_tags == ["model/tree"]
+    assert card.footprint == {"gpus": 2, "gpu_mem_mib": 8_000}
+
+
+def test_non_string_controls_and_infinite_at_node_cannot_alias_valid_cards():
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "True", "statement": "literal true", "at_node": float("inf")}),
+        ("card_added", {"id": "target", "statement": "target"}),
+        ("card_merged", {"canonical": "target", "aliases": [True]}),
+        ("card_enriched", {"id": True, "research_origin": "must-not-coerce"}),
+        ("card_dropped", {"id": True, "reason": "must-not-coerce"}),
+    ]))
+    assert set(st.cards) == {"True", "target"}
+    assert st.cards["True"].created_at_node == 0
+    assert st.cards["True"].status == "proposed" and st.cards["True"].research_origin is None
+
+
+def test_proposal_digest_uses_the_durable_legacy_envelope_and_frozen_v1_fields():
+    assert IDEA_PROPOSAL_DIGEST_V1_FIELDS == (
+        "operator", "params", "rationale", "eval_profile", "eval_timeout", "theme",
+        "concepts", "concept_mode", "concepts_added", "concepts_removed", "space",
+        "hypothesis", "card_id", "footprint",
+    )
+    legacy = Idea(operator="draft")
+    explicit_empty = Idea(operator="draft", concepts=[])
+    assert "concepts" not in durable_idea_payload(legacy)
+    assert durable_idea_payload(explicit_empty)["concepts"] == []
+    assert idea_proposal_digest(legacy) != idea_proposal_digest(explicit_empty)
+    assert idea_proposal_digest(Idea.model_validate(durable_idea_payload(legacy))) == idea_proposal_digest(legacy)
+
+
+def test_proposal_digest_rejects_oversized_mapping_keys_before_sorting_them():
+    class _ExplodingSortKey(str):
+        def __lt__(self, other):
+            raise AssertionError("oversized keys must fail before sorting")
+
+    idea = Idea(operator="draft")
+    idea.params = {
+        _ExplodingSortKey("a" * 513): 1.0,
+        _ExplodingSortKey("b" * 513): 2.0,
+    }
+    assert idea_proposal_digest(idea) is None
+
+
 def test_novelty_and_cross_run_signals_are_rehomed_by_node_id():
     st = fold(_mk([
         ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
@@ -309,8 +413,209 @@ def test_novelty_and_cross_run_signals_are_rehomed_by_node_id():
     ]))
     c = st.cards[hypothesis_id("novel idea")]
     assert c.novelty_verdict == {"grade": "REOPEN", "level": 5, "near_node": 0, "recommendation": "allow"}
-    assert c.cross_run_prior == {"matched_concepts": ["loss/contrastive"],
-                                 "prior_runs": [{"run": "x", "metric": 0.6}]}
+    assert c.cross_run_prior == {
+        "v": None,
+        "matched_concepts": ["loss/contrastive"],
+        "prior_runs": [{"run": "x", "metric": 0.6}],
+        "prior_runs_total": None,
+        "prior_runs_omitted": None,
+        "prior_runs_complete": False,
+        "concept_source": {"source_complete": False},
+    }
+
+
+def test_modern_sidecars_attach_only_to_the_exact_proposal_and_lifecycles():
+    near = Idea(operator="draft", hypothesis="near proposal")
+    candidate = Idea(operator="draft", hypothesis="exact candidate", concepts=[])
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 0, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(near)}),
+        ("node_created", {"node_id": 1, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(candidate)}),
+        ("novelty_graded", {
+            "node_id": 1, "generation": 0, "proposal_ref": idea_proposal_ref(candidate),
+            "grade": "REOPEN", "level": 5, "near_node": 0, "near_generation": 0,
+            "recommendation": "allow",
+        }),
+        ("cross_run_prior", {
+            "v": 2, "node_id": 1, "generation": 0,
+            "proposal_ref": idea_proposal_ref(candidate),
+            "matched_concepts": ["loss/contrastive"],
+            "prior_runs": [{"run": "x", "metric": 0.6}],
+            "prior_runs_total": 1, "prior_runs_omitted": 0,
+            "prior_runs_complete": True,
+            "concept_source": {"source_complete": True, "source_rows_total": 1},
+        }),
+    ])
+    card = _fold_with_cursor(events).cards[hypothesis_id("exact candidate")]
+    assert card.novelty_verdict == {
+        "grade": "REOPEN", "level": 5, "near_node": 0,
+        "near_generation": 0, "recommendation": "allow",
+    }
+    assert card.cross_run_prior == {
+        "v": 2,
+        "matched_concepts": ["loss/contrastive"],
+        "prior_runs": [{"run": "x", "metric": 0.6}],
+        "prior_runs_total": 1,
+        "prior_runs_omitted": 0,
+        "prior_runs_complete": True,
+        "concept_source": {"source_complete": True, "source_rows_total": 1},
+    }
+
+
+def test_modern_sidecars_fail_closed_on_mismatch_future_or_malformed_refs():
+    candidate = Idea(operator="draft", hypothesis="bound candidate")
+    other = Idea(operator="draft", hypothesis="discarded candidate")
+    exact = idea_proposal_ref(candidate)
+    assert exact is not None
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(candidate)}),
+        ("novelty_graded", {"node_id": 1, "generation": 0,
+                            "proposal_ref": idea_proposal_ref(other), "grade": "wrong-digest"}),
+        ("novelty_graded", {"node_id": 1, "generation": 0,
+                            "proposal_ref": {"v": 2, "digest": exact["digest"]},
+                            "grade": "future-ref"}),
+        ("novelty_graded", {"node_id": 1, "generation": 0,
+                            "proposal_ref": {"v": 1, "digest": 7}, "grade": "bad-ref"}),
+        ("novelty_graded", {"node_id": 1, "generation": 1,
+                            "proposal_ref": exact, "grade": "wrong-generation"}),
+        ("novelty_graded", {"node_id": 1, "proposal_ref": exact, "grade": "missing-generation"}),
+        ("novelty_graded", {"node_id": 1, "generation": 0, "grade": "missing-ref"}),
+        ("novelty_rejected", {"node_id": 1, "generation": 0, "proposal_ref": exact,
+                              "action": "reproposed", "kind": "semantic"}),
+        ("cross_run_prior", {"node_id": 1, "generation": 0,
+                             "proposal_ref": idea_proposal_ref(other),
+                             "matched_concepts": ["must/not-attach"]}),
+    ])
+    card = _fold_with_cursor(events).cards[hypothesis_id("bound candidate")]
+    assert card.novelty_verdict is None and card.cross_run_prior is None
+
+
+def test_same_digest_aba_is_fenced_by_generation_and_current_receipt_attaches():
+    candidate = Idea(operator="draft", hypothesis="same proposal after reset")
+    ref = idea_proposal_ref(candidate)
+    base = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(candidate)}),
+        ("novelty_graded", {"node_id": 1, "generation": 0, "proposal_ref": ref,
+                            "grade": "stale-generation"}),
+        ("node_reset", {"node_id": 1, "generation": 0, "from_stage": "propose"}),
+        ("node_created", {"node_id": 1, "generation": 1, "operator": "draft",
+                          "idea": durable_idea_payload(candidate)}),
+    ])
+    stale = _fold_with_cursor(base).cards[hypothesis_id("same proposal after reset")]
+    assert stale.novelty_verdict is None
+
+    current = _fold_with_cursor(base + _mk([
+        ("novelty_graded", {"node_id": 1, "generation": 1, "proposal_ref": ref,
+                            "grade": "current-generation"}),
+    ])).cards[hypothesis_id("same proposal after reset")]
+    assert current.novelty_verdict["grade"] == "current-generation"
+
+
+@pytest.mark.parametrize(
+    "transition", ["absent", "missing-generation", "reset", "tombstone", "abort"],
+)
+def test_modern_near_node_requires_a_live_matching_lifecycle(transition):
+    near = Idea(operator="draft", hypothesis="near lifecycle")
+    candidate = Idea(operator="draft", hypothesis=f"candidate {transition}")
+    near_id = 99 if transition == "absent" else 0
+    novelty = {
+        "node_id": 1, "generation": 0, "proposal_ref": idea_proposal_ref(candidate),
+        "grade": "near-check", "near_node": near_id, "near_generation": 0,
+    }
+    if transition == "missing-generation":
+        novelty.pop("near_generation")
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 0, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(near)}),
+        ("node_created", {"node_id": 1, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(candidate)}),
+        ("novelty_graded", novelty),
+    ])
+    if transition == "reset":
+        events += _mk([
+            ("node_reset", {"node_id": 0, "generation": 0, "from_stage": "propose"}),
+            ("node_created", {"node_id": 0, "generation": 1, "operator": "draft",
+                              "idea": durable_idea_payload(near)}),
+        ])
+    elif transition == "tombstone":
+        events += _mk([("node_tombstoned", {"node_ids": [0]})])
+    elif transition == "abort":
+        events += _mk([("node_abort", {"node_id": 0, "generation": 0})])
+    card = _fold_with_cursor(events).cards[hypothesis_id(f"candidate {transition}")]
+    assert card.novelty_verdict["near_node"] is None
+    if transition == "missing-generation":
+        assert "near_generation" not in card.novelty_verdict
+    else:
+        assert card.novelty_verdict["near_generation"] == 0
+
+
+@pytest.mark.parametrize("modern", [False, True])
+@pytest.mark.parametrize("transition", ["tombstone", "abort"])
+def test_sidecars_never_annotate_an_inactive_subject_lifecycle(modern, transition):
+    candidate = Idea(operator="draft", hypothesis=f"inactive subject {modern} {transition}")
+    receipt = {"node_id": 1, "grade": "must-not-attach"}
+    if modern:
+        receipt.update({"generation": 0, "proposal_ref": idea_proposal_ref(candidate)})
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(candidate)}),
+        ("novelty_graded", receipt),
+    ])
+    if transition == "tombstone":
+        events += _mk([("node_tombstoned", {"node_ids": [1]})])
+    else:
+        events += _mk([("node_abort", {"node_id": 1, "generation": 0})])
+    card = _fold_with_cursor(events).cards[hypothesis_id(candidate.hypothesis)]
+    assert card.novelty_verdict is None
+
+
+def test_legacy_sidecars_only_attach_to_generation_zero_and_never_rehome_reproposals():
+    events = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "legacy exact"}}),
+        ("novelty_graded", {"node_id": 1, "grade": "legacy-attaches"}),
+        ("node_created", {"node_id": 2, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "legacy replacement"}}),
+        ("novelty_rejected", {"node_id": 2, "action": "reproposed", "kind": "semantic"}),
+        ("node_created", {"node_id": 3, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "legacy cross run"}}),
+        ("novelty_rejected", {"node_id": 3, "action": "reproposed", "kind": "semantic"}),
+        ("cross_run_prior", {"node_id": 3, "matched_concepts": ["must/not-attach"]}),
+    ])
+    st = _fold_with_cursor(events)
+    assert st.cards[hypothesis_id("legacy exact")].novelty_verdict["grade"] == "legacy-attaches"
+    assert st.cards[hypothesis_id("legacy replacement")].novelty_verdict is None
+    assert st.cards[hypothesis_id("legacy cross run")].cross_run_prior is None
+
+
+def test_cross_run_projection_retains_completeness_receipt_without_claiming_exactness():
+    candidate = Idea(operator="draft", hypothesis="bounded prior receipt")
+    prior_runs = [{"run": f"r-{index}"} for index in range(65)]
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "generation": 0, "operator": "draft",
+                          "idea": durable_idea_payload(candidate)}),
+        ("cross_run_prior", {
+            "v": 2, "node_id": 1, "generation": 0,
+            "proposal_ref": idea_proposal_ref(candidate),
+            "matched_concepts": ["loss/contrastive"], "prior_runs": prior_runs,
+            "prior_runs_total": 65, "prior_runs_omitted": 0,
+            "prior_runs_complete": True,
+            "concept_source": {"source_complete": True},
+        }),
+    ]))
+    receipt = st.cards[hypothesis_id("bounded prior receipt")].cross_run_prior
+    assert len(receipt["prior_runs"]) == 64 and receipt["prior_runs_total"] == 65
+    assert receipt["prior_runs_omitted"] >= 1 and receipt["prior_runs_complete"] is False
 
 
 def test_card_ranked_stamps_priority_on_open_cards_only():
@@ -569,6 +874,70 @@ def test_native_id_reused_for_two_seeds_fails_closed_instead_of_conflating_cards
     ]))
     assert st.cards == {}  # both raw card_added rows remain the audit receipt; no identity is guessed
     assert set(st.hypotheses) == {hypothesis_id("seed A"), hypothesis_id("seed B")}
+
+
+def test_node_only_native_id_reuse_is_detected_before_evidence_can_be_conflated():
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "node seed A",
+                                   "card_id": "card-shared"}}),
+        ("node_created", {"node_id": 2, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "node seed B",
+                                   "card_id": "card-shared"}}),
+    ]))
+    assert st.cards == {}
+    assert set(st.hypotheses) == {hypothesis_id("node seed A"), hypothesis_id("node seed B")}
+
+
+def test_short_hash_collision_uses_full_statement_identity_and_suppresses_ambiguous_controls():
+    first = (
+        "same collision slug that exceeds forty eight chars abcdefghijklmnopqrstuvwxyz "
+        "zkv1b41rqyc5sj96kmgg"
+    )
+    second = (
+        "same collision slug that exceeds forty eight chars abcdefghijklmnopqrstuvwxyz "
+        "djo35wgfbw9l72jaw2h8"
+    )
+    short_id = hypothesis_id(first)
+    assert short_id == hypothesis_id(second)
+    assert hypothesis_statement_digest(first) != hypothesis_statement_digest(second)
+
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-first", "statement": first}),
+        ("card_added", {"id": "card-second", "statement": second}),
+        ("hypothesis_updated", {"id": short_id, "status": "abandoned"}),
+        ("card_dropped", {"id": short_id, "reason": "ambiguous legacy control"}),
+    ]))
+    assert set(st.cards) == {"card-first", "card-second"}
+    assert {card.statement for card in st.cards.values()} == {first, second}
+    assert all(card.verdict == "open" and card.status == "proposed" for card in st.cards.values())
+
+
+def test_native_id_collision_with_another_seed_hash_preserves_both_without_guessing_controls():
+    first = "unrelated alpha idea"
+    second = "unrelated beta idea"
+    second_hash = hypothesis_id(second)
+    st = _fold_with_cursor(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": second_hash, "statement": first}),
+        ("card_added", {"id": "card-second", "statement": second}),
+        ("hypothesis_updated", {"id": second_hash, "status": "abandoned"}),
+        ("card_dropped", {"id": second_hash, "reason": "ambiguous spelling"}),
+        ("card_enriched", {"id": second_hash, "research_origin": "exact native card control"}),
+        ("card_ranked", {"order": [second_hash]}),
+    ]))
+    assert set(st.cards) == {second_hash, "card-second"}
+    assert st.cards[second_hash].statement == first
+    assert st.cards["card-second"].statement == second
+    # The legacy hypothesis control is ambiguous and fails closed, while card-native event types name
+    # the explicit native id exactly and therefore still apply to the alpha card.
+    assert st.cards[second_hash].status == "dropped" and st.cards[second_hash].verdict == "open"
+    assert st.cards[second_hash].research_origin == "exact native card control"
+    assert st.cards[second_hash].priority == 0 and st.cards[second_hash].foresight_rank == 0
+    assert st.cards["card-second"].verdict == "open"
+    assert st.cards["card-second"].priority is None
 
 
 def test_research_origin_is_rehomed_from_the_node_provenance():
