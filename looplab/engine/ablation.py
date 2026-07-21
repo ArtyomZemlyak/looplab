@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import anyio
 
+from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, durable_idea_payload
 from looplab.events.replay import fold
 from looplab.events.types import EV_ABLATE
@@ -66,6 +67,7 @@ class AblationMixin:
             tg.cancel_scope.cancel()
         return result
 
+    @in_llm_lane("build")
     async def _ablate(self, parent_id: int, *, expected_generation: Optional[int] = None) -> None:
         """Ablation-driven refinement (I7, MLE-STAR): probe each parameter's impact by
         setting it to a neutral baseline (0.0) and re-running, then create a
@@ -206,6 +208,7 @@ class AblationMixin:
             lines[k] = "# [ablated] " + lines[k]
         return "\n".join(lines) + "\n"
 
+    @in_llm_lane("build")
     async def _ablate_code(self, parent_id: int, generation: int, ablation_id: str) -> None:
         """A0a code-block ablation → targeted refinement (MLE-STAR, 64% MLE-bench-Lite). Score each
         generated code block's contribution by neutralizing it and measuring the metric delta (a

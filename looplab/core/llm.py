@@ -41,6 +41,7 @@ except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is fo
 import urllib.request  # noqa: F401
 
 from looplab.core import tracing
+from looplab.core.llm_broker import llm_request_permit
 # Re-exported for backward compatibility: dozens of importers (and tests) do
 # `from looplab.core.llm import LLMError / BudgetExceeded`. The definitions live in
 # `looplab.core.errors` so `parse` can import them without importing this module.
@@ -532,7 +533,11 @@ class OpenAICompatibleClient:
             use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
                           and not _stalled_prev)
             try:
-                parsed = self._sdk_chat(payload, use_stream)
+                # CODEX AGENT: admit immediately around the real provider attempt, not around a
+                # whole node build. Retries take fresh fair turns and nested build -> novelty work
+                # cannot retain a build permit while asking for another lane at total=1.
+                with llm_request_permit():
+                    parsed = self._sdk_chat(payload, use_stream)
             except openai.BadRequestError as e:
                 # A 400 that rejects our REASONING toggle — a litellm-proxied model like glm-5.1
                 # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
@@ -695,19 +700,22 @@ class OpenAICompatibleClient:
                     try:
                         # Capture usage BEFORE yielding a co-located delta: if a consumer closes or
                         # cancels while suspended at that yield, the finally block still charges it.
-                        for ev in _stream_with_idle_guard(
-                                self._sdk.chat.completions.create(**kwargs),
-                                self.timeout, self.header_timeout):
-                            observed = getattr(ev, "usage", None)
-                            if observed is not None:
-                                usage_observed = True
-                                usage = _normalize_usage(_stream_usage(observed))
-                            if not ev.choices:
-                                continue
-                            piece = getattr(ev.choices[0].delta, "content", None) or ""
-                            if piece:
-                                pieces.append(piece)
-                                yield piece
+                        # Keep a stream's slot until its final chunk (or consumer close). The context
+                        # exits before either blocking fallback below, so total=1 cannot self-deadlock.
+                        with llm_request_permit():
+                            for ev in _stream_with_idle_guard(
+                                    self._sdk.chat.completions.create(**kwargs),
+                                    self.timeout, self.header_timeout):
+                                observed = getattr(ev, "usage", None)
+                                if observed is not None:
+                                    usage_observed = True
+                                    usage = _normalize_usage(_stream_usage(observed))
+                                if not ev.choices:
+                                    continue
+                                piece = getattr(ev.choices[0].delta, "content", None) or ""
+                                if piece:
+                                    pieces.append(piece)
+                                    yield piece
                         stream_completed = True
                         break                    # streamed (or cleanly ended) -> done
                     except openai.BadRequestError as e:
@@ -959,7 +967,10 @@ class LiteLLMClient:
         last: Optional[BaseException] = None
         for attempt in range(4):
             try:
-                return litellm.completion(model=self.model, **kwargs)
+                # CODEX AGENT: match the OpenAI-compatible transport seam. One attempt borrows one
+                # atomic total+lane slot; backoff/retry waiting itself consumes no shared capacity.
+                with llm_request_permit():
+                    return litellm.completion(model=self.model, **kwargs)
             except Exception as e:  # noqa: BLE001 - normalize EVERY provider error to LLMError
                 last = e
                 name = type(e).__name__.lower()

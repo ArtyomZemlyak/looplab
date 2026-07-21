@@ -25,6 +25,7 @@ from looplab.core.config import parallelism_aliases
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
+from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
                                   node_concept_event_provenance)
@@ -476,6 +477,10 @@ class StrategyCadenceMixin:
                         continue
                     self.parallel_build = max(1, _value)
                     self._llm_parallel = self.parallel_build
+                    if _k == "llm_parallel":
+                        # CODEX AGENT: mutate the broker active tasks already reference. Replacing
+                        # it here would split old/new borrowers across two independent totals.
+                        self._reconfigure_llm_broker(_value)
                 except (TypeError, ValueError, OverflowError):
                     pass
         # The policy NAME and its `policy_params` are gated INDEPENDENTLY: an operator can pin
@@ -592,6 +597,7 @@ class StrategyCadenceMixin:
             **coverage_signal(state, resolution=self.archive_resolution)})
         return fold(self.store.read_all())
 
+    @in_llm_lane("enrichment")
     def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
         """PART IV Phase 2a: record a compact concept-graph coverage + uncovered-region snapshot at the
         strategist cadence when `concept_pivot` is on. The producer is LLM-backed when a client is wired,
@@ -901,6 +907,7 @@ class StrategyCadenceMixin:
         }
 
     # --- R1-c: calibrated-verifier metric-tie-break -------------------------------------------------
+    @in_llm_lane("enrichment")
     def _maybe_verify_ties(self, state: RunState) -> RunState:
         """R1-c: the calibrated §12-verifier metric-tie-break (opt-in). Find the complete selector-reachable
         exact/CI tie that is not yet resolvable and re-score every member against one evidence revision
@@ -1039,6 +1046,7 @@ class StrategyCadenceMixin:
         except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
             return None
 
+    @in_llm_lane("enrichment")
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.
         Records a `strategy_decision` and re-folds only when the strategy actually changes.

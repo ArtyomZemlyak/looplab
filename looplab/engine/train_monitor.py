@@ -29,6 +29,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.llm_broker import in_llm_lane
+
 # The verdict schema the log observer returns. `status` drives everything downstream: a non-"healthy"
 # verdict becomes an EV_TRAIN_MONITOR_ALERT (Phase 1) and, later, a gated early kill (Phase 3, "broken"
 # only). Field descriptions are part of the schema the model sees — they ARE the classification contract.
@@ -384,6 +386,7 @@ class TrainingMonitorMixin:
         except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict this tick", not a crash
             return None
 
+    @in_llm_lane("enrichment")
     async def _monitor_training(self, node_id: int, generation: int, workdir, cancel,
                                 context: str = "", kill_signal: Optional[dict] = None,
                                 log_snapshot: Optional[TrainingLogSnapshot] = None) -> None:

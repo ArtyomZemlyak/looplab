@@ -16,6 +16,7 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events and stdlib (the trust/search deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
@@ -103,6 +104,7 @@ class ResearchCadenceMixin:
             self._record_deep_research(memo, trigger=trigger, manual=manual)
         return fold(self.store.read_all())
 
+    @in_llm_lane("deep_research")
     def _compute_deep_research(self, state: RunState, trigger: str, *, trace: bool = True):
         """PURE compute: run one Deep-Research step and RETURN the memo WITHOUT writing the event log,
         so it can run in a worker thread concurrently with an eval while the engine stays the sole
@@ -125,6 +127,7 @@ class ResearchCadenceMixin:
     # from the CONCURRENT research task (`orchestrator._spawn_research`), the one enforced
     # exception to engine invariant #1 ("only the main task appends"). The assertions make a
     # future selection-affecting append here fail fast instead of racing the event order.
+    @in_llm_lane("deep_research")
     def _record_deep_research(self, memo, *, trigger: str, manual: bool) -> None:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
@@ -201,6 +204,7 @@ class ResearchCadenceMixin:
             return "strategist"
         return None
 
+    @in_llm_lane("novelty_dedup")
     def _maybe_merge_hypotheses(self, state: RunState) -> RunState:
         """Agentic consolidation of the OPEN-hypothesis board (P1+). The fold merges hypotheses only by
         EXACT statement hash, so paraphrases of one belief pile up as separate open entries. Here —
@@ -281,6 +285,7 @@ class ResearchCadenceMixin:
         return self._write_report_with_seq(
             state, trigger=trigger, finalize_scope=finalize_scope)[0]
 
+    @in_llm_lane("enrichment")
     def _write_report_with_seq(self, state: RunState, *, trigger: str,
                                finalize_scope: str | None = None) -> tuple[RunState, int | None]:
         """Write a report and return its event sequence for the natural-finish CAS."""

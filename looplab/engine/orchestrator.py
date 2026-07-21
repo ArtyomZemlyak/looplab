@@ -77,6 +77,8 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
 from looplab.core.models import Idea, Node, NodeStatus, RunState, durable_idea_payload
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
+from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
+                                     in_llm_lane, llm_broker_scope, llm_lane_scope)
 from looplab.search.operators import merge_idea
 from looplab.search.policy import KIND_EXPAND, SearchPolicy
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
@@ -488,6 +490,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # either axis (strategy._apply_strategy) refreshes both the legacy attr and these aliases.
         self._eval_parallel = self.max_parallel
         self._llm_parallel = self.parallel_build
+        # The canonical field is also the opt-in switch for the SHARED provider-call budget. An
+        # unset field (including legacy-only parallel_build) and startup AUTO preserve historical
+        # unbounded research overlap; only a positive canonical value activates a finite total.
+        try:
+            _startup_llm_total = (min(64, int(_llm_parallel_opt))
+                                  if _llm_parallel_opt is not None
+                                  and int(_llm_parallel_opt) > 0 else None)
+        except (TypeError, ValueError, OverflowError):
+            _startup_llm_total = None
+        self._llm_broker = LLMConcurrencyBroker(
+            total=_startup_llm_total,
+            lane_limits=default_llm_lane_limits(_startup_llm_total),
+        )
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
         self._gpu_lock = threading.Lock()
         self.timeout = timeout
@@ -851,6 +866,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return finished.seq == tail_seq + 1
 
     async def run(self) -> RunState:
+        """Run under one shared broker context inherited by anyio tasks and worker threads."""
+        broker = getattr(self, "_llm_broker", None)
+        if broker is None:  # defensive for test/library engines constructed through __new__
+            broker = self._llm_broker = LLMConcurrencyBroker()
+        with llm_broker_scope(broker), llm_lane_scope("engine"):
+            return await self._run_with_llm_broker()
+
+    async def _run_with_llm_broker(self) -> RunState:
         events = self.store.read_all()
         state = fold(events)
         if self._recover_interrupted_builds(state):
@@ -958,7 +981,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # then it's frozen + protected and the optimization loop trusts it.
             if self.onboarder is not None and not state.spec_confirmed:
                 if state.proposed_spec is None:
-                    with self.tracer.span("onboard", new_trace=True):
+                    with self.tracer.span("onboard", new_trace=True), \
+                            llm_lane_scope("enrichment"):
                         proposal = self.onboarder()
                     self.store.append(EV_SPEC_PROPOSED, proposal)
                     continue
@@ -1511,6 +1535,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self._llm_parallel = self.parallel_build
                 except (TypeError, ValueError, OverflowError):
                     pass
+        # A canonical live control opts into the shared provider-call ceiling. Replay may also retain
+        # the last canonical total beside a newer legacy build-only override so resume cannot silently
+        # change broker behavior; legacy-only historical controls remain unbounded for compatibility.
+        if "llm_broker_total" in _bo or "llm_parallel" in _bo:
+            self._reconfigure_llm_broker(
+                _bo.get("llm_broker_total", _bo.get("llm_parallel")))
         return max_s, max_es
 
     async def _serve_forced_requests(self, state: RunState) -> bool:
@@ -1974,20 +2004,24 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _task_fingerprint(self, final: RunState, best=None) -> list[str]:
         return self.lessons.task_fingerprint(final, best)
 
+    @in_llm_lane("enrichment")
     def _write_reflection_note(self, final: RunState) -> None:
         return self.lessons.write_reflection_note(final)
 
+    @in_llm_lane("enrichment")
     def _reflect_lessons(self, final: RunState, best, fp: list) -> list:
         return self.lessons.reflect_lessons(final, best, fp)
 
     def _append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
         return self.lessons.append_lessons(lessons, hygiene=hygiene)
 
+    @in_llm_lane("enrichment")
     def _comparative_lessons(self, state: RunState, fp: list, exclude=()) -> tuple[list, list]:
         return self.lessons.comparative_lessons(state, fp, exclude=exclude)
 
     _spent_pairs = staticmethod(LessonMemory.spent_pairs)
 
+    @in_llm_lane("enrichment")
     def _maybe_distill_lessons(self, state: RunState) -> RunState:
         # Own op-trace: LessonMemory writes lessons_distilled via the SAME store, so an append inside
         # this span is stamped with it (current_ids) → the UI scopes the event's trace to the distill.
@@ -1997,10 +2031,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _lessons_store_stamp(self):
         return self.lessons.lessons_store_stamp()
 
+    @in_llm_lane("enrichment")
     def _maybe_refresh_lessons(self, state: RunState) -> RunState:
         with self._op_span("lessons_refresh"):
             return self.lessons.maybe_refresh_lessons(state)
 
+    @in_llm_lane("enrichment")
     def _maybe_reconcile_lessons(self, state: RunState) -> RunState:
         # Own op-trace: reconcile appends lessons_reconciled / lessons_distilled via the SAME store,
         # so those events are scoped to this span in the UI.
@@ -2013,6 +2049,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _reflect_client(self):
         return self.lessons.reflect_client()
 
+    @in_llm_lane("enrichment")
     def _causal_meta_note(self, final: RunState, best) -> Optional[str]:
         return self.lessons.causal_meta_note(final, best)
 
@@ -2025,15 +2062,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _store_concept_capsule(self, final: RunState) -> None:
         return self.lessons.store_concept_capsule(final)
 
+    @in_llm_lane("enrichment")
     def _store_research_claims(self, final: RunState) -> None:
         return self.lessons.store_research_claims(final)
 
+    @in_llm_lane("enrichment")
     def _store_concept_curation(self, final: RunState) -> None:
         return self.lessons.store_concept_curation(final)
 
+    @in_llm_lane("enrichment")
     def _store_claim_curation(self, final: RunState) -> None:
         return self.lessons.store_claim_curation(final)
 
+    @in_llm_lane("enrichment")
     def _store_task_facets(self, final: RunState) -> None:
         return self.lessons.store_task_facets(final)
 
@@ -2140,6 +2181,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         resolved = self.max_parallel if value == 0 else value
         return min(64, max(1, resolved))
 
+    def _reconfigure_llm_broker(self, value) -> None:
+        """Apply one live canonical total without replacing a broker held by active borrowers."""
+        if isinstance(value, bool):
+            return
+        if isinstance(value, float) and (
+                not math.isfinite(value) or not value.is_integer()):
+            return
+        try:
+            # Live Strategist/operator zero is a finite safety floor (1), not startup AUTO. This
+            # matches the canonical runtime contract and avoids surprising GPU-count re-resolution.
+            raw_total = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return
+        # CODEX AGENT: this method is also a defensive resume boundary for manually-constructed or
+        # forward-version state. Never turn an invalid/huge value into a different valid paid-call cap.
+        if not 0 <= raw_total <= 64:
+            return
+        total = max(1, raw_total)
+        broker = getattr(self, "_llm_broker", None)
+        if broker is None:
+            self._llm_broker = LLMConcurrencyBroker(
+                total=total, lane_limits=default_llm_lane_limits(total))
+            return
+        broker.reconfigure(total=total, lane_limits=default_llm_lane_limits(total))
+
     def _build_role_pairs(self, n: int) -> list:
         """Up to `n` (researcher, developer) pairs for a parallel build batch: the primary (self's roles)
         plus fresh WIRED pairs from `role_factory`, cached in `self._role_pool` and reused across batches
@@ -2169,6 +2235,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         bind_cost_accountants(self)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
 
+    @in_llm_lane("build")
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,
                      pretelemetry=None) -> None:
         # Variant-1 parallel build: `roles` is a per-build (researcher, developer) pair from the pool
@@ -2417,6 +2484,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 except Exception:  # noqa: BLE001 — best-effort terminal; never re-raise into the group
                     pass
 
+    @in_llm_lane("build")
     def _rerun_node(self, node: Node, state: RunState) -> None:
         """node_reset "propose"/"implement": re-run this EXISTING node id IN PLACE (never mints a new
         id — the whole point is to FIX a node, not proliferate). "implement" keeps the Researcher's idea
@@ -2499,6 +2567,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._emit_hypothesis_ranked(node.id, generation)
         self._emit_foresight_selected(node.id, generation)
 
+    @in_llm_lane("build")
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
         pending node. The operator supplies an idea (operator label, params, rationale, optional

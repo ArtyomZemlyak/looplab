@@ -16,6 +16,7 @@ import sys
 from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
+from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState
 from looplab.engine.triage import _rule_triage
 
@@ -24,6 +25,7 @@ class CrashRepairMixin:
     """The engine's crash-triage/repair-context cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
 
+    @in_llm_lane("build")
     def _triage_crash(self, state: RunState, node, error: str, attempt: int,
                       reason: str = "crash") -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:

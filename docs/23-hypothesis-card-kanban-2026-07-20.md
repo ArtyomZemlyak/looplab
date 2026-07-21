@@ -474,7 +474,12 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     yield 1, not GPU-count. **`llm_parallel` is a multi-lane budget**, not a single build pool — named
     lanes `build/propose`, `deep_research`, `novelty_dedup`, `enrichment`, each with a dedicated worker
     allotment; `AUTO` couples the build lane to `eval_parallel` and leaves research unbounded (byte-
-    identical default). The Strategist re-allocates the total + per-lane split on its cadence
+    identical default). Unclassified engine-side LLM work enters a closed `engine` fallback lane: it
+    still consumes the shared total, so a newly-added producer cannot silently bypass a finite budget.
+    A legacy-only `parallel_build` setting/control retains its historical build-only meaning and does
+    not enable the shared total; once a canonical live total was recorded, later legacy build retunes
+    retain that total in a separate replay receipt so live execution and resume cannot diverge.
+    The Strategist re-allocates the total + per-lane split on its cadence
     (`engine/strategy.py`) and steers only the new names. Layer 2 alone still delivers **no** throughput
     change (alternation kept) — its value is the cost-control decoupling + the lane budget that L4/L5 make
     load-bearing. Timeout is ONE canonical field (`eval_timeout`) with a **Settings hard ceiling** the

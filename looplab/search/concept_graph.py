@@ -654,8 +654,19 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
             results = [_emit_safe(n) for n in batch]
         else:
             import concurrent.futures as _futures
+            from contextvars import copy_context
+
+            # CODEX AGENT: ThreadPoolExecutor (unlike anyio.to_thread) does not propagate
+            # ContextVars. Capture one independent Context per worker item so concept tagging keeps
+            # the Engine's shared broker + enrichment lane instead of silently becoming unbounded.
+            contextual_batch = [(copy_context(), n) for n in batch]
+
+            def _emit_in_context(item):
+                context, node = item
+                return context.run(_emit_safe, node)
+
             with _futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                results = list(ex.map(_emit_safe, batch))
+                results = list(ex.map(_emit_in_context, contextual_batch))
         for nid, raw_ids in results:
             _apply(nid, raw_ids)
     return tags

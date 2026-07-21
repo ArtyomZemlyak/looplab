@@ -19,6 +19,8 @@ import os
 import re
 from pathlib import Path
 
+from looplab.core.llm_broker import in_llm_lane
+
 
 class EvalStagesMixin:
     """The engine's staged-eval cluster. See the module docstring for the mixin convention
@@ -315,6 +317,7 @@ class EvalStagesMixin:
         objective = (str(_ms.get("pattern") or _ms.get("key") or "").split("(")[0].strip()
                      or "the objective metric")
 
+        @in_llm_lane("enrichment")
         def _check(stage_name, tail):
             msgs = [{"role": "system", "content":
                      "You are a SANITY checker for ONE stage of an ML eval pipeline, run BEFORE the next "

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, RunState
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED
 from looplab.search.operators import merge_idea
@@ -44,6 +45,7 @@ class NodeBuildMixin:
                           f"Parents — {descr}.")
         return base
 
+    @in_llm_lane("build")
     def _agent_next_actions(self, state: RunState) -> list[dict]:
         """Self-driving action selection (Step 5). The unified agent picks the next macro action
         from the pure legal-action gate; forced phases (evaluate-pending / budget / seed) give it
@@ -92,6 +94,7 @@ class NodeBuildMixin:
         })
         return [chosen]
 
+    @in_llm_lane("build")
     def _implement(self, idea, parent=None) -> str:
         """Route an implement through `implement_from(idea, parent)` when the Developer supports it
         and a parent exists — so an IMPROVE/REFINE starts from the parent's actual solution (its
@@ -126,6 +129,7 @@ class NodeBuildMixin:
         di.rationale = ((di.rationale or "") + "\n" + "\n".join(blocks)).strip()
         return di
 
+    @in_llm_lane("build")
     def _repair(self, node, err: str, state: Optional[RunState] = None) -> str:
         """Route a repair through `repair_from(idea, node, error)` when the Developer supports it, so
         the fix is seeded from the FAILING NODE's OWN files — not the shared developer's `last_files`,

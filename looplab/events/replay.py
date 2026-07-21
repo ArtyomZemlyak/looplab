@@ -2548,6 +2548,12 @@ def _on_budget_extend(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.budget_overrides.pop(
                 _legacy if _key == _canonical else _canonical, None)
             st.budget_overrides[_key] = _value
+            if _canonical == "llm_parallel" and _key == _canonical:
+                # CODEX AGENT: the legacy alias historically governed only build fan-out. Preserve the
+                # last explicit canonical shared-total intent independently, so canonical->legacy
+                # sequences behave identically before and after process restart without retroactively
+                # throttling legacy-only logs.
+                st.budget_overrides["llm_broker_total"] = _value
     _raw_add = d.get("add_nodes")
     if _raw_add is not None and not isinstance(_raw_add, bool):
         if not (isinstance(_raw_add, float) and (

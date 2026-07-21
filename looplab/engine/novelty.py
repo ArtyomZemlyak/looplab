@@ -21,6 +21,7 @@ import unicodedata
 from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
+from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
                                   idea_proposal_digest, idea_proposal_ref)
@@ -499,6 +500,7 @@ class NoveltyGateMixin:
                     pass
         return False
 
+    @in_llm_lane("build")
     def _propose_batch(self, state: RunState, n: int) -> list:
         """Variant-1 Phase 2 — the ONE shared-researcher pass that yields up to N DISTINCT seed
         hypotheses for a concurrent draft batch ("one researcher -> N ideas -> N developers"), so a
@@ -1048,6 +1050,7 @@ class NoveltyGateMixin:
         except Exception:  # noqa: BLE001 — audit only, never block proposing
             return
 
+    @in_llm_lane("novelty_dedup")
     def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None,
                             prospective_node_id=None) -> Idea:
         """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
