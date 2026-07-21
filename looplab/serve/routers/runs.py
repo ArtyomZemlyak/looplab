@@ -802,6 +802,12 @@ def build_router(srv) -> APIRouter:
     # ------------------------------------------------------------------ state + time-travel
     @router.get("/api/runs/{run_id}/state")
     def get_state(run_id: str, seq: Optional[int] = None):
+        """Return the bounded public run state.
+
+        ``state.cards`` remains the backwards-compatible mapping; ``state.cards_projection`` carries
+        its collection and per-card completeness receipts. Historical ``seq`` reads use the same wire
+        projection as the live state, SSE, and review surfaces.
+        """
         return _state_payload(_run_dir(run_id), seq)
 
     @router.get("/api/runs/{run_id}/concepts")
@@ -1618,6 +1624,7 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/events")
     async def stream_events(run_id: str, request: Request):
+        """Stream canonical public state frames, including the Cards completeness receipt."""
         rd = _run_dir(run_id)
 
         async def gen():

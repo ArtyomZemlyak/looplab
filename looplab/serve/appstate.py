@@ -29,7 +29,7 @@ from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
     PHASE_SEARCH, PHASE_SPEC_APPROVAL, RUN_GENERATION_FIELD)
-from looplab.serve.public_cards import INTERNAL_CARD_STATE_FIELDS, public_cards
+from looplab.serve.public_cards import INTERNAL_CARD_STATE_FIELDS, public_cards_projection
 from looplab.serve.reviews import ReviewStore
 from looplab.serve.run_commands import RunCommandService, run_generation_token
 from looplab.serve.settings_store import SettingsStore
@@ -169,7 +169,11 @@ class AppState:
         # CODEX AGENT: exclude open event journals before Pydantic copies them, then publish only the
         # bounded derived DTO. This shared boundary feeds owner state, SSE, and review state.
         d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
-        d["cards"] = public_cards(st.cards)
+        # CODEX AGENT: `cards` and its completeness receipt must come from one projection invocation.
+        # Re-projecting the two halves separately would let mutable caller input or a later selector
+        # change publish counts that do not describe the actual mapping in this SSE/state frame.
+        card_fragment = public_cards_projection(st.cards).model_dump(mode="json")
+        d.update(card_fragment)
         d = _public_state_value(d)
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.trust.redact import redact_secrets

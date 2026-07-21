@@ -274,6 +274,7 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/review/state")
     def review_state(request: Request, seq: Optional[int] = None):
+        """Return the review-safe state with the same bounded Cards fragment as owner/SSE state."""
         with _bound_run(request) as (_record_value, rd):
             if seq is not None:
                 # The review UI has no history scrubber.  Reject arbitrary historical folds instead

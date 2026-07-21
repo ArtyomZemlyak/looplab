@@ -4,6 +4,9 @@ from __future__ import annotations
 import heapq
 import json
 import math
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from looplab.core.concepts import normalized_concept_materialization_receipt
 
@@ -19,6 +22,7 @@ INTERNAL_CARD_STATE_FIELDS = frozenset({
 PUBLIC_CARD_MAX_COUNT = 256
 PUBLIC_CARD_MAX_BYTES = 8_192
 PUBLIC_CARDS_MAX_BYTES = 512 * 1_024
+PUBLIC_CARDS_PROJECTION_MAX_BYTES = 512 * 1_024
 _MAX_ITEMS = 32
 _MAX_TEXT_BYTES = 2_048
 _MAX_REF_BYTES = 256
@@ -81,6 +85,83 @@ _CARD_CONCEPT_PROVENANCE = frozenset({
 })
 
 
+class PublicProjectionCount(BaseModel):
+    """Exact count receipt for one bounded public projection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total: int = Field(ge=0)
+    returned: int = Field(ge=0)
+    omitted: int = Field(ge=0)
+    complete: bool
+
+    @model_validator(mode="after")
+    def _coherent_count(self) -> "PublicProjectionCount":
+        if self.returned > self.total or self.omitted != self.total - self.returned:
+            raise ValueError("projection counts must partition total")
+        if self.complete and self.omitted:
+            raise ValueError("a projection with omissions cannot be complete")
+        return self
+
+
+class PublicProjectionSlice(PublicProjectionCount):
+    """Loss receipt for content units inside one public Card field."""
+
+    unit: Literal["characters", "items", "entries", "fields", "values"]
+
+
+class PublicCardProjectionReceipt(BaseModel):
+    """Per-card field coverage; ``omissions`` is sparse and contains no source values."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    complete: bool
+    fields: PublicProjectionCount
+    omissions: dict[str, PublicProjectionSlice] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _coherent_card(self) -> "PublicCardProjectionReceipt":
+        if self.complete != self.fields.complete:
+            raise ValueError("card completeness must match its public-field receipt")
+        if self.complete and self.omissions:
+            raise ValueError("a complete card cannot carry omission receipts")
+        return self
+
+
+class PublicCardsProjectionMetadata(BaseModel):
+    """Collection coverage for the backwards-compatible public ``cards`` mapping."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_valid: bool
+    total: int = Field(ge=0)
+    returned: int = Field(ge=0)
+    omitted: int = Field(ge=0)
+    complete: bool
+    items: dict[str, PublicCardProjectionReceipt] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _coherent_collection(self) -> "PublicCardsProjectionMetadata":
+        if self.returned > self.total or self.omitted != self.total - self.returned:
+            raise ValueError("card collection counts must partition total")
+        if self.returned != len(self.items):
+            raise ValueError("every returned card must have one coverage receipt")
+        exact = self.source_valid and not self.omitted and all(
+            item.complete for item in self.items.values())
+        if self.complete != exact:
+            raise ValueError("collection completeness must be end-to-end")
+        return self
+
+
+class PublicCardsEnvelope(BaseModel):
+    """Canonical Card fragment inserted into owner, SSE, and review state payloads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    cards: dict[str, dict]
+    cards_projection: PublicCardsProjectionMetadata
+
+
 def _clip_utf8(value: str, limit: int) -> str:
     return value.encode("utf-8")[:max(0, limit)].decode("utf-8", errors="ignore")
 
@@ -93,7 +174,12 @@ def _text(value, limit: int, *, free_text: bool = False):
     # CODEX AGENT: scan a bounded look-ahead so a credential crossing the display cut is redacted as one
     # token, while an attacker-sized prose field never costs O(raw size) on each SSE tick.
     bounded = value[:max(0, limit) + 512]
-    return _clip_utf8(redact_secrets(bounded, entropy=free_text), limit)
+    try:
+        return _clip_utf8(redact_secrets(bounded, entropy=free_text), limit)
+    except UnicodeError:
+        # CODEX AGENT: an unpaired surrogate cannot be represented by the UTF-8 JSON wire contract.
+        # Omit it instead of letting one corrupt Card terminate every state/SSE/review projection.
+        return _SKIP
 
 
 def _number(value, *, integer: bool = False):
@@ -298,7 +384,7 @@ def _steering(value) -> list[dict]:
 
 def _exact_ref_projection(value) -> list[str] | None:
     """Return the exact public semantic set, or None when public bounds make it lossy."""
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(value, (list, tuple)) or len(value) > _MAX_ITEMS:
         return None
     out: list[str] = []
     for item in value:
@@ -389,6 +475,346 @@ def _field_value(card, name: str):
     return _SKIP
 
 
+def _json_value(value):
+    return value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+
+
+def _named_scalars_lossless(raw, bounded, allowed, *, free_text: bool = False) -> bool:
+    if raw is None:
+        return bounded is None
+    if not isinstance(raw, dict):
+        return False
+    expected = {}
+    for key in sorted(allowed):
+        if key not in raw:
+            continue
+        value = _bounded_scalar(raw[key], free_text=free_text)
+        if value is _SKIP or value != raw[key]:
+            return False
+        expected[key] = value
+    return expected == bounded
+
+
+def _outcomes_lossless(raw, bounded) -> bool:
+    return (
+        isinstance(raw, dict)
+        and len(raw) <= _MAX_ITEMS
+        and bounded == raw
+    )
+
+
+def _matched_outcomes_lossless(raw, bounded) -> bool:
+    if not isinstance(raw, (list, tuple)) or len(raw) > _MAX_ITEMS:
+        return False
+    expected = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return False
+        row = {}
+        if "concept" in item:
+            concept = _text(item["concept"], _MAX_REF_BYTES)
+            if concept is _SKIP or concept != item["concept"]:
+                return False
+            row["concept"] = concept
+        if "outcome_retained" in item:
+            if not isinstance(item["outcome_retained"], bool):
+                return False
+            row["outcome_retained"] = item["outcome_retained"]
+        if "outcome" in item:
+            outcome = _number(item["outcome"])
+            if outcome is _SKIP or outcome != item["outcome"]:
+                return False
+            row["outcome"] = outcome
+        expected.append(row)
+    return expected == bounded
+
+
+def _prior_run_lossless(raw, bounded) -> bool:
+    if not isinstance(raw, dict) or _prior_run(raw) != bounded:
+        return False
+    for key in _PRIOR_RUN_KEYS & raw.keys():
+        value = raw[key]
+        if key in {"concepts", "matched_concepts"}:
+            if (not isinstance(value, (list, tuple)) or len(value) > _MAX_ITEMS
+                    or _refs(value) != list(value)):
+                return False
+        elif key == "outcomes":
+            if not _outcomes_lossless(value, bounded.get(key)):
+                return False
+        elif key == "matched_concept_outcomes":
+            if not _matched_outcomes_lossless(value, bounded.get(key)):
+                return False
+        elif key == "source_receipt":
+            if not _named_scalars_lossless(value, bounded.get(key), _RECEIPT_KEYS):
+                return False
+        else:
+            projected = _bounded_scalar(value)
+            if projected is _SKIP or projected != value:
+                return False
+    return True
+
+
+def _cross_run_lossless(raw, bounded) -> bool:
+    if not isinstance(raw, dict) or _cross_run(raw) != bounded:
+        return False
+    if "v" in raw:
+        version = _number(raw["v"], integer=True)
+        if version is _SKIP or version != raw["v"]:
+            return False
+    if "matched_concepts" in raw:
+        concepts = raw["matched_concepts"]
+        if (not isinstance(concepts, (list, tuple)) or len(concepts) > _MAX_ITEMS
+                or _refs(concepts) != list(concepts)):
+            return False
+    if "prior_runs" in raw:
+        runs = raw["prior_runs"]
+        if (not isinstance(runs, (list, tuple)) or len(runs) > _MAX_ITEMS
+                or any(not isinstance(item, dict) for item in runs)):
+            return False
+        if not all(_prior_run_lossless(item, projected)
+                   for item, projected in zip(runs, bounded["prior_runs"], strict=True)):
+            return False
+    for key in ("prior_runs_total", "prior_runs_omitted"):
+        if key in raw:
+            number = _number(raw[key], integer=True)
+            if number is _SKIP or number != raw[key]:
+                return False
+    if "prior_runs_complete" in raw and not isinstance(raw["prior_runs_complete"], bool):
+        return False
+    if "concept_source" in raw and not _named_scalars_lossless(
+            raw["concept_source"], bounded.get("concept_source"), _CONCEPT_SOURCE_KEYS):
+        return False
+    return True
+
+
+def _steering_lossless(raw, bounded) -> bool:
+    if not isinstance(raw, (list, tuple)) or len(raw) > _MAX_ITEMS:
+        return False
+    expected = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return False
+        row = {}
+        for key in sorted(_STEERING_KEYS & item.keys()):
+            value = item[key]
+            if isinstance(value, (list, tuple)):
+                if len(value) > _MAX_ITEMS:
+                    return False
+                children = []
+                for child in value:
+                    projected = _bounded_scalar(child, free_text=True)
+                    if projected is _SKIP or projected != child:
+                        return False
+                    children.append(projected)
+                row[key] = children
+            else:
+                projected = _bounded_scalar(value, free_text=True)
+                if projected is _SKIP or projected != value:
+                    return False
+                row[key] = projected
+        expected.append(row)
+    return expected == bounded
+
+
+def _concept_source_lossless(raw, bounded) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    allowed = {
+        "kind", "node_id", "node_generation", "provenance", "membership_present",
+        "complete", "receipt_valid", "materialization_receipt",
+    }
+    source_view = {key: raw[key] for key in allowed & raw.keys() if raw[key] is not None}
+    return source_view == bounded == _card_concept_source(raw)
+
+
+def _field_projection_lossless(name: str, raw, bounded) -> bool:
+    raw = _json_value(raw)
+    if name in _TEXT_LIMITS:
+        return isinstance(raw, str) and bounded == raw
+    if name in _REF_FIELDS:
+        return isinstance(raw, str) and bounded == raw
+    if name in _INT_FIELDS:
+        return _number(raw, integer=True) == raw == bounded
+    if name in _FLOAT_FIELDS:
+        return _number(raw) == raw == bounded
+    if name in _REF_LIST_FIELDS:
+        return (
+            isinstance(raw, (list, tuple))
+            and len(raw) <= _MAX_ITEMS
+            and _refs(raw) == list(raw) == bounded
+        )
+    if name in _INT_LIST_FIELDS:
+        return (
+            isinstance(raw, (list, tuple))
+            and len(raw) <= _MAX_ITEMS
+            and _ints(raw) == list(raw) == bounded
+        )
+    if name == "actionable":
+        return isinstance(raw, bool) and bounded is raw
+    if name == "params":
+        return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
+    if name == "space":
+        return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
+    if name == "footprint":
+        return _named_scalars_lossless(raw, bounded, _FOOTPRINT_KEYS)
+    if name == "novelty_verdict":
+        return _named_scalars_lossless(raw, bounded, _NOVELTY_KEYS, free_text=True)
+    if name == "cross_run_prior":
+        return _cross_run_lossless(raw, bounded)
+    if name == "concept_source":
+        return _concept_source_lossless(raw, bounded)
+    if name == "steering_context":
+        return _steering_lossless(raw, bounded)
+    return False
+
+
+def _field_exact(card, dto: dict, name: str) -> bool:
+    raw = _field(card, name)
+    if raw is _SKIP or raw is None or name not in dto:
+        return False
+    bounded = _field_value(card, name)
+    return (
+        bounded is not _SKIP
+        and dto[name] == bounded
+        and _field_projection_lossless(name, raw, bounded)
+    )
+
+
+def _field_slice(name: str, raw, projected, *, exact: bool) -> PublicProjectionSlice:
+    raw = _json_value(raw)
+    if isinstance(raw, str):
+        unit = "characters"
+        total = len(raw)
+        if exact:
+            returned = total
+        elif isinstance(projected, str):
+            # CODEX AGENT: redaction/clipping preserves order but may transform a suffix. Count only
+            # the exact prefix; stopping at the first changed character cannot overstate coverage.
+            returned = next(
+                (index for index, (source, public) in enumerate(zip(raw, projected))
+                 if source != public),
+                min(len(raw), len(projected)),
+            )
+        else:
+            returned = 0
+    elif isinstance(raw, (list, tuple)):
+        unit = "items"
+        total = len(raw)
+        if exact:
+            returned = total
+        elif isinstance(projected, list):
+            # CODEX AGENT: count only source values that survived byte clipping/redaction exactly.
+            # The projector considers at most `_MAX_ITEMS`, so this stays bounded even for a hostile list.
+            remaining = list(raw[:_MAX_ITEMS])
+            returned = 0
+            for item in projected:
+                try:
+                    index = remaining.index(item)
+                except ValueError:
+                    continue
+                returned += 1
+                remaining.pop(index)
+        else:
+            returned = 0
+    elif isinstance(raw, dict):
+        unit = "entries"
+        keys = None
+        if name == "footprint":
+            keys = _FOOTPRINT_KEYS & raw.keys()
+        elif name == "novelty_verdict":
+            keys = _NOVELTY_KEYS & raw.keys()
+        elif name == "cross_run_prior":
+            keys = {
+                "v", "matched_concepts", "prior_runs", "prior_runs_total",
+                "prior_runs_omitted", "prior_runs_complete", "concept_source",
+            } & raw.keys()
+        elif name == "concept_source":
+            keys = {
+                "kind", "node_id", "node_generation", "provenance", "membership_present",
+                "complete", "receipt_valid", "materialization_receipt",
+            } & raw.keys()
+            keys = {key for key in keys if raw[key] is not None}
+        if keys is None:
+            total = len(raw)
+            if exact:
+                returned = total
+            elif isinstance(projected, dict):
+                returned = sum(
+                    key in raw and raw[key] == value
+                    for key, value in projected.items()
+                )
+            else:
+                returned = 0
+        else:
+            total = len(keys)
+            returned = total if exact else sum(
+                key in projected and projected[key] == raw[key]
+                for key in keys
+                if isinstance(projected, dict)
+            )
+    else:
+        unit = "values"
+        total = 1
+        returned = int(exact)
+    return PublicProjectionSlice(
+        unit=unit,
+        total=total,
+        returned=returned,
+        omitted=total - returned,
+        complete=exact,
+    )
+
+
+def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
+    # CODEX AGENT: the mapping key, not a spoofable object field, is the authoritative public Card.id.
+    total = 1
+    returned = 1
+    exact_fields: dict[str, bool] = {"id": True}
+    omissions: dict[str, PublicProjectionSlice] = {}
+    for name in _FIELDS[1:]:
+        raw = _field(card, name)
+        if raw is _SKIP or raw is None:
+            continue
+        total += 1
+        exact = _field_exact(card, dto, name)
+        exact_fields[name] = exact
+        if exact:
+            returned += 1
+            continue
+        projected = dto.get(name, _SKIP)
+        omissions[name] = _field_slice(name, raw, projected, exact=False)
+
+    for group, names in {
+        "action": ("operator", "params", "space", "eval_profile"),
+        "concepts": ("concept_tags", "concept_source", "provenance_tier"),
+    }.items():
+        present = [
+            name for name in names
+            if (value := _field(card, name)) is not _SKIP and value is not None
+        ]
+        exact_count = sum(exact_fields.get(name, False) for name in present)
+        if present and exact_count != len(present):
+            omissions[group] = PublicProjectionSlice(
+                unit="fields",
+                total=len(present),
+                returned=exact_count,
+                omitted=len(present) - exact_count,
+                complete=False,
+            )
+
+    fields = PublicProjectionCount(
+        total=total,
+        returned=returned,
+        omitted=total - returned,
+        complete=returned == total,
+    )
+    return PublicCardProjectionReceipt(
+        complete=fields.complete,
+        fields=fields,
+        omissions=omissions,
+    )
+
+
 def _dto(card, authoritative_id: str) -> dict:
     # CODEX AGENT: fixed admission order keeps identity/lifecycle available; rich optional fields enter
     # only while the complete UTF-8 JSON representation remains inside the per-card SSE envelope.
@@ -473,24 +899,82 @@ def _selection_key(cards: dict, card_id: str):
     )
 
 
-def public_cards(cards) -> dict[str, dict]:
-    """Return a deterministic, allow-listed and size-bounded card mapping."""
-    if not isinstance(cards, dict):
-        return {}
+def _projection_metadata(source_valid: bool, total: int,
+                         admitted: list[tuple[str, dict, PublicCardProjectionReceipt]]
+                         ) -> PublicCardsProjectionMetadata:
+    items = {card_id: receipt for card_id, _dto_value, receipt in sorted(admitted)}
+    returned = len(items)
+    omitted = total - returned
+    complete = source_valid and not omitted and all(item.complete for item in items.values())
+    return PublicCardsProjectionMetadata(
+        source_valid=source_valid,
+        total=total,
+        returned=returned,
+        omitted=omitted,
+        complete=complete,
+        items=items,
+    )
+
+
+def public_cards_projection(cards) -> PublicCardsEnvelope:
+    """Return the one canonical, bounded Card wire fragment plus exact coverage metadata."""
+    source_valid = isinstance(cards, dict)
+    if not source_valid:
+        metadata = _projection_metadata(False, 0, [])
+        return PublicCardsEnvelope(cards={}, cards_projection=metadata)
+
+    total = len(cards)
     valid_ids = (key for key in cards if _authoritative_id(key))
     selected = heapq.nsmallest(
         PUBLIC_CARD_MAX_COUNT, valid_ids, key=lambda card_id: _selection_key(cards, card_id))
-    admitted: list[tuple[str, dict]] = []
+    admitted: list[tuple[str, dict, PublicCardProjectionReceipt]] = []
     board_bytes = 2
+    metadata_items_bytes = 2
     for card_id in selected:
         dto = _dto(cards[card_id], card_id)
+        receipt = _card_projection_receipt(cards[card_id], dto)
         key_bytes = json.dumps(card_id, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         dto_bytes = json.dumps(dto, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         entry_bytes = len(key_bytes) + 1 + len(dto_bytes) + bool(admitted)
-        if board_bytes + entry_bytes > PUBLIC_CARDS_MAX_BYTES:
+        receipt_bytes = json.dumps(
+            receipt.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        metadata_entry_bytes = len(key_bytes) + 1 + len(receipt_bytes) + bool(admitted)
+        # CODEX AGENT: metadata is part of the public surface, not an unbounded diagnostic sidecar.
+        # Admit a card only when both its DTO and its exact receipt fit their independently fixed budgets.
+        if (board_bytes + entry_bytes > PUBLIC_CARDS_MAX_BYTES
+                or metadata_items_bytes + metadata_entry_bytes
+                > PUBLIC_CARDS_PROJECTION_MAX_BYTES - 1_024):
             continue
-        admitted.append((card_id, dto))
+        admitted.append((card_id, dto, receipt))
         board_bytes += entry_bytes
+        metadata_items_bytes += metadata_entry_bytes
+
+    metadata = _projection_metadata(True, total, admitted)
+    metadata_bytes = len(json.dumps(
+        metadata.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8"))
+    # CODEX AGENT: keep the limit executable even though admission reserves more than today's fixed
+    # envelope, so a future metadata field cannot silently invalidate the SSE byte bound.
+    while admitted and metadata_bytes > PUBLIC_CARDS_PROJECTION_MAX_BYTES:
+        admitted.pop()
+        metadata = _projection_metadata(True, total, admitted)
+        metadata_bytes = len(json.dumps(
+            metadata.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+
     # CODEX AGENT: relevance decides admission, while the wire mapping is id-sorted for exact replay and
     # cache determinism independent of source insertion order.
-    return {card_id: dto for card_id, dto in sorted(admitted)}
+    public = {card_id: dto for card_id, dto, _receipt in sorted(admitted)}
+    return PublicCardsEnvelope(cards=public, cards_projection=metadata)
+
+
+def public_cards(cards) -> dict[str, dict]:
+    """Backwards-compatible mapping view of :func:`public_cards_projection`."""
+    return public_cards_projection(cards).cards

@@ -519,6 +519,27 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
   though the pin EVENTS land in L6 — else L6 forces a `_derive_cards` rewrite. These empty `{}` keys
   appear in the dump → regenerate the golden and correct any "adds nothing" claim.
 
+**Landed public read contract (owner state, SSE, and review state).** `RunState.cards` remains an
+internal folded model; transport metadata is deliberately not written back into it. The shared
+`AppState.state_payload` publishes one canonical fragment on all three surfaces:
+
+- `state.cards` remains the backwards-compatible id-keyed DTO mapping. It is allow-listed and bounded
+  to 256 cards, 8 KiB per card, and 512 KiB for the mapping. Fold input journals and operator override
+  maps are excluded before serialization; they are not public fields and are not counted as omissions.
+- `state.cards_projection` is the separate bounded receipt. Its `total`, `returned`, and `omitted`
+  partition the exact folded source mapping (invalid/secret-bearing ids count in `total` but are omitted
+  fail-closed); `source_valid` distinguishes an exact empty mapping from a malformed source.
+- Collection `complete` is true only when every source card was returned **and** every returned card's
+  public fields were exact. `items[id].fields` gives the per-card field partition. Sparse
+  `items[id].omissions` receipts give exact source-unit counts for truncated/redacted strings, bounded
+  lists, maps, the action block, and concept ownership/tags. A transformed value is not counted as an
+  exact returned unit. The metadata sidecar has its own 512 KiB ceiling and participates in admission,
+  so it cannot become an unbounded SSE amplification path.
+- Existing clients may continue reading only `state.cards`. Completeness-aware consumers must check the
+  collection receipt before treating absence as truth and the per-card receipt before treating a DTO as
+  exact. Upstream receipts inside `cross_run_prior` and `concept_source` retain their own meaning; this
+  outer receipt reports only additional loss at the public Card boundary.
+
 **1b (enrichment):**
 - `Card.footprint` sub-schema — concrete shape `{gpus:int, gpu_mem_mib:Optional[int],
   proposed_by:str, finalized_by:Optional[str], pinned_by:Optional[str]}`; UNSPECIFIED (`None`/`gpus None`)

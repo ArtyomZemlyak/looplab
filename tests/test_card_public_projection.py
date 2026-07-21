@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.serve.public_cards import (  # noqa: E402
     INTERNAL_CARD_STATE_FIELDS, PUBLIC_CARD_MAX_BYTES, PUBLIC_CARD_MAX_COUNT,
-    PUBLIC_CARDS_MAX_BYTES, public_cards)
+    PUBLIC_CARDS_MAX_BYTES, PUBLIC_CARDS_PROJECTION_MAX_BYTES, public_cards,
+    public_cards_projection)
 from looplab.serve.server import make_app  # noqa: E402
 
 
@@ -82,6 +83,14 @@ def _assert_public_card_payload(payload: dict) -> None:
     state = payload["state"]
     assert not (INTERNAL_CARD_STATE_FIELDS & state.keys())
     assert set(state["cards"]) == {"card-safe"}
+    projection = state["cards_projection"]
+    assert projection["source_valid"] is True
+    assert (projection["total"], projection["returned"], projection["omitted"]) == (1, 1, 0)
+    # Secret redaction is intentionally lossy and therefore fails the end-to-end receipt closed.
+    assert projection["complete"] is False
+    card_projection = projection["items"]["card-safe"]
+    assert card_projection["complete"] is False
+    assert {"rationale", "steering_context"} <= card_projection["omissions"].keys()
     card = state["cards"]["card-safe"]
     assert card["statement"] == "a public direction"
     assert card["operator"] == "improve" and card["params"] == {"lr": 0.2}
@@ -119,6 +128,18 @@ def test_owner_state_sse_and_review_share_the_bounded_card_projection(tmp_path, 
     owner_payload = owner.json()
     _assert_public_card_payload(owner_payload)
 
+    historical = client.get("/api/runs/demo/state?seq=0", headers=_OWNER)
+    assert historical.status_code == 200
+    assert historical.json()["state"]["cards"] == {}
+    assert historical.json()["state"]["cards_projection"] == {
+        "source_valid": True,
+        "total": 0,
+        "returned": 0,
+        "omitted": 0,
+        "complete": True,
+        "items": {},
+    }
+
     stream = client.get("/api/runs/demo/events", headers=_OWNER)
     assert stream.status_code == 200
     state_frame = next(frame for frame in stream.text.split("\n\n") if "event: state" in frame)
@@ -126,6 +147,7 @@ def test_owner_state_sse_and_review_share_the_bounded_card_projection(tmp_path, 
         line[6:] for line in state_frame.splitlines() if line.startswith("data: ")))
     _assert_public_card_payload(sse_payload)
     assert sse_payload["state"]["cards"] == owner_payload["state"]["cards"]
+    assert sse_payload["state"]["cards_projection"] == owner_payload["state"]["cards_projection"]
 
     created = client.post(
         "/api/runs/demo/reviews", headers=_OWNER,
@@ -138,6 +160,7 @@ def test_owner_state_sse_and_review_share_the_bounded_card_projection(tmp_path, 
     review_payload = review.json()
     _assert_public_card_payload(review_payload)
     assert review_payload["state"]["cards"] == owner_payload["state"]["cards"]
+    assert review_payload["state"]["cards_projection"] == owner_payload["state"]["cards_projection"]
 
 
 def test_public_cards_are_count_size_total_and_deterministic():
@@ -155,13 +178,24 @@ def test_public_cards_are_count_size_total_and_deterministic():
     })
     first = public_cards(small_rows)
     second = public_cards(dict(reversed(list(small_rows.items()))))
+    first_envelope = public_cards_projection(small_rows).model_dump(mode="json")
+    second_envelope = public_cards_projection(
+        dict(reversed(list(small_rows.items())))).model_dump(mode="json")
     first_raw = json.dumps(first, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     second_raw = json.dumps(second, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
     assert first_raw == second_raw
+    assert first_envelope == second_envelope
+    assert first_envelope["cards"] == first
     assert len(first) == PUBLIC_CARD_MAX_COUNT
     assert list(first) == ["card-000", *(f"card-{index:03d}" for index in range(45, 300))]
     assert first["card-000"]["id"] == "card-000"
+    first_projection = first_envelope["cards_projection"]
+    assert (first_projection["total"], first_projection["returned"],
+            first_projection["omitted"]) == (300, 256, 44)
+    assert first_projection["complete"] is False
+    assert set(first_projection["items"]) == set(first)
+    assert all(item["complete"] for item in first_projection["items"].values())
 
     hostile_rows = {
         f"card-{index:03d}": {
@@ -205,12 +239,20 @@ def test_public_cards_are_count_size_total_and_deterministic():
 
     bounded = public_cards(hostile_rows)
     reversed_bounded = public_cards(dict(reversed(list(hostile_rows.items()))))
+    hostile_envelope = public_cards_projection(hostile_rows).model_dump(mode="json")
+    reversed_hostile_envelope = public_cards_projection(
+        dict(reversed(list(hostile_rows.items())))).model_dump(mode="json")
     bounded_raw = json.dumps(bounded, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     reversed_raw = json.dumps(
         reversed_bounded, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
     assert bounded_raw == reversed_raw
+    assert hostile_envelope == reversed_hostile_envelope
+    assert hostile_envelope["cards"] == bounded
     assert len(bounded_raw.encode("utf-8")) <= PUBLIC_CARDS_MAX_BYTES
+    metadata_raw = json.dumps(
+        hostile_envelope["cards_projection"], ensure_ascii=False, separators=(",", ":"))
+    assert len(metadata_raw.encode("utf-8")) <= PUBLIC_CARDS_PROJECTION_MAX_BYTES
     assert _PRIVATE_MARKER not in bounded_raw and _SECRET not in bounded_raw
     assert "private_note" not in bounded_raw and "spoof-" not in bounded_raw
     assert "x" * 257 not in bounded and "line\nbreak" not in bounded and _SECRET not in bounded
@@ -219,3 +261,109 @@ def test_public_cards_are_count_size_total_and_deterministic():
     sample = next(iter(bounded.values()))
     assert "parent_id" not in sample and "priority" not in sample
     assert sample["evidence"] == [1, 3]
+    metadata = hostile_envelope["cards_projection"]
+    assert metadata["total"] == len(hostile_rows)
+    assert metadata["returned"] == len(bounded)
+    assert metadata["omitted"] == len(hostile_rows) - len(bounded)
+    assert metadata["complete"] is False
+    assert set(metadata["items"]) == set(bounded)
+    for receipt in metadata["items"].values():
+        fields = receipt["fields"]
+        assert fields["total"] == fields["returned"] + fields["omitted"]
+        for omission in receipt["omissions"].values():
+            assert omission["total"] == omission["returned"] + omission["omitted"]
+
+
+def test_per_card_receipts_count_bounded_text_lists_action_and_concepts_exactly():
+    rows = {
+        "card-bounded": {
+            "status": "proposed",
+            "verdict": "open",
+            "actionable": True,
+            "statement": "direction",
+            "operator": "improve",
+            "params": {f"p-{index:02d}": float(index) for index in range(40)},
+            "space": {"depth": [float(index) for index in range(40)]},
+            "evidence": list(range(40)),
+            "concept_tags": [f"axis/tag-{index:02d}" for index in range(40)],
+            "steering_context": [{"kind": "coverage", "at_node": index}
+                                 for index in range(40)],
+        },
+        "card-text": {
+            "status": "evaluated",
+            "verdict": "tested",
+            "actionable": False,
+            "statement": "x" * 10_000,
+        },
+    }
+    envelope = public_cards_projection(rows).model_dump(mode="json")
+    metadata = envelope["cards_projection"]
+
+    assert (metadata["total"], metadata["returned"], metadata["omitted"]) == (2, 2, 0)
+    assert metadata["complete"] is False
+
+    bounded = metadata["items"]["card-bounded"]
+    assert bounded["omissions"]["evidence"] == {
+        "unit": "items", "total": 40, "returned": 32, "omitted": 8, "complete": False,
+    }
+    assert bounded["omissions"]["concept_tags"] == {
+        "unit": "items", "total": 40, "returned": 32, "omitted": 8, "complete": False,
+    }
+    assert bounded["omissions"]["params"] == {
+        "unit": "entries", "total": 40, "returned": 32, "omitted": 8, "complete": False,
+    }
+    assert bounded["omissions"]["space"] == {
+        "unit": "entries", "total": 1, "returned": 0, "omitted": 1, "complete": False,
+    }
+    assert bounded["omissions"]["steering_context"] == {
+        "unit": "items", "total": 40, "returned": 32, "omitted": 8, "complete": False,
+    }
+    assert bounded["omissions"]["action"] == {
+        "unit": "fields", "total": 3, "returned": 1, "omitted": 2, "complete": False,
+    }
+    assert bounded["omissions"]["concepts"] == {
+        "unit": "fields", "total": 1, "returned": 0, "omitted": 1, "complete": False,
+    }
+
+    text = metadata["items"]["card-text"]
+    assert text["omissions"]["statement"] == {
+        "unit": "characters", "total": 10_000, "returned": 2_048,
+        "omitted": 7_952, "complete": False,
+    }
+    assert len(envelope["cards"]["card-text"]["statement"].encode("utf-8")) == 2_048
+
+
+def test_projection_fails_closed_for_a_malformed_collection_source():
+    envelope = public_cards_projection(None).model_dump(mode="json")
+    assert envelope["cards"] == {}
+    assert envelope["cards_projection"] == {
+        "source_valid": False,
+        "total": 0,
+        "returned": 0,
+        "omitted": 0,
+        "complete": False,
+        "items": {},
+    }
+    assert public_cards(None) == {}
+
+
+def test_invalid_unicode_is_omitted_and_receipted_without_breaking_the_wire_json():
+    envelope = public_cards_projection({
+        "card-unicode": {
+            "status": "proposed",
+            "actionable": True,
+            "statement": "valid-prefix\ud800invalid",
+            "concept_tags": ["safe", "bad\ud800ref"],
+        },
+    }).model_dump(mode="json")
+
+    card = envelope["cards"]["card-unicode"]
+    assert "statement" not in card
+    assert card["concept_tags"] == ["safe"]
+    receipt = envelope["cards_projection"]["items"]["card-unicode"]
+    assert receipt["complete"] is False
+    assert receipt["omissions"]["statement"]["returned"] == 0
+    assert receipt["omissions"]["concept_tags"] == {
+        "unit": "items", "total": 2, "returned": 1, "omitted": 1, "complete": False,
+    }
+    json.dumps(envelope, ensure_ascii=False).encode("utf-8")
