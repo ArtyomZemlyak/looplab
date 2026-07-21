@@ -29,6 +29,7 @@ from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
     PHASE_SEARCH, PHASE_SPEC_APPROVAL, RUN_GENERATION_FIELD)
+from looplab.serve.public_cards import INTERNAL_CARD_STATE_FIELDS, public_cards
 from looplab.serve.reviews import ReviewStore
 from looplab.serve.run_commands import RunCommandService, run_generation_token
 from looplab.serve.settings_store import SettingsStore
@@ -165,7 +166,11 @@ class AppState:
         last_seq = evs[-1].seq if evs else -1
         # Trim heavy per-node payloads from the live state (code/files/stdout/error) — they are
         # fetched on demand via /nodes/{id}. Keeps SSE ticks small even for code-writing runs.
-        d = _public_state_value(st.model_dump(mode="json"))
+        # CODEX AGENT: exclude open event journals before Pydantic copies them, then publish only the
+        # bounded derived DTO. This shared boundary feeds owner state, SSE, and review state.
+        d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
+        d["cards"] = public_cards(st.cards)
+        d = _public_state_value(d)
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.trust.redact import redact_secrets
         for n in d.get("nodes", {}).values():
