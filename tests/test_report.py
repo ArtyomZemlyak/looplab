@@ -442,8 +442,12 @@ def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monk
         # may return the durable job receipt even for this trivial worker; consume that same job instead
         # of pretending scheduling latency changed the report contract or leaking registry capacity.
         if result.get("status") == "running":
+            job_id = result.get("job_id")
+            assert isinstance(job_id, str) and job_id
             for _ in range(500):
-                result = client.get(f"/api/jobs/{result['job_id']}").json()
+                # A nonterminal GET is intentionally only {status: running}; keep the immutable id from
+                # the POST receipt across every poll instead of expecting it to be echoed by status reads.
+                result = client.get(f"/api/jobs/{job_id}").json()
                 if result.get("status") == "done":
                     break
                 time.sleep(0.01)
