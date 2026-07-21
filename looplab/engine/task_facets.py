@@ -70,6 +70,9 @@ def _read_task_facet_rows(path: Path) -> list[dict]:
 
 def _task_facets_prompt_payload(goal: str, kind: str) -> dict:
     """Return the exact bounded data envelope shown to the model."""
+    # CODEX AGENT: External-provider privacy gap: slicing bounds cost but does not redact credentials,
+    # signed URLs, or local paths embedded in a task goal. Apply the same versioned secret-redaction
+    # boundary used by the concept/claim stewards before both digesting and sending this envelope.
     return {"kind": str(kind or "")[:120], "goal": str(goal or "")[:4000]}
 
 

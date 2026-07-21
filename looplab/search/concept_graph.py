@@ -458,6 +458,10 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
             "Key on the underlying METHOD/family, not the surface name. Call `emit` once with `concept_ids` "
             "(a subset of the known ids, possibly empty if none fits).\n\nKNOWN VOCABULARY:\n"
             + ("\n".join(f"- {c.id}: {c.label}" for c in known) or "(empty)"))
+        # CODEX AGENT: ``text`` is persisted behavioral input, not trusted prompt prose. Bound and
+        # secret-redact it, serialize it as an explicitly untrusted data envelope, and forbid embedded
+        # instructions. Raw interpolation lets an idea/hypothesis command known ids and manipulate F2
+        # novelty admission while also expanding or leaking the external-provider payload.
         msgs = [{"role": "system", "content": system},
                 {"role": "user", "content": f"ITEM:\n{text}\n\nWhich KNOWN concepts does it touch? "
                                             "Emit their ids."}]
@@ -1376,6 +1380,10 @@ def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_b
         out = parse_structured(client, [{"role": "system", "content": system},
                                         {"role": "user", "content": user}], _Out, parser)
     except Exception:  # noqa: BLE001 — best-effort: no importance signal beats crashing the diagnostic
+        # CODEX AGENT: ``[]`` is also a valid successful verdict. The live cadence durably snapshots this
+        # failure sentinel and de-duplicates the projection, turning a transient outage into permanent
+        # "no important blind spots." Return typed availability/provenance (or raise to the durable caller)
+        # and persist empty only after a confirmed provider response parsed successfully.
         return []
     seen = set(explored)
     items: list[dict] = []

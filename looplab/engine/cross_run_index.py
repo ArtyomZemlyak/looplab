@@ -149,6 +149,9 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
     """Best-effort (kind, metric) from a run's `task.snapshot.json` — tolerant of the legacy `kind` enum
     and the newer nested `metric.{reader,kind}` spelling (see adapters/tasks.py). Never raises."""
     try:
+        # CODEX AGENT: A portfolio scan reads this file without a regular-file check or byte cap; one
+        # hostile/accidental giant snapshot can exhaust the index worker even though digesting was streamed.
+        # Parse the same bounded frozen bytes used by the cache identity and receipt any omission/failure.
         snap = json.loads((run_dir / "task.snapshot.json").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — a missing/garbled snapshot just yields empty facets (see NOTE below)
         # NOTE (CODEX): "" here is indistinguishable from a genuinely empty facet; a full record would carry
@@ -255,6 +258,9 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
             # Digesting and snapshot projection are I/O too. Keep the whole per-run pipeline inside the
             # resilience boundary so one unreadable directory becomes an explicit skip instead of
             # aborting an otherwise healthy portfolio rebuild.
+            # CODEX AGENT: Cache identity is computed before a separate event/snapshot read and never
+            # revalidated. An append/reset between them can store facts under a digest for different bytes;
+            # freeze one bounded source generation or verify the digest again after projection before reuse.
             digest = run_source_digest(ev.parent)
             cached = prior_runs.get(name)
             if digest and _cached_entry_matches_contract(cached, contract, source_digest=digest):
@@ -264,6 +270,9 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
                 continue
             store = EventStore(ev)
             events = store.read_all()
+            # CODEX AGENT: ``read_all`` silently ignores an unterminated JSONL tail, while ``digest`` above
+            # includes it. A nonempty prefix is then marked built and cached forever as complete facts.
+            # Detect the torn tail and emit an incomplete/skipped receipt instead of blessing the prefix.
             if store.divergence is not None:
                 raise ValueError(
                     f"corrupt complete event record at line {store.divergence.get('corrupt_line')}")

@@ -153,6 +153,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 # prompts/parser travel WITH the client so a merge_system.md override and the run's
                 # configured structured-output parser reach the merge's adjudication call (I18/ADR-8).
                 prompts, parser = self._merge_prompt_opts()
+                # CODEX AGENT: This can run remote paraphrase adjudication while ``lessons.jsonl.lock``
+                # is held, so one slow provider blocks every concurrent lesson writer and governed reader
+                # needing this source. Snapshot under the lock, release it for paid inference, then reacquire
+                # and CAS/reconcile before the rewrite instead of holding a global I/O lock across the call.
                 self._e._consolidate_lessons_file(path, self._e._reflect_client(), self._e._embedder,
                                                   parser=parser, prompts=prompts)
                 self._e._compact_lessons(path)

@@ -616,6 +616,10 @@ class StrategyCadenceMixin:
                and snapshot_matches_analytics_projection(state, c)
                for c in state.concept_coverage_snapshots):
             return state
+        # CODEX AGENT: ``_concept_coverage_snapshot`` can issue several paid tagging/consolidation calls
+        # before any durable invocation claim exists. A crash after provider success but before the event
+        # append purchases the same semantic work again on resume. Claim the bounded input digest before
+        # dispatch and persist terminal/ambiguous receipts; an eventual snapshot is not a payment fence.
         snap = self._concept_coverage_snapshot(state)
         if snap is None:
             return state
