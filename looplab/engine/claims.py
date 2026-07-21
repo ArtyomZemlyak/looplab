@@ -2557,6 +2557,10 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     corpus_digest = _retrieval_corpus_digest(
         docs, concept_source=concept_source, research_source=research_source,
         claim_source=claim_source)
+    # CODEX AGENT: ``max_corpus`` bounds only the hybrid index: this digest still sorts and serializes
+    # every full claim/concept after preselection already scanned them all. Use a persisted/incremental
+    # corpus revision plus a bounded candidate index and omission receipt so portfolio growth cannot make
+    # one retrieval request O(all stored evidence) in memory and CPU before the advertised cap applies.
     indexed_source = {**concept_source, **projection_receipt}
     retrieval_source = {**indexed_source, "research_source": research_source,
                         "claim_source": claim_source}

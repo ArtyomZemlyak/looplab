@@ -148,6 +148,10 @@ const sourceRevision = (key, value) => {
 
 export function isValidAtlasSourceEnvelope(key, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  // # CODEX AGENT: Atlas/claims validation accepts arbitrarily large arrays and later retains the raw
+  // envelope in React state before `take()` applies render caps. Enforce route maxima + receipt equations
+  // here, or immediately project to a bounded allowlist, so a malformed 200 cannot turn the advertised
+  // bounded UI into an O(response) browser-heap sink.
   if (key === 'atlas') {
     return Array.isArray(value.explored)
       && Array.isArray(value.thin_coverage)

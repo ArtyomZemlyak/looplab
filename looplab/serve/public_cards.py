@@ -775,6 +775,10 @@ def _field_projection_lossless(name: str, raw, bounded) -> bool:
         )
     if name == "actionable":
         return isinstance(raw, bool) and bounded is raw
+    # CODEX AGENT: Modern lifecycle fields have projectors but no lossless cases in this switch.
+    # ``identity``, ``selection_provenance``, ``selection_blockers``, and ``selection_ready`` therefore
+    # make every exact native Card look incomplete and keep collection completeness permanently false.
+    # Add strict/coherent equality branches for all four before using the receipt as public authority.
     if name == "params":
         return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
     if name == "space":

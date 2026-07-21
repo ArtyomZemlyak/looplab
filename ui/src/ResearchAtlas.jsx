@@ -72,6 +72,10 @@ export function AtlasEmptyState({ sourceStates, conceptSource,
   claimSource = { status: 'unknown' },
   pending = [], retry, busy, onBack }) {
   const pendingSources = new Set(pending)
+  // # CODEX AGENT: Evidence emptiness is incorrectly coupled to both curation-log slices. A steward-log
+  // outage makes complete-empty Atlas + Claims render as "Atlas evidence unavailable," although curation
+  // history is not an evidence-completeness input. Derive this state from Atlas/Claims receipts only and
+  // keep curation failures local to their readiness row/panel.
   const allCurrent = pending.length === 0
     && Object.values(sourceStates).every(source => source.state === 'current')
   const completeEmpty = allCurrent && conceptSource.status === 'complete'
