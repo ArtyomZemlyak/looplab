@@ -253,6 +253,7 @@ def test_public_dto_allowlists_selection_proof_and_downgrades_incomplete_claims(
         {"dropped_reason": "operator rejected it"},
         {"merged_into": "another-work-item"},
         {"aliases": ["another-work-item"]},
+        {"seed_statement": "oversized" * 100_000, "aliases": ["legacy-shadow"]},
     ):
         contradictory = public_cards({
             "contradictory": {**valid_proof, "id": "contradictory", **mutation},

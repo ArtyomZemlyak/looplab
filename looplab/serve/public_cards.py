@@ -535,7 +535,13 @@ def _public_selection_lifecycle_is_coherent(card, out: dict) -> bool:
     work_item_aliases = list(aliases)
     if work_item_aliases:
         seed_statement = _field(card, "seed_statement")
-        if not isinstance(seed_statement, str) or not seed_statement:
+        if (not isinstance(seed_statement, str) or not seed_statement
+                or len(seed_statement) > _MAX_TEXT_BYTES):
+            return False
+        try:
+            if len(seed_statement.encode("utf-8")) > _MAX_TEXT_BYTES:
+                return False
+        except UnicodeError:
             return False
         shadow_id = hypothesis_id(seed_statement)
         if any(not isinstance(alias, str) or alias != shadow_id for alias in work_item_aliases):
