@@ -345,6 +345,10 @@ def test_abandon_fences_live_worker_and_wins_late_cross_process_terminal_race(
 
 
 def test_provider_failure_after_dispatch_stays_unresolved_and_is_never_rebilled(tmp_path, monkeypatch):
+    # CODEX AGENT: the endpoint is allowed to outlive its bounded inline wait. Force that public async
+    # contract here and observe the job receipt; assuming a fast provider failure always completes
+    # inline made the at-most-once test depend on CI scheduler latency.
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
     _seed_run(tmp_path)
     calls = []
     provider_calls = []
@@ -374,9 +378,12 @@ def test_provider_failure_after_dispatch_stays_unresolved_and_is_never_rebilled(
     client = TestClient(make_app(tmp_path))
     failed = _post(client, "ambiguous-key")
     assert failed.status_code == 200
-    assert failed.json()["code"] == "concept_lens_uncertain"
-    assert failed.json()["ambiguous"] is True
-    assert "secret-token-123" not in failed.text
+    initial = failed.json()
+    assert initial["status"] == "running"
+    failure = _wait_job(client, initial["job_id"])
+    assert failure["code"] == "concept_lens_uncertain"
+    assert failure["ambiguous"] is True
+    assert "secret-token-123" not in failed.text and "secret-token-123" not in str(failure)
     assert provider_calls == ["tool"]
     events = EventStore(tmp_path / "demo" / "events.jsonl").read_all()
     assert sum(event.type == EV_CONCEPT_LENS_STARTED for event in events) == 1
@@ -395,7 +402,7 @@ def test_provider_failure_after_dispatch_stays_unresolved_and_is_never_rebilled(
     assert len(calls) == 1
 
     abandoned = _abandon(
-        restarted, "ambiguous-key", failed.json()["generation"], failed.json()["request_id"])
+        restarted, "ambiguous-key", failure["generation"], failure["request_id"])
     assert abandoned.status_code == 200
     receipt = abandoned.json()
     assert receipt["code"] == "concept_lens_abandoned"
@@ -413,7 +420,8 @@ def test_provider_failure_after_dispatch_stays_unresolved_and_is_never_rebilled(
     monkeypatch.setattr(
         "looplab.serve.server.make_llm_client", lambda *_args, **_kwargs: _ImmediateLensClient())
     fresh = _post(restarted, "fresh-after-abandon")
-    assert fresh.status_code == 200 and fresh.json()["ok"] is True
+    assert fresh.status_code == 200 and fresh.json()["status"] == "running"
+    assert _wait_job(restarted, fresh.json()["job_id"])["ok"] is True
 
     terminals = [event for event in EventStore(tmp_path / "demo" / "events.jsonl").read_all()
                  if event.type == EV_CONCEPT_LENS_COMPLETED
