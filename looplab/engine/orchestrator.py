@@ -2575,7 +2575,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         )
         # This is intentionally a writer-prefix matcher, not a loose semantic comparison. A future
         # additive mint field must make an old writer decline reuse until that field is reviewed.
-        return data == expected
+        # `at_node` is proposal provenance (WHERE the reservation was taken), NOT part of the Card's
+        # identity — the ownership receipt/action digest deliberately excludes it. It advances with
+        # every intervening reservation, so gating on its exact value would silently defeat both
+        # exact-active-work dedup (a duplicate proposed later in the same serial batch) and
+        # crash-prefix reuse after other nodes were built. Require a bounded int, then compare the
+        # rest of the payload exactly.
+        stored_at_node = data.get("at_node")
+        if type(stored_at_node) is not int or not 0 <= stored_at_node <= (1 << 31) - 1:
+            return False
+        return {**data, "at_node": at_node} == expected
 
     @staticmethod
     def _card_score_snapshot(state: RunState, requested: Optional[int]):

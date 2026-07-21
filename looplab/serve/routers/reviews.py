@@ -280,11 +280,20 @@ def build_router(srv) -> APIRouter:
                 # The review UI has no history scrubber.  Reject arbitrary historical folds instead
                 # of giving an untrusted recipient an unbounded cache-key/CPU amplification primitive.
                 raise HTTPException(400, "historical snapshots are not available through review links")
-            # CODEX AGENT: ``state_payload`` already computed Cards and their exact completeness receipt.
-            # This second generic scrub can mutate secret-looking Card keys/values without recomputing
-            # ``cards_projection``, so review responses can claim exact data that was redacted. Preserve
-            # the canonical fragment through this scrub or issue a receipt that records review-time loss.
-            return _scrub_json(srv.state_payload(rd), omit_keys=_SUMMARY_OMIT_KEYS)
+            # ``state_payload`` already computed Cards and their exact completeness receipt via the
+            # bounded, secret-redacted public projection (identical to owner/SSE state). A second
+            # generic scrub would mutate secret-looking Card keys/values WITHOUT recomputing
+            # ``cards_projection``, so the review response could claim exact/complete coverage of data
+            # it silently redacted. Preserve the canonical Cards fragment verbatim through the scrub —
+            # owner/SSE never re-scrub it either — so the completeness receipt stays truthful.
+            payload = srv.state_payload(rd)
+            inner = payload.get("state")
+            preserved = ({key: inner[key] for key in ("cards", "cards_projection") if key in inner}
+                         if isinstance(inner, dict) else {})
+            scrubbed = _scrub_json(payload, omit_keys=_SUMMARY_OMIT_KEYS)
+            if preserved and isinstance(scrubbed.get("state"), dict):
+                scrubbed["state"].update(preserved)
+            return scrubbed
 
     @router.get("/api/review/comments")
     def review_comments(request: Request, limit: int = Query(100, ge=1, le=100),

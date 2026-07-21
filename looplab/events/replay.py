@@ -3880,8 +3880,16 @@ _CARD_ADDED_ACTION_FIELDS = frozenset({
 
 
 def _card_action_receipt_payload(snapshot: dict) -> dict:
-    """Extract exactly the immutable action subset covered by the v1 ownership digest."""
-    return {field: snapshot.get(field) for field in CARD_ACTION_DIGEST_V1_FIELDS}
+    """Extract exactly the immutable action subset covered by the v1 ownership digest.
+
+    Forward ONLY the fields actually present in the snapshot. ``card_action_digest`` applies each
+    field's documented default for an ABSENT key (notably ``scored_against_empty`` -> ``False``),
+    but a key explicitly set to ``None`` is a different, rejected shape (``type(None) is not bool``).
+    Emitting ``None`` fences for missing fields therefore makes the recomputed digest ``None`` and
+    downgrades a valid native card (whose mint-time receipt used those same defaults) to a
+    synthesized shadow — so omit absent fields instead of coercing them to ``None``.
+    """
+    return {field: snapshot[field] for field in CARD_ACTION_DIGEST_V1_FIELDS if field in snapshot}
 
 
 def _card_added_ownership(

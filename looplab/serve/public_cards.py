@@ -72,6 +72,10 @@ _STEERING_KEYS = {
     "siblings", "level", "remaining_seconds", "total_seconds", "seconds", "mode", "node_ids",
     "file_count", "status", "novelty_stance", "fidelity",
 }
+# The exact closed vocabulary of a matched_concept_outcome row (see `_matched_outcomes`). This is
+# NOT the steering vocabulary: guarding these rows against `_STEERING_KEYS` (which lacks every one of
+# these keys) makes every real row look lossy and falsely reports the whole card projection incomplete.
+_MATCHED_OUTCOME_KEYS = {"concept", "outcome_retained", "outcome"}
 _RECEIPT_KEYS = {
     "concept_evidence_nodes_total", "concept_evidence_nodes_incomplete", "concept_evidence_complete",
     "concepts_total", "concepts_omitted", "concepts_complete", "concept_outcomes_total",
@@ -682,7 +686,7 @@ def _matched_outcomes_lossless(raw, bounded) -> bool:
             return False
         # Unknown future fields may be safely omitted from the bounded view, but that omission must
         # never be reported as a complete receipt.
-        if not set(item) <= _STEERING_KEYS:
+        if not set(item) <= _MATCHED_OUTCOME_KEYS:
             return False
         row = {}
         if "concept" in item:

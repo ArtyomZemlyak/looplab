@@ -589,10 +589,19 @@ def normalize_steering_context(value) -> list[dict] | None:
                     return None
                 item[key] = current
             elif key in {"remaining_seconds", "total_seconds", "seconds"}:
-                if (isinstance(current, bool) or not isinstance(current, (int, float))
-                        or not math.isfinite(float(current)) or not 0 <= float(current) <= 1e12):
+                # An arbitrary-precision int from a corrupt/future/external writer overflows float()
+                # (`int too large to convert to float`). A raise here would brick replay — the fold
+                # loop has NO per-event guard — so treat an unconvertible value as fail-closed (None),
+                # exactly like every other rejected shape, instead of crashing every replay/resume/view.
+                if isinstance(current, bool) or not isinstance(current, (int, float)):
                     return None
-                item[key] = round(float(current), 3)
+                try:
+                    fval = float(current)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if not math.isfinite(fval) or not 0 <= fval <= 1e12:
+                    return None
+                item[key] = round(fval, 3)
             elif key == "ref":
                 is_digest = (
                     isinstance(current, str)
