@@ -47,7 +47,8 @@ from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, iter_jsonl)
 from looplab.events.replay import fold
 from looplab.events.types import (
-    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
+    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_CARD_EDITED,
+    EV_CARD_OPERATOR_DROPPED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED, EV_DEEP_RESEARCH,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
@@ -109,6 +110,12 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
     EV_PROMOTE: _spec(EV_PROMOTE, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_ADDED: _spec(EV_HYPOTHESIS_ADDED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_UPDATED: _spec(EV_HYPOTHESIS_UPDATED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    # Layer 6 operator card-steering: advisory overlays into the reserved override maps — never spawn
+    # compute, wake a dead engine, or open a request/done counter (docs/23 §12.6 stage 10 gate).
+    EV_CARD_REPRIORITIZED: _spec(EV_CARD_REPRIORITIZED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_EDITED: _spec(EV_CARD_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_RESOURCE_PINNED: _spec(EV_CARD_RESOURCE_PINNED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_OPERATOR_DROPPED: _spec(EV_CARD_OPERATOR_DROPPED, EnginePolicy.NO_SPAWN, "folded_intent"),
 }
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
 
@@ -147,6 +154,13 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
+    # Layer 6 operator card-steering. The CLIENT payload names the target `card_id` (+ the field it sets);
+    # provenance (`dropped_by`/`pinned_by`) is SERVER-stamped and deliberately NOT accepted from the client
+    # so a forged `source:'novelty'`/engine drop is impossible (docs/23 §12.6 stage 10 threat row).
+    EV_CARD_REPRIORITIZED: frozenset({"card_id", "priority"}),
+    EV_CARD_EDITED: frozenset({"card_id", "statement"}),
+    EV_CARD_RESOURCE_PINNED: frozenset({"card_id", "gpus", "gpu_mem_mib"}),
+    EV_CARD_OPERATOR_DROPPED: frozenset({"card_id", "reason"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_SPECS), "every control event needs a data allowlist"
 
@@ -1094,6 +1108,38 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         if status not in {"open", "abandoned", "deleted"}:
             raise HTTPException(400, "hypothesis status must be open, abandoned, or deleted")
         data["status"] = status
+    elif event_type == EV_CARD_REPRIORITIZED:
+        # Operator pins a board priority. The fold overlays it LAST (operator-wins) and resolves the id
+        # through the merge-canonical map, so a stale/aliased card id lands on the survivor, never a crash.
+        data["card_id"] = _text("card_id", limit=256)
+        priority = _integer("priority")
+        if not 0 <= priority <= (1 << 31) - 1:
+            raise HTTPException(400, "priority must be between 0 and 2147483647")
+        data["priority"] = priority
+    elif event_type == EV_CARD_EDITED:
+        # DISPLAY statement only — the immutable seed statement stays the hash-join key (decision 24).
+        data["card_id"] = _text("card_id", limit=256)
+        data["statement"] = _text("statement", limit=2_048)
+    elif event_type == EV_CARD_RESOURCE_PINNED:
+        # Server-side sane bounds (400 on out-of-range); the L4 admission path additionally clamps the
+        # EFFECTIVE footprint to the live GPU pool envelope, so an over-pin can never wedge the scheduler.
+        data["card_id"] = _text("card_id", limit=256)
+        pinned = False
+        for field, upper in (("gpus", 1024), ("gpu_mem_mib", 1_000_000_000)):
+            if data.get(field) is not None:
+                value = _integer(field)
+                if not 0 <= value <= upper:
+                    raise HTTPException(400, f"{field} must be between 0 and {upper}")
+                data[field] = value
+                pinned = True
+        if not pinned:
+            raise HTTPException(400, "card_resource_pinned needs at least one of gpus/gpu_mem_mib")
+    elif event_type == EV_CARD_OPERATOR_DROPPED:
+        # `dropped_by='operator'` is server-STAMPED by the fold, never accepted from the client, so an
+        # operator drop can never be forged as an engine/novelty drop.
+        data["card_id"] = _text("card_id", limit=256)
+        if data.get("reason") is not None:
+            data["reason"] = _text("reason", required=False, limit=2_000)
 
     try:
         # Encode INSIDE the guard: json.dumps(ensure_ascii=False) accepts a lone surrogate (valid

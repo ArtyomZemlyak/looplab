@@ -47,7 +47,8 @@ from looplab.events.types import (
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_CARD_ADDED, EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
-    EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
+    EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_OPERATOR_DROPPED,
+    EV_CARD_RANKED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
@@ -2572,6 +2573,66 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         st.card_build_requests.pop(card_id, None)
 
 
+def _card_control_id(d: dict) -> str | None:
+    """Bounded operator-control card id. All four L6 controls key the target on `card_id` (consistent
+    with the sibling build/enrichment events); a malformed/absent id is an honest no-op, never a crash."""
+    return _card_replay_id(d.get("card_id"))
+
+
+def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 6: operator pins a board priority. Overlaid LAST in `_derive_cards` (operator-wins).
+    cid = _card_control_id(d)
+    if cid is None:
+        return
+    priority = d.get("priority")
+    if type(priority) is int and 0 <= priority <= (1 << 31) - 1:
+        st.card_priority_pins[cid] = priority
+
+
+def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 6: operator edits the DISPLAY statement ONLY — the immutable `seed_statement` stays the
+    # hash-join key (docs/23 decision 24), so a paraphrase never un-links the card's evidence.
+    cid = _card_control_id(d)
+    if cid is None:
+        return
+    statement = _card_replay_text(d.get("statement"), max_chars=2_048, strip=True)
+    if statement is not None and statement.isprintable():
+        st.card_operator_edits[cid] = {"statement": statement}
+
+
+def _on_card_resource_pinned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 6: operator pins the footprint. The SERVER already clamped to the detected GPU envelope (400
+    # on out-of-range); the fold applies only sane structural bounds so a corrupt/future row cannot fold an
+    # unschedulable card, and re-clamps idempotently on resume.
+    cid = _card_control_id(d)
+    if cid is None:
+        return
+    pin: dict = {}
+    gpus = d.get("gpus")
+    if type(gpus) is int and 0 <= gpus <= 1024:
+        pin["gpus"] = gpus
+    mem = d.get("gpu_mem_mib")
+    if type(mem) is int and 0 <= mem <= 1_000_000_000:
+        pin["gpu_mem_mib"] = mem
+    if pin:
+        st.card_resource_pins[cid] = pin
+
+
+def _on_card_operator_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 6: operator drop. A DISTINCT event from the engine's `card_dropped` (so the engine's domain
+    # drop is never reclassified as a UI control) that folds into the SAME `cards_dropped` lifecycle
+    # channel keyed on `id`, with server-stamped `dropped_by='operator'` provenance.
+    cid = _card_control_id(d)
+    if cid is None:
+        return
+    receipt: dict = {"id": cid, "dropped_by": "operator"}
+    reason = _card_replay_text(
+        d.get("reason"), max_chars=_CARD_REPLAY_RATIONALE_MAX)
+    if reason is not None:
+        receipt["reason"] = reason
+    st.cards_dropped.append(receipt)
+
+
 def _on_hypothesis_updated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Carries a status override (human/agent drops — or reopens — a line of inquiry).
     # Last write wins: "deleted" removes the card entirely (sticky); "abandoned" adds the
@@ -3229,6 +3290,10 @@ _HANDLERS = {
     EV_CARD_RANKED: _on_card_ranked,
     EV_CARD_BUILD_REQUESTED: _on_card_build_requested,
     EV_CARD_BUILD_DONE: _on_card_build_done,
+    EV_CARD_REPRIORITIZED: _on_card_reprioritized,
+    EV_CARD_EDITED: _on_card_edited,
+    EV_CARD_RESOURCE_PINNED: _on_card_resource_pinned,
+    EV_CARD_OPERATOR_DROPPED: _on_card_operator_dropped,
     EV_PROXY_SCORED: _on_proxy_scored,
     EV_BEST_CONFIRMED: _on_best_confirmed,
     EV_RUN_FINISHED: _on_run_finished,
@@ -4918,12 +4983,15 @@ def _derive_cards(st: RunState) -> None:
     #    regardless of event arrival order). The maps are empty until Layer 6 fills them, so this is a
     #    no-op in Layer 1; reserving it here means Layer 6 needs no `_derive_cards` rewrite. `card_edited`
     #    overlays the DISPLAY statement only — the join key stays `seed_statement` (docs/23 decision 24).
+    # Resolve through `_canon` so an operator control that named a card BEFORE it was merged still lands
+    # on the canonical survivor — a stale board id must not silently drop the operator's override (the
+    # exact decision-27 "operator wins" guarantee this overlay exists to provide).
     for cid, edit in (st.card_operator_edits or {}).items():
-        c = cards.get(cid)
+        c = cards.get(_canon(cid))
         if c is not None and isinstance(edit, dict) and edit.get("statement"):
             c.statement = str(edit["statement"])
     for cid, pri in (st.card_priority_pins or {}).items():
-        c = cards.get(cid)
+        c = cards.get(_canon(cid))
         if c is not None:
             c.pinned = True
             try:
@@ -4931,7 +4999,7 @@ def _derive_cards(st: RunState) -> None:
             except (TypeError, ValueError):
                 pass
     for cid, pin in (st.card_resource_pins or {}).items():
-        c = cards.get(cid)
+        c = cards.get(_canon(cid))
         if c is not None and isinstance(pin, dict):
             fp = dict(c.footprint or {})
             for k in ("gpus", "gpu_mem_mib"):

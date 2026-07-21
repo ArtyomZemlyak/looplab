@@ -235,6 +235,15 @@ EV_CARD_RANKED = "card_ranked"                  # Layer 1b: board priority order
 # serial spine stays byte-identical (golden unchanged).
 EV_CARD_BUILD_REQUESTED = "card_build_requested"   # elect (K,G) for speculative pre-build; opens the request
 EV_CARD_BUILD_DONE = "card_build_done"             # close it: {node_id, speculative} | {skipped: reason}
+# Layer 6 operator card-steering controls (docs/23 §12.6 stage 10). FOUR distinct operator-only control
+# intents (NO_SPAWN/advisory: they fold into the RESERVED override maps and never spawn compute or wake a
+# dead engine). Deliberately kept DISTINCT from the engine's own `card_dropped` so the engine's domain drop
+# is never reclassified as a UI control event (command_observation keys domain-progress off CONTROL_EVENTS).
+# All are server-stamped (provenance is out of the client payload) and generation-fenced by the command path.
+EV_CARD_REPRIORITIZED = "card_reprioritized"       # operator pins board priority -> card_priority_pins
+EV_CARD_EDITED = "card_edited"                      # operator edits the DISPLAY statement -> card_operator_edits
+EV_CARD_RESOURCE_PINNED = "card_resource_pinned"    # operator pins the footprint (clamped) -> card_resource_pins
+EV_CARD_OPERATOR_DROPPED = "card_operator_dropped"  # operator drop -> cards_dropped (dropped_by='operator')
 EV_RUN_REOPENED = "run_reopened"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins

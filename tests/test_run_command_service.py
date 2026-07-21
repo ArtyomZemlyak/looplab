@@ -178,6 +178,8 @@ def test_every_control_event_has_one_explicit_engine_policy():
         "comment_created", "comment_edited", "comment_resolution_changed", "concept_tag_edited",
         "run_concepts",
         "hypothesis_added", "hypothesis_updated",
+        # Layer 6 operator card-steering: advisory overlays, never spawn/wake compute.
+        "card_reprioritized", "card_edited", "card_resource_pinned", "card_operator_dropped",
     }
 
 

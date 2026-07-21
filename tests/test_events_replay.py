@@ -1801,3 +1801,28 @@ def test_card_build_request_done_pair_folds_and_clears(tmp_path):
     s2 = EventStore(q)
     _seed(s2)
     assert fold(s2.read_all()).card_build_requests == {}
+
+
+def test_l6_operator_card_controls_fold_and_resolve_through_merge(tmp_path):
+    # Layer 6: the four operator controls overlay the reserved maps (operator-wins) and resolve the id
+    # through the merge-canonical map so a control naming a pre-merge alias still lands on the survivor.
+    from looplab.serve.run_commands import normalize_control
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    s.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {"x": 1.0}, "hypothesis": "h"},
+                              "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    cid = next(iter(fold(s.read_all()).cards))
+    # Reprioritize an ALIAS id, then merge alias->cid: the pin must follow to the canonical survivor.
+    s.append("card_reprioritized", normalize_control(None, tmp_path, "card_reprioritized",
+                                                     {"card_id": "card-alias", "priority": 9}))
+    s.append("card_merged", {"canonical": cid, "aliases": ["card-alias"]})
+    c = fold(s.read_all()).cards[cid]
+    assert c.pinned and c.priority == 9, "operator pin must resolve through the merge to the survivor"
+    # Provenance is server-stamped: a client-forged dropped_by is a 400 (allowlist rejects unknown keys).
+    import pytest as _pytest
+    with _pytest.raises(Exception):
+        normalize_control(None, tmp_path, "card_operator_dropped",
+                          {"card_id": cid, "dropped_by": "novelty"})
