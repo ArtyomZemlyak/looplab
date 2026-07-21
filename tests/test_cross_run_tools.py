@@ -516,6 +516,51 @@ def _cap_scoped(run_id, task_id, concepts, fingerprint, *, direction="max"):
                                  concepts=concepts, concept_outcomes={c: 0.9 for c in concepts})
 
 
+def test_bound_tools_never_reuse_current_run_as_prior_memory(tmp_path):
+    from types import SimpleNamespace
+
+    from looplab.engine.claims import record_research_claims
+
+    _seed(tmp_path, lessons=[
+        _lesson("generation stale lesson", "supported", [1], run_id="current"),
+        _lesson("generation prior lesson", "supported", [2], run_id="prior"),
+    ], capsules=[
+        _cap_scoped("current", "t", ["generation/stale"], ["retrieval", "ranking"]),
+        _cap_scoped("prior", "t", ["generation/prior"], ["retrieval", "ranking"]),
+    ])
+    record_research_claims(
+        tmp_path, run_id="current", task_id="t", direction="max",
+        claims=[{"statement": "generation stale research", "node_ids": [1]}],
+    )
+    record_research_claims(
+        tmp_path, run_id="prior", task_id="t", direction="max",
+        claims=[{"statement": "generation prior research", "node_ids": [2]}],
+    )
+    tools = CrossRunTools(tmp_path)
+    tools.bind_state(SimpleNamespace(
+        run_id="current", task_id="t", goal="retrieval ranking", direction="max",
+        node_concepts={},
+    ))
+
+    outputs = {
+        "prior": tools.execute("cross_run_prior_attempts", {"idea": "generation"}),
+        "claims": tools.execute("cross_run_claims", {"query": "generation"}),
+        "atlas": tools.execute("cross_run_atlas", {}),
+        "map": tools.execute("cross_run_concept_map", {}),
+        "search": tools.execute("cross_run_search", {"query": "generation"}),
+    }
+
+    combined = "\n".join(outputs.values())
+    assert "generation/stale" not in combined
+    assert "generation stale lesson" not in combined
+    assert "generation stale research" not in combined
+    assert "generation/prior" in outputs["prior"]
+    assert "generation prior lesson" in outputs["claims"]
+    assert "generation/prior" in outputs["atlas"]
+    assert "generation/prior" in outputs["map"]
+    assert "generation prior" in outputs["search"]
+
+
 def test_bound_scopes_out_foreign_task_capsules_in_prior_attempts_and_atlas(tmp_path):
     # The c41a5f6 leak fix scopes CAPSULES too (prior_attempts / atlas are the primary anti-duplication
     # surfaces) — a bound run must not see a foreign task's prior art. Guards a silent capsule-leak regression.

@@ -170,6 +170,14 @@ class CrossRunTools:
         return (f"[{self._concept_projection_status.upper()} current_concept_projection "
                 f"reasons={reasons}]")
 
+    def _is_current_run(self, row: dict) -> bool:
+        """Whether a persisted cross-run row belongs to the bound live run."""
+        return bool(
+            self._bound
+            and self._run_id
+            and str(row.get("run_id") or "") == self._run_id
+        )
+
     def _in_scope(self, row: dict, *, source: str = "generic") -> bool:
         """True for compatible direction plus exact task or strict related-goal fingerprint.
 
@@ -178,6 +186,10 @@ class CrossRunTools:
         """
         if not self._bound:
             return True                                        # unbound -> portfolio-wide
+        # CODEX AGENT: run_id is the replacement-generation fence. A stale durable row carrying the
+        # live run's identity is never "prior" evidence, even when its task and direction still match.
+        if self._is_current_run(row):
+            return False
         # CODEX AGENT: a bound provider is agent-facing. Exact task identity cannot override missing or
         # malformed polarity provenance; only an explicitly unbound human/CLI audit stays portfolio-wide.
         if not same_live_direction(self._direction, row.get("direction")):
@@ -329,6 +341,8 @@ class CrossRunTools:
         fingerprint_unknown = fingerprint_omitted = direction_unknown = 0
         current_direction_valid = valid_live_direction(self._direction)
         for capsule in caps:
+            if self._is_current_run(capsule):
+                continue
             persisted_direction = capsule.get("direction")
             if not current_direction_valid or not valid_live_direction(persisted_direction):
                 unknown.append(capsule)
