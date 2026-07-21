@@ -1174,6 +1174,10 @@ const _HYP_COLUMNS = [
 // Monochrome source glyphs (no emoji): who posed the hypothesis. Reuses the shared icon set.
 const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', strategist: 'compass' }
 
+// # CODEX AGENT: UI contract gap: owner/review DTOs already carry a bounded `cards_projection`, but the
+// only board consumes `state.hypotheses` and labels direction aggregates as cards. Users cannot inspect
+// immutable work-item identity, receipt completeness, lifecycle, or `selection_ready`. Add a separate
+// read-only Card surface and keep these add/abandon/delete controls scoped strictly to Hypotheses.
 export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
   const [draft, setDraft] = useState('')
   // Optimistic status overrides {id: 'abandoned'|'deleted'}: the run-state round-trip that reflects a

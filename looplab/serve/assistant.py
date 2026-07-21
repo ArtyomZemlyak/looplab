@@ -409,6 +409,10 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     # tools). PORTFOLIO-WIDE: run_turn binds no single RunState, so the provider stays unbound (see its
     # bind_state docstring) and answers across the whole portfolio. Pure read, no mutation → present in
     # EVERY mode, incl. read-only plan and recovery; gated on the same memory_dir + flag as the roles.
+    # CODEX AGENT: Multi-user security gap: ``cross_run_enabled`` is one process-wide feature flag, not
+    # a principal/tenant authorization decision. Any caller that can reach the owner Assistant receives
+    # the same unbound portfolio, including recovery and plan turns. Before shared deployment, pass an
+    # authenticated visibility predicate into every provider read and redact before model/tool exposure.
     if cross_run_enabled:
         from looplab.tools.cross_run_tools import CrossRunTools
         providers.append(CrossRunTools(mdir, role="researcher"))

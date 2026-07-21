@@ -2250,6 +2250,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return
         state, node_id, kind, _bparents, parent_generations = reserved
         researcher, developer = roles if roles is not None else (self.researcher, self.developer)
+        # CODEX AGENT: Native Card production is still absent at this seam: the engine reserves a node
+        # but never mints ``card_added.ownership_receipt`` or overwrites ``Idea.card_id`` before the slow
+        # implementation call. Consequently every derived Card is a legacy/hash shadow and the new
+        # fail-closed ``selection_ready`` contract can never become true; Layer 3 must not schedule from
+        # this projection until mint/link, terminalization, and crash-prefix recovery land together.
         # Phase-handoff ledger for THIS node build: propose → stages → plan → implement each distill
         # their transcript into a brief the next phase reads (see agents.agent.run_phase), so later
         # phases trust what earlier ones explored instead of re-reading the repo. Node-scoped (fresh

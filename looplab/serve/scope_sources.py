@@ -96,6 +96,10 @@ def _file_identity(status: os.stat_result) -> tuple[int, ...]:
 
 def _file_observation(status: os.stat_result) -> tuple[int, ...]:
     """Same-reader observation; ctime catches same-size A/B/A rewrites."""
+    # CODEX AGENT: Windows correctness gap: CPython 3.12 exposes creation time as ``st_ctime``, not
+    # NTFS ChangeTime. A same-size A/B/A rewrite with a restored mtime can therefore evade this tuple
+    # and let a paid cross-run report mix filesystem generations. Query FILE_BASIC_INFO.ChangeTime from
+    # the open handle and retain that token through final pathname revalidation before trusting the fold.
     return (*_file_identity(status), _ns(status, "ctime"))
 
 
