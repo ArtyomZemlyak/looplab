@@ -288,7 +288,16 @@ class AblationMixin:
         if top is not None:
             s, e = blocks[int(top)]
             top_src = "\n".join(code.splitlines()[s:e])[:300]
+        # The seed statement must be a single-line, printable, bounded string: writer-side Card minting
+        # (`_card_statement`) fails closed on a multi-line/unprintable statement, and the descriptive
+        # rationale below embeds the ablated code block (a newline), so it cannot double as the seed.
+        # Carry an explicit `hypothesis` (the node-side join key) so the refine_block always mints a
+        # native Card; without it `_reserve_node_build` returns None every cadence and the ablate loop
+        # never creates the child, spinning forever (arch-review: card-minting vs ablation interaction).
+        statement = (f"code-block ablation: refine the highest-impact pipeline block #{top} "
+                     f"of node {parent_id} and keep the rest")
         idea = Idea(operator="refine_block", params=dict(parent.idea.params),
+                    hypothesis=statement,
                     rationale=("code-block ablation: refine the highest-impact pipeline block "
                                f"#{top} and keep the rest. Block:\n{top_src}"),
                     footprint=parent.idea.footprint,
