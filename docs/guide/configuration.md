@@ -110,7 +110,7 @@ product defaults; the preset keeps those values on but does not newly activate t
 
 A profile is **config-first**: it only fills fields you did *not* set yourself, so any explicit
 knob — in the file, on the CLI (`--set`), or via `LOOPLAB_*` — always wins. It deliberately touches
-only quality/trust knobs, never spend (`max_nodes`/`max_parallel` stay yours).
+only quality/trust knobs, never spend (`max_nodes`/`eval_parallel` stay yours).
 
 ```bash
 looplab run examples/dataset_task.json --set profile=thorough      # everything trustworthy, on
@@ -122,10 +122,10 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | Setting | Env | Default | Description |
 |---|---|---|---|
 | `max_nodes` | `LOOPLAB_MAX_NODES` | `8` | Candidate (node) budget for the search |
-| `max_parallel` | `LOOPLAB_MAX_PARALLEL` | `1` | Concurrent evaluations. `1` = one experiment at a time (deterministic); raise to fan out |
-| `parallel_build` | `LOOPLAB_PARALLEL_BUILD` | `1` | Concurrent node BUILDS (research + code) for independent seed/explore drafts, each on its own pooled (researcher, developer) pair; a single shared-researcher pass yields the N distinct seed ideas. `1` = serial + fully deterministic (today). `0` = AUTO = the resolved `max_parallel` (build as many seeds as you can concurrently eval). `>1` fans draft builds out across worker threads: the event-log write order (seq/interleave of `node_building`/`node_created`) becomes nondeterministic across re-runs, though the fold stays deterministic and order-tolerant so replay is unaffected. The Strategist may retune it live (governance matrix). Needs a `role_factory` wired into the engine; without it, clamps to `1` |
-| `eval_parallel` | `LOOPLAB_EVAL_PARALLEL` | _(unset)_ | **Canonical** name for concurrent EVALUATIONS (the GPU/experiment consumer), decoupled from LLM concurrency (Kanban re-arch, docs/23 Layer 2). Unset (`None`) falls back to `max_parallel` → byte-identical to today; `0` = AUTO (one experiment per detected GPU). The L4 scheduler bin-packs declared footprints against the GPU inventory as a separate axis. The Strategist steers this (governance matrix); `max_parallel` stays a back-compat alias |
-| `llm_parallel` | `LOOPLAB_LLM_PARALLEL` | _(unset)_ | **Canonical** name for concurrent LLM BUILDS (the producer), decoupled from eval concurrency. Unset (`None`) falls back to `parallel_build`; `0` = AUTO (= resolved `eval_parallel`, build as many seeds as you can eval). Layer 5 turns this into a multi-lane budget the Strategist re-allocates across build/research/novelty-dedup/enrichment; Layer 2 lands only the decoupled knob (no throughput change — the spine still alternates). `parallel_build` stays a back-compat alias |
+| `max_parallel` | `LOOPLAB_MAX_PARALLEL` | `1` | Legacy raw-config alias for `eval_parallel`. Retained for old files, CLI arguments, environment variables, and snapshots; prefer the canonical name in new configuration and governance. |
+| `parallel_build` | `LOOPLAB_PARALLEL_BUILD` | `1` | Legacy raw-config alias for `llm_parallel`. Retained for old files, CLI arguments, environment variables, and snapshots; prefer the canonical name in new configuration and governance. |
+| `eval_parallel` | `LOOPLAB_EVAL_PARALLEL` | _(unset)_ | **Canonical** concurrent EVALUATIONS width (GPU/experiment consumer), independent from LLM concurrency. Unset (`None`) falls back to legacy `max_parallel`; launch-time `0` is AUTO (one experiment per detected GPU, at least one). A live Strategist/operator update of `0` settles to safe serial width `1` instead of re-reading mutable hardware. |
+| `llm_parallel` | `LOOPLAB_LLM_PARALLEL` | _(unset)_ | **Canonical** concurrent LLM node-BUILD width (producer), independent from eval concurrency. Unset (`None`) falls back to legacy `parallel_build`; launch-time `0` is AUTO (the resolved `eval_parallel`). A live Strategist/operator update of `0` settles to safe serial width `1`. Values above one fan draft builds across worker role pairs; without a `role_factory`, execution clamps to one. |
 | `train_monitor` | `LOOPLAB_TRAIN_MONITOR` | `true` | Per-eval background observer that tails the live training log while a (long) stage runs. Advisory/observability only (no node-selection or replay impact); no-ops without an LLM client or on the solution.py path |
 | `train_monitor_interval_s` | `LOOPLAB_TRAIN_MONITOR_INTERVAL_S` | `600.0` | Base monitor tick cadence in seconds; the effective cadence adapts to the per-experiment budget and can only be tightened by this. No-op unless `train_monitor` is on |
 | `train_monitor_kill` | `LOOPLAB_TRAIN_MONITOR_KILL` | `false` | Opt-in INTERVENTION: let the monitor tree-kill a training it judges `broken` (diverged / silent CPU fallback / not learning) early. The node then fails normally (`reason=monitor_broken`). Off = observe only |
@@ -275,13 +275,16 @@ A setting **absent** from the map is locked — only a human can change it via t
 is **enforced at runtime** (`_agent_may`) at every **agent** seam, so removing a role from a knob
 truly locks it — not just a UI hint: the Strategist's whole applied control surface (`policy`,
 `policy_params`, `ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`,
-`novelty_stance`, `developer`, `fidelity`, `timeout`, `max_parallel`) is gated in `_apply_strategy`.
+`novelty_stance`, `developer`, `fidelity`, `timeout`, `eval_parallel`, `llm_parallel`) is gated in
+`_apply_strategy`. Old snapshots that have only `max_parallel`/`parallel_build` grants remain valid;
+an explicit canonical entry takes precedence, including an empty allow-list that revokes the grant.
 A `budget_extend`, by contrast, is a **human control intent** — the boss action-builder can only
 emit `add_nodes`, so its resource fields (`max_seconds`, `max_eval_seconds`, `timeout`,
-`max_parallel`) reach the log only from an operator and are applied **as-is**. (A human/operator
+`eval_parallel`, `llm_parallel`, plus legacy aliases) reach the log only from an operator and are
+applied after bounded validation. (A human/operator
 pin via the UI/snapshot always wins — the matrix governs the autonomous agents, not the human.) The
-default grants those resource/search-shape knobs to the agents and keeps infra (`llm_*`,
-`trust_mode`, `docker_image`, api key) locked.
+default grants those resource/search-shape knobs to the agents and keeps provider infrastructure
+(`llm_model`, `llm_base_url`, credentials, `trust_mode`, `docker_image`) locked.
 (`fidelity`/`novelty_stance`/`prefer_sweep`/`developer` are governance keys for the strategist's
 per-node dials — not 1:1 `Settings` fields, but gated the same way.)
 

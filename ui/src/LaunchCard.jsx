@@ -401,11 +401,13 @@ export default function LaunchCard({
           const id = `launch-${reactId}-settings-${field.key}`
           const fieldError = errors[`settings.${field.key}`]
           const value = runtimeValue(draft, field.key)
+          const helpId = field.help ? `${id}-help` : undefined
+          const describedBy = [helpId, fieldError ? errorId : null].filter(Boolean).join(' ') || undefined
           return <div className="asst-launch-field" key={field.key}>
             <label htmlFor={id}>{field.label}</label>
             {field.type === 'enum'
               ? <select id={id} className="text" value={value} disabled={locked || !settingsParsed.ok}
-                  aria-invalid={fieldError ? 'true' : undefined} aria-describedby={fieldError ? errorId : undefined}
+                  aria-invalid={fieldError ? 'true' : undefined} aria-describedby={describedBy}
                   onChange={event => changeRuntime(field, event.target.value)}>
                   <EnumOptions field={field} value={value} />
                 </select>
@@ -413,8 +415,9 @@ export default function LaunchCard({
                   type={field.type === 'text' ? 'text' : 'number'} min={field.min}
                   step={field.type === 'int' ? 1 : field.type === 'float' ? 'any' : undefined}
                   placeholder={field.placeholder || 'inherit'} aria-invalid={fieldError ? 'true' : undefined}
-                  aria-describedby={fieldError ? errorId : undefined}
+                  aria-describedby={describedBy}
                   onChange={event => changeRuntime(field, event.target.value)} />}
+            {field.help && <span className="asst-launch-help" id={helpId}>{field.help}</span>}
           </div>
         })}
       </div>

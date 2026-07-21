@@ -214,11 +214,13 @@ rolls that might collide:
 
 ### Phase 3 — settings, governance, autonomy
 
-- `Settings.parallel_build: int = 1` (`ge=0`; `0`=AUTO = GPU count, same convention as `max_parallel`).
+- `Settings.parallel_build: int = 1` (`ge=0`; launch-time `0`=AUTO = the resolved eval width).
   Document in `configuration.md` + the process diagram (docs-in-sync rule).
-- Let the **Strategist** set `parallel_build` (add to the `agent_control` matrix + `validate_strategy`
-  whitelist, mirroring `max_parallel`) so parallelism is agent-autonomous — "let the box decide".
-- Keep `parallel_build ≤ max_parallel ≤ GPU count` sane (a build with no GPU to eval on later is wasted).
+- The implemented Strategist surface uses canonical `llm_parallel`/`eval_parallel`; legacy
+  `parallel_build`/`max_parallel` remain resume/config aliases. Live `0` settles to serial `1` rather
+  than re-running launch-time AUTO discovery.
+- Keep the producer and eval widths independently bounded. They intentionally need not be equal: LLM
+  work and GPU evaluations consume different resources; startup AUTO is only a convenient initial split.
 
 ### Phase 4 — verification
 

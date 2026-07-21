@@ -30,6 +30,41 @@ AGENT_ROLES = ("strategist", "boss", "researcher")
 # verifier's emergency ceiling so a typo cannot multiply paid synchronous calls across a run.
 MAX_FORESIGHT_VERIFY_SAMPLES = 8
 
+
+# Layer-2 parallelism renamed two public settings without removing the durable legacy fields. Keep
+# the equivalence in one place: config-source precedence, governance migration, and live strategy
+# application must all agree which names describe the same authority/value.
+PARALLELISM_ALIASES: dict[str, str] = {
+    "max_parallel": "eval_parallel",
+    "parallel_build": "llm_parallel",
+}
+
+
+def parallelism_aliases(setting: str) -> tuple[str, ...]:
+    """Return every spelling in ``setting``'s alias family, canonical name first."""
+    for legacy, canonical in PARALLELISM_ALIASES.items():
+        if setting in (legacy, canonical):
+            return canonical, legacy
+    return (setting,)
+
+
+def canonicalize_parallelism_source(values: dict) -> dict:
+    """Promote legacy parallel keys *within one config-precedence source*.
+
+    Applying this only after file/CLI/env were flattened would let a lower-priority canonical env
+    value shadow a higher-priority legacy file value (or a file canonical value shadow a CLI legacy
+    override), so callers with sub-layers normalize each layer independently.
+    """
+    if not isinstance(values, dict):
+        return values
+    out = dict(values)
+    for legacy, canonical in PARALLELISM_ALIASES.items():
+        if out.get(canonical) is None and out.get(legacy) is not None:
+            # CODEX AGENT: canonicalize inside each precedence layer, never across the flattened
+            # result. The alias migration must not invert CLI > file > env precedence.
+            out[canonical] = out[legacy]
+    return out
+
 # Settings whose semantics are committed by ``run_started`` and restored from the folded event log
 # on every re-entry.  Changing one only in ``config.snapshot.json`` would mix incompatible evidence
 # (a different holdout split) or make the live producer disagree with replay's selection policy.
@@ -86,7 +121,7 @@ def run_start_pinned_settings(state) -> dict:
 # access or proposal-only governance as a no-op for agent behavior, cost, or proposal admission.
 #
 # `thorough` deliberately touches only QUALITY/TRUST machinery, not spend: it does NOT raise
-# max_nodes / max_parallel (those are cost knobs the user owns). It enables multi-seed confirmation
+# max_nodes / eval_parallel (those are cost knobs the user owns). It enables multi-seed confirmation
 # (demote seed-lucky leaders), the reward-hack / leakage / critic monitors AND flips them from
 # advisory to *gating* (`trust_gate="gate"` — a
 # flagged win can no longer be selected as best), ablation-driven refinement, and the prompt cues
@@ -123,10 +158,9 @@ PROFILES: dict[str, dict] = {
 # EngineOptions "Engine() == shipped defaults" invariant) instead of diverging to an all-locked map.
 DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
     "timeout": ["researcher", "strategist"],
-    "max_parallel": ["strategist"],
-    "parallel_build": ["strategist"],
-    # Layer-2 canonical parallelism names (docs/23). The Strategist steers THESE; the legacy names above
-    # stay granted only for back-compat. Same grant surface (strategist-only).
+    # Layer-2 canonical names are the presented/default governance surface. `_agent_may` falls back
+    # to an old snapshot's legacy grant only when its canonical counterpart is absent, so removing
+    # duplicate defaults preserves resume authority while an explicit canonical revocation still wins.
     "eval_parallel": ["strategist"],
     "llm_parallel": ["strategist"],
     "max_nodes": ["strategist", "boss"],
@@ -184,6 +218,27 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
     )
 
+    @classmethod
+    def settings_customise_sources(
+            cls, settings_cls, init_settings, env_settings, dotenv_settings,
+            file_secret_settings):
+        """Preserve source precedence across canonical/legacy parallelism names.
+
+        Pydantic ranks init > env > dotenv correctly, but it ranks field names rather than semantic
+        alias families. Promoting a legacy value inside each source before the merge makes an old
+        explicit snapshot/file value beat a lower-priority canonical env value. ``appconfig`` also
+        promotes its file/typed/--set sub-layers before combining them into the init source.
+        """
+        def _with_parallel_aliases(source):
+            return lambda: canonicalize_parallelism_source(source())
+
+        return (
+            _with_parallel_aliases(init_settings),
+            _with_parallel_aliases(env_settings),
+            _with_parallel_aliases(dotenv_settings),
+            _with_parallel_aliases(file_secret_settings),
+        )
+
     # Run profile (config-first preset, see PROFILES above). "default"/"fast" = today's lean
     # defaults; "thorough" turns the built quality/trust machinery ON in one word. A profile only
     # fills fields the user did NOT set — every knob it touches stays individually overridable.
@@ -200,12 +255,12 @@ class Settings(BaseSettings):
     # run with its own resources/trackers. Set > 1 to opt into the parallel fan-out (the task-group path),
     # where each concurrent eval is pinned to a distinct GPU. `max_parallel=0` means AUTO: the engine runs
     # one experiment per DETECTED GPU (orchestrator resolves 0 -> GPU count, clamped to >=1) — the
-    # "let the box decide" autonomy knob the Strategist can also set.
+    # "let the box decide" startup knob. Live Strategist/operator zero settles to serial width 1.
     max_parallel: int = Field(default=1, ge=0, le=1024)
     # Variant-1 parallel BUILD: research + code up to N independent (seed/explore) nodes CONCURRENTLY,
     # each on its own pooled (researcher, developer) pair + GPU-pinned eval. 1 = serial (today).
     # `parallel_build=0` means AUTO: the engine resolves it to the (resolved) `max_parallel` so you build
-    # exactly as many seeds as you can concurrently evaluate — "let the box decide", also Strategist-set.
+    # exactly as many seeds as you can concurrently evaluate. Live Strategist/operator zero settles to 1.
     # Needs a role_factory wired into the engine (the CLI/launcher passes one); without it, clamps to 1.
     parallel_build: int = Field(default=1, ge=0, le=64)
     # Hypothesis-card Kanban re-architecture (docs/23, Layer 2). Two INDEPENDENT concurrency axes,
@@ -377,11 +432,11 @@ class Settings(BaseSettings):
     # idea). A setting ABSENT from this map is LOCKED — no agent may change it, only a human via the
     # snapshot/UI. The gate is ENFORCED at every AGENT seam via `_agent_may` — the strategist's whole
     # control surface (policy/operators/novelty_stance/prefer_sweep/developer/fidelity/timeout/
-    # max_parallel) is checked in `_apply_strategy`, so removing a role from a knob genuinely locks it,
+    # eval_parallel/llm_parallel) is checked in `_apply_strategy`, so removing a role from a knob locks it,
     # not just greys out the UI pill. The boss/max_* grants document boss-relevant knobs, but a
     # `budget_extend` is a HUMAN control intent (the boss action-builder can only emit `add_nodes`), so
     # it is applied as-is — the human always wins via the UI/snapshot. Defaults are conservative: resource/
-    # search-shape knobs the agents already reason about; infra (llm_*, trust_mode, api_key,
+    # search-shape knobs the agents already reason about; provider infra (llm_model/base_url/api_key,
     # docker_image) stays locked. The UI shows S/B/R pills per setting. `timeout` granted to the
     # researcher IS the "auto" per-node mode — the researcher sizes each experiment's wall-clock
     # (Idea.eval_timeout); the config `timeout` is the fallback for nodes it doesn't size. Env override

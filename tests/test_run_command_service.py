@@ -1083,6 +1083,23 @@ def test_command_http_is_no_store_for_success_validation_and_early_auth(monkeypa
     assert denied.status_code == 401 and denied.headers["cache-control"] == "no-store"
 
 
+def test_budget_extend_normalizes_canonical_and_legacy_parallel_axes(tmp_path):
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    data = normalize_control(srv, rd, "budget_extend", {
+        "eval_parallel": 0, "llm_parallel": "0",
+        "max_parallel": 1024, "parallel_build": 64,
+    })
+    assert data == {"eval_parallel": 0, "llm_parallel": 0,
+                    "max_parallel": 1024, "parallel_build": 64}
+    for bad in ({"eval_parallel": 1025}, {"llm_parallel": 65},
+                {"max_parallel": -1}, {"parallel_build": True},
+                {"eval_parallel": "9" * 5000}):
+        with pytest.raises(HTTPException) as exc:
+            normalize_control(srv, rd, "budget_extend", bad)
+        assert exc.value.status_code == 400
+
+
 @pytest.mark.parametrize("event_type,data", [
     ("budget_extend", {"add_nodes": 0}),
     ("budget_extend", {"max_eval_seconds": "not-a-number"}),

@@ -123,7 +123,8 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_NODE_ABORT: frozenset({"node_id", "generation", "reason"}),
     EV_NODE_RESET: frozenset({"node_id", "generation", "from_stage"}),
     EV_BUDGET_EXTEND: frozenset(
-        {"add_nodes", "max_seconds", "max_eval_seconds", "timeout", "max_parallel"}),
+        {"add_nodes", "max_seconds", "max_eval_seconds", "timeout",
+         "eval_parallel", "llm_parallel", "max_parallel", "parallel_build"}),
     EV_HINT: frozenset({"text", "replace"}),
     EV_SET_STRATEGY: frozenset({"strategy"}),
     EV_FORCE_CONFIRM: frozenset({"node_id", "generation"}),
@@ -438,7 +439,10 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         if isinstance(value, int):
             return value
         if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
-            return int(value.strip())
+            try:
+                return int(value.strip())
+            except (ValueError, OverflowError):
+                pass
         raise HTTPException(400, f"{name} must be an integer")
 
     def _integer(name: str, *, required: bool = True) -> Optional[int]:
@@ -827,7 +831,8 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     elif event_type == EV_FORK:
         data["from_node_id"] = _node("from_node_id")
     elif event_type == EV_BUDGET_EXTEND:
-        allowed = ("add_nodes", "max_seconds", "max_eval_seconds", "timeout", "max_parallel")
+        allowed = ("add_nodes", "max_seconds", "max_eval_seconds", "timeout",
+                   "eval_parallel", "llm_parallel", "max_parallel", "parallel_build")
         if not any(data.get(name) is not None for name in allowed):
             raise HTTPException(400, "budget_extend needs at least one budget field")
         if data.get("add_nodes") is not None:
@@ -837,12 +842,16 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             if value <= 0 or value > 1_000_000:
                 raise HTTPException(400, "add_nodes must be between 1 and 1000000")
             data["add_nodes"] = value
-        if data.get("max_parallel") is not None:
-            value = _integer("max_parallel")
-            # Ceiling mirrors Settings.max_parallel: an unbounded value fans out that many sandboxes.
-            if value <= 0 or value > 1024:
-                raise HTTPException(400, "max_parallel must be between 1 and 1024")
-            data["max_parallel"] = value
+        for name, upper in (("eval_parallel", 1024), ("max_parallel", 1024),
+                            ("llm_parallel", 64), ("parallel_build", 64)):
+            if data.get(name) is None:
+                continue
+            value = _integer(name)
+            # CODEX AGENT: 0 is a valid live request but settles to serial width 1. Only startup
+            # Settings interpret 0 as hardware/eval-coupled AUTO.
+            if value < 0 or value > upper:
+                raise HTTPException(400, f"{name} must be between 0 and {upper}")
+            data[name] = value
         for name in ("max_seconds", "max_eval_seconds", "timeout"):
             if data.get(name) is None:
                 continue

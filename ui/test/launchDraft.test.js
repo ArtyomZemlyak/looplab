@@ -81,6 +81,21 @@ test('curated runtime edits update the same JSON and preserve unknown nested ove
   assert.match(validateLaunchDraft(fractional.draft).errors['settings.max_nodes'], /integer/)
 })
 
+test('launch controls expose canonical independent concurrency with bounded AUTO zero', () => {
+  const keys = new Set(LAUNCH_RUNTIME_FIELDS.map(field => field.key))
+  assert.ok(keys.has('eval_parallel'))
+  assert.ok(keys.has('llm_parallel'))
+  assert.ok(!keys.has('max_parallel'))
+  assert.ok(!keys.has('parallel_build'))
+
+  const draft = createLaunchDraft({ ...proposal, settings: { eval_parallel: 0, llm_parallel: 0 } })
+  assert.equal(validateLaunchDraft(draft).ok, true)
+  const tooWide = createLaunchDraft({ ...proposal, settings: { eval_parallel: 1025, llm_parallel: 65 } })
+  const errors = validateLaunchDraft(tooWide).errors
+  assert.match(errors['settings.eval_parallel'], /between 0 and 1024/)
+  assert.match(errors['settings.llm_parallel'], /between 0 and 64/)
+})
+
 test('the validation fingerprint is semantic, stable, and includes provenance chat', () => {
   const one = createLaunchDraft(proposal)
   const reordered = {

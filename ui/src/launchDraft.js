@@ -9,7 +9,10 @@ export const LAUNCH_RUNTIME_FIELDS = Object.freeze([
   { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb'] },
   { key: 'max_nodes', label: 'Max nodes', type: 'int', min: 1 },
   { key: 'n_seeds', label: 'Seeds', type: 'int', min: 1 },
-  { key: 'max_parallel', label: 'Max parallel', type: 'int', min: 1 },
+  { key: 'eval_parallel', label: 'Eval parallel', type: 'int', min: 0, max: 1024,
+    help: 'Concurrent evaluations; 0 = AUTO (one per detected GPU).' },
+  { key: 'llm_parallel', label: 'LLM parallel', type: 'int', min: 0, max: 64,
+    help: 'Concurrent LLM builds; 0 = AUTO (track resolved eval parallelism).' },
   { key: 'max_seconds', label: 'Wall-clock budget (s)', type: 'float', min: 0 },
   { key: 'max_eval_seconds', label: 'Eval budget (s)', type: 'float', min: 0 },
 ])
@@ -87,8 +90,13 @@ export function validateLaunchDraft(draft) {
     for (const field of LAUNCH_RUNTIME_FIELDS) {
       const value = settings[field.key]
       if (value == null || value === '') continue
-      if (field.type === 'int' && (!Number.isInteger(value) || (field.min != null && value < field.min))) {
-        errors[`settings.${field.key}`] = `${field.label} must be an integer${field.min != null ? ` of at least ${field.min}` : ''}`
+      if (field.type === 'int' && (!Number.isInteger(value)
+          || (field.min != null && value < field.min)
+          || (field.max != null && value > field.max))) {
+        const range = field.min != null && field.max != null
+          ? ` between ${field.min} and ${field.max}`
+          : field.min != null ? ` of at least ${field.min}` : ''
+        errors[`settings.${field.key}`] = `${field.label} must be an integer${range}`
       }
       if (field.type === 'float' && (typeof value !== 'number' || !Number.isFinite(value)
           || (field.min != null && value <= field.min))) {

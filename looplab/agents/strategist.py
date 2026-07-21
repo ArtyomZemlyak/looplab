@@ -21,11 +21,13 @@ Two backends:
 """
 from __future__ import annotations
 
+import math
 from typing import Optional, Protocol, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from looplab.agents.roles import _attention_points
+from looplab.core.config import PARALLELISM_ALIASES, canonicalize_parallelism_source
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.prompts import PromptStore, render
@@ -61,10 +63,10 @@ Strategy = TypedDict(
         "timeout": float,       # per-eval wall-clock budget (s) — applied only if the matrix allows it
         # Layer-2 canonical parallelism names (docs/23) — prefer these; the two legacy names below stay
         # accepted for back-compat. Applied only if the agent-control matrix allows it.
-        "eval_parallel": int,   # concurrent evals (GPU consumer); 0=AUTO=one per detected GPU
-        "llm_parallel": int,    # concurrent LLM builds (producer); 0=AUTO=resolved eval_parallel
+        "eval_parallel": int,   # live eval width (GPU consumer); 0 settles to safe serial width 1
+        "llm_parallel": int,    # live LLM-build width (producer); 0 settles to safe serial width 1
         "max_parallel": int,    # legacy alias of eval_parallel — applied only if the matrix allows it
-        "parallel_build": int,  # legacy alias of llm_parallel (0=AUTO=max_parallel) — if allowed
+        "parallel_build": int,  # legacy alias of llm_parallel (live 0 -> serial 1) — if allowed
         "request_research": bool,  # ask the engine to run the Deep-Research stage before continuing
         "rationale": str,       # human-readable "why" (the UI panel)
         "source": str,          # "rule"|"llm"|"operator"|"config" (provenance, audit)
@@ -85,6 +87,8 @@ class StrategyContext(BaseModel):
     avg_eval_seconds: Optional[float] = None   # mean per-node eval cost so far (sweep cost signal)
     node_budget_frac: float = 0.0              # fraction of the node budget spent (P2 endgame reserve)
     current_policy: str = "greedy"             # the ACTIVE policy (for switch-back rules, D3)
+    eval_parallel: int = 1                     # current settled eval width (never startup AUTO/0)
+    llm_parallel: int = 1                      # current settled LLM-build width
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
@@ -216,18 +220,20 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     ns = strat.get("novelty_stance")
     if ns in NOVELTY_STANCES:
         out["novelty_stance"] = ns
-    # Resource budgets (bounds match config: timeout>0, max_parallel>=0). Whitelisted here for shape;
+    # Resource budgets (bounds match config: timeout>0, eval parallelism >=0). Whitelisted here for shape;
     # the engine's _apply_strategy applies them ONLY if the governance matrix grants the strategist.
     tmo = strat.get("timeout")
-    if isinstance(tmo, (int, float)) and not isinstance(tmo, bool) and tmo > 0:
+    if (isinstance(tmo, (int, float)) and not isinstance(tmo, bool)
+            and math.isfinite(tmo) and tmo > 0):
         out["timeout"] = float(tmo)
     # Layer-2 canonical parallelism names (docs/23) + their legacy aliases. Bounds match config
-    # (eval_parallel 0..1024, llm_parallel 0..64). 0 = AUTO, resolved in _apply_strategy.
+    # (eval_parallel 0..1024, llm_parallel 0..64). Live 0 settles to serial width 1 in
+    # _apply_strategy; only startup Settings resolve AUTO from hardware/the settled eval width.
     ep = strat.get("eval_parallel")
     if isinstance(ep, int) and not isinstance(ep, bool) and 0 <= ep <= 1024:
         out["eval_parallel"] = ep
     mp = strat.get("max_parallel")
-    if isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0:
+    if isinstance(mp, int) and not isinstance(mp, bool) and 0 <= mp <= 1024:
         out["max_parallel"] = mp   # legacy alias of eval_parallel, resolved in _apply_strategy
     lp = strat.get("llm_parallel")
     if isinstance(lp, int) and not isinstance(lp, bool) and 0 <= lp <= 64:
@@ -382,13 +388,32 @@ _STRATEGIST_SYSTEM = (
     "signal (theme spread / dominant-theme concentration) — choose `explore` when the search is "
     "NARROWING onto one theme (high dominant-theme fraction / low theme entropy, especially in the "
     "recent window), `exploit` in the endgame or when a fresh lead is compounding, else `balanced` "
-    "(== today's behavior). Respond ONLY with the requested structured fields; pick `policy` from "
-    "the provided available list."
+    "(== today's behavior). You may retune the two INDEPENDENT canonical concurrency axes: "
+    "`eval_parallel` (0..1024, concurrent evaluations) and `llm_parallel` (0..64, concurrent LLM "
+    "builds). Emit ONLY those canonical names, never the legacy max_parallel/parallel_build aliases. "
+    "A live value of 0 safely serializes that axis to 1; startup config uses 0 as hardware AUTO. "
+    "Respond ONLY with the requested structured fields; pick `policy` from the provided available list."
 )
+
+
+def canonicalize_strategy_parallelism(strat: Optional[dict]) -> dict:
+    """Return one spelling per parallelism axis for durable/live Strategy deltas.
+
+    A partial legacy delta must first promote to canonical and then discard both legacy spellings.
+    Otherwise merging it onto an active Strategy that already contains a canonical value leaves the
+    stale canonical value to win at apply time, silently dropping the newer delta.
+    """
+    out = canonicalize_parallelism_source(strat or {})
+    for legacy, canonical in PARALLELISM_ALIASES.items():
+        if canonical in out:
+            out.pop(legacy, None)
+    return out
 
 
 class _StrategyOut(BaseModel):
     """Structured shape the LLM fills (a subset of Strategy; validated again by validate_strategy)."""
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+
     policy: Optional[str] = None
     fidelity: Optional[str] = None
     novelty_stance: Optional[str] = None    # explore|balanced|exploit — novelty pressure downstream
@@ -397,7 +422,19 @@ class _StrategyOut(BaseModel):
     complexity_cue: Optional[bool] = None
     prefer_sweep: Optional[bool] = None
     request_research: Optional[bool] = None
+    timeout: Optional[float] = Field(default=None, gt=0)
+    eval_parallel: Optional[int] = Field(default=None, ge=0, le=1024)
+    llm_parallel: Optional[int] = Field(default=None, ge=0, le=64)
     rationale: str = ""
+
+    @field_validator("timeout", "eval_parallel", "llm_parallel", mode="before")
+    @classmethod
+    def _resource_scalars_are_not_booleans(cls, value):
+        # CODEX AGENT: JSON booleans are numeric subclasses in Python; accepting true as width/timeout
+        # 1 makes a malformed tool result look valid and diverges from validate_strategy's contract.
+        if isinstance(value, bool):
+            raise ValueError("resource scalar must not be boolean")
+        return value
 
 
 def _fmt_operator_yields(yields: dict) -> str:
@@ -431,6 +468,8 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"improves_since_best={ctx.improves_since_best} numeric_space={ctx.is_numeric_space} "
         f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
         f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
+        f"current canonical concurrency: eval_parallel={ctx.eval_parallel} "
+        f"llm_parallel={ctx.llm_parallel}\n"
         f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
         + (f"bounded cross-run observations (not coverage): {ctx.cross_run_note}\n"
            if ctx.cross_run_note else "")
@@ -444,7 +483,9 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
         "evals are costly and the space is numeric; set request_research=true when the run is "
         "stalled or confused and would benefit from a deep-research step over all results + the "
-        "web before continuing)."
+        "web before continuing; optional timeout (>0), eval_parallel (0..1024), and llm_parallel "
+        "(0..64). Use only those canonical parallel names. These are live deltas: 0 means serial 1; "
+        "startup settings use 0 for hardware AUTO)."
     )
     # Active operator/boss directives (the same `pending_hints` the Researcher already follows,
     # rendered the same way so recency/precedence read identically): the Strategist owns the
@@ -472,6 +513,12 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         strat["novelty_stance"] = out.novelty_stance
     if out.request_research:
         strat["request_research"] = True
+    if out.timeout is not None:
+        strat["timeout"] = out.timeout
+    if out.eval_parallel is not None:
+        strat["eval_parallel"] = out.eval_parallel
+    if out.llm_parallel is not None:
+        strat["llm_parallel"] = out.llm_parallel
     ops: dict = {}
     if out.ablate_every is not None:
         ops["ablate_every"] = out.ablate_every

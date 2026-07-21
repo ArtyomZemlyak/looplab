@@ -6,9 +6,17 @@ either name keeps the runtime attr AND its read-through alias (_eval_parallel / 
 Layer 2 delivers NO throughput change (the spine still alternates) — this only locks the plumbing."""
 from __future__ import annotations
 
+import math
+
 import looplab.engine.orchestrator as _orch
+import pytest
+from pydantic import ValidationError
 from looplab.adapters.toytask import ToyTask
 from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.agents.strategist import (
+    StrategyContext, _StrategyOut, _assemble_strategy, _strategist_brief,
+    canonicalize_strategy_parallelism, validate_strategy)
+from looplab.core.models import RunState
 from looplab.engine.orchestrator import Engine
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
@@ -66,6 +74,15 @@ def test_strategist_steers_new_names_and_syncs_alias(tmp_path):
     assert e.max_parallel == 1 and e._eval_parallel == 1
 
 
+def test_live_zero_is_serial_not_startup_auto(tmp_path, monkeypatch):
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1, 2, 3])
+    e = _engine(tmp_path / "live-zero", eval_parallel=4, llm_parallel=3)
+    assert (e.max_parallel, e.parallel_build) == (4, 3)
+    e._apply_strategy({"eval_parallel": 0, "llm_parallel": 0})
+    assert (e.max_parallel, e._eval_parallel) == (1, 1)
+    assert (e.parallel_build, e._llm_parallel) == (1, 1)
+
+
 def test_strategist_legacy_name_still_applies(tmp_path):
     e = _engine(tmp_path / "sl")
     e._apply_strategy({"max_parallel": 6})
@@ -88,3 +105,47 @@ def test_steering_one_axis_leaves_the_other_untouched(tmp_path):
     assert e.max_parallel == 9 and e.parallel_build == 1 and e._llm_parallel == 1
     e._apply_strategy({"llm_parallel": 5})
     assert e.parallel_build == 5 and e.max_parallel == 9          # eval axis unchanged by the build steer
+
+
+def test_llm_and_tool_output_contract_exposes_only_canonical_parallel_names():
+    out = _StrategyOut(timeout=45.0, eval_parallel=8, llm_parallel=3, rationale="retune")
+    strat = _assemble_strategy(out)
+    assert strat["timeout"] == 45.0
+    assert strat["eval_parallel"] == 8
+    assert strat["llm_parallel"] == 3
+    properties = _StrategyOut.model_json_schema()["properties"]
+    assert {"timeout", "eval_parallel", "llm_parallel"} <= set(properties)
+    assert {"max_parallel", "parallel_build"}.isdisjoint(properties)
+    for bad in ({"timeout": math.inf}, {"timeout": True}, {"eval_parallel": True},
+                {"llm_parallel": True}, {"eval_parallel": 1025}, {"llm_parallel": 65}):
+        with pytest.raises(ValidationError):
+            _StrategyOut(**bad)
+
+
+def test_strategist_brief_reports_current_independent_widths():
+    ctx = StrategyContext(eval_parallel=7, llm_parallel=2)
+    brief = _strategist_brief(RunState(), ctx)
+    assert "eval_parallel=7 llm_parallel=2" in brief
+    assert "Use only those canonical parallel names" in brief
+
+
+def test_validation_bounds_legacy_and_canonical_parallel_values():
+    ctx = StrategyContext()
+    cleaned = validate_strategy({
+        "timeout": 10.0, "eval_parallel": 1024, "llm_parallel": 64,
+        "max_parallel": 1024, "parallel_build": 64,
+    }, ctx)
+    assert cleaned is not None and cleaned["max_parallel"] == 1024
+    rejected = validate_strategy({
+        "timeout": math.inf, "eval_parallel": 1025, "llm_parallel": 65,
+        "max_parallel": 1025, "parallel_build": 65,
+    }, ctx)
+    assert rejected is None
+
+
+def test_legacy_partial_is_promoted_before_active_strategy_merge():
+    active = canonicalize_strategy_parallelism({"eval_parallel": 8, "llm_parallel": 4})
+    delta = canonicalize_strategy_parallelism({"max_parallel": 3, "parallel_build": 2})
+    merged = {**active, **delta}
+    assert merged == {"eval_parallel": 3, "llm_parallel": 2}
+    assert {"max_parallel", "parallel_build"}.isdisjoint(merged)

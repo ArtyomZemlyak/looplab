@@ -47,6 +47,9 @@ test('launch card is a labelled busy form with actionable errors and status', as
   assert.match(card, /path === 'settings' \|\| path\.startsWith\('settings\.'\)/)
   assert.match(card, /<code>\{path\}<\/code>/,
     'nested server errors must retain their exact field path in the alert')
+  assert.match(card, /field\.help && <span className="asst-launch-help" id=\{helpId\}>\{field\.help\}<\/span>/,
+    'runtime AUTO semantics must be visible and programmatically associated with their controls')
+  assert.match(card, /aria-describedby=\{describedBy\}/)
   assert.match(card, /Operator checklist only — these notes are not commands and are not executed automatically\./)
 })
 

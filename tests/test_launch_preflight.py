@@ -181,6 +181,27 @@ def test_precedence_saved_then_file_then_explicit_and_file_backend_is_honest(tmp
     assert settings["backend"] == "toy"            # task-file choice suppresses inference/UI default
 
 
+def test_launch_parallel_aliases_preserve_saved_file_explicit_precedence(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOPLAB_EVAL_PARALLEL", "11")
+    (tmp_path / "ui_settings.json").write_text(json.dumps({
+        "eval_parallel": 10,
+    }), encoding="utf-8")
+    task_file = tmp_path / "parallel-task.json"
+    task_file.write_text(json.dumps({
+        "task": _toy(),
+        "settings": {"eval_parallel": 7},
+    }), encoding="utf-8")
+
+    response = TestClient(make_app(tmp_path)).post("/api/start/preflight", json={
+        "run_id": "parallel-precedence",
+        "task_file": str(task_file),
+        "settings": {"max_parallel": 2},
+    })
+    assert response.status_code == 200
+    settings = response.json()["preview"]["settings"]
+    assert settings["eval_parallel"] == 2     # explicit legacy beats file/saved/env canonical
+
+
 def test_stale_validation_token_never_spawns_or_materializes(tmp_path, monkeypatch):
     source = tmp_path / "source.json"
     source.write_text(json.dumps(_toy()), encoding="utf-8")

@@ -2503,31 +2503,62 @@ def _on_budget_extend(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # an ADDITIVE delta — "give the run N more nodes" — so several extensions accumulate; the
     # orchestrator folds it into the policy's effective max_nodes so a finished run, once
     # reopened, proposes more experiments instead of immediately re-finishing.
-    # max_seconds/max_eval_seconds (budgets) + timeout/max_parallel (resource retune, gated by
-    # the governance matrix at apply time) are ABSOLUTE new values (last write wins).
+    # max_seconds/max_eval_seconds (budgets) + timeout/the two parallel axes are ABSOLUTE new
+    # values (last write wins). Canonical and legacy parallel spellings remain replay-compatible.
     # COERCE to number in the fold: a UI form / TUI can post a STRING ("600"), and the engine
     # compares these numerically (`total_eval_seconds >= max_es`), so an un-coerced string would
     # raise TypeError in the main loop — and because the event replays, EVERY resume re-crashes
     # (a permanent poison event). A non-numeric value is skipped, not stored.
-    for _k, _cast in (("max_seconds", float), ("max_eval_seconds", float),
-                      ("timeout", float), ("max_parallel", int)):
-        if d.get(_k) is not None:
-            try:
-                _v = _cast(d[_k])
-            except (TypeError, ValueError):
-                continue
-            # Reject NaN/Inf: `float("nan")`/`float("inf")` PASS the cast, but a ceiling of
-            # nan makes `total_eval_seconds >= nan` always False (budget silently disabled) and
-            # inf never trips — and the poison value re-folds on every resume, permanently. Skip
-            # it (keep the prior ceiling) rather than store a budget-disabling value.
-            if _cast is float and not math.isfinite(_v):
-                continue
-            st.budget_overrides[_k] = _v
-    if d.get("add_nodes") is not None:
+    for _k in ("max_seconds", "max_eval_seconds", "timeout"):
+        _raw = d.get(_k)
+        if _raw is None or isinstance(_raw, bool):
+            continue
         try:
-            st.budget_overrides["add_nodes"] = int(st.budget_overrides.get("add_nodes", 0)) + int(d["add_nodes"])
-        except (TypeError, ValueError):
-            pass
+            _v = float(_raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        # CODEX AGENT: malformed historical control events must remain total under replay. Reject
+        # non-finite/non-positive ceilings instead of persisting a resume-crashing poison value.
+        if math.isfinite(_v) and _v > 0:
+            st.budget_overrides[_k] = _v
+    for _legacy, _canonical, _upper in (
+            ("max_parallel", "eval_parallel", 1024),
+            ("parallel_build", "llm_parallel", 64)):
+        _selected: tuple[str, int] | None = None
+        # Legacy first, canonical last: canonical wins when one event carries both valid spellings.
+        # Across events, whichever spelling arrived last owns the whole axis family and removes the
+        # stale sibling; otherwise apply's canonical-last order could resurrect an older value.
+        for _k in (_legacy, _canonical):
+            _raw = d.get(_k)
+            if _raw is None or isinstance(_raw, bool):
+                continue
+            if isinstance(_raw, float) and (
+                    not math.isfinite(_raw) or not _raw.is_integer()):
+                continue
+            try:
+                _v = int(_raw)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if 0 <= _v <= _upper:
+                _selected = (_k, _v)
+        if _selected is not None:
+            _key, _value = _selected
+            # CODEX AGENT: one folded key per authority family preserves true event-order LWW while
+            # retaining the latest event's spelling for old/no-broker resume compatibility.
+            st.budget_overrides.pop(
+                _legacy if _key == _canonical else _canonical, None)
+            st.budget_overrides[_key] = _value
+    _raw_add = d.get("add_nodes")
+    if _raw_add is not None and not isinstance(_raw_add, bool):
+        if not (isinstance(_raw_add, float) and (
+                not math.isfinite(_raw_add) or not _raw_add.is_integer())):
+            try:
+                _add = int(_raw_add)
+                if 0 < _add <= 1_000_000:
+                    st.budget_overrides["add_nodes"] = (
+                        int(st.budget_overrides.get("add_nodes", 0)) + _add)
+            except (TypeError, ValueError, OverflowError):
+                pass
 
 def _on_hint(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Append-only by default; a `replace` hint supersedes all prior standing directives

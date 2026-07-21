@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import hashlib
+import math
 import os
 import secrets
 import threading
@@ -1444,8 +1445,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # control event (folded into state.budget_overrides), e.g. "keep going for 600s more".
         # max_seconds ("keep going 600s more") is a first-class operator budget extension via the
         # budget_extend control event, not an agent_control-governed knob — applied as-is.
-        max_s = state.budget_overrides.get("max_seconds", self.max_seconds)
         _bo = state.budget_overrides
+
+        def _finite_ceiling(key: str, fallback: Optional[float]) -> Optional[float]:
+            raw = _bo.get(key)
+            if raw is None or isinstance(raw, bool):
+                return fallback
+            try:
+                value = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                return fallback
+            return value if math.isfinite(value) and value > 0 else fallback
+
+        # CODEX AGENT: apply stays total even for a manually constructed/forward-version RunState;
+        # replay normally sanitizes these first, but a poison ceiling must never disable a budget.
+        max_s = _finite_ceiling("max_seconds", self.max_seconds)
         # A `budget_extend` is a HUMAN control intent, NOT an agent decision: CONTROL_EVENTS are
         # UI/CLI-authored (see the engine-writer invariant), and the boss action-builder
         # (serve/routers/boss.py::_Action) can ONLY ever emit `add_nodes` — it carries no field for
@@ -1455,29 +1469,48 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # — no agent authors them — and only ever DROPPED the operator's OWN override, silently pinning
         # the run to the old cap. Agent-authored resource retunes (the Strategist's timeout/max_parallel)
         # remain governed by the matrix in `_apply_strategy`, which is where the M4 lock genuinely lives.
-        max_es = _bo.get("max_eval_seconds", self.max_eval_seconds)
-        if "timeout" in _bo:
+        max_es = _finite_ceiling("max_eval_seconds", self.max_eval_seconds)
+        if "timeout" in _bo and not isinstance(_bo["timeout"], bool):
             try:
-                self.timeout = max(0.1, float(_bo["timeout"]))
-            except (TypeError, ValueError):
+                _timeout = float(_bo["timeout"])
+                if math.isfinite(_timeout) and _timeout > 0:
+                    self.timeout = max(0.1, _timeout)
+            except (TypeError, ValueError, OverflowError):
                 pass
-        if "max_parallel" in _bo:
-            try:
-                _mp = int(_bo["max_parallel"])
-                # 0 = AUTO (one experiment per detected GPU), same as the launch-time setting — so the
-                # Strategist can hand parallelism back to "let the box decide", not just pick a fixed N.
-                self.max_parallel = max(1, len(self._gpu_ids)) if _mp == 0 else max(1, _mp)
-                self._eval_parallel = self.max_parallel   # keep the L2 canonical alias in sync (see __init__)
-            except (TypeError, ValueError):
-                pass
-        if "parallel_build" in _bo:
-            try:
-                # 0 = AUTO = the resolved max_parallel (build as many seeds as we can concurrently eval);
-                # resolved AFTER max_parallel above so an AUTO build tracks a just-changed AUTO eval width.
-                self.parallel_build = self._resolve_parallel_build(int(_bo["parallel_build"]))
-                self._llm_parallel = self.parallel_build   # keep the L2 canonical alias in sync
-            except (TypeError, ValueError):
-                pass
+        # Legacy first, canonical last: a modern command carrying both spellings is deterministic.
+        # Live 0 settles to serial width 1; only launch-time Settings retain hardware/eval AUTO.
+        for _key in ("max_parallel", "eval_parallel"):
+            if _key in _bo:
+                try:
+                    _value = _bo[_key]
+                    if isinstance(_value, bool):
+                        continue
+                    if isinstance(_value, float) and (
+                            not math.isfinite(_value) or not _value.is_integer()):
+                        continue
+                    _value = int(_value)
+                    if not 0 <= _value <= 1024:
+                        continue
+                    self.max_parallel = max(1, _value)
+                    self._eval_parallel = self.max_parallel
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        for _key in ("parallel_build", "llm_parallel"):
+            if _key in _bo:
+                try:
+                    _value = _bo[_key]
+                    if isinstance(_value, bool):
+                        continue
+                    if isinstance(_value, float) and (
+                            not math.isfinite(_value) or not _value.is_integer()):
+                        continue
+                    _value = int(_value)
+                    if not 0 <= _value <= 64:
+                        continue
+                    self.parallel_build = max(1, _value)
+                    self._llm_parallel = self.parallel_build
+                except (TypeError, ValueError, OverflowError):
+                    pass
         return max_s, max_es
 
     async def _serve_forced_requests(self, state: RunState) -> bool:
@@ -2091,11 +2124,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return state, node_id, kind, _bparents, parent_generations
 
     def _resolve_parallel_build(self, value: int) -> int:
-        """Resolve a `parallel_build` setting to a concrete build fan-out. `0` = AUTO = the (already
+        """Resolve a startup `parallel_build` setting to a concrete build fan-out. `0` = AUTO = the (already
         resolved) `self.max_parallel`, so we build exactly as many seeds as we can concurrently evaluate;
         any other value is used as-is (clamped to >=1). The build pool still clamps to 1 downstream
-        (`_build_role_pairs`) when no `role_factory` is wired. Shared by __init__ and the Strategist's
-        live `_apply_strategy` retune so both honour the AUTO convention identically."""
+        (`_build_role_pairs`) when no `role_factory` is wired. Live strategy/control updates use 0=1
+        because they settle immediately rather than retaining an AUTO mode."""
         try:
             value = int(value)
         except (TypeError, ValueError):

@@ -30,7 +30,17 @@ class EvalDispatchMixin:
         """Governance gate (Settings.agent_control): may `role` (strategist|boss|researcher) change
         `setting` at runtime? A setting absent from the map is LOCKED for everyone. Pure + cheap —
         called at each agent seam so the matrix is the single source of truth."""
-        return role in (self._agent_control.get(setting) or ())
+        from looplab.core.config import parallelism_aliases
+
+        aliases = parallelism_aliases(setting)
+        if len(aliases) == 1:
+            return role in (self._agent_control.get(setting) or ())
+        canonical, legacy = aliases
+        # CODEX AGENT: a canonical entry is the migrated authority record even when its allow-list is
+        # empty (an explicit revocation). Fall back to a legacy snapshot grant only when the canonical
+        # key is absent; unioning both would let a stale alias silently bypass a new canonical lock.
+        authority_key = canonical if canonical in self._agent_control else legacy
+        return role in (self._agent_control.get(authority_key) or ())
 
     def _ensure_run_setup(self) -> None:
         """Run the eval's RUN-LEVEL `run_setup` exactly ONCE, before the first eval — e.g. a one-time

@@ -889,6 +889,46 @@ def test_budget_extend_string_value_is_coerced_not_poison(tmp_path):
     assert fold(s.read_all()).budget_overrides["max_seconds"] == 600.0
 
 
+def test_budget_extend_fold_is_total_and_keeps_last_good_canonical_values(tmp_path):
+    s = EventStore(tmp_path / "budget-poison.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("budget_extend", {"timeout": 30, "eval_parallel": 4, "llm_parallel": 2,
+                               "add_nodes": 3})
+    s.append("budget_extend", {
+        "timeout": "Infinity", "max_seconds": True,
+        "eval_parallel": "9" * 5000, "llm_parallel": 65,
+        "max_parallel": -1, "parallel_build": False, "add_nodes": "9" * 5000,
+    })
+    s.append("budget_extend", {
+        "eval_parallel": 3.5, "llm_parallel": 1.25, "add_nodes": 2.5,
+    })
+    bo = fold(s.read_all()).budget_overrides
+    assert bo["timeout"] == 30.0
+    assert bo["eval_parallel"] == 4 and bo["llm_parallel"] == 2
+    assert bo["add_nodes"] == 3
+    assert {"max_seconds", "max_parallel", "parallel_build"}.isdisjoint(bo)
+
+
+def test_budget_extend_parallel_alias_families_are_event_order_lww(tmp_path):
+    s = EventStore(tmp_path / "budget-alias-lww.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("budget_extend", {"eval_parallel": 4, "llm_parallel": 3})
+    s.append("budget_extend", {"max_parallel": 2, "parallel_build": 1})
+    bo = fold(s.read_all()).budget_overrides
+    assert bo["max_parallel"] == 2 and bo["parallel_build"] == 1
+    assert {"eval_parallel", "llm_parallel"}.isdisjoint(bo)
+
+    # Reverse direction and same-event conflicts: latest event wins across events; canonical wins
+    # within one event. Exactly one spelling per family survives the fold.
+    s.append("budget_extend", {
+        "max_parallel": 5, "eval_parallel": 6,
+        "parallel_build": 4, "llm_parallel": 2,
+    })
+    bo = fold(s.read_all()).budget_overrides
+    assert bo["eval_parallel"] == 6 and bo["llm_parallel"] == 2
+    assert {"max_parallel", "parallel_build"}.isdisjoint(bo)
+
+
 def test_conflicting_second_terminal_does_not_flip_the_node(tmp_path):
     """First-terminal-wins for the WHOLE node: a corrupt/double-appended node_failed after a
     node_evaluated must not flip the evaluated node to failed and drop its metric."""

@@ -338,6 +338,20 @@ def test_file_settings_override_env(tmp_path, monkeypatch):
     assert "nodes=2" in result.output          # file beat env (99)
 
 
+def test_parallel_aliases_preserve_cli_file_snapshot_over_env_precedence(monkeypatch):
+    from looplab.core.appconfig import build_settings
+    from looplab.core.config import Settings
+
+    monkeypatch.setenv("LOOPLAB_EVAL_PARALLEL", "9")
+    from_file = build_settings({"max_parallel": 3}, {}, {})
+    assert from_file.eval_parallel == 3       # legacy file beats lower-priority canonical env
+    old_snapshot = Settings(**{"max_parallel": 4})
+    assert old_snapshot.eval_parallel == 4    # legacy snapshot beats canonical env too
+
+    cli_legacy = build_settings({"eval_parallel": 8}, {}, {"max_parallel": 2})
+    assert cli_legacy.eval_parallel == 2      # CLI legacy beats lower-priority file canonical
+
+
 def test_out_flag_overrides_file_out(tmp_path):
     cfg = tmp_path / "r.yaml"
     cfg.write_text(f"out: {tmp_path / 'fromfile'}\n"

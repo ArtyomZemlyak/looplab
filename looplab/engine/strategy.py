@@ -14,11 +14,14 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events, search, agents and stdlib (SurrogateResearcher / cli PRESETS stay lazy, method-local)."""
 from __future__ import annotations
 
+import math
 from typing import Optional
 
-from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure_rate,
+from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
+                                       canonicalize_strategy_parallelism, failure_rate,
                                        improves_since_best, is_numeric_space, run_phase,
                                        validate_strategy)
+from looplab.core.config import parallelism_aliases
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
@@ -59,6 +62,7 @@ class StrategyCadenceMixin:
         REAL change so the engine doesn't re-record/re-apply an identical strategy every iteration."""
         if not s:
             return {}
+        s = canonicalize_strategy_parallelism(s)
         # `timeout`/`max_parallel` are here because _apply_strategy applies them (resource-budget retune);
         # omitting them meant a decision that changed ONLY one of them was never seen as a change, so it
         # was never recorded or applied (the P8 live-budget retune silently no-op'd unless bundled with a
@@ -94,6 +98,8 @@ class StrategyCadenceMixin:
             node_budget_frac=(len(state.nodes) / self.policy.max_nodes
                               if getattr(self.policy, "max_nodes", 0) else 0.0),  # P2 endgame reserve
             current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
+            eval_parallel=self._eval_parallel,
+            llm_parallel=self._llm_parallel,
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
@@ -349,6 +355,9 @@ class StrategyCadenceMixin:
 
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
+        # CODEX AGENT: every newly recorded decision has one canonical spelling per concurrency
+        # axis. Legacy records remain replayable, but stale aliases cannot survive into the next merge.
+        strat = canonicalize_strategy_parallelism(strat)
         self.store.append(EV_STRATEGY_DECISION, {
             "strategy": strat,
             "at_node": len(state.nodes),
@@ -400,7 +409,8 @@ class StrategyCadenceMixin:
         pinned = set(strat.get("_pinned") or [])
 
         def may(k):
-            return k in pinned or self._agent_may("strategist", k)
+            return (any(alias in pinned for alias in parallelism_aliases(k))
+                    or self._agent_may("strategist", k))
         if may("novelty_stance") and strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
         ops = strat.get("operators") or {}
@@ -417,35 +427,56 @@ class StrategyCadenceMixin:
         # Resource budgets the Strategist may retune live (gated by the governance matrix). self.timeout
         # is read fresh per eval and self.max_parallel rebuilds the CapacityLimiter each batch, so a
         # mid-run change takes effect on the next node without any rewiring.
-        if "timeout" in strat and may("timeout"):
+        if ("timeout" in strat and may("timeout")
+                and not isinstance(strat["timeout"], bool)):
             try:
-                self.timeout = max(0.1, float(strat["timeout"]))
-            except (TypeError, ValueError):
+                _timeout = float(strat["timeout"])
+                if math.isfinite(_timeout) and _timeout > 0:
+                    self.timeout = max(0.1, _timeout)
+            except (TypeError, ValueError, OverflowError):
                 pass
         # Layer-2 (docs/23): the Strategist steers the CANONICAL `eval_parallel`/`llm_parallel`; the
         # legacy `max_parallel`/`parallel_build` stay accepted for back-compat. Each retune refreshes BOTH
         # the runtime attr (read by evaluate.py/crash_repair/_dispatch_evals) AND the `_eval_parallel`/
-        # `_llm_parallel` read-through aliases. A Strategist/operator 0 still means AUTO->resolved, never
-        # a hang; the `max(1, ...)` / `_resolve_parallel_build` guards keep it >=1.
+        # `_llm_parallel` read-through aliases. Live deltas do not retain an AUTO state: 0 settles to
+        # safe serial width 1. Startup config alone resolves 0 from hardware / the settled eval width.
         # Legacy alias FIRST, canonical name LAST, so when a strategy carries BOTH the canonical value
         # wins (last write) — matching __init__ ("a NEW name, when set, WINS over its legacy alias").
         for _k in ("max_parallel", "eval_parallel"):
             if _k in strat and may(_k):
                 try:
-                    self.max_parallel = max(1, int(strat[_k]))
+                    _value = strat[_k]
+                    if isinstance(_value, bool):
+                        continue
+                    if isinstance(_value, float) and (
+                            not math.isfinite(_value) or not _value.is_integer()):
+                        continue
+                    _value = int(_value)
+                    if not 0 <= _value <= 1024:
+                        continue
+                    self.max_parallel = max(1, _value)
                     self._eval_parallel = self.max_parallel
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     pass
-        # llm_parallel / parallel_build: concurrent node BUILDS. 0 = AUTO -> resolved eval concurrency
-        # (build exactly as many seeds as you can concurrently eval). Rebuilt role pool is lazy
+        # llm_parallel / parallel_build: concurrent node BUILDS. Rebuilt role pool is lazy
         # (_build_role_pairs), so a mid-run change takes effect on the next draft batch; clamps to 1
         # without a role_factory. Legacy-first / canonical-last, same precedence rule as the eval axis.
+        # A live 0 means serial 1; only launch-time 0 couples AUTO build width to settled eval width.
         for _k in ("parallel_build", "llm_parallel"):
             if _k in strat and may(_k):
                 try:
-                    self.parallel_build = self._resolve_parallel_build(int(strat[_k]))
+                    _value = strat[_k]
+                    if isinstance(_value, bool):
+                        continue
+                    if isinstance(_value, float) and (
+                            not math.isfinite(_value) or not _value.is_integer()):
+                        continue
+                    _value = int(_value)
+                    if not 0 <= _value <= 64:
+                        continue
+                    self.parallel_build = max(1, _value)
                     self._llm_parallel = self.parallel_build
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     pass
         # The policy NAME and its `policy_params` are gated INDEPENDENTLY: an operator can pin
         # `policy_params` ALONE (with `policy` locked out of the strategist's grant) and that pin must
@@ -1044,8 +1075,8 @@ class StrategyCadenceMixin:
         pin_fields = {k: vpin[k] for k in raw_pin if vpin and k in vpin}
         # 1. Re-assert the pin only if a VALID pinned field isn't currently in force (merge onto active).
         if pin_fields and any(active_core.get(k) != v for k, v in pin_fields.items()):
-            strat = validate_strategy({**(state.active_strategy or {}), **pin_fields,
-                                       "source": "operator"}, ctx)
+            active = canonicalize_strategy_parallelism(state.active_strategy)
+            strat = validate_strategy({**active, **pin_fields, "source": "operator"}, ctx)
             if strat:
                 strat.setdefault("rationale", "operator-pinned strategy")
                 strat["_pinned"] = sorted(pin_fields)   # per-field operator provenance (see may())
@@ -1062,6 +1093,9 @@ class StrategyCadenceMixin:
             with self._op_span("strategist_consult"):
                 strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
                 if strat:
+                    # A legacy-only partial is a NEW delta. Promote it before merging with active
+                    # canonical state, or the stale canonical counterpart would shadow this update.
+                    strat = canonicalize_strategy_parallelism(strat)
                     strat.update(pin_fields)   # pinned (validated) policy/fidelity are non-negotiable
                     # Record the decision MERGED onto the live/active strategy (mirror the operator-pin
                     # path above). A strategist decision is a PARTIAL dict — only the fields the model
@@ -1071,7 +1105,7 @@ class StrategyCadenceMixin:
                     # fidelity, operators, …) to the config default — a silent divergence of the search
                     # machinery from the pre-crash live state (architecture-review M3). `operators` is
                     # applied field-by-field too, so it must DEEP-merge, not replace the whole sub-dict.
-                    prev = state.active_strategy or {}
+                    prev = canonicalize_strategy_parallelism(state.active_strategy)
                     merged = {**prev, **strat}
                     prev_ops, new_ops = prev.get("operators") or {}, strat.get("operators") or {}
                     if prev_ops or new_ops:

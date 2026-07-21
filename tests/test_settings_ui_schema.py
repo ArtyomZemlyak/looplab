@@ -104,6 +104,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
+    # CODEX AGENT: curated settings expose the two independent canonical axes; legacy aliases still
+    # parse in raw config/snapshots but must not remain as competing operator controls.
+    assert {"eval_parallel", "llm_parallel"} <= set(by_key)
+    assert {"max_parallel", "parallel_build"}.isdisjoint(by_key)
+    assert "0 = AUTO at launch" in by_key["eval_parallel"]["help"]
+    assert "Live Strategist/operator updates settle 0" in by_key["llm_parallel"]["help"]
     assert set(("concept_pivot", "concept_run_base", "concept_retag_every",
                 "graded_novelty", "capability_expansion")) <= set(by_key)
     assert "does not itself rank candidates" in by_key["concept_pivot"]["help"]
@@ -137,6 +143,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert served_fields["max_nodes"] | {"minimum": 1, "maximum": 1_000_000} == served_fields["max_nodes"]
     assert served_fields["n_seeds"]["minimum"] == 1
     assert served_fields["n_seeds"]["maximum"] == 1024
+    assert served_fields["eval_parallel"]["minimum"] == 0
+    assert served_fields["eval_parallel"]["maximum"] == 1024
+    assert served_fields["llm_parallel"]["minimum"] == 0
+    assert served_fields["llm_parallel"]["maximum"] == 64
     assert served_fields["timeout"]["exclusiveMinimum"] == 0
     assert served_fields["timeout"]["nullable"] is False
     assert served_fields["max_seconds"]["nullable"] is True

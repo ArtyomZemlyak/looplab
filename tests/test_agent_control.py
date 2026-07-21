@@ -135,14 +135,13 @@ def test_strategist_blocked_when_not_granted(tmp_path):
 
 
 def test_strategist_applies_parallel_build_with_auto_when_granted(tmp_path):
-    # Variant-1 Phase 3: parallel_build is Strategist-governed like max_parallel; 0 = AUTO resolves to
-    # the (freshly applied) max_parallel so a build fan-out tracks the eval width.
+    # Live updates settle 0 to safe serial width 1. Only startup Settings use AUTO coupling.
     eng = _engine(tmp_path / "pb_on",
                   agent_control={"parallel_build": ["strategist"], "max_parallel": ["strategist"]})
     eng._apply_strategy({"max_parallel": 3, "parallel_build": 2})
     assert eng.max_parallel == 3 and eng.parallel_build == 2
-    eng._apply_strategy({"parallel_build": 0})                         # AUTO -> resolved max_parallel (3)
-    assert eng.parallel_build == 3
+    eng._apply_strategy({"parallel_build": 0})
+    assert eng.parallel_build == 1
 
 
 def test_strategist_parallel_build_blocked_when_not_granted(tmp_path):
@@ -177,14 +176,16 @@ def test_validate_strategy_whitelists_resource_budgets():
     ctx = StrategyContext(available_policies=["greedy"], available_developers=["default"])
     out = validate_strategy({"timeout": 120.0, "max_parallel": 3, "parallel_build": 2}, ctx)
     assert out["timeout"] == 120.0 and out["max_parallel"] == 3 and out["parallel_build"] == 2
-    assert validate_strategy({"parallel_build": 0}, ctx)["parallel_build"] == 0   # 0 = AUTO is valid
+    assert validate_strategy({"parallel_build": 0}, ctx)["parallel_build"] == 0   # live 0 -> serial 1
     # bad shapes dropped
     assert "timeout" not in (validate_strategy({"timeout": -5}, ctx) or {})
     assert "parallel_build" not in (validate_strategy({"parallel_build": -1}, ctx) or {})
     assert "parallel_build" not in (validate_strategy({"parallel_build": 99}, ctx) or {})   # >64 dropped
     assert "max_parallel" not in (validate_strategy({"max_parallel": -1}, ctx) or {})      # negative dropped
-    assert validate_strategy({"max_parallel": 0}, ctx)["max_parallel"] == 0   # 0 = AUTO (per-GPU), allowed
+    assert validate_strategy({"max_parallel": 0}, ctx)["max_parallel"] == 0   # live 0 -> serial 1
     assert "max_parallel" not in (validate_strategy({"max_parallel": True}, ctx) or {})   # bool != int budget
+    assert "max_parallel" not in (validate_strategy({"max_parallel": 1025}, ctx) or {})
+    assert "timeout" not in (validate_strategy({"timeout": float("inf")}, ctx) or {})
 
 
 # ----------------------------------------------------- boss budget_extend fold
@@ -192,10 +193,14 @@ def test_budget_extend_folds_timeout_and_parallel(tmp_path):
     p = tmp_path / "events.jsonl"
     s = EventStore(p)
     s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
-    s.append("budget_extend", {"timeout": 600.0, "max_parallel": 5, "max_eval_seconds": 1000.0})
+    s.append("budget_extend", {"timeout": 600.0, "max_parallel": 5,
+                                "eval_parallel": 4, "llm_parallel": 2,
+                                "max_eval_seconds": 1000.0})
     st = fold(EventStore(p).read_all())
     assert st.budget_overrides["timeout"] == 600.0
-    assert st.budget_overrides["max_parallel"] == 5
+    assert st.budget_overrides["eval_parallel"] == 4
+    assert st.budget_overrides["llm_parallel"] == 2
+    assert "max_parallel" not in st.budget_overrides
     assert st.budget_overrides["max_eval_seconds"] == 1000.0
 
 
@@ -203,6 +208,9 @@ def test_default_settings_matrix_shape():
     s = Settings()
     assert s.agent_control["timeout"] == ["researcher", "strategist"]
     assert "boss" in s.agent_control["max_nodes"]      # budget_extend was already a boss power
+    assert s.agent_control["eval_parallel"] == ["strategist"]
+    assert s.agent_control["llm_parallel"] == ["strategist"]
+    assert "max_parallel" not in s.agent_control and "parallel_build" not in s.agent_control
     assert "llm_model" not in s.agent_control           # infra stays locked
 
 
@@ -220,6 +228,71 @@ def test_budget_extend_is_a_human_intent_applied_regardless_of_matrix(tmp_path):
     assert max_es == 222.0                # operator max_eval_seconds honoured despite the locked matrix
     assert eng.timeout == 44.0            # operator timeout retune applied as-is
     assert eng.max_parallel == 6          # operator max_parallel retune applied as-is
+
+
+def test_budget_extend_canonical_zero_settles_both_axes_to_one(tmp_path):
+    eng = _engine(tmp_path / "canonical-zero", agent_control={})
+    st = RunState(budget_overrides={"eval_parallel": 0, "llm_parallel": 0})
+    eng._apply_control_overrides(st)
+    assert (eng.max_parallel, eng._eval_parallel) == (1, 1)
+    assert (eng.parallel_build, eng._llm_parallel) == (1, 1)
+
+
+def test_folded_budget_alias_lww_applies_latest_values_on_both_axes(tmp_path):
+    events = tmp_path / "alias-lww.jsonl"
+    store = EventStore(events)
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    store.append("budget_extend", {"eval_parallel": 8, "llm_parallel": 5})
+    store.append("budget_extend", {"max_parallel": 3, "parallel_build": 2})
+    eng = _engine(tmp_path / "alias-lww-engine", agent_control={})
+    eng._apply_control_overrides(fold(store.read_all()))
+    assert (eng.max_parallel, eng.parallel_build) == (3, 2)
+
+    store.append("budget_extend", {"eval_parallel": 7, "llm_parallel": 4})
+    eng._apply_control_overrides(fold(store.read_all()))
+    assert (eng.max_parallel, eng.parallel_build) == (7, 4)
+
+
+def test_control_override_apply_is_total_for_poisoned_state(tmp_path):
+    eng = _engine(tmp_path / "poisoned-control", timeout=30.0, agent_control={})
+    eng.max_seconds = 120.0
+    eng.max_eval_seconds = 80.0
+    state = RunState(budget_overrides={
+        "max_seconds": float("inf"), "max_eval_seconds": float("nan"),
+        "timeout": True, "eval_parallel": 2.5, "llm_parallel": 1.5,
+    })
+    max_s, max_es = eng._apply_control_overrides(state)
+    assert (max_s, max_es, eng.timeout) == (120.0, 80.0, 30.0)
+    assert (eng.max_parallel, eng.parallel_build) == (1, 1)
+
+
+def test_legacy_governance_snapshot_grants_canonical_counterparts(tmp_path):
+    eng = _engine(tmp_path / "old-grants", agent_control={
+        "max_parallel": ["strategist"], "parallel_build": ["strategist"],
+    })
+    eng._apply_strategy({"eval_parallel": 4, "llm_parallel": 3})
+    assert (eng.max_parallel, eng.parallel_build) == (4, 3)
+
+
+def test_canonical_governance_defaults_grant_legacy_counterparts(tmp_path):
+    eng = _engine(tmp_path / "new-grants", agent_control={
+        "eval_parallel": ["strategist"], "llm_parallel": ["strategist"],
+    })
+    eng._apply_strategy({"max_parallel": 5, "parallel_build": 2})
+    assert (eng.max_parallel, eng.parallel_build) == (5, 2)
+
+
+def test_canonical_governance_revocation_beats_stale_legacy_grant(tmp_path):
+    # CODEX AGENT: migration fallback is absence-only. An explicit empty canonical grant is a lock,
+    # not an invitation to union a stale legacy snapshot entry back into the authority decision.
+    eng = _engine(tmp_path / "canonical-locks", agent_control={
+        "eval_parallel": [], "max_parallel": ["strategist"],
+        "llm_parallel": [], "parallel_build": ["strategist"],
+    })
+    eng._apply_strategy({"eval_parallel": 4, "llm_parallel": 3})
+    assert (eng.max_parallel, eng.parallel_build) == (1, 1)
+    assert eng._agent_may("strategist", "max_parallel") is False
+    assert eng._agent_may("strategist", "parallel_build") is False
 
 
 def test_operator_policy_params_pin_applies_even_when_policy_is_locked(tmp_path):
