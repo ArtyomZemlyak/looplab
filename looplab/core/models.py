@@ -1764,6 +1764,12 @@ class RunState(BaseModel):
     card_priority_pins: dict[str, int] = Field(default_factory=dict)
     card_operator_edits: dict[str, dict] = Field(default_factory=dict)
     card_resource_pins: dict[str, dict] = Field(default_factory=dict)
+    # Layer 5a producer/consumer core (docs/23 §12.6 stage 8). OPEN speculative-build requests keyed by
+    # card id (value {generation, at_node}), appended by `card_build_requested` and cleared by the matching
+    # `card_build_done` — the durable request/done pair that makes `_serve_card_builds` idempotent on
+    # resume. Empty {} for pre-L5a logs and whenever `speculation_depth=0` (the election never fires), so
+    # the serial spine stays byte-identical. NEVER read by best-selection (advisory scheduling state only).
+    card_build_requests: dict[str, dict] = Field(default_factory=dict)
     # Agent-authored run report (conclusion-first; audit-only sidecar — NEVER read by best-selection).
     # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
     # UI renders the deterministic analysis from the node set and layers this narrative on top.

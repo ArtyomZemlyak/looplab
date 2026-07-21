@@ -227,6 +227,14 @@ EV_CARD_MERGED = "card_merged"                  # fold alias cards into a canoni
 EV_CARD_DROPPED = "card_dropped"                # engine/operator drop: reason + dropped_by (lifecycle)
 EV_CARD_ENRICHED = "card_enriched"              # Layer 1b: novelty/cross-run/footprint delta (last-write-by-seq)
 EV_CARD_RANKED = "card_ranked"                  # Layer 1b: board priority order (mirrors hypothesis_ranked)
+# Layer 5a concurrent producer/consumer core (docs/23 §12.6 stage 8). A durable request/done pair: the
+# MAIN task elects a ready Card and appends `card_build_requested` (generation-fenced, under `_id_lock`);
+# a `card_build_done` closes that request (a committed speculative node, a crash-recovered node, or a
+# skip). Both are main-task-written and FOLDED into `card_build_requests` so resume-by-replay is
+# idempotent. At `speculation_depth=0` the election never fires, so neither event is ever emitted and the
+# serial spine stays byte-identical (golden unchanged).
+EV_CARD_BUILD_REQUESTED = "card_build_requested"   # elect (K,G) for speculative pre-build; opens the request
+EV_CARD_BUILD_DONE = "card_build_done"             # close it: {node_id, speculative} | {skipped: reason}
 EV_RUN_REOPENED = "run_reopened"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins

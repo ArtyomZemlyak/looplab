@@ -46,7 +46,8 @@ from looplab.events.types import (
     EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
-    EV_CARD_ADDED, EV_CARD_DROPPED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
+    EV_CARD_ADDED, EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
+    EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
@@ -2539,6 +2540,38 @@ def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             metadata["ranked"] = ranked
     st.card_ranking = metadata
 
+
+def _on_card_build_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 5a: OPEN one speculative-build request for a card. Bounds mirror the other card handlers so a
+    # malformed/future row is an honest no-op, never an iterable assumption that could brick replay.
+    raw_id = d.get("card_id")
+    if not isinstance(raw_id, str):
+        return
+    card_id = raw_id.strip()
+    if not card_id or len(card_id) > 256:
+        return
+    entry: dict = {}
+    generation = d.get("generation")
+    if type(generation) is int and 0 <= generation <= (1 << 31) - 1:
+        entry["generation"] = generation
+    at_node = d.get("at_node")
+    if type(at_node) is int and 0 <= at_node <= (1 << 31) - 1:
+        entry["at_node"] = at_node
+    st.card_build_requests[card_id] = entry
+
+
+def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Layer 5a: CLOSE the card's open request (committed speculative node, crash-recovered node, or skip).
+    # Keyed by card id: request and done are main-task-written 1:1 per election cycle and always land
+    # request-before-done in log order, so a plain pop is order-safe. Never resurrects a cleared request.
+    raw_id = d.get("card_id")
+    if not isinstance(raw_id, str):
+        return
+    card_id = raw_id.strip()
+    if card_id:
+        st.card_build_requests.pop(card_id, None)
+
+
 def _on_hypothesis_updated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Carries a status override (human/agent drops — or reopens — a line of inquiry).
     # Last write wins: "deleted" removes the card entirely (sticky); "abandoned" adds the
@@ -3194,6 +3227,8 @@ _HANDLERS = {
     EV_CARD_DROPPED: _on_card_dropped,
     EV_CARD_ENRICHED: _on_card_enriched,
     EV_CARD_RANKED: _on_card_ranked,
+    EV_CARD_BUILD_REQUESTED: _on_card_build_requested,
+    EV_CARD_BUILD_DONE: _on_card_build_done,
     EV_PROXY_SCORED: _on_proxy_scored,
     EV_BEST_CONFIRMED: _on_best_confirmed,
     EV_RUN_FINISHED: _on_run_finished,

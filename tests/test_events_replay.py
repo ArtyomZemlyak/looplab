@@ -1774,3 +1774,30 @@ def test_extra_metric_projection_rejects_hostile_numeric_adapter():
             raise TypeError("hostile numeric adapter")
 
     assert normalize_extra_metrics({"hostile": HostileInt(1), "ok": 2}) == {"ok": 2.0}
+
+
+def test_card_build_request_done_pair_folds_and_clears(tmp_path):
+    # Layer 5a producer/consumer core: the durable request/done pair opens an OPEN speculative-build
+    # request and the matching done clears it, so resume-by-replay is idempotent.
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    _seed(s)
+    s.append("card_build_requested", {"card_id": "card-5", "generation": 0, "at_node": 3})
+    st = fold(s.read_all())
+    assert st.card_build_requests == {"card-5": {"generation": 0, "at_node": 3}}
+    # A second open request for another card coexists; the done closes only its own card.
+    s.append("card_build_requested", {"card_id": "card-6"})
+    s.append("card_build_done", {"card_id": "card-5", "node_id": 7, "speculative": True})
+    st = fold(s.read_all())
+    assert st.card_build_requests == {"card-6": {}}
+    # A malformed/future row is an honest no-op and never bricks the fold.
+    s.append("card_build_requested", {"card_id": 123})          # non-string id: skipped
+    s.append("card_build_done", {"card_id": "card-6"})           # closes card-6
+    s.append("card_build_done", {"card_id": "never-opened"})     # pop of absent key: safe
+    st = fold(s.read_all())
+    assert st.card_build_requests == {}
+    # Old logs with no L5a events carry the empty default (additive/reader-defaulted).
+    q = tmp_path / "legacy.jsonl"
+    s2 = EventStore(q)
+    _seed(s2)
+    assert fold(s2.read_all()).card_build_requests == {}
