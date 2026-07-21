@@ -2047,27 +2047,251 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
         except Exception:
             pass
 
+_CARD_REPLAY_ID_MAX = 256
+_CARD_REPLAY_STATEMENT_MAX = 4_000
+_CARD_REPLAY_SOURCE_MAX = 64
+_CARD_REPLAY_RATIONALE_MAX = 400
+_CARD_REPLAY_ACTION_MAP_MAX = 64
+_CARD_REPLAY_ACTION_LIST_MAX = 64
+_CARD_REPLAY_MERGE_ALIASES_MAX = 256
+_CARD_REPLAY_NODE_ID_MAX = (1 << 31) - 1
+
+
+def _card_replay_id(value) -> str | None:
+    """Return one canonical card id without copying an oversized hostile string."""
+    if not isinstance(value, str) or len(value) > _CARD_REPLAY_ID_MAX:
+        return None
+    bounded = value.strip()
+    return bounded if bounded and bounded.isprintable() else None
+
+
+def _card_replay_text(
+    value, *, max_chars: int, strip: bool = False, allow_empty: bool = False,
+) -> str | None:
+    if not isinstance(value, str) or len(value) > max_chars:
+        return None
+    bounded = value.strip() if strip else value
+    return bounded if bounded or allow_empty else None
+
+
+def _card_replay_node_id(value) -> int | None:
+    node_id = _coerce_node_id({"node_id": value})
+    return node_id if node_id is not None and 0 <= node_id <= _CARD_REPLAY_NODE_ID_MAX else None
+
+
+def _bounded_card_action_map(value) -> dict[str, float]:
+    """Normalize a scalar map with lexical top-K identity and O(K) temporary memory."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, float] = {}
+    for raw_key, raw_value in value.items():
+        if (not isinstance(raw_key, str) or not raw_key or len(raw_key) > 200
+                or isinstance(raw_value, bool) or not isinstance(raw_value, (int, float))):
+            continue
+        try:
+            number = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(number):
+            continue
+        if len(out) >= _CARD_REPLAY_ACTION_MAP_MAX:
+            greatest = max(out)
+            if raw_key >= greatest:
+                continue
+            del out[greatest]
+        out[raw_key] = number
+    return dict(sorted(out.items()))
+
+
+def _bounded_card_action_space(value) -> dict[str, list[float]]:
+    """Normalize a search space without sorting/copying an attacker-sized mapping."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, list[float]] = {}
+    rows = heapq.nsmallest(
+        _CARD_REPLAY_ACTION_MAP_MAX,
+        ((key, raw) for key, raw in value.items()
+         if isinstance(key, str) and key and len(key) <= 200),
+        key=lambda row: row[0],
+    )
+    for raw_key, raw_values in rows:
+        if not isinstance(raw_values, list):
+            continue
+        values: list[float] = []
+        for raw_value in raw_values[:_CARD_REPLAY_ACTION_LIST_MAX]:
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                continue
+            try:
+                number = float(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(number):
+                values.append(number)
+        out[raw_key] = values
+    return out
+
+
+def _bounded_card_action(value: dict) -> dict:
+    """Copy only the action fields consumed by ``_card_added_snapshot``."""
+    out: dict = {}
+    operator = _card_replay_text(value.get("operator"), max_chars=64, strip=True)
+    if operator is not None:
+        out["operator"] = operator
+    if isinstance(value.get("params"), dict):
+        out["params"] = _bounded_card_action_map(value["params"])
+    if isinstance(value.get("space"), dict):
+        out["space"] = _bounded_card_action_space(value["space"])
+    profile = _card_replay_text(value.get("eval_profile"), max_chars=256, allow_empty=True)
+    if profile is not None:
+        out["eval_profile"] = profile
+
+    concept_key = "concept_tags" if "concept_tags" in value else "concepts" if "concepts" in value else None
+    if concept_key is not None:
+        raw_concepts = value.get(concept_key)
+        concepts, overflow, invalid = bounded_raw_concept_values(raw_concepts)
+        if isinstance(raw_concepts, list):
+            out[concept_key] = concepts
+        # These flags are produced here, never trusted from the event. They retain the truth that a
+        # compact membership is only a projection rather than forging a complete proposal receipt.
+        out["_concept_tags_overflow"] = overflow
+        out["_concept_tags_invalid"] = invalid
+
+    if isinstance(value.get("parent_ids"), list):
+        parent_ids: list[int] = []
+        for raw_parent in value["parent_ids"][:_CARD_REPLAY_ACTION_LIST_MAX]:
+            parent_id = _card_replay_node_id(raw_parent)
+            if parent_id is not None and parent_id not in parent_ids:
+                parent_ids.append(parent_id)
+        out["parent_ids"] = parent_ids
+    parent_id = _card_replay_node_id(value.get("parent_id"))
+    if parent_id is not None:
+        out["parent_id"] = parent_id
+    return out
+
+
+def _bounded_card_added_receipt(d: dict) -> dict | None:
+    """Canonical replay input for a ``card_added`` envelope."""
+    rec: dict = {}
+    card_id = _card_replay_id(d.get("id"))
+    statement = _card_replay_text(
+        d.get("statement"), max_chars=_CARD_REPLAY_STATEMENT_MAX, strip=True)
+    if card_id is None and statement is None:
+        return None
+    if card_id is not None:
+        rec["id"] = card_id
+    if statement is not None:
+        rec["statement"] = statement
+    source = _card_replay_text(d.get("source"), max_chars=_CARD_REPLAY_SOURCE_MAX, strip=True)
+    if source is not None:
+        rec["source"] = source
+    rationale = _card_replay_text(d.get("rationale"), max_chars=_CARD_REPLAY_RATIONALE_MAX)
+    if rationale is not None:
+        rec["rationale"] = rationale
+    at_node = _card_replay_node_id(d.get("at_node"))
+    if at_node is not None:
+        rec["at_node"] = at_node
+
+    if isinstance(d.get("idea"), dict):
+        # An explicit (even empty) idea owns the snapshot in historical replay; retaining that shape keeps
+        # a top-level fallback action from silently overriding it after sanitization.
+        rec["idea"] = _bounded_card_action(d["idea"])
+    else:
+        rec.update(_bounded_card_action(d))
+
+    if isinstance(d.get("parent_ids"), list):
+        parent_ids: list[int] = []
+        for raw_parent in d["parent_ids"][:_CARD_REPLAY_ACTION_LIST_MAX]:
+            parent_id = _card_replay_node_id(raw_parent)
+            if parent_id is not None and parent_id not in parent_ids:
+                parent_ids.append(parent_id)
+        rec["parent_ids"] = parent_ids
+    parent_id = _card_replay_node_id(d.get("parent_id"))
+    if parent_id is not None:
+        rec["parent_id"] = parent_id
+    scored_against = _card_replay_node_id(d.get("scored_against"))
+    if scored_against is not None:
+        rec["scored_against"] = scored_against
+    footprint = normalize_researcher_footprint(d.get("footprint"))
+    if footprint is not None:
+        rec["footprint"] = footprint
+    if isinstance(d.get("steering_context"), list):
+        steering: list[dict] = []
+        budget = [256]
+        for item in d["steering_context"][:_CARD_REPLAY_ACTION_LIST_MAX]:
+            if not isinstance(item, dict):
+                continue
+            valid, bounded = _bounded_card_enrichment(item, budget=budget)
+            if valid and isinstance(bounded, dict):
+                steering.append(bounded)
+        rec["steering_context"] = steering
+    return rec
+
+
+def _bounded_card_merge_receipt(d: dict) -> dict | None:
+    canonical = _card_replay_id(d.get("canonical"))
+    raw_aliases = d.get("aliases")
+    if canonical is None or not isinstance(raw_aliases, list) or not raw_aliases:
+        return None
+    aliases: list[str] = []
+    for raw_alias in raw_aliases[:_CARD_REPLAY_MERGE_ALIASES_MAX]:
+        alias = _card_replay_id(raw_alias)
+        if alias is not None and alias not in aliases:
+            aliases.append(alias)
+    if not aliases:
+        return None
+    rec = {"canonical": canonical, "aliases": aliases}
+    statement = _card_replay_text(
+        d.get("statement"), max_chars=_CARD_REPLAY_STATEMENT_MAX, strip=True)
+    if statement is not None:
+        rec["statement"] = statement
+    return rec
+
+
+def _bounded_card_drop_receipt(d: dict) -> dict | None:
+    card_id = _card_replay_id(d.get("id"))
+    if card_id is None:
+        return None
+    rec = {"id": card_id}
+    reason = _card_replay_text(d.get("reason"), max_chars=_CARD_REPLAY_RATIONALE_MAX)
+    if reason is not None:
+        rec["reason"] = reason
+    raw_dropped_by = d.get("dropped_by")
+    if raw_dropped_by is None or raw_dropped_by == "":
+        raw_dropped_by = d.get("by")
+    dropped_by = _card_replay_text(
+        raw_dropped_by, max_chars=_CARD_REPLAY_SOURCE_MAX, strip=True)
+    if dropped_by is not None:
+        rec["dropped_by"] = dropped_by
+    return rec
+
+
 def _on_card_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Hypothesis-card Kanban (docs/23, Layer 1a): a thin card registration (id + immutable statement +
     # source). Collected here; evidence/verdict/status are DERIVED post-loop in `_derive_cards`. A card
     # with neither an id nor a statement is meaningless — skip it (mirrors hypothesis_added's guard).
-    if d.get("id") or d.get("statement"):
-        st.cards_added.append(d)
+    receipt = _bounded_card_added_receipt(d)
+    if receipt is not None:
+        # CODEX AGENT: RunState is deep-copied on every incremental snapshot. Never retain Event.data
+        # here: one unknown megabyte field would otherwise be multiplied by every live state read.
+        st.cards_added.append(receipt)
 
 def _on_card_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Engine-written agentic merge — fold alias cards into a canonical. Collected here, APPLIED
     # deterministically in `_derive_cards` (no LLM in the fold), order-tolerant, back-compat on old logs.
-    canonical = d.get("canonical")
-    if (isinstance(canonical, str) and canonical.strip() and len(canonical.strip()) <= 256
-            and isinstance(d.get("aliases"), list) and d["aliases"]):
-        st.cards_merged.append(d)
+    receipt = _bounded_card_merge_receipt(d)
+    if receipt is not None:
+        # CODEX AGENT: aliases are identity-bearing, so cap the durable prefix before RunState owns it;
+        # unknown merge metadata has no replay semantics and remains only in the append-only log.
+        st.cards_merged.append(receipt)
 
 def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Engine/operator drop of a card: {id, reason, dropped_by}. Lifecycle override applied in
     # `_derive_cards` (the card stays visible with status='dropped', like an abandoned hypothesis).
-    card_id = d.get("id")
-    if isinstance(card_id, str) and card_id.strip() and len(card_id.strip()) <= 256:
-        st.cards_dropped.append(d)
+    receipt = _bounded_card_drop_receipt(d)
+    if receipt is not None:
+        # CODEX AGENT: keep a typed lifecycle receipt, not the raw control payload. This also prevents
+        # arbitrary objects from becoming enormous strings later in `_derive_cards`.
+        st.cards_dropped.append(receipt)
 
 def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: a delta onto a card (novelty verdict, cross-run prior, footprint-finalize, steering cues).
@@ -3244,12 +3468,15 @@ def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None 
         return True, out
     if isinstance(value, dict):
         out = {}
-        rows = sorted(
+        # CODEX AGENT: sorting the whole hostile map is an O(n) temporary-memory amplification before
+        # the 64-row output cap. A lexical heap keeps deterministic top-K semantics in O(K) memory.
+        rows = heapq.nsmallest(
+            64,
             ((key, item) for key, item in value.items()
              if isinstance(key, str) and key and len(key) <= 128),
             key=lambda row: row[0],
         )
-        for key, item in rows[:64]:
+        for key, item in rows:
             valid, bounded = _bounded_card_enrichment(item, depth=depth + 1, budget=budget)
             if valid:
                 out[key] = bounded
@@ -3311,10 +3538,17 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     if isinstance(profile, str) and len(profile) <= 256:
         snapshot["eval_profile"] = profile
         owns_action = True
-    concept_key_present = "concept_tags" in idea or "concepts" in idea
+    concept_key_present = (
+        "concept_tags" in idea or "concepts" in idea
+        or "_concept_tags_overflow" in idea or "_concept_tags_invalid" in idea
+    )
     raw_concepts = idea.get("concept_tags", idea.get("concepts"))
     if concept_key_present:
         values, overflow, invalid = bounded_raw_concept_values(raw_concepts)
+        # Sanitized receipts carry these internal flags because the compact list alone cannot prove
+        # whether the original membership was complete. Payload-provided flag fields are not copied.
+        overflow = overflow or idea.get("_concept_tags_overflow") is True
+        invalid = invalid or idea.get("_concept_tags_invalid") is True
         snapshot["concept_source"] = _proposal_card_concept_source(
             "card_added", present=isinstance(raw_concepts, list), overflow=overflow, invalid=invalid)
     else:

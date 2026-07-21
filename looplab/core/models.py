@@ -1312,9 +1312,9 @@ class RunState(BaseModel):
     # Hypothesis-card Kanban re-architecture (docs/23, Layer 1a). The CARD ledger — DERIVED each fold by
     # `_derive_cards` (mirrors `hypotheses`), ADVISORY, never read by best-selection. Keyed by card id.
     cards: dict[str, Card] = Field(default_factory=dict)
-    # Folded inputs for `_derive_cards` (mirror the `hypotheses_*` lists). `cards_added`: thin card_added
-    # records; `cards_merged`: alias->canonical merges (applied deterministically, no LLM); `cards_dropped`:
-    # engine/operator drops carrying {id, reason, dropped_by}.
+    # Folded inputs for `_derive_cards` (mirror the `hypotheses_*` lists). These are canonical bounded
+    # replay receipts, never raw Event.data: `cards_added` keeps the thin action seed, `cards_merged` the
+    # alias->canonical identity edges, and `cards_dropped` only {id, reason, dropped_by}.
     cards_added: list[dict] = Field(default_factory=list)
     cards_merged: list[dict] = Field(default_factory=list)
     cards_dropped: list[dict] = Field(default_factory=list)
