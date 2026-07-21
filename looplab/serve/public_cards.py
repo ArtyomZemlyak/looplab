@@ -5,6 +5,8 @@ import heapq
 import json
 import math
 
+from looplab.core.concepts import normalized_concept_materialization_receipt
+
 
 # CODEX AGENT: these are replay inputs/override journals, not a public read model. Excluding them before
 # Pydantic serialization prevents future producer-only fields and oversized event blobs from being copied
@@ -25,10 +27,11 @@ _SKIP = object()
 # CODEX AGENT: this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
-    "id", "status", "verdict", "actionable", "statement", "seed_statement", "source",
+    "id", "status", "verdict", "actionable", "concept_source", "statement", "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
     "dropped_reason", "dropped_by", "parent_id", "parent_ids", "scored_against", "operator",
-    "params", "space", "eval_profile", "concept_tags", "priority", "foresight_rank", "confidence",
+    "params", "space", "eval_profile", "concept_tags", "priority",
+    "foresight_rank", "confidence",
     "footprint", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
     "claim_refs", "steering_context", "provenance_tier",
 )
@@ -70,6 +73,12 @@ _CONCEPT_SOURCE_KEYS = {
     "source_rows_quarantined", "source_malformed_rows", "source_invalid_capsule_rows",
     "source_duplicate_run_rows",
 }
+# CODEX AGENT: this is the CARD's exact node/proposal owner receipt.  It is intentionally separate from
+# `_CONCEPT_SOURCE_KEYS`, which describes cross-run capsule-store completeness inside cross_run_prior.
+_CARD_CONCEPT_SOURCE_KINDS = frozenset({"card_added", "card_enriched", "node"})
+_CARD_CONCEPT_PROVENANCE = frozenset({
+    "researcher-authored", "classifier", "operator-edited", "offline-heuristic", "untrusted-source",
+})
 
 
 def _clip_utf8(value: str, limit: int) -> str:
@@ -287,6 +296,60 @@ def _steering(value) -> list[dict]:
     return out
 
 
+def _exact_ref_projection(value) -> list[str] | None:
+    """Return the exact public semantic set, or None when public bounds make it lossy."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    out: list[str] = []
+    for item in value:
+        ref = _text(item, _MAX_REF_BYTES)
+        if ref is _SKIP or not ref or ref != item:
+            return None
+        if ref not in out:
+            out.append(ref)
+            if len(out) > _MAX_ITEMS:
+                return None
+    return out
+
+
+def _card_concept_source(value):
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, dict):
+        return None if value is None else {}
+    kind = value.get("kind")
+    if kind not in _CARD_CONCEPT_SOURCE_KINDS:
+        return {}
+    out = {"kind": kind}
+    if kind == "node":
+        node_identity = []
+        for key in ("node_id", "node_generation"):
+            number = _number(value.get(key), integer=True)
+            if number is not _SKIP and number is not None and number >= 0:
+                out[key] = number
+                node_identity.append(number)
+        if len(node_identity) != 2:
+            return {}
+        provenance = value.get("provenance")
+        if provenance in _CARD_CONCEPT_PROVENANCE:
+            out["provenance"] = provenance
+    provenance_known = kind != "node" or "provenance" in out
+    membership_present = value.get("membership_present") is True
+    claimed_complete = value.get("complete") is True
+    claimed_receipt_valid = value.get("receipt_valid") is True
+    raw_receipt = value.get("materialization_receipt")
+    receipt = normalized_concept_materialization_receipt(raw_receipt) if raw_receipt is not None else None
+    receipt_valid = claimed_receipt_valid and (raw_receipt is None or receipt is not None)
+    out["membership_present"] = membership_present
+    out["complete"] = bool(
+        claimed_complete and membership_present and provenance_known
+        and receipt_valid and receipt is None)
+    out["receipt_valid"] = receipt_valid
+    if receipt is not None:
+        out["materialization_receipt"] = receipt
+    return out
+
+
 def _field(card, name: str):
     return card.get(name, _SKIP) if isinstance(card, dict) else getattr(card, name, _SKIP)
 
@@ -319,6 +382,8 @@ def _field_value(card, name: str):
         return _named_scalars(value, _NOVELTY_KEYS, free_text=True)
     if name == "cross_run_prior":
         return _cross_run(value)
+    if name == "concept_source":
+        return _card_concept_source(value)
     if name == "steering_context":
         return _steering(value)
     return _SKIP
@@ -328,14 +393,42 @@ def _dto(card, authoritative_id: str) -> dict:
     # CODEX AGENT: fixed admission order keeps identity/lifecycle available; rich optional fields enter
     # only while the complete UTF-8 JSON representation remains inside the per-card SSE envelope.
     out: dict = {"id": authoritative_id}
+    concept_source_claimed_complete = False
     for name in _FIELDS[1:]:
         value = _field_value(card, name)
         if value is _SKIP:
             continue
+        if name == "concept_source" and isinstance(value, dict):
+            concept_source_claimed_complete = value.get("complete") is True
+            # CODEX AGENT: source completeness is end-to-end on the public DTO. Start fail-closed and
+            # restore True only after the exact tag set itself survives size/ref projection below.
+            value = {**value, "complete": False}
         candidate = {**out, name: value}
         encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) <= PUBLIC_CARD_MAX_BYTES:
             out = candidate
+    concept_source = out.get("concept_source")
+    if isinstance(concept_source, dict):
+        exact_tags = _exact_ref_projection(_field(card, "concept_tags"))
+        if (concept_source_claimed_complete and exact_tags is not None
+                and out.get("concept_tags", _SKIP) == exact_tags):
+            concept_source["complete"] = True  # false -> true only shrinks the bounded JSON envelope
+        # CODEX AGENT: never ship two disagreeing provenance claims.  The exact node receipt is the
+        # authority; proposal-only/malformed/size-omitted receipts clear the compatibility scalar.
+        exact_provenance = (
+            concept_source.get("provenance") if concept_source.get("kind") == "node" else None)
+        if exact_provenance in _CARD_CONCEPT_PROVENANCE:
+            candidate = {**out, "provenance_tier": exact_provenance}
+            candidate_bytes = json.dumps(
+                candidate, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            if len(candidate_bytes) <= PUBLIC_CARD_MAX_BYTES:
+                out = candidate
+            else:
+                out.pop("provenance_tier", None)
+        else:
+            out.pop("provenance_tier", None)
+    else:
+        out.pop("provenance_tier", None)
     return out
 
 

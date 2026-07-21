@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import Iterable, Optional
+from typing import Iterable, Literal, Optional
 
 from looplab.core.concepts import (
     CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
@@ -20,6 +20,7 @@ from looplab.core.concepts import (
     BoundedConceptAccumulator,
     bounded_raw_concept_values,
     concept_materialization_receipt,
+    normalized_concept_materialization_receipt,
     normalized_concept_renames,
     resolve_concept_set_reasons,
 )
@@ -30,7 +31,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      node_concept_event_provenance,
-                     Card, Event, Hypothesis, Idea, Node, NodeStatus,
+                     Card, CardConceptSource, Event, Hypothesis, Idea, Node, NodeStatus,
                      RunState, Trial, hypothesis_id, hypothesis_statement_digest, idea_proposal_digest,
                      normalize_extra_metrics, normalize_researcher_footprint, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
@@ -2076,13 +2077,24 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         rec = {"id": raw_id.strip()}
         allowed = (
             "novelty_verdict", "cross_run_prior", "footprint", "steering_context",
-            "concept_tags", "lesson_refs", "claim_refs", "research_origin", "provenance_tier",
+            "concept_tags", "lesson_refs", "claim_refs", "research_origin",
             "foresight_rank", "confidence",
         )
         # CODEX AGENT: bound each allow-listed sibling independently. A huge lexically-early unknown
         # field must not consume a shared budget and erase id or a later valid field.
         for key in allowed:
             if key not in d:
+                continue
+            if key == "concept_tags":
+                # CODEX AGENT: keep enough derived receipt data to say that a node-less enrichment was
+                # lossy.  The caller-provided provenance_tier is intentionally not copied: a free-form
+                # delta must never promote its own tags to classifier/operator truth.
+                if not isinstance(d[key], list):
+                    continue
+                values, overflow, invalid = bounded_raw_concept_values(d[key])
+                rec[key] = values
+                rec["_concept_tags_overflow"] = overflow
+                rec["_concept_tags_invalid"] = invalid
                 continue
             valid, bounded = _bounded_card_enrichment(d[key])
             if valid:
@@ -3245,6 +3257,24 @@ def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None 
     return False, None
 
 
+def _proposal_card_concept_source(
+    kind: Literal["card_added", "card_enriched"], *, present: bool,
+    overflow: bool = False, invalid: bool = False,
+) -> CardConceptSource:
+    reasons: set[ConceptMaterializationReason] = set()
+    if overflow:
+        reasons.add(CONCEPTS_PER_NODE_CAP_REASON)
+    if invalid:
+        reasons.add(CONCEPT_INVALID_ID_REASON)
+    receipt = concept_materialization_receipt(reasons)
+    return CardConceptSource(
+        kind=kind,
+        membership_present=present,
+        complete=present and receipt is None,
+        materialization_receipt=receipt,
+    )
+
+
 def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     """Tolerantly decode one atomic, node-less card action snapshot."""
     idea = d.get("idea") if isinstance(d.get("idea"), dict) else d
@@ -3281,11 +3311,17 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     if isinstance(profile, str) and len(profile) <= 256:
         snapshot["eval_profile"] = profile
         owns_action = True
+    concept_key_present = "concept_tags" in idea or "concepts" in idea
     raw_concepts = idea.get("concept_tags", idea.get("concepts"))
+    if concept_key_present:
+        values, overflow, invalid = bounded_raw_concept_values(raw_concepts)
+        snapshot["concept_source"] = _proposal_card_concept_source(
+            "card_added", present=isinstance(raw_concepts, list), overflow=overflow, invalid=invalid)
+    else:
+        snapshot["concept_source"] = _proposal_card_concept_source(
+            "card_added", present=False)
     if isinstance(raw_concepts, list):
-        # Reuse the tolerant durable Idea boundary so card_added and node_created normalize tags alike.
-        snapshot["concept_tags"] = Idea(
-            operator=snapshot.get("operator") or "draft", concepts=raw_concepts).concepts
+        snapshot["concept_tags"] = values
         owns_action = True
 
     raw_parent_ids = d.get("parent_ids", idea.get("parent_ids"))
@@ -3454,6 +3490,63 @@ def _card_cross_run_projection(d: dict) -> dict:
     }
 
 
+_CARD_NODE_CONCEPT_PROVENANCE = frozenset({
+    NODE_CONCEPT_PROVENANCE_AUTHORED,
+    NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+    NODE_CONCEPT_PROVENANCE_OPERATOR,
+    NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+    NODE_CONCEPT_PROVENANCE_UNTRUSTED,
+})
+
+
+def _card_node_concept_projection(st: RunState, node: Node) -> tuple[list[str], CardConceptSource]:
+    """Project one exact node owner from the already-finalized concept read model."""
+    memberships = getattr(st, "node_concepts", None)
+    membership_map_valid = isinstance(memberships, dict)
+    membership_present = membership_map_valid and node.id in memberships
+    raw_membership = memberships.get(node.id) if membership_present else []
+    tags, overflow, invalid = bounded_raw_concept_values(raw_membership)
+
+    receipts = getattr(st, "node_concept_materialization_receipts", None)
+    receipt_map_valid = isinstance(receipts, dict)
+    raw_receipt = receipts.get(node.id, _MISSING) if receipt_map_valid else None
+    receipt = (
+        normalized_concept_materialization_receipt(raw_receipt)
+        if raw_receipt is not _MISSING else None
+    )
+    receipt_valid = receipt_map_valid and (
+        raw_receipt is _MISSING or receipt is not None)
+    reasons: set[ConceptMaterializationReason] = set(
+        receipt["reasons"] if receipt is not None else ())
+    if overflow:
+        reasons.add(CONCEPTS_PER_NODE_CAP_REASON)
+    if invalid or (membership_present and not isinstance(raw_membership, list)):
+        reasons.add(CONCEPT_INVALID_ID_REASON)
+    materialization_receipt = concept_materialization_receipt(reasons)
+
+    provenance_map = getattr(st, "node_concept_provenance", None)
+    raw_provenance = provenance_map.get(node.id) if isinstance(provenance_map, dict) else None
+    provenance_known = raw_provenance in _CARD_NODE_CONCEPT_PROVENANCE
+    provenance = (
+        raw_provenance if provenance_known else
+        NODE_CONCEPT_PROVENANCE_UNTRUSTED if raw_provenance is not None else None
+    )
+    # CODEX AGENT: `[]` with membership_present=True and no receipt is an exact empty set.  The same
+    # value with an absent key, a corrupt receipt, or an unavailable delta is explicitly incomplete.
+    source = CardConceptSource(
+        kind="node",
+        node_id=node.id,
+        node_generation=node.attempt,
+        provenance=provenance,
+        membership_present=membership_present,
+        complete=(membership_present and membership_map_valid and provenance_known
+                  and receipt_valid and materialization_receipt is None),
+        receipt_valid=receipt_valid,
+        materialization_receipt=materialization_receipt,
+    )
+    return tags, source
+
+
 def _derive_cards(st: RunState) -> None:
     """Build the CARD ledger (Kanban re-architecture, docs/23 Layer 1a). DERIVED, order-tolerant,
     ADVISORY — never read by best-selection, exactly like `_derive_hypotheses`, which it MIRRORS. A card
@@ -3616,16 +3709,20 @@ def _derive_cards(st: RunState) -> None:
         cid = owner_by_statement.get(statement_id, raw_cid) if raw_cid == seed_id else raw_cid
         if not cid:
             continue
+        node_concept_tags, node_concept_source = _card_node_concept_projection(st, n)
         c = cards.get(cid)
         if c is None:
             c = Card(id=cid, statement=stmt, seed_statement=stmt, source="researcher",
                      rationale=(n.idea.rationale or "")[:400], created_at_node=n.id,
                      operator=n.idea.operator, params=dict(n.idea.params or {}),
                      space={k: list(v) for k, v in (n.idea.space or {}).items()},
-                     eval_profile=n.idea.eval_profile, concept_tags=list(n.idea.concepts or []),
+                     eval_profile=n.idea.eval_profile, concept_tags=node_concept_tags,
+                     concept_source=node_concept_source,
+                     provenance_tier=node_concept_source.provenance,
                      parent_id=(n.parent_ids[0] if n.parent_ids else None),
                      parent_ids=list(n.parent_ids or []))
             cards[cid] = c
+            action_owned_cards.add(cid)
         elif not c.evidence and cid not in action_owned_cards:
             # CODEX AGENT: card_added is intentionally thin. Backfill its missing action block from the
             # earliest linked node; otherwise the normal card_added -> node_created staging path leaves a
@@ -3635,10 +3732,16 @@ def _derive_cards(st: RunState) -> None:
             c.params = dict(n.idea.params or {})
             c.space = {k: list(v) for k, v in (n.idea.space or {}).items()}
             c.eval_profile = n.idea.eval_profile
-            c.concept_tags = list(n.idea.concepts or [])
             c.parent_id = n.parent_ids[0] if n.parent_ids else None
             c.parent_ids = list(n.parent_ids or [])
             action_owned_cards.add(cid)
+        if c.concept_source is None or c.concept_source.kind != "node":
+            # CODEX AGENT: the first linked node is the exact action/evidence owner.  Later evidence may
+            # have classifier/operator tags of its own, but folding those into one card would create a
+            # provenance lie.  Node ids are visited in sorted order, so ownership is replay-order stable.
+            c.concept_tags = node_concept_tags
+            c.concept_source = node_concept_source
+            c.provenance_tier = node_concept_source.provenance
         if n.id not in c.evidence:
             c.evidence.append(n.id)
 
@@ -3700,29 +3803,45 @@ def _derive_cards(st: RunState) -> None:
     if alias:
         folded: dict[str, Card] = {}
         folded_control_ids: dict[str, set[str]] = {}
-        for cid in list(cards):
-            tid = _canon(cid)
-            folded_control_ids.setdefault(
-                tid, {tid} if tid not in ambiguous_seeds else set(),
-            ).update(control_ids.get(cid, set()))
-            tgt = folded.get(tid)
-            if tgt is None:
-                base = cards.get(tid, cards[cid])   # seed from the canonical row if it exists, else this
-                tgt = base.model_copy(deep=True)
-                tgt.id = tid
-                if tid in merged_stmt:
-                    tgt.statement = merged_stmt[tid]    # canonical DISPLAY statement; seed stays the join key
-                tgt.evidence = list(base.evidence)
-                tgt.aliases = list(base.aliases)
-                folded[tid] = tgt
-            if cid != tid and cid not in tgt.aliases:
-                tgt.aliases.append(cid)             # record which ids were folded into this canonical
-            for ev in cards[cid].evidence:
-                if ev not in tgt.evidence:
-                    tgt.evidence.append(ev)
-        for tgt in folded.values():
-            tgt.evidence.sort()
-            tgt.aliases.sort()
+        grouped: dict[str, list[str]] = {}
+        for cid in sorted(cards):
+            grouped.setdefault(_canon(cid), []).append(cid)
+        for tid in sorted(grouped):
+            members = grouped[tid]
+            # CODEX AGENT: if a merge names no materialized canonical row, event insertion order must not
+            # choose the surviving action/concept owner. Prefer a canonical action; otherwise choose the
+            # lexically first concrete action and copy its WHOLE block plus concept receipt together.
+            action_candidates = [cid for cid in members if cid in action_owned_cards]
+            action_owner_id = (
+                tid if tid in action_owned_cards else
+                action_candidates[0] if action_candidates else
+                tid if tid in cards else members[0]
+            )
+            base_id = tid if tid in cards else action_owner_id
+            tgt = cards[base_id].model_copy(deep=True)
+            if action_owner_id != base_id:
+                action_owner = cards[action_owner_id].model_copy(deep=True)
+                for field in (
+                    "operator", "params", "space", "eval_profile", "concept_tags", "concept_source",
+                    "provenance_tier", "parent_id", "parent_ids", "scored_against",
+                ):
+                    setattr(tgt, field, getattr(action_owner, field))
+            tgt.id = tid
+            if tid in merged_stmt:
+                tgt.statement = merged_stmt[tid]    # DISPLAY statement; seed remains the join key
+            tgt.evidence = sorted({
+                evidence for cid in members for evidence in cards[cid].evidence
+            })
+            tgt.aliases = sorted({
+                alias_id for cid in members
+                for alias_id in ([cid] if cid != tid else []) + list(cards[cid].aliases)
+                if alias_id != tid
+            })
+            folded[tid] = tgt
+            target_controls = folded_control_ids.setdefault(
+                tid, {tid} if tid not in ambiguous_seeds else set())
+            for cid in members:
+                target_controls.update(control_ids.get(cid, set()))
         for alias_id in alias:
             target_id = _canon(alias_id)
             target = folded.get(target_id)
@@ -3836,8 +3955,8 @@ def _derive_cards(st: RunState) -> None:
     # type-guarded and the two numeric coercions are guarded INDIVIDUALLY, so a bad numeric field can
     # never drop a valid sibling field that appears after it in the delta (key-order-independent apply).
     _ENRICH_DICT = {"novelty_verdict", "cross_run_prior", "footprint"}
-    _ENRICH_REFS = {"concept_tags", "lesson_refs", "claim_refs"}
-    _ENRICH_STR = {"research_origin", "provenance_tier"}
+    _ENRICH_REFS = {"lesson_refs", "claim_refs"}
+    _ENRICH_STR = {"research_origin"}
     for d in sorted(st.cards_enriched, key=lambda r: (
             r.get("_seq") if type(r.get("_seq")) is int else -1,
             r.get("_event_index") if type(r.get("_event_index")) is int else -1)):
@@ -3856,6 +3975,22 @@ def _derive_cards(st: RunState) -> None:
                 valid, bounded = _bounded_card_enrichment(v)
                 if valid:
                     setattr(c, k, bounded)
+            elif k == "concept_tags" and isinstance(v, list):
+                if c.concept_source is not None and c.concept_source.kind == "node":
+                    continue
+                refs: list[str] = []
+                for item in v[:64]:
+                    if isinstance(item, str) and item not in refs:
+                        refs.append(item)
+                c.concept_tags = refs
+                c.concept_source = _proposal_card_concept_source(
+                    "card_enriched", present=True,
+                    overflow=d.get("_concept_tags_overflow") is True,
+                    invalid=d.get("_concept_tags_invalid") is True,
+                )
+                # CODEX AGENT: enrichment is proposal metadata, never independent classifier/operator
+                # evidence.  Keep the legacy scalar synchronized with the exact owner receipt.
+                c.provenance_tier = None
             elif k in _ENRICH_REFS and isinstance(v, list):
                 refs: list[str] = []
                 for item in v[:64]:

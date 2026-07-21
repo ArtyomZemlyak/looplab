@@ -637,7 +637,8 @@ def test_card_enriched_applies_allow_listed_fields_and_tolerates_malformed():
         ("card_enriched", {"id": "no-such-card", "research_origin": "x"}),  # unknown id -> skipped
     ])
     c = st.cards[cid]
-    assert c.research_origin == "memo-9" and c.provenance_tier == "authored"
+    assert c.research_origin == "memo-9"
+    assert c.provenance_tier is None  # a free-form enrichment cannot self-certify concept provenance
     assert c.footprint == {"gpus": 2}                              # dict delta applied, string one skipped
 
 
@@ -660,7 +661,7 @@ def test_card_enriched_bad_numeric_does_not_drop_sibling_fields():
     st = _run(extra=[("card_enriched", {"id": cid, "confidence": "not-a-float",
                                         "research_origin": "memo-1", "provenance_tier": "authored"})])
     c = st.cards[cid]
-    assert c.research_origin == "memo-1" and c.provenance_tier == "authored" and c.confidence is None
+    assert c.research_origin == "memo-1" and c.provenance_tier is None and c.confidence is None
 
 
 def test_card_enriched_deep_values_and_numeric_fields_are_bounded():

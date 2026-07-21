@@ -755,6 +755,46 @@ class Hypothesis(BaseModel):
     priority: Optional[int] = None
 
 
+class CardConceptSource(BaseModel):
+    """Exact owner receipt for ``Card.concept_tags``.
+
+    A card may accumulate evidence from several nodes with different concept producers.  One scalar
+    provenance label is therefore meaningful only when the displayed tags name the exact proposal/node
+    they came from.  ``complete`` distinguishes an honest explicit empty membership from an absent or
+    lossy one; ``materialization_receipt`` carries the folded delta/classifier corruption causes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["card_added", "card_enriched", "node"]
+    node_id: Optional[int] = Field(default=None, ge=0)
+    node_generation: Optional[int] = Field(default=None, ge=0)
+    provenance: Optional[Literal[
+        "researcher-authored", "classifier", "operator-edited", "offline-heuristic",
+        "untrusted-source",
+    ]] = None
+    membership_present: bool = False
+    complete: bool = False
+    receipt_valid: bool = True
+    materialization_receipt: Optional[ConceptMaterializationReceipt] = None
+
+    @model_validator(mode="after")
+    def _coherent_owner(self) -> "CardConceptSource":
+        # CODEX AGENT: a node provenance label without an exact lifecycle owner is forgeable metadata,
+        # not a receipt.  Proposal-only sources deliberately carry neither a node id nor trusted producer.
+        if self.kind == "node":
+            if self.node_id is None or self.node_generation is None:
+                raise ValueError("node concept sources require node_id and node_generation")
+        elif self.node_id is not None or self.node_generation is not None or self.provenance is not None:
+            raise ValueError("proposal concept sources cannot claim node identity or provenance")
+        if self.complete and (
+                not self.membership_present or not self.receipt_valid
+                or self.materialization_receipt is not None
+                or (self.kind == "node" and self.provenance is None)):
+            raise ValueError("complete concept sources require an exact present membership")
+        return self
+
+
 class Card(BaseModel):
     """A first-class hypothesis CARD — the durable, rich unit the Kanban re-architecture is built on
     (docs/23). It is the SUPERSET of the thin `Hypothesis`: it accretes the substance that lives on
@@ -807,6 +847,9 @@ class Card(BaseModel):
     space: dict[str, list[float]] = Field(default_factory=dict)
     eval_profile: Optional[str] = None
     concept_tags: list[str] = Field(default_factory=list)
+    # CODEX AGENT: exact, additive ownership receipt for concept_tags.  Without it a merged card could
+    # show the union/override from several evidence nodes beside one misleading scalar provenance tier.
+    concept_source: Optional[CardConceptSource] = None
     # Board prioritization (foresight) — stamped from card_ranked in Layer 1b; audit/UI only.
     priority: Optional[int] = None
     foresight_rank: Optional[int] = None
@@ -820,6 +863,8 @@ class Card(BaseModel):
     lesson_refs: list[str] = Field(default_factory=list)
     claim_refs: list[str] = Field(default_factory=list)
     steering_context: list[dict] = Field(default_factory=list)  # compact STRUCTURED cues (no verbatim capture)
+    # Compatibility scalar for existing clients. Derived only from concept_source.provenance for an exact
+    # node owner; proposal-only sources keep it None, and card_enriched cannot assign it independently.
     provenance_tier: Optional[str] = None
 
 

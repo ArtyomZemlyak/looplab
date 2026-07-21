@@ -134,7 +134,7 @@ each fold by `_derive_cards` (§6), mirroring how `RunState.hypotheses` is deriv
 | `id` (opaque, stable, wording-independent) | engine-minted at `card_added` (§4) | new |
 | `statement`, `rationale`, `source` | `Idea.hypothesis`/`rationale` + `hypothesis_added.source` | reuse |
 | `idea` block: `operator, params, space, eval_profile` | `Idea` (`models.py:166-218`) via the built node | link |
-| `concept_tags` + `provenance_tier` | `Idea.concepts` → classifier/operator (`node_concepts`) | link |
+| `concept_tags` + exact `concept_source` receipt (`provenance_tier` compatibility scalar) | one deterministic action/evidence owner's folded `node_concepts`; node-less proposal snapshot until linked | link |
 | `novelty_verdict` (grade/level, near_node, recommendation) | `novelty_graded`/`novelty_rejected` — **re-home** | new field |
 | `cross_run_prior` (matched concepts, prior runs+outcomes) | `cross_run_prior` — **re-home** | new field |
 | `foresight_rank` + `confidence` (+ source) | `hypothesis_ranked` + `foresight_selected` | reuse |
@@ -532,8 +532,10 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
 - `Card.novelty_verdict` (grade/level/near_node/recommendation) from the already-folded
   `novelty_events`/`novelty_grades` (a card FIELD, per §0.5 — never a colliding `card_dropped`).
 - `Card.cross_run_prior` (ref-shaped), `research_origin` (memo-id ref), `lesson_refs`/`claim_refs` (id
-  refs); `foresight_rank`/`priority`/`confidence` + a `pinned` provenance flag; `concept_tags`/
-  `provenance_tier` from `node_concepts`; `steering_context` (structured cues only — enforce at the mint
+  refs); `foresight_rank`/`priority`/`confidence` + a `pinned` provenance flag; `concept_tags` plus an
+  exact owner/generation/provenance/materialization receipt from folded `node_concepts` (never a mixed-
+  evidence union; `card_enriched` may tag only a node-less proposal and cannot self-certify provenance);
+  `steering_context` (structured cues only — enforce at the mint
   site, or give it its own `entropy=True` redaction pass, since cards ride only the tokenless public dump).
 
 **Events (1a):** `card_added` (thin — id, immutable statement, source, steering snapshot, operator kind,
@@ -627,7 +629,8 @@ then **6**.
   verdict == hash-joined hypothesis verdict byte-for-byte.
 - **1b.** `Idea.footprint` + `Card.footprint` sub-schema (UNSPECIFIED distinct from `gpus=1`),
   `novelty_verdict`, `cross_run_prior`, `research_origin`, `foresight_rank`/`priority`/`confidence`+pinned,
-  `concept_tags`/`provenance_tier`, `steering_context`; `card_enriched`(last-write-by-seq)/`card_ranked`;
+  `concept_tags`/exact `concept_source` receipt/derived `provenance_tier`, `steering_context`;
+  `card_enriched`(last-write-by-seq, proposal tags remain untrusted)/`card_ranked`;
   reserve `last_footprint`; structured-only cue enforcement; `footprint.timeout` governance gate. *Gate:*
   all additive/nullable; ref-shape hard gate (no body fields). *Tests:* `test_event_types`, golden regen
   for `footprint:null`, NEW: ref-size cap, `steering_context` passes redaction, `test_role_output_contract`
