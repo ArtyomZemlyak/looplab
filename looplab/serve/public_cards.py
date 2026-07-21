@@ -31,7 +31,8 @@ _SKIP = object()
 # CODEX AGENT: this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
-    "id", "status", "verdict", "actionable", "concept_source", "statement", "seed_statement", "source",
+    "id", "status", "verdict", "actionable", "identity", "selection_provenance",
+    "selection_blockers", "selection_ready", "concept_source", "statement", "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
     "dropped_reason", "dropped_by", "parent_id", "parent_ids", "scored_against", "operator",
     "params", "space", "eval_profile", "concept_tags", "priority",
@@ -83,6 +84,19 @@ _CARD_CONCEPT_SOURCE_KINDS = frozenset({"card_added", "card_enriched", "node"})
 _CARD_CONCEPT_PROVENANCE = frozenset({
     "researcher-authored", "classifier", "operator-edited", "offline-heuristic", "untrusted-source",
 })
+_CARD_IDENTITY_KINDS = frozenset({"native", "legacy_hash", "synthesized_shadow"})
+_CARD_IDENTITY_SOURCES = frozenset({
+    "card_added_receipt", "card_added_unbound", "hypothesis_shadow", "node_statement_hash",
+    "node_card_id", "merge", "unknown",
+})
+_CARD_ACTION_SOURCES = frozenset({"card_added", "node", "mixed", "none"})
+_CARD_FRESHNESS = frozenset({"current", "stale", "unknown"})
+_CARD_OWNER_STATES = frozenset({"none", "in_flight", "terminal", "mixed", "unknown"})
+_CARD_SELECTION_BLOCKERS = (
+    "identity_not_native", "action_owner_missing", "action_owner_ambiguous",
+    "action_receipt_incomplete", "freshness_unknown", "freshness_stale", "work_in_flight",
+    "work_terminal", "work_owner_unknown", "card_terminal", "merged_work_items",
+)
 
 
 class PublicProjectionCount(BaseModel):
@@ -436,6 +450,80 @@ def _card_concept_source(value):
     return out
 
 
+def _card_identity(value):
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, dict):
+        return {}
+    kind = value.get("kind")
+    source = value.get("source")
+    if kind not in _CARD_IDENTITY_KINDS or source not in _CARD_IDENTITY_SOURCES:
+        return {}
+    out = {
+        "kind": kind,
+        "source": source,
+        "durable": value.get("durable") is True,
+        "receipt_valid": value.get("receipt_valid") is True,
+    }
+    digest = _text(value.get("action_digest"), 128)
+    if digest is not _SKIP and digest:
+        out["action_digest"] = digest
+    valid_digest = (
+        isinstance(out.get("action_digest"), str)
+        and out["action_digest"].startswith("card-action:v1:")
+        and len(out["action_digest"]) == len("card-action:v1:") + 64
+        and all(char in "0123456789abcdef" for char in out["action_digest"][-64:])
+    )
+    native = kind == "native"
+    coherent = native == (
+        source == "card_added_receipt" and out["durable"]
+        and out["receipt_valid"] and valid_digest)
+    if not coherent or (not native and (
+            out["durable"] or out["receipt_valid"] or "action_digest" in out)):
+        return {}
+    return out
+
+
+def _card_selection_provenance(value):
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, dict):
+        return {}
+    action_source = value.get("action_source")
+    freshness = value.get("freshness")
+    owner_state = value.get("owner_state")
+    owner_count = _number(value.get("action_owner_count"), integer=True)
+    action_complete = value.get("action_complete")
+    if (action_source not in _CARD_ACTION_SOURCES or freshness not in _CARD_FRESHNESS
+            or owner_state not in _CARD_OWNER_STATES or owner_count is _SKIP
+            or owner_count is None or not 0 <= owner_count <= 257
+            or not isinstance(action_complete, bool)):
+        return {}
+    if ((owner_count == 0) != (action_source == "none")
+            or (action_source == "mixed" and owner_count < 2)
+            or (action_complete and owner_count != 1)):
+        return {}
+    return {
+        "action_source": action_source,
+        "action_owner_count": owner_count,
+        "action_complete": action_complete,
+        "freshness": freshness,
+        "owner_state": owner_state,
+    }
+
+
+def _card_selection_blockers(value) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return list(_CARD_SELECTION_BLOCKERS)
+    allowed = set(_CARD_SELECTION_BLOCKERS)
+    if (len(value) > len(_CARD_SELECTION_BLOCKERS)
+            or any(not isinstance(item, str) or item not in allowed for item in value)
+            or len(set(value)) != len(value)):
+        return list(_CARD_SELECTION_BLOCKERS)
+    present = set(value)
+    return [blocker for blocker in _CARD_SELECTION_BLOCKERS if blocker in present]
+
+
 def _field(card, name: str):
     return card.get(name, _SKIP) if isinstance(card, dict) else getattr(card, name, _SKIP)
 
@@ -456,8 +544,14 @@ def _field_value(card, name: str):
         return _refs(value)
     if name in _INT_LIST_FIELDS:
         return _ints(value)
-    if name == "actionable":
+    if name in {"actionable", "selection_ready"}:
         return value if isinstance(value, bool) else _SKIP
+    if name == "identity":
+        return _card_identity(value)
+    if name == "selection_provenance":
+        return _card_selection_provenance(value)
+    if name == "selection_blockers":
+        return _card_selection_blockers(value)
     if name == "params":
         return _params(value)
     if name == "space":
@@ -833,6 +927,36 @@ def _dto(card, authoritative_id: str) -> dict:
         encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) <= PUBLIC_CARD_MAX_BYTES:
             out = candidate
+    if out.get("selection_ready") is True:
+        identity = out.get("identity")
+        provenance = out.get("selection_provenance")
+        selection_proof = bool(
+            isinstance(identity, dict)
+            and identity.get("kind") == "native"
+            and identity.get("source") == "card_added_receipt"
+            and identity.get("durable") is True
+            and identity.get("receipt_valid") is True
+            and isinstance(provenance, dict)
+            and provenance.get("action_source") == "card_added"
+            and provenance.get("action_owner_count") == 1
+            and provenance.get("action_complete") is True
+            and provenance.get("freshness") == "current"
+            and provenance.get("owner_state") == "none"
+            and out.get("selection_blockers") == []
+        )
+        if not selection_proof:
+            candidate = {
+                **out,
+                "selection_blockers": out.get("selection_blockers") or [
+                    "action_receipt_incomplete"],
+                "selection_ready": False,
+            }
+            candidate_bytes = json.dumps(
+                candidate, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            if len(candidate_bytes) <= PUBLIC_CARD_MAX_BYTES:
+                out = candidate
+            else:
+                out.pop("selection_ready", None)
     concept_source = out.get("concept_source")
     if isinstance(concept_source, dict):
         exact_tags = _exact_ref_projection(_field(card, "concept_tags"))
@@ -880,6 +1004,8 @@ def _selection_int(card, name: str):
 def _selection_key(cards: dict, card_id: str):
     card = cards[card_id]
     status = _field(card, "status")
+    # CODEX AGENT: this is DTO admission/display relevance only. `actionable` is deliberately NOT the
+    # executable queue contract; future Layer-3 selection must require folded `selection_ready`.
     actionable = _field(card, "actionable") is True
     active = isinstance(status, str) and status in {"proposed", "building", "coded", "running"}
     priority = _selection_int(card, "priority")

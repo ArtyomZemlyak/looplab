@@ -567,6 +567,124 @@ def idea_proposal_ref(idea: Idea) -> dict | None:
     return {"v": 1, "digest": digest} if digest is not None else None
 
 
+CARD_ACTION_DIGEST_V1_FIELDS = (
+    "operator", "params", "space", "eval_profile", "parent_id", "parent_ids",
+    "scored_against", "footprint",
+)
+
+
+def card_action_digest(card_id: str, statement: str, action: dict) -> str | None:
+    """Return the exact bounded identity of one card work item.
+
+    This is deliberately narrower than :func:`idea_proposal_digest`: a card is a queued work item,
+    not the aggregate research direction represented by ``Hypothesis``.  The digest binds the stable
+    card id and immutable seed statement to the concrete build action and its freshness/parent anchors.
+    Concept membership is metadata with its own completeness receipt and is intentionally not a
+    prerequisite for execution.
+    """
+    if (not isinstance(card_id, str) or not card_id or card_id != card_id.strip()
+            or len(card_id) > 256 or not card_id.isprintable()
+            or not isinstance(statement, str) or not statement.strip()
+            or statement != statement.strip() or len(statement) > 2_048
+            or not isinstance(action, dict)):
+        return None
+
+    operator = action.get("operator")
+    if (not isinstance(operator, str) or not operator or operator != operator.strip()
+            or len(operator) > 64 or not operator.isprintable()):
+        return None
+
+    def _number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("card action values must be finite numbers")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("card action values must be finite numbers")
+        return 0.0 if number == 0.0 else number
+
+    def _params(value) -> dict[str, float]:
+        if value is None:
+            return {}
+        if (not isinstance(value, dict) or len(value) > 64
+                or any(not isinstance(key, str) or not key or len(key) > 200
+                       or not key.isprintable() for key in value)):
+            raise ValueError("card params are malformed or oversized")
+        return {key: _number(value[key]) for key in sorted(value)}
+
+    def _space(value) -> dict[str, list[float]]:
+        if value is None:
+            return {}
+        if (not isinstance(value, dict) or len(value) > 64
+                or any(not isinstance(key, str) or not key or len(key) > 200
+                       or not key.isprintable() for key in value)):
+            raise ValueError("card search space is malformed or oversized")
+        out: dict[str, list[float]] = {}
+        for key in sorted(value):
+            values = value[key]
+            if not isinstance(values, list) or len(values) > 64:
+                raise ValueError("card search-space values are malformed or oversized")
+            out[key] = [_number(item) for item in values]
+        return out
+
+    def _node_id(value):
+        if value is None:
+            return None
+        if type(value) is not int or not 0 <= value <= (1 << 31) - 1:
+            raise ValueError("card node anchors must be bounded integers")
+        return value
+
+    try:
+        raw_parent_ids = action.get("parent_ids", [])
+        if (not isinstance(raw_parent_ids, list) or len(raw_parent_ids) > 64
+                or len(set(raw_parent_ids)) != len(raw_parent_ids)):
+            return None
+        parent_ids = [_node_id(value) for value in raw_parent_ids]
+        if any(value is None for value in parent_ids):
+            return None
+        parent_id = _node_id(action.get("parent_id"))
+        scored_against = _node_id(action.get("scored_against"))
+        profile = action.get("eval_profile")
+        if (profile is not None and (not isinstance(profile, str) or len(profile) > 256
+                                     or not profile.isprintable())):
+            return None
+        footprint = action.get("footprint")
+        if footprint is not None:
+            footprint = normalize_researcher_footprint(footprint)
+            if footprint is None:
+                return None
+        payload = {
+            "v": 1,
+            "card_id": card_id,
+            "statement": statement,
+            "action": {
+                "operator": operator,
+                "params": _params(action.get("params")),
+                "space": _space(action.get("space")),
+                "eval_profile": profile,
+                "parent_id": parent_id,
+                "parent_ids": parent_ids,
+                "scored_against": scored_against,
+                "footprint": footprint,
+            },
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        return None
+    if len(encoded) > 131_072:
+        return None
+    return "card-action:v1:" + hashlib.sha256(encoded).hexdigest()
+
+
+def card_ownership_receipt(card_id: str, statement: str, action: dict) -> dict | None:
+    """Create the v1 durable ``card_added`` ownership receipt for a concrete work item."""
+    digest = card_action_digest(card_id, statement, action)
+    if digest is None:
+        return None
+    return {"v": 1, "card_id": card_id, "action_digest": digest}
+
+
 class Trial(BaseModel):
     """One configuration evaluated inside an intra-node sweep. Audit/UI data — the node's scalar
     `metric` is set (by the engine) from the best feasible trial, so fold/best-selection are
@@ -795,16 +913,82 @@ class CardConceptSource(BaseModel):
         return self
 
 
+class CardIdentityProvenance(BaseModel):
+    """Bounded proof of where a card work-item identity came from.
+
+    ``native`` is intentionally receipt-based, never inferred from an id's spelling.  Until the
+    engine's mint/link lifecycle writes ``card_added.ownership_receipt``, every hash join, unbound
+    ``card_added`` row, and node-only ``Idea.card_id`` remains a non-selectable shadow projection.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["native", "legacy_hash", "synthesized_shadow"] = "synthesized_shadow"
+    source: Literal[
+        "card_added_receipt", "card_added_unbound", "hypothesis_shadow",
+        "node_statement_hash", "node_card_id", "merge", "unknown",
+    ] = "unknown"
+    durable: bool = False
+    receipt_valid: bool = False
+    action_digest: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _coherent_identity(self) -> "CardIdentityProvenance":
+        native = self.kind == "native"
+        valid_digest = (
+            isinstance(self.action_digest, str)
+            and self.action_digest.startswith("card-action:v1:")
+            and len(self.action_digest) == len("card-action:v1:") + 64
+            and all(char in "0123456789abcdef" for char in self.action_digest[-64:])
+        )
+        if native != (
+                self.source == "card_added_receipt" and self.durable
+                and self.receipt_valid and valid_digest):
+            raise ValueError("native card identity requires one valid durable card_added receipt")
+        if not native and (self.durable or self.receipt_valid or self.action_digest is not None):
+            raise ValueError("shadow card identities cannot claim a durable native receipt")
+        return self
+
+
+CardSelectionBlocker = Literal[
+    "identity_not_native", "action_owner_missing", "action_owner_ambiguous",
+    "action_receipt_incomplete", "freshness_unknown", "freshness_stale",
+    "work_in_flight", "work_terminal", "work_owner_unknown", "card_terminal",
+    "merged_work_items",
+]
+
+
+class CardSelectionProvenance(BaseModel):
+    """Complete, bounded inputs used to derive ``Card.selection_ready``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action_source: Literal["card_added", "node", "mixed", "none"] = "none"
+    action_owner_count: int = Field(default=0, ge=0, le=257)
+    action_complete: bool = False
+    freshness: Literal["current", "stale", "unknown"] = "unknown"
+    owner_state: Literal["none", "in_flight", "terminal", "mixed", "unknown"] = "none"
+
+    @model_validator(mode="after")
+    def _coherent_selection_source(self) -> "CardSelectionProvenance":
+        if (self.action_owner_count == 0) != (self.action_source == "none"):
+            raise ValueError("zero action owners require action_source=none")
+        if self.action_source == "mixed" and self.action_owner_count < 2:
+            raise ValueError("mixed action provenance requires multiple owners")
+        if self.action_complete and self.action_owner_count != 1:
+            raise ValueError("only one exact action owner can be complete")
+        return self
+
+
 class Card(BaseModel):
-    """A first-class hypothesis CARD — the durable, rich unit the Kanban re-architecture is built on
-    (docs/23). It is the SUPERSET of the thin `Hypothesis`: it accretes the substance that lives on
-    Idea/Node (operator, params, footprint, concepts, novelty verdict, cross-run prior, steering
-    context) until a card is ready to run. Layer 1: DERIVED each fold by `_derive_cards` (which MIRRORS
-    `_derive_hypotheses`) and ADVISORY — never read by best-selection, exactly like the hypothesis board
-    today. The `verdict` (open/testing/supported/tested/abandoned) is computed by the SHARED
-    `_evidence_verdict` helper so it is byte-identical to the hash-joined hypothesis; the lifecycle
-    `status` lane is separate. Enrichment fields below the divider are RESERVED here so later layers do
-    not rework the model — they stay at their defaults until Layer 1b populates them."""
+    """One immutable proposal/work item in the target Card queue (docs/23).
+
+    ``Hypothesis`` remains the many-experiment research-direction aggregate. The current Layer-1
+    migration projection also materializes legacy/hash/synthesized Card shadows so old logs retain a
+    useful board, but those rows are advisory and never selection-ready. Only a unique receipt-bound
+    ``card_added`` can establish native work-item identity; future Layer-3 code must consume
+    ``selection_ready``, never infer executability from the compatibility ``actionable`` flag.
+    """
     id: str                                             # engine-minted `card-{k}` (later) or statement hash
     statement: str                                      # the DISPLAY statement (operator-editable in L6)
     # The IMMUTABLE seed statement captured at card_added — the stable statement-hash JOIN key, held
@@ -822,12 +1006,17 @@ class Card(BaseModel):
     # Research verdict (DERIVED via the shared `_evidence_verdict` helper — byte-identical to the
     # hash-joined hypothesis): open | testing | supported | tested | abandoned.
     verdict: str = "open"
-    # Layer 1c: is this card a legitimate candidate for the (future) work queue? DERIVED — False for a
-    # dropped card, a `gated` card (its evidence was all trust-gated/breed-excluded, so it is NOT
-    # re-proposable as fresh — docs/23 decision 28), or an abandoned one; True otherwise (proposed /
-    # running / evaluated). ADVISORY in Layer 1 (nothing reads it until the Layer-3 scorer); it is the
-    # clean exclusion seam so the scorer never has to re-derive "is this card dead?".
+    # Layer-1c compatibility flag for board filtering only: False for dropped/gated/abandoned, True for
+    # proposed/running/evaluated. It deliberately does NOT imply that one fresh executable action exists.
     actionable: bool = True
+    # CODEX AGENT: `actionable` is a compatibility/advisory board flag, never proof that a card is one
+    # executable work item.  Only the receipt-backed, fail-closed seam below may be consumed by the
+    # future Layer-3 queue. `selection_ready` stays False for every legacy/hash/synthesized runtime card.
+    identity: CardIdentityProvenance = Field(default_factory=CardIdentityProvenance)
+    selection_provenance: CardSelectionProvenance = Field(default_factory=CardSelectionProvenance)
+    selection_blockers: list[CardSelectionBlocker] = Field(
+        default_factory=lambda: ["identity_not_native"], max_length=16)
+    selection_ready: bool = False
     evidence: list[int] = Field(default_factory=list)   # node ids that tested it (== node_ids)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # Identity / lineage.
@@ -866,6 +1055,34 @@ class Card(BaseModel):
     # Compatibility scalar for existing clients. Derived only from concept_source.provenance for an exact
     # node owner; proposal-only sources keep it None, and card_enriched cannot assign it independently.
     provenance_tier: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _selection_readiness_is_fail_closed(self) -> "Card":
+        if not self.selection_ready:
+            return self
+        provenance = self.selection_provenance
+        if not (
+            self.identity.kind == "native"
+            and self.identity.durable
+            and self.identity.receipt_valid
+            and provenance.action_source == "card_added"
+            and provenance.action_owner_count == 1
+            and provenance.action_complete
+            and provenance.freshness == "current"
+            and provenance.owner_state == "none"
+            and not self.selection_blockers
+            and self.status == "proposed"
+            and self.verdict == "open"
+            and not self.evidence
+            and not [
+                alias for alias in self.aliases
+                if not self.seed_statement or alias != hypothesis_id(self.seed_statement)
+            ]
+            and self.dropped_reason is None
+            and self.merged_into is None
+        ):
+            raise ValueError("selection_ready requires one fresh, native, unowned work item")
+        return self
 
 
 class ResearchMemo(BaseModel):

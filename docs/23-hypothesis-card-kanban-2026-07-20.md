@@ -1,10 +1,38 @@
 # Hypothesis-Card Kanban re-architecture — design + Layer 1 detail (2026-07-20)
 
-Status: **design finalized, pre-implementation.** Grounded in four exhaustive code maps
-(idea-pipeline · strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review
-(design + adversarial verify) consolidated in **§12 — the authoritative build contract**. The high-level
-plan lives as a private artifact; this is the committed working record and the concrete Layer-1 design.
-**Read §12 first** — it supersedes §3–§8/§11 where they conflict.
+Status: **partial implementation; selection remains deliberately blocked.** Grounded in four exhaustive
+code maps (idea-pipeline · strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer
+mega-review (design + adversarial verify) consolidated in **§12 — the authoritative target contract**.
+The landed-vs-deferred record below is authoritative for current code; §12 describes the target and
+supersedes §3–§8/§11 only as a design, not as a claim that those layers ship today.
+
+## 0.0.1 Current implementation truth (2026-07-21)
+
+| Area | Landed now | Still deferred / blocked |
+|---|---|---|
+| Direction board | `Hypothesis` remains the derived research-direction aggregate and the shipping UI board | no rename or Card UI migration |
+| Card read model | `Card`, `Idea.card_id`, deterministic `_derive_cards`, card event/enrichment projection, exact concept-owner receipt, bounded public DTO | native engine mint/link producer, `node_building.card_id`, lifecycle-specific build receipts |
+| Identity / readiness | receipt-bound `Card.identity`, bounded `selection_provenance`, stable `selection_blockers`, fail-closed `selection_ready` | production emits no `card_added.ownership_receipt`, so current runtime cards are never selection-ready |
+| Concurrency | canonical `eval_parallel`/`llm_parallel` control contract and shared lane-aware LLM broker | footprint scheduler and concurrent card producer/consumer |
+| Selection / UX | none; existing node policies and `HypothesisBoard` are unchanged | Layer 3 scorer, Layer 4 scheduler, Layer 5 speculation/freshness runtime, Layer 6 Card controls/UI |
+
+**Hard blocker:** do not feed `_derive_cards` output to Layer 3 yet. `Card.actionable` is a compatibility
+board flag meaning only “not dropped/gated/abandoned”; it is true for proposed-without-action, running,
+evaluated, and superseded work. It is therefore **not evidence of executability**. A future selector may
+consume only `selection_ready`, which requires all of the following:
+
+1. one unique `card_added` carrying an exact v1 `ownership_receipt` bound to the card id, immutable seed
+   statement, concrete action, parent anchors, resource declaration, and `scored_against` fence;
+2. one complete concrete action owner with a supported operator/parent shape;
+3. `scored_against == state.best_node_id` at fold time;
+4. no linked pending, terminal, failed/superseded, missing, or merged work-item owner.
+
+ID spelling is never the discriminator: even an id that resembles a statement hash is native when its
+ownership receipt is valid, while an unreceipted `card-*` string is only a synthesized shadow. Concept
+membership is independent metadata with its own completeness receipt; absent concept tags do not block
+execution. Until the atomic main-task mint/link lifecycle writes the ownership receipt, normal
+statement-hash cards, unbound `card_added` rows, and node-only `Idea.card_id` rows remain visible for
+audit but fold to `selection_ready=false` with bounded reasons.
 
 ## 0. Why, and the build order
 
@@ -30,7 +58,7 @@ the end so the only genuinely selection-affecting change lands last on a settled
 5. **Execution without idle** — concurrent producer/consumer, speculative pre-build, freshness gate.
 6. **Board UX** — extend the kanban to the full lifecycle + card-steering control events.
 
-Owner decisions locked: card accretes fields until ready (readiness is *derived*, not a field);
+Owner decisions locked: readiness is a derived read-model (`selection_ready`), never event-authoritative;
 footprint = an accreted resource field — **Researcher proposes it, Developer finalizes from code**;
 speculation depth = enough to keep GPUs utilized, freshness gate on; **stable `card_id` immediately**.
 
@@ -113,7 +141,7 @@ foresight's). Land or explicitly defer each.
 
 ## 2. Layer 1 scope + non-goals
 
-**In scope:** a first-class, durable, folded **Card** entity with a stable id; a `_derive_cards`
+**Target scope (not a statement that every item has landed):** a first-class, durable, folded **Card** entity with a stable id; a `_derive_cards`
 projection modeled on `_derive_hypotheses`; new advisory `card_*` events; nodes carry `card_id`; every
 homeless producer output (§7) attached to its card; the card store serialized to the UI (rides the
 existing public dump for free).
@@ -125,9 +153,17 @@ byte-identical to today; the card store is pure additive folded state.
 
 ## 3. The Card model
 
-A new `Card` (pydantic, `core/models.py`) — the union of today's thin `Hypothesis` (`models.py:555-575`)
-and the rich substance that lives on `Idea`/`Node`. `RunState.cards: dict[str, Card]` is **derived**
-each fold by `_derive_cards` (§6), mirroring how `RunState.hypotheses` is derived today.
+The target architecture has two deliberately different identities:
+
+- `Hypothesis` is the research-direction aggregate: it may collect many experiments and verdicts.
+- `Card` is exactly one immutable proposal/work item: its native id owns one action receipt and one
+  lifecycle. Merging directions must not silently merge executable actions.
+
+The currently landed `RunState.cards: dict[str, Card]` is a **migration read model** derived by
+`_derive_cards`. For compatibility it still mirrors hash-joined hypotheses, unions legacy evidence,
+and preserves the earliest action when old aliases merge. Those shadow rows are useful audit data but
+are not native executable Cards: the identity/readiness guard keeps them `selection_ready=false`.
+Layer 3 must remain disabled until the native mint/link lifecycle removes that ambiguity at the writer.
 
 | Card field | Filled by (producer → today's home) | Layer-1 status |
 |---|---|---|
@@ -244,10 +280,10 @@ From map A, these currently evaporate or float in prospective-id lists; Layer 1 
 
 ## 8. Back-compat + golden-replay safety
 
-- `RunState.cards` is `Field(default_factory=dict)` → old logs fold to `{}`; `Idea/Node.card_id`
-  defaults `None`. The golden-replay `model_dump()` gains additive `cards: {}` (+ `card_id: null`) →
-  regenerate the golden snapshot in the same change (documented, single additive diff), like the
-  `buildings` change.
+- `RunState.cards` is `Field(default_factory=dict)`, but an old log that contains
+  `idea.hypothesis`/`hypothesis_added` now derives legacy statement-hash Card shadows. Only old logs
+  with no hypothesis/card inputs fold to `{}`. Those compatibility rows have `identity.kind=legacy_hash`
+  and `selection_ready=false`; `Idea.card_id` still defaults to `None`.
 - No card event is selection-affecting → best-selection, confirm-eligibility, and every
   `pending_nodes()`-keyed guarantee are untouched → `test_options_divergence` / golden stay green.
 - The statement-hash fallback keeps every existing hypothesis-board test passing.
@@ -509,7 +545,8 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
   card against `state.best()`/`rank_by_metric[:2]`/`breedable_nodes()`.
 - `Card.source` enum `{researcher|operator|engine|foresight|novelty|freshness}` + `dropped_reason` +
   `dropped_by{operator|engine|freshness|novelty}` + `merged_into`/`aliases` (cycle-safe via `_canon`).
-  Dropped and merged-away cards are excluded from the actionable queue (L3).
+  Dropped and merged-away cards receive terminal/merge `selection_blockers`; L3 must never treat the
+  broader compatibility `actionable` set as its queue.
 - `scored_against`/`built_against: Optional[int]` staleness scalar recorded IN `card_added`/`card_ranked`
   (= `best_node_id` or event seq the card was scored against); the freshness gate compares it
   deterministically. Reader-default `None` → a card with no fence never speculates.
@@ -659,8 +696,9 @@ then **6**.
 - **1c.** Wire engine-authored `card_dropped` (novelty/freshness; node-less `_intra_batch_dup`) +
   `card_merged`/`_canon` into `_derive_cards` exclusion; derive `status='gated'` for all-breed-
   excluded/trust-gated evidence (distinct from true-open); tolerate a card whose only node terminated
-  `node_failed(reason='superseded')`. *Gate:* advisory only. *Tests:* dropped/merged/gated excluded from
-  the actionable set; gated≠EXPLORE-band; `card_dropped` order-tolerance applied LAST.
+  `node_failed(reason='superseded')`. *Gate:* advisory only. *Tests:* dropped/merged/gated are not
+  `selection_ready` (while compatibility `actionable` retains its documented legacy meaning);
+  gated≠EXPLORE-band; `card_dropped` order-tolerance applied LAST.
 - **2.** `Settings`+`EngineOptions` `eval_parallel`/`llm_parallel` `Optional[int]=None` as the **canonical**
   fields; resolve `_eval_parallel` (None→legacy `max_parallel`, AUTO(0)→`max(1,len(_gpu_ids))`) and
   `_llm_parallel` (None→legacy `parallel_build`, AUTO(0)→`_eval_parallel` for the build lane). `max_parallel`/

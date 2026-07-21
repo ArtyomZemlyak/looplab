@@ -62,8 +62,9 @@ def test_card_replay_journals_are_allowlisted_and_size_bounded():
     assert added["id"] == "card-safe" and added["statement"] == "bounded proposal"
     assert set(added["idea"]) == {
         "operator", "params", "space", "eval_profile", "concept_tags",
-        "_concept_tags_overflow", "_concept_tags_invalid", "parent_ids",
+        "_concept_tags_overflow", "_concept_tags_invalid", "_unknown_action_fields", "parent_ids",
     }
+    assert added["idea"]["_unknown_action_fields"] is True
     assert len(added["idea"]["params"]) <= 64
     assert len(added["idea"]["space"]) <= 64
     assert all(len(values) <= 64 for values in added["idea"]["space"].values())

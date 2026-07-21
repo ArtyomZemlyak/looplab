@@ -222,7 +222,7 @@ EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypo
 # of the thin hypothesis board that later layers turn into the work queue. FOLDED + ADVISORY in Layer 1
 # (never read by best-selection; `_derive_cards` mirrors `_derive_hypotheses`). Main-task-written; NONE
 # are BACKGROUND_APPENDABLE (a monotonic card_id cannot be background-minted — docs/23 decision 29).
-EV_CARD_ADDED = "card_added"                    # thin: id + immutable statement + source (+ later enrich)
+EV_CARD_ADDED = "card_added"                    # id + immutable action/ownership receipt (+ later enrich)
 EV_CARD_MERGED = "card_merged"                  # fold alias cards into a canonical (mirrors hypothesis_merged)
 EV_CARD_DROPPED = "card_dropped"                # engine/operator drop: reason + dropped_by (lifecycle)
 EV_CARD_ENRICHED = "card_enriched"              # Layer 1b: novelty/cross-run/footprint delta (last-write-by-seq)

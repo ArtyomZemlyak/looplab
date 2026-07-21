@@ -26,14 +26,16 @@ from looplab.core.concepts import (
 )
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   verifier_evidence_digest)
-from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
+from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
                      NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      node_concept_event_provenance,
-                     Card, CardConceptSource, Event, Hypothesis, Idea, Node, NodeStatus,
-                     RunState, Trial, hypothesis_id, hypothesis_statement_digest, idea_proposal_digest,
-                     normalize_extra_metrics, normalize_researcher_footprint, run_setup_key)
+                     Card, CardConceptSource, CardIdentityProvenance, CardSelectionProvenance,
+                     Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial, card_action_digest,
+                     card_ownership_receipt, hypothesis_id, hypothesis_statement_digest,
+                     idea_proposal_digest, normalize_extra_metrics, normalize_researcher_footprint,
+                     run_setup_key, valid_researcher_footprint)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
@@ -2131,7 +2133,7 @@ def _bounded_card_action_space(value) -> dict[str, list[float]]:
     return out
 
 
-def _bounded_card_action(value: dict) -> dict:
+def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) -> dict:
     """Copy only the action fields consumed by ``_card_added_snapshot``."""
     out: dict = {}
     operator = _card_replay_text(value.get("operator"), max_chars=64, strip=True)
@@ -2166,7 +2168,34 @@ def _bounded_card_action(value: dict) -> dict:
     parent_id = _card_replay_node_id(value.get("parent_id"))
     if parent_id is not None:
         out["parent_id"] = parent_id
+    if record_unknown_fields:
+        known_fields = {
+            "operator", "params", "space", "eval_profile", "concept_tags", "concepts",
+            "parent_id", "parent_ids",
+        }
+        if any(field not in known_fields for field in value):
+            # CODEX AGENT: retain only the fact that executable meaning was discarded. Copying an
+            # unknown value would defeat the replay bound; forgetting its existence could turn a
+            # lossy future-schema action into a receipt-backed selectable Card.
+            out["_unknown_action_fields"] = True
     return out
+
+
+def _bounded_card_ownership_receipt(value, *, card_id: str | None) -> dict | None:
+    """Retain one exact, constant-size v1 ownership proof and reject every extension."""
+    keys = {"v", "card_id", "action_digest"}
+    if not isinstance(value, dict) or set(value) != keys or card_id is None:
+        return None
+    digest = value.get("action_digest")
+    prefix = "card-action:v1:"
+    if (type(value.get("v")) is not int or value["v"] != 1
+            or value.get("card_id") != card_id
+            or not isinstance(digest, str)
+            or len(digest) != len(prefix) + 64
+            or not digest.startswith(prefix)
+            or any(char not in "0123456789abcdef" for char in digest[len(prefix):])):
+        return None
+    return {"v": 1, "card_id": card_id, "action_digest": digest}
 
 
 def _bounded_card_added_receipt(d: dict) -> dict | None:
@@ -2194,7 +2223,7 @@ def _bounded_card_added_receipt(d: dict) -> dict | None:
     if isinstance(d.get("idea"), dict):
         # An explicit (even empty) idea owns the snapshot in historical replay; retaining that shape keeps
         # a top-level fallback action from silently overriding it after sanitization.
-        rec["idea"] = _bounded_card_action(d["idea"])
+        rec["idea"] = _bounded_card_action(d["idea"], record_unknown_fields=True)
     else:
         rec.update(_bounded_card_action(d))
 
@@ -2224,6 +2253,10 @@ def _bounded_card_added_receipt(d: dict) -> dict | None:
             if valid and isinstance(bounded, dict):
                 steering.append(bounded)
         rec["steering_context"] = steering
+    ownership_receipt = _bounded_card_ownership_receipt(
+        d.get("ownership_receipt"), card_id=card_id)
+    if ownership_receipt is not None:
+        rec["ownership_receipt"] = ownership_receipt
     return rec
 
 
@@ -2266,9 +2299,9 @@ def _bounded_card_drop_receipt(d: dict) -> dict | None:
 
 
 def _on_card_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Hypothesis-card Kanban (docs/23, Layer 1a): a thin card registration (id + immutable statement +
-    # source). Collected here; evidence/verdict/status are DERIVED post-loop in `_derive_cards`. A card
-    # with neither an id nor a statement is meaningless — skip it (mirrors hypothesis_added's guard).
+    # Hypothesis-card Kanban (docs/23): bounded registration plus an optional immutable ownership
+    # receipt. Unreceipted historical rows remain visible shadows; only `_derive_cards` may validate
+    # native identity/readiness. Evidence/verdict/status are derived.
     receipt = _bounded_card_added_receipt(d)
     if receipt is not None:
         # CODEX AGENT: RunState is deep-copied on every incremental snapshot. Never retain Event.data
@@ -3594,6 +3627,92 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     return snapshot, owns_action
 
 
+_CARD_ADDED_ACTION_FIELDS = frozenset({
+    "operator", "params", "space", "eval_profile", "concept_tags", "concepts",
+    "parent_id", "parent_ids", "_concept_tags_overflow", "_concept_tags_invalid",
+})
+
+
+def _card_action_receipt_payload(snapshot: dict) -> dict:
+    """Extract exactly the immutable action subset covered by the v1 ownership digest."""
+    return {field: snapshot.get(field) for field in CARD_ACTION_DIGEST_V1_FIELDS}
+
+
+def _card_added_ownership(
+    d: dict, card_id: str, statement: str, snapshot: dict, *, owns_action: bool,
+) -> tuple[bool, bool, str | None]:
+    """Validate a native identity receipt and whether its action was losslessly represented."""
+    explicit_id = d.get("id")
+    expected = card_ownership_receipt(card_id, statement, _card_action_receipt_payload(snapshot))
+    receipt_valid = bool(
+        isinstance(explicit_id, str)
+        and explicit_id == card_id
+        and expected is not None
+        and d.get("ownership_receipt") == expected
+    )
+    raw_idea = d.get("idea")
+    if not receipt_valid or not owns_action or not isinstance(raw_idea, dict):
+        return receipt_valid, False, expected.get("action_digest") if expected else None
+
+    # CODEX AGENT: the receipt covers the complete executable subset. Unknown Idea members may gain
+    # execution meaning in a later schema, so an old reader cannot silently discard them and still call
+    # the action complete. Concept membership is the sole exception: it is metadata with its own receipt.
+    if not set(raw_idea) <= _CARD_ADDED_ACTION_FIELDS:
+        return True, False, expected["action_digest"]
+    if d.get("footprint") is not None and not valid_researcher_footprint(d.get("footprint")):
+        return True, False, expected["action_digest"]
+    raw_action = {
+        "operator": raw_idea.get("operator"),
+        "params": raw_idea.get("params"),
+        "space": raw_idea.get("space"),
+        "eval_profile": raw_idea.get("eval_profile"),
+        "parent_id": d.get("parent_id", raw_idea.get("parent_id")),
+        "parent_ids": d.get("parent_ids", raw_idea.get("parent_ids", [])),
+        "scored_against": d.get("scored_against"),
+        "footprint": d.get("footprint"),
+    }
+    raw_expected = card_ownership_receipt(card_id, statement, raw_action)
+    action_complete = raw_expected == expected
+    return True, action_complete, expected["action_digest"]
+
+
+def _card_action_from_projection(card: Card) -> dict:
+    return {
+        "operator": card.operator,
+        "params": card.params,
+        "space": card.space,
+        "eval_profile": card.eval_profile,
+        "parent_id": card.parent_id,
+        "parent_ids": card.parent_ids,
+        "scored_against": card.scored_against,
+        "footprint": card.footprint,
+    }
+
+
+def _card_action_has_live_anchors(card: Card, breedable_node_ids: set[int]) -> bool:
+    """Whether the bounded action has one executable operator/parent shape right now."""
+    operator = card.operator
+    parent_ids = list(card.parent_ids or [])
+    if card.parent_id is not None:
+        if parent_ids and parent_ids[0] != card.parent_id:
+            return False
+        if not parent_ids:
+            parent_ids = [card.parent_id]
+    if len(parent_ids) != len(set(parent_ids)):
+        return False
+    if operator == "draft":
+        return not parent_ids
+    if operator in {"improve", "debug"}:
+        expected_parents = 1
+    elif operator == "merge":
+        expected_parents = 2
+    else:
+        return False
+    if len(parent_ids) != expected_parents:
+        return False
+    return all(parent_id in breedable_node_ids for parent_id in parent_ids)
+
+
 def _card_sidecar_subject(st: RunState, d: dict, node_to_card: dict[int, str], *,
                           legacy_reproposed_nodes: set[int] | None = None,
                           cross_run: bool = False) -> str | None:
@@ -3881,6 +4000,24 @@ def _derive_cards(st: RunState) -> None:
         seed_id for seed_id, statement_ids in statements_by_seed_hash.items() if len(statement_ids) > 1
     } | namespace_conflicts
     action_owned_cards: set[str] = set()
+    card_origins: dict[str, str] = {}
+    card_registrations: dict[str, dict] = {}
+    action_owners: dict[str, dict] = {}
+
+    def _record_registration(card_id: str, *, valid: bool, digest: str | None) -> None:
+        row = card_registrations.setdefault(
+            card_id, {"count": 0, "valid_count": 0, "digest": None})
+        row["count"] = min(257, row["count"] + 1)
+        if valid:
+            row["valid_count"] = min(257, row["valid_count"] + 1)
+            row["digest"] = digest if row["valid_count"] == 1 else None
+
+    def _record_action_owner(card_id: str, source: str, *, complete: bool) -> None:
+        row = action_owners.setdefault(
+            card_id, {"count": 0, "sources": set(), "all_complete": True})
+        row["count"] = min(257, row["count"] + 1)
+        row["sources"].add(source)
+        row["all_complete"] = row["all_complete"] and complete
 
     # 1) explicitly-added cards — may start with no evidence. Coerce defensively (engine/control events
     #    arrive verbatim; one malformed entry must not brick every fold). Until the engine mints `card_*`
@@ -3904,7 +4041,7 @@ def _derive_cards(st: RunState) -> None:
             if seed_id in ambiguous_seeds and (not native_row or raw_cid == seed_id):
                 continue
             cid = owner_by_statement.get(statement_id, raw_cid) if raw_cid == seed_id else raw_cid
-            if not cid or len(cid) > 256 or cid in cards:
+            if not cid or len(cid) > 256:
                 continue
             try:
                 at_node = int(d.get("at_node", 0) or 0)
@@ -3913,12 +4050,23 @@ def _derive_cards(st: RunState) -> None:
             if not 0 <= at_node <= (1 << 31) - 1:
                 at_node = 0
             snapshot, owns_action = _card_added_snapshot(d) if native_row else ({}, False)
+            receipt_valid, action_complete, action_digest = (
+                _card_added_ownership(d, cid, stmt, snapshot, owns_action=owns_action)
+                if native_row else (False, False, None)
+            )
+            if native_row:
+                _record_registration(cid, valid=receipt_valid, digest=action_digest)
+                if owns_action:
+                    _record_action_owner(cid, "card_added", complete=action_complete)
+            if cid in cards:
+                continue
             cards[cid] = Card(
                 id=cid, statement=stmt, seed_statement=stmt,
                 source=str(d.get("source") or "human"),   # mirror _derive_hypotheses' default
                 rationale=str(d.get("rationale", ""))[:400], created_at_node=at_node,
                 **snapshot,
             )
+            card_origins[cid] = "card_added_unbound" if native_row else "hypothesis_shadow"
             if owns_action:
                 action_owned_cards.add(cid)
         except Exception:  # noqa: BLE001 — one bad record must not brick the fold
@@ -3943,6 +4091,9 @@ def _derive_cards(st: RunState) -> None:
         cid = owner_by_statement.get(statement_id, raw_cid) if raw_cid == seed_id else raw_cid
         if not cid:
             continue
+        existing_action = action_owners.get(cid)
+        if existing_action is None or "card_added" not in existing_action["sources"]:
+            _record_action_owner(cid, "node", complete=False)
         node_concept_tags, node_concept_source = _card_node_concept_projection(st, n)
         c = cards.get(cid)
         if c is None:
@@ -3956,6 +4107,7 @@ def _derive_cards(st: RunState) -> None:
                      parent_id=(n.parent_ids[0] if n.parent_ids else None),
                      parent_ids=list(n.parent_ids or []))
             cards[cid] = c
+            card_origins[cid] = "node_card_id" if explicit_card_id else "node_statement_hash"
             action_owned_cards.add(cid)
         elif not c.evidence and cid not in action_owned_cards:
             # CODEX AGENT: card_added is intentionally thin. Backfill its missing action block from the
@@ -4037,6 +4189,8 @@ def _derive_cards(st: RunState) -> None:
     if alias:
         folded: dict[str, Card] = {}
         folded_control_ids: dict[str, set[str]] = {}
+        folded_origins: dict[str, str] = {}
+        folded_action_owners: dict[str, dict] = {}
         grouped: dict[str, list[str]] = {}
         for cid in sorted(cards):
             grouped.setdefault(_canon(cid), []).append(cid)
@@ -4072,6 +4226,14 @@ def _derive_cards(st: RunState) -> None:
                 if alias_id != tid
             })
             folded[tid] = tgt
+            folded_origins[tid] = card_origins.get(tid, "merge")
+            owner_rows = [action_owners[cid] for cid in members if cid in action_owners]
+            if owner_rows:
+                folded_action_owners[tid] = {
+                    "count": min(257, sum(row["count"] for row in owner_rows)),
+                    "sources": set().union(*(row["sources"] for row in owner_rows)),
+                    "all_complete": all(row["all_complete"] for row in owner_rows),
+                }
             target_controls = folded_control_ids.setdefault(
                 tid, {tid} if tid not in ambiguous_seeds else set())
             for cid in members:
@@ -4089,6 +4251,8 @@ def _derive_cards(st: RunState) -> None:
                     target_controls.add(alias_id)
         cards = folded
         control_ids = folded_control_ids
+        card_origins = folded_origins
+        action_owners = folded_action_owners
 
     # 3) record-setters (sticky SOTA advancers) — the SAME pure helper the hypotheses use, so a card's
     #    verdict is byte-identical to its hash-joined hypothesis.
@@ -4314,13 +4478,118 @@ def _derive_cards(st: RunState) -> None:
             c.footprint = fp
 
     # 8) LAYER-1c exclusion seam — derive `actionable` from the FINAL status/verdict (after every
-    #    override), so the Layer-3 scorer never re-derives "is this card dead?". A dropped card, a `gated`
-    #    card (evidence all trust-gated/breed-excluded -> not re-proposable as fresh), and an abandoned
-    #    card are excluded; everything else (proposed/running/evaluated) is a legitimate candidate.
-    #    Merged-away (non-canonical) cards are already absent from `cards`, so they are excluded by
-    #    construction. Advisory in Layer 1 — nothing reads it until Layer 3.
+    #    override). This compatibility flag means only "not administratively dead" for the board:
+    #    running/evaluated cards intentionally remain True. It MUST NOT be consumed as proof of
+    #    executability; receipt-backed `selection_ready` below is the future queue seam.
     for c in cards.values():
         c.actionable = c.status not in ("dropped", "gated") and c.verdict != "abandoned"
+
+    # CODEX AGENT: Step 9 fails closed at the architecture boundary. Hypothesis remains a
+    # research-direction aggregate; a selectable Card must be exactly one immutable work item with a
+    # durable `card_added`
+    # ownership receipt. No current production writer emits that receipt, so legacy hash joins, unbound
+    # card_added rows, and node-only card ids remain visible but can never become selection-ready.
+    breedable_card_parent_ids = {node.id for node in st.breedable_nodes()}
+    for cid, c in cards.items():
+        registration = card_registrations.get(cid, {})
+        if (registration.get("count") == 1 and registration.get("valid_count") == 1
+                and isinstance(registration.get("digest"), str)):
+            c.identity = CardIdentityProvenance(
+                kind="native", source="card_added_receipt", durable=True, receipt_valid=True,
+                action_digest=registration["digest"],
+            )
+        else:
+            origin = card_origins.get(cid, "unknown")
+            legacy = origin in {"hypothesis_shadow", "node_statement_hash"}
+            c.identity = CardIdentityProvenance(
+                kind="legacy_hash" if legacy else "synthesized_shadow",
+                source=origin if origin in {
+                    "card_added_unbound", "hypothesis_shadow", "node_statement_hash",
+                    "node_card_id", "merge", "unknown",
+                } else "unknown",
+            )
+
+        owner = action_owners.get(cid, {"count": 0, "sources": set(), "all_complete": False})
+        owner_count = min(257, owner["count"])
+        owner_sources = owner["sources"]
+        if owner_count == 0:
+            action_source = "none"
+        elif len(owner_sources) == 1:
+            action_source = next(iter(owner_sources))
+        else:
+            action_source = "mixed"
+
+        projected_digest = card_action_digest(
+            c.id, c.seed_statement, _card_action_from_projection(c))
+        action_complete = bool(
+            owner_count == 1
+            and owner["all_complete"]
+            and c.identity.kind == "native"
+            and projected_digest == c.identity.action_digest
+            and _card_action_has_live_anchors(c, breedable_card_parent_ids)
+        )
+        if c.scored_against is None or st.best_node_id is None:
+            freshness = "unknown"
+        elif c.scored_against == st.best_node_id:
+            freshness = "current"
+        else:
+            freshness = "stale"
+
+        work_states: set[str] = set()
+        for node_id in c.evidence:
+            node = st.nodes.get(node_id)
+            if node is None:
+                work_states.add("unknown")
+            elif (node.status is NodeStatus.pending and not node.tombstoned
+                  and node.id not in st.aborted_nodes):
+                work_states.add("in_flight")
+            else:
+                work_states.add("terminal")
+        if not work_states:
+            owner_state = "none"
+        elif len(work_states) == 1:
+            owner_state = next(iter(work_states))
+        elif "unknown" in work_states:
+            owner_state = "unknown"
+        else:
+            owner_state = "mixed"
+        c.selection_provenance = CardSelectionProvenance(
+            action_source=action_source,
+            action_owner_count=owner_count,
+            action_complete=action_complete,
+            freshness=freshness,
+            owner_state=owner_state,
+        )
+
+        blockers: list[str] = []
+        if c.identity.kind != "native":
+            blockers.append("identity_not_native")
+        if owner_count == 0:
+            blockers.append("action_owner_missing")
+        elif owner_count > 1:
+            blockers.append("action_owner_ambiguous")
+        if owner_count == 1 and not action_complete:
+            blockers.append("action_receipt_incomplete")
+        if freshness == "unknown":
+            blockers.append("freshness_unknown")
+        elif freshness == "stale":
+            blockers.append("freshness_stale")
+        if owner_state in {"in_flight", "mixed"}:
+            blockers.append("work_in_flight")
+        if owner_state in {"terminal", "mixed"}:
+            blockers.append("work_terminal")
+        if owner_state == "unknown":
+            blockers.append("work_owner_unknown")
+        if c.status in {"dropped", "gated"} or c.verdict == "abandoned":
+            blockers.append("card_terminal")
+        work_item_aliases = [
+            alias_id for alias_id in c.aliases
+            if not c.seed_statement or alias_id != hypothesis_id(c.seed_statement)
+        ]
+        if work_item_aliases:
+            blockers.append("merged_work_items")
+        c.selection_blockers = blockers
+        c.selection_ready = not blockers
 
     # A hypothesis DELETED by the operator (hypothesis_updated status=deleted) is removed from the board
     # entirely; the shadow card must vanish with it (mirrors `_derive_hypotheses`' final filter). Until a
