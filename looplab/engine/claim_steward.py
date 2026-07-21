@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+from looplab.trust.cross_run import cross_run_text
+
 _MAX_PROPOSALS = 10
 _MAX_CLAIMS = 60             # bounded prompt — the most-evidenced / contested claims first
 CLAIM_CURATION_INPUT_SCHEMA = "finalize-claim-curation/v3"
@@ -28,8 +30,15 @@ def _proposal_budget(max_proposals: int) -> int:
 def _bounded_refs(value, *, maximum: int, item_maximum: int) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
-    return [str(x)[:item_maximum] for x in value[:maximum]
-            if isinstance(x, (str, int)) and not isinstance(x, bool)]
+    out = []
+    for raw in value[:maximum]:
+        if not isinstance(raw, (str, int)) or isinstance(raw, bool):
+            continue
+        safe = cross_run_text(
+            raw, max_chars=item_maximum, single_line=True, entropy=True)
+        if safe:
+            out.append(safe)
+    return out
 
 
 def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
@@ -75,8 +84,19 @@ def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
                 "research": {"rows_quarantined": 0},
             }
         payload.append({
-            "id": cid, "statement": statement[:400], "scope": scope[:160], "metric": metric[:160],
-            "epistemic": str(c.get("epistemic") or "inconclusive")[:40],
+            # CODEX AGENT: the opaque claim id remains bound to the raw reviewed identity, while every
+            # persisted evidence string is redacted at the external-provider boundary. The private id map
+            # below still resolves a returned id to the exact statement/scope/metric governance target.
+            "id": cid,
+            "statement": cross_run_text(
+                statement, max_chars=400, single_line=True, entropy=True),
+            "scope": cross_run_text(
+                scope, max_chars=160, single_line=True, entropy=True),
+            "metric": cross_run_text(
+                metric, max_chars=160, single_line=True, entropy=True),
+            "epistemic": cross_run_text(
+                c.get("epistemic") or "inconclusive", max_chars=40,
+                single_line=True, entropy=True),
             "n_support": max(0, n_support), "n_oppose": max(0, n_oppose),
             "support_refs": _bounded_refs(c.get("support"), maximum=12, item_maximum=160),
             "oppose_refs": _bounded_refs(c.get("oppose"), maximum=12, item_maximum=160),

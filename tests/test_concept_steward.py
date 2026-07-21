@@ -74,6 +74,26 @@ def test_steward_uses_opaque_ids_and_keeps_untrusted_labels_out_of_system_prompt
     assert "ignore system" in client.messages[1]["content"]
 
 
+def test_steward_redacts_persisted_secrets_before_external_provider_prompt():
+    secret = "sk-proj-0123456789abcdefghijklmnop"
+    overview, _ = _overview([f"secret/{secret}"])
+    overview["concepts"][0]["runs"][0]["run_id"] = "password=tiny-secret"
+
+    class _Capture(_Client):
+        messages = None
+
+        def complete_tool(self, messages, json_schema):
+            self.messages = messages
+            return self._c
+
+    client = _Capture({"merges": [], "splits": [], "purges": []})
+    propose_concept_curation(overview, client)
+    rendered = json.dumps(client.messages, ensure_ascii=False)
+
+    assert secret not in rendered and "tiny-secret" not in rendered
+    assert "sk-***" in rendered and "password=***" in rendered
+
+
 def test_merge_target_must_be_in_vocabulary():
     # mega-review regression: a merge whose TARGET is not a listed concept is a hallucination -> dropped
     ov, _ = _overview(["data/hn"], ["data/hard-negative-mining"])

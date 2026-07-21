@@ -89,6 +89,28 @@ def test_steward_uses_claim_ids_and_keeps_untrusted_statements_out_of_system_pro
     assert "support_refs" in client.messages[1]["content"]
 
 
+def test_steward_redacts_persisted_secrets_before_external_provider_prompt():
+    secret = "sk-proj-0123456789abcdefghijklmnop"
+    claim = _claim(f"password=tiny-secret {secret} improves recall")
+    claim["support"] = [f"Authorization: Bearer {secret}"]
+    claim["sources"] = ["https://api-user:api-secret@example.test?token=hidden"]
+
+    class _Capture(_Client):
+        messages = None
+
+        def complete_tool(self, messages, json_schema):
+            self.messages = messages
+            return self._d
+
+    client = _Capture([])
+    propose_claim_curation([claim], client)
+    rendered = json.dumps(client.messages, ensure_ascii=False)
+
+    for leaked in (secret, "tiny-secret", "api-user", "api-secret", "token=hidden"):
+        assert leaked not in rendered
+    assert "password=***" in rendered and "Bearer ***" in rendered
+
+
 def test_steward_cannot_ratify_unsupported_or_pin_evidence_free_claim():
     claims = [_claim("unsupported", epistemic="inconclusive", n_support=0, n_oppose=0),
               _claim("refuted", epistemic="refuted", n_support=0, n_oppose=2)]

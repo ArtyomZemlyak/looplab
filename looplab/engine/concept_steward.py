@@ -19,6 +19,8 @@ import hashlib
 import json
 from typing import Optional
 
+from looplab.trust.cross_run import cross_run_text
+
 _MAX_PROPOSALS = 12          # a bounded curation per pass — the steward suggests the highest-value few
 _MAX_GRAPH = 200             # cap the concepts shown to the model (most-explored first) — bounded prompt
 _MAX_RECEIPT_COUNT = 1_000_000_000
@@ -49,13 +51,23 @@ def _concept_prompt_payload(overview: dict) -> tuple[list[dict], dict[str, str]]
         for run in (e.get("runs") or [])[:8]:
             if not isinstance(run, dict):
                 continue
-            evidence_runs.append({"run_id": str(run.get("run_id") or "")[:120],
-                                  "direction": str(run.get("direction") or "")[:8],
+            evidence_runs.append({"run_id": cross_run_text(
+                                      run.get("run_id"), max_chars=120,
+                                      single_line=True, entropy=True),
+                                  "direction": cross_run_text(
+                                      run.get("direction"), max_chars=8,
+                                      single_line=True, entropy=True),
                                   "has_metric": run.get("metric") is not None})
         n_runs = e.get("n_runs")
         n_runs = n_runs if isinstance(n_runs, int) and not isinstance(n_runs, bool) else 0
+        # CODEX AGENT: opaque ids bind model choices to the raw canonical vocabulary; the display label and
+        # run provenance are still persisted cross-run data and must be redacted before leaving for a paid
+        # provider. Keep the private id map raw so a returned id resolves to the exact governance target.
         payload.append({
-            "id": cid, "label": label, "n_runs": max(0, n_runs), "evidence_runs": evidence_runs,
+            "id": cid,
+            "label": cross_run_text(
+                label, max_chars=500, single_line=True, entropy=True),
+            "n_runs": max(0, n_runs), "evidence_runs": evidence_runs,
         })
     return payload, id_to_concept
 
