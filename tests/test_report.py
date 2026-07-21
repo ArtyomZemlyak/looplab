@@ -423,7 +423,9 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
 
 
 def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monkeypatch):
-    """An inline paid result is replayable from its event receipt, not an unreachable job id."""
+    """Every paid result is reachable and consumed, independent of runner scheduling latency."""
+    import time
+
     _build_run(tmp_path, "demo", writer=None)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: {
@@ -436,7 +438,17 @@ def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monk
     for index in range(65):
         result = _refresh_report(
             client, generation=generation, key=f"fast-refresh-{index}").json()
+        # CODEX AGENT: inline_wait is an optimization, not an API guarantee. A loaded Windows runner
+        # may return the durable job receipt even for this trivial worker; consume that same job instead
+        # of pretending scheduling latency changed the report contract or leaking registry capacity.
+        if result.get("status") == "running":
+            for _ in range(500):
+                result = client.get(f"/api/jobs/{result['job_id']}").json()
+                if result.get("status") == "done":
+                    break
+                time.sleep(0.01)
         assert result["ok"] is True
+        assert result["generation"] == generation
 
     assert app.state.looplab.jobs._jobs == {}
 
