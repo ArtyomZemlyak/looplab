@@ -52,6 +52,13 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'collaboration-support',
+              // # CODEX AGENT: Both collaboration entrances use the same bounded comment reader.
+              // One interaction chunk lets them share vocabulary without making it route-eager.
+              test: /[/\\]src[/\\](CollabPanel|CommentsThread|commentsModel|useComments)\.(js|jsx)$/,
+              includeDependenciesRecursively: false,
+            },
+            {
               name: 'vendor-flow',
               // The app adapter and these private graph dependencies are an exact @xyflow
               // co-closure; no non-graph source imports them. One stream shares a gzip dictionary

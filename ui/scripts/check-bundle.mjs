@@ -13,6 +13,9 @@ const named = name => Object.freeze({ name })
 // # CODEX AGENT: Assistant + Attention share one owner-only lazy boundary and always mount together.
 // Measure that real boundary once; public/review reachability must exclude the same canonical root.
 const ownerChrome = source('src/OwnerChrome.jsx')
+// # CODEX AGENT: The comments reader and collaboration shell intentionally share one interaction
+// chunk; use its stable name so route/security checks keep working when Rollup omits source facades.
+const collaboration = named('collaboration-support')
 
 // These are target budgets for the split graph, not a waiver for eager code. The route/panel lazy
 // boundaries have landed; the checker deliberately stays red whenever a working build exceeds a
@@ -88,7 +91,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
     {
       name: 'owner collaboration increment',
-      roots: [source('src/CollabPanel.jsx')],
+      roots: [collaboration],
       // Comments/sharing is independently lazy so review users never pull the owner panel hub.
       // Keep the owner-workspace interaction cheap as comment features grow.
       baselineRoots: [
@@ -100,7 +103,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
     {
       name: 'review collaboration increment',
-      roots: [source('src/CollabPanel.jsx')],
+      roots: [collaboration],
       baselineRoots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx'),
       ],
@@ -129,7 +132,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
     {
       name: 'List defers graph and panel code',
       roots: [entry, named('RunList'), ownerChrome],
-      targets: [named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx')],
+      targets: [named('vendor-flow'), source('src/panels.jsx'), collaboration],
       requireTargets: true,
     },
     {
@@ -137,7 +140,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // Settings.jsx and its shared schema/form are one manual group; Rolldown omits `src` from the
       // grouped dynamic entry, so use its stable chunk name rather than weakening this proof.
       roots: [entry, named('settings-support'), ownerChrome],
-      targets: [named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx')],
+      targets: [named('vendor-flow'), source('src/panels.jsx'), collaboration],
       requireTargets: true,
     },
     {
@@ -148,7 +151,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       ],
       targets: [
         named('RunView'), named('vendor-flow'), source('src/Dock.jsx'),
-        source('src/Inspector.jsx'), source('src/panels.jsx'), source('src/CollabPanel.jsx'),
+        source('src/Inspector.jsx'), source('src/panels.jsx'), collaboration,
       ],
       requireTargets: true,
     },
@@ -157,7 +160,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       roots: [entry, source('src/SharedAssistant.jsx')],
       targets: [
         ownerChrome, source('src/Dock.jsx'),
-        named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx'),
+        named('vendor-flow'), source('src/panels.jsx'), collaboration,
       ],
       requireTargets: true,
     },
@@ -174,7 +177,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'valid review and comments exclude owner-only surfaces',
       roots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx'),
-        source('src/Inspector.jsx'), source('src/Report.jsx'), source('src/CollabPanel.jsx'),
+        source('src/Inspector.jsx'), source('src/Report.jsx'), collaboration,
       ],
       targets: [
         ownerChrome,

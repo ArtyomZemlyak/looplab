@@ -110,16 +110,20 @@ test('the default policy is satisfiable by a fully split route and interaction g
   const sources = [
     'RunList.jsx', 'OwnerChrome.jsx', 'RunView.jsx', 'Dag.jsx',
     'Dock.jsx', 'Inspector.jsx', 'ConceptChipBar.jsx', 'ConceptView.jsx', 'panels.jsx',
-    'CollabPanel.jsx', 'SharedAssistant.jsx', 'Report.jsx', 'ResearchAtlas.jsx',
+    'SharedAssistant.jsx', 'Report.jsx', 'ResearchAtlas.jsx',
   ]
   const graph = {
     'index.html': {
       file: 'assets/entry.js', src: 'index.html', name: 'index', isEntry: true,
-      dynamicImports: [...sources.map(file => `src/${file}`), '_settings-support.js', '_vendor-flow.js'],
+      dynamicImports: [...sources.map(file => `src/${file}`), '_collaboration-support.js',
+        '_settings-support.js', '_vendor-flow.js'],
       css: ['assets/base.css'],
     },
     '_settings-support.js': {
       file: 'assets/settings-support.js', name: 'settings-support', isDynamicEntry: true,
+    },
+    '_collaboration-support.js': {
+      file: 'assets/collaboration-support.js', name: 'collaboration-support', isDynamicEntry: true,
     },
     '_vendor-flow.js': { file: 'assets/vendor-flow.js', name: 'vendor-flow' },
   }

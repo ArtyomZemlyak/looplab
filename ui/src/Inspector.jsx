@@ -12,9 +12,12 @@ import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
-import CommentsThread from './CommentsThread.jsx'
 import { traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail } from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
+
+// # CODEX AGENT: Comments are an explicit Inspector interaction. Keep their independently secured
+// review transport out of the base DAG closure, then load the same component only when this tab opens.
+const CommentsThread = React.lazy(() => import('./CommentsThread.jsx'))
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated

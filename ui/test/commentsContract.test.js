@@ -607,6 +607,10 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
   assert.match(runView, /refreshKey=\{state\?\.comments_revision\}/)
   assert.doesNotMatch(runView, /(?:commentsRevision|refreshKey)=\{seq\}/)
   assert.match(inspector, /refreshKey=\{commentsRevision\}/)
+  assert.match(inspector, /React\.lazy\(\(\) => import\('\.\/CommentsThread\.jsx'\)\)/,
+    'the base DAG must defer comment code until the Inspector Comments interaction')
+  assert.doesNotMatch(inspector, /import CommentsThread from/,
+    'the Inspector route must not restore a static CommentsThread edge')
   assert.match(hook, /refreshKey/)
   assert.match(hook, /commentMatchesSubject/)
   assert.match(inspector, /nodeGeneration=\{n\.attempt\}/)
