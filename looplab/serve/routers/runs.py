@@ -800,6 +800,10 @@ def build_router(srv) -> APIRouter:
     srv.list_runs_fn = list_runs
 
     # ------------------------------------------------------------------ state + time-travel
+    # CODEX AGENT: This is the advertised public Card read contract, but without a response model OpenAPI
+    # cannot expose ``PublicCardsEnvelope``/``cards_projection`` to generated clients. Add a typed state
+    # envelope (with an intentional compatibility extension point for legacy fields) so consumers can
+    # discover and validate the completeness contract instead of reverse-engineering runtime JSON.
     @router.get("/api/runs/{run_id}/state")
     def get_state(run_id: str, seq: Optional[int] = None):
         """Return the bounded public run state.

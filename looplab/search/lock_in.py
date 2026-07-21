@@ -45,6 +45,10 @@ def capability_expansion_due(state, *, streak_threshold: int) -> tuple:
     0)` with no snapshot. The CURRENT streak clears after a successful pivot, so this self-resets. The caller
     gates on the `capability_expansion` flag (this reads only the recorded audit snapshot, never selection)."""
     snaps = getattr(state, "concept_coverage_snapshots", None) or []
+    # CODEX AGENT: The producer de-duplicates against ANY exact projection receipt, but this consumer
+    # checks only the last row. After A→B→A retagging at one node count, cadence reuses A while B stays
+    # last and incorrectly suppresses capability expansion. Reverse-scan for the newest receipt that
+    # satisfies ``snapshot_matches_analytics_projection`` so production and consumption pick one snapshot.
     cs = snaps[-1] if snaps else {}
     if not snapshot_matches_analytics_projection(state, cs):
         return False, None, 0

@@ -1709,6 +1709,10 @@ def _materialize_concept_deltas(
 def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV Phase 2a: the fold only retains the coverage / uncovered-region curve and never selects
     # from it; the live proposal path may later consume the record as a steering cue. at_node dedups resume.
+    # CODEX AGENT: This journal is behavioral, not audit-only: ``capability_expansion_due`` can rewrite
+    # the proposal cue and stamp KIND_EXPAND. Admit a detached, allow-listed, bounded schema and compact
+    # history; retaining raw event data lets malformed/oversized fields steer search and inflate every
+    # fold, owner-state response, and SSE update.
     st.concept_coverage_snapshots.append(d)
 
 def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1887,6 +1891,10 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if conf == 0.0:
             conf = 0.0
         prov = str(ed.get("provenance") or "")
+        # CODEX AGENT: This delimiter is also admitted inside every component, so distinct triples can
+        # collide. Equal-ranked colliders become first-wins and reversing event order changes RunState.
+        # Validate/canonicalize components or key the mapping by an unambiguous tuple/length-prefix before
+        # claiming the explicit-edge reducer is commutative.
         key = "\t".join((src, rel, dst))
         cur = st.concept_edges.get(key)
         # A total order on (confidence, provenance-rank, provenance) makes the winner a pure function of

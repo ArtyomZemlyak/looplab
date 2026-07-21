@@ -1084,6 +1084,10 @@ def public_cards_projection(cards) -> PublicCardsEnvelope:
         return PublicCardsEnvelope(cards={}, cards_projection=metadata)
 
     total = len(cards)
+    # CODEX AGENT: The wire count is bounded, but ``nsmallest`` still traverses every source Card on each
+    # cache-invalidating owner/SSE/review projection. Bound admission upstream or maintain a cached bounded
+    # relevance index with an overflow receipt; an attacker-sized folded map must not make this public read
+    # boundary O(total Cards) CPU despite its small response.
     valid_ids = (key for key in cards if _authoritative_id(key))
     selected = heapq.nsmallest(
         PUBLIC_CARD_MAX_COUNT, valid_ids, key=lambda card_id: _selection_key(cards, card_id))

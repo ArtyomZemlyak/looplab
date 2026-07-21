@@ -127,6 +127,10 @@ class CrossRunTools:
         self._concepts: set[str] = set()      # E2: the current run's concept set (for similar_runs overlap)
         self._concept_projection_status = "complete"
         self._concept_projection_reasons: tuple[str, ...] = ()
+        # CODEX AGENT: Scope construction is fail-open: a forgotten/failed ``bind_state`` leaves the
+        # provider portfolio-wide, and ``bind_state(None)`` silently preserves that exposure. Because the
+        # same class is model-facing and human-facing, require an explicit audience/scope mode at creation;
+        # an unbound agent provider should return no rows rather than inherit CLI-level visibility.
         self._bound = False
         self._capsule_scope_receipt = {
             "scope_complete": True,
@@ -409,6 +413,10 @@ class CrossRunTools:
         # the agent phase — drive_tool_loop does not guard tools.execute).
         try:
             result = self._execute(name, args or {})
+            # CODEX AGENT: Auditability gap: the exact rendered tool result, its scope snapshot, and the
+            # consuming model turn share no durable invocation id. Generic traces cannot prove which
+            # mutable portfolio bytes influenced a later proposal after restart/replay. Persist a bounded
+            # result digest + source watermark and reference that receipt from the resulting decision event.
             # CODEX AGENT: this final boundary covers every current/future tool branch, including a
             # malformed legacy value that bypasses a field-level formatter. Tool results are persisted
             # in traces and fed back to the model, so they are never allowed to carry raw credentials.

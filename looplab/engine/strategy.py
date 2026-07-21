@@ -605,6 +605,10 @@ class StrategyCadenceMixin:
         folded record does not select a node directly, but its explore-stance directive can change future
         Researcher candidates. Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op
         off-cadence / mid-eval / when the flag is off / when neither a client nor fallback skeleton works."""
+        # CODEX AGENT: Contract drift: this implementation uses the seed boundary +
+        # ``concept_retag_every``, while this docstring, configuration.md, core config help, and the
+        # Settings schema still promise ``strategist_every``. Align every operator-facing description so
+        # users see the real freshness and paid-LLM cadence rather than tuning the wrong control.
         if not getattr(self, "_concept_pivot", False) or not self._should_consult_concepts(state):
             return state
         n = len(state.nodes)

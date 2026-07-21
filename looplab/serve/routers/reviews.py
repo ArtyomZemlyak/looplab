@@ -280,6 +280,10 @@ def build_router(srv) -> APIRouter:
                 # The review UI has no history scrubber.  Reject arbitrary historical folds instead
                 # of giving an untrusted recipient an unbounded cache-key/CPU amplification primitive.
                 raise HTTPException(400, "historical snapshots are not available through review links")
+            # CODEX AGENT: ``state_payload`` already computed Cards and their exact completeness receipt.
+            # This second generic scrub can mutate secret-looking Card keys/values without recomputing
+            # ``cards_projection``, so review responses can claim exact data that was redacted. Preserve
+            # the canonical fragment through this scrub or issue a receipt that records review-time loss.
             return _scrub_json(srv.state_payload(rd), omit_keys=_SUMMARY_OMIT_KEYS)
 
     @router.get("/api/review/comments")

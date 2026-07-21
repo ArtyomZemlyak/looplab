@@ -78,6 +78,9 @@ class CrossRunAtlasResponse(_CrossRunResponse):
     n_concepts: int
     n_claims: int
     n_contested: int
+    # CODEX AGENT: These receipts are semantic UI authority, not opaque payloads. Promote their versioned
+    # shapes/invariants (and visible row projections below) to strict Pydantic models so OpenAPI can express
+    # complete/partial/unknown; today the browser duplicates undocumented server equations over ``Any``.
     concept_source: dict[str, Any]
     research_source: dict[str, Any]
     claim_source: dict[str, Any]
