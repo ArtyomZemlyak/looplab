@@ -77,6 +77,10 @@ def docker_gpu_argv(env: Optional[dict], *, runtime: Optional[str] = None) -> li
     supported_runtime = runtime in (None, "", "nvidia")
     if supported_runtime and docker_nvidia_runtime_available():
         return ["--gpus", f"device={devices}"]
+    # CODEX AGENT: this is fail-open after the scheduler has already treated the devices as reserved.
+    # The container then runs without the promised device fence (or without GPU access at all under
+    # runsc), while the engine records an admitted GPU footprint. Explicit GPU work should fail/pause
+    # admission here; only a truly unspecified legacy request can safely use the unpinned fallback.
     if not _DOCKER_GPU_FALLBACK_WARNED:
         why = (f"the configured OCI runtime {runtime!r} cannot expose NVIDIA devices"
                if not supported_runtime else "the Docker daemon has no advertised NVIDIA runtime")

@@ -1099,6 +1099,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # before action selection — so the override is never dropped on a swap iteration. Card mode
             # uses its effective denominator; tombstoned/trust-gated attempts must not inflate capacity.
             # The legacy flag-off branch retains the historical raw-node floor byte-for-byte.
+            # CODEX AGENT: max_nodes is documented and surfaced in UI as the experiment hard ceiling,
+            # but this denominator refunds every gated/tombstoned attempt. A run whose outputs are all
+            # trust-gated can therefore execute indefinitely when no time budget is configured. Keep a
+            # separate raw compute/admission cap; "search capacity" must not erase work already spent.
             _budget_used = card_budget_used(state) if self.card_driven_selection else len(state.nodes)
             self.policy.max_nodes = max(
                 _budget_used,
@@ -1299,6 +1303,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                           {"scores": a["_scores"], "chosen": a.get("_chosen"),
                                            "reason": a.get("_reason")})
                     if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
+                        # CODEX AGENT: widened Card ASHA lanes carry the same survivor receipt on every
+                        # action, so this loop emits N indistinguishable rung_promoted events for one
+                        # halving decision. The UI/audit ledger overcounts promotions; emit the lane
+                        # receipt once, or include the per-action chosen parent in each event.
                         self.store.append(EV_RUNG_PROMOTED,
                                           {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
                     if META_CARD_ID in a:

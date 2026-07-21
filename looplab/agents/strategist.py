@@ -281,6 +281,10 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     if isinstance(lp, int) and not isinstance(lp, bool) and 0 <= lp <= 64:
         out["llm_parallel"] = lp
     lane_limits = strat.get("llm_lane_limits")
+    # CODEX AGENT: the prompt/API call this an atomic replacement map, but rejecting `{}` means an
+    # operator can set limits and can never replace them with the all-unbounded allocation. The HTTP
+    # normalizer and live apply path make the same non-empty check, so resume faithfully preserves an
+    # irreversible setting. Accept an explicit empty map as "clear all lanes" while absence means retain.
     if isinstance(lane_limits, dict) and lane_limits:
         # One allocation is atomic. Reject the whole mapping on an unknown lane or malformed value
         # rather than silently applying a surprising partial paid-call budget. Values stay RAW in the

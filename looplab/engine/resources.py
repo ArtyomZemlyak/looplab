@@ -106,6 +106,10 @@ class ResourceSchedulingMixin:
         total = len(getattr(self, "_gpu_ids", []) or [])
         out = dict(clean)
         if "gpus" in out:
+            # CODEX AGENT: clamping a positive requirement to zero changes "needs a GPU" into a
+            # successful CPU/unpinned admission on a host with no detected devices. That is not a safe
+            # resource clamp: it makes the durable effective footprint disagree with the experiment and
+            # usually burns a full eval before failing. Preserve an unsatisfied state and reject/pause it.
             out["gpus"] = min(out["gpus"], total)
         if isinstance(out.get("gpu_mem_mib"), int):
             requested_gpus = out.get("gpus", 1)
@@ -225,6 +229,10 @@ class ResourceSchedulingMixin:
         # handed out, `_acquire_gpu` returned an unpinned eval instead of blocking.  Preserve that
         # branch byte-for-byte; only an explicit footprint participates in strict admission.
         if gpu_ids is None and request["unspecified"]:
+            # CODEX AGENT: this compatibility branch defeats the new reservation boundary exactly when
+            # the pool is saturated: the extra eval is launched unpinned and can see/use GPUs already
+            # owned by siblings. With max_parallel > GPU count this recreates oversubscription/OOM;
+            # unspecified work must wait, receive an explicit CPU mask, or be capped at pool width.
             gpu_ids = []
             request["pin"] = False
         if gpu_ids is None:

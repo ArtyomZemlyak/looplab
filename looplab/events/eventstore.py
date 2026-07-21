@@ -673,6 +673,11 @@ class EventStore:
             payload = b"".join(
                 orjson.dumps(event.model_dump(mode="json")) + b"\n" for event in events
             )
+            # CODEX AGENT: one write call prevents another writer from interleaving records, but it is
+            # not an all-or-nothing transaction across a process/host crash. A torn payload may leave
+            # several complete leading claims visible and only its last partial line ignored. If callers
+            # require lane atomicity (rather than adjacency), persist one batch envelope/commit marker
+            # and teach replay to ignore every member until that marker is present.
             accepted = False
             try:
                 with open(self.path, "ab") as f:

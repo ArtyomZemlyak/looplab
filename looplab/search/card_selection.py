@@ -329,6 +329,10 @@ def forced_card_actions(
     else:
         seeded = used
     if seeded < seed_target:
+        # CODEX AGENT: the Card selector is bypassed for the entire seed prefix: even ready native
+        # draft Cards are ignored and bare drafts invoke the proposer to mint different work. This
+        # strands pre-populated/operator-prioritized root Cards and contradicts queue ownership; fill
+        # the forced width from matching ready draft Cards before synthesizing only the shortfall.
         width = min(seed_target - seeded, limit - used)
         return [{"kind": "draft"} for _ in range(width)]
     return None
@@ -340,6 +344,10 @@ def _explored_concepts(state: RunState) -> set[str]:
         if not node_counts_toward_card_budget(state, node):
             continue
         tags = state.node_concepts.get(node_id)
+        # CODEX AGENT: node_concepts may be a retained partial/untrusted Part-IV/V projection. Using
+        # it (or falling back to proposer-authored Idea.concepts) turns incomplete taxonomy into a
+        # selection-bearing coverage score. Consult the materialization receipt + provenance and use
+        # only complete authorized membership; otherwise coverage for this node must be unavailable.
         if tags is None:
             tags = node.idea.concepts
         explored.update(tag for tag in tags or [] if isinstance(tag, str) and tag)
