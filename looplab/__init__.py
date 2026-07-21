@@ -75,6 +75,7 @@ _LAYOUT = {
     "atomicio": "core",
     "best_of_n": "search",
     "bg_tasks": "runtime",
+    "card_selection": "search",   # L3: card-queue macro-action selection scorer (flag-gated)
     "classification": "adapters",
     "cli_agent": "agents",
     "comment_projection": "events",
@@ -178,6 +179,7 @@ _LAYOUT = {
     "repo_write_tools": "adapters",
     "report": "serve",
     "research_cadence": "engine",
+    "resources": "engine",   # L4: GPU inventory, footprint clamping, lifecycle-scoped reservations
     "reposcout": "tools",
     "retrieval": "tools",
     "reviews": "serve",
