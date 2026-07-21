@@ -16,6 +16,30 @@ supersedes §3–§8/§11 only as a design, not as a claim that those layers shi
 | Concurrency | canonical `eval_parallel`/`llm_parallel` control contract and shared lane-aware LLM broker | footprint scheduler and concurrent card producer/consumer |
 | Selection / UX | none; existing node policies and `HypothesisBoard` are unchanged | Layer 3 scorer, Layer 4 scheduler, Layer 5 speculation/freshness runtime, Layer 6 Card controls/UI |
 
+### Stage progress ledger (audit baseline `54ab8d60`, 2026-07-21)
+
+`Complete` means every acceptance item in §12.6 is implemented and covered. `Partial` does not mean
+“shipped”: it records useful landed substrate while naming the still-missing contract. Update this table
+in the same commit that changes a stage; never infer completion from a green but narrower test suite.
+
+| Stage | Honest status | Landed commits / evidence | Validation at this baseline | Remaining before `Complete` |
+|---|---|---|---|---|
+| **1a-extract** | **Complete** | `024358f` pure verdict helpers | unchanged golden + `test_verdict_helper`; included in the 4,523-test full pass at `c07b36c6` | none |
+| **1a-model** | **Partial** | `d4dc621` model/read projection; identity/replay hardening through `e66b728c`, `9cff2fbd`, `602a0cf2`, `54ab8d60` | current card/replay/event/golden focused suite green at `54ab8d60` | atomically mint native `card_added` + ownership receipt under `_id_lock`; carry `card_id` in `node_building`; concurrent-draft dedupe and resume coverage |
+| **1b** | **Partial** | `d10bbe1` enrichment schema/projection; concept/public hardening through `b90babd4`, `c2e73d06` | card enrichment, concept truth, public projection, replay bounds green at `54ab8d60` | reserve and forward `last_footprint`; wire bounded Researcher proposal / Developer finalization and structured steering-context producer contracts |
+| **1c** | **Partial** | `015b699` derived exclusion seam; `54ab8d60` fail-closed selection blockers | dropped/merged/gated replay and selection-guard tests green | engine-authored `card_dropped`/`card_merged`; node-less `_intra_batch_dup`; superseded lifecycle producer coverage |
+| **2** | **Partial** | `15df954` canonical axes; `5e871dc5` control hardening; `d9940342` shared lane broker | two-pool/broker/config regression surfaces green in the full pass | Strategist-owned total **and per-lane** allocation, durable/live reconfiguration parity, diagram/docs contract |
+| **4** | **Not started** (substrate only) | `Idea.footprint` exists; `hardware.detect_gpus()` exposes memory | no L4 acceptance suite exists on this baseline | full §12.6 L4: Developer footprint, memory-aware race-free bin-packing, Docker remap/fallback, timeout ceiling, prompts, confirm-path admission |
+| **3** | **Blocked / not started** | `54ab8d60` deliberately makes legacy/shadow cards non-selectable | selection-guard tests prove fail-closed behavior only | flag-gated card scorer, exact forced-prefix/liveness, policy lanes, `Strategy.card_scoring`, budget denominator and fidelity tests |
+| **5a** | **Not started** | L2 broker is prerequisite substrate | existing serial spine remains covered | request-driven producer/consumer task group, durable request/done pair, isolated roles, main-task commit, recovery and quiescence |
+| **5b** | **Not started** | none beyond Card readiness substrate | no speculation/freshness acceptance suite | durable speculative marker, `speculation_depth`, eligibility-set freshness drop, ASHA/merge rules, resume and budget accounting |
+| **6** | **Not started** (public DTO prerequisite landed) | bounded Card DTO in `902cc6d9`, completeness receipts through `c2e73d06` | public projection/API tests green; 596 UI tests + production build green at `c2e73d06` | Card Kanban lanes, four server-stamped controls, operator-wins overlays/CAS, resource clamp, UI/docs/diagram integration |
+
+Validation receipts for the audit: backend full suite **4,523 collected / 0 failed** at `c07b36c6`;
+changed card/replay/API surfaces green through `54ab8d60`; UI **596/596** and production build green;
+`mkdocs build --strict` green. Later stage commits must replace these receipts with checks run on their
+own rebased commit before the row may advance.
+
 **Hard blocker:** do not feed `_derive_cards` output to Layer 3 yet. `Card.actionable` is a compatibility
 board flag meaning only “not dropped/gated/abandoned”; it is true for proposed-without-action, running,
 evaluated, and superseded work. It is therefore **not evidence of executability**. A future selector may
