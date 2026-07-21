@@ -246,6 +246,20 @@ def test_public_dto_allowlists_selection_proof_and_downgrades_incomplete_claims(
     assert hostile["selection_ready"] is False
     assert hostile["selection_blockers"]
 
+    valid_proof = card.model_dump(mode="json")
+    for mutation in (
+        {"status": "running", "evidence": [7]},
+        {"status": "evaluated", "evidence": [7]},
+        {"dropped_reason": "operator rejected it"},
+        {"merged_into": "another-work-item"},
+        {"aliases": ["another-work-item"]},
+    ):
+        contradictory = public_cards({
+            "contradictory": {**valid_proof, "id": "contradictory", **mutation},
+        })["contradictory"]
+        assert contradictory["selection_ready"] is False
+        assert contradictory["selection_blockers"]
+
 
 def test_card_schema_exposes_identity_readiness_and_stable_blockers():
     schema = Card.model_json_schema()

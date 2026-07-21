@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from looplab.core.concepts import normalized_concept_materialization_receipt
+from looplab.core.models import hypothesis_id
 
 
 # CODEX AGENT: these are replay inputs/override journals, not a public read model. Excluding them before
@@ -524,6 +525,29 @@ def _card_selection_blockers(value) -> list[str]:
     return [blocker for blocker in _CARD_SELECTION_BLOCKERS if blocker in present]
 
 
+def _public_selection_lifecycle_is_coherent(card, out: dict) -> bool:
+    """Prove the non-receipt Card invariants before preserving a ready claim on the wire."""
+    evidence = _field(card, "evidence")
+    aliases = _field(card, "aliases")
+    if (not isinstance(evidence, (list, tuple)) or evidence
+            or not isinstance(aliases, (list, tuple)) or len(aliases) > _MAX_ITEMS):
+        return False
+    work_item_aliases = list(aliases)
+    if work_item_aliases:
+        seed_statement = _field(card, "seed_statement")
+        if not isinstance(seed_statement, str) or not seed_statement:
+            return False
+        shadow_id = hypothesis_id(seed_statement)
+        if any(not isinstance(alias, str) or alias != shadow_id for alias in work_item_aliases):
+            return False
+    return bool(
+        out.get("status") == "proposed"
+        and out.get("verdict") == "open"
+        and _field(card, "dropped_reason") is None
+        and _field(card, "merged_into") is None
+    )
+
+
 def _field(card, name: str):
     return card.get(name, _SKIP) if isinstance(card, dict) else getattr(card, name, _SKIP)
 
@@ -943,6 +967,10 @@ def _dto(card, authoritative_id: str) -> dict:
             and provenance.get("freshness") == "current"
             and provenance.get("owner_state") == "none"
             and out.get("selection_blockers") == []
+            # CODEX AGENT: a receipt alone is not the queue boundary. Preserve readiness only when
+            # lifecycle ownership is also exact; hostile/legacy mappings must not publish a running,
+            # evaluated, dropped, or merged Card as executable work.
+            and _public_selection_lifecycle_is_coherent(card, out)
         )
         if not selection_proof:
             candidate = {
