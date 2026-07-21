@@ -233,8 +233,13 @@ def test_latest_research_memo_is_stamped_as_a_structured_card_cue():
 
     host._set_complexity_hint(state, None)
 
+    # HARDENING (547b8d0): the strategy cue records the Strategist's novelty dial on every
+    # proposal, and "balanced" is a first-class NOVELTY_STANCES value (not an "unset" sentinel) —
+    # so the neutral default stamps `{"kind": "strategy", "novelty_stance": "balanced"}` too, giving
+    # the Card a complete stance receipt (balanced-recorded is distinct from stance-absent).
     assert host.researcher._steering_context == [
         {"kind": "research_memo", "ref": memo_id},
+        {"kind": "strategy", "novelty_stance": "balanced"},
     ]
 
 

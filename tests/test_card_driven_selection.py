@@ -290,12 +290,19 @@ def test_eligibility_requires_selection_ready_and_current_operator_anchors():
         "selection_ready": False,
         "selection_blockers": ["freshness_stale"],
     })
-    poisoned_gated = _ready_card("gated", parents=(0,)).model_copy(update={"status": "gated"})
+    # A gated work item is never selection_ready in a real fold (the fail-closed Card validator
+    # forbids gated + selection_ready=True); the eligibility read must still exclude it.
+    poisoned_gated = _ready_card("gated", parents=(0,)).model_copy(
+        update={"status": "gated", "selection_ready": False})
     missing_anchor = _ready_card("missing", parents=(99,))
     state = RunState(
         nodes={0: _node(0)},
-        cards={card.id: card for card in (ready, not_ready, poisoned_gated, missing_anchor)},
+        cards={card.id: card for card in (ready, not_ready, missing_anchor)},
     )
+    # `poisoned_gated` is an INCOHERENT row (gated + selection_ready=True) the fold never mints — the
+    # Card coherence validator now rejects it at RunState construction. Inject it past validation to
+    # prove the pure `_strictly_selection_ready` status recheck still drops it if such a row leaked in.
+    state.cards[poisoned_gated.id] = poisoned_gated
 
     assert [card.id for card in eligible_cards(state, _FallbackPolicy([]))] == ["ready"]
 
@@ -319,8 +326,12 @@ def test_merge_card_requires_both_current_top_two_anchors():
 
 def test_dropped_gated_and_not_ready_cards_are_never_sent_to_a_policy_scorer():
     ready = _ready_card("ready")
-    gated = _ready_card("gated").model_copy(update={"status": "gated"})
-    dropped = _ready_card("dropped").model_copy(update={"dropped_reason": "duplicate"})
+    # Gated/dropped work items are never selection_ready in a real fold — the fail-closed Card
+    # validator (`_selection_readiness_is_fail_closed`) forbids the incoherent gated/dropped +
+    # selection_ready=True state, so build them the way the fold actually produces them.
+    gated = _ready_card("gated").model_copy(update={"status": "gated", "selection_ready": False})
+    dropped = _ready_card("dropped").model_copy(
+        update={"dropped_reason": "duplicate", "selection_ready": False})
     not_ready = _ready_card("not-ready").model_copy(update={"selection_ready": False})
     state = RunState(
         nodes={0: _node(0)},

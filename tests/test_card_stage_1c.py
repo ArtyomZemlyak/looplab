@@ -202,7 +202,17 @@ def test_drop_and_merge_exclusions_are_order_tolerant_and_preserve_legacy_action
     for state in (before, after):
         assert set(state.cards) == {"card-canonical"}
         card = state.cards["card-canonical"]
-        assert card.aliases == ["card-alias"]
+        from looplab.core.models import hypothesis_id
+        # A merge folds the alias card's whole identity closure into the canonical survivor: its
+        # work-item id PLUS both cards' legacy seed-statement hashes, so any old hash-addressed
+        # control resolves to the survivor (hardened in e66b728 "harden replay card identity";
+        # mirrors test_cards.py's `hypothesis_id(a) in canon.aliases`). The pre-hardening
+        # `== ["card-alias"]` was stale — it expected only the work-item id.
+        assert card.aliases == sorted([
+            "card-alias",
+            hypothesis_id("alias direction"),
+            hypothesis_id("canonical direction"),
+        ])
         # Compatibility `actionable` means only "not administratively dead"; a merged work item is
         # deliberately excluded by the strict queue contract without changing that legacy scalar.
         assert card.actionable is True

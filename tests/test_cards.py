@@ -125,7 +125,11 @@ def test_node_less_card_added_preserves_one_tolerant_atomic_action_snapshot():
     assert card.eval_profile == "smoke" and card.concept_tags == ["model/tree"]
     assert card.parent_id == 3 and card.parent_ids == [3] and card.scored_against == 9
     assert card.footprint == {"gpus": 2, "gpu_mem_mib": 8_000}
-    assert card.steering_context == [{"kind": "coverage", "ref": "axis/model"}]
+    # HARDENING (547b8d0): steering_context is now a CLOSED-vocabulary, fail-closed receipt
+    # (normalize_steering_context, core/models.py). The non-dict `1` element — and the unknown
+    # "coverage" kind / non-digest "axis/model" ref — drop the WHOLE snapshot to []; a truthful
+    # lossless receipt never silently keeps a rejected cue.
+    assert card.steering_context == []
 
 
 def test_invalid_non_string_card_id_falls_back_to_statement_hash():

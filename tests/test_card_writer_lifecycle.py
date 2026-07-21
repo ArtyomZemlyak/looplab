@@ -739,7 +739,16 @@ def test_novelty_sidecar_uses_the_final_reused_card_identity(tmp_path, monkeypat
     _start(before_crash)
     before_crash.store.append(EV_CARD_ADDED, _native_card_payload("card-7", idea))
 
-    resumed = _engine(run_dir, developer=_Developer())
+    # Reuse must ride the FRESH-proposal path so it crosses the novelty-admission boundary: a
+    # `preproposed` idea is one the batch pass ALREADY novelty-gated (see
+    # `test_strategist.py::test_serial_draft_improve_and_batch_bind_the_exact_persisted_idea`), so
+    # `_prepare_node_idea` deliberately does NOT re-gate it. Here the Researcher re-proposes the exact
+    # orphan action, `_plan_native_card` reuses card-7, and the gate fires exactly once on that reuse.
+    resumed = _engine(run_dir, idea=idea, developer=_Developer())
+    # The `_native_card_payload` prefix minted card-7 with an EMPTY steering context; neutralize the
+    # complexity hint so the resumed proposal carries the same empty context and the action matches
+    # for reuse (production stamps both the mint and the resume identically, so they match there too).
+    monkeypatch.setattr(resumed, "_set_complexity_hint", lambda *a, **k: None)
     observed_refs: list[dict] = []
 
     def _record_novelty(state, candidate, *, prospective_node_id=None, **kwargs):
@@ -758,7 +767,7 @@ def test_novelty_sidecar_uses_the_final_reused_card_identity(tmp_path, monkeypat
         return candidate
 
     monkeypatch.setattr(resumed, "_apply_novelty_gate", _record_novelty)
-    resumed._create_node({"kind": "draft"}, preproposed=idea)
+    resumed._create_node({"kind": "draft"})
 
     events = resumed.store.read_all()
     assert [event.data["id"] for event in events if event.type == EV_CARD_ADDED] == ["card-7"]

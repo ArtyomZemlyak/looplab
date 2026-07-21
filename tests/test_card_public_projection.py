@@ -90,26 +90,24 @@ def _assert_public_card_payload(payload: dict) -> None:
     assert projection["complete"] is False
     card_projection = projection["items"]["card-safe"]
     assert card_projection["complete"] is False
-    assert {"rationale", "steering_context"} <= card_projection["omissions"].keys()
+    # The durable fold applies normalize_steering_context, whose closed vocabulary rejects the whole
+    # snapshot (unknown ``kind``/``private_note``) and stores ``[]`` — so the public projection sees an
+    # empty, exact steering list, and ``rationale`` (secret-redacted) is the only lossy public field.
+    assert "steering_context" not in card_projection["omissions"]
+    assert {"rationale"} <= card_projection["omissions"].keys()
     card = state["cards"]["card-safe"]
     assert card["statement"] == "a public direction"
     assert card["operator"] == "improve" and card["params"] == {"lr": 0.2}
-    assert card["footprint"] == {"gpus": 2}
-    assert card["novelty_verdict"] == {
-        "grade": "ALLOW", "level": 4, "near_generation": 3, "recommendation": "run",
-    }
-    assert card["steering_context"] == [{
-        "kind": "coverage", "reason": "sk-***", "ref": "axis/model",
-    }]
-    prior = card["cross_run_prior"]
-    assert prior["v"] == 2
-    assert prior["prior_runs_total"] == 2
-    assert prior["prior_runs_omitted"] == 1
-    assert prior["prior_runs_complete"] is False
-    assert prior["concept_source"] == {"partial_capsules": 1, "source_complete": False}
-    assert prior["prior_runs"][0]["source_receipt"] == {
-        "concepts_complete": True, "concepts_total": 1,
-    }
+    # The card_enriched footprint/novelty/cross_run payloads each embedded an unknown ``private_note``
+    # key, so the fold's closed-vocabulary enrichment normalizers (_bounded_card_footprint_enrichment,
+    # _bounded_card_novelty_enrichment, _bounded_card_cross_run_enrichment) reject each one WHOLE rather
+    # than ship a silently-stripped (falsely lossless) subset into the durable Card read model.
+    assert card.get("footprint") is None
+    assert card.get("novelty_verdict") is None
+    assert card.get("cross_run_prior") is None
+    # normalize_steering_context fail-closed on the unknown ``kind``/``private_note`` at fold time, so
+    # the durable Card carries an empty steering snapshot rather than a lossy, secret-bearing one.
+    assert card["steering_context"] == []
     encoded = json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     assert len(encoded) <= PUBLIC_CARD_MAX_BYTES
     raw = json.dumps(payload, ensure_ascii=False)

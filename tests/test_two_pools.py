@@ -117,7 +117,10 @@ def test_strategy_context_reads_the_live_broker_lane_allocation(tmp_path):
 
 
 def test_strategy_context_distinguishes_unbounded_broker_from_build_fanout(tmp_path):
-    e = _engine(tmp_path / "unbounded-ctx", eval_parallel=4)
+    # llm_parallel=0 is startup AUTO: the build fan-out resolves to eval_parallel (4) while the broker
+    # total stays unbounded (None). (Unset llm_parallel is the documented *legacy* path -> fan-out 1;
+    # only the explicit 0=AUTO knob mirrors eval_parallel here — see config.py two-pool contract.)
+    e = _engine(tmp_path / "unbounded-ctx", eval_parallel=4, llm_parallel=0)
     ctx = e._strategy_ctx(RunState())
     assert ctx.llm_parallel == 4
     assert ctx.llm_total is None
