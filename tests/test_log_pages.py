@@ -71,6 +71,38 @@ def test_tail_older_newer_and_generation_fence(tmp_path):
     assert newer["has_more"]["newer"] is False
 
 
+def test_batch_members_are_logical_rows_for_pages_cursors_and_anchors(tmp_path):
+    path = tmp_path / "batched" / "events.jsonl"
+    store = EventStore(path)
+    store.append("run_started", {
+        "run_id": "batched", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append_many([
+        ("timeline_note", {"n": 1}),
+        ("timeline_note", {"n": 2}),
+        ("timeline_note", {"n": 3}),
+    ])
+    assert len(path.read_bytes().splitlines()) == 2
+    pager = EventLogPager()
+
+    tail = pager.page(path, direction="tail", limit=2)
+    assert [event["seq"] for event in tail["events"]] == [2, 3]
+    assert all(event["type"] != "__looplab_event_batch_v1__" for event in tail["events"])
+    assert tail["total_events"] == 4
+    assert tail["range"]["start_index"] == 2
+
+    older = pager.page(
+        path, direction="older", limit=2, cursor=tail["cursors"]["older"],
+        generation=tail["generation"])
+    assert [event["seq"] for event in older["events"]] == [0, 1]
+    newer = pager.page(
+        path, direction="newer", limit=2, cursor=older["cursors"]["newer"],
+        generation=tail["generation"])
+    assert [event["seq"] for event in newer["events"]] == [2, 3]
+    around = pager.page(path, direction="around", anchor_seq=1, limit=3)
+    assert around["matched_seq"] == 1
+    assert [event["seq"] for event in around["events"]] == [0, 1, 2]
+
+
 def test_reset_invalidates_generation_and_cursor(tmp_path):
     path = _seed_run(tmp_path, 5)
     pager = EventLogPager()

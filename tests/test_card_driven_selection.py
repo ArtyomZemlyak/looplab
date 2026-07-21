@@ -140,6 +140,21 @@ def test_forced_prefix_evaluates_every_pending_node_before_budget_or_debug():
     ]
 
 
+def test_forced_seed_prefix_consumes_staged_draft_cards_before_raw_width():
+    state = RunState(cards={
+        "card-a": _ready_card("card-a", operator="draft", parents=()),
+        "card-b": _ready_card("card-b", operator="draft", parents=()),
+    })
+    policy = GreedyTree(n_seeds=3, max_nodes=3, debug_depth=0)
+
+    # Never mix authority kinds in one turn: consume the two concrete receipts first; after they
+    # become Nodes a fresh fold may ask the Researcher for the one remaining raw seed.
+    assert forced_card_actions(state, policy, max_nodes=3) == [
+        {"kind": "draft", "_card_id": "card-a"},
+        {"kind": "draft", "_card_id": "card-b"},
+    ]
+
+
 def test_forced_debug_precedes_card_scoring_and_reuses_matching_ready_card_id():
     state = RunState(
         nodes={
@@ -290,19 +305,16 @@ def test_eligibility_requires_selection_ready_and_current_operator_anchors():
         "selection_ready": False,
         "selection_blockers": ["freshness_stale"],
     })
-    # A gated work item is never selection_ready in a real fold (the fail-closed Card validator
-    # forbids gated + selection_ready=True); the eligibility read must still exclude it.
-    poisoned_gated = _ready_card("gated", parents=(0,)).model_copy(
-        update={"status": "gated", "selection_ready": False})
+    poisoned_gated = _ready_card("gated", parents=(0,)).model_copy(update={
+        "status": "gated",
+        "selection_ready": False,
+        "selection_blockers": ["card_terminal"],
+    })
     missing_anchor = _ready_card("missing", parents=(99,))
     state = RunState(
         nodes={0: _node(0)},
-        cards={card.id: card for card in (ready, not_ready, missing_anchor)},
+        cards={card.id: card for card in (ready, not_ready, poisoned_gated, missing_anchor)},
     )
-    # `poisoned_gated` is an INCOHERENT row (gated + selection_ready=True) the fold never mints — the
-    # Card coherence validator now rejects it at RunState construction. Inject it past validation to
-    # prove the pure `_strictly_selection_ready` status recheck still drops it if such a row leaked in.
-    state.cards[poisoned_gated.id] = poisoned_gated
 
     assert [card.id for card in eligible_cards(state, _FallbackPolicy([]))] == ["ready"]
 
@@ -326,12 +338,17 @@ def test_merge_card_requires_both_current_top_two_anchors():
 
 def test_dropped_gated_and_not_ready_cards_are_never_sent_to_a_policy_scorer():
     ready = _ready_card("ready")
-    # Gated/dropped work items are never selection_ready in a real fold — the fail-closed Card
-    # validator (`_selection_readiness_is_fail_closed`) forbids the incoherent gated/dropped +
-    # selection_ready=True state, so build them the way the fold actually produces them.
-    gated = _ready_card("gated").model_copy(update={"status": "gated", "selection_ready": False})
-    dropped = _ready_card("dropped").model_copy(
-        update={"dropped_reason": "duplicate", "selection_ready": False})
+    gated = _ready_card("gated").model_copy(update={
+        "status": "gated",
+        "selection_ready": False,
+        "selection_blockers": ["card_terminal"],
+    })
+    dropped = _ready_card("dropped").model_copy(update={
+        "status": "dropped",
+        "dropped_reason": "duplicate",
+        "selection_ready": False,
+        "selection_blockers": ["card_terminal"],
+    })
     not_ready = _ready_card("not-ready").model_copy(update={"selection_ready": False})
     state = RunState(
         nodes={0: _node(0)},

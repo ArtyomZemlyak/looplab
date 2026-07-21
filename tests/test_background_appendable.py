@@ -17,7 +17,8 @@ import inspect
 
 from looplab.core.models import Event
 from looplab.events.replay import fold
-from looplab.events.types import (ALL_EVENT_TYPES, BACKGROUND_APPENDABLE, EV_HINT,
+from looplab.events.types import (ALL_EVENT_TYPES, BACKGROUND_APPENDABLE,
+                                   EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_HINT,
                                    EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_LLM_USAGE,
                                    EV_RESEARCH_COMPLETED)
 
@@ -59,6 +60,7 @@ def test_registry_sane():
     assert BACKGROUND_APPENDABLE == frozenset({
         EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE, EV_HYPOTHESIS_MERGED,
     })
+    assert {EV_CARD_BUILD_REQUESTED, EV_CARD_BUILD_DONE}.isdisjoint(BACKGROUND_APPENDABLE)
 
 
 def test_background_events_are_selection_neutral_at_every_position():

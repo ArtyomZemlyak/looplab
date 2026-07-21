@@ -47,8 +47,8 @@ from looplab.events.types import (
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_CARD_ADDED, EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
-    EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_OPERATOR_DROPPED,
-    EV_CARD_RANKED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
+    EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
+    EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
@@ -240,6 +240,10 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # only the JSON boolean true: strings and integers in malformed/legacy rows fail closed to the
     # byte-identical policy/pilot path.
     st.card_driven_selection = d.get("card_driven_selection") is True
+    # A strict bounded integer is required: bools/strings/floats are malformed and must not turn on
+    # speculative execution. Absent on old logs -> 0 -> historical alternating build/eval behavior.
+    _spec_depth = d.get("speculation_depth", 0)
+    st.speculation_depth = (_spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
     # D1: recorded at start so replay applies the same selection rule. Absent in old
     # logs -> False -> byte-identical legacy selection.
     st.holdout_select = bool(d.get("holdout_select", False))
@@ -277,7 +281,7 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if nid is None:
         return
     current = st.nodes.get(nid)
-    if current is not None and (nid in st.aborted_nodes or current.tombstoned):
+    if nid in st.aborted_nodes or (current is not None and current.tombstoned):
         _clear_build_marker(st, d, nid)
         return
     if current is not None and not _generation_matches(current, d):
@@ -290,6 +294,15 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # RunState marker just as the durable card journals do; old node_building rows retain their
         # exact marker shape because the key is absent unless a valid id was recorded.
         marker["card_id"] = card_id
+    if d.get("speculative") is True:
+        card_build_generation = d.get("card_build_generation")
+        if (type(card_build_generation) is int
+                and 0 <= card_build_generation <= _CARD_REPLAY_NODE_ID_MAX):
+            # This is the speculative request epoch, distinct from the Node lifecycle generation
+            # below. Keeping both names prevents a reopened-run request from impersonating another
+            # request merely because every newly-created Node starts at lifecycle generation zero.
+            marker["speculative"] = True
+            marker["card_build_generation"] = card_build_generation
     generation = _event_generation(d)
     if type(generation) is int and generation >= 0:
         marker["generation"] = generation
@@ -327,7 +340,17 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         _clear_build_marker(st, d, nid)
         return
     current = st.nodes.get(nid)
-    if current is not None and (nid in st.aborted_nodes or current.tombstoned):
+    # A generation-less abort may deliberately name the next not-yet-created slot. Only the main
+    # writer can acknowledge that pre-reservation intent with this narrow marker; ordinary late
+    # workers remain inert after an abort, preserving the unknown-abort resurrection fence.
+    materialize_aborted_intent = bool(
+        d.get("materialize_aborted_intent") is True
+        and current is None
+        and nid in st.aborted_nodes
+        and _event_generation(d) is _MISSING
+    )
+    if ((nid in st.aborted_nodes and not materialize_aborted_intent)
+            or (current is not None and current.tombstoned)):
         _clear_build_marker(st, d, nid)
         return
     generation = _event_generation(d)
@@ -339,6 +362,14 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     if current is not None and generation != current.attempt:
         return                       # a late rebuild from a superseded lifecycle
+    speculative = d.get("speculative") is True
+    raw_card_build_generation = d.get("card_build_generation")
+    card_build_generation = (
+        raw_card_build_generation
+        if (speculative and type(raw_card_build_generation) is int
+            and 0 <= raw_card_build_generation <= _CARD_REPLAY_NODE_ID_MAX)
+        else None
+    )
     try:
         n = Node(
             id=nid,
@@ -352,6 +383,8 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             footprint_finalized=d.get("footprint_finalized") is True,
+            speculative=speculative,
+            card_build_generation=card_build_generation,
         )
     except (MemoryError, RecursionError):
         # A RESOURCE glitch is NOT a corrupt-data error: it must fail LOUD, not be swallowed.
@@ -765,7 +798,9 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             _charge_terminal_cost(st, n, d, ctx)
 
 
-_FAILURE_SPIKE_IGNORED_REASONS = {"aborted", "cancelled", "proxy_skipped", "superseded"}
+_FAILURE_SPIKE_IGNORED_REASONS = {
+    "aborted", "cancelled", "card_dropped", "proxy_skipped", "superseded",
+}
 
 
 def _counts_as_current_failure(st: RunState, n: Node) -> bool:
@@ -2408,6 +2443,45 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # arbitrary objects from becoming enormous strings later in `_derive_cards`.
         st.cards_dropped.append(receipt)
 
+
+def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Fold one server-stamped operator priority pin into its last-write-wins map."""
+    card_id = _card_replay_id(d.get("id"))
+    priority = d.get("priority")
+    if (card_id is not None and d.get("source") == "operator" and d.get("pinned") is True
+            and type(priority) is int and 0 <= priority < 256):
+        # Reinsert so dict iteration preserves GLOBAL last-event order even when aliases later merge
+        # several raw ids onto one canonical Card. Plain assignment would retain first-insertion order.
+        st.card_priority_pins.pop(card_id, None)
+        st.card_priority_pins[card_id] = priority
+
+
+def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Fold a display-only edit; the immutable seed/action receipt remains untouched."""
+    card_id = _card_replay_id(d.get("id"))
+    statement = _card_replay_text(
+        d.get("statement"), max_chars=_CARD_REPLAY_STATEMENT_MAX, strip=True)
+    if card_id is not None and statement is not None and d.get("source") == "operator":
+        st.card_operator_edits.pop(card_id, None)
+        st.card_operator_edits[card_id] = {"statement": statement, "source": "operator"}
+
+
+def _on_card_resource_pinned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Fold a quantitative operator override without rewriting receipt-owned ``footprint``."""
+    card_id = _card_replay_id(d.get("id"))
+    if card_id is None or d.get("source") != "operator" or d.get("pinned") is not True:
+        return
+    pin: dict[str, int | str] = {"pinned_by": "operator"}
+    for key in ("gpus", "gpu_mem_mib"):
+        value = d.get(key)
+        if type(value) is int and 0 <= value <= _CARD_REPLAY_NODE_ID_MAX:
+            pin[key] = value
+        elif key in d:
+            return
+    if len(pin) > 1:
+        st.card_resource_pins.pop(card_id, None)
+        st.card_resource_pins[card_id] = pin
+
 def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: a delta onto a card (novelty verdict, cross-run prior, footprint-finalize, steering cues).
     # Collected here; APPLIED last-write-by-envelope-order in `_derive_cards`.
@@ -2540,98 +2614,6 @@ def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if valid:
             metadata["ranked"] = ranked
     st.card_ranking = metadata
-
-
-def _on_card_build_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Layer 5a: OPEN one speculative-build request for a card. Bounds mirror the other card handlers so a
-    # malformed/future row is an honest no-op, never an iterable assumption that could brick replay.
-    raw_id = d.get("card_id")
-    if not isinstance(raw_id, str):
-        return
-    card_id = raw_id.strip()
-    if not card_id or len(card_id) > 256:
-        return
-    entry: dict = {}
-    generation = d.get("generation")
-    if type(generation) is int and 0 <= generation <= (1 << 31) - 1:
-        entry["generation"] = generation
-    at_node = d.get("at_node")
-    if type(at_node) is int and 0 <= at_node <= (1 << 31) - 1:
-        entry["at_node"] = at_node
-    st.card_build_requests[card_id] = entry
-
-
-def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Layer 5a: CLOSE the card's open request (committed speculative node, crash-recovered node, or skip).
-    # Keyed by card id: request and done are main-task-written 1:1 per election cycle and always land
-    # request-before-done in log order, so a plain pop is order-safe. Never resurrects a cleared request.
-    raw_id = d.get("card_id")
-    if not isinstance(raw_id, str):
-        return
-    card_id = raw_id.strip()
-    if card_id:
-        st.card_build_requests.pop(card_id, None)
-
-
-def _card_control_id(d: dict) -> str | None:
-    """Bounded operator-control card id. All four L6 controls key the target on `card_id` (consistent
-    with the sibling build/enrichment events); a malformed/absent id is an honest no-op, never a crash."""
-    return _card_replay_id(d.get("card_id"))
-
-
-def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Layer 6: operator pins a board priority. Overlaid LAST in `_derive_cards` (operator-wins).
-    cid = _card_control_id(d)
-    if cid is None:
-        return
-    priority = d.get("priority")
-    if type(priority) is int and 0 <= priority <= (1 << 31) - 1:
-        st.card_priority_pins[cid] = priority
-
-
-def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Layer 6: operator edits the DISPLAY statement ONLY — the immutable `seed_statement` stays the
-    # hash-join key (docs/23 decision 24), so a paraphrase never un-links the card's evidence.
-    cid = _card_control_id(d)
-    if cid is None:
-        return
-    statement = _card_replay_text(d.get("statement"), max_chars=2_048, strip=True)
-    if statement is not None and statement.isprintable():
-        st.card_operator_edits[cid] = {"statement": statement}
-
-
-def _on_card_resource_pinned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Layer 6: operator pins the footprint. The SERVER already clamped to the detected GPU envelope (400
-    # on out-of-range); the fold applies only sane structural bounds so a corrupt/future row cannot fold an
-    # unschedulable card, and re-clamps idempotently on resume.
-    cid = _card_control_id(d)
-    if cid is None:
-        return
-    pin: dict = {}
-    gpus = d.get("gpus")
-    if type(gpus) is int and 0 <= gpus <= 1024:
-        pin["gpus"] = gpus
-    mem = d.get("gpu_mem_mib")
-    if type(mem) is int and 0 <= mem <= 1_000_000_000:
-        pin["gpu_mem_mib"] = mem
-    if pin:
-        st.card_resource_pins[cid] = pin
-
-
-def _on_card_operator_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Layer 6: operator drop. A DISTINCT event from the engine's `card_dropped` (so the engine's domain
-    # drop is never reclassified as a UI control) that folds into the SAME `cards_dropped` lifecycle
-    # channel keyed on `id`, with server-stamped `dropped_by='operator'` provenance.
-    cid = _card_control_id(d)
-    if cid is None:
-        return
-    receipt: dict = {"id": cid, "dropped_by": "operator"}
-    reason = _card_replay_text(
-        d.get("reason"), max_chars=_CARD_REPLAY_RATIONALE_MAX)
-    if reason is not None:
-        receipt["reason"] = reason
-    st.cards_dropped.append(receipt)
-
 
 def _on_hypothesis_updated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Carries a status override (human/agent drops — or reopens — a line of inquiry).
@@ -3127,6 +3109,60 @@ def _on_fork(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_fork_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.forks_done += 1   # one per processed fork request (gate for replay-safe fulfillment)
 
+
+def _on_card_build_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Fold one main-task speculative build election.
+
+    The request generation is the search epoch observed under ``_id_lock``. A late producer from an
+    earlier epoch may still be given up by a matching done record, but a request itself cannot enter
+    the queue with a stale/forged epoch. The compact normalized record is the durable buffer key.
+    """
+    card_id = _card_replay_id(d.get("card_id"))
+    generation = d.get("generation")
+    if (card_id is None or type(generation) is not int
+            or not 0 <= generation <= _CARD_REPLAY_NODE_ID_MAX
+            or generation != st.search_epoch):
+        return
+    st.card_build_requests.append({"card_id": card_id, "generation": generation})
+
+
+def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Advance exactly one positional Card-build request and retain its successful node link.
+
+    A valid skipped result deliberately advances the counter so producer failure cannot wedge every
+    resume. Unlike the older fork pair, the async producer can race a search-epoch change, so the writer
+    must duplicate the exact request identity and replay advances only the matching current head.
+    Orphan/malformed/mismatched done rows are inert and can never skip a later real request.
+    """
+    request_index = st.card_builds_done
+    request = (st.card_build_requests[request_index]
+               if request_index < len(st.card_build_requests) else None)
+    card_id = _card_replay_id(d.get("card_id"))
+    generation = d.get("generation")
+    if (request is None or card_id != request["card_id"]
+            or type(generation) is not int or generation != request["generation"]):
+        return
+    skipped = d.get("skipped")
+    if skipped in {"producer_failed", "stale"}:
+        st.card_builds_done += 1
+        if skipped == "producer_failed" and card_id not in st.card_build_producer_failed:
+            st.card_build_producer_failed.append(card_id)
+        return
+    if skipped is not None or d.get("speculative") is not True:
+        return
+    node_id = _card_replay_node_id(d.get("node_id"))
+    if node_id is None:
+        return
+    node = st.nodes.get(node_id)
+    if (node is None or node.idea.card_id != card_id
+            or getattr(node, "speculative", False) is not True
+            or getattr(node, "card_build_generation", None) != generation):
+        return
+    # Keep only the exact bounded receipt consumed by depth/freshness recovery. Last write for a node
+    # is harmless and deterministic; first-terminal lifecycle rules still own its actual node state.
+    st.card_builds_done += 1
+    st.speculative_nodes[node_id] = dict(request)
+
 def _on_inject_node(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.inject_requests.append(d)        # operator-authored experiment (manual tree edit)
 
@@ -3284,16 +3320,15 @@ _HANDLERS = {
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,
     EV_HYPOTHESIS_UPDATED: _on_hypothesis_updated,
     EV_CARD_ADDED: _on_card_added,
-    EV_CARD_MERGED: _on_card_merged,
-    EV_CARD_DROPPED: _on_card_dropped,
-    EV_CARD_ENRICHED: _on_card_enriched,
-    EV_CARD_RANKED: _on_card_ranked,
     EV_CARD_BUILD_REQUESTED: _on_card_build_requested,
     EV_CARD_BUILD_DONE: _on_card_build_done,
+    EV_CARD_MERGED: _on_card_merged,
+    EV_CARD_DROPPED: _on_card_dropped,
     EV_CARD_REPRIORITIZED: _on_card_reprioritized,
     EV_CARD_EDITED: _on_card_edited,
     EV_CARD_RESOURCE_PINNED: _on_card_resource_pinned,
-    EV_CARD_OPERATOR_DROPPED: _on_card_operator_dropped,
+    EV_CARD_ENRICHED: _on_card_enriched,
+    EV_CARD_RANKED: _on_card_ranked,
     EV_PROXY_SCORED: _on_proxy_scored,
     EV_BEST_CONFIRMED: _on_best_confirmed,
     EV_RUN_FINISHED: _on_run_finished,
@@ -3980,16 +4015,16 @@ _CARD_ADDED_ACTION_FIELDS = frozenset({
 
 
 def _card_action_receipt_payload(snapshot: dict) -> dict:
-    """Extract exactly the immutable action subset covered by the v1 ownership digest.
-
-    Forward ONLY the fields actually present in the snapshot. ``card_action_digest`` applies each
-    field's documented default for an ABSENT key (notably ``scored_against_empty`` -> ``False``),
-    but a key explicitly set to ``None`` is a different, rejected shape (``type(None) is not bool``).
-    Emitting ``None`` fences for missing fields therefore makes the recomputed digest ``None`` and
-    downgrades a valid native card (whose mint-time receipt used those same defaults) to a
-    synthesized shadow — so omit absent fields instead of coercing them to ``None``.
-    """
-    return {field: snapshot[field] for field in CARD_ACTION_DIGEST_V1_FIELDS if field in snapshot}
+    """Extract exactly the immutable action subset covered by the v1 ownership digest."""
+    # Preserve absence: the v1 digest owns canonical defaults for sparse historical receipts (notably
+    # ``scored_against_empty=False`` and ``parent_ids=[]``). Materialising every missing member as None
+    # changes those semantics and incorrectly demotes a structurally-valid but incomplete native receipt
+    # to a synthesized shadow. Completeness is checked independently below and still fails closed.
+    return {
+        field: snapshot[field]
+        for field in CARD_ACTION_DIGEST_V1_FIELDS
+        if field in snapshot
+    }
 
 
 def _card_added_ownership(
@@ -4083,7 +4118,7 @@ def _card_debuggable_leaf_ids(st: RunState) -> set[int]:
             and not node.tombstoned
             and node.id not in st.aborted_nodes
             and node.id not in has_child
-            and node.error_reason != "idea_rejected"
+            and node.error_reason not in {"idea_rejected", "card_dropped"}
         )
     }
 
@@ -4623,6 +4658,7 @@ def _derive_cards(st: RunState) -> None:
     for seed_id, owner in seed_owner.items():
         if seed_id != owner:
             alias[seed_id] = owner
+    identity_bridge_ids = frozenset(alias)
     merged_stmt: dict[str, str] = {}
     for native_merge, d in (
             [(True, row) for row in st.cards_merged]
@@ -4729,7 +4765,11 @@ def _derive_cards(st: RunState) -> None:
         for alias_id in alias:
             target_id = _canon(alias_id)
             target = folded.get(target_id)
-            if target is not None and alias_id != target_id and alias_id not in target.aliases:
+            # Hash -> native edges are lookup/control bridges, not work items merged into this Card.
+            # Keep them in ``control_ids`` below, but do not leak those automatic spellings through the
+            # public ``Card.aliases`` audit field. Explicit/materialized merge members were added above.
+            if (target is not None and alias_id not in identity_bridge_ids
+                    and alias_id != target_id and alias_id not in target.aliases):
                 target.aliases.append(alias_id)
                 target.aliases.sort()
                 target_controls = folded_control_ids.setdefault(
@@ -4983,30 +5023,32 @@ def _derive_cards(st: RunState) -> None:
     #    regardless of event arrival order). The maps are empty until Layer 6 fills them, so this is a
     #    no-op in Layer 1; reserving it here means Layer 6 needs no `_derive_cards` rewrite. `card_edited`
     #    overlays the DISPLAY statement only — the join key stays `seed_statement` (docs/23 decision 24).
-    # Resolve through `_canon` so an operator control that named a card BEFORE it was merged still lands
-    # on the canonical survivor — a stale board id must not silently drop the operator's override (the
-    # exact decision-27 "operator wins" guarantee this overlay exists to provide).
-    for cid, edit in (st.card_operator_edits or {}).items():
-        c = cards.get(_canon(cid))
+    # Resolve through `_canon` so a control that named a card before it was merged still lands on the
+    # canonical survivor. Bound the stored id first as an additional replay hardening fence.
+    for raw_id, edit in (st.card_operator_edits or {}).items():
+        bounded_id = _card_id(raw_id)
+        c = cards.get(_canon(bounded_id)) if bounded_id is not None else None
         if c is not None and isinstance(edit, dict) and edit.get("statement"):
             c.statement = str(edit["statement"])
-    for cid, pri in (st.card_priority_pins or {}).items():
-        c = cards.get(_canon(cid))
+    for raw_id, pri in (st.card_priority_pins or {}).items():
+        bounded_id = _card_id(raw_id)
+        c = cards.get(_canon(bounded_id)) if bounded_id is not None else None
         if c is not None:
             c.pinned = True
             try:
                 c.priority = int(pri)
             except (TypeError, ValueError):
                 pass
-    for cid, pin in (st.card_resource_pins or {}).items():
-        c = cards.get(_canon(cid))
+    for raw_id, pin in (st.card_resource_pins or {}).items():
+        bounded_id = _card_id(raw_id)
+        c = cards.get(_canon(bounded_id)) if bounded_id is not None else None
         if c is not None and isinstance(pin, dict):
-            fp = dict(c.footprint or {})
-            for k in ("gpus", "gpu_mem_mib"):
-                if k in pin:
-                    fp[k] = pin[k]
-            fp["pinned_by"] = "operator"
-            c.footprint = fp
+            # ``footprint`` participates in the native action digest and MUST remain immutable.
+            # Admission/freshness merge this independent override through effective_card_footprint.
+            c.resource_pin = {
+                **{key: pin[key] for key in ("gpus", "gpu_mem_mib") if key in pin},
+                "pinned_by": "operator",
+            }
 
     # 8) LAYER-1c exclusion seam — derive `actionable` from the FINAL status/verdict (after every
     #    override). This compatibility flag means only "not administratively dead" for the board:

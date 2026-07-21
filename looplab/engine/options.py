@@ -125,6 +125,8 @@ class EngineOptions:
     agent_drives_actions: bool = False   # agent picks the next macro action (within a legal gate)
     # Layer 3: opt-in Card queue owns macro-action selection; false preserves the legacy policy/pilot path.
     card_driven_selection: bool = False
+    # Layer 5: maximum request+committed speculative Card backlog. Zero keeps speculation fully off.
+    speculation_depth: int = 0
     inline_repair: bool = True           # hybrid: triage + repair a crashed node IN PLACE (no new node)
     inline_repair_attempts: int = 0      # max in-place repair retries per node (0 = UNLIMITED)
     inline_repair_stuck_repeat: int = 4  # abandon when the SAME error repeats this many times in a row

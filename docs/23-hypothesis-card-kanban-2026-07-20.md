@@ -1,48 +1,48 @@
-# Hypothesis-Card Kanban re-architecture — design + Layer 1 detail (2026-07-20)
+# Hypothesis-Card Kanban re-architecture — design and implementation ledger (2026-07-20)
 
-Status: **implementation in progress; Layers 1, 2, 3 and 4 are implemented. Card-driven selection is
-available behind its default-off run-start-pinned flag; Layers 5 and 6 remain.** Grounded in four
-exhaustive code maps (idea-pipeline ·
+Status: **Layers 1–6 and the post-review hardening pass are complete; the consolidated
+backend/UI/build/docs revalidation is green and recorded below.
+Card-driven selection remains a default-off, run-start-pinned opt-in; positive-depth speculation is a
+second pinned opt-in that takes effect only when Card-driven selection is enabled.**
+Grounded in four exhaustive code maps (idea-pipeline ·
 strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review consolidated in
-**§12 — the authoritative target contract**. The ledger below is the current implementation truth;
-all implementation tests are intentionally deferred to one final gate after Layers 3/5/6, per owner
-instruction on 2026-07-21.
+**§12 — the authoritative target contract**. The ledger below is the validated implementation truth.
 
 ## 0.0.1 Current implementation truth (2026-07-21)
 
-| Area | Landed now | Still deferred / blocked |
+| Area | Landed now | Remaining |
 |---|---|---|
-| Direction board | `Hypothesis` remains the derived research-direction aggregate and the shipping UI board | Card Kanban migration remains Layer 6 |
-| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection | Layer 5 speculative request/done lifecycle |
-| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint | speculative freshness receipts (Layer 5) and operator controls (Layer 6) |
-| Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim is tail-CAS fenced | Layer 5 counterfactual freshness eligibility for already-claimed speculative work |
-| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation, shared broker, memory-aware GPU pool, lifecycle reservations, Docker remap/fallback, confirm admission | concurrent Card producer/consumer remains Layer 5 |
-| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, atomic batch claim and Strategist-owned scoring; existing node policies remain the flag-off default | Layer 5 speculation/freshness and Layer 6 controls/UI |
+| Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | none |
+| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | none |
+| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays | none |
+| Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
+| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, fail-closed Docker GPU pinning and explicit CPU isolation, confirm admission, isolated Card producer/consumer | none |
+| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, crash-atomic batch claim, durable exact ASHA receipts and Strategist-owned scoring over canonical trusted concept membership; bounded lifecycle lanes; optimistic generation-fenced edit/priority/resource/drop controls | none |
 
-### Stage progress ledger (working baseline after `547b8d0f`, 2026-07-21)
+### Stage progress ledger (implementation working tree, 2026-07-21)
 
-`Complete` means every acceptance item in §12.6 is implemented and has passed the final gate.
-`Implemented; final gate pending` means production code and focused tests exist, but those tests have
-not yet been run because the owner asked for one consolidated test/build pass after all stages. Update
-this table in the same commit that changes a stage.
+`Complete` means every acceptance item in §12.6 is implemented and covered by the final validation
+receipt below. Every stage row is current for this implementation snapshot.
 
-| Stage | Honest status | Landed commits / evidence | Validation at this baseline | Remaining before `Complete` |
+| Stage | Honest status | Landed commits / evidence | Final validation | Remaining |
 |---|---|---|---|---|
-| **1a-extract** | **Complete** | `024358f` pure verdict helpers | unchanged golden + `test_verdict_helper`; included in the prior 4,523-test full pass | none |
-| **1a-model** | **Implemented; final gate pending** | native planner/reservation, ownership receipt, drop-first recovery, parallel preplanning, rerun/inject/ablation linkage | focused lifecycle/replay tests added; not run in this implementation pass | consolidated final gate only |
-| **1b** | **Implemented; final gate pending** | strict enrichment fence/schema; structured steering; live ranking; stable memo/claim/lesson refs; Developer footprint plumbing | focused writer/public/replay/role tests added; not run in this implementation pass | consolidated final gate only |
-| **1c** | **Implemented; final gate pending** | engine-authored drop/merge mirror, node-less duplicate Cards, immediate reconciliation, CAS-safe drop and superseded lifecycle handling | focused Stage-1c/lifecycle tests added; not run in this implementation pass | consolidated final gate only |
-| **2** | **Implemented; final gate pending** | canonical axes, shared lane broker, Strategist `llm_lane_limits`, live/operator reconfiguration, UI/docs/diagram contract | focused broker/strategy/control/UI tests updated; not run in this implementation pass | consolidated final gate only |
-| **4** | **Implemented; final gate pending** | Developer-finalized footprint; timeout ceiling; memory-aware atomic GPU pool; logical/physical remap; lifecycle/confirm admission; Docker probe/fallback; footprint-conditioned prompts | `test_gpu_resources` and related focused tests added; not run in this implementation pass | consolidated final gate only |
-| **3** | **Implemented; final gate pending** | default-off pinned selector; strict scorer and exact forced prefix; effective budget; policy-faithful greedy/population/ASHA lanes; due cadence protection; atomic existing-Card batch claim; `Strategy.card_scoring` and launch/UI surface | focused selector/claim/replay/strategy/options/server/UI tests added; not run in this implementation pass | consolidated final gate only |
-| **5a** | **Substrate landed; core wiring pending** | durable `card_build_requested`/`card_build_done` FOLDED pair + folded `card_build_requests` open-request state (order-safe pop, additive/empty for old logs, golden regenerated); L2 broker and L3 atomic Card claim remain the prerequisite substrate | `test_event_types`/`test_golden_replay`/`test_events_replay`/`test_background_appendable` green; existing serial spine untouched (byte-identical) | request-driven producer/consumer task group, `precoded=` on `_create_node`, election under `_id_lock`, `_serve_card_builds` spine branch, speculative marker, isolated roles, main-task commit, recovery and quiescence, `speculation_depth` knob |
-| **5b** | **Not started** | strict Card readiness and L3 selection set landed | no speculation/freshness acceptance suite | durable speculative marker, `speculation_depth`, counterfactual/include-owned eligibility (the ready-only L3 set is intentionally insufficient), freshness drop, ASHA/merge rules, resume and budget accounting |
-| **6** | **Backend landed; UI pending** | four DISTINCT server-stamped operator controls (`card_reprioritized`/`card_edited`/`card_resource_pinned`/`card_operator_dropped`) folding into the reserved override maps, overlaid LAST through `_canon` (operator-wins across a merge); provenance rejected from the client payload; sane-bound 400 on resource pin. Bounded Card DTO in `902cc6d9` remains the projection prerequisite | focused fold + forgery tests; `test_event_types`/golden/control-policy + data-field guards green | Card Kanban UI lanes (`panels.jsx`), `state_payload` card-trim, exact-envelope resource clamp, `card_enriched`-vs-operator-edit CAS, docs/diagram (config/UI field counts, `agent-architecture.html` board box) |
+| **1a-extract** | **Complete** | `024358f` pure verdict helpers | covered by the consolidated receipt below | none |
+| **1a-model** | **Complete** | native planner/reservation, ownership receipt, drop-first recovery, parallel preplanning, rerun/inject/ablation linkage | covered by the consolidated receipt below | none |
+| **1b** | **Complete** | strict enrichment fence/schema; structured steering; live ranking; stable memo/claim/lesson refs; Developer footprint plumbing | covered by the consolidated receipt below | none |
+| **1c** | **Complete** | engine-authored drop/merge mirror, node-less duplicate Cards, immediate reconciliation, CAS-safe drop and superseded lifecycle handling | covered by the consolidated receipt below | none |
+| **2** | **Complete** | canonical axes, shared lane broker, Strategist `llm_lane_limits`, live/operator reconfiguration, UI/docs/diagram contract | covered by the consolidated receipt below | none |
+| **4** | **Complete** | Developer-finalized footprint; timeout ceiling; memory-aware atomic GPU pool; logical/physical remap; lifecycle/confirm admission; fail-closed Docker GPU pinning plus CPU isolation; footprint-conditioned prompts | covered by the consolidated receipt below | none |
+| **3** | **Complete** | default-off pinned selector; strict scorer and exact forced prefix; effective ranking view under a hard physical reservation ceiling; policy-faithful greedy/population/ASHA lanes with durable exact promotion receipts; due cadence protection; crash-atomic existing-Card batch claim; canonical trusted concept coverage; `Strategy.card_scoring` and launch/UI surface | covered by the consolidated receipt below | none |
+| **5a** | **Complete** | durable exact-head request/done queue; isolated pooled Researcher/Developer; worker-only slow proposal/build buffers; main-task Card/Node commits; producer-failure serial fallback; crash-prefix recovery; terminal-batch outer-cadence boundary | covered by the consolidated receipt below | none |
+| **5b** | **Complete** | static run-pinned depth; live-backlog accounting; counterfactual include-owned selection; pre-scorer and pre-GPU freshness; ASHA/merge/resource fences; stale drop without physical-slot refund; resume and terminal cleanup | covered by the consolidated receipt below | none |
+| **6** | **Complete** | bounded Card lifecycle Kanban + legacy fallback; four command-only server-stamped controls; append-time generation/subject CAS; final operator-wins overlays; immutable-base effective resource pins with resume clamp; exact operator-drop eval cancel; UI/docs/diagram integration | covered by the consolidated receipt below | none |
 
-Previous validation receipt (before this implementation pass): backend **4,523 collected / 0 failed**,
-UI **596/596**, production build and strict MkDocs build green. During this pass only static inspection
-and `git diff --check` are used. One final backend/UI/build/MkDocs gate will replace this receipt after
-all stages are implemented; until then no newly implemented row is marked `Complete`.
+Final validation receipt (2026-07-21): backend **4,775 passed / 40 skipped / 0 failed**
+(all **4,815** cases in the complete four-file-shard partition; only affected shards/cases were rerun
+after test-contract alignment), UI **602/602**, production Vite build green
+(**270 modules transformed**), strict MkDocs build green, and `git diff --check` green. The one
+parallel-load `strict_fsync` timing failure reproduced green in isolation and its complete shard then
+passed **1,293 / 8 skipped** without a code change.
 
 ### Live implementation TODO
 
@@ -50,11 +50,29 @@ all stages are implemented; until then no newly implemented row is marked `Compl
 - [x] Layer 2 — canonical eval/LLM concurrency and named lanes.
 - [x] Layer 3 — Card selection, scoring, policy fidelity and atomic existing-work claim.
 - [x] Layer 4 — footprint-aware resource scheduling and GPU lifecycle reservations.
-- [ ] Layer 5a — concurrent request-driven producer/consumer execution.
-- [ ] Layer 5b — durable speculation plus counterfactual freshness gate.
-- [ ] Layer 6 — Card Kanban, four server-stamped controls and operator-wins overlays.
-- [ ] Final documentation/acceptance audit against every §12.6 item.
-- [ ] One consolidated backend/UI/build/MkDocs gate, fixes, final commit and push to `master`.
+- [x] Layer 5a — concurrent request-driven producer/consumer execution.
+- [x] Layer 5b — durable speculation plus counterfactual freshness gate.
+- [x] Layer 6 — Card Kanban, four server-stamped controls and operator-wins overlays.
+- [x] Final documentation/acceptance audit against every §12.6 item.
+- [x] One consolidated backend/UI/build/MkDocs revalidation after post-review hardening.
+- [x] Final commit and direct push to `master`.
+
+### Post-review hardening receipt
+
+- An explicit `llm_lane_limits: {}` is a durable atomic clear; omission retains the current allocation.
+- `max_nodes + budget_extend.add_nodes` is the hard ceiling for every distinct durable Node reservation,
+  including tombstoned, gated, failed and freshness-dropped attempts and outstanding speculative requests.
+  The Card selector still ranks an effective filtered view, but only `budget_extend` creates new physical
+  capacity. Fork, inject, ablation, serial, parallel and speculative admission share this boundary.
+- Widened and speculative ASHA paths deduplicate exact rung/survivor receipts against the durable log.
+- Positive explicit GPU work remains unavailable on a zero-GPU host; a saturated unspecified parallel
+  request waits instead of launching unpinned. Docker refuses a positive pin it cannot enforce, while an
+  explicit CPU reservation injects `NVIDIA_VISIBLE_DEVICES=void`.
+- `EventStore.append_many` exposes a complete logical batch or none of it after a torn write. EventStore,
+  replay, command observation, scope/report capture, SSE, timeline paging, run caches and maintenance tools
+  expand the bounded storage envelope consistently; generic non-event JSONL readers remain format-agnostic.
+- Coverage scoring consumes only complete authorized current memberships and canonicalizes Card aliases,
+  case and spacing through the same concept-identity projection.
 
 **Resolved Layer-3 safety boundary:** the selector now consumes only `selection_ready`, and the
 existing-Card writer re-folds and claims the complete selected lane under `_id_lock` with a tail CAS.
@@ -75,9 +93,9 @@ membership is independent metadata with its own completeness receipt; absent con
 execution. The native writer produces valid receipts and Layer 3 claims the existing Card without
 re-proposing or minting a replacement. Legacy statement-hash Cards, unbound
 `card_added` rows and node-only `Idea.card_id` rows remain visible for audit and fail closed.
-Layer 5 must not reuse the ready-only selection set verbatim for freshness: once claimed, a Card is
-intentionally in-flight. Its speculative gate therefore needs the counterfactual/include-owned API
-called out in the TODO and Stage 5b row.
+Layer 5 does not reuse the ready-only selection set verbatim for freshness: once claimed, a Card is
+intentionally in-flight. The implemented gate uses the counterfactual/include-owned API plus the exact
+durable `card_build_done → node_id` link before every scorer consult and again before GPU admission.
 
 ## 0. Why, and the build order
 
@@ -92,9 +110,9 @@ The pleasant surprise (map D): the board is **already** a fold projection (`_der
 events); `ui/src/panels.jsx::HypothesisBoard` is a shipping kanban. So this is *extending a
 load-bearing seam*, not building from scratch.
 
-**Build order — do all of it, in 6 layers by dependency + risk** (each self-standing, behind a knob
-whose default == today, each through mega-analysis → build → mega-review → tests → push; risk rises to
-the end so the only genuinely selection-affecting change lands last on a settled base):
+**Build order — do all of it, in 6 layers by dependency + risk** (each self-standing, with additive,
+default-off, or explicit-operator behavior preserving today's no-opt-in path; each through mega-analysis
+→ build → mega-review → tests → push; the authoritative dependency reorder is in §12.6):
 
 1. **Data — the card** (this doc). First-class durable card entity + land every homeless signal.
 2. **Two pools** — split LLM-concurrency (`llm_parallel`) from GPU-concurrency (`eval_parallel`).
@@ -133,7 +151,8 @@ engine-minted monotonic, **main-task-only**, reserved+appended **atomically unde
 (id + statement + source + steering snapshot, all available at proposal) and appended **immediately at
 mint**; heavy enrichment defers to `card_enriched`. NEVER mint → slow work → append (TOCTOU). Resume is
 deterministic (counter = max-over-log + 1). All Layer-1 card events are main-task-written; background
-enrichment (Layer 5) will reserve ids up front under the lock.
+Layer 5 slow workers never reserve ids or append Card lifecycle events: they return bounded in-memory
+proposal/build results and the main task revalidates and commits under the normal lock/CAS boundary.
 
 **`card_id` on `Idea` ONLY (not `Node`).** It flows through `node_created` for free
 (`durable_idea_payload` + replay `Idea(**d["idea"])`). `_derive_cards` links via `idea.card_id`. Never
@@ -263,7 +282,7 @@ the license already granted at `types.py:274-283`) — none are selection-affect
 
 | Event | Bucket | Written by | Models on |
 |---|---|---|---|
-| `card_added` (id, statement, source, footprint-proposal, steering snapshot) | folded, `BACKGROUND_APPENDABLE`-eligible | engine (may be a bg enrich task) | `hypothesis_added` |
+| `card_added` (id, statement, source, footprint-proposal, steering snapshot) | folded, main-task-only | engine main task | `hypothesis_added` |
 | `card_enriched` (novelty verdict / cross-run prior / concept tags / footprint-finalize) | folded, advisory | engine | `hypothesis_updated` |
 | `card_ranked` (priority order) | folded, advisory | engine (foresight) | `hypothesis_ranked` |
 | `card_merged` (alias → canonical) | folded, advisory | engine consolidation | `hypothesis_merged` |
@@ -272,9 +291,9 @@ the license already granted at `types.py:274-283`) — none are selection-affect
 Each new `EV_*` constant goes in `events/types.py`, added to `replay._HANDLERS` (folded), and — for the
 subset written by the concurrent enrichment task — to `BACKGROUND_APPENDABLE` **only after** its
 membership is proven by extending `tests/test_background_appendable.py` (splice-position invariance).
-`tests/test_event_types.py` guards the one-bucket rule. (In Layer 1 we may keep all card events
-main-task-written and defer `BACKGROUND_APPENDABLE` membership to Layer 5 when a background enrich task
-exists — chosen at review time.)
+`tests/test_event_types.py` guards the one-bucket rule. All Card lifecycle events remain main-task-only.
+Layer 5 workers buffer proposal audit intents and computed artifacts; the main task publishes them only
+after the proposal's epoch/parent/best/cue fence still matches.
 
 ## 6. The `_derive_cards` fold projection
 
@@ -390,28 +409,39 @@ drafts too (extends §4); the queue **is the folded log**, never an in-memory `a
 
 The three hardest layers form ONE story, and the sole-writer log is what makes it replay-safe:
 
-- **The queue IS the log.** Producer output = a folded `node_created` linked by `idea.card_id`; consumer
-  input = `fold(read_all()).cards` / `pending_nodes()`. In-flight build = `st.buildings` (a
+- **The durable queue IS the log.** Producer output = a folded `node_created` linked by `idea.card_id`.
+  Consumer input = `fold(read_all()).cards` / `pending_nodes()`. In-flight build = `st.buildings` (a
   `node_building` without its `node_created`); in-flight eval = pending coded nodes; done = terminal.
-  Nothing lives only in memory, so a crash loses nothing and resume is `fold(read_all())`.
+  No queue, selection, ownership, or lifecycle decision lives only in memory, so a crash loses no
+  durable intent and resume is `fold(read_all())`. Recomputable proposal/code artifacts may live in
+  bounded memory buffers and are deliberately regenerated from a durable request or a fresh fenced fold
+  after a crash.
 - **Sole-writer of the speculative `node_created` is the MAIN task.** The background producer coroutine
   fills a pure-Python buffer `_spec_builds[(card_id, generation)]` and writes **no folded event**
   (optionally a fold-ignored `DIAGNOSTIC EV_CARD_BUILT`). This **overrides** the core sub-design's
   "producer appends via the Variant-1 worker-thread seam": `node_created` is selection-affecting and is
   NOT in `BACKGROUND_APPENDABLE`, and the Variant-1 seam is drafts-only (`all(kind=='draft')`,
-  orchestrator.py:1086). Variant-1 stays scoped to the initial all-drafts seed batch.
-- **The producer is strictly request-driven.** The main task elects the next buildable card via the L3
-  scorer and appends `card_build_requested{card_id:K, generation:G}` — ONE durable event that is
+  orchestrator.py:1086). Variant-1 stays scoped to the initial all-drafts seed batch. The separate
+  steady-state raw-proposal worker similarly returns only `_spec_raw_stage_result`; the main task alone
+  revalidates its generation/parents/best/cue/tail fence and appends the staged Card.
+- **The build producer is strictly request-driven.** The main task elects the next buildable Card via the
+  L3 scorer and appends `card_build_requested{card_id:K, generation:G}` — ONE durable event that is
   simultaneously the selection point AND the compute gate (folded, main-task-only, reserved +
   generation-fenced under `_id_lock`; `st.card_build_requests` is a verbatim mirror of `_on_fork`). The
   producer fills exactly `_spec_builds[(K,G)]` for the head request; it never free-selects "the top card"
-  (that would let its choice diverge from the pinned request and wedge the gate forever).
+  (that would let its choice diverge from the pinned request and wedge the gate forever). When no ready
+  Card owns a built-in policy's counterfactual raw create action while an eval is running, an isolated
+  Researcher may prepare that proposal without folded writes; the main task stages the Card under the
+  full fence first and only then elects its exact durable build request. Unsupported custom-policy and
+  ablation lanes, or a rejected/stale proposal, return once to the serial outer boundary.
 - **Producer-failure give-up is mandatory.** An async producer sits between request and done (unlike
   fork, whose work is synchronous), so a crash/timeout would wedge the pipeline and re-wedge on every
   resume. The main-task commit branch `_serve_card_builds` (sibling of `_serve_forced_requests`,
   orchestrator.py:1430) is **crash-recovery-first** (a node with `idea.card_id==K` at gen G already
-  exists → only append `card_build_done`, never double-create), else commits the ready buffer via
-  `_create_node(precoded=…)` under `_id_lock` + `card_build_done{node_id, speculative:true}`, else
+  exists → only append `card_build_done`, never double-create), else reserves the exact
+  `node_building` under the short `_id_lock` tail CAS, commits the ready buffer via the reserved
+  `_create_node(precoded=…)` outside that lock, then appends
+  `card_build_done{node_id, speculative:true}`; otherwise it
   advances the counter with `card_build_done{skipped:'producer_failed'|'stale'}` — mirroring
   `_serve_forced_requests` always appending `fork_done` even on `skipped:'stale_generation'`.
 - **The freshness gate is engine-live, never in fold, and runs BEFORE every scorer consult.** Every
@@ -423,29 +453,36 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
   "strictly rank-1"** (that collapses a population lane to one card and drops N-1 of every N speculative
   builds, re-idling the GPUs the layer exists to fill). A drop reuses the existing
   `node_failed(reason='superseded')` terminal (whitelisted, replay.py:749), honoring one-terminal-per-node.
-- **Quiescence latch is derived purely from folded state + the two semaphores.** Both loops stay alive
+- **Quiescence is derived from folded state plus bounded worker/result/in-flight latches.** The
+  structured session uses scoped task groups; its loops stay alive
   while ANY of {`st.buildings` non-empty, a pending-coded node exists, `card_build_requests` >
-  `card_builds_done`, the producer has a buildable card, any in-flight build/eval}; only when all are
-  simultaneously empty do both return. Structured concurrency joins every build/eval child before the
-  outer loop can finalize (writers are never `abandon_on_cancel`), so no write lands past finalize and the
+  `card_builds_done`, a buffered/in-flight build or raw proposal, the producer has a buildable Card, any
+  in-flight eval}; only when all are simultaneously empty do both return. Structured concurrency joins
+  every build/eval child before the outer loop can finalize (writers are never `abandon_on_cancel`), so
+  no write lands past finalize and the
   **unchanged** confirm/holdout/finalize path (orchestrator.py:1008–1048) runs exactly as today.
 - **Everything is behind defaults that reproduce today byte-for-byte:** `card_driven_selection=False`,
   `speculation_depth=0`, `llm_parallel=None(→1)`, `eval_parallel=None(→max_parallel)`, freshness off,
-  footprint unspecified. `_spawn_research` overlap (orchestrator.py:1585) is preserved inside the new
-  session task group.
+  footprint unspecified. `_spawn_research` overlap (orchestrator.py:1585) is preserved inside the
+  structured session.
 
 ### 12.2 Finalized decisions (30), grouped
 
 **A — Concurrency, sole-writer, resume:**
-1. Queue = the folded log; nothing lives only in memory (§12.1).
-2. Sole-writer of speculative `node_created` = main task; producer fills `_spec_builds` only.
-3. Producer strictly request-driven; `card_build_requested` is the single selection+gate event.
+1. Durable queue/selection/ownership state = the folded log; only bounded, recomputable worker artifacts
+   live in memory (§12.1).
+2. Sole-writer of speculative `node_created` and staged `card_added` = main task; workers fill
+   `_spec_builds` / `_spec_raw_stage_result` only.
+3. Build producer strictly request-driven; `card_build_requested` is the single build-selection+compute
+   gate. A raw fallback proposal is worker-prepared but must be main-task-staged as a fenced Card before
+   that exact Card can receive a request.
 4. Producer-failure give-up branch (`card_build_done{skipped}`) is mandatory; crash-recovery-first.
 5. Producer uses an **isolated** `(researcher, developer)` pair from the L2 `llm_parallel` role pool,
    never `self.developer` (else it cross-wires `last_files`/`last_deleted` with main-task builds/repairs,
    the race at evaluate.py:362–367).
-6. Quiescence latch derived from folded state + the two semaphores; outer finalize path unchanged.
-7. `_spawn_research` overlap preserved inside the new session task group.
+6. Quiescence is derived from folded state plus bounded worker/result/in-flight latches; outer finalize
+   path unchanged.
+7. `_spawn_research` overlap is preserved inside the structured session.
 
 **B — Freshness & scoring:**
 8. Freshness drop = "no longer ELIGIBLE", never "rank-1"; consults L3's current selection SET.
@@ -463,11 +500,13 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     from evaluated members only; the blanket "population→wide speculation" rule holds for
     evolutionary/mcts but not ASHA). Merge-card freshness: fresh iff BOTH parents remain in
     `rank_by_metric[:2]` AND breedable.
-13. **Node-budget denominator excludes tombstoned + freshness-dropped speculative nodes.** Verified:
-    tombstoned nodes stay in `st.nodes` (models.py:435) and every policy budgets on `total=len(nodes)`
-    (policy.py:227), so a drop-rate *d* would silently steal ~*d* of `max_nodes` — a search-quality
-    regression scaling with exactly the divergence rate. Pure fold-adjacent count change (old logs have
-    none → golden stays byte-identical); **landed WITH L5, not after.**
+13. **The effective Card ranking denominator excludes tombstoned/gated/freshness-dropped nodes, while
+    the physical reservation ceiling never refunds them.** Tombstoned attempts remain durable evidence
+    in `st.nodes`; failed `node_building` ids and unmaterialized speculative requests are reservations too.
+    The engine therefore translates the remaining raw slots into the filtered policy view, but every
+    distinct reservation still consumes `max_nodes + budget_extend.add_nodes`. This preserves selection
+    quality inside the capacity the operator actually granted without allowing repeated drop/retry cycles
+    to bypass the hard limit. **Landed across L3/L5 and shared by every Node-creation path.**
 14. Developer-crash sentinel eval race closed structurally: the consumer readiness predicate **excludes**
     nodes whose code is the `'(developer error:'` sentinel (a pure fold-readable `node.code`/`status`
     check); never rely on `node_failed`-wins timing.
@@ -542,8 +581,10 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     `card_edited`, `card_resource_pinned`, operator `card_dropped`). **DIAGNOSTIC** (fold-ignored, splice-
     neutral by construction): `EV_CARD_BUILT`, `EV_CARD_FRESHNESS`, optional
     `EV_SCHED_DECISION`/`EV_GPU_ALLOCATED`. **NONE go in `BACKGROUND_APPENDABLE`.**
-    `card_build_requested`/`card_build_done` are the ONLY selection-affecting new events and form a
-    generation-fenced request/done counter pair (verbatim mirrors of `_on_fork`/`_on_fork_done`).
+    `card_build_requested`/`card_build_done` are the ONLY autonomous L5 queue events that affect
+    selection and form a generation-fenced request/done counter pair (verbatim mirrors of
+    `_on_fork`/`_on_fork_done`). Explicit L6 operator controls may also change later selection/admission;
+    an exact post-start operator drop may cooperatively cancel its already-running eval.
 
 **F — Defaults & Layer 2 scope:**
 30. Layer 2 scope (**revised by owner decisions 6 & 7**): additive `eval_parallel`/`llm_parallel` fields +
@@ -650,8 +691,9 @@ does not force a rework.
 
 ### 12.4 Cross-layer gaps that no single layer owned (now assigned)
 
-1. **Node-budget accounting** for freshness-dropped/tombstoned speculative nodes → assigned to L3
-   (denominator) + landed WITH L5 (decision 13). *Critical.*
+1. **Dual-view Node-budget accounting** → L3 owns the effective filtered ranking denominator; L5 and the
+   common reservation boundary charge tombstoned, gated, failed, freshness-dropped and outstanding
+   speculative reservations to the hard physical ceiling (decision 13). *Critical, resolved.*
 2. **Durable speculative marker** on `node_created` + the `card_build_done`→`node_id` link — required by
    the freshness gate/crash-recovery; keying the gate on "`idea.card_id` is set" would fire on NORMAL
    card-linked nodes and break default byte-identity. A Layer-1 schema item beyond §0.5 → owned by 1a
@@ -671,18 +713,20 @@ does not force a rework.
    `eval_timeout`, clamped to a new Settings hard ceiling (`max_eval_timeout`); footprint carries no timeout.
 8. **confirm/holdout endgame coupling** (L3 empty-condition ⟺ L5 not keeping the queue non-empty past the
    node-budget boundary) → a shared liveness test on the quadratic toy A/B.
-9. **Docker `--gpus` honesty** on GPU-present/no-nvidia-runtime boxes → RESOLVED (owner decision 4): probe
-   runtime, **fall back to unpinned + warn** (never REFUSE — preserves today's CPU-fallback), owned by L4.
+9. **Docker `--gpus` honesty** on GPU-present/no-nvidia-runtime boxes → RESOLVED (owner decision 4): a
+   non-empty scheduler-owned device pin is an enforcement boundary, so probe the daemon/runtime and
+   **fail closed before launch** when it cannot be honored. Explicit CPU reservations override CUDA-image
+   defaults with `NVIDIA_VISIBLE_DEVICES=void`; truly unspecified legacy work remains unpinned.
 
 ### 12.5 Remaining risks (with mitigations)
 
 | Sev | Risk | Mitigation |
 |---|---|---|
-| **crit** | Freshness-dropped speculative nodes burn the `max_nodes` budget (`total=len(nodes)`, tombstoned kept) | Exclude tombstoned + freshness-dropped speculative nodes from the budget denominator; land WITH L5; characterization test that a drop does not decrement remaining budget |
-| **crit** | Over-declared footprint (`gpus>len(_gpu_ids)`, operator pin `gpus=99/0`) wedges the run (all-or-nothing acquire never returns) | Clamp `need=max(0,min(need,len(_gpu_ids)))` + cue; empty-pool→`[]`; clamp operator pin to envelope (400); re-clamp on resume |
-| high | Sole-writer violation if the producer appends `node_created` | Producer fills `_spec_builds` only; main task commits under `_id_lock`; Variant-1 stays seed-only |
+| **crit** | Repeated tombstone/freshness-drop cycles bypass `max_nodes` if the filtered ranking denominator is also used as physical capacity | Keep the filtered effective ranking view, but charge every durable Node id and outstanding request to one hard reservation ceiling; only `budget_extend` adds slots |
+| **crit** | Over-declared footprint (`gpus>len(_gpu_ids)`, operator pin `gpus=99/0`) wedges or silently becomes CPU work | Clamp positive requests to a non-empty pool envelope; on a zero-GPU host preserve the positive unsatisfied request; explicit `gpus=0` is the only CPU declaration; re-clamp operator pins on resume |
+| high | Sole-writer violation if a worker appends `card_added`/`node_created` | Workers fill only bounded `_spec_builds`/`_spec_raw_stage_result`; main task performs the short reservation/staging CAS and commits the reserved lifecycle; Variant-1 stays seed-only |
 | high | Freshness keyed on "rank-1" collapses the population lane + re-idles GPUs | Drop only on merged/dropped/footprint-miss/not-in-selection-SET; L3 exposes its live selection set |
-| high | Producer-selection ↔ durable-request divergence, or async producer crash, wedges the pipeline + every resume | Producer strictly request-driven; main-task give-up branch appends `card_build_done{skipped}` |
+| high | Build-selection ↔ durable-request divergence, or async build-producer crash, wedges the pipeline + every resume | Build producer strictly request-driven; raw proposals must be staged before election; main-task give-up branch appends `card_build_done{skipped}` |
 | high | Developer-crash sentinel eval race (consumer dispatches on a `'(developer error:'` node) | Exclude sentinel-code nodes from the consumer readiness predicate (fold-readable check) |
 | high | Early-finish + repair-starvation under L3 (non-forced `[]` → confirm with budget unspent; dropped `debug_action` starves a failed leaf) | `card_next_actions` never non-forced `[]` while budget remains (fall back to `next_actions`); bake `debug_action` into the forced prefix; liveness test reaching confirm at the same budget as the serial spine |
 | med | `eval_parallel` mis-modeled as GPU inventory re-seeds `--gpus 2`; defaulted `gpus=1` pins a serial DataParallel run | `eval_parallel` = outer ceiling only; pack against `_free_gpus`(+mem); UNSPECIFIED = today's per-branch behavior |
@@ -693,9 +737,10 @@ does not force a rework.
 
 ### 12.6 Implementation stages (the ordered build plan)
 
-Dependency- and risk-ordered. Each stage is behind a flag/default whose value == today; risk rises to the
-end so the only genuinely selection-affecting change (L3) lands on a settled base, and resources (L4) are
-settled before selection consumes them. **Note the reorder vs §0's 1→6:** the split Layer 1 (1a-extract →
+Dependency- and risk-ordered. Each autonomous stage is behind a flag/default whose value == today; L3 is
+the baseline selector replacement, while positive-depth L5 execution and L6 operator commands are
+separately gated. Resources (L4) are settled before any of them consume the envelope. **Note the reorder
+vs §0's 1→6:** the split Layer 1 (1a-extract →
 1a-model → 1b → 1c), then **2 → 4 → 3** (resources before the selection change, since L3 population lanes
 need `eval_parallel` and footprint-fit), then **5a → 5b** (concurrent core, then speculation+freshness),
 then **6**.
@@ -709,9 +754,9 @@ then **6**.
 | 5 | **2** — two independent concurrency pools (knob split, no overlap yet) | no | med | — (orthogonal) |
 | 6 | **4** — agent-declared footprint + mem-aware bin-packing admission | no | high | 1b, 2 |
 | 7 | **3** — card-driven selection scorer (**CHANGES SELECTION**, flag-gated) | **yes** | high | 1a-model, 1b, 1c, 2 |
-| 8 | **5a** — concurrent producer/consumer core (two pools overlap, `speculation_depth=0`) | no (default) | high | 2, 3, 4 |
-| 9 | **5b** — pre-launch freshness gate + speculation-depth enablement | no (default) | high | 5a, 4, 3 |
-| 10 | **6** — board UX (card Kanban) + operator card-steering | no (advisory) | med | 1a-model, 1b, 1c, 3, 4, 5b |
+| 8 | **5a** — concurrent producer/consumer substrate (strictly inactive at `speculation_depth=0`) | no (default) | high | 2, 3, 4 |
+| 9 | **5b** — pre-launch freshness gate + speculation-depth enablement | yes, only with Card selection + positive depth | high | 5a, 4, 3 |
+| 10 | **6** — board UX (card Kanban) + operator card-steering | yes, only on explicit operator command | med | 1a-model, 1b, 1c, 3, 4, 5b |
 
 **Per-stage scope / gate / tests (the load-bearing detail):**
 
@@ -761,16 +806,19 @@ then **6**.
   `_emit_node_created` sites like `last_files`; forward through every wrapper); build `_gpu_mem` from
   `core/hardware.detect_gpus()` joined to `_detect_gpu_ids` (logical↔physical remap under
   `CUDA_VISIBLE_DEVICES`; degrade to count-only on join failure); replace `_acquire_gpu`/`_release_gpu`
-  with `_acquire_gpus(n,mem)`/`_release_gpus` (all-or-nothing under `_gpu_lock`, over-declaration CLAMP +
-  cue, empty-pool→`[]`); footprint-aware admission in `_dispatch_evals` with a race-free primitive +
-  pop-first-fitting so `gpus=0` skips a blocked head; `eval_parallel` = outer ceiling only; UNSPECIFIED =
-  today per-branch; reservation held across the node lifecycle, released once in the dispatcher `finally`;
-  docker `--gpus device=` remap with nvidia-runtime probe + unpinned-fallback+warn; make
+  with `_acquire_gpus(n,mem)`/`_release_gpus` (all-or-nothing under `_gpu_lock`; clamp positive
+  over-declaration only against a non-empty pool; a zero-GPU host preserves it as unavailable);
+  footprint-aware admission in `_dispatch_evals` with a race-free primitive + pop-first-fitting so
+  `gpus=0` skips a blocked head; `eval_parallel` = outer ceiling only; a saturated unspecified parallel
+  request waits rather than oversubscribing; reservation held across the node lifecycle, released once in
+  the dispatcher `finally`; Docker `--gpus device=` remap with daemon/runtime probe and fail-closed positive
+  pinning, plus `NVIDIA_VISIBLE_DEVICES=void` for explicit CPU isolation; make
   proposal_cues/crash_repair `--gpus 1` cue footprint-CONDITIONED (PromptStore contracts, changed
   deliberately); confirm-phase seed evals acquire through the same pool. *Gate:* UNSPECIFIED → today
   byte-identical; footprint never enters metric/best/`next_actions`/breedable; ordinals never fold.
   *Tests:* over-declared clamps without wedging; unspecified serial multi-GPU stays whole-box; race-free
-  admission under concurrent releases; `gpus=0` past a stalled head; docker remap + fallback;
+  admission under concurrent releases; `gpus=0` past a stalled head; Docker remap, fail-closed pinning and
+  CPU isolation;
   agent-declared `eval_timeout` clamped to the `max_eval_timeout` Settings ceiling (never exceeds it);
   Developer scale-up beyond the Researcher proposal allowed but clamped to the pool envelope + cue;
   `test_role_output_contract` green with all wrappers forwarding; golden unchanged.
@@ -781,44 +829,59 @@ then **6**.
   optional additive `card_score`/`card_select` per policy (a policy lacking `card_score` falls back to
   `next_actions`); greedy=argmax single hot card, population=top-K lane (documented intended flag-on change
   for mcts/asha, or node-granular improve within the lane); open-band lexicographic `(band, exploration_
-  key)`; **node-budget denominator excludes tombstoned/gated nodes** (shared fix, pinned here); optional
+  key)`; **the ranking denominator excludes tombstoned/gated nodes while one raw reservation ceiling
+  charges them** (shared fix, pinned here); optional
   `card_selected` audit as **DIAGNOSTIC** (owner decision 5; promote to REPLACE-latest folded only if the
   board later needs it — never an unbounded per-iteration list); **`Strategy.card_scoring` is a distinct
   field the Strategist shapes** (owner decision 7 — explore/exploit stance + weights on novelty/coverage;
   `validate_strategy` whitelist), not merely derived from the policy. *Gate:* flag off → byte-identical; flag
   recorded in `run_started`; empty-actions contract identical to `next_actions`. *Tests:* liveness (no
   early finish), `debug_action` before any card improve, greedy single-hot-card == serial greedy, mcts/asha
-  intended delta, both-flags precedence, dropped/gated never scored, budget excludes tombstoned/gated,
+  intended delta, both-flags precedence, dropped/gated never scored, effective ranking excludes them but
+  the hard physical ceiling does not refund them,
   `test_options_divergence`+golden unchanged at default.
-- **5a.** Replace the build/eval tail (orchestrator.py:1050–1162) with ONE `anyio` task group modeled on
-  the `_dispatch_evals` continuous-dispatch loop, outer loop (836–1048) + `_spawn_research` overlap
+- **5a.** Replace the build/eval tail (orchestrator.py:1050–1162) with one structured session using
+  scoped `anyio` task groups, modeled on the `_dispatch_evals` continuous-dispatch loop; outer loop
+  (836–1048) + `_spawn_research` overlap
   byte-identical; CONSUMER = generalized continuous-dispatch (re-fold, pick READY card via L3 scorer,
   EXCLUDE sentinel nodes, admit via L4, terminals stay main-loop under `_write_lock`); PRODUCER =
   request-driven, isolated pooled role pair, fills `_spec_builds[(K,G)]`, no folded event; MAIN task:
   elect + `card_build_requested` (folded, `_id_lock`, generation-fenced; `_on_card_build_requested`→
   `st.card_build_requests`), `_serve_card_builds` spine branch (crash-recovery-first; else
   `_create_node(precoded=…)`+speculative marker+`card_build_done{node_id,speculative:true}`; else
-  `card_build_done{skipped}`); add `precoded=(code,files)` to `_create_node` (sibling of `preproposed`);
-  quiescence latch; move `_reserve_node_build` off the event loop or bound its `_id_lock` fold; node-budget
-  excludes freshness-dropped speculative nodes. *Gate:* `speculation_depth=0` → never elects, alternation
+  `card_build_done{skipped}`); add a precoded-result path to `_create_node` (sibling of `preproposed`);
+  when no ready Card owns a built-in counterfactual raw-create lane during an eval, a worker-only isolated
+  Researcher prepares it without folded writes and the main task stages it only after
+  generation/parent/best/cue/tail-CAS revalidation, then requests that exact Card; custom/ablation/invalid
+  raw lanes yield once to the serial outer spine; quiescence includes folded state plus buffered/in-flight
+  build, raw-proposal and eval latches; keep every fold/policy/slow call outside `_id_lock` so its blocks
+  contain only the short tail-CAS append; selection excludes freshness-dropped speculative nodes while
+  their physical reservation remains charged.
+  *Gate:* `speculation_depth=0` → never elects, alternation
   byte-identical; folded-but-never-emitted keeps golden/`test_options_divergence` green; new events recorded
   in run_started-pinned settings. *Tests:* sole-writer, request-driven fill exactly `(K,G)`, producer-
   failure give-up (no wedge, survives resume), crash between `node_created` and `card_build_done` recovers
   without double-create, quiescence never declares drain with a build in flight, sentinel never GPU-
-  dispatched, `_id_lock` hold bounded under producer+parallel_build+reset stress,
-  `test_background_appendable` unaffected, `test_event_types`.
+  dispatched, raw fallback overlaps a held eval and rejected raw proposals run once then yield,
+  structural `_id_lock`-scope checks plus injected tail-CAS races prove slow fold/proposal work is outside
+  the lock and lifecycle events are not duplicated; `test_background_appendable` unaffected;
+  `test_event_types`.
 - **5b.** Freshness gate in the consumer before every scorer consult and pre-GPU (pure predicate over the
   fresh fold for speculative-marked nodes; DROP only on merged/dropped/footprint-miss/not-in-selection-
   SET); on drop append `node_failed(reason='superseded', eval_seconds=0)` under `_write_lock` + optional
-  `DIAGNOSTIC EV_CARD_FRESHNESS`; `speculation_depth: int=Field(default=0,ge=0,le=64)` (0=OFF; AUTO→
-  `eval_parallel`); depth = outstanding requests + committed-unevaluated speculative nodes; cap ASHA
+  `DIAGNOSTIC EV_CARD_FRESHNESS`; `speculation_depth: int=Field(default=0,ge=0,le=64)` (0=OFF;
+  1–64 = exact static live-prefetch-backlog depth; adaptive/AUTO depth is deferred); a positive value is
+  effective only with `card_driven_selection=True`; live depth = outstanding requests + committed pending
+  speculative nodes not already admitted to this exact consumer session; cap ASHA
   speculation to depth-0 across rungs; merge fresh iff both parents in `rank_by_metric[:2]` AND breedable;
   keyed on the durable speculative marker + `card_build_done`→`node_id` link (NOT "`idea.card_id` set").
   *Gate:* `speculation_depth=0` → gate never fires, byte-identical; gate scoped to speculative-marked
-  nodes only. *Tests:* under `eval_parallel>1` the eligibility gate does NOT drop N-1 of N; gate runs
-  before `next_actions` so confirm/holdout still fire; ASHA depth-0 across rungs; merge both-parents rule;
-  dropped speculation does not decrement remaining budget; freshness re-run on resume drops a now-stale
-  node; golden unchanged at depth 0.
+  nodes only. *Tests:* under `eval_parallel>1` the eligibility gate does NOT drop N-1 of N; a source-order
+  tripwire proves the outer freshness drain precedes `_select_actions`, while the consolidated gate runs
+  the existing confirm/holdout suites for the unchanged outer finalization path; ASHA depth-0 across
+  rungs; merge both-parents rule;
+  dropped speculation does not refund a physical reservation; freshness re-run on resume drops a now-stale
+  node; only `budget_extend` admits another slot; golden unchanged at depth 0.
 - **6.** Extend `ui/src/panels.jsx::HypothesisBoard` into a card Kanban keyed on derived `Card.status`
   lanes (reuse `byStatus`/priority sort, optimistic-override, evidence chips→`onSelect`); trim card
   payloads in `state_payload` paralleling the node-trim loop; register FOUR events across all registries in
@@ -826,12 +889,20 @@ then **6**.
   envelope (400; re-clamp on resume); fold into the reserved override maps overlaid LAST (operator-wins);
   `card_edited` overlays DISPLAY only (join key stays the immutable seed); `card_enriched` must not clobber
   operator edits (or CAS); treat `card_edited` as potentially selection-affecting (live scorer re-reads
-  next pass); docs (config/UI field counts, `agent-architecture.html` board box). *Gate:* NO_SPAWN/
-  folded_intent → advisory, no compute side effect, no request/done counter, a dead engine is never woken;
-  generation-fenced via the existing `runCommand expected_generation`. *Tests:* run_commands assert-equal
-  guards green; `test_event_types`; forged `source:'novelty'` rejected/overridden; out-of-envelope pin →
+  next pass); under the append lock re-fold and recheck generation, canonical Card existence and the live
+  resource envelope; preserve global event-order LWW when aliases later merge; before serial/speculative/
+  confirm GPU launch, re-fold the effective pin and release/retry any reservation formed for an older pin;
+  docs (config/UI field counts, `agent-architecture.html` board box). *Gate:* NO_SPAWN/folded_intent never
+  starts or wakes compute and never changes a request/done counter; the sole intentional runtime side
+  effect is an exact post-start operator `card_dropped`, which cooperatively cancels its already-running
+  eval and charges elapsed compute. Generation is fenced via the existing `runCommand expected_generation`
+  and the append-time CAS. *Tests:* run_commands assert-equal guards green; `test_event_types`; forged
+  `source:'novelty'` rejected/overridden; out-of-envelope pin →
   400 (no unschedulable card folded); `card_edited` paraphrase does NOT break the hash-join; operator pin
-  survives a Strategist re-rank + a Developer re-finalize; `card_enriched` does not clobber operator edits.
+  survives a Strategist re-rank + a Developer re-finalize; `card_enriched` does not clobber operator edits;
+  append-time subject/envelope races fail closed; aliases retain global log-order LWW; pin changes between
+  reservation and launch release/retry in serial, speculative and confirm paths; only the exact post-start
+  operator drop cancels a running eval, while engine/unrelated/pre-start drops do not.
 
 ### 12.7 Deferred, and open questions for the owner
 
@@ -880,9 +951,11 @@ the stage scopes.
    **clamped to** — an agent or operator can request a longer eval but can never exceed the run-configured
    maximum. No second channel, no ungoverned override.
 4. **Over-declaration posture → agreed.** The Developer MAY finalize a LARGER footprint than the Researcher
-   proposed (the Developer actually knows the code — e.g. a DDP finetune), **clamped to the pool envelope**
-   with a cue/log so the scale-up is visible. Docker untrusted tier on a box without the nvidia runtime →
-   **fall back to unpinned + warn** (never REFUSE — that would regress today's working CPU-fallback path).
+   proposed (the Developer actually knows the code — e.g. a DDP finetune), **clamped to a non-empty pool
+   envelope** with a cue/log so the scale-up is visible. On a zero-GPU host a positive requirement remains
+   positive and unavailable rather than becoming CPU work. Docker untrusted/hostile tiers must
+   **fail closed** when a non-empty device pin cannot be enforced; only explicit `gpus=0` selects CPU and
+   forces `NVIDIA_VISIBLE_DEVICES=void`.
 5. **`card_selected`/`card_build` audit bucket → DIAGNOSTIC** (fold-ignored) on first ship; promote to a
    folded REPLACE-latest slot (like `policy_decision`) only if the board later needs "why this card" as
    durable derived state. Zero replay surface now.

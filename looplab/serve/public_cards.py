@@ -39,7 +39,7 @@ _FIELDS = (
     "scored_against", "scored_against_generation", "scored_against_empty", "operator",
     "params", "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
     "foresight_rank", "confidence",
-    "footprint", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
+    "footprint", "resource_pin", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
     "claim_refs", "steering_context", "provenance_tier",
 )
 _TEXT_LIMITS = {
@@ -64,6 +64,12 @@ _PRIOR_RUN_KEYS = {
     "run", "run_id", "metric", "best_metric", "run_best_metric", "similarity", "concepts",
     "matched_concepts", "outcomes", "matched_concept_outcomes", "source_receipt",
 }
+_MATCHED_OUTCOME_KEYS = frozenset({"concept", "outcome_retained", "outcome"})
+_CROSS_RUN_KEYS = frozenset({
+    "v", "matched_concepts", "prior_runs", "prior_runs_total", "prior_runs_omitted",
+    "prior_runs_complete", "concept_source",
+})
+_CROSS_RUN_PROJECTED_REQUIRED_KEYS = frozenset({"matched_concepts", "prior_runs"})
 _STEERING_KEYS = {
     "kind", "ref", "source", "at_node", "node_id", "card_id", "concept_id", "strategy",
     "stance", "memo_id", "trigger", "value", "label", "operator", "reason",
@@ -93,6 +99,10 @@ _CONCEPT_SOURCE_KEYS = {
 # CODEX AGENT: this is the CARD's exact node/proposal owner receipt.  It is intentionally separate from
 # `_CONCEPT_SOURCE_KEYS`, which describes cross-run capsule-store completeness inside cross_run_prior.
 _CARD_CONCEPT_SOURCE_KINDS = frozenset({"card_added", "card_enriched", "node"})
+_CARD_CONCEPT_SOURCE_KEYS = frozenset({
+    "kind", "node_id", "node_generation", "provenance", "membership_present",
+    "complete", "receipt_valid", "materialization_receipt",
+})
 _CARD_CONCEPT_PROVENANCE = frozenset({
     "researcher-authored", "classifier", "operator-edited", "offline-heuristic", "untrusted-source",
 })
@@ -636,7 +646,7 @@ def _field_value(card, name: str):
         return _space(value)
     if name == "parent_generations":
         return None if value is None else _generations(value)
-    if name == "footprint":
+    if name in {"footprint", "resource_pin"}:
         return _named_scalars(value, _FOOTPRINT_KEYS)
     if name == "novelty_verdict":
         return _named_scalars(value, _NOVELTY_KEYS, free_text=True)
@@ -657,6 +667,8 @@ def _named_scalars_lossless(raw, bounded, allowed, *, free_text: bool = False) -
     if raw is None:
         return bounded is None
     if not isinstance(raw, dict):
+        return False
+    if not set(raw) <= allowed:
         return False
     expected = {}
     for key in sorted(allowed):
@@ -708,7 +720,8 @@ def _matched_outcomes_lossless(raw, bounded) -> bool:
 
 
 def _prior_run_lossless(raw, bounded) -> bool:
-    if not isinstance(raw, dict) or _prior_run(raw) != bounded:
+    if (not isinstance(raw, dict) or not set(raw) <= _PRIOR_RUN_KEYS
+            or _prior_run(raw) != bounded):
         return False
     for key in _PRIOR_RUN_KEYS & raw.keys():
         value = raw[key]
@@ -733,7 +746,9 @@ def _prior_run_lossless(raw, bounded) -> bool:
 
 
 def _cross_run_lossless(raw, bounded) -> bool:
-    if not isinstance(raw, dict) or _cross_run(raw) != bounded:
+    if (not isinstance(raw, dict) or not set(raw) <= _CROSS_RUN_KEYS
+            or not _CROSS_RUN_PROJECTED_REQUIRED_KEYS <= raw.keys()
+            or _cross_run(raw) != bounded):
         return False
     if "v" in raw:
         version = _number(raw["v"], integer=True)
@@ -772,6 +787,8 @@ def _steering_lossless(raw, bounded) -> bool:
     for item in raw:
         if not isinstance(item, dict):
             return False
+        if not set(item) <= _STEERING_KEYS:
+            return False
         row = {}
         for key in sorted(_STEERING_KEYS & item.keys()):
             value = item[key]
@@ -797,11 +814,13 @@ def _steering_lossless(raw, bounded) -> bool:
 def _concept_source_lossless(raw, bounded) -> bool:
     if not isinstance(raw, dict):
         return False
-    allowed = {
-        "kind", "node_id", "node_generation", "provenance", "membership_present",
-        "complete", "receipt_valid", "materialization_receipt",
+    if not set(raw) <= _CARD_CONCEPT_SOURCE_KEYS:
+        return False
+    source_view = {
+        key: raw[key]
+        for key in _CARD_CONCEPT_SOURCE_KEYS & raw.keys()
+        if raw[key] is not None
     }
-    source_view = {key: raw[key] for key in allowed & raw.keys() if raw[key] is not None}
     return source_view == bounded == _card_concept_source(raw)
 
 
@@ -873,7 +892,7 @@ def _field_projection_lossless(name: str, raw, bounded) -> bool:
         return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
     if name == "parent_generations":
         return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and _generations(raw) == raw == bounded
-    if name == "footprint":
+    if name in {"footprint", "resource_pin"}:
         return _named_scalars_lossless(raw, bounded, _FOOTPRINT_KEYS)
     if name == "novelty_verdict":
         return _named_scalars_lossless(raw, bounded, _NOVELTY_KEYS, free_text=True)
@@ -937,21 +956,21 @@ def _field_slice(name: str, raw, projected, *, exact: bool) -> PublicProjectionS
     elif isinstance(raw, dict):
         unit = "entries"
         keys = None
-        if name == "footprint":
-            keys = _FOOTPRINT_KEYS & raw.keys()
-        elif name == "novelty_verdict":
-            keys = _NOVELTY_KEYS & raw.keys()
-        elif name == "cross_run_prior":
-            keys = {
-                "v", "matched_concepts", "prior_runs", "prior_runs_total",
-                "prior_runs_omitted", "prior_runs_complete", "concept_source",
-            } & raw.keys()
+        if name in {"footprint", "resource_pin", "novelty_verdict", "cross_run_prior"}:
+            # Unknown nested entries are safely absent from the DTO, but still belong to the exact
+            # source-unit partition and therefore count as omissions rather than disappearing from it.
+            # Include projected-only members as well: e.g. ``cross_run_prior`` inserts required empty
+            # lists when an old sparse source omitted them. Those transformed values are useful on the
+            # wire but are not exact source data, so the receipt must expose non-zero loss.
+            keys = set(raw)
+            if isinstance(projected, dict):
+                keys.update(projected)
         elif name == "concept_source":
-            keys = {
-                "kind", "node_id", "node_generation", "provenance", "membership_present",
-                "complete", "receipt_valid", "materialization_receipt",
-            } & raw.keys()
-            keys = {key for key in keys if raw[key] is not None}
+            keys = set(raw)
+            keys -= {
+                key for key in _CARD_CONCEPT_SOURCE_KEYS & raw.keys()
+                if raw[key] is None
+            }
         if keys is None:
             total = len(raw)
             if exact:
@@ -966,7 +985,7 @@ def _field_slice(name: str, raw, projected, *, exact: bool) -> PublicProjectionS
         else:
             total = len(keys)
             returned = total if exact else sum(
-                key in projected and projected[key] == raw[key]
+                key in raw and key in projected and projected[key] == raw[key]
                 for key in keys
                 if isinstance(projected, dict)
             )

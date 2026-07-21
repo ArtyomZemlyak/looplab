@@ -19,6 +19,7 @@ from typing import Callable, TypeVar
 import orjson
 
 from looplab.core.models import Event
+from looplab.events.eventstore import MAX_EVENT_BATCH_BYTES, decode_event_record
 from looplab.serve.run_commands import run_generation_token
 
 MAX_SCOPE_EVENT_BYTES = 32 * 1024 * 1024
@@ -30,6 +31,34 @@ _MISSING_DIGEST = hashlib.sha256(b"<missing>").hexdigest()
 _READ_CHUNK_BYTES = 1024 * 1024
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _T = TypeVar("_T")
+
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _WindowsFileBasicInfo(ctypes.Structure):
+        _fields_ = (
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        )
+
+    _get_file_information_by_handle_ex = ctypes.WinDLL(
+        "kernel32", use_last_error=True
+    ).GetFileInformationByHandleEx
+    _get_file_information_by_handle_ex.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    _get_file_information_by_handle_ex.restype = wintypes.BOOL
+else:
+    _get_file_information_by_handle_ex = None
 
 
 class ScopeSourceError(RuntimeError):
@@ -65,6 +94,7 @@ class _CapturedFile:
     path: Path
     raw: bytes | None
     status: os.stat_result | None
+    change_time: int | None
 
 
 def _ns(status: os.stat_result, field: str) -> int:
@@ -96,11 +126,32 @@ def _file_identity(status: os.stat_result) -> tuple[int, ...]:
 
 def _file_observation(status: os.stat_result) -> tuple[int, ...]:
     """Same-reader observation; ctime catches same-size A/B/A rewrites."""
-    # CODEX AGENT: Windows correctness gap: CPython 3.12 exposes creation time as ``st_ctime``, not
-    # NTFS ChangeTime. A same-size A/B/A rewrite with a restored mtime can therefore evade this tuple
-    # and let a paid cross-run report mix filesystem generations. Query FILE_BASIC_INFO.ChangeTime from
-    # the open handle and retain that token through final pathname revalidation before trusting the fold.
+    # On Windows ``st_ctime`` is creation time. ``_descriptor_change_time`` supplies the distinct NTFS
+    # ChangeTime token while the file is open; retaining ctime here still strengthens path observations
+    # and preserves the existing portable identity contract.
     return (*_file_identity(status), _ns(status, "ctime"))
+
+
+def _descriptor_change_time(descriptor: int) -> int | None:
+    """Return Windows FILE_BASIC_INFO.ChangeTime for one already-open descriptor.
+
+    CPython exposes creation time, not NTFS ChangeTime, as ``st_ctime`` on Windows. The native token is
+    therefore required to detect a same-size A/B/A rewrite whose writer restores ``mtime``. Other
+    platforms retain their existing ctime-based observation and return ``None`` here.
+    """
+    if _get_file_information_by_handle_ex is None:
+        return None
+    info = _WindowsFileBasicInfo()
+    handle = msvcrt.get_osfhandle(descriptor)
+    if not _get_file_information_by_handle_ex(
+        wintypes.HANDLE(handle),
+        0,  # FILE_INFO_BY_HANDLE_CLASS.FileBasicInfo
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        error = ctypes.get_last_error()
+        raise OSError(error, "could not query FILE_BASIC_INFO.ChangeTime")
+    return int(info.ChangeTime)
 
 
 def _directory_identity(status: os.stat_result) -> tuple[int, ...]:
@@ -182,7 +233,7 @@ def _read_from_stable_file(
     path: Path,
     before: os.stat_result,
     reader: Callable[[int, int], _T],
-) -> tuple[_T, os.stat_result]:
+) -> tuple[_T, os.stat_result, int | None]:
     try:
         descriptor = os.open(path, _open_flags())
     except OSError as exc:
@@ -190,6 +241,8 @@ def _read_from_stable_file(
 
     result: _T | None = None
     problem: Exception | None = None
+    opened_change_time: int | None = None
+    opened_change_time_valid = False
     try:
         try:
             opened = os.fstat(descriptor)
@@ -198,16 +251,21 @@ def _read_from_stable_file(
                 raise ScopeSourceChangedError(
                     f"scope source changed before reading: {path.name}"
                 )
+            opened_change_time = _descriptor_change_time(descriptor)
+            opened_change_time_valid = True
             result = reader(descriptor, int(before.st_size))
         except Exception as exc:  # noqa: BLE001 - revalidate identity before propagating
             problem = exc
         try:
             after_read = os.fstat(descriptor)
+            after_change_time = _descriptor_change_time(descriptor)
         except OSError as exc:
             raise ScopeSourceChangedError(
                 f"scope source changed while reading: {path.name}"
             ) from exc
-        if _file_observation(after_read) != _file_observation(opened):
+        if (_file_observation(after_read) != _file_observation(opened)
+                or (opened_change_time_valid
+                    and after_change_time != opened_change_time)):
             raise ScopeSourceChangedError(f"scope source changed while reading: {path.name}")
     finally:
         os.close(descriptor)
@@ -227,7 +285,7 @@ def _read_from_stable_file(
             raise ScopeSourceError(f"scope source could not be read: {path.name}") from problem
         raise problem
     assert result is not None
-    return result, after
+    return result, after, after_change_time
 
 
 def _read_exact(descriptor: int, expected_size: int) -> bytes:
@@ -251,7 +309,7 @@ def _capture_file(path: Path, *, limit: int, required: bool) -> _CapturedFile:
     except FileNotFoundError as exc:
         if required:
             raise ScopeSourceCorruptError(f"required scope source is missing: {path.name}") from exc
-        return _CapturedFile(path=path, raw=None, status=None)
+        return _CapturedFile(path=path, raw=None, status=None, change_time=None)
     except OSError as exc:
         raise ScopeSourceError(f"scope source is unavailable: {path.name}") from exc
     _require_regular(before, label=path.name)
@@ -259,8 +317,8 @@ def _capture_file(path: Path, *, limit: int, required: bool) -> _CapturedFile:
         raise ScopeSourceCapacityError(
             f"scope source exceeds its {limit}-byte limit: {path.name}"
         )
-    raw, after = _read_from_stable_file(path, before, _read_exact)
-    return _CapturedFile(path=path, raw=raw, status=after)
+    raw, after, change_time = _read_from_stable_file(path, before, _read_exact)
+    return _CapturedFile(path=path, raw=raw, status=after, change_time=change_time)
 
 
 def _revalidate_file(captured: _CapturedFile) -> None:
@@ -286,9 +344,26 @@ def _revalidate_file(captured: _CapturedFile) -> None:
         raise ScopeSourceChangedError(
             f"scope source changed during capture: {captured.path.name}"
         )
+    if captured.change_time is not None:
+        try:
+            _, _, current_change_time = _read_from_stable_file(
+                captured.path, current, lambda _descriptor, _size: True
+            )
+        except ScopeSourceChangedError:
+            raise
+        except ScopeSourceError as exc:
+            raise ScopeSourceChangedError(
+                f"scope source could not be revalidated: {captured.path.name}"
+            ) from exc
+        if current_change_time != captured.change_time:
+            raise ScopeSourceChangedError(
+                f"scope source changed during capture: {captured.path.name}"
+            )
 
 
-def _event_from_line(raw: bytes, *, line_number: int) -> Event:
+def _events_from_line(raw: bytes, *, line_number: int) -> tuple[Event, ...]:
+    """Strictly expand one physical event-log row into its logical event sequence."""
+
     try:
         value = orjson.loads(raw)
     except (orjson.JSONDecodeError, RecursionError) as exc:
@@ -300,20 +375,29 @@ def _event_from_line(raw: bytes, *, line_number: int) -> Event:
             f"event log line {line_number} is not a JSON object"
         )
     try:
-        event = Event.model_validate(value, strict=True)
+        events = tuple(decode_event_record(value, strict=True))
     except Exception as exc:  # noqa: BLE001 - Pydantic exposes several validation failure types
         raise ScopeSourceCorruptError(
             f"event log has an invalid event at complete line {line_number}"
         ) from exc
-    if event.v != 1:
-        raise ScopeSourceCorruptError(f"event log line {line_number} has unsupported version")
-    if type(event.seq) is not int:
-        raise ScopeSourceCorruptError(f"event log line {line_number} has a non-integer seq")
-    if not math.isfinite(event.ts):
-        raise ScopeSourceCorruptError(
-            f"event log line {line_number} has a non-finite timestamp"
-        )
-    return event
+    if not events:
+        raise ScopeSourceCorruptError(f"event log line {line_number} has no logical events")
+    for event in events:
+        if event.v != 1:
+            raise ScopeSourceCorruptError(f"event log line {line_number} has unsupported version")
+        if type(event.seq) is not int:
+            raise ScopeSourceCorruptError(f"event log line {line_number} has a non-integer seq")
+        if not math.isfinite(event.ts):
+            raise ScopeSourceCorruptError(
+                f"event log line {line_number} has a non-finite timestamp"
+            )
+    return events
+
+
+def _event_from_line(raw: bytes, *, line_number: int) -> Event:
+    """Return the first logical Event for bounded first-record generation probes."""
+
+    return _events_from_line(raw, line_number=line_number)[0]
 
 
 def _parse_events(raw: bytes, *, run_id: str) -> tuple[Event, ...]:
@@ -325,16 +409,16 @@ def _parse_events(raw: bytes, *, run_id: str) -> tuple[Event, ...]:
             raise ScopeSourceCorruptError(
                 f"event log has a blank complete line at {line_number}"
             )
-        event = _event_from_line(line, line_number=line_number)
-        if event.seq != len(events):
-            raise ScopeSourceCorruptError(
-                f"event log sequence is not contiguous at complete line {line_number}"
-            )
-        if event.type == "run_started":
-            run_started_count += 1
-            if event.data.get("run_id") != run_id:
-                raise ScopeSourceCorruptError("run_started does not match the run directory")
-        events.append(event)
+        for event in _events_from_line(line, line_number=line_number):
+            if event.seq != len(events):
+                raise ScopeSourceCorruptError(
+                    f"event log sequence is not contiguous at complete line {line_number}"
+                )
+            if event.type == "run_started":
+                run_started_count += 1
+                if event.data.get("run_id") != run_id:
+                    raise ScopeSourceCorruptError("run_started does not match the run directory")
+            events.append(event)
     if not events:
         raise ScopeSourceCorruptError("event log has no complete events")
     if run_started_count == 0:
@@ -494,7 +578,7 @@ def probe_scope_log_sig(
     root: Path,
     run_id: str,
     *,
-    first_line_limit: int = 1 * 1024 * 1024,
+    first_line_limit: int = MAX_EVENT_BATCH_BYTES,
 ) -> list:
     """Return a reset-safe log signature after reading only its bounded first line."""
     if type(first_line_limit) is not int or first_line_limit <= 0:
@@ -511,7 +595,7 @@ def probe_scope_log_sig(
     if before.st_size > MAX_SCOPE_EVENT_BYTES:
         raise ScopeSourceCapacityError("event log exceeds the per-run byte limit")
     line_limit = min(first_line_limit, MAX_SCOPE_EVENT_BYTES)
-    line, after = _read_from_stable_file(
+    line, after, _change_time = _read_from_stable_file(
         path,
         before,
         lambda descriptor, size: _read_first_complete_line(

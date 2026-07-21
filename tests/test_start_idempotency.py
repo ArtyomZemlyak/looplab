@@ -10,6 +10,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 
 
@@ -212,6 +213,28 @@ def test_current_setup_prelude_and_legacy_direct_anchor_are_both_positive(
         assert started.status_code == 200
         assert started.json()["status"] == "succeeded"
         assert started.json()["started"] is True
+
+
+def test_start_observation_expands_atomic_setup_and_identity_batch(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path))
+
+    def proven_spawn(*_args, **kwargs):
+        run_dir = Path(kwargs["run_dir"])
+        EventStore(run_dir / "events.jsonl").append_many([
+            ("setup_started", {"phase": "task+data"}),
+            ("setup_step", {"step": "workspace fingerprint"}),
+            ("run_started", {"run_id": run_dir.name}),
+        ])
+        return None
+
+    monkeypatch.setattr("looplab.serve.routers.control._spawn_engine", proven_spawn)
+    payload = {**_validated(client, "batch-layout"), "idempotency_key": "batch-layout-key"}
+
+    started = client.post("/api/start", json=payload)
+
+    assert started.status_code == 200
+    assert started.json()["status"] == "succeeded"
+    assert started.json()["started"] is True
 
 
 @pytest.mark.parametrize("reconcile_as_stale_reservation", [False, True])

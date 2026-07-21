@@ -19,7 +19,9 @@ from fastapi.responses import JSONResponse
 from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
-from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, write_jsonl_atomic
+from looplab.events.eventstore import (
+    MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, decode_event_record,
+    write_jsonl_atomic)
 from looplab.events.replay import fold
 from looplab.events.types import EV_APPROVAL_GRANTED, EV_RESUME_REQUESTED, EV_SPEC_APPROVED
 from looplab.serve.appstate import _RESERVED_RUN_IDS
@@ -578,34 +580,37 @@ def build_router(srv) -> APIRouter:
                 expected_seq = 0
                 total_bytes = 0
                 for _ in range(4096):
-                    raw = stream.readline(1_048_577)
+                    raw = stream.readline(MAX_EVENT_BATCH_BYTES + 1)
                     if not raw:
                         return False
                     total_bytes += len(raw)
-                    if (len(raw) > 1_048_576 or total_bytes > 4_194_304
+                    if (len(raw) > MAX_EVENT_BATCH_BYTES
+                            or total_bytes > 2 * MAX_EVENT_BATCH_BYTES
                             or not raw.endswith(b"\n") or not raw.strip()):
                         return False
-                    event = orjson.loads(raw)
-                    if not isinstance(event, dict):
+                    physical = orjson.loads(raw)
+                    if (not isinstance(physical, dict)
+                            or not {"v", "seq", "ts", "type", "data"} <= set(physical)):
                         return False
-                    version = event.get("v")
-                    seq = event.get("seq")
-                    ts = event.get("ts")
-                    event_type = event.get("type")
-                    data = event.get("data")
-                    if (type(version) is not int or version != 1
-                            or type(seq) is not int or seq != expected_seq
-                            or isinstance(ts, bool) or not isinstance(ts, (int, float))
-                            or not math.isfinite(ts) or ts <= 0
-                            or not isinstance(event_type, str)
-                            or not isinstance(data, dict)):
-                        return False
-                    expected_seq += 1
-                    if event_type == "run_started":
-                        run_id = data.get("run_id")
-                        return isinstance(run_id, str) and run_id == rd.name
-                    if event_type not in {"setup_started", "setup_step"}:
-                        return False
+                    for event in decode_event_record(physical, strict=True):
+                        version = event.v
+                        seq = event.seq
+                        ts = event.ts
+                        event_type = event.type
+                        data = event.data
+                        if (type(version) is not int or version != 1
+                                or type(seq) is not int or seq != expected_seq
+                                or isinstance(ts, bool) or not isinstance(ts, (int, float))
+                                or not math.isfinite(ts) or ts <= 0
+                                or not isinstance(event_type, str)
+                                or not isinstance(data, dict)):
+                            return False
+                        expected_seq += 1
+                        if event_type == "run_started":
+                            run_id = data.get("run_id")
+                            return isinstance(run_id, str) and run_id == rd.name
+                        if event_type not in {"setup_started", "setup_step"}:
+                            return False
                 return False
         except (OSError, ValueError, TypeError, orjson.JSONDecodeError):
             return False

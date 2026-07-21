@@ -9,6 +9,7 @@ import orjson
 import pytest
 
 import looplab.serve.command_observation as command_observation
+from looplab.events.eventstore import EventStore
 from looplab.serve.command_observation import CommandObservationIndex
 
 
@@ -57,6 +58,27 @@ def test_large_cold_scan_then_unchanged_and_one_append_are_linear_delta(tmp_path
     assert delta.has_domain_progress(count - 1)
     assert index.metrics.last_bytes_read == len(appended)
     assert index.metrics.last_records_parsed == 1
+
+
+def test_atomic_batch_counts_and_indexes_each_logical_event_with_physical_valid_end(tmp_path):
+    path = tmp_path / "events.jsonl"
+    store = EventStore(path)
+    store.append("run_started", {"run_id": "r"})
+    store.append_many([
+        ("metric", {"value": 1}),
+        ("run_abort", {"reason": "operator"}),
+    ])
+    index = CommandObservationIndex()
+
+    observed = index.observe(path)
+
+    assert observed.event_count == 3
+    assert observed.latest_seq == 2
+    assert observed.valid_end == path.stat().st_size
+    assert observed.torn_tail is False
+    assert [event.type for event in observed.events()] == ["run_started", "metric", "run_abort"]
+    assert observed.latest_run_abort is not None and observed.latest_run_abort.seq == 2
+    assert index.metrics.last_records_parsed == 3
 
 
 def test_exact_intent_ack_finish_and_abort_facts_preserve_command_semantics(tmp_path):

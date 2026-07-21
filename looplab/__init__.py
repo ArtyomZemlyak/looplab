@@ -74,8 +74,8 @@ _LAYOUT = {
     "assistant_commands": "serve",
     "atomicio": "core",
     "best_of_n": "search",
+    "card_selection": "search",  # Card-backed candidate election and ownership receipts
     "bg_tasks": "runtime",
-    "card_selection": "search",   # L3: card-queue macro-action selection scorer (flag-gated)
     "classification": "adapters",
     "cli_agent": "agents",
     "comment_projection": "events",
@@ -179,7 +179,7 @@ _LAYOUT = {
     "repo_write_tools": "adapters",
     "report": "serve",
     "research_cadence": "engine",
-    "resources": "engine",   # L4: GPU inventory, footprint clamping, lifecycle-scoped reservations
+    "resources": "engine",  # resource-envelope and Card footprint scheduling helpers
     "reposcout": "tools",
     "retrieval": "tools",
     "reviews": "serve",
@@ -199,6 +199,7 @@ _LAYOUT = {
     "span_index": "events",   # derived light span index behind the UI trace views (perf)
     "signal_delivery": "engine",   # §1 signal-delivery registry (docs/14-agent-framework-mega-review)
     "skills": "tools",
+    "speculation": "engine",  # durable speculative Card build queue and worker contracts
     "source_identity": "trust",   # provenance/source-identity checks among the trust monitors
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)

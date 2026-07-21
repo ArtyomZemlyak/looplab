@@ -214,6 +214,60 @@ def test_delete_node_purge_physically_rewrites_and_backs_up(tmp_path):
     assert (rd / "events.jsonl.bak-del1").exists()                  # recoverable backup
 
 
+def test_delete_node_purge_filters_logical_members_inside_atomic_batch(tmp_path):
+    rd = tmp_path / "batched-purge"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": rd.name, "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 0.0}}, "code": "c"})
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.0})
+    store.append_many([
+        ("node_created", {
+            "node_id": 1, "parent_ids": [0], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": 1.0}}, "code": "c"}),
+        ("node_evaluated", {"node_id": 1, "metric": 1.0}),
+        ("node_created", {
+            "node_id": 2, "parent_ids": [1], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": 2.0}}, "code": "c"}),
+        ("node_evaluated", {"node_id": 2, "metric": 2.0}),
+    ])
+    store.append("pause", {})
+    original = (rd / "events.jsonl").read_bytes()
+    assert b"__looplab_event_batch_v1__" in original
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once", command_service=_RecordingCommands(tmp_path))
+
+    out = tool.execute("delete_node", {"run_id": rd.name, "node_id": 1, "purge": True})
+
+    assert "deleted node(s) [1, 2]" in out
+    remaining = EventStore(rd / "events.jsonl").read_all()
+    assert set(fold(remaining).nodes) == {0}
+    assert all((event.data or {}).get("node_id") not in {1, 2} for event in remaining)
+    assert (rd / "events.jsonl.bak-del1").read_bytes() == original
+
+
+def test_delete_node_purge_refuses_to_turn_torn_tail_into_implicit_repair(tmp_path):
+    rd = tmp_path / "torn-purge"
+    _run(rd, nodes=(0, 1)).append("pause", {})
+    path = rd / "events.jsonl"
+    with path.open("ab") as handle:
+        handle.write(b'{"v":1,"seq":99,"type":"node_created"')
+    original = path.read_bytes()
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once", command_service=_RecordingCommands(tmp_path))
+
+    out = tool.execute("delete_node", {"run_id": rd.name, "node_id": 1, "purge": True})
+
+    assert "refusing irreversible purge" in out
+    assert path.read_bytes() == original
+    assert not (rd / "events.jsonl.bak-del1").exists()
+
+
 @pytest.mark.parametrize("purge", [False, True])
 def test_delete_node_rechecks_and_rejects_tree_change_during_permission(tmp_path, purge):
     rd = tmp_path / ("race-purge" if purge else "race-tombstone")

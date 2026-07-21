@@ -203,7 +203,7 @@ export function commentMutationError(error, fallback = 'Comment could not be sav
   if (error?.code === 'comment_subject_changed' || error?.code === 'node_generation_changed') {
     return 'This experiment attempt changed. Your draft is preserved; return to the current attempt.'
   }
-  if (error?.code === 'comment_concurrency_busy') {
+  if (['collaboration_concurrency_busy', 'comment_concurrency_busy'].includes(error?.code)) {
     return 'The comment is changing too quickly to update safely. Your draft is preserved; refresh and retry.'
   }
   if (error?.code === 'event_lock_unavailable') {

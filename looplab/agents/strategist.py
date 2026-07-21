@@ -117,8 +117,9 @@ class StrategyContext(BaseModel):
     current_policy: str = "greedy"             # the ACTIVE policy (for switch-back rules, D3)
     eval_parallel: int = 1                     # current settled eval width (never startup AUTO/0)
     # `_llm_parallel` is also the settled build fan-out used by legacy-compatible producer code.
-    # It is *not* proof that the shared broker has a finite total: canonical-unset startup keeps
-    # the broker total unbounded while resolving this build width from eval concurrency.
+    # It is *not* proof that the shared broker has a finite total: canonical-unset startup preserves
+    # legacy parallel_build, while canonical startup AUTO resolves this width from eval concurrency;
+    # both modes deliberately keep the broker total unbounded.
     llm_parallel: int = 1
     llm_total: Optional[int] = None             # live shared-broker total; None = unbounded
     llm_lane_limits: dict[str, int | None] = Field(default_factory=dict)
@@ -281,22 +282,20 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     if isinstance(lp, int) and not isinstance(lp, bool) and 0 <= lp <= 64:
         out["llm_parallel"] = lp
     lane_limits = strat.get("llm_lane_limits")
-    # CODEX AGENT: the prompt/API call this an atomic replacement map, but rejecting `{}` means an
-    # operator can set limits and can never replace them with the all-unbounded allocation. The HTTP
-    # normalizer and live apply path make the same non-empty check, so resume faithfully preserves an
-    # irreversible setting. Accept an explicit empty map as "clear all lanes" while absence means retain.
-    if isinstance(lane_limits, dict) and lane_limits:
+    if isinstance(lane_limits, dict):
         # One allocation is atomic. Reject the whole mapping on an unknown lane or malformed value
         # rather than silently applying a surprising partial paid-call budget. Values stay RAW in the
-        # durable Strategy; the live apply boundary settles 0 to one worker, just like the totals.
+        # durable Strategy; the live apply boundary settles 0 to one worker, just like the totals. An
+        # explicit empty mapping atomically clears every lane cap; omission retains the prior allocation.
         clean_lanes: dict[str, int] = {}
+        lane_values_valid = True
         for lane, value in lane_limits.items():
             if (lane not in LLM_LANES or isinstance(value, bool)
                     or not isinstance(value, int) or not 0 <= value <= 64):
-                clean_lanes = {}
+                lane_values_valid = False
                 break
             clean_lanes[lane] = value
-        if clean_lanes:
+        if lane_values_valid:
             out["llm_lane_limits"] = clean_lanes
     pb = strat.get("parallel_build")
     if isinstance(pb, int) and not isinstance(pb, bool) and 0 <= pb <= 64:
@@ -665,9 +664,9 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
     if out.llm_parallel is not None:
         strat["llm_parallel"] = out.llm_parallel
     if out.llm_lane_limits is not None:
-        lanes = out.llm_lane_limits.model_dump(exclude_none=True)
-        if lanes:
-            strat["llm_lane_limits"] = lanes
+        # The nested model distinguishes an omitted field (None) from an explicit empty object. Keep
+        # that distinction so structured output can clear every lane cap instead of silently retaining it.
+        strat["llm_lane_limits"] = out.llm_lane_limits.model_dump(exclude_none=True)
     card_scoring = getattr(out, "card_scoring", None)
     if card_scoring is not None:
         strat["card_scoring"] = card_scoring.model_dump()

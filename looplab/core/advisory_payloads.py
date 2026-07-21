@@ -31,6 +31,204 @@ _ADVISORY_REF_PREFIXES = {
     namespace: f"{namespace}:sha256:" for namespace in _ADVISORY_REF_NAMESPACES
 }
 
+_CROSS_RUN_AVAILABLE_KEYS = frozenset({
+    "v", "scope_task", "excluded_run", "n_lessons", "n_capsules", "n_research",
+    "concept_scope", "claim_source", "corpus_digest", "render_digest",
+})
+_CROSS_RUN_UNAVAILABLE_KEYS = frozenset({"v", "status", "complete", "governance"})
+_CROSS_RUN_CONCEPT_SCOPE_KEYS = frozenset({
+    "scope_complete", "scope_unknown_capsules", "scope_fingerprint_unknown_capsules",
+    "scope_fingerprint_items_omitted", "scope_direction_unknown_capsules",
+})
+_CROSS_RUN_CLAIM_SOURCE_KEYS = frozenset({
+    "v", "receipt_known", "source_complete", "read_complete",
+    "research_source_complete", "lessons", "research", "snapshot_digest",
+})
+_CROSS_RUN_CLAIM_SEGMENT_KEYS = frozenset({
+    "read_complete", "rows_total", "rows_retained", "rows_quarantined",
+    "malformed_rows", "invalid_rows",
+})
+_CROSS_RUN_GOVERNANCE_KEYS = frozenset({
+    "v", "status", "complete", "code", "ledger", "reason",
+})
+_CROSS_RUN_GOVERNANCE_LEDGERS = frozenset({
+    "concept_aliases", "concept_splits", "claim_decisions", "concept_governance",
+    "concept_capsules", "cross_run_sources", "concept_curation", "claim_curation",
+    "task_facets", "task_facets_curation",
+})
+_CROSS_RUN_GOVERNANCE_REASONS = frozenset({
+    "storage_unreadable", "torn_tail", "blank_row", "malformed_json", "non_object",
+    "unsupported_schema", "unknown_action", "invalid_record", "duplicate_action_id",
+    "invalid_revision", "revision_mismatch", "revision_collision", "identity_cycle",
+})
+_MAX_CROSS_RUN_RECEIPT_COUNT = (1 << 31) - 1
+
+
+def bounded_cross_run_advisory_receipt(value) -> dict:
+    """Return the exact bounded audit receipt stamped by proposal cues, or ``{}``.
+
+    Staged Cards may survive a process restart before their Node is built, so the proposal's advisory
+    provenance must ride the durable Card receipt rather than a process-local role attribute.  This
+    boundary is deliberately narrower than an arbitrary JSON copier: only the two current v2 shapes
+    (available corpus or governance-unavailable) pass, with a bounded nested receipt payload.
+    """
+
+    if not isinstance(value, dict) or not value or value.get("v") != 2:
+        return {}
+
+    def _digest(item) -> bool:
+        return bool(
+            isinstance(item, str)
+            and len(item) == 64
+            and all(ch in "0123456789abcdef" for ch in item)
+        )
+
+    def _count(item) -> bool:
+        return type(item) is int and 0 <= item <= _MAX_CROSS_RUN_RECEIPT_COUNT
+
+    def _scope_identity(item) -> bool:
+        if not isinstance(item, str) or len(item) > 500:
+            return False
+        # The proposal writer uses the same always-on durable boundary. Requiring a fixed point
+        # makes replay reject credential/control-bearing strings instead of silently changing the
+        # audit receipt whose digests describe the model-visible corpus.
+        clean = redact_persisted_text(
+            item, max_chars=500, entropy=False, single_line=True,
+        )
+        return item == " ".join(clean.split())
+
+    def _concept_scope(item) -> dict | None:
+        if not isinstance(item, dict) or set(item) != _CROSS_RUN_CONCEPT_SCOPE_KEYS:
+            return None
+        if type(item.get("scope_complete")) is not bool:
+            return None
+        count_keys = _CROSS_RUN_CONCEPT_SCOPE_KEYS - {"scope_complete"}
+        if any(not _count(item.get(key)) for key in count_keys):
+            return None
+        unknown = item["scope_unknown_capsules"]
+        if (item["scope_complete"] != (unknown == 0)
+                or item["scope_fingerprint_unknown_capsules"] > unknown
+                or item["scope_direction_unknown_capsules"] > unknown
+                or (unknown == 0 and item["scope_fingerprint_items_omitted"] != 0)):
+            return None
+        return {key: item[key] for key in (
+            "scope_complete", "scope_unknown_capsules",
+            "scope_fingerprint_unknown_capsules", "scope_fingerprint_items_omitted",
+            "scope_direction_unknown_capsules",
+        )}
+
+    def _claim_segment(item) -> dict | None:
+        if not isinstance(item, dict) or set(item) != _CROSS_RUN_CLAIM_SEGMENT_KEYS:
+            return None
+        if type(item.get("read_complete")) is not bool:
+            return None
+        count_keys = _CROSS_RUN_CLAIM_SEGMENT_KEYS - {"read_complete"}
+        if any(not _count(item.get(key)) for key in count_keys):
+            return None
+        if (item["rows_quarantined"] != item["malformed_rows"] + item["invalid_rows"]
+                or item["rows_total"] != item["rows_retained"] + item["rows_quarantined"]
+                or item["read_complete"] != (item["rows_quarantined"] == 0)):
+            return None
+        return {key: item[key] for key in (
+            "read_complete", "rows_total", "rows_retained", "rows_quarantined",
+            "malformed_rows", "invalid_rows",
+        )}
+
+    def _claim_source(item) -> dict | None:
+        if not isinstance(item, dict) or set(item) != _CROSS_RUN_CLAIM_SOURCE_KEYS:
+            return None
+        bool_keys = (
+            "receipt_known", "source_complete", "read_complete",
+            "research_source_complete",
+        )
+        if item.get("v") != 1 or any(type(item.get(key)) is not bool for key in bool_keys):
+            return None
+        lessons = _claim_segment(item.get("lessons"))
+        research = _claim_segment(item.get("research"))
+        snapshot_digest = item.get("snapshot_digest")
+        if lessons is None or research is None:
+            return None
+        if not ((item["receipt_known"] is False and snapshot_digest == "")
+                or (item["receipt_known"] is True and _digest(snapshot_digest))):
+            return None
+        read_complete = lessons["read_complete"] and research["read_complete"]
+        consistent = (
+            (not item["receipt_known"]
+             and not item["source_complete"]
+             and not item["read_complete"]
+             and not item["research_source_complete"])
+            or (
+                item["receipt_known"]
+                and item["read_complete"] == read_complete
+                and (not item["research_source_complete"] or research["read_complete"])
+                and item["source_complete"]
+                == (lessons["read_complete"] and item["research_source_complete"])
+            )
+        )
+        if not consistent:
+            return None
+        return {
+            "v": 1,
+            **{key: item[key] for key in bool_keys},
+            "lessons": lessons,
+            "research": research,
+            "snapshot_digest": snapshot_digest,
+        }
+
+    def _governance(item) -> dict | None:
+        if not isinstance(item, dict) or set(item) != _CROSS_RUN_GOVERNANCE_KEYS:
+            return None
+        if not (
+            item.get("v") == 1
+            and item.get("status") == "unavailable"
+            and item.get("complete") is False
+            and item.get("code") == "governance_ledger_unavailable"
+            and item.get("ledger") in _CROSS_RUN_GOVERNANCE_LEDGERS
+            and item.get("reason") in _CROSS_RUN_GOVERNANCE_REASONS
+        ):
+            return None
+        return {key: item[key] for key in (
+            "v", "status", "complete", "code", "ledger", "reason",
+        )}
+
+    if set(value) == _CROSS_RUN_UNAVAILABLE_KEYS:
+        governance = _governance(value.get("governance"))
+        if (value.get("status") != "unavailable"
+                or value.get("complete") is not False
+                or governance is None):
+            return {}
+        return {
+            "v": 2,
+            "status": "unavailable",
+            "complete": False,
+            "governance": governance,
+        }
+
+    if set(value) != _CROSS_RUN_AVAILABLE_KEYS:
+        return {}
+    concept_scope = _concept_scope(value.get("concept_scope"))
+    claim_source = _claim_source(value.get("claim_source"))
+    if (concept_scope is None or claim_source is None
+            or not all(_count(value.get(key))
+                       for key in ("n_lessons", "n_capsules", "n_research"))
+            or not _scope_identity(value.get("scope_task"))
+            or not _scope_identity(value.get("excluded_run"))
+            or not _digest(value.get("corpus_digest"))
+            or not _digest(value.get("render_digest"))):
+        return {}
+    return {
+        "v": 2,
+        "scope_task": value["scope_task"],
+        "excluded_run": value["excluded_run"],
+        "n_lessons": value["n_lessons"],
+        "n_capsules": value["n_capsules"],
+        "n_research": value["n_research"],
+        "concept_scope": concept_scope,
+        "claim_source": claim_source,
+        "corpus_digest": value["corpus_digest"],
+        "render_digest": value["render_digest"],
+    }
+
 
 def valid_advisory_ref(value, namespace: str) -> bool:
     """Whether ``value`` is one exact, printable, content-addressed advisory reference.

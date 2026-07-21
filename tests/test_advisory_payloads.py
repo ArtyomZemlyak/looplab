@@ -1,9 +1,100 @@
 """Focused trust-ordering regressions for bounded advisory payloads."""
 
 from looplab.core.advisory_payloads import (
+    bounded_cross_run_advisory_receipt,
     sanitize_report_payload,
     sanitize_research_memo_payload,
 )
+
+
+def _cross_run_receipt() -> dict:
+    segment = {
+        "read_complete": True,
+        "rows_total": 0,
+        "rows_retained": 0,
+        "rows_quarantined": 0,
+        "malformed_rows": 0,
+        "invalid_rows": 0,
+    }
+    return {
+        "v": 2,
+        "scope_task": "toy",
+        "excluded_run": "run-before-restart",
+        "n_lessons": 0,
+        "n_capsules": 1,
+        "n_research": 0,
+        "concept_scope": {
+            "scope_complete": True,
+            "scope_unknown_capsules": 0,
+            "scope_fingerprint_unknown_capsules": 0,
+            "scope_fingerprint_items_omitted": 0,
+            "scope_direction_unknown_capsules": 0,
+        },
+        "claim_source": {
+            "v": 1,
+            "receipt_known": True,
+            "source_complete": True,
+            "read_complete": True,
+            "research_source_complete": True,
+            "lessons": dict(segment),
+            "research": dict(segment),
+            "snapshot_digest": "a" * 64,
+        },
+        "corpus_digest": "b" * 64,
+        "render_digest": "c" * 64,
+    }
+
+
+def test_cross_run_receipt_accepts_only_the_two_closed_current_shapes():
+    available = _cross_run_receipt()
+    unavailable = {
+        "v": 2,
+        "status": "unavailable",
+        "complete": False,
+        "governance": {
+            "v": 1,
+            "status": "unavailable",
+            "complete": False,
+            "code": "governance_ledger_unavailable",
+            "ledger": "concept_aliases",
+            "reason": "torn_tail",
+        },
+    }
+
+    assert bounded_cross_run_advisory_receipt(available) == available
+    assert bounded_cross_run_advisory_receipt(unavailable) == unavailable
+    assert bounded_cross_run_advisory_receipt({
+        **available,
+        "status": "unavailable",
+        "complete": False,
+        "governance": unavailable["governance"],
+    }) == {}
+
+
+def test_cross_run_receipt_rejects_oversize_unknown_and_secret_bearing_replay_data():
+    available = _cross_run_receipt()
+    assert bounded_cross_run_advisory_receipt({
+        **available,
+        "scope_task": "x" * 501,
+    }) == {}
+    assert bounded_cross_run_advisory_receipt({
+        **available,
+        "claim_source": {
+            **available["claim_source"],
+            "api_key": "sk-this-must-not-be-forwarded",
+        },
+    }) == {}
+    assert bounded_cross_run_advisory_receipt({
+        **available,
+        "concept_scope": {
+            **available["concept_scope"],
+            "future_counter": 1,
+        },
+    }) == {}
+    assert bounded_cross_run_advisory_receipt({
+        **available,
+        "scope_task": "authorization: bearer forged-credential",
+    }) == {}
 
 
 def test_memo_sanitizer_preserves_late_unsupported_verdict_under_saturated_payload():

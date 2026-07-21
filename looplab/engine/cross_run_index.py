@@ -233,6 +233,24 @@ def run_source_digest(run_dir: str | Path) -> str:
     return "s_" + h.hexdigest()
 
 
+def _event_log_tail_is_complete(path: Path) -> bool:
+    """Return whether an event log has no unterminated physical record.
+
+    EventStore deliberately folds a complete prefix while a writer is between bytes.  A portfolio cache
+    has a stronger contract: it must never bless that temporary prefix as complete facts.  Checking one
+    final byte is sufficient for ordinary events and for the crash-atomic ``append_many`` envelope because
+    both become visible only at their terminating newline.  Empty files remain an ordinary empty-source
+    case handled by the projection guard below.
+    """
+
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            return True
+        handle.seek(-1, 2)
+        return handle.read(1) == b"\n"
+
+
 def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = None,
                             universal: bool = True) -> dict:
     """Rebuild the portfolio index over `<run_root>/*/events.jsonl`, REUSING cached facts for runs whose
@@ -258,27 +276,39 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
             # Digesting and snapshot projection are I/O too. Keep the whole per-run pipeline inside the
             # resilience boundary so one unreadable directory becomes an explicit skip instead of
             # aborting an otherwise healthy portfolio rebuild.
-            # CODEX AGENT: Cache identity is computed before a separate event/snapshot read and never
-            # revalidated. An append/reset between them can store facts under a digest for different bytes;
-            # freeze one bounded source generation or verify the digest again after projection before reuse.
+            # Cache identity is observed separately from projection. Revalidate the same digest below
+            # before publishing either cached or newly-folded facts, so an append/reset cannot bind facts
+            # to different bytes.
             digest = run_source_digest(ev.parent)
+            if not _event_log_tail_is_complete(ev):
+                raise ValueError("torn event-log tail (unterminated physical record)")
             cached = prior_runs.get(name)
             if digest and _cached_entry_matches_contract(cached, contract, source_digest=digest):
+                # A digest and a tail probe are separate reads. Re-observe the complete source before
+                # publishing cached facts so an append/reset between them cannot reuse the old projection.
+                if (not _event_log_tail_is_complete(ev)
+                        or run_source_digest(ev.parent) != digest):
+                    raise RuntimeError("run source changed while validating cached facts")
                 runs[name] = {"digest": digest, "facts_digest": cached["facts_digest"],
                               "facts": cached["facts"]}
                 receipts["cached"].append(name)
                 continue
             store = EventStore(ev)
             events = store.read_all()
-            # CODEX AGENT: ``read_all`` silently ignores an unterminated JSONL tail, while ``digest`` above
-            # includes it. A nonempty prefix is then marked built and cached forever as complete facts.
-            # Detect the torn tail and emit an incomplete/skipped receipt instead of blessing the prefix.
+            # The terminal-newline check above rejects an unterminated physical record before this lenient
+            # reader can turn it into an apparently complete prefix. A malformed *complete* row is the
+            # distinct divergence case below.
             if store.divergence is not None:
                 raise ValueError(
                     f"corrupt complete event record at line {store.divergence.get('corrupt_line')}")
             st = fold(events)
             kind, metric = _snapshot_kind_metric(ev.parent)
             facts = run_facts(st, kind=kind, metric=metric, universal=universal)
+            # Bind facts to the exact event+snapshot content named by ``digest``. This also closes the
+            # pre-existing digest/read TOCTOU noted above, rather than merely detecting torn batches.
+            if (not _event_log_tail_is_complete(ev)
+                    or run_source_digest(ev.parent) != digest):
+                raise RuntimeError("run source changed while building facts")
         except Exception as e:  # noqa: BLE001 — an unreadable run becomes an explicit skip receipt, not a gap
             receipts["skipped"].append({"dir": name, "reason": f"{type(e).__name__}: {e}"[:200]})
             continue

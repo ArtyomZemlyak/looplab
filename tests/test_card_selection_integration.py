@@ -5,6 +5,7 @@ from pathlib import Path
 
 import anyio
 
+import looplab.engine.orchestrator as orchestrator_module
 from looplab.adapters.toytask import ToyTask
 from looplab.core.models import Idea, RunState
 from looplab.engine.orchestrator import Engine
@@ -38,7 +39,7 @@ class _CaptureDeveloper:
 
 
 def _engine(run_dir, *, unified=False, agent_drives=False, policy=None, max_nodes=4,
-            card_driven=True) -> Engine:
+            card_driven=True, speculation_depth=0) -> Engine:
     task = ToyTask.load(TASK_FILE)
     researcher = _NoResearcher()
     developer = _CaptureDeveloper()
@@ -54,16 +55,20 @@ def _engine(run_dir, *, unified=False, agent_drives=False, policy=None, max_node
         unified_agent=unified,
         agent_drives_actions=agent_drives,
         card_driven_selection=card_driven,
+        speculation_depth=speculation_depth,
     )
     engine._novelty_mode = "off"
     return engine
 
 
 def _start(engine: Engine) -> None:
-    engine.store.append("run_started", {
+    payload = {
         "run_id": "l3", "task_id": "toy", "goal": "g", "direction": "min",
         "card_driven_selection": True,
-    })
+    }
+    if engine.speculation_depth:
+        payload["speculation_depth"] = engine.speculation_depth
+    engine.store.append("run_started", payload)
 
 
 def _add_ready_draft(engine: Engine, card_id="card-7", *, x=0.25) -> Idea:
@@ -172,6 +177,115 @@ def test_claim_tail_cas_rejects_control_event_winning_after_refold(tmp_path, mon
     assert engine._claim_existing_card_build(action) is None
     assert raced is True
     assert not [event for event in engine.store.read_all() if event.type == EV_NODE_BUILDING]
+
+
+def test_staged_proposal_is_ready_inventory_without_a_node_owner(tmp_path):
+    engine = _engine(tmp_path / "staged-inventory")
+    _start(engine)
+    engine._gpu_ids = [0]
+    engine._gpu_mem = {0: 8_192}
+    events = engine.store.read_all()
+    state = fold(events)
+    idea = Idea(
+        operator="draft",
+        params={"x": 0.4},
+        hypothesis="stage a bounded seed before implementation",
+        rationale="let the request-driven producer consume this durable proposal",
+        footprint={"gpus": 9, "gpu_mem_mib": 32_768},
+    )
+
+    card_id = engine._stage_prepared_card(
+        {"kind": "draft"},
+        idea,
+        proposal_state=state,
+        proposal_node_ceiling=0,
+        at_node=0,
+        source="researcher",
+    )
+
+    assert card_id == "card-0"
+    after_events = engine.store.read_all()
+    assert [event.type for event in after_events].count(EV_CARD_ADDED) == 1
+    assert not [event for event in after_events if event.type == EV_NODE_BUILDING]
+    after = fold(after_events)
+    assert after.cards[card_id].selection_ready is True
+    assert after.cards[card_id].footprint == {
+        "gpus": 1, "gpu_mem_mib": 8_192, "proposed_by": "researcher",
+    }
+
+    # Crash-prefix retry sees the exact ready receipt and reuses it without duplicate registration.
+    assert engine._stage_prepared_card(
+        {"kind": "draft"},
+        idea,
+        proposal_state=state,
+        proposal_node_ceiling=0,
+        at_node=0,
+        source="researcher",
+    ) == card_id
+    assert [event.type for event in engine.store.read_all()].count(EV_CARD_ADDED) == 1
+
+
+def test_positive_depth_without_isolated_pair_falls_back_to_serial_card_claim(tmp_path):
+    engine = _engine(
+        tmp_path / "no-isolated-pair",
+        max_nodes=1,
+        policy=GreedyTree(n_seeds=0, max_nodes=1, debug_depth=0),
+        speculation_depth=2,
+    )
+    _start(engine)
+    original = _add_ready_draft(engine)
+
+    anyio.run(engine.run)
+
+    events = engine.store.read_all()
+    assert not [event for event in events if event.type == "card_build_requested"]
+    assert [event.data["card_id"] for event in events
+            if event.type == EV_NODE_BUILDING] == [original.card_id]
+    assert [event.data["idea"]["card_id"] for event in events
+            if event.type == EV_NODE_CREATED] == [original.card_id]
+    assert engine.researcher.calls == 0
+
+
+def test_staged_card_bootstrap_forwards_the_invocation_wall_deadline(
+    tmp_path, monkeypatch,
+):
+    engine = _engine(
+        tmp_path / "bootstrap-deadline",
+        max_nodes=1,
+        policy=GreedyTree(n_seeds=0, max_nodes=1, debug_depth=0),
+        speculation_depth=1,
+    )
+    _start(engine)
+    _add_ready_draft(engine)
+    engine.max_seconds = 30.0
+    captured = {}
+
+    monkeypatch.setattr(engine, "_setup_phase", lambda _state: None)
+    monkeypatch.setattr(engine, "_producer_role_pair", lambda: (object(), object()))
+    monkeypatch.setattr(engine, "_request_card_build", lambda: True)
+
+    async def _session(evals, state, max_es, wall_deadline=None):
+        captured.update(
+            evals=evals,
+            state=state,
+            max_es=max_es,
+            wall_deadline=wall_deadline,
+        )
+        engine.store.append("run_finished", {"reason": "test session observed"})
+
+    monkeypatch.setattr(engine, "_run_card_session", _session)
+    monkeypatch.setattr(orchestrator_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "finalize_run",
+        lambda current, **_kwargs: fold(current.store.read_all()),
+    )
+
+    anyio.run(engine.run)
+
+    assert captured["evals"] == []
+    assert captured["max_es"] is None
+    assert captured["wall_deadline"] == 130.0
 
 
 def test_population_lane_claims_complete_card_batch_before_first_build(tmp_path):

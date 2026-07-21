@@ -370,6 +370,8 @@ def test_idea_rejected_lineage_skipped_by_debug_action():
                        idea=Idea(operator="draft", params={}),
                        status=NodeStatus.failed, error="boom", error_reason="idea_rejected")
     assert debug_action(st, debug_depth=1) is None     # rejected idea is not debugged
+    st.nodes[0].error_reason = "card_dropped"
+    assert debug_action(st, debug_depth=1) is None     # operator-stopped work is not crash repair
     # A plain crash leaf IS debugged.
     st.nodes[0].error_reason = "crash"
     act = debug_action(st, debug_depth=1)

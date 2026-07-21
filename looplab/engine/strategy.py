@@ -525,7 +525,7 @@ class StrategyCadenceMixin:
         # total+lane controller. Missing lanes are unbounded within the shared total, matching the
         # broker's explicit partial-map contract.
         raw_lanes = strat.get("llm_lane_limits")
-        if isinstance(raw_lanes, dict) and raw_lanes and may("llm_lane_limits"):
+        if isinstance(raw_lanes, dict) and may("llm_lane_limits"):
             settled_lanes: dict[str, int] = {}
             lane_values_valid = True
             for lane, value in raw_lanes.items():
@@ -534,7 +534,7 @@ class StrategyCadenceMixin:
                     lane_values_valid = False
                     break
                 settled_lanes[lane] = max(1, value)
-            if lane_values_valid and settled_lanes:
+            if lane_values_valid:
                 broker = self._llm_broker
                 broker.reconfigure(
                     total=broker.snapshot()["total"], lane_limits=settled_lanes)
@@ -597,6 +597,10 @@ class StrategyCadenceMixin:
                 # CODEX AGENT: cached parallel workers otherwise keep sending implementation calls
                 # through the previous backend after the primary Developer has visibly switched.
                 self._role_pool = None
+                # Layer-5 leases one pair out of that pool. Sessions are joined before the outer
+                # Strategist cadence runs, so invalidating the lease here is race-free and ensures the
+                # next speculative build observes the newly selected Developer backend.
+                self._spec_role_pair = None
                 self._pool_developer_override = dev
                 # Bind the replacement between calls, before its first implementation request.
                 bind_cost_accountants(self)

@@ -157,10 +157,20 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a **high-precision** flag
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
-- **Hypotheses board** — a kanban of what the run is trying to learn (open / testing / supported /
-  tested / abandoned). Each experiment states the hypothesis it tests; deep-research directions and
-  your own "+ Add" questions land here too, then get tracked to a verdict with links to the evidence
-  nodes. Audit-only — it never changes which node wins.
+- **Cards board** — the run's bounded work-item projection, grouped into the seven stable lifecycle
+  lanes (proposed / building / coded / running / evaluated / gated / dropped), with optional
+  speculative lanes and unknown future statuses shown without hiding data. Cards expose receipt
+  completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
+  edit display text, pin the 1-based visible priority, pin an effective GPU envelope, or deliberately
+  drop a Card. All four actions use the same generation-fenced command lifecycle as the rest of the
+  workspace; accepted/executing actions remain visibly pending across SSE lag, while a definite
+  failure rolls back only that optimistic field. Resource display keeps the immutable declared
+  `footprint` separate from the effective `resource_pin`; the browser sends only quantitative values
+  and the server stamps operator provenance and validates the live GPU envelope. Dropping a Card is
+  the explicit stop-now affordance for its matching in-flight eval; engine/freshness drops still burn
+  to a valid terminal result. An exact empty Card
+  projection keeps the legacy **Hypotheses** add/abandon board as a compatibility fallback for old or
+  not-yet-seeded runs.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and
@@ -175,7 +185,7 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   empty states separately. Full recorded span dictionaries remain only in `spans.jsonl` and are not downloadable
   through these routes.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
-  launch snapshot for the next restart (not the global UI defaults). Six run-start selection fields are
+  launch snapshot for the next restart (not the global UI defaults). Seven run-start selection fields are
   read-only after `run_started` and come from the folded event log; the API overlays/repairs those values.
   `trust_gate` is changed through a durable event as well as the snapshot, so its effective state is replayable.
   The GET returns a 64-character `config_revision`; the current editor sends it as `expected_revision`.

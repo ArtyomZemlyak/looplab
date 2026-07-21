@@ -50,11 +50,11 @@ class RunStateCache:
         hit = self._cache.get(str(run_id))
         if hit and hit[0] == sig:
             return hit[1]
-        from looplab.events.eventstore import iter_jsonl
+        from looplab.events.eventstore import iter_event_jsonl
         from looplab.core.models import Event
         from looplab.events.replay import fold
         try:
-            st = fold(Event(**o) for o in iter_jsonl(rd / "events.jsonl"))
+            st = fold(Event(**o) for o in iter_event_jsonl(rd / "events.jsonl"))
         except (OSError, ValueError, TypeError):
             return None
         self._cache[str(run_id)] = (sig, st)

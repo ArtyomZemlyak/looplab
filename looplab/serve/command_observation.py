@@ -6,8 +6,8 @@ log in every helper turns a long run into quadratic disk parsing.  This module s
 event byte once, retains only eight active run indexes, and gives one stable logical observation to
 all helpers in a monitor iteration.
 
-The scanner deliberately mirrors :func:`looplab.events.eventstore.iter_jsonl`: the first partial,
-invalid, non-object, or invalid-Event row ends the recoverable prefix.  A later append resumes from
+The scanner deliberately mirrors :func:`looplab.events.eventstore.iter_event_jsonl`: the first partial,
+invalid, non-object, invalid-Event, or malformed batch row ends the recoverable prefix. A later append resumes from
 the last valid byte boundary, so completing a torn tail is observed without re-reading the prefix.
 Replacement, shrink, and a sampled same-size sentinel change rebuild the index before it is trusted.
 """
@@ -28,6 +28,7 @@ import orjson
 
 from looplab.core.models import Event, RunState
 from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.events.eventstore import decode_event_record
 from looplab.events.replay import fold
 from looplab.events.types import EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
 from looplab.serve.protocol import CONTROL_EVENTS
@@ -137,7 +138,9 @@ def _probe_signature(handle: BinaryIO, size: int) -> bytes:
         handle.seek(position)
 
 
-def _parse_event(raw: bytes) -> Optional[Event]:
+def _parse_event(raw: bytes) -> Optional[tuple[Event, ...]]:
+    """Parse one physical row and atomically expand its logical Event members."""
+
     line = raw.strip()
     if not line:
         return None
@@ -148,7 +151,7 @@ def _parse_event(raw: bytes) -> Optional[Event]:
     if not isinstance(value, dict):
         raise ValueError("event row is not an object")
     try:
-        return Event(**value)
+        return tuple(decode_event_record(value))
     except Exception as exc:  # noqa: BLE001 - identical recoverable boundary to EventStore.read_all
         raise ValueError("invalid event envelope") from exc
 
@@ -218,15 +221,15 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int,
             break
         end = handle.tell()
         try:
-            event = _parse_event(raw)
+            events = _parse_event(raw)
         except ValueError:
             stopped = True
             break
         # Blank complete rows are part of the valid byte prefix but not EventStore events.
         valid_end = end
-        if event is not None:
-            delta.append(event)
-            parsed += 1
+        if events is not None:
+            delta.extend(events)
+            parsed += len(events)
 
     index.valid_end = valid_end
     index.observed_size = snapshot_size

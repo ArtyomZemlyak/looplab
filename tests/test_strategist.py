@@ -117,6 +117,7 @@ def test_validate_strategy_keeps_raw_closed_llm_lane_allocation():
     out = validate_strategy({"llm_parallel": 0, "llm_lane_limits": lanes}, _ctx())
     assert out["llm_parallel"] == 0
     assert out["llm_lane_limits"] == lanes  # durable Strategy stores raw zero; live apply settles it
+    assert validate_strategy({"llm_lane_limits": {}}, _ctx())["llm_lane_limits"] == {}
 
     for invalid in ({"unknown": 1}, {"build": True}, {"build": -1}, {"build": 65}):
         cleaned = validate_strategy(
@@ -256,6 +257,248 @@ def test_strategy_context_uses_effective_card_budget_only_in_card_mode(tmp_path)
     assert legacy._strategy_ctx(state).node_budget_frac == 3 / legacy.policy.max_nodes
 
 
+def test_card_budget_keeps_gated_and_tombstoned_work_under_raw_hard_ceiling(tmp_path):
+    state = RunState(nodes={
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=1.0),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=0.9, tombstoned=True),
+        2: Node(id=2, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=0.8, feasible=False),
+    })
+    eng = _engine(tmp_path / "card-hard-ceiling", card_driven_selection=True)
+
+    eng._refresh_speculation_budget(state, events=[])
+
+    # One effective Node plus five remaining raw slots: the two excluded attempts are not ranked, but
+    # cannot be refunded into an unbounded stream beyond the configured eight physical reservations.
+    assert eng.policy.max_nodes == 6
+
+
+def test_flag_off_policy_denominator_spends_raw_reservation_gaps(tmp_path):
+    eng = _engine(tmp_path / "legacy-raw-gap", card_driven_selection=False)
+    eng._base_max_nodes = 3
+    state = RunState(nodes={
+        0: Node(
+            id=0, operator="draft", idea=Idea(operator="draft"),
+            status=NodeStatus.evaluated, metric=1.0,
+        ),
+    })
+    events = [
+        Event(type="node_building", data={"node_id": 0}),
+        # A crashed reservation consumed id 1 without leaving a folded Node.
+        Event(type="node_building", data={"node_id": 1}),
+    ]
+
+    eng._refresh_speculation_budget(state, events=events)
+
+    # Legacy policies compare len(nodes) to max_nodes. Translate the one remaining physical slot into
+    # that denominator; setting it to the raw hard limit would incorrectly advertise two more Nodes.
+    assert eng.policy.max_nodes == 2
+
+
+def test_common_node_reservation_boundary_waits_for_add_nodes(tmp_path):
+    eng = _engine(
+        tmp_path / "hard-reservation-boundary",
+        policy=GreedyTree(n_seeds=1, max_nodes=1),
+    )
+    eng.store.append("run_started", {
+        "run_id": "r", "task_id": "t", "goal": "g", "direction": "min",
+    })
+
+    first = eng._reserve_node_build({"kind": "draft"})
+    assert first is not None and first.node_id == 0
+    assert eng._reserve_node_build({"kind": "draft"}) is None
+
+    eng.store.append("budget_extend", {"add_nodes": 1})
+    extended = eng._reserve_node_build({"kind": "draft"})
+    assert extended is not None and extended.node_id == 1
+
+
+def test_budget_blocked_inject_stays_pending_until_add_nodes(tmp_path, monkeypatch):
+    eng = _engine(
+        tmp_path / "pending-inject-budget",
+        policy=GreedyTree(n_seeds=1, max_nodes=1),
+    )
+    state = RunState(
+        nodes={
+            0: Node(
+                id=0, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=1.0,
+            ),
+        },
+        inject_requests=[{"idea": {"operator": "manual"}}],
+    )
+    created = []
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(eng, "_create_injected_node", created.append)
+    monkeypatch.setattr(anyio, "sleep", fake_sleep)
+
+    assert anyio.run(eng._serve_forced_requests, state) is True
+    assert created == []
+    assert sleeps == [0.5]  # bounded polling, never an empty-action finalization or tight spin
+    assert not [event for event in eng.store.read_all() if event.type == "inject_done"]
+
+    state.budget_overrides["add_nodes"] = 1
+    assert anyio.run(eng._serve_forced_requests, state) is True
+    assert created == state.inject_requests
+    assert sleeps == [0.5]
+    assert len([event for event in eng.store.read_all() if event.type == "inject_done"]) == 1
+
+
+def test_budget_blocked_fork_stays_pending_until_add_nodes(tmp_path, monkeypatch):
+    eng = _engine(
+        tmp_path / "pending-fork-budget",
+        policy=GreedyTree(n_seeds=1, max_nodes=1),
+    )
+    state = RunState(
+        nodes={
+            0: Node(
+                id=0, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=1.0,
+            ),
+        },
+        fork_requests=[{"from_node_id": 0, "generation": 0}],
+    )
+    created = []
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(eng, "_create_node", created.append)
+    monkeypatch.setattr(anyio, "sleep", fake_sleep)
+
+    assert anyio.run(eng._serve_forced_requests, state) is True
+    assert created == []
+    assert sleeps == [0.5]
+    assert not [event for event in eng.store.read_all() if event.type == "fork_done"]
+
+    state.budget_overrides["add_nodes"] = 1
+    assert anyio.run(eng._serve_forced_requests, state) is True
+    assert created == [{
+        "kind": "improve", "parent_id": 0, "parent_generations": {"0": 0},
+    }]
+    assert sleeps == [0.5]
+    assert len([event for event in eng.store.read_all() if event.type == "fork_done"]) == 1
+
+
+def test_terminal_eval_budget_closes_all_pending_node_creators_before_finish(
+    tmp_path, monkeypatch,
+):
+    eng = _engine(
+        tmp_path / "terminal-budget-forced-queue",
+        policy=GreedyTree(n_seeds=1, max_nodes=1),
+    )
+    eng.store.append("run_started", {
+        "run_id": "r", "task_id": "t", "goal": "g", "direction": "min",
+    })
+    eng.store.append("node_created", {
+        "node_id": 0,
+        "parent_ids": [],
+        "operator": "draft",
+        "idea": {"operator": "draft"},
+        "code": "",
+    })
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.0,
+    })
+    eng.store.append("fork", {"from_node_id": 0, "generation": 0})
+    eng.store.append("inject_node", {"idea": {"operator": "manual"}})
+    eng.store.append("force_ablate", {"node_id": 0, "generation": 0})
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(anyio, "sleep", fake_sleep)
+    state = fold(eng.store.read_all())
+    assert anyio.run(eng._serve_forced_requests, state) is True
+    assert sleeps == [0.5]  # model the full-cap turn immediately before eval budget wins
+    assert fold(eng.store.read_all()).forks_done == 0
+
+    append_many = eng.store.append_many
+    batches = []
+
+    def record_append_many(records, **kwargs):
+        batches.append(list(records))
+        return append_many(records, **kwargs)
+
+    monkeypatch.setattr(eng.store, "append_many", record_append_many)
+    for expected in ("fork", "inject", "ablate"):
+        state = fold(eng.store.read_all())
+        assert eng._close_node_creating_forced_request_before_terminal_gate(
+            state, reason="eval_budget",
+        ) is True, expected
+    state = fold(eng.store.read_all())
+    assert eng._close_node_creating_forced_request_before_terminal_gate(
+        state, reason="eval_budget",
+    ) is False
+
+    # Failure+gate is one crash-atomic event-store batch; no resume can duplicate only the failure.
+    assert [[event_type for event_type, _payload in batch] for batch in batches] == [[
+        "inject_failed", "inject_done",
+    ]]
+    events = eng.store.read_all()
+    failed = next(event for event in events if event.type == "inject_failed")
+    inject_done = next(event for event in events if event.type == "inject_done")
+    assert inject_done.seq == failed.seq + 1
+    assert failed.data["reason"] == inject_done.data["skipped"] == "eval_budget"
+    assert fold(events).forks_done == 1
+    assert fold(events).injects_done == 1
+    assert any(event.type == "fork_done" and event.data.get("skipped") == "eval_budget"
+               for event in events)
+    assert any(event.type == "ablate" and event.data.get("skipped") == "eval_budget"
+               for event in events)
+    assert len(fold(events).nodes) == 1
+
+    tail = events[-1].seq
+    assert eng._finish_if_quiescent({"reason": "eval_budget"}, after_seq=tail) is True
+    finished = fold(eng.store.read_all())
+    assert finished.finished and finished.stop_reason == "eval_budget"
+    assert finished.forks_done == 1 and finished.injects_done == 1
+
+
+def test_malformed_inject_at_node_cap_is_rejected_before_waiting(tmp_path, monkeypatch):
+    eng = _engine(
+        tmp_path / "invalid-inject-at-cap",
+        policy=GreedyTree(n_seeds=1, max_nodes=1),
+    )
+    eng.store.append("run_started", {
+        "run_id": "r", "task_id": "t", "goal": "g", "direction": "min",
+    })
+    eng.store.append("node_created", {
+        "node_id": 0,
+        "parent_ids": [],
+        "operator": "draft",
+        "idea": {"operator": "draft"},
+        "code": "",
+    })
+    eng.store.append("inject_node", {"idea": "not-an-object"})
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(anyio, "sleep", fake_sleep)
+    assert anyio.run(
+        eng._serve_forced_requests, fold(eng.store.read_all()),
+    ) is True
+    events = eng.store.read_all()
+    assert sleeps == []
+    assert fold(events).injects_done == 1
+    assert not [event for event in events if event.type == "node_building"]
+    failed = next(event for event in events if event.type == "inject_failed")
+    done = next(event for event in events if event.type == "inject_done")
+    assert done.seq == failed.seq + 1
+    assert failed.data["reason"] == done.data["skipped"] == "invalid_request"
+
+
 def test_off_emits_no_strategy_decision(tmp_path):
     state = anyio.run(_engine(tmp_path / "off").run)
     assert state.finished
@@ -392,6 +635,25 @@ def test_asha_end_to_end_emits_rung_promoted(tmp_path):
     assert state.finished and len(state.nodes) == 10
     assert state.rungs, "expected at least one rung_promoted event"
     assert any(n.operator == "improve" for n in state.nodes.values())
+
+
+def test_widened_asha_lane_emits_one_indistinguishable_rung_receipt(tmp_path):
+    run_dir = tmp_path / "asha-lane-receipt"
+    eng = _engine(run_dir)
+    lane = [
+        {"kind": "improve", "parent_id": 0, "_rung": 1, "_promoted": [0, 1]},
+        {"kind": "improve", "parent_id": 1, "_rung": 1, "_promoted": [0, 1]},
+    ]
+
+    for action in lane:
+        eng._append_rung_promotion(action)
+
+    # A fresh process must derive the same dedupe decision from the durable log, not a local lane set.
+    resumed = _engine(run_dir)
+    assert resumed._append_rung_promotion(lane[1]) is False
+
+    promotions = [event for event in eng.store.read_all() if event.type == "rung_promoted"]
+    assert [event.data for event in promotions] == [{"rung": 1, "survivors": [0, 1]}]
 
 
 def test_make_policy_registers_asha():
@@ -1140,11 +1402,24 @@ def test_code_block_ablation_end_to_end(tmp_path):
     eng = _engine(tmp_path / "cba",
                   policy=GreedyTree(n_seeds=3, max_nodes=10, ablate_every=2),
                   ablate_code_blocks=True)
-    state = anyio.run(eng.run)
+
+    async def _run_bounded():
+        # If a refine-block Card cannot be reserved, n_refine never advances and the policy keeps
+        # selecting the same due ablation forever.  Fail this regression promptly instead of hanging
+        # the whole suite when that lifecycle contract regresses.
+        with anyio.fail_after(30):
+            return await eng.run()
+
+    state = anyio.run(_run_bounded)
     evs = list(_read(tmp_path / "cba"))
     ablates = [e for e in evs if e.type == "ablate"]
     assert ablates, "expected an ablate event"
     assert any(e.data.get("mode") == "code_blocks" for e in ablates)
+    assert len(ablates) <= eng.policy.max_nodes
+    assert not [
+        e for e in evs
+        if e.type == "novelty_rejected" and e.data.get("kind") == "card_contract"
+    ]
     refined = [n for n in state.nodes.values() if n.operator == "refine_block"]
     assert refined
     assert all(n.idea.card_id and state.cards[n.idea.card_id].identity.kind == "native"
@@ -1342,6 +1617,18 @@ def test_llm_strategist_can_allocate_named_lanes_from_structured_output():
     assert "LLM lanes={'build': 2}" in " ".join(m["content"] for m in client.messages)
 
 
+def test_llm_strategist_structured_output_distinguishes_lane_clear_from_omission():
+    clear = LLMStrategist(_CaptureClient({
+        "llm_lane_limits": {}, "rationale": "remove lane caps",
+    })).decide(RunState(), _ctx(llm_lane_limits={"build": 2}))
+    omitted = LLMStrategist(_CaptureClient({
+        "rationale": "retain current allocation",
+    })).decide(RunState(), _ctx(llm_lane_limits={"build": 2}))
+
+    assert clear["llm_lane_limits"] == {}
+    assert "llm_lane_limits" not in omitted
+
+
 def test_llm_card_scoring_prompt_and_schema_are_flag_gated():
     legacy = _CaptureClient({"policy": "greedy", "rationale": "legacy"})
     LLMStrategist(legacy).decide(RunState(), _ctx())
@@ -1485,6 +1772,20 @@ def test_operator_pin_owns_canonical_totals_and_raw_lane_split_across_resume(tmp
     resumed._apply_strategy(active)
     assert (resumed._eval_parallel, resumed._llm_parallel) == (1, 1)
     assert resumed._llm_broker.snapshot()["lane_limits"] == broker["lane_limits"]
+
+
+def test_live_empty_lane_allocation_clears_caps_and_omission_retains_it(tmp_path):
+    eng = _engine(tmp_path / "lane-clear")
+    eng._apply_strategy({"llm_lane_limits": {"build": 2, "deep_research": 1}})
+    assert eng._llm_broker.snapshot()["lane_limits"] == {"build": 2, "deep_research": 1}
+
+    eng._apply_strategy({"fidelity": "smoke"})
+    assert eng._llm_broker.snapshot()["lane_limits"] == {"build": 2, "deep_research": 1}
+
+    eng._apply_strategy({"llm_lane_limits": {}})
+    assert eng._llm_broker.snapshot()["lane_limits"] == {}
+    eng._apply_strategy({"llm_parallel": 3})
+    assert eng._llm_broker.snapshot()["lane_limits"] == {}
 
 
 def test_operator_pin_policy_wins_over_strategist(tmp_path):

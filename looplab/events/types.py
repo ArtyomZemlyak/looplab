@@ -227,23 +227,16 @@ EV_CARD_MERGED = "card_merged"                  # fold alias cards into a canoni
 EV_CARD_DROPPED = "card_dropped"                # engine/operator drop: reason + dropped_by (lifecycle)
 EV_CARD_ENRICHED = "card_enriched"              # Layer 1b: novelty/cross-run/footprint delta (last-write-by-seq)
 EV_CARD_RANKED = "card_ranked"                  # Layer 1b: board priority order (mirrors hypothesis_ranked)
-# Layer 5a concurrent producer/consumer core (docs/23 §12.6 stage 8). A durable request/done pair: the
-# MAIN task elects a ready Card and appends `card_build_requested` (generation-fenced, under `_id_lock`);
-# a `card_build_done` closes that request (a committed speculative node, a crash-recovered node, or a
-# skip). Both are main-task-written and FOLDED into `card_build_requests` so resume-by-replay is
-# idempotent. At `speculation_depth=0` the election never fires, so neither event is ever emitted and the
-# serial spine stays byte-identical (golden unchanged).
-EV_CARD_BUILD_REQUESTED = "card_build_requested"   # elect (K,G) for speculative pre-build; opens the request
-EV_CARD_BUILD_DONE = "card_build_done"             # close it: {node_id, speculative} | {skipped: reason}
-# Layer 6 operator card-steering controls (docs/23 §12.6 stage 10). FOUR distinct operator-only control
-# intents (NO_SPAWN/advisory: they fold into the RESERVED override maps and never spawn compute or wake a
-# dead engine). Deliberately kept DISTINCT from the engine's own `card_dropped` so the engine's domain drop
-# is never reclassified as a UI control event (command_observation keys domain-progress off CONTROL_EVENTS).
-# All are server-stamped (provenance is out of the client payload) and generation-fenced by the command path.
-EV_CARD_REPRIORITIZED = "card_reprioritized"       # operator pins board priority -> card_priority_pins
-EV_CARD_EDITED = "card_edited"                      # operator edits the DISPLAY statement -> card_operator_edits
-EV_CARD_RESOURCE_PINNED = "card_resource_pinned"    # operator pins the footprint (clamped) -> card_resource_pins
-EV_CARD_OPERATOR_DROPPED = "card_operator_dropped"  # operator drop -> cards_dropped (dropped_by='operator')
+# Layer 6 operator controls. These are generation-fenced, server-stamped command intents; they fold
+# into dedicated override maps and are overlaid after every engine/Strategist projection. `card_dropped`
+# above is the fourth control as well as an engine lifecycle event.
+EV_CARD_REPRIORITIZED = "card_reprioritized"
+EV_CARD_EDITED = "card_edited"
+EV_CARD_RESOURCE_PINNED = "card_resource_pinned"
+# Layer 5's request/done execution ledger. Both are folded and main-task-only: the request is the
+# durable selection+compute gate; done advances it after commit or an explicit producer-failure give-up.
+EV_CARD_BUILD_REQUESTED = "card_build_requested"
+EV_CARD_BUILD_DONE = "card_build_done"
 EV_RUN_REOPENED = "run_reopened"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins

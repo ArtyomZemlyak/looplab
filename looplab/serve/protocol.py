@@ -41,8 +41,8 @@ Protocols named here:
 from __future__ import annotations
 
 from looplab.events.types import (
-    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_CARD_EDITED,
-    EV_CARD_OPERATOR_DROPPED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED, EV_DEEP_RESEARCH,
+    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
@@ -69,9 +69,10 @@ CONTROL_EVENTS = {
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,  # PART V Phase 2b: an operator re-tags one node's concepts (command-only)
     EV_RUN_CONCEPTS,  # PART V (D): operator/assistant sets the run's BASE concept set (last-write-wins)
-    # Layer 6 operator card-steering (docs/23 §12.6 stage 10): pin priority, edit the display statement,
-    # pin the footprint, or drop a card. Advisory (NO_SPAWN/folded_intent); provenance is server-stamped.
-    EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_OPERATOR_DROPPED,
+    # Layer 6 Card board controls (docs/23 §12.6 stage 10) are command-only and server-stamped. They
+    # never wake a dead engine; live selection/scheduling observes their fold, and an exact operator
+    # drop may cancel its running eval.
+    EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
 }
 
 # Versioned collaboration is command-only: unlike the compatibility /control route, the durable
@@ -79,6 +80,7 @@ CONTROL_EVENTS = {
 COLLABORATION_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,
+    EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
     # PART V (D): a base-concept edit is command-only too — force it through the generation-fenced command
     # endpoint (not the legacy /control route) so a write formed against an old generation can't land on a
     # post-reset replacement run, exactly like its per-node sibling EV_CONCEPT_TAG_EDITED.

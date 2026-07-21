@@ -21,7 +21,6 @@ import os
 import re
 import subprocess
 import sys
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
@@ -37,7 +36,6 @@ SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)"
 MAX_TIMEOUT_S = 24 * 3600.0    # 24 hours
 
 _DOCKER_NVIDIA_RUNTIME_CACHE: Optional[bool] = None
-_DOCKER_GPU_FALLBACK_WARNED = False
 
 
 def docker_nvidia_runtime_available() -> bool:
@@ -64,31 +62,50 @@ def docker_nvidia_runtime_available() -> bool:
 def docker_gpu_argv(env: Optional[dict], *, runtime: Optional[str] = None) -> list[str]:
     """Translate a physical CUDA visibility pin to Docker's device request.
 
-    Unsupported daemons and non-NVIDIA isolation runtimes deliberately fall back to the historical
-    unpinned Docker launch (with a one-time warning) rather than turning a capability probe into an
-    eval crash.  The host/trusted path remains pinned through ``CUDA_VISIBLE_DEVICES`` itself.
+    A non-empty ``CUDA_VISIBLE_DEVICES`` is an explicit device fence, so inability to enforce it
+    fails closed before container launch. Empty CPU masks and truly unspecified legacy environments
+    need no Docker GPU capability and retain their historical no-argument behavior.
     """
-    global _DOCKER_GPU_FALLBACK_WARNED
     if not isinstance(env, dict) or "CUDA_VISIBLE_DEVICES" not in env:
         return []
     devices = str(env.get("CUDA_VISIBLE_DEVICES") or "").strip()
     if not devices or devices.lower() in {"-1", "none", "nodevfiles", "void"}:
         return []
-    supported_runtime = runtime in (None, "", "nvidia")
+    # Docker applies its NVIDIA device request before invoking the selected low-level runtime.
+    # In particular gVisor's nvproxy path is driven by the same ``--gpus`` request, so a configured
+    # ``runsc`` runtime is GPU-capable too.  If nvproxy/toolkit support is missing, container creation
+    # itself fails closed; rejecting every hostile-tier GPU request here would also reject valid hosts.
+    supported_runtime = runtime in (None, "", "runc", "nvidia", "runsc")
     if supported_runtime and docker_nvidia_runtime_available():
         return ["--gpus", f"device={devices}"]
-    # CODEX AGENT: this is fail-open after the scheduler has already treated the devices as reserved.
-    # The container then runs without the promised device fence (or without GPU access at all under
-    # runsc), while the engine records an admitted GPU footprint. Explicit GPU work should fail/pause
-    # admission here; only a truly unspecified legacy request can safely use the unpinned fallback.
-    if not _DOCKER_GPU_FALLBACK_WARNED:
-        why = (f"the configured OCI runtime {runtime!r} cannot expose NVIDIA devices"
-               if not supported_runtime else "the Docker daemon has no advertised NVIDIA runtime")
-        warnings.warn(
-            f"GPU reservation is active, but {why}; running this container without a Docker "
-            "device pin.", RuntimeWarning, stacklevel=3)
-        _DOCKER_GPU_FALLBACK_WARNED = True
-    return []
+    why = (f"the configured OCI runtime {runtime!r} cannot expose NVIDIA devices"
+           if not supported_runtime else "the Docker daemon has no advertised NVIDIA runtime")
+    raise RuntimeError(
+        f"GPU device pin {devices!r} was requested, but {why}; "
+        "refusing to launch an unpinned container.")
+
+
+def docker_gpu_env(env: Optional[dict], *, gpu_args: list[str]) -> dict:
+    """Return the environment safe to forward into a Docker GPU/CPU container.
+
+    ``CUDA_VISIBLE_DEVICES`` is a process-level CUDA selector, not a device-injection boundary.  A
+    CUDA image commonly carries ``NVIDIA_VISIBLE_DEVICES=all`` and a daemon may use NVIDIA as its
+    default runtime, so an explicit CPU reservation must override that image default with ``void``.
+    Conversely, for a positive scheduler-owned pin, Docker's ``--gpus device=...`` request is the
+    authoritative physical fence: do not forward a host ``NVIDIA_VISIBLE_DEVICES`` value that could
+    widen/conflict with it, and do not re-forward the physical CUDA ordinal into the re-indexed child.
+    Truly unspecified legacy environments retain their historical forwarding behavior.
+    """
+    clean = dict(env or {}) if isinstance(env, dict) else {}
+    if "CUDA_VISIBLE_DEVICES" not in clean:
+        return clean
+    devices = str(clean.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    if gpu_args:
+        clean.pop("CUDA_VISIBLE_DEVICES", None)
+        clean.pop("NVIDIA_VISIBLE_DEVICES", None)
+    elif not devices or devices.lower() in {"-1", "none", "nodevfiles", "void"}:
+        clean["NVIDIA_VISIBLE_DEVICES"] = "void"
+    return clean
 
 
 def finite_timeout(value, default: float = 600.0) -> float:
@@ -802,11 +819,9 @@ class DockerSandbox:
         timeout = finite_timeout(timeout, 30.0)
         gpu_args = docker_gpu_argv(env, runtime=self.runtime)
         envs = []
-        for k, v in (env or {}).items():            # pass env into the container explicitly
-            # `--gpus device=<physical>` is the visibility fence.  Re-forwarding that physical CVD
-            # inside a container whose visible set is re-indexed can hide the sole logical device.
-            if gpu_args and k == "CUDA_VISIBLE_DEVICES":
-                continue
+        for k, v in docker_gpu_env(env, gpu_args=gpu_args).items():
+            # Pass the reconciled environment into the container explicitly.  GPU pins are enforced
+            # by ``--gpus``; CPU pins also override CUDA-image NVIDIA defaults at injection time.
             envs += ["-e", f"{k}={v}"]
         # In-container self-limit (coreutils `timeout`): killing the host `docker run` CLI on
         # timeout does NOT stop the daemon-owned container, so bound it from INSIDE — the

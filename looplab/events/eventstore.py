@@ -23,6 +23,95 @@ from looplab.core.tracing import current_ids
 # span via current_ids) from an EXPLICIT None (a telemetry event that must carry NO trace).
 _UNSET_TRACE = object()
 
+# ``append_many`` is a logical transaction, not a promise that one ``write`` syscall cannot tear. Keep
+# its members in one newline-delimited envelope so the existing torn-final-line rule exposes either the
+# complete batch or none of it. The type is reserved and decoded below before any caller sees Events.
+_EVENT_BATCH_TYPE = "__looplab_event_batch_v1__"
+_EVENT_BATCH_SCHEMA = "looplab.event-batch/v1"
+# Keep construction/validation CPU and memory bounded independently of serialized size, while staying
+# above every canonical fan-out knob (Settings.n_seeds/max_parallel allow 1024). Custom policy lanes may
+# be wider, so retain generous headroom; the byte ceiling below remains the tighter bound for rich rows.
+_MAX_EVENT_BATCH_MEMBERS = 4096
+_MAX_EVENT_BATCH_BYTES = 8 * 1024 * 1024
+# Public physical-record ceiling for bounded event-log readers. It includes the terminating newline,
+# matching ``append_many``'s payload check; readers must not reject a writer-valid batch prelude.
+MAX_EVENT_BATCH_BYTES = _MAX_EVENT_BATCH_BYTES
+_EVENT_FIELDS = frozenset({"v", "seq", "ts", "type", "data", "trace_id", "span_id"})
+_EVENT_BATCH_DATA_FIELDS = frozenset({"schema", "count", "first_seq", "last_seq", "events"})
+
+
+def is_event_batch_record(obj: object) -> bool:
+    """Whether a parsed physical event-log object claims the reserved batch protocol."""
+
+    return isinstance(obj, dict) and obj.get("type") == _EVENT_BATCH_TYPE
+
+
+def _decode_batch_envelope(obj: dict) -> list[Event]:
+    """Strictly validate and expand one internal crash-atomic batch envelope."""
+
+    if set(obj) != _EVENT_FIELDS or obj.get("type") != _EVENT_BATCH_TYPE:
+        raise ValueError("invalid event batch envelope")
+    # This is an internal v1 storage protocol, not an ordinary backwards-compatible Event row.  Never
+    # let Pydantic coercion make a non-canonical envelope valid (notably ``True == 1`` for seq/version).
+    outer = Event.model_validate(obj, strict=True)
+    if outer.model_dump(mode="json") != obj:
+        raise ValueError("non-canonical event batch envelope")
+    if outer.v != 1:
+        raise ValueError("unsupported event batch envelope version")
+    data = outer.data
+    if set(data) != _EVENT_BATCH_DATA_FIELDS or data.get("schema") != _EVENT_BATCH_SCHEMA:
+        raise ValueError("invalid event batch schema")
+    count = data.get("count")
+    first_seq = data.get("first_seq")
+    last_seq = data.get("last_seq")
+    members = data.get("events")
+    if (
+        type(count) is not int
+        or not 1 <= count <= _MAX_EVENT_BATCH_MEMBERS
+        or type(first_seq) is not int
+        or type(last_seq) is not int
+        or first_seq < 0
+        or last_seq != outer.seq
+        or first_seq != last_seq - count + 1
+        or not isinstance(members, list)
+        or len(members) != count
+        or len(orjson.dumps(obj)) + 1 > _MAX_EVENT_BATCH_BYTES
+    ):
+        raise ValueError("invalid event batch bounds")
+
+    events: list[Event] = []
+    for offset, raw in enumerate(members):
+        if not isinstance(raw, dict) or set(raw) != _EVENT_FIELDS:
+            raise ValueError("invalid event batch member")
+        event = Event.model_validate(raw, strict=True)
+        if (
+            event.model_dump(mode="json") != raw
+            or event.v != 1
+            or event.type == _EVENT_BATCH_TYPE
+            or event.seq != first_seq + offset
+        ):
+            raise ValueError("invalid event batch member")
+        events.append(event)
+    return events
+
+
+def decode_event_record(obj: dict, *, strict: bool = False) -> list[Event]:
+    """Decode one physical event-log object into its logical Events.
+
+    Ordinary historical rows retain EventStore's tolerant Pydantic compatibility unless ``strict`` is
+    requested by an authority boundary.  The reserved batch protocol is always strict and canonical.
+    Callers that read arbitrary JSONL must not use this helper: a foreign object may legitimately carry
+    the same ``type`` string without being an event envelope.
+    """
+
+    event = Event.model_validate(obj, strict=True) if strict else Event(**obj)
+    return _decode_batch_envelope(obj) if is_event_batch_record(obj) else [event]
+
+
+# Private compatibility name for older internal call sites.  New event-specific readers should import the
+# public helper so the generic JSONL reader can remain format-agnostic.
+_decode_event_record = decode_event_record
+
 
 class EventLogCorruptionError(RuntimeError):
     """A COMPLETE corrupt record was found in an append-only event log. `read_all` stops at that
@@ -122,8 +211,9 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False):
 def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
     """Yield dict records from an append-only JSONL file, tolerating a torn/partial final line
     (a crash mid-append): stop at the first line without a trailing newline or that fails to
-    parse. Shared by the event store and the span reader so both files have identical
-    durability semantics."""
+    parse. This helper is deliberately FORMAT-AGNOSTIC: chat, assistant-message and span stores also use
+    it, and a foreign row whose ordinary ``type`` happens to equal an internal event type must round-trip
+    unchanged. Event-log consumers use :func:`iter_event_jsonl` below."""
     p = Path(path)
     if not p.exists():
         return
@@ -140,6 +230,29 @@ def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
                 break  # corrupt tail — stop cleanly
             if not isinstance(obj, dict):
                 break  # a valid-JSON but non-object line is corruption, not a record
+            yield obj
+
+
+def iter_event_jsonl(path: str | os.PathLike) -> Iterator[dict]:
+    """Yield logical event envelopes while preserving ``iter_jsonl`` torn-tail semantics.
+
+    A physical ``append_many`` envelope is an implementation detail and expands atomically: malformed
+    batches end the recoverable prefix and no member is exposed.  Keeping this event-aware behavior out of
+    ``iter_jsonl`` is required for non-event JSONL stores that share the generic reader.
+    """
+
+    for obj in iter_jsonl(path):
+        try:
+            events = decode_event_record(obj)
+        except Exception:  # noqa: BLE001 - malformed event/batch envelope is log corruption
+            break
+        if is_event_batch_record(obj):
+            for event in events:
+                yield event.model_dump(mode="json")
+        else:
+            # Preserve the legacy raw-envelope projection for ordinary rows (including tolerated
+            # additive fields and absent optional defaults). Event construction above is validation,
+            # not permission for an event-aware transport or maintenance rewrite to canonicalize it.
             yield obj
 
 
@@ -341,7 +454,7 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
             ok = isinstance(obj, dict)
             if ok:
                 try:
-                    Event(**obj)
+                    _decode_event_record(obj)
                 except Exception:  # noqa: BLE001 — a dict that isn't a valid Event is where read_all stops
                     ok = False
         if not ok:
@@ -581,6 +694,8 @@ class EventStore:
         ``require_durable`` fails unless fsync succeeds within the configured deadline. Paid
         external work uses it before starting; ordinary logging remains FUSE-friendly best effort.
         """
+        if type == _EVENT_BATCH_TYPE:
+            raise ValueError("the internal event batch type is reserved")
         # Stamp the event with the active span's (trace_id, span_id) so the UI can join events to the
         # trace — UNLESS the caller passes an EXPLICIT pair (even None): a telemetry event emitted AFTER
         # its op's span closed (foresight ranking) carries the captured trace_id of that op, and an
@@ -640,13 +755,18 @@ class EventStore:
                     require_durable: bool = False) -> list[Event]:
         """Append a bounded group of events under one tail CAS and writer lock.
 
-        The group is serialized into one contiguous JSONL write while the same interprocess lock used
-        by :meth:`append` is held. This is the event-log transaction needed when several durable
-        ownership claims were selected from one snapshot: another writer can land before the group or
-        after it, never between its records. An empty group is a no-op.
+        The group is serialized into one bounded internal JSONL envelope while the same interprocess
+        lock used by :meth:`append` is held. Readers strictly validate and expand that one record before
+        returning Events. A torn final line therefore exposes zero members, while a complete envelope
+        preserves the historical contiguous sequences and return value. Another writer can land before
+        the group or after it, never between its records. An empty group is a no-op.
         """
         if not records:
             return []
+        if len(records) > _MAX_EVENT_BATCH_MEMBERS:
+            raise ValueError(f"event batch exceeds {_MAX_EVENT_BATCH_MEMBERS} members")
+        if any(event_type == _EVENT_BATCH_TYPE for event_type, _data in records):
+            raise ValueError("the internal event batch type is reserved")
         if trace_id is _UNSET_TRACE:
             trace_id, span_id = current_ids()
         with self._append_lock, _interprocess_lock(
@@ -670,14 +790,23 @@ class EventStore:
                 )
                 for offset, (event_type, data) in enumerate(records, start=1)
             ]
-            payload = b"".join(
-                orjson.dumps(event.model_dump(mode="json")) + b"\n" for event in events
+            envelope = Event(
+                seq=events[-1].seq,
+                ts=events[-1].ts,
+                type=_EVENT_BATCH_TYPE,
+                data={
+                    "schema": _EVENT_BATCH_SCHEMA,
+                    "count": len(events),
+                    "first_seq": events[0].seq,
+                    "last_seq": events[-1].seq,
+                    "events": [event.model_dump(mode="json") for event in events],
+                },
+                trace_id=trace_id,
+                span_id=span_id,
             )
-            # CODEX AGENT: one write call prevents another writer from interleaving records, but it is
-            # not an all-or-nothing transaction across a process/host crash. A torn payload may leave
-            # several complete leading claims visible and only its last partial line ignored. If callers
-            # require lane atomicity (rather than adjacency), persist one batch envelope/commit marker
-            # and teach replay to ignore every member until that marker is present.
+            payload = orjson.dumps(envelope.model_dump(mode="json")) + b"\n"
+            if len(payload) > _MAX_EVENT_BATCH_BYTES:
+                raise ValueError(f"event batch exceeds {_MAX_EVENT_BATCH_BYTES} serialized bytes")
             accepted = False
             try:
                 with open(self.path, "ab") as f:
@@ -738,7 +867,7 @@ class EventStore:
                 ok_bytes = 0
                 for o, end in objs:
                     try:
-                        evs.append(Event(**o))
+                        evs.extend(_decode_event_record(o))
                     except Exception:  # noqa: BLE001
                         break
                     ok_bytes = end

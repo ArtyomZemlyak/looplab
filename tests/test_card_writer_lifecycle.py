@@ -226,6 +226,37 @@ def test_serial_create_mints_one_exact_native_card_before_build_and_persists_lin
     assert terminal.selection_ready is False
 
 
+def test_depth_zero_card_registration_does_not_gain_layer5_cross_run_receipt(tmp_path):
+    proposed = _idea("legacy receipt identity", 0.375)
+    developer = _Developer()
+    engine = _engine(tmp_path / "depth-zero-receipt", developer=developer)
+    receipt = {
+        "v": 2,
+        "status": "unavailable",
+        "complete": False,
+        "governance": {
+            "v": 1,
+            "status": "unavailable",
+            "complete": False,
+            "code": "governance_ledger_unavailable",
+            "ledger": "concept_aliases",
+            "reason": "torn_tail",
+        },
+    }
+    engine.researcher._cross_run_advisory_receipt = receipt
+    _start(engine)
+
+    engine._create_node({"kind": "draft"}, preproposed=proposed)
+
+    added = next(event for event in engine.store.read_all() if event.type == EV_CARD_ADDED)
+    created = next(event for event in engine.store.read_all() if event.type == EV_NODE_CREATED)
+    assert engine.speculation_depth == 0
+    assert "cross_run_receipt" not in added.data
+    # Existing node telemetry remains unchanged; only Layer-5 staged Card inventory owns the new
+    # durable registration receipt used to reconstruct speculative provenance after restart.
+    assert created.data["cross_run_receipt"] == receipt
+
+
 def test_card_allocator_uses_only_gap_safe_numeric_card_added_ceiling(tmp_path):
     engine = _engine(tmp_path / "ceiling", developer=_Developer())
     _start(engine)

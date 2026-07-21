@@ -8,6 +8,7 @@ from pathlib import Path
 import orjson
 import pytest
 
+from looplab.events.eventstore import EventStore
 from looplab.serve import scope_sources
 from looplab.serve.scope_sources import (
     ScopeSourceCapacityError,
@@ -84,6 +85,26 @@ def test_capture_freezes_valid_source_and_compatible_revision(tmp_path):
     assert len(source.revision["generation"]) == 64
     with pytest.raises(FrozenInstanceError):
         source.event_bytes = 0  # type: ignore[misc]
+
+
+def test_capture_expands_atomic_event_batch_as_contiguous_logical_events(tmp_path):
+    run_dir = tmp_path / "batch-run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "batch-run", "task_id": "task-a"})
+    store.append_many([
+        ("timeline_note", {"n": 1}),
+        ("timeline_note", {"n": 2}),
+    ])
+
+    source = capture_scope_source(tmp_path, "batch-run")
+
+    assert [event.seq for event in source.events] == [0, 1, 2]
+    assert [event.type for event in source.events] == [
+        "run_started", "timeline_note", "timeline_note"]
+    assert source.revision["event_count"] == 3
+    assert source.revision["tail_seq"] == 2
+    assert len((run_dir / "events.jsonl").read_bytes().splitlines()) == 2
 
 
 def test_capture_uses_stable_missing_snapshot_digest(tmp_path):

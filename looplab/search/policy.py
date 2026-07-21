@@ -177,7 +177,8 @@ def debug_action(state: RunState, debug_depth: int) -> Optional[dict]:
     for n in sorted(state.nodes.values(), key=lambda n: n.id):
         if (n.status is NodeStatus.failed and n.id not in state.aborted_nodes
                 and n.id not in has_child
-                and n.error_reason != "idea_rejected"   # crash-triage judged the idea wrong: don't debug it
+                # Governance terminals are intentional, not implementation crashes to repair.
+                and n.error_reason not in {"idea_rejected", "card_dropped"}
                 and _debug_lineage(state, n.id) < debug_depth):
             return {"kind": KIND_DEBUG, "parent_id": n.id}
     return None

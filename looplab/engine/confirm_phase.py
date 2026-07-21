@@ -40,7 +40,8 @@ class ConfirmPhaseMixin:
     def _confirmation_node_current(self, node_id: int, generation: int) -> bool:
         state = fold(self.store.read_all())
         node = state.nodes.get(node_id)
-        return (node is not None and node.attempt == generation
+        return (not state.paused and not state.finished and not state.stop_requested
+                and node is not None and node.attempt == generation
                 and node.status is NodeStatus.evaluated and not node.tombstoned
                 and node_id not in state.aborted_nodes)
 
@@ -87,10 +88,54 @@ class ConfirmPhaseMixin:
                     # an eval that runs seconds-to-minutes.
                     await anyio.sleep(1.0)
 
-            reservation = await self._wait_reserve_node_resources(nd)
-            if not self._confirmation_node_current(nd.id, generation):
-                self._release_gpus(reservation.get("gpu_ids"))
-                return None
+            resource_node = nd
+            while True:
+                resource_state = fold(self.store.read_all())
+                live = resource_state.nodes.get(nd.id)
+                if (
+                    resource_state.paused
+                    or resource_state.finished
+                    or resource_state.stop_requested
+                    or live is None
+                    or live.attempt != generation
+                    or live.status is not NodeStatus.evaluated
+                    or live.tombstoned
+                    or live.id in resource_state.aborted_nodes
+                ):
+                    return None
+                resource_node = live
+                reservation = await self._wait_reserve_node_resources(
+                    resource_node,
+                    resource_pin=self._card_resource_pin_for_node(
+                        resource_state, resource_node),
+                    wait_once=True,
+                )
+                if reservation is None:
+                    # The finite resource tick is also the operator-control polling cadence.  Re-fold
+                    # before retrying so a GPU->CPU re-pin can progress without any GPU release and a
+                    # pause/stop/abort/reset cannot start an obsolete confirmation subprocess.
+                    continue
+                admitted = fold(self.store.read_all())
+                current = admitted.nodes.get(nd.id)
+                if (
+                    admitted.paused
+                    or admitted.finished
+                    or admitted.stop_requested
+                    or current is None
+                    or current.attempt != generation
+                    or current.status is not NodeStatus.evaluated
+                    or current.tombstoned
+                    or current.id in admitted.aborted_nodes
+                ):
+                    self._release_gpus(reservation.get("gpu_ids"))
+                    return None
+                if not self._node_resource_reservation_is_current(
+                    admitted, current, reservation,
+                ):
+                    self._release_gpus(reservation.get("gpu_ids"))
+                    resource_node = current
+                    continue
+                break
             confirm_env = self._resource_eval_env(
                 reservation, base={"LOOPLAB_EVAL_SEED": str(s)})
 

@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from looplab.engine.orchestrator import Engine  # noqa: E402
 from looplab.search.policy import GreedyTree  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
-from looplab.events.eventstore import EventStore, iter_jsonl  # noqa: E402
+from looplab.events.eventstore import EventStore, iter_event_jsonl, iter_jsonl  # noqa: E402
 from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 from looplab.adapters.toytask import ToyTask  # noqa: E402
@@ -1102,7 +1102,7 @@ def test_post_finish_tail_of_pending_abort_hands_off_to_finalize_not_resume(
 def test_time_travel_seq(tmp_path):
     _build_run(tmp_path)
     rd = tmp_path / "demo"
-    raw = list(iter_jsonl(rd / "events.jsonl"))
+    raw = list(iter_event_jsonl(rd / "events.jsonl"))
     created = next(e for e in raw if e["type"] == "node_created")
     created_seq = created["seq"]
     nid = created["data"]["node_id"]
@@ -1139,7 +1139,7 @@ def test_historical_node_detail_rejects_replaced_run_generation(tmp_path):
     _build_run(tmp_path)
     rd = tmp_path / "demo"
     log = rd / "events.jsonl"
-    raw = list(iter_jsonl(log))
+    raw = list(iter_event_jsonl(log))
     created = next(event for event in raw if event["type"] == "node_created")
     seq = created["seq"]
     nid = created["data"]["node_id"]
@@ -1936,10 +1936,12 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
         "select_verifier": True, "verifier_ci_tie": True,
         "select_verifier_samples": 7,
         "card_driven_selection": True,
+        "speculation_depth": 4,
     })
     snapshot = Settings(
         timeout=30.0, holdout_fraction=0.1, holdout_select=False,
         select_verifier=False, verifier_ci_tie=False, select_verifier_samples=1,
+        speculation_depth=0,
     ).masked_snapshot()
     (rd / "config.snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
@@ -1949,6 +1951,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
     assert shown["select_verifier"] is True and shown["verifier_ci_tie"] is True
     assert shown["select_verifier_samples"] == 7
     assert shown["card_driven_selection"] is True
+    assert shown["speculation_depth"] == 4
     meta = shown["_looplab_config_meta"]
     assert set(meta["run_start_pinned_fields"]) == RUN_START_PINNED_FIELDS
     assert set(meta["snapshot_mismatch_fields"]) == RUN_START_PINNED_FIELDS
@@ -1971,6 +1974,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "select_verifier": True, "verifier_ci_tie": True,
         "select_verifier_samples": 7,
         "card_driven_selection": True,
+        "speculation_depth": 4,
     })
     (rd / "config.snapshot.json").write_text(
         json.dumps(Settings().masked_snapshot()), encoding="utf-8")
@@ -1982,6 +1986,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "verifier_ci_tie": False,
         "select_verifier_samples": 2,
         "card_driven_selection": False,
+        "speculation_depth": 0,
     }
 
     assert set(attempted) == RUN_START_PINNED_FIELDS

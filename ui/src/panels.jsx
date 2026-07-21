@@ -1160,10 +1160,8 @@ export function CrossRunPanel({ state, onClose }) {
   )
 }
 
-// P1 hypothesis board: the run's ledger of what it's TRYING TO LEARN, as a kanban. Turns the DAG
-// from "mutations tried" into "questions asked → answered". Columns are the derived verdict; each
-// card links to its evidence nodes. Audit-only (never affects selection), so it's a pure projection
-// of state.hypotheses + a thin human add/abandon via control events.
+// Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
+// bounded public Card DTO and four generation-fenced, server-stamped operator controls below.
 const _HYP_COLUMNS = [
   ['open', 'Open', 'question posed, not yet tested'],
   ['testing', 'Testing', 'experiments running'],
@@ -1174,11 +1172,508 @@ const _HYP_COLUMNS = [
 // Monochrome source glyphs (no emoji): who posed the hypothesis. Reuses the shared icon set.
 const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', strategist: 'compass' }
 
-// # CODEX AGENT: UI contract gap: owner/review DTOs already carry a bounded `cards_projection`, but the
-// only board consumes `state.hypotheses` and labels direction aggregates as cards. Users cannot inspect
-// immutable work-item identity, receipt completeness, lifecycle, or `selection_ready`. Add a separate
-// read-only Card surface and keep these add/abandon/delete controls scoped strictly to Hypotheses.
-export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
+const _CARD_COLUMNS = [
+  ['proposed', 'Proposed', 'work item is open and has not started'],
+  ['speculating', 'Speculating', 'speculative build requested'],
+  ['building', 'Building', 'code is being produced'],
+  ['built-awaiting-commit', 'Awaiting commit', 'build finished; durable node commit is pending'],
+  ['coded', 'Coded', 'code exists and is waiting to run'],
+  ['running', 'Running', 'evaluation is in flight'],
+  ['evaluated', 'Evaluated', 'evidence has reached a verdict'],
+  ['gated', 'Gated', 'trust or breeding gates exclude the available evidence'],
+  ['dropped', 'Dropped', 'operator or engine removed the work item'],
+]
+const _CARD_FROZEN_STATUSES = new Set(['proposed', 'building', 'coded', 'running', 'evaluated', 'gated', 'dropped'])
+const _CARD_OPTIONAL_STATUSES = new Set(['speculating', 'built-awaiting-commit'])
+const _CARD_ICON = {
+  researcher: 'search', deep_research: 'bulb', human: 'user', strategist: 'compass',
+  operator: 'user', engine: 'bot', novelty: 'bulb',
+}
+const _CARD_RENDER_LIMIT = 256 // mirrors PUBLIC_CARD_MAX_COUNT at the wire boundary
+
+const _cardText = value => typeof value === 'string' && value.trim() ? value.trim() : null
+const _cardNumber = value => typeof value === 'number' && Number.isFinite(value) ? value : null
+const _cardInt = value => Number.isSafeInteger(value) && value >= 0 ? value : null
+const _cardRefs = value => Array.isArray(value)
+  ? value.filter(item => typeof item === 'string' && item).slice(0, 32) : []
+const _cardNodes = value => Array.isArray(value)
+  ? value.filter(item => Number.isSafeInteger(item) && item >= 0).slice(0, 32) : []
+
+function _cardStatus(card) {
+  return _cardText(card.status) || 'unknown'
+}
+
+function _cardStatusLabel(status) {
+  return status.split(/[-_]/).filter(Boolean)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ') || 'Other'
+}
+
+function _cardRows(state) {
+  if (!isRecord(state?.cards)) return []
+  return Object.entries(state.cards)
+    .filter(([id, card]) => typeof id === 'string' && id && isRecord(card))
+    .slice(0, _CARD_RENDER_LIMIT)
+    // The mapping key is authoritative. Never let a malformed/spoofed body id change joins or receipts.
+    .map(([id, card]) => ({ ...card, id }))
+}
+
+function _cardLanes(cards) {
+  const occupied = new Set(cards.map(_cardStatus))
+  const configured = _CARD_COLUMNS.filter(([status]) => !_CARD_OPTIONAL_STATUSES.has(status) || occupied.has(status))
+  const known = new Set(_CARD_COLUMNS.map(([status]) => status))
+  const extra = [...occupied].filter(status => !known.has(status)).sort()
+    .map(status => [status, _cardStatusLabel(status), 'new derived lifecycle status'])
+  const dropped = configured.find(([status]) => status === 'dropped')
+  return [...configured.filter(([status]) => status !== 'dropped'), ...extra, dropped].filter(Boolean)
+}
+
+function _cardOrder(a, b) {
+  const ap = _cardNumber(a.priority) ?? _cardNumber(a.foresight_rank) ?? Infinity
+  const bp = _cardNumber(b.priority) ?? _cardNumber(b.foresight_rank) ?? Infinity
+  if (ap !== bp) return ap - bp
+  const an = _cardInt(a.created_at_node) ?? Infinity
+  const bn = _cardInt(b.created_at_node) ?? Infinity
+  return an - bn || a.id.localeCompare(b.id)
+}
+
+const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop']
+
+function _cardResourceValues(value) {
+  if (!isRecord(value)) return null
+  const gpus = _cardInt(value.gpus)
+  const gpuMem = _cardInt(value.gpu_mem_mib)
+  return gpus == null && gpuMem == null ? null : {
+    ...(gpus == null ? {} : { gpus }),
+    ...(gpuMem == null ? {} : { gpu_mem_mib: gpuMem }),
+  }
+}
+
+function _sameCardResourceValues(left, right) {
+  const a = _cardResourceValues(left)
+  const b = _cardResourceValues(right)
+  if (a == null || b == null) return a === b
+  return ['gpus', 'gpu_mem_mib'].every(key => (
+    Object.hasOwn(a, key) === Object.hasOwn(b, key) && a[key] === b[key]
+  ))
+}
+
+function _cardControlReflected(card, kind, patch) {
+  if (!card || !isRecord(patch)) return false
+  if (kind === 'edit') return card.statement === patch.statement
+  if (kind === 'priority') return card.priority === patch.priority && card.pinned === true
+  if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
+  if (kind === 'drop') return card.status === 'dropped'
+    && (!patch.dropped_reason || card.dropped_reason === patch.dropped_reason)
+  return false
+}
+
+function _cardWithOptimisticControls(card, controlState) {
+  if (!isRecord(controlState?.updates)) return card
+  const visible = { ...card }
+  for (const kind of _CARD_CONTROL_KINDS) {
+    if (isRecord(controlState.updates[kind])) Object.assign(visible, controlState.updates[kind])
+  }
+  return visible
+}
+
+function _cardResourceSummary(value, { unavailable = 'unspecified' } = {}) {
+  const footprint = _cardResourceValues(value)
+  if (!footprint) return unavailable
+  const gpus = footprint.gpus
+  const memory = footprint.gpu_mem_mib
+  return [
+    gpus == null ? 'GPU count unspecified'
+      : gpus === 0 ? 'CPU only' : `${gpus} GPU${gpus === 1 ? '' : 's'}`,
+    memory == null ? null : `${fmtInt(memory)} MiB/GPU`,
+  ].filter(Boolean).join(' · ')
+}
+
+function _CardProjectionNotice({ projection, cards }) {
+  if (!isRecord(projection)) return <div className="card-projection-note" role="status">
+    Card coverage receipt unavailable; this older payload may be incomplete.
+  </div>
+  if (projection.complete === true) return null
+  const total = _cardInt(projection.total)
+  const returned = _cardInt(projection.returned) ?? cards.length
+  const sourceInvalid = projection.source_valid === false
+  return <div className="card-projection-note" role="status">
+    <OpIcon name="alert" size={12} />
+    <span>{sourceInvalid
+      ? 'Card source was invalid; no complete board can be claimed.'
+      : `Showing ${returned}${total == null ? '' : ` of ${total}`} Cards; clipped or redacted public fields are marked partial.`}</span>
+  </div>
+}
+
+function _CardKanbanCard({
+  card, receipt, onSelect, onClose, onControl, controlState, controlsLocked,
+}) {
+  const statement = _cardText(card.statement) || `Card ${card.id}`
+  const source = _cardText(card.source)
+  const operator = _cardText(card.operator)
+  const evalProfile = _cardText(card.eval_profile)
+  const params = isRecord(card.params) ? Object.entries(card.params)
+    .filter(([, value]) => _cardNumber(value) != null).slice(0, 6) : []
+  const spaceCount = isRecord(card.space) ? Object.keys(card.space).length : 0
+  const footprintKnown = Object.hasOwn(card, 'footprint')
+  const baseFootprint = isRecord(card.footprint) ? card.footprint : null
+  const resourcePin = isRecord(card.resource_pin) ? card.resource_pin : null
+  const effectiveFootprint = baseFootprint || resourcePin
+    ? { ...(_cardResourceValues(baseFootprint) || {}), ...(_cardResourceValues(resourcePin) || {}) }
+    : null
+  if (effectiveFootprint?.gpus === 0) delete effectiveFootprint.gpu_mem_mib
+  const effectiveGpus = effectiveFootprint ? _cardInt(effectiveFootprint.gpus) : null
+  const pinValues = _cardResourceValues(resourcePin)
+  const formGpus = pinValues?.gpus ?? effectiveGpus
+  const formGpuMem = pinValues && Object.hasOwn(pinValues, 'gpu_mem_mib')
+    ? pinValues.gpu_mem_mib : null
+  const evalTimeout = _cardNumber(card.eval_timeout)
+  const identity = isRecord(card.identity) ? card.identity : null
+  const selection = isRecord(card.selection_provenance) ? card.selection_provenance : null
+  const blockersKnown = Object.hasOwn(card, 'selection_blockers')
+  const blockers = _cardRefs(card.selection_blockers)
+  const evidenceKnown = Object.hasOwn(card, 'evidence')
+  const evidence = _cardNodes(card.evidence).slice(0, 8)
+  const concepts = _cardRefs(card.concept_tags).slice(0, 5)
+  const parents = _cardNodes(card.parent_ids)
+  const parent = _cardInt(card.parent_id)
+  if (parent != null && !parents.includes(parent)) parents.unshift(parent)
+  const scoredAgainst = _cardInt(card.scored_against)
+  const bestDelta = _cardNumber(card.best_delta)
+  const priority = _cardNumber(card.priority)
+  const novelty = isRecord(card.novelty_verdict) ? _cardText(card.novelty_verdict.grade) : null
+  const omissionCount = isRecord(receipt?.omissions) ? Object.keys(receipt.omissions).length : 0
+  const declaredResources = footprintKnown
+    ? _cardResourceSummary(baseFootprint) : 'resource projection unavailable'
+  const effectiveResources = _cardResourceSummary(effectiveFootprint)
+  const pinResources = _cardResourceSummary(resourcePin)
+  const provenanceBits = [
+    source && `source ${source}`,
+    identity && _cardText(identity.kind) && `identity ${identity.kind}`,
+    _cardText(card.provenance_tier) && `tier ${card.provenance_tier}`,
+    selection && _cardText(selection.action_source) && `action ${selection.action_source}`,
+    baseFootprint && _cardText(baseFootprint.proposed_by) && `proposed ${baseFootprint.proposed_by}`,
+    baseFootprint && _cardText(baseFootprint.finalized_by) && `finalized ${baseFootprint.finalized_by}`,
+    resourcePin && _cardText(resourcePin.pinned_by) && `resource pin ${resourcePin.pinned_by}`,
+    _cardText(card.research_origin) && `research ${card.research_origin}`,
+  ].filter(Boolean)
+  const [statementDraft, setStatementDraft] = useState(statement)
+  const [priorityDraft, setPriorityDraft] = useState(
+    _cardInt(card.priority) == null ? '' : String(card.priority + 1))
+  const [gpuDraft, setGpuDraft] = useState(formGpus == null ? '' : String(formGpus))
+  const [memoryDraft, setMemoryDraft] = useState(formGpuMem == null ? '' : String(formGpuMem))
+  const [dropReason, setDropReason] = useState('operator dropped')
+  const [controlError, setControlError] = useState('')
+  const ownPending = isRecord(controlState?.pending) ? controlState.pending : null
+  const busy = !!ownPending || controlsLocked === true
+  const terminal = _cardStatus(card) === 'dropped' || !!_cardText(card.merged_into)
+  useEffect(() => {
+    setStatementDraft(statement)
+    setPriorityDraft(_cardInt(card.priority) == null ? '' : String(card.priority + 1))
+    setGpuDraft(formGpus == null ? '' : String(formGpus))
+    setMemoryDraft(formGpuMem == null ? '' : String(formGpuMem))
+  }, [card.id, statement, card.priority, formGpus, formGpuMem])
+
+  const control = async (kind, data, patch) => {
+    if (!onControl || busy) return
+    setControlError('')
+    try { await onControl(card, kind, data, patch) }
+    catch (error) { setControlError(error?.message || String(error)) }
+  }
+  const saveStatement = () => {
+    const next = statementDraft.trim()
+    if (!next || next.length > 4000) { setControlError('Display statement must be 1–4000 characters.'); return }
+    if (next !== statement) control('edit', { statement: next }, { statement: next })
+  }
+  const savePriority = () => {
+    const visible = Number(priorityDraft)
+    if (!Number.isSafeInteger(visible) || visible < 1 || visible > 256) {
+      setControlError('Priority must be between 1 and 256.'); return
+    }
+    control('priority', { priority: visible - 1 }, { priority: visible - 1 })
+  }
+  const saveResources = () => {
+    const nextGpus = Number(gpuDraft)
+    const nextMemory = memoryDraft.trim() === '' ? null : Number(memoryDraft)
+    if (!Number.isSafeInteger(nextGpus) || nextGpus < 0
+      || (nextMemory != null && (!Number.isSafeInteger(nextMemory) || nextMemory < 0))) {
+      setControlError('GPU count and memory must be non-negative integers.'); return
+    }
+    if (nextGpus === 0 && nextMemory != null) {
+      setControlError('CPU-only Cards cannot request GPU memory.'); return
+    }
+    // This local patch contains quantitative display values only. Authority/provenance is stamped by
+    // the server event and is never supplied by the browser, even optimistically.
+    const pin = { gpus: nextGpus, ...(nextMemory == null ? {} : { gpu_mem_mib: nextMemory }) }
+    control('resources', { gpus: nextGpus, gpu_mem_mib: nextMemory }, { resource_pin: pin })
+  }
+  const drop = () => {
+    const reason = dropReason.trim() || 'operator dropped'
+    control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
+  }
+  return <article className="card-kanban-card" data-card-id={card.id} aria-busy={ownPending ? 'true' : undefined}>
+    <div className="card-kanban-stmt">
+      <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
+        <OpIcon name={_CARD_ICON[source] || 'dot'} size={12} />
+      </span>
+      <span>{statement}</span>
+    </div>
+    <div className="card-kanban-meta">
+      <span className="chip xs" title="durable Card identity">{card.id}</span>
+      {priority != null && <span className="chip xs" title="derived priority; 1 is highest">#{priority + 1}</span>}
+      {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} /> pinned</span>}
+      {card.selection_ready === true
+        ? <span className="chip xs ok" title="eligible for Card-driven selection">selection ready</span>
+        : card.selection_ready === false
+          ? <span className="chip xs warn" title="not eligible for Card-driven selection">not selection ready</span>
+          : <span className="chip xs" title="selection readiness was not present in the public projection">readiness unknown</span>}
+      {receipt && receipt.complete !== true && <span className="chip xs warn"
+        title={`${omissionCount} public field omission${omissionCount === 1 ? '' : 's'}`}>
+        partial DTO{omissionCount ? ` · ${omissionCount}` : ''}</span>}
+    </div>
+    {(operator || evalProfile || params.length || spaceCount) && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Action</span>
+      <span>{operator || 'operator unspecified'}</span>
+      {evalProfile && <span>profile {evalProfile}</span>}
+      {params.map(([key, value]) => <span key={key} className="card-param">{key}={fmt(value)}</span>)}
+      {spaceCount > 0 && <span>{spaceCount} search variable{spaceCount === 1 ? '' : 's'}</span>}
+    </div>}
+    <div className="card-kanban-fact">
+      <span className="card-kanban-k">Declared</span>
+      <span>{declaredResources}{evalTimeout == null ? '' : ` · ${fmt(evalTimeout)}s timeout`}</span>
+    </div>
+    {resourcePin && <div className="card-kanban-fact card-resource-pin">
+      <span className="card-kanban-k">Effective pin</span>
+      <span><span className="chip xs warn">{_cardText(resourcePin.pinned_by) === 'operator'
+        ? 'operator override' : 'pending operator override'}</span> {effectiveResources}
+        <span className="card-resource-request">requested {pinResources}</span></span>
+    </div>}
+    <div className="card-kanban-fact">
+      <span className="card-kanban-k">Provenance</span>
+      <span>{provenanceBits.length ? provenanceBits.join(' · ') : 'unavailable'}</span>
+    </div>
+    <div className="card-kanban-fact">
+      <span className="card-kanban-k">Gate</span>
+      <span>{selection && _cardText(selection.freshness) ? `freshness ${selection.freshness}` : 'freshness unknown'}
+        {selection && _cardText(selection.owner_state) ? ` · owner ${selection.owner_state}` : ''}
+        {selection && typeof selection.action_complete === 'boolean'
+          ? ` · action ${selection.action_complete ? 'complete' : 'incomplete'}` : ''}</span>
+    </div>
+    {blockers.length > 0 && <div className="card-kanban-blockers" aria-label="Selection blockers">
+      {blockers.slice(0, 5).map(blocker => <span key={blocker} className="chip xs warn">
+        {blocker.replaceAll('_', ' ')}</span>)}
+      {blockers.length > 5 && <span className="muted">+{blockers.length - 5}</span>}
+    </div>}
+    {!blockersKnown && <div className="muted card-kanban-unknown">Selection blockers unavailable</div>}
+    {(parents.length > 0 || scoredAgainst != null) && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Lineage</span>
+      <span>{parents.length ? `parent ${parents.map(id => `#${id}`).join(', ')}` : ''}
+        {scoredAgainst != null ? `${parents.length ? ' · ' : ''}scored vs #${scoredAgainst}` : ''}</span>
+    </div>}
+    {(concepts.length > 0 || novelty) && <div className="card-kanban-tags">
+      {novelty && <span className="chip xs">novelty {novelty}</span>}
+      {concepts.map(concept => <span key={concept} className="chip xs">{concept}</span>)}
+    </div>}
+    {(_cardText(card.merged_into) || _cardText(card.dropped_reason)) && <div className="card-kanban-terminal">
+      {_cardText(card.merged_into) ? `Merged into ${card.merged_into}` : card.dropped_reason}
+      {_cardText(card.dropped_by) ? ` · by ${card.dropped_by}` : ''}
+    </div>}
+    <div className="card-kanban-evidence">
+      {evidence.map(nid => <button key={nid} type="button" className="btn xs ghost"
+        aria-label={`Open evidence node #${nid}`} title={`evidence node #${nid}`}
+        onClick={() => { onSelect?.(nid); onClose?.() }}>#{nid}</button>)}
+      {bestDelta != null && <span className={'chip xs ' + (bestDelta > 0 ? 'ok' : '')}
+        title="best improvement over parent among the evidence">Δ{fmt(bestDelta)}</span>}
+      {evidence.length === 0 && <span className="muted">
+        {evidenceKnown ? 'No evidence nodes' : 'Evidence unavailable'}</span>}
+    </div>
+    {onControl && !terminal && <details className="card-kanban-controls">
+      <summary aria-label={`Operator controls for ${card.id}`}>Operator controls</summary>
+      <form className="card-control-form" onSubmit={event => { event.preventDefault(); saveStatement() }}>
+        <label><span>Display statement</span><textarea className="text card-control-statement"
+          aria-label={`Display statement for ${card.id}`} rows="3" value={statementDraft}
+          maxLength={4000} disabled={busy} onChange={event => setStatementDraft(event.target.value)} /></label>
+        <button type="submit" className="btn xs" disabled={busy || !statementDraft.trim()
+          || statementDraft.trim() === statement}>Save text</button>
+      </form>
+      <form className="card-control-form" onSubmit={event => { event.preventDefault(); savePriority() }}>
+        <label><span>Priority (1 is highest)</span><input className="text" type="number" min="1" max="256"
+          aria-label={`Priority for ${card.id}`} value={priorityDraft} disabled={busy}
+          onChange={event => setPriorityDraft(event.target.value)} /></label>
+        <button type="submit" className="btn xs" disabled={busy || !priorityDraft}>Pin priority</button>
+      </form>
+      <form className="card-control-resource" onSubmit={event => { event.preventDefault(); saveResources() }}>
+        <fieldset disabled={busy}>
+          <legend>Effective resource pin</legend>
+          <div className="card-control-resource-fields">
+            <label><span>GPUs</span><input className="text" type="number" min="0" step="1"
+              aria-label={`GPU count for ${card.id}`} value={gpuDraft}
+              onChange={event => {
+                setGpuDraft(event.target.value)
+                if (event.target.value === '0') setMemoryDraft('')
+              }} /></label>
+            <label><span>MiB / GPU</span><input className="text" type="number" min="0" step="1"
+              aria-label={`GPU memory in MiB for ${card.id}`} placeholder="inherit declared"
+              value={memoryDraft} disabled={busy || gpuDraft === '0'}
+              onChange={event => setMemoryDraft(event.target.value)} /></label>
+          </div>
+          <div className="card-control-help">Validated against the current server GPU envelope;
+            blank memory inherits the declared value.</div>
+          <button type="submit" className="btn xs" disabled={busy || gpuDraft === ''}>Pin resources</button>
+        </fieldset>
+      </form>
+      <details className="card-control-danger">
+        <summary>Drop Card…</summary>
+        <form className="card-control-form" onSubmit={event => { event.preventDefault(); drop() }}>
+          <label><span>Reason (optional)</span><input className="text" value={dropReason} maxLength={400}
+            aria-label={`Drop reason for ${card.id}`} disabled={busy}
+            onChange={event => setDropReason(event.target.value)} /></label>
+          <button type="submit" className="btn xs danger" disabled={busy}>Confirm drop</button>
+        </form>
+      </details>
+      {controlsLocked && !ownPending && <div className="card-control-feedback" role="status">
+        Another Card command is still being submitted for this run.</div>}
+    </details>}
+    {isRecord(controlState?.notice) && <div
+      className={'card-control-feedback ' + (controlState.notice.tone || '')}
+      role={controlState.notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
+      {controlState.notice.text}</div>}
+    {controlError && <div className="card-control-feedback error" role="alert">{controlError}</div>}
+  </article>
+}
+
+function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
+  const [optim, setOptim] = useState({})
+  const inFlight = useRef(new Set())
+  const cardsById = new Map(cards.map(card => [card.id, card]))
+  const cardsByIdRef = useRef(cardsById)
+  cardsByIdRef.current = cardsById
+  useEffect(() => {
+    setOptim(current => {
+      let changed = false
+      const next = { ...current }
+      for (const [id, entry] of Object.entries(current)) {
+        const card = cardsByIdRef.current.get(id)
+        if (!card) { delete next[id]; changed = true; continue }
+        const updates = { ...(entry.updates || {}) }
+        for (const kind of _CARD_CONTROL_KINDS) {
+          if (updates[kind] && _cardControlReflected(card, kind, updates[kind])) {
+            delete updates[kind]
+            changed = true
+          }
+        }
+        const pending = entry.pending && updates[entry.pending.kind] ? entry.pending : null
+        if (pending !== entry.pending) changed = true
+        if (Object.keys(updates).length === 0 && !pending) {
+          delete next[id]
+          changed = true
+        } else if (changed || pending !== entry.pending) {
+          next[id] = { ...entry, updates, pending }
+        }
+      }
+      return changed ? next : current
+    })
+  }, [state.cards])
+  const visibleCards = cards.map(card => _cardWithOptimisticControls(card, optim[card.id]))
+  const globalPending = Object.values(optim).some(entry => isRecord(entry?.pending))
+  const cardControl = async (card, kind, data, patch) => {
+    const labels = {
+      edit: { saving: 'Saving Card display text…', success: 'Card display text updated', failure: 'Could not edit Card' },
+      priority: { saving: 'Pinning Card priority…', success: 'Card priority pinned', failure: 'Could not pin Card priority' },
+      resources: { saving: 'Pinning Card resources…', success: 'Card resources pinned', failure: 'Could not pin Card resources' },
+      drop: { saving: 'Dropping Card…', success: 'Card dropped', failure: 'Could not drop Card' },
+    }[kind]
+    if (!labels || inFlight.current.size > 0) {
+      const message = 'Another Card command is still being submitted for this run.'
+      onToast?.(message)
+      return { kind: 'pending', message }
+    }
+    inFlight.current.add(card.id)
+    setOptim(current => {
+      const entry = current[card.id] || {}
+      return { ...current, [card.id]: {
+        ...entry,
+        updates: { ...(entry.updates || {}), [kind]: patch },
+        pending: { kind, phase: 'submitting' },
+        notice: { tone: 'pending', text: labels.saving },
+      } }
+    })
+    try {
+      const record = kind === 'edit'
+        ? await CONTROL.editCard(runId, card.id, data.statement)
+        : kind === 'priority'
+          ? await CONTROL.reprioritizeCard(runId, card.id, data.priority)
+          : kind === 'resources'
+            ? await CONTROL.pinCardResources(runId, card.id, data.gpus, data.gpu_mem_mib)
+            : await CONTROL.dropCard(runId, card.id, data.reason)
+      const feedback = commandFeedback(record, {
+        success: labels.success, noop: `${labels.success} (already current)`,
+        executing: `${labels.success} — waiting for the live fold`, failure: labels.failure,
+      })
+      onToast?.(feedback.message)
+      setOptim(current => {
+        const entry = current[card.id]
+        if (!entry) return current
+        const updates = { ...(entry.updates || {}) }
+        const rawCard = cardsByIdRef.current.get(card.id)
+        if (feedback.kind === 'error' || _cardControlReflected(rawCard, kind, patch)) delete updates[kind]
+        const pending = feedback.kind === 'pending' && updates[kind]
+          ? { kind, phase: 'waiting-for-fold' } : null
+        const notice = feedback.kind === 'error'
+          ? { tone: 'error', text: feedback.message }
+          : { tone: feedback.kind === 'pending' ? 'pending' : 'success', text: feedback.message }
+        return { ...current, [card.id]: { ...entry, updates, pending, notice } }
+      })
+      return feedback
+    } catch (error) {
+      const uncertain = error?.submissionMayHaveSucceeded === true || error?.commandUnknown === true
+        || ['accepted', 'executing'].includes(error?.commandRecord?.status)
+      const message = uncertain
+        ? `${labels.success} may still complete — waiting for the live fold`
+        : `${labels.failure}: ${error?.message || error}`
+      onToast?.(message)
+      setOptim(current => {
+        const entry = current[card.id]
+        if (!entry) return current
+        const updates = { ...(entry.updates || {}) }
+        if (!uncertain) delete updates[kind]
+        return { ...current, [card.id]: {
+          ...entry, updates,
+          pending: uncertain ? { kind, phase: 'confirmation-unknown' } : null,
+          notice: { tone: uncertain ? 'pending' : 'error', text: message },
+        } }
+      })
+      return { kind: uncertain ? 'pending' : 'error', message }
+    } finally {
+      inFlight.current.delete(card.id)
+    }
+  }
+  const projection = isRecord(state.cards_projection) ? state.cards_projection : null
+  const receipts = isRecord(projection?.items) ? projection.items : {}
+  const lanes = _cardLanes(visibleCards)
+  const total = _cardInt(projection?.total)
+  const sub = total != null && total !== cards.length
+    ? `${visibleCards.length} of ${total} public work items` : `${visibleCards.length} work item${visibleCards.length === 1 ? '' : 's'}`
+  return <Panel title="Cards" sub={sub} onClose={onClose} wide>
+    <_CardProjectionNotice projection={projection} cards={visibleCards} />
+    <div className="card-board" aria-label="Card lifecycle kanban">
+      {lanes.map(([key, label, hint]) => {
+        const rows = visibleCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
+        const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
+        return <section key={key} className={'card-col' + tone} aria-label={`${label}: ${rows.length}`}>
+          <div className="card-col-h" title={hint}>{label} <span className="muted">{rows.length}</span></div>
+          {rows.map(card => <_CardKanbanCard key={card.id} card={card}
+            receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
+            controlState={optim[card.id]} controlsLocked={globalPending && !optim[card.id]?.pending}
+            onSelect={onSelect} onClose={onClose}
+            onControl={typeof runId === 'string' && runId ? cardControl : null} />)}
+          {rows.length === 0 && <div className="muted card-empty">—</div>}
+        </section>
+      })}
+    </div>
+  </Panel>
+}
+
+function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
   const [draft, setDraft] = useState('')
   // Optimistic status overrides {id: 'abandoned'|'deleted'}: the run-state round-trip that reflects a
   // control event can lag (its SSE is buffered by a proxy), so apply the click to the board AT ONCE
@@ -1292,6 +1787,19 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
         </div>}
     </Panel>
   )
+}
+
+export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
+  const cards = _cardRows(state)
+  const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
+  // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
+  // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.
+  const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0
+    || projection?.source_valid === false
+  return hasAuthoritativeCards
+    ? <_CardKanban state={state} cards={cards} runId={runId} onSelect={onSelect}
+      onClose={onClose} onToast={onToast} />
+    : <_HypothesisFallback state={state} runId={runId} onSelect={onSelect} onClose={onClose} onToast={onToast} />
 }
 
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live

@@ -9,12 +9,14 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 import pytest
 
 from looplab.events.eventstore import EventStore
 from looplab.core.models import NodeStatus
+from looplab.engine.evaluate import _card_identity_spellings
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
@@ -124,7 +126,9 @@ def test_force_ablate_runs_and_is_replay_safe(tmp_path):
     s1 = _paused(rd)
     assert s1.awaiting_approval and not s1.finished
     nid = s1.best().id
-    EventStore(rd / "events.jsonl").append("force_ablate", {"node_id": nid})
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 1})
+    store.append("force_ablate", {"node_id": nid})
     s2 = _paused(rd)
     assert any(a["parent_id"] == nid for a in s2.ablations)          # ablation ran
     n_abl = len(s2.ablations)
@@ -137,7 +141,9 @@ def test_fork_creates_improve_node(tmp_path):
     s1 = _paused(rd)
     nid = s1.best().id
     n0 = len(s1.nodes)
-    EventStore(rd / "events.jsonl").append("fork", {"from_node_id": nid})
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 1})
+    store.append("fork", {"from_node_id": nid})
     s2 = _paused(rd)
     assert s2.forks_done == 1 and len(s2.nodes) > n0
     # the new node descends from the forked parent
@@ -209,7 +215,9 @@ def test_inject_node_with_parent_and_replay_safe(tmp_path):
     s1 = _paused(rd)                                  # a paused run with evaluated nodes
     pid = s1.best().id
     n0 = len(s1.nodes)
-    EventStore(rd / "events.jsonl").append("inject_node", {
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 1})
+    store.append("inject_node", {
         "idea": {"operator": "improve", "params": {"x": 0.1}}, "parent_id": pid})
     s2 = _paused(rd)
     assert s2.injects_done == 1 and len(s2.nodes) > n0
@@ -251,7 +259,9 @@ def test_inject_merge_with_parent_ids_builds_multiparent_node(tmp_path):
     ids = sorted(s1.nodes)[:2]
     assert len(ids) == 2
     n0 = len(s1.nodes)
-    EventStore(rd / "events.jsonl").append("inject_node", {
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 1})
+    store.append("inject_node", {
         "idea": {"operator": "merge", "rationale": "canvas merge"}, "parent_ids": ids})
     s2 = _paused(rd)
     child = next(n for n in s2.nodes.values() if n.id >= n0 and len(n.parent_ids) >= 2)
@@ -267,6 +277,7 @@ def test_reopen_finished_run_with_injected_node(tmp_path):
     # queues the node; re-entering the loop evaluates it and re-finishes.
     store = EventStore(rd / "events.jsonl")
     store.append("run_reopened", {})
+    store.append("budget_extend", {"add_nodes": 1})
     store.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 0.2},
                                           "rationale": "post-hoc idea"}, "parent_id": None})
     s2 = anyio.run(_engine(rd).run)
@@ -300,6 +311,138 @@ def test_run_argv_cancel_kills_inflight(tmp_path):
     dt = time.time() - t0
     timer.cancel()
     assert dt < 6.0 and to   # killed ~0.4s in, NOT after the 20s sleep or 30s timeout
+
+
+class _BlockingCardEvalSandbox:
+    """Deterministic eval that exposes the cancellation Event without spawning a process."""
+
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.cancel = None
+
+    def run(self, code, workdir, timeout=30.0, env=None, cancel=None):
+        self.cancel = cancel
+        self.started.set()
+        while not self.release.wait(0.01):
+            if cancel is not None and cancel.is_set():
+                return RunResult(
+                    exit_code=-9, stdout="", stderr="cancelled", metric=None, timed_out=True)
+        return RunResult(
+            exit_code=0, stdout='{"metric": 0.25}', stderr="", metric=0.25,
+            timed_out=False)
+
+
+def _seed_pending_card_eval(eng):
+    eng.store.append("run_started", {
+        "run_id": "r", "task_id": "t", "goal": "g", "direction": "min",
+    })
+    eng.store.append("card_added", {
+        "id": "card-1", "statement": "long candidate", "source": "researcher",
+    })
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {
+            "operator": "draft", "hypothesis": "long candidate", "card_id": "card-1",
+        },
+        "code": "print(0.25)",
+    })
+
+
+async def _exercise_card_drop_watcher(eng, sandbox, event, before_start, expect_cancel):
+    if before_start:
+        eng.store.append("card_dropped", event)
+    try:
+        with anyio.fail_after(3.0):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(eng._evaluate, 0, anyio.CapacityLimiter(1), None)
+                started = await anyio.to_thread.run_sync(sandbox.started.wait, 1.0)
+                assert started, "eval did not enter the sandbox"
+                if not before_start:
+                    eng.store.append("card_dropped", event)
+                if expect_cancel:
+                    cancelled = await anyio.to_thread.run_sync(sandbox.cancel.wait, 1.5)
+                    assert cancelled, "operator Card drop did not reach the eval cancel Event"
+                else:
+                    await anyio.sleep(0.45)  # watcher cadence is 0.3s
+                    assert sandbox.cancel is not None and not sandbox.cancel.is_set()
+                    sandbox.release.set()
+    finally:
+        sandbox.release.set()
+
+
+def test_operator_card_drop_tree_kills_matching_inflight_eval_and_charges_compute(tmp_path):
+    sandbox = _BlockingCardEvalSandbox()
+    eng = _engine(tmp_path / "operator-drop", sandbox=sandbox)
+    _seed_pending_card_eval(eng)
+
+    anyio.run(
+        _exercise_card_drop_watcher,
+        eng, sandbox,
+        {"id": "card-1", "reason": "stop now", "dropped_by": "operator"},
+        False, True,
+    )
+
+    terminal = [event for event in eng.store.read_all() if event.type == "node_failed"][-1]
+    assert terminal.data["reason"] == "card_dropped"
+    assert terminal.data["eval_seconds"] > 0
+    assert "Card dropped by operator" in terminal.data["error"]
+
+
+def test_operator_canonical_drop_kills_inflight_eval_linked_to_merged_alias(tmp_path):
+    sandbox = _BlockingCardEvalSandbox()
+    eng = _engine(tmp_path / "operator-drop-merged-alias", sandbox=sandbox)
+    _seed_pending_card_eval(eng)
+    eng.store.append("card_added", {
+        "id": "card-2", "statement": "canonical candidate", "source": "researcher",
+    })
+    eng.store.append("card_merged", {"canonical": "card-2", "aliases": ["card-1"]})
+
+    before = fold(eng.store.read_all())
+    assert before.nodes[0].idea.card_id == "card-1"  # immutable proposal-time identity
+    assert "card-1" in before.cards["card-2"].aliases
+
+    anyio.run(
+        _exercise_card_drop_watcher,
+        eng, sandbox,
+        {"id": "card-2", "reason": "stop merged work", "dropped_by": "operator"},
+        False, True,
+    )
+
+    terminal = [event for event in eng.store.read_all() if event.type == "node_failed"][-1]
+    assert terminal.data["reason"] == "card_dropped"
+    assert terminal.data["eval_seconds"] > 0
+
+
+def test_active_card_alias_resolution_fails_closed_for_ambiguous_owner():
+    state = SimpleNamespace(cards={
+        "card-2": SimpleNamespace(aliases=["card-1"]),
+        "card-3": SimpleNamespace(aliases=["card-1"]),
+    })
+
+    assert _card_identity_spellings(state, "card-1") == frozenset()
+
+
+@pytest.mark.parametrize(("event", "before_start"), [
+    ({"id": "card-1", "reason": "engine decision", "dropped_by": "engine"}, False),
+    ({"id": "card-other", "reason": "stop now", "dropped_by": "operator"}, False),
+    ({"id": "card-1", "reason": "already visible", "dropped_by": "operator"}, True),
+])
+def test_card_drop_watcher_ignores_non_operator_unrelated_and_prestart_events(
+        tmp_path, event, before_start):
+    sandbox = _BlockingCardEvalSandbox()
+    eng = _engine(tmp_path / f"ignored-{event['dropped_by']}-{event['id']}-{before_start}",
+                  sandbox=sandbox)
+    _seed_pending_card_eval(eng)
+
+    anyio.run(
+        _exercise_card_drop_watcher,
+        eng, sandbox, event,
+        before_start, False,
+    )
+
+    node = fold(eng.store.read_all()).nodes[0]
+    assert node.status is NodeStatus.evaluated and node.metric == 0.25
 
 
 class _BlockingProbeSandbox:
@@ -393,6 +536,7 @@ def test_natural_finish_uses_the_action_decision_sequence(tmp_path):
         actions = original(state)
         if not actions and state.nodes and not raced:
             raced = True
+            eng.store.append("budget_extend", {"add_nodes": 1})
             eng.store.append("inject_node", {
                 "idea": {"operator": "manual", "params": {"x": 0.25},
                          "rationale": "won the finish race"},
@@ -429,6 +573,7 @@ def test_live_engine_rebuilds_holdout_partition_when_race_rotates_epoch(tmp_path
             eng.store.append("holdout_evaluated", {
                 "node_id": best.id, "generation": best.attempt,
                 "metric": best.metric, "search_epoch": state.search_epoch})
+            eng.store.append("budget_extend", {"add_nodes": 1})
             eng.store.append("inject_node", {
                 "idea": {"operator": "manual", "params": {"x": 0.33}}})
             return []
@@ -452,6 +597,7 @@ def test_finish_report_cannot_hide_a_concurrent_control(tmp_path):
             nonlocal injected
             if trigger == "finish" and not injected:
                 injected = True
+                eng.store.append("budget_extend", {"add_nodes": 1})
                 eng.store.append("inject_node", {
                     "idea": {"operator": "manual", "params": {"x": 0.75},
                              "rationale": "arrived during final report"},

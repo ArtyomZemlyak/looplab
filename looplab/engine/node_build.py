@@ -195,7 +195,9 @@ class NodeBuildMixin:
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
                            source=_OMIT, origin=_OMIT, generation=_OMIT,
                            parent_generations=_OMIT, cross_run_receipt=_OMIT,
-                           footprint_finalized=_OMIT) -> None:
+                           footprint_finalized=_OMIT, speculative=_OMIT,
+                           card_build_generation=_OMIT, materialize_aborted_intent=_OMIT,
+                           expected_last_seq=_OMIT) -> None:
         """The single `node_created` emitter for all four creation sites (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
         `_OMIT` sentinel and are LEFT OUT of the payload when not passed — never None-filled —
@@ -210,7 +212,14 @@ class NodeBuildMixin:
                      ("source", source), ("origin", origin), ("generation", generation),
                      ("parent_generations", parent_generations),
                      ("cross_run_receipt", cross_run_receipt),
-                     ("footprint_finalized", footprint_finalized)):
+                     ("footprint_finalized", footprint_finalized),
+                     ("speculative", speculative),
+                     ("card_build_generation", card_build_generation),
+                     ("materialize_aborted_intent", materialize_aborted_intent)):
             if v is not _OMIT:
                 data[k] = v
-        self.store.append(EV_NODE_CREATED, data)
+        append_kwargs = (
+            {} if expected_last_seq is _OMIT
+            else {"expected_last_seq": expected_last_seq}
+        )
+        self.store.append(EV_NODE_CREATED, data, **append_kwargs)

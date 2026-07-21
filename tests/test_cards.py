@@ -106,7 +106,7 @@ def test_card_added_seeds_a_proposed_card_with_no_evidence():
     assert c.evidence == [] and c.source == "operator" and c.seed_statement == "external data helps"
 
 
-def test_node_less_card_added_preserves_one_tolerant_atomic_action_snapshot():
+def test_node_less_card_added_preserves_action_but_rejects_invalid_steering_snapshot():
     st = _fold_with_cursor(_mk([
         ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
         ("card_added", {
@@ -125,10 +125,8 @@ def test_node_less_card_added_preserves_one_tolerant_atomic_action_snapshot():
     assert card.eval_profile == "smoke" and card.concept_tags == ["model/tree"]
     assert card.parent_id == 3 and card.parent_ids == [3] and card.scored_against == 9
     assert card.footprint == {"gpus": 2, "gpu_mem_mib": 8_000}
-    # HARDENING (547b8d0): steering_context is now a CLOSED-vocabulary, fail-closed receipt
-    # (normalize_steering_context, core/models.py). The non-dict `1` element — and the unknown
-    # "coverage" kind / non-digest "axis/model" ref — drop the WHOLE snapshot to []; a truthful
-    # lossless receipt never silently keeps a rejected cue.
+    # Steering is a closed, ref-shaped writer contract. One malformed member invalidates the atomic
+    # snapshot instead of letting replay silently turn a lossy projection into an apparently exact cue.
     assert card.steering_context == []
 
 
@@ -256,7 +254,8 @@ def test_reserved_operator_override_overlay_is_applied_last():
     assert c.seed_statement == "interaction features help"   # join key UNCHANGED
     assert c.priority == 3
     assert c.pinned is True
-    assert c.footprint == {"gpus": 2, "gpu_mem_mib": 8000, "pinned_by": "operator"}
+    assert c.footprint is None                              # immutable action declaration unchanged
+    assert c.resource_pin == {"gpus": 2, "gpu_mem_mib": 8000, "pinned_by": "operator"}
 
 
 def test_derive_cards_does_not_touch_selection_or_hypotheses():
@@ -1114,4 +1113,5 @@ def test_operator_pin_wins_over_engine_enrichment():
     assert st.cards[cid].footprint == {"gpus": 8, "proposed_by": "researcher"}
     st.card_resource_pins = {cid: {"gpus": 1}}
     _derive_cards(st)
-    assert st.cards[cid].footprint["gpus"] == 1 and st.cards[cid].footprint["pinned_by"] == "operator"
+    assert st.cards[cid].footprint == {"gpus": 8, "proposed_by": "researcher"}
+    assert st.cards[cid].resource_pin == {"gpus": 1, "pinned_by": "operator"}

@@ -25,7 +25,8 @@ from typing import BinaryIO, Optional
 import orjson
 from fastapi import HTTPException
 
-from looplab.core.models import Event
+from looplab.events.eventstore import (
+    MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record)
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -37,7 +38,7 @@ MIN_BYTES = 1024
 MAX_INDEXED_RUNS = 8
 # Bound parser memory independently of the response byte budget. Canonical event rows above this
 # hard ceiling end the recoverable page prefix (and are reported as a source-limited torn tail).
-MAX_SOURCE_ROW_BYTES = 8 * 1024 * 1024
+MAX_SOURCE_ROW_BYTES = MAX_EVENT_BATCH_BYTES
 MAX_PLACEHOLDER_TYPE_CHARS = 256
 
 _GENERATION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -53,10 +54,15 @@ class _Row:
     seq: int
     event_type: Optional[str]
     ts: object
+    member_index: int = 0
+    logical_bytes: int = 0
 
     @property
     def raw_bytes(self) -> int:
-        return self.end - self.start
+        # Ordinary rows retain their exact source-byte cost (including the newline). Batch members use
+        # their compact logical envelope size so one 8 MiB physical transaction does not turn every
+        # small member into an 8 MiB placeholder or exhaust a page N times over.
+        return self.logical_bytes or (self.end - self.start)
 
 
 @dataclass
@@ -82,12 +88,19 @@ class _Index:
 def _generation_for(first: object) -> Optional[str]:
     if not isinstance(first, dict):
         return None
-    seq = first.get("seq")
-    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
-        return None
+    batched = is_event_batch_record(first)
+    if not batched:
+        seq = first.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            return None
     try:
-        event = Event(**first)
+        events = decode_event_record(first)
     except Exception:  # noqa: BLE001 - malformed first row means no safe generation fence
+        return None
+    if not events:
+        return None
+    event = events[0]
+    if not isinstance(event.seq, int) or isinstance(event.seq, bool) or event.seq < 0:
         return None
     token = run_generation_token([event])
     return token or None
@@ -120,10 +133,10 @@ def _metadata_signature(stat: os.stat_result) -> tuple[int, int]:
     return stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _row_from(raw: bytes, start: int, end: int) -> Optional[_Row]:
+def _row_from(raw: bytes, start: int, end: int) -> list[_Row]:
     line = raw.strip()
     if not line:
-        return None
+        return []
     try:
         obj = orjson.loads(line)
     except orjson.JSONDecodeError as exc:
@@ -131,18 +144,40 @@ def _row_from(raw: bytes, start: int, end: int) -> Optional[_Row]:
     if not isinstance(obj, dict):
         raise ValueError("non-object JSONL tail")
     try:
-        event = Event(**obj)
+        events = decode_event_record(obj)
     except Exception as exc:  # noqa: BLE001 - parity with EventStore.read_all's recoverable prefix
         raise ValueError("invalid event envelope") from exc
-    seq = obj.get("seq")
-    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+    batched = is_event_batch_record(obj)
+    ordinary_seq = None if batched else obj.get("seq")
+    if (not batched and (
+            not isinstance(ordinary_seq, int)
+            or isinstance(ordinary_seq, bool)
+            or ordinary_seq < 0)):
         raise ValueError("event seq must be an explicit nonnegative integer")
-    # Only placeholders retain these fields. Normalize through Event and cap the stored value so a
-    # hostile giant type string cannot dominate the index or break the byte cap. Keep it ordinary:
-    # interning attacker-controlled unique values would outlive this pager's bounded run LRU.
-    event_type = event.type[:MAX_PLACEHOLDER_TYPE_CHARS]
-    ts = event.ts if math.isfinite(event.ts) else 0.0
-    return _Row(start=start, end=end, seq=seq, event_type=event_type, ts=ts)
+    rows: list[_Row] = []
+    for member_index, event in enumerate(events):
+        seq = event.seq if batched else ordinary_seq
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            raise ValueError("event seq must be an explicit nonnegative integer")
+        # Only placeholders retain these fields. Normalize through Event and cap the stored value so a
+        # hostile giant type string cannot dominate the index or break the byte cap. Keep it ordinary:
+        # interning attacker-controlled unique values would outlive this pager's bounded run LRU.
+        event_type = event.type[:MAX_PLACEHOLDER_TYPE_CHARS]
+        ts = event.ts if math.isfinite(event.ts) else 0.0
+        logical_bytes = (
+            len(orjson.dumps(event.model_dump(mode="json")))
+            if batched else end - start
+        )
+        rows.append(_Row(
+            start=start,
+            end=end,
+            seq=seq,
+            event_type=event_type,
+            ts=ts,
+            member_index=member_index,
+            logical_bytes=logical_bytes,
+        ))
+    return rows
 
 
 def _scan(handle: BinaryIO, index: _Index, snapshot_size: int) -> None:
@@ -163,23 +198,30 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int) -> None:
             break
         end = handle.tell()
         try:
-            row = _row_from(raw, start, end)
+            physical_rows = _row_from(raw, start, end)
         except ValueError:
             torn = True
             break
         # Blank complete lines are skipped by iter_jsonl but remain part of the durable valid prefix.
-        if row is not None:
+        if physical_rows:
             # EventStore's writer allocates a strictly increasing seq. Gaps are legitimate after an
             # atomic rewrite, but duplicate/decreasing seq would make client identity ambiguous and
             # therefore ends the canonical timeline prefix just like a malformed envelope.
-            if index.seq_values and row.seq <= index.seq_values[-1]:
+            if index.seq_values and physical_rows[0].seq <= index.seq_values[-1]:
+                torn = True
+                break
+            if any(
+                later.seq <= earlier.seq
+                for earlier, later in zip(physical_rows, physical_rows[1:])
+            ):
                 torn = True
                 break
             index.valid_end = end
-            row_index = len(index.rows)
-            index.rows.append(row)
-            index.seq_values.append(row.seq)
-            index.seq_row_indexes.append(row_index)
+            for row in physical_rows:
+                row_index = len(index.rows)
+                index.rows.append(row)
+                index.seq_values.append(row.seq)
+                index.seq_row_indexes.append(row_index)
         else:
             index.valid_end = end
     index.observed_size = snapshot_size
@@ -353,17 +395,33 @@ class EventLogPager:
                      byte_limit: int) -> tuple[list[dict], int]:
         events: list[dict] = []
         wire_bytes = 0
+        decoded: dict[tuple[int, int], list[dict]] = {}
         for row in rows[start:end]:
             if row.raw_bytes > byte_limit:
                 event = _placeholder(row)
             else:
-                handle.seek(row.start)
-                raw = handle.read(row.raw_bytes).strip()
-                try:
-                    obj = orjson.loads(raw)
-                except orjson.JSONDecodeError:
-                    obj = None
-                event = obj if isinstance(obj, dict) else _placeholder(row)
+                physical_key = (row.start, row.end)
+                logical = decoded.get(physical_key)
+                if logical is None:
+                    handle.seek(row.start)
+                    raw = handle.read(row.end - row.start).strip()
+                    try:
+                        obj = orjson.loads(raw)
+                        if isinstance(obj, dict):
+                            parsed = decode_event_record(obj)
+                            logical = (
+                                [item.model_dump(mode="json") for item in parsed]
+                                if is_event_batch_record(obj) else [obj]
+                            )
+                        else:
+                            logical = []
+                    except Exception:  # noqa: BLE001 - defensive against concurrent source mutation
+                        logical = []
+                    decoded[physical_key] = logical
+                event = (
+                    logical[row.member_index]
+                    if row.member_index < len(logical) else _placeholder(row)
+                )
             size = len(orjson.dumps(event))
             # Selection accounts for source bytes (which are at least compact JSON bytes) or the
             # exact placeholder size. This assertion makes the wire cap an executable invariant.

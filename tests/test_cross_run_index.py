@@ -260,6 +260,27 @@ def test_valid_prefix_with_a_corrupt_complete_record_is_skipped(tmp_path):
                for row in result["receipts"]["skipped"])
 
 
+def test_valid_prefix_with_torn_batch_tail_is_skipped_and_not_cached(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "active", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    prior = build_index_incremental(root)
+    path = root / "active" / "events.jsonl"
+    with path.open("ab") as handle:
+        # A crash-atomic append_many transaction is one physical record. Even though the existing logical
+        # prefix is foldable, portfolio facts must not bless/cache it while this envelope is incomplete.
+        handle.write(b'{"v":1,"seq":99,"type":"__looplab_event_batch_v1__","data":{"events":[')
+
+    result = build_index_incremental(root, prior=prior)
+
+    assert result["index"] == []
+    assert result["receipts"]["cached"] == []
+    assert result["receipts"]["built"] == []
+    assert any(
+        row["dir"] == "active" and "unterminated physical record" in row["reason"]
+        for row in result["receipts"]["skipped"]
+    )
+
+
 def test_unreadable_digest_skips_only_that_run(tmp_path, monkeypatch):
     root = tmp_path / "runs"
     _make_run_dir(root, "good", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])

@@ -1272,6 +1272,17 @@ export const CONTROL = {
   addHypothesis: (rid, statement) => runCommand(rid, 'hypothesis_added', { statement, source: 'human' }),
   abandonHypothesis: (rid, id) => runCommand(rid, 'hypothesis_updated', { id, status: 'abandoned' }),
   deleteHypothesis: (rid, id) => runCommand(rid, 'hypothesis_updated', { id, status: 'deleted' }),
+  // Layer-6 Card board controls. Authority/provenance is server-stamped; clients submit only the
+  // exact subject and editable value through the generation-fenced command protocol.
+  reprioritizeCard: (rid, id, priority) => runCommand(
+    rid, 'card_reprioritized', { id, priority }),
+  editCard: (rid, id, statement) => runCommand(rid, 'card_edited', { id, statement }),
+  pinCardResources: (rid, id, gpus, gpuMemMiB = null) => runCommand(
+    rid, 'card_resource_pinned', {
+      id, gpus, ...(gpuMemMiB == null ? {} : { gpu_mem_mib: gpuMemMiB }),
+    }),
+  dropCard: (rid, id, reason = 'operator dropped') => runCommand(
+    rid, 'card_dropped', { id, reason }),
   // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
   // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
   // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).

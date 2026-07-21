@@ -154,9 +154,10 @@ def test_confirm_seed_reserves_and_releases_through_shared_gpu_pool(tmp_path):
     node = fold(eng.store.read_all()).nodes[0]
     calls = []
 
-    async def reserve(nd):
+    async def reserve(nd, *, resource_pin=None, wait_once=False):
         calls.append(("reserve", nd.id))
-        return {"gpu_ids": [7], "cpu_only": False, "pin": True}
+        request = eng._resource_request_for_node(nd, resource_pin=resource_pin)
+        return {**request, "gpu_ids": [7]}
 
     def release(ids):
         calls.append(("release", list(ids)))
@@ -170,6 +171,159 @@ def test_confirm_seed_reserves_and_releases_through_shared_gpu_pool(tmp_path):
     eng._run_eval = fake_run_eval
     anyio.run(eng._run_confirm_seed, node, eng.confirm_seed_base)
     assert calls == [("reserve", 0), ("run", "7", "full"), ("release", [7])]
+
+
+def test_confirm_seed_releases_stale_pin_reservation_before_eval(tmp_path):
+    """Confirmation must refold and retry when a Card pin changes during a blocking wait."""
+    eng = _noisy_engine(tmp_path / "confirm-pin-race", confirm_top_k=1, confirm_seeds=1,
+                        max_nodes=1)
+    eng.store.append("run_started", {
+        "run_id": "confirm-pin-race", "task_id": "toy", "direction": "min"})
+    eng.store.append("card_added", {
+        "id": "card-1", "statement": "immutable seed", "source": "researcher",
+        "idea": {"operator": "draft", "params": {}, "space": {}},
+        "footprint": {"gpus": 1, "gpu_mem_mib": 8_000},
+    })
+    eng.store.append("card_resource_pinned", {
+        "id": "card-1", "gpus": 1, "gpu_mem_mib": 8_000,
+        "source": "operator", "pinned": True,
+    })
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(
+            operator="draft",
+            card_id="card-1",
+            footprint={"gpus": 1, "gpu_mem_mib": 8_000},
+        ).model_dump(mode="json"),
+        "code": "",
+    })
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0})
+    node = fold(eng.store.read_all()).nodes[0]
+    waits: list[dict] = []
+    releases: list[list[int]] = []
+    runs: list[tuple[str, str, list[list[int]]]] = []
+
+    def release(ids):
+        releases.append(list(ids or []))
+
+    def fake_run_eval(_node, _workdir, env=None, profile=None, cancel=None):
+        runs.append(((env or {}).get("CUDA_VISIBLE_DEVICES"), profile, list(releases)))
+        return RunResult(exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
+
+    eng._release_gpus = release
+    eng._run_eval = fake_run_eval
+
+    async def scenario():
+        wait_entered = anyio.Event()
+        pin_changed = anyio.Event()
+
+        async def reserve(nd, *, resource_pin=None, wait_once=False):
+            waits.append(dict(resource_pin or {}))
+            request = eng._resource_request_for_node(nd, resource_pin=resource_pin)
+            if len(waits) == 1:
+                wait_entered.set()
+                await pin_changed.wait()
+                return {**request, "gpu_ids": [7]}
+            return {**request, "gpu_ids": []}
+
+        eng._wait_reserve_node_resources = reserve
+        results = []
+
+        async def run_seed():
+            results.append(await eng._run_confirm_seed(node, eng.confirm_seed_base))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run_seed)
+            with anyio.fail_after(2):
+                await wait_entered.wait()
+            eng.store.append("card_resource_pinned", {
+                "id": "card-1", "gpus": 0,
+                "source": "operator", "pinned": True,
+            })
+            pin_changed.set()
+        return results
+
+    results = anyio.run(scenario)
+
+    assert [pin["gpus"] for pin in waits] == [1, 0]
+    assert releases == [[7], []]
+    assert runs == [("", "full", [[7]])]
+    assert results == [1.0]
+
+
+def test_confirm_seed_refolds_pin_after_bounded_wait_without_gpu_release(tmp_path):
+    """A GPU->CPU re-pin wakes confirmation via polling, not an unrelated pool release."""
+    eng = _noisy_engine(tmp_path / "confirm-pin-poll", confirm_top_k=1, confirm_seeds=1,
+                        max_nodes=1)
+    eng._gpu_ids = [0]
+    eng._gpu_physical_ids = {0: "0"}
+    eng._gpu_mem = {0: 16_000}
+    eng._free_gpus = [0]
+    eng._gpu_epoch = 0
+    eng._eval_gpu_reservations = {}
+    assert eng._acquire_gpus(1) == [0]               # external owner never releases this GPU
+
+    eng.store.append("run_started", {
+        "run_id": "confirm-pin-poll", "task_id": "toy", "direction": "min"})
+    eng.store.append("card_added", {
+        "id": "card-1", "statement": "immutable seed", "source": "researcher",
+        "idea": {"operator": "draft", "params": {}, "space": {}},
+        "footprint": {"gpus": 1, "gpu_mem_mib": 8_000},
+    })
+    eng.store.append("card_resource_pinned", {
+        "id": "card-1", "gpus": 1, "gpu_mem_mib": 8_000,
+        "source": "operator", "pinned": True,
+    })
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(
+            operator="draft",
+            card_id="card-1",
+            footprint={"gpus": 1, "gpu_mem_mib": 8_000},
+        ).model_dump(mode="json"),
+        "code": "",
+    })
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0})
+    node = fold(eng.store.read_all()).nodes[0]
+    runs: list[tuple[str, str]] = []
+
+    def fake_run_eval(_node, _workdir, env=None, profile=None, cancel=None):
+        runs.append(((env or {}).get("CUDA_VISIBLE_DEVICES"), profile))
+        return RunResult(exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
+
+    eng._run_eval = fake_run_eval
+    wait_entered = threading.Event()
+    original_wait = eng._wait_for_gpu_change
+
+    def observed_wait(epoch):
+        wait_entered.set()
+        original_wait(epoch)
+
+    eng._wait_for_gpu_change = observed_wait
+
+    async def scenario():
+        results = []
+
+        async def run_seed():
+            results.append(await eng._run_confirm_seed(node, eng.confirm_seed_base))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run_seed)
+            with anyio.fail_after(2):
+                assert await anyio.to_thread.run_sync(wait_entered.wait, 1.0)
+            eng.store.append("card_resource_pinned", {
+                "id": "card-1", "gpus": 0,
+                "source": "operator", "pinned": True,
+            })
+        return results
+
+    results = anyio.run(scenario)
+
+    assert eng._free_gpus == []                      # progress did not depend on a pool epoch bump
+    assert runs == [("", "full")]
+    assert results == [1.0]
 
 
 @pytest.mark.parametrize("intervention,data", [

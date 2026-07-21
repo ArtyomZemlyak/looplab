@@ -24,7 +24,8 @@ from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
-    EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock, iter_jsonl)
+    EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
+    iter_event_jsonl, iter_jsonl)
 from looplab.events.replay import FoldCursor, fold
 from looplab.events.traceview import TRACE_PROJECTION_SCHEMA, unavailable_projection
 from looplab.events.types import (
@@ -2057,7 +2058,7 @@ def build_router(srv) -> APIRouter:
         """Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive
         seq lower bound."""
         rd = _run_dir(run_id)
-        return [o for o in iter_jsonl(rd / "events.jsonl") if o.get("seq", -1) > since]
+        return [o for o in iter_event_jsonl(rd / "events.jsonl") if o.get("seq", -1) > since]
 
     @router.get("/api/runs/{run_id}/log-page")
     def event_log_page(

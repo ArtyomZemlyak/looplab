@@ -17,6 +17,7 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -26,6 +27,7 @@ import orjson
 from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.types import (
+    EV_ABLATE,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
     EV_CARD_ADDED, EV_CARD_DROPPED, EV_CARD_MERGED,
@@ -54,6 +56,7 @@ from looplab.engine.evaluate import EvaluateMixin
 from looplab.engine.node_build import NodeBuildMixin
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
 from looplab.engine.resources import ResourceSchedulingMixin, detect_gpu_inventory
+from looplab.engine.speculation import SpeculationMixin
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
 from looplab.engine.novelty import NoveltyGateMixin
@@ -81,6 +84,7 @@ from looplab.core.models import (
     Idea, Node, NodeStatus, RunState, card_action_digest, card_ownership_receipt,
     durable_idea_payload, idea_proposal_ref, normalize_researcher_footprint,
 )
+from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
@@ -88,6 +92,7 @@ from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limi
 from looplab.search.card_selection import (
     META_CARD_ID, card_action as projected_card_action, card_budget_used,
     card_next_actions, card_selection_set, eligible_cards, forced_card_actions,
+    speculative_raw_actions,
 )
 from looplab.search.operators import merge_idea
 from looplab.search.policy import KIND_EXPAND, SearchPolicy
@@ -139,6 +144,16 @@ class _CardReservationPlan(NamedTuple):
     payload: Optional[dict]
 
 
+class _InjectedNodePlan(NamedTuple):
+    """Pure, bounded preparation result for one operator-authored Node request."""
+
+    idea: Idea
+    parent_ids: list[int]
+    parent_generations: dict[str, int]
+    code: Optional[str]
+    implementation_ref: Optional[str]
+
+
 def _detect_gpu_ids() -> list[int]:
     """Best-effort list of usable GPU ordinals for the per-eval GPU pinning + `max_parallel=0` AUTO
     (evaluate.py). Honors an existing `CUDA_VISIBLE_DEVICES` (respect an operator/scheduler that already
@@ -174,7 +189,8 @@ def _detect_gpu_ids() -> list[int]:
 # `self._ablate(...)` call site (and every test poking those names on Engine) is untouched.
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
-             AuditMixin, ResourceSchedulingMixin, EvaluateMixin, NodeBuildMixin, ProposalCuesMixin,
+             AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
+             ProposalCuesMixin,
              TrainingMonitorMixin, AshaMonitorMixin):
     def __init__(
         self,
@@ -311,6 +327,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         unified_agent = _opt("unified_agent")
         agent_drives_actions = _opt("agent_drives_actions")
         card_driven_selection = _opt("card_driven_selection")
+        speculation_depth = _opt("speculation_depth")
         inline_repair = _opt("inline_repair")
         inline_repair_attempts = _opt("inline_repair_attempts")
         inline_repair_stuck_repeat = _opt("inline_repair_stuck_repeat")
@@ -515,6 +532,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # The receipt-backed Card authority wins when both opt-in selectors are enabled. Letting the
         # free-form agent arm pre-empt it would silently bypass the atomic existing-work claim below.
         self.card_driven_selection = bool(card_driven_selection)
+        # Keep a settled, bounded scalar for the Layer-5 producer/consumer seam. Zero is a hard
+        # off-switch; no task group/request event is allowed to infer a non-zero depth from hardware.
+        self.speculation_depth = max(0, min(64, int(speculation_depth or 0)))
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
         # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
@@ -1003,16 +1023,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if state.finished:
                 break
             if isinstance(state.leakage, dict) and state.leakage.get("leak"):
+                if self._close_card_build_before_terminal_gate(state):
+                    continue
                 if self._finish_with_report_if_quiescent(
                         state, {"reason": "leakage"}, after_seq=decision_seq):
                     break
                 continue
             if state.stop_requested:
+                if self._close_card_build_before_terminal_gate(state):
+                    continue
                 if self._finish_with_report_if_quiescent(
                         state, {"reason": "aborted"}, after_seq=decision_seq):
                     break
                 continue
             if state.paused:
+                if self._close_card_build_before_terminal_gate(state):
+                    continue
                 break
             # node_reset (operator "re-run this node from a stage"): a reset from implement/propose
             # re-develops the SAME node id IN PLACE before any other loop work, so it never mints a new
@@ -1068,6 +1094,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             max_s, max_es = self._apply_control_overrides(state)
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
+                if self._close_card_build_before_terminal_gate(state, max_es):
+                    continue
+                if self._close_node_creating_forced_request_before_terminal_gate(
+                    state, reason="time_budget",
+                ):
+                    continue
                 if self._finish_with_report_if_quiescent(
                         state, {"reason": "time_budget"}, after_seq=decision_seq):
                     break
@@ -1077,6 +1109,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # the silent multi-hour sweep that real training runs can produce.
             if (max_es is not None
                     and state.total_eval_seconds >= max_es):
+                if self._close_card_build_before_terminal_gate(state, max_es):
+                    continue
+                if self._close_node_creating_forced_request_before_terminal_gate(
+                    state, reason="eval_budget",
+                ):
+                    continue
                 if self._finish_with_report_if_quiescent(
                         state, {"reason": "eval_budget"}, after_seq=decision_seq):
                     break
@@ -1085,6 +1123,27 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if await self._serve_forced_requests(state):
                 continue
 
+            if self._speculation_enabled():
+                # Crash-prefix cleanup and the durable Card-build queue both precede cadences and
+                # empty-action finalization. Otherwise request->node_building->crash can finish the run
+                # with its exact request head still unacknowledged.
+                if await self._close_developer_sentinel_once():
+                    continue
+                speculative_state = fold(self.store.read_all())
+                if self._head_request(speculative_state) is not None or speculative_state.buildings:
+                    await self._run_card_session(
+                        [],
+                        speculative_state,
+                        max_es,
+                        None if max_s is None else start + max_s,
+                    )
+                    continue
+
+            # The translated Card denominator changes whenever an attempt becomes tombstoned/gated or
+            # a speculative freshness drop lands.  Refresh it BEFORE the Strategist reads
+            # ``node_budget_frac``; the post-cadence refresh below is still required because a live
+            # policy swap rebuilds ``policy.max_nodes`` from its unextended base.
+            self._refresh_speculation_budget(state, events=decision_events)
             state = self._run_cadences(state)
             post_cadence_events = self.store.read_all()
             post_cadence_seq = post_cadence_events[-1].seq if post_cadence_events else -1
@@ -1092,21 +1151,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Re-enter every gate after either an internal cadence append or a concurrent control.
                 continue
 
-            # Effective node budget: a `budget_extend` with add_nodes (e.g. "give the run 10 more
-            # nodes") raises the policy's max_nodes so a reopened/resumed run keeps proposing
-            # experiments instead of immediately re-finishing. Applied HERE — AFTER any in-loop policy
-            # swap (strategist / set_strategy above, which rebuilds the policy un-extended) and right
-            # before action selection — so the override is never dropped on a swap iteration. Card mode
-            # uses its effective denominator; tombstoned/trust-gated attempts must not inflate capacity.
-            # The legacy flag-off branch retains the historical raw-node floor byte-for-byte.
-            # CODEX AGENT: max_nodes is documented and surfaced in UI as the experiment hard ceiling,
-            # but this denominator refunds every gated/tombstoned attempt. A run whose outputs are all
-            # trust-gated can therefore execute indefinitely when no time budget is configured. Keep a
-            # separate raw compute/admission cap; "search capacity" must not erase work already spent.
-            _budget_used = card_budget_used(state) if self.card_driven_selection else len(state.nodes)
-            self.policy.max_nodes = max(
-                _budget_used,
-                self._base_max_nodes + int(state.budget_overrides.get("add_nodes", 0) or 0))
+            # Refresh after any in-loop policy swap so a live `add_nodes` extension is never lost. Card
+            # mode translates the raw hard ceiling into the effective policy view: gated/tombstoned
+            # Nodes stay hidden from ranking, but their already-reserved slots cannot be spent again.
+            self._refresh_speculation_budget(state, events=post_cadence_events)
+
+            if self._speculation_enabled():
+                # Layer 5 freshness is live engine policy, never fold semantics. Drain one stale Node
+                # and restart the turn; only a fully-clean fresh prefix may reach Card scoring.
+                if await self._drop_stale_speculation():
+                    continue
+                fresh_events = self.store.read_all()
+                fresh_seq = fresh_events[-1].seq if fresh_events else -1
+                if fresh_seq != post_cadence_seq:
+                    continue
+                state = fold(fresh_events)
 
             actions = self._select_actions(state)
             if not actions:
@@ -1180,6 +1239,57 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         break
                     continue
                 self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
+                if self._speculation_enabled():
+                    receipt_owned = [META_CARD_ID in action for action in creates]
+                    # One turn has one authority. A mixed lane could stage new work while claiming a
+                    # stale selection snapshot, so retain the serial spine's existing fail-closed rule.
+                    if any(receipt_owned) and not all(receipt_owned):
+                        _created_no_terminal -= len(creates)
+                        continue
+
+                    if not any(receipt_owned):
+                        # Raw policy actions do not yet name executable work. Author their concrete
+                        # Ideas and durable Cards now, but deliberately leave every Node slot unowned;
+                        # the next fresh fold must select them before a producer can be requested.
+                        stageable = speculative_raw_actions(
+                            state,
+                            self.policy,
+                            self.policy.max_nodes,
+                            scoring=getattr(self, "_card_scoring", None),
+                            resource_envelope=self._resource_envelope(),
+                        )
+                        if stageable:
+                            # Author one work item at a time. The live depth is filled by the isolated
+                            # steady-state proposer while eval runs; staging an unreserved wide seed
+                            # batch here only creates stale inventory if the first fast eval moves best.
+                            one = stageable[:1]
+                            _created_no_terminal -= max(0, len(creates) - len(one))
+                            if self._stage_card_creates(one, state):
+                                continue
+                            # A rejected staging attempt gets one ordinary serial compatibility try;
+                            # it must not poll the same paid proposal outside the runaway accounting.
+                        # Unsupported/custom scorer semantics retain the exact serial compatibility
+                        # path below; a Card it cannot score must never be staged/reused in a loop.
+
+                    # A positive depth is useful only with a genuinely isolated role pair. If the
+                    # configured factory cannot provide one, fall through to the safe serial Card
+                    # claim below. Otherwise request/session is the sole build path: a lost selection
+                    # CAS restarts from a fresh fold and never silently converts to serial execution.
+                    serial_fallback = any(
+                        self._card_requires_serial_fallback(action.get(META_CARD_ID))
+                        for action in creates
+                    )
+                    if (all(receipt_owned)
+                            and self._producer_role_pair() is not None
+                            and not serial_fallback):
+                        if self._request_card_build():
+                            await self._run_card_session(
+                                [],
+                                fold(self.store.read_all()),
+                                max_es,
+                                None if max_s is None else start + max_s,
+                            )
+                        continue
                 # Variant-1 parallel BUILD: seed/explore DRAFTS are independent, so build (research + code)
                 # up to `parallel_build` at once, each on its OWN pooled (researcher, developer) pair + its
                 # own pre-reserved id (reserved serially under _id_lock, then fanned out in a task-group of
@@ -1232,6 +1342,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                         steering_context=_drop.get("steering_context", []),
                                     )
                             self._pending_batch_dropped = []
+                            self._pending_batch_novelty_gated = []
                             continue
                         # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned 1:1
                         # with _ideas), so each build emits ITS OWN hypothesis_ranked/foresight_selected.
@@ -1242,9 +1353,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 self.store.append(EV_POLICY_DECISION,
                                                   {"scores": _a["_scores"], "chosen": _a.get("_chosen"),
                                                    "reason": _a.get("_reason")})
-                            if _a.get("_rung") is not None:
-                                self.store.append(EV_RUNG_PROMOTED,
-                                                  {"rung": _a["_rung"], "survivors": _a.get("_promoted", [])})
+                            self._append_rung_promotion(_a)
                         # Proposal is complete before durable reservation: a native Card receipt must
                         # bind the exact immutable statement/action.  The MAIN TASK serially commits
                         # card_added -> node_building for each idea, then workers only implement.
@@ -1268,6 +1377,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     steering_context=_drop.get("steering_context", []),
                                 )
                         self._pending_batch_dropped = []
+                        # The accepted Ideas are now durably reserved, so the unreserved compatibility
+                        # capability is no longer reachable or needed.
+                        self._pending_batch_novelty_gated = []
                         # Cost guardrail (Phase 4): surface the concurrent build fan-out width in the
                         # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
                         # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
@@ -1302,13 +1414,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         self.store.append(EV_POLICY_DECISION,
                                           {"scores": a["_scores"], "chosen": a.get("_chosen"),
                                            "reason": a.get("_reason")})
-                    if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
-                        # CODEX AGENT: widened Card ASHA lanes carry the same survivor receipt on every
-                        # action, so this loop emits N indistinguishable rung_promoted events for one
-                        # halving decision. The UI/audit ledger overcounts promotions; emit the lane
-                        # receipt once, or include the per-action chosen parent in each event.
-                        self.store.append(EV_RUNG_PROMOTED,
-                                          {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
+                    self._append_rung_promotion(a)
                     if META_CARD_ID in a:
                         # The complete Card lane was claimed atomically above, before the first slow
                         # build could make its siblings ineligible through the evaluate-all prefix.
@@ -1343,7 +1449,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         break
                 continue
 
-            await self._dispatch_evals(evals, state, max_es)
+            if self._speculation_enabled():
+                await self._run_card_session(
+                    evals,
+                    state,
+                    max_es,
+                    None if max_s is None else start + max_s,
+                )
+            else:
+                await self._dispatch_evals(evals, state, max_es)
 
         # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
         # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
@@ -1354,6 +1468,169 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # Pure structural decomposition of run(): each method is a cohesive span lifted verbatim so the
     # loop body reads as a table of guarded steps. No behavior/ordering/gating change — every event
     # emission, _write_lock point, and fold site stays exactly where it was in the original run().
+
+    def _hard_node_reservation_limit(self, state: RunState) -> int:
+        """Return the operator-owned ceiling for distinct durable Node reservations."""
+
+        base_limit = getattr(self, "_base_max_nodes", None)
+        if base_limit is None:
+            # Compatibility for narrowly-constructed Engine test doubles and older embedders. A fully
+            # initialized Engine always owns ``_base_max_nodes``; only the partial-object seam falls
+            # back to the policy/configured value, and an unconfigured object fails closed at zero.
+            base_limit = getattr(getattr(self, "policy", None), "max_nodes", None)
+        if base_limit is None:
+            base_limit = getattr(self, "max_nodes", 0)
+        try:
+            base_limit = int(base_limit)
+        except (TypeError, ValueError, OverflowError):
+            base_limit = 0
+        return max(
+            0,
+            base_limit + int(state.budget_overrides.get("add_nodes", 0) or 0),
+        )
+
+    def _unmaterialized_card_request_indices(self, state: RunState) -> set[int]:
+        """Return exact outstanding request indexes that still own a future Node slot.
+
+        Materialized ownership is matched as a multiset: one strict speculative ``node_building``
+        marker or one not-yet-linked speculative Node can discharge only one request with the exact
+        ``(card_id, card_build_generation)`` identity. Ordinary Card build markers, mismatched
+        generations, and Nodes already linked by an accepted ``card_build_done`` cannot discharge a
+        later duplicate request. The returned absolute indexes make conversion credit head-specific.
+        """
+
+        done = max(0, min(int(state.card_builds_done), len(state.card_build_requests)))
+        materialized: dict[tuple[str, int], int] = {}
+
+        def _add_materialized(key: tuple[str, int]) -> None:
+            materialized[key] = materialized.get(key, 0) + 1
+
+        linked_node_ids = {
+            node_id for node_id in state.speculative_nodes
+            if type(node_id) is int
+        }
+        # A valid node_created clears its build marker. If a corrupt prefix leaves both projections,
+        # count the physical node id once, preferring the created Node below.
+        for node_id, marker in state.buildings.items():
+            if (
+                type(node_id) is not int
+                or node_id in state.nodes
+                or node_id in linked_node_ids
+                or not isinstance(marker, Mapping)
+                or marker.get("node_id") != node_id
+                or marker.get("speculative") is not True
+            ):
+                continue
+            card_id = marker.get("card_id")
+            generation = marker.get("card_build_generation")
+            if isinstance(card_id, str) and card_id and type(generation) is int and generation >= 0:
+                _add_materialized((card_id, generation))
+
+        for node in state.nodes.values():
+            if (
+                node.id in linked_node_ids
+                or node.speculative is not True
+                or not isinstance(node.idea.card_id, str)
+                or not node.idea.card_id
+                or type(node.card_build_generation) is not int
+            ):
+                continue
+            _add_materialized((node.idea.card_id, node.card_build_generation))
+
+        unmaterialized: set[int] = set()
+        for request_index in range(done, len(state.card_build_requests)):
+            request = state.card_build_requests[request_index]
+            key = self._request_key(request)
+            if key is None:
+                continue
+            available = materialized.get(key, 0)
+            if available:
+                materialized[key] = available - 1
+            else:
+                unmaterialized.add(request_index)
+        return unmaterialized
+
+    def _unmaterialized_card_reservations(self, state: RunState) -> int:
+        """Count durable requests not yet represented by a distinct physical Node reservation."""
+
+        return len(self._unmaterialized_card_request_indices(state))
+
+    def _node_reservation_slots_remaining(
+        self,
+        state: RunState,
+        *,
+        events=None,
+        consume_request: bool = False,
+    ) -> int:
+        """Return strict remaining physical slots at every new-Node append boundary.
+
+        ``consume_request`` is used only while converting the exact outstanding speculative head into
+        ``node_building``; that request already owns one slot and must not be charged twice.
+        """
+
+        if events is None:
+            events = self.store.read_all()
+        raw_used = self._node_id_ceiling(events, state)
+        unmaterialized = self._unmaterialized_card_request_indices(state)
+        request_used = len(unmaterialized)
+        head_index = max(
+            0, min(int(state.card_builds_done), len(state.card_build_requests)),
+        )
+        if consume_request and head_index in unmaterialized:
+            request_used -= 1
+        return max(0, self._hard_node_reservation_limit(state) - raw_used - request_used)
+
+    def _refresh_speculation_budget(self, state: RunState, *, events=None) -> None:
+        """Refresh the live policy denominator without refunding the hard Node admission ceiling.
+
+        Card selection ranks an effective view that excludes tombstoned and currently gated Nodes. The
+        configured ``max_nodes + add_nodes`` limit, however, bounds physical Node reservations. Translate
+        its remaining raw slots into the effective denominator so policy intent keeps the filtered view
+        while every slot already reserved — including a failed reservation gap — remains spent. This
+        overrides the SpeculationMixin helper so serial and speculative Card admission share one limit.
+        """
+        hard_limit = self._hard_node_reservation_limit(state)
+        if events is None:
+            events = self.store.read_all()
+        raw_used = self._node_id_ceiling(events, state)
+        request_used = self._unmaterialized_card_reservations(state)
+        effective_used = (
+            card_budget_used(state) if self.card_driven_selection else len(state.nodes)
+        )
+        self.policy.max_nodes = effective_used + max(
+            0, hard_limit - raw_used - request_used,
+        )
+
+    def _append_rung_promotion(self, action: dict) -> bool:
+        """Durably append one row per exact ASHA halving receipt, including across resume.
+
+        Widened Card lanes stamp the same rung/survivor decision on every chosen parent.  Speculation
+        commits those parents in separate turns, so an in-memory per-lane set cannot deduplicate them.
+        The append-only log is the authority: retry tail races, but suppress an exact receipt already
+        recorded by an ordinary or speculative path.  A changed rung or survivor set remains distinct.
+        """
+        if action.get("_rung") is None:
+            return False
+        payload = {"rung": action["_rung"], "survivors": action.get("_promoted", [])}
+        for _attempt in range(64):
+            events = self.store.read_all()
+            if any(
+                event.type == EV_RUNG_PROMOTED
+                and event.data.get("rung") == payload["rung"]
+                and event.data.get("survivors", []) == payload["survivors"]
+                for event in events
+            ):
+                return False
+            tail = events[-1].seq if events else -1
+            try:
+                with self._id_lock:
+                    self.store.append(
+                        EV_RUNG_PROMOTED, payload, expected_last_seq=tail,
+                    )
+                return True
+            except EventStoreConcurrencyError:
+                continue
+        return False
 
     def _select_actions(self, state: RunState) -> list[dict]:
         """Apply the explicit macro-selection authority order for one fresh fold."""
@@ -1377,13 +1654,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "select_verifier_samples": self._select_verifier_samples,
             "verifier_ci_tie": self._verifier_ci_tie,
         }
-        legacy_fields = RUN_START_PINNED_FIELDS - {"card_driven_selection"}
+        legacy_fields = RUN_START_PINNED_FIELDS - {"card_driven_selection", "speculation_depth"}
         if values.keys() != legacy_fields:
             raise RuntimeError("run-start pinned settings contract drifted")
         # Keep the default run_started payload byte-identical. Replay treats an absent key as false;
         # only the opt-in path needs an additive durable marker.
         if self.card_driven_selection:
             values["card_driven_selection"] = True
+        # Preserve the default run_started bytes just like the Card selector flag. Replay supplies
+        # zero for an absent key, while an enabled overlap treatment must be durable across resume.
+        if self.speculation_depth:
+            values["speculation_depth"] = self.speculation_depth
         return values
 
     def _setup_phase(self, state: RunState) -> None:
@@ -1552,6 +1833,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # grant for card_scoring depends on this run-start-pinned value, not the ambient snapshot.
         if _entry.run_id:
             self.card_driven_selection = _entry.card_driven_selection
+            self.speculation_depth = _entry.speculation_depth
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
         if _entry.active_strategy:
@@ -1711,11 +1993,133 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 _bo.get("llm_broker_total", _bo.get("llm_parallel")))
         return max_s, max_es
 
+    async def _defer_for_node_budget(self, state: RunState) -> bool:
+        """Keep a durable node-creating control head live until ``budget_extend`` admits it.
+
+        Returning immediately as "not served" would let the empty-action branch finalize with a
+        stranded fork/inject/ablation request. Returning immediately as "served" would tight-spin.
+        One bounded poll turn keeps the engine responsive to abort/pause/budget controls and survives
+        process restart because the request itself remains the append-only queue authority.
+        """
+
+        if self._node_reservation_slots_remaining(state) >= 1:
+            return False
+        await anyio.sleep(0.5)
+        return True
+
+    @staticmethod
+    def _pending_forced_ablation(state: RunState) -> Optional[dict]:
+        """Return the first exact forced-ablation lifecycle not yet acknowledged."""
+
+        forced = next((r for r in state.ablate_request_generations
+                       if r.get("node_id") in state.nodes
+                       and r.get("node_id") not in state.aborted_nodes
+                       and not state.nodes[r["node_id"]].tombstoned
+                       and state.nodes[r["node_id"]].attempt == r.get("generation")
+                       and not any(a.get("parent_id") == r["node_id"]
+                                   and a.get("generation") == r.get("generation")
+                                   for a in state.ablations)), None)
+        if forced is not None:
+            return dict(forced)
+        legacy = next((parent_id for parent_id in state.ablate_requests
+                       if parent_id in state.nodes
+                       and parent_id not in state.aborted_nodes
+                       and not state.nodes[parent_id].tombstoned
+                       and not any(a.get("parent_id") == parent_id
+                                   for a in state.ablations)), None)
+        if legacy is None:
+            return None
+        return {
+            "node_id": legacy,
+            "generation": state.nodes[legacy].attempt,
+        }
+
+    def _append_inject_failure(
+        self,
+        state: RunState,
+        *,
+        error: str,
+        reason: str,
+    ) -> bool:
+        """Atomically append one positional inject failure and its replay gate."""
+
+        request_idx = state.injects_done
+        for _attempt in range(64):
+            events = self.store.read_all()
+            current = fold(events)
+            if current.injects_done > request_idx:
+                return True
+            if (
+                current.injects_done != request_idx
+                or len(current.inject_requests) <= request_idx
+            ):
+                return False
+            tail = events[-1].seq if events else -1
+            try:
+                self.store.append_many([
+                    (EV_INJECT_FAILED, {
+                        "idx": request_idx,
+                        "error": str(error)[:500],
+                        "reason": reason,
+                    }),
+                    (EV_INJECT_DONE, {
+                        "idx": request_idx,
+                        "skipped": reason,
+                    }),
+                ], expected_last_seq=tail)
+                return True
+            except EventStoreConcurrencyError:
+                continue
+        return False
+
+    def _close_node_creating_forced_request_before_terminal_gate(
+        self,
+        state: RunState,
+        *,
+        reason: str,
+    ) -> bool:
+        """Durably skip one forced Node creator before a stronger terminal budget wins.
+
+        Wall/eval ceilings intentionally outrank operator work, but finalizing without a matching
+        acknowledgement leaves a replay-visible queue head stranded in a finished run. Close one head
+        per turn, then re-fold before the terminal CAS. A node-budget-only wait never calls this helper
+        and therefore remains resumable via ``budget_extend{add_nodes}``.
+        """
+
+        if len(state.fork_requests) > state.forks_done:
+            request = state.fork_requests[state.forks_done]
+            self.store.append(EV_FORK_DONE, {
+                "from_node_id": request.get("from_node_id"),
+                "generation": request.get("generation"),
+                "skipped": reason,
+            })
+            return True
+        if len(state.inject_requests) > state.injects_done:
+            self._append_inject_failure(
+                state,
+                error=f"not executed: terminal {reason} gate won",
+                reason=reason,
+            )
+            # A lost tail CAS still means this head blocks finalization. Re-fold and retry next turn.
+            return True
+        forced_ablate = self._pending_forced_ablation(state)
+        if forced_ablate is not None:
+            self.store.append(EV_ABLATE, {
+                "parent_id": forced_ablate["node_id"],
+                "generation": forced_ablate["generation"],
+                "impacts": {},
+                "eval_seconds": 0.0,
+                "skipped": reason,
+            })
+            return True
+        return False
+
     async def _serve_forced_requests(self, state: RunState) -> bool:
         # Operator-forced steering (Phase 5), one per iteration then re-fold. Each is gated on
         # the domain event it produces (fork_done / an ablate event / node_confirmed), so a
         # resume never repeats it — deterministic under replay. Returns True when a request was
-        # served (the caller re-folds via `continue`); False lets the loop fall through.
+        # served OR deliberately left pending for node budget (the caller re-folds via `continue`);
+        # False lets the loop fall through. The pending branch performs its own bounded wait.
         if len(state.fork_requests) > state.forks_done:
             req = state.fork_requests[state.forks_done]
             pid = req.get("from_node_id")
@@ -1727,6 +2131,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                       and pid not in state.aborted_nodes
                       and (generation is None or current.attempt == generation))
             if served:
+                # A valid fork remains the durable queue head while the physical Node ceiling is full.
+                # Do not append fork_done: a later budget_extend must be able to serve this same intent.
+                if await self._defer_for_node_budget(state):
+                    return True
                 generation = current.attempt
                 self._create_node({"kind": "improve", "parent_id": pid,
                                    "parent_generations": {str(pid): generation}})
@@ -1740,39 +2148,46 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `inject_done` so a resume never re-creates it — deterministic under replay.
         if len(state.inject_requests) > state.injects_done:
             req = state.inject_requests[state.injects_done]
+            # Reject a structurally impossible durable row before waiting for Node capacity. The
+            # validator is pure/bounded and mirrors materialization; no Developer/LLM work occurs.
+            try:
+                self._prepare_injected_node(state, req)
+            except Exception as exc:  # noqa: BLE001 - legacy/hand-authored event rows are untrusted
+                self._append_inject_failure(
+                    state,
+                    error=str(exc),
+                    reason="invalid_request",
+                )
+                return True
+            # Unlike malformed input, temporary budget exhaustion is not a failed inject. Leave the
+            # request unacknowledged so an additive budget extension can admit it exactly once.
+            if await self._defer_for_node_budget(state):
+                return True
             try:
                 self._create_injected_node(req)
             except Exception as e:  # noqa: BLE001 - a malformed operator/API inject must not
                 # crash-loop the engine: without advancing the gate, every resume replays the same
                 # bad request and dies again, leaving the run unrecoverable. Record + skip it.
-                self.store.append(EV_INJECT_FAILED,
-                                  {"idx": state.injects_done, "error": str(e)[:500]})
                 # The request is about to be marked done in this SAME invocation, so unlike an
                 # escaping serial build exception there may be no resume boundary to clean a partial
                 # reservation. Terminalize any surviving marker before advancing the request gate.
                 failed_state = fold(self.store.read_all())
                 if failed_state.buildings:
                     self._recover_interrupted_builds(failed_state)
+                self._append_inject_failure(
+                    state,
+                    error=str(e),
+                    reason="materialization_failed",
+                )
+                return True
             self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
             return True
-        forced_ablate = next((r for r in state.ablate_request_generations
-                              if r.get("node_id") in state.nodes
-                              and r.get("node_id") not in state.aborted_nodes
-                              and not state.nodes[r["node_id"]].tombstoned
-                              and state.nodes[r["node_id"]].attempt == r.get("generation")
-                              and not any(a.get("parent_id") == r["node_id"]
-                                          and a.get("generation") == r.get("generation")
-                                          for a in state.ablations)), None)
-        if forced_ablate is None:
-            legacy_ablate = next((p for p in state.ablate_requests
-                                  if p in state.nodes
-                                  and p not in state.aborted_nodes
-                                  and not state.nodes[p].tombstoned
-                                  and not any(a.get("parent_id") == p for a in state.ablations)), None)
-            if legacy_ablate is not None:
-                forced_ablate = {"node_id": legacy_ablate,
-                                  "generation": state.nodes[legacy_ablate].attempt}
+        forced_ablate = self._pending_forced_ablation(state)
         if forced_ablate is not None:
+            # Ablation probes culminate in one new refine_block Node. Avoid both the paid probes and a
+            # false completion while that physical reservation has no budget slot.
+            if await self._defer_for_node_budget(state):
+                return True
             await self._ablate(forced_ablate["node_id"],
                                expected_generation=forced_ablate["generation"])
             return True
@@ -2051,11 +2466,79 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         node = cur.nodes.get(a["node_id"])
                         reservation = None
                         generation = None
+                        skip_eval = False
                         if node is not None and hasattr(self, "_wait_reserve_node_resources"):
-                            reservation = await self._wait_reserve_node_resources(node)
                             generation = node.attempt
-                            self._register_eval_resource_reservation(
-                                node.id, generation, reservation)
+                            while True:
+                                # Resource waits must not pin a stale fold forever.  A GPU->CPU Card
+                                # re-pin does not release a GPU (and therefore does not bump the pool
+                                # epoch), so re-fold after every bounded condition tick and fence the
+                                # exact lifecycle plus run-level operator gates before retrying.
+                                waiting = fold(self.store.read_all())
+                                live = waiting.nodes.get(node.id)
+                                terminal = bool(
+                                    getattr(waiting, "paused", False)
+                                    or getattr(waiting, "finished", False)
+                                    or getattr(waiting, "stop_requested", None)
+                                )
+                                lifecycle_current = bool(
+                                    live is not None
+                                    and live.attempt == generation
+                                    and live.status is NodeStatus.pending
+                                    and not live.tombstoned
+                                    and live.id not in waiting.aborted_nodes
+                                    and not terminal
+                                    and not (max_es is not None
+                                             and waiting.total_eval_seconds >= max_es)
+                                )
+                                if not lifecycle_current:
+                                    if live is not None and live.id in waiting.aborted_nodes:
+                                        self._skip_if_aborted(a, waiting)
+                                    skip_eval = True
+                                    break
+                                cur, node = waiting, live
+                                reservation = await self._wait_reserve_node_resources(
+                                    node,
+                                    resource_pin=self._card_resource_pin_for_node(cur, node),
+                                    wait_once=True,
+                                )
+                                if reservation is None:
+                                    continue
+                                admitted = fold(self.store.read_all())
+                                live = admitted.nodes.get(node.id)
+                                terminal = bool(
+                                    getattr(admitted, "paused", False)
+                                    or getattr(admitted, "finished", False)
+                                    or getattr(admitted, "stop_requested", None)
+                                )
+                                if (
+                                    live is None
+                                    or live.attempt != generation
+                                    or live.status is not NodeStatus.pending
+                                    or live.tombstoned
+                                    or live.id in admitted.aborted_nodes
+                                    or terminal
+                                    or (max_es is not None
+                                        and admitted.total_eval_seconds >= max_es)
+                                ):
+                                    self._release_gpus(reservation.get("gpu_ids"))
+                                    reservation = None
+                                    if live is not None and live.id in admitted.aborted_nodes:
+                                        self._skip_if_aborted(a, admitted)
+                                    skip_eval = True
+                                    break
+                                if not self._node_resource_reservation_is_current(
+                                    admitted, live, reservation,
+                                ):
+                                    self._release_gpus(reservation.get("gpu_ids"))
+                                    cur, node = admitted, live
+                                    continue
+                                node = live
+                                self._register_eval_resource_reservation(
+                                    node.id, generation, reservation)
+                                break
+                        if skip_eval:
+                            continue
                         try:
                             await self._evaluate(a["node_id"], limiter, max_es)
                         finally:
@@ -2134,7 +2617,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     chosen_index = pos
                                     chosen_node = node
                                     break
-                                candidate = self._try_reserve_node_resources(node)
+                                candidate = self._try_reserve_node_resources(
+                                    node,
+                                    resource_pin=self._card_resource_pin_for_node(cur, node),
+                                )
                                 if candidate is not None:
                                     chosen_index = pos
                                     chosen_node = node
@@ -2149,6 +2635,43 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 await anyio.to_thread.run_sync(
                                     self._wait_for_gpu_change, epoch, abandon_on_cancel=True)
                                 continue
+                            if chosen_node is not None and chosen_reservation is not None:
+                                admitted = fold(self.store.read_all())
+                                live = admitted.nodes.get(chosen_node.id)
+                                terminal_gate = bool(
+                                    getattr(admitted, "paused", False)
+                                    or getattr(admitted, "finished", False)
+                                    or getattr(admitted, "stop_requested", None)
+                                )
+                                lifecycle_current = bool(
+                                    live is not None
+                                    and live.attempt == chosen_node.attempt
+                                    and getattr(live, "status", NodeStatus.pending)
+                                    is NodeStatus.pending
+                                    and not getattr(live, "tombstoned", False)
+                                    and live.id not in admitted.aborted_nodes
+                                    and not terminal_gate
+                                    and not (max_es is not None
+                                             and admitted.total_eval_seconds >= max_es)
+                                )
+                                if (
+                                    not lifecycle_current
+                                    or not self._node_resource_reservation_is_current(
+                                        admitted, live, chosen_reservation,
+                                    )
+                                ):
+                                    self._release_gpus(chosen_reservation.get("gpu_ids"))
+                                    if terminal_gate:
+                                        # A pause/stop can land during the bounded resource wait.  The
+                                        # reservation was formed from the old turn, so release it and end
+                                        # admission instead of spinning or scheduling work past the gate.
+                                        slots.release()
+                                        break
+                                    if not lifecycle_current:
+                                        pending.pop(chosen_index)
+                                    slots.release()
+                                    continue
+                                chosen_node = live
                             chosen = pending.pop(chosen_index)
                             generation = (chosen_node.attempt if chosen_node is not None else None)
                             if chosen_reservation is not None and generation is not None:
@@ -2511,7 +3034,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _card_added_payload(card_id: str, statement: str, action: dict, idea: Idea, *,
                             source: str, at_node: int,
                             implementation_ref: Optional[str] = None,
-                            steering_context=()) -> dict:
+                            steering_context=(), cross_run_receipt=None) -> dict:
         receipt = card_ownership_receipt(card_id, statement, action)
         proposal_ref = idea_proposal_ref(idea)
         bounded_steering = normalize_steering_context(steering_context)
@@ -2526,6 +3049,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                      or not implementation_ref.startswith("implementation:v1:")
                      or len(implementation_ref) != len("implementation:v1:") + 64)):
             raise ValueError("invalid implementation identity")
+        advisory_receipt = bounded_cross_run_advisory_receipt(cross_run_receipt)
         return {
             "id": card_id,
             "statement": statement,
@@ -2555,12 +3079,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # collapse merely because their params/profile happen to match.
             "proposal_ref": proposal_ref,
             **({"implementation_ref": implementation_ref} if implementation_ref else {}),
+            **({"cross_run_receipt": advisory_receipt} if advisory_receipt else {}),
         }
 
     @classmethod
     def _card_event_matches(cls, data: dict, idea: Idea, action: dict, *, source: str,
                             at_node: int, implementation_ref: Optional[str],
-                            steering_context=()) -> bool:
+                            steering_context=(), cross_run_receipt=None) -> bool:
         """True only for the exact writer shape used by a crash-prefix card reservation."""
         card_id = data.get("id")
         if cls._engine_card_number(card_id) is None:
@@ -2572,19 +3097,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         expected = cls._card_added_payload(
             card_id, statement, action, rebound, source=source, at_node=at_node,
             implementation_ref=implementation_ref, steering_context=steering_context,
+            cross_run_receipt=cross_run_receipt,
         )
+        if data == expected:
+            return True
+        # ``at_node`` is allocation-time provenance, not executable proposal identity. A second
+        # pre-reservation naturally sees a later node-id ceiling; everything else in the immutable
+        # writer receipt must still match exactly so active work dedupes without weakening source,
+        # action, steering, implementation or advisory identity.
+        recorded_at_node = data.get("at_node")
+        if (type(recorded_at_node) is not int
+                or not 0 <= recorded_at_node <= (1 << 31) - 1):
+            return False
+        expected["at_node"] = recorded_at_node
         # This is intentionally a writer-prefix matcher, not a loose semantic comparison. A future
         # additive mint field must make an old writer decline reuse until that field is reviewed.
-        # `at_node` is proposal provenance (WHERE the reservation was taken), NOT part of the Card's
-        # identity — the ownership receipt/action digest deliberately excludes it. It advances with
-        # every intervening reservation, so gating on its exact value would silently defeat both
-        # exact-active-work dedup (a duplicate proposed later in the same serial batch) and
-        # crash-prefix reuse after other nodes were built. Require a bounded int, then compare the
-        # rest of the payload exactly.
-        stored_at_node = data.get("at_node")
-        if type(stored_at_node) is not int or not 0 <= stored_at_node <= (1 << 31) - 1:
-            return False
-        return {**data, "at_node": at_node} == expected
+        return data == expected
 
     @staticmethod
     def _card_score_snapshot(state: RunState, requested: Optional[int]):
@@ -2635,7 +3163,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                           parent_generations: dict[str, int], scored_against: Optional[int],
                           source: str, at_node: int,
                           implementation_ref: Optional[str] = None, excluded=(),
-                          steering_context=(),
+                          steering_context=(), cross_run_receipt=None,
                           superseded_card_id: Optional[str] = None) -> _CardReservationPlan:
         """Resolve exact live dedupe, crash-prefix reuse, or a fresh engine id without appending."""
         score_snapshot = cls._card_score_snapshot(state, scored_against)
@@ -2662,7 +3190,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if cls._card_event_matches(
                         event.data, idea, action, source=source, at_node=at_node,
                         implementation_ref=implementation_ref,
-                        steering_context=steering_context):
+                        steering_context=steering_context,
+                        cross_run_receipt=cross_run_receipt):
                     matches.append(cid)
             except (TypeError, ValueError, OverflowError):
                 continue
@@ -2712,6 +3241,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             payload = cls._card_added_payload(
                 card_id, statement, action, reserved_idea, source=source, at_node=at_node,
                 implementation_ref=implementation_ref, steering_context=steering_context,
+                cross_run_receipt=cross_run_receipt,
             )
         except (TypeError, ValueError, OverflowError):
             return _CardReservationPlan("invalid", None, None, None)
@@ -2722,7 +3252,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             scored_against: Optional[int] = None,
                             source: str = "researcher",
                             implementation_ref: Optional[str] = None,
-                            steering_context=()):
+                            steering_context=(), cross_run_receipt=None):
         """Atomically reserve one native Card and its node-building owner under ``_id_lock``.
 
         The final Idea must already exist: the immutable statement and exact action receipt cannot be
@@ -2735,6 +3265,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         with self._id_lock:
             events = self.store.read_all()
             state = fold(events)
+            if self._node_reservation_slots_remaining(state, events=events) < 1:
+                return None
             parent_snapshot = self._build_parent_snapshot(state, action)
             if parent_snapshot is None:
                 return None
@@ -2755,9 +3287,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 events, state, idea, parents=parents, parent_generations=parent_generations,
                 scored_against=scored_against, source=source, at_node=node_id,
                 implementation_ref=implementation_ref, steering_context=steering_context,
+                cross_run_receipt=cross_run_receipt,
             )
             if plan.disposition == "invalid":
-                self.store.append(EV_NOVELTY_REJECTED, {
+                self._append_proposal_event(EV_NOVELTY_REJECTED, {
                     "node_id": node_id, "generation": 0, "kind": "card_contract",
                     "reason": "proposal cannot form a bounded native Card action",
                     "action": "dropped",
@@ -2781,6 +3314,212 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             })
             return _BuildReservation(
                 state, node_id, kind, parents, parent_generations, card_id, reserved_idea)
+
+    @staticmethod
+    def _proposal_cue_fence(state: RunState) -> bytes:
+        """Bounded proposal authority that may move without changing the search epoch."""
+
+        return orjson.dumps({
+            "pending_hints": state.pending_hints,
+            "research_count": len(state.research),
+            "latest_research": state.research[-1] if state.research else None,
+            "pending_strategy": state.pending_strategy,
+            "active_strategy": state.active_strategy,
+        }, option=orjson.OPT_SORT_KEYS)
+
+    def _stage_prepared_card(self, action: dict, idea: Idea, *, proposal_state: RunState,
+                             proposal_node_ceiling: int, at_node: int, source: str,
+                             steering_context=(), cross_run_receipt=None,
+                             proposal_cue_fence: Optional[bytes] = None,
+                             proposal_authority_seq: Optional[int] = None) -> Optional[str]:
+        """Commit one concrete proposal as a ready Card, without reserving a Node.
+
+        Layer 5 needs durable inventory *before* it can elect a request-driven producer.  Proposal is
+        slow and therefore happens outside ``_id_lock``; this short commit re-folds and accepts the
+        result only while its epoch, parents, best anchor and future node-slot ceiling are unchanged.
+        Serial callers may retry harmless tail churn; isolated RAW callers additionally fence every
+        non-LLM-telemetry event. A lifecycle move returns to the outer loop so a proposal authored
+        against an old search state can never be relabelled as current work.
+        """
+        if not isinstance(idea, Idea):
+            try:
+                idea = Idea.model_validate(idea)
+            except Exception:
+                return None
+        if (type(proposal_node_ceiling) is not int or proposal_node_ceiling < 0
+                or type(at_node) is not int or at_node < proposal_node_ceiling):
+            return None
+        if (proposal_authority_seq is not None
+                and (type(proposal_authority_seq) is not int
+                     or proposal_authority_seq < -1)):
+            return None
+        bounded_steering = normalize_steering_context(steering_context)
+        if bounded_steering is None:
+            return None
+        expected_parent = self._build_parent_snapshot(proposal_state, action)
+        expected_score = self._card_score_snapshot(
+            proposal_state, proposal_state.best_node_id)
+        expected_cues = (
+            self._proposal_cue_fence(proposal_state)
+            if proposal_cue_fence is None else proposal_cue_fence
+        )
+        if expected_parent is None or expected_score is None:
+            return None
+
+        # A Researcher declaration is persisted as the effective, schedulable request.  In particular,
+        # an over-declared GPU count must not become an immutable receipt that Layer 4 later clamps to a
+        # different action.  The writer owns card_id, so discard the provisional planner sidecar too.
+        clean = idea.model_copy(deep=True, update={
+            "card_id": None,
+            "footprint": self._clamp_resource_footprint(idea.footprint),
+        })
+        for _attempt in range(64):
+            # The log scan, fold, lifecycle fences and duplicate/id plan are intentionally outside
+            # `_id_lock`: they scale with run history and may invoke bounded hashing/validation.  The
+            # append's tail CAS is the authority for the snapshot.  If another reservation or control
+            # wins after this plan, the CAS loses and the next turn recomputes every derived value.
+            events = self.store.read_all()
+            tail = events[-1].seq if events else -1
+            # The isolated RAW worker is authorized by one exact semantic proposal prefix. LLM usage
+            # telemetry is worker-owned and may advance the physical tail, but every other event is
+            # authority-bearing. Serial outer batches omit this optional fence and retain CAS retries.
+            if (proposal_authority_seq is not None
+                    and self._proposal_authority_seq(events) != proposal_authority_seq):
+                return None
+            state = fold(events)
+            if (state.search_epoch != proposal_state.search_epoch
+                    or state.paused or state.finished or state.stop_requested
+                    or state.best_node_id != proposal_state.best_node_id
+                    or self._proposal_cue_fence(state) != expected_cues
+                    or self._node_id_ceiling(events, state) != proposal_node_ceiling
+                    or self._build_parent_snapshot(state, action) != expected_parent
+                    or self._card_score_snapshot(
+                        state, proposal_state.best_node_id) != expected_score):
+                return None
+            kind, parents, parent_generations = expected_parent
+            del kind
+            plan = self._plan_native_card(
+                events,
+                state,
+                clean,
+                parents=parents,
+                parent_generations=parent_generations,
+                scored_against=proposal_state.best_node_id,
+                source=source,
+                at_node=at_node,
+                steering_context=bounded_steering,
+                cross_run_receipt=cross_run_receipt,
+            )
+            if plan.disposition == "reuse":
+                # Reuse mutates nothing.  Its eventual request/claim always re-folds and revalidates
+                # the Card, so it needs no writer lock or synthetic event merely to stabilize the tail.
+                return plan.card_id
+            if plan.disposition != "mint" or plan.card_id is None or plan.payload is None:
+                return None
+            try:
+                with self._id_lock:
+                    self.store.append(
+                        EV_CARD_ADDED, plan.payload, expected_last_seq=tail)
+                return plan.card_id
+            except EventStoreConcurrencyError:
+                continue
+        return None
+
+    @in_llm_lane("build")
+    def _stage_card_creates(self, actions: list[dict], state: RunState) -> list[str]:
+        """Turn raw policy creates into durable, selection-ready Card receipts only.
+
+        No ``node_building`` is written here.  A later fresh fold must select the Card, after which the
+        isolated producer is gated by ``card_build_requested``.  Multi-seed drafts retain the existing
+        shared-Researcher diversity pass; non-draft actions reuse the exact ordinary proposal helper.
+        """
+        raw = [dict(action) for action in actions
+               if isinstance(action, dict) and META_CARD_ID not in action]
+        if not raw:
+            return []
+        proposal_events = self.store.read_all()
+        proposal_state = fold(proposal_events)
+        proposal_node_ceiling = self._node_id_ceiling(proposal_events, proposal_state)
+        prepared: list[tuple[dict, Idea, str, int, list, dict]] = []
+        dropped_batch: list[dict] = []
+        try:
+            if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
+                ideas = self._propose_batch(proposal_state, len(raw))
+                telemetry = list(
+                    getattr(self, "_pending_batch_telemetry", None) or [])
+                if len(telemetry) < len(ideas):
+                    telemetry.extend([None] * (len(ideas) - len(telemetry)))
+                dropped_batch = list(
+                    getattr(self, "_pending_batch_dropped", None) or [])
+                for offset, (action, idea, record) in enumerate(
+                        zip(raw, ideas, telemetry)):
+                    steering = ((record or {}).get("_steering_context", [])
+                                if isinstance(record, dict) else [])
+                    advisory_receipt = bounded_cross_run_advisory_receipt(
+                        (record or {}).get("_cross_run_advisory_receipt", {})
+                        if isinstance(record, dict) else {}
+                    )
+                    prepared.append((
+                        action, idea, "researcher",
+                        proposal_node_ceiling + offset, steering, advisory_receipt,
+                    ))
+            else:
+                for offset, action in enumerate(raw):
+                    source = "engine" if action.get("kind") == "merge" else "researcher"
+                    idea = self._prepare_node_idea(
+                        action,
+                        proposal_state,
+                        researcher=self.researcher,
+                        prospective_node_id=proposal_node_ceiling + offset,
+                        source=source,
+                        proposal_events=proposal_events,
+                    )
+                    if idea is None:
+                        continue
+                    prepared.append((
+                        action,
+                        idea,
+                        source,
+                        proposal_node_ceiling + offset,
+                        list(getattr(self.researcher, "_steering_context", []) or []),
+                        bounded_cross_run_advisory_receipt(getattr(
+                            self.researcher, "_cross_run_advisory_receipt", {}) or {}),
+                    ))
+
+            staged: list[str] = []
+            for action, idea, source, at_node, steering, advisory_receipt in prepared:
+                card_id = self._stage_prepared_card(
+                    action,
+                    idea,
+                    proposal_state=proposal_state,
+                    proposal_node_ceiling=proposal_node_ceiling,
+                    at_node=at_node,
+                    source=source,
+                    steering_context=steering,
+                    cross_run_receipt=advisory_receipt,
+                )
+                if card_id is not None:
+                    staged.append(card_id)
+
+            # Preserve the existing audit treatment for batch proposals rejected before Node ownership.
+            # Accepted staged Cards land first, so rejected receipts allocate fresh ids after them.
+            for dropped in dropped_batch:
+                if isinstance(dropped, dict) and isinstance(dropped.get("idea"), Idea):
+                    self._record_node_less_card(
+                        dropped["idea"],
+                        reason=str(dropped.get("reason") or "proposal_rejected")[:160],
+                        steering_context=dropped.get("steering_context", []),
+                    )
+            return staged
+        finally:
+            self._pending_batch_dropped = []
+            self._pending_batch_telemetry = []
+            self._pending_batch_novelty_gated = []
+            # Node-oriented telemetry cannot truthfully be emitted until a Node exists.  Clear the
+            # primary pair so it cannot leak onto a later repair/legacy build; the staged Card already
+            # owns its immutable proposal and steering receipts.
+            self._discard_node_build_telemetry(
+                researcher=self.researcher, developer=self.developer)
 
     @staticmethod
     def _card_claim_receipt_action(card) -> dict:
@@ -2893,6 +3632,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         with self._id_lock:
             events = self.store.read_all()
             state = fold(events)
+            self._refresh_speculation_budget(state, events=events)
+            if self._node_reservation_slots_remaining(state, events=events) < len(actions):
+                return None
             try:
                 max_nodes = max(0, int(self.policy.max_nodes))
             except (TypeError, ValueError, OverflowError):
@@ -3216,7 +3958,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 steering_context=steering_context,
             )
             if plan.disposition == "invalid":
-                self.store.append(EV_NOVELTY_REJECTED, {
+                self._append_proposal_event(EV_NOVELTY_REJECTED, {
                     "node_id": prospective_node_id, "generation": 0,
                     "kind": "card_contract",
                     "reason": "proposal cannot form a bounded native Card action",
@@ -3225,9 +3967,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return plan.idea if plan.disposition in {"mint", "reuse"} else None
 
         if preproposed is not None:
+            already_gated = False
+            pending_batch = getattr(self, "_pending_batch_novelty_gated", None)
+            if isinstance(pending_batch, list):
+                for index, batch_idea in enumerate(pending_batch):
+                    if preproposed is batch_idea:
+                        # Consume the capability exactly once.  Equality is intentionally insufficient:
+                        # a direct plugin/caller proposal that happens to match a batch result has not
+                        # itself crossed the proposal-bound gate.
+                        del pending_batch[index]
+                        already_gated = True
+                        break
             candidate = (self._canonicalize_draft_idea(preproposed)
                          if kind == "draft" else preproposed)
-            return _link(candidate)
+            linked = _link(candidate)
+            if linked is None or kind in {"merge", "debug"}:
+                return linked
+            if already_gated:
+                return linked
+            # Direct callers may supply a concrete proposal without a batch reservation. Resolve its
+            # final writer-owned Card id first, then run the same proposal-bound novelty sidecar as the
+            # ordinary draft/improve path. Reserved parallel batches bypass this helper entirely: their
+            # shared proposal pass has already applied the gate.
+            final = self._apply_novelty_gate(
+                state, linked, researcher=researcher,
+                prospective_node_id=prospective_node_id,
+            )
+            return _link(final)
 
         if kind == "draft":
             self._set_complexity_hint(state, None, researcher=researcher)
@@ -3286,7 +4052,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     @in_llm_lane("build")
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,
-                     pretelemetry=None) -> None:
+                     pretelemetry=None, precoded=None,
+                     precoded_max_eval_seconds: Optional[float] = None) -> None:
         """Run proposal, reservation and implementation in one node-scoped handoff context."""
         from looplab.agents.agent import handoff_scope
 
@@ -3299,6 +4066,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         with self.tracer.span(
                 "create_node", new_trace=True, node_id=trace_node_id,
                 operator=action.get("kind")), handoff_scope(enabled=self._phase_handoff_summary):
+            if precoded is not None:
+                # Layer 5: the isolated producer already completed every slow role call.  Keep the
+                # ordinary path below literally unchanged; this main-task branch only commits the
+                # exact buffered result and its durable speculative marker.
+                return self._create_precoded_node(
+                    action,
+                    reserved,
+                    precoded,
+                    max_eval_seconds=precoded_max_eval_seconds,
+                )
             return self._create_node_scoped(
                 action, roles, reserved, preproposed=preproposed,
                 pretelemetry=pretelemetry)
@@ -3463,6 +4240,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     error="parent lifecycle changed while building", reason="superseded")
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
+            materialize_abort = node_id in state.aborted_nodes
             self._emit_node_created(
                 node_id=node_id,
                 parent_ids=parents,
@@ -3480,6 +4258,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                    is not None else getattr(self, "_cross_run_advisory_receipt", {})),
                 **({"parent_generations": parent_generations} if parent_generations else {}),
                 **({"footprint_finalized": True} if footprint_finalized else {}),
+                # A legacy generation-less abort may intentionally reserve a not-yet-created slot.
+                # Mark only an intent already present in the reservation snapshot. An abort that lands
+                # after node_building is a losing-worker race and deliberately gets no escape hatch.
+                **({"materialize_aborted_intent": True}
+                   if materialize_abort else {}),
             )
             if node_id not in fold(self.store.read_all()).nodes:
                 self._fail_reserved_build(
@@ -3487,12 +4270,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     error="node creation was rejected during replay", reason="superseded")
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
+            if materialize_abort:
+                # Preserve the already-recorded operator intent as the first terminal for this newly
+                # materialized lifecycle. This also keeps a Developer-error sentinel from stealing the
+                # terminal with an unrelated crash/pause after the operator had already cancelled it.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": "aborted by operator",
+                    "reason": "aborted", "eval_seconds": 0.0,
+                })
             # The Developer session CRASHED when its code is the "(developer error: …)" sentinel (an
             # exception in _run — e.g. an LLM 401/timeout). FAIL the node now: without this it stays
             # pending, and the eval runs the PARENT's carried-over entrypoint and inherits the PARENT's
             # metric — a false success that pollutes the search (the 401-window nodes 50-54 each faked
             # the parent's 0.81 this way). node_created → node_failed keeps the one-terminal invariant.
-            if isinstance(code, str) and code.startswith("(developer error:"):
+            elif isinstance(code, str) and code.startswith("(developer error:"):
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "generation": 0,
                     "error": code, "reason": "developer_crash",
@@ -3716,6 +4508,81 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._emit_hypothesis_ranked(node.id, generation)
         self._emit_foresight_selected(node.id, generation)
 
+    def _prepare_injected_node(
+        self,
+        state: RunState,
+        req: Mapping,
+    ) -> _InjectedNodePlan:
+        """Purely validate and normalize an inject request before any slot/LLM wait.
+
+        Control/API writers already enforce a stricter schema. This boundary also handles legacy or
+        hand-authored event rows and deliberately mirrors the tolerant materializer semantics; it has
+        no provider, Developer, filesystem, or event-log side effect.
+        """
+
+        if not isinstance(req, Mapping):
+            raise ValueError("injected request must be an object")
+        idea_d = dict(req.get("idea") or {})
+        idea_d.setdefault("operator", "manual")
+        # Coerce params to floats defensively (a manual form may send strings); drop unparseable.
+        raw_params = idea_d.get("params") or {}
+        if not isinstance(raw_params, dict):
+            raw_params = {}
+        params: dict[str, float] = {}
+        for key, value in raw_params.items():
+            try:
+                params[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        idea_d["params"] = params
+
+        raw_parents = req.get("parent_ids")
+        if isinstance(raw_parents, list):
+            parents = [parent_id for parent_id in raw_parents if parent_id in state.nodes]
+        else:
+            parent_id = req.get("parent_id")
+            parents = [parent_id] if parent_id is not None and parent_id in state.nodes else []
+        unavailable = [
+            parent_id for parent_id in parents
+            if state.nodes[parent_id].tombstoned or parent_id in state.aborted_nodes
+        ]
+        if unavailable:
+            raise ValueError(f"parent node(s) unavailable: {unavailable}")
+        parent_generations = {
+            str(parent_id): state.nodes[parent_id].attempt for parent_id in parents
+        }
+        expected_parent_generations = req.get("parent_generations")
+        if expected_parent_generations is not None:
+            if not isinstance(expected_parent_generations, dict):
+                raise ValueError("parent_generations must be an object")
+            if len(expected_parent_generations) != len(parent_generations):
+                raise ValueError("parent generation snapshot does not match parents")
+            for parent_id, generation in parent_generations.items():
+                if expected_parent_generations.get(parent_id) != generation:
+                    raise ValueError(f"stale parent generation for node #{parent_id}")
+
+        code = req.get("code")
+        # U3 real merge: this combines Idea metadata only. Developer work remains after reservation.
+        if not code and idea_d.get("operator") == "merge" and len(parents) >= 2:
+            parent_nodes = [state.nodes[parent_id] for parent_id in parents]
+            idea = (self._ensemble_idea(parent_nodes) if self._merge_mode == "ensemble"
+                    else merge_idea(parent_nodes))
+        else:
+            idea = Idea(**idea_d)
+        idea = idea.model_copy(deep=True, update={"card_id": None})
+        implementation_ref = self._implementation_ref(
+            code=code,
+            files=req.get("files"),
+            deleted=req.get("deleted"),
+        )
+        return _InjectedNodePlan(
+            idea,
+            parents,
+            parent_generations,
+            code,
+            implementation_ref,
+        )
+
     @in_llm_lane("build")
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
@@ -3728,54 +4595,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
         is identical to an agent-authored node, so a hand-added winner can be selected as best."""
         state = fold(self.store.read_all())
-        idea_d = dict(req.get("idea") or {})
-        idea_d.setdefault("operator", "manual")
-        # Coerce params to floats defensively (a manual form may send strings); drop unparseable.
-        raw_params = idea_d.get("params") or {}
-        if not isinstance(raw_params, dict):
-            raw_params = {}   # a non-dict params (e.g. "lr=0.1") would AttributeError on .items()
-        params: dict[str, float] = {}
-        for k, v in raw_params.items():
-            try:
-                params[str(k)] = float(v)
-            except (TypeError, ValueError):
-                continue
-        idea_d["params"] = params
-        # Parents: accept a multi-parent `parent_ids` list (U3 drag-to-merge) or the legacy single
-        # `parent_id`. Keep only ids that exist, preserving order.
-        raw_parents = req.get("parent_ids")
-        if isinstance(raw_parents, list):
-            parents = [p for p in raw_parents if p in state.nodes]
-        else:
-            pid = req.get("parent_id")
-            parents = [pid] if pid is not None and pid in state.nodes else []
-        unavailable = [pid for pid in parents
-                       if state.nodes[pid].tombstoned or pid in state.aborted_nodes]
-        if unavailable:
-            raise ValueError(f"parent node(s) unavailable: {unavailable}")
-        parent_generations = {str(pid): state.nodes[pid].attempt for pid in parents}
-        expected_parent_generations = req.get("parent_generations")
-        if expected_parent_generations is not None:
-            if not isinstance(expected_parent_generations, dict):
-                raise ValueError("parent_generations must be an object")
-            if len(expected_parent_generations) != len(parent_generations):
-                raise ValueError("parent generation snapshot does not match parents")
-            for pid, generation in parent_generations.items():
-                if expected_parent_generations.get(pid) != generation:
-                    raise ValueError(f"stale parent generation for node #{pid}")
-        code = req.get("code")
-        # U3 real merge: two parents + a merge operator + no ready-made code => build the idea via the
-        # engine's own merge/ensemble path (code recombination), identical to a policy-driven merge —
-        # so dragging node A onto node B produces a genuine combined child, not a blank manual node.
-        if not code and idea_d.get("operator") == "merge" and len(parents) >= 2:
-            pnodes = [state.nodes[i] for i in parents]
-            idea = (self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
-                    else merge_idea(pnodes))
-        else:
-            idea = Idea(**idea_d)
-        idea = idea.model_copy(deep=True, update={"card_id": None})
-        implementation_ref = self._implementation_ref(
-            code=req.get("code"), files=req.get("files"), deleted=req.get("deleted"))
+        prepared = self._prepare_injected_node(state, req)
+        idea = prepared.idea
+        parents = prepared.parent_ids
+        parent_generations = prepared.parent_generations
+        code = prepared.code
+        implementation_ref = prepared.implementation_ref
         reservation = self._reserve_node_build(
             {
                 "kind": idea.operator,

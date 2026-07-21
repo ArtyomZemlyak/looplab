@@ -660,7 +660,7 @@ def test_legacy_annotations_do_not_consume_modern_comment_budget():
 
 
 def test_legacy_annotations_do_not_block_modern_comment_end_to_end(tmp_path):
-    """R8: the APPEND-TIME precondition (_comment_precondition) — not just intake + fold — must count
+    """R8: the APPEND-TIME precondition (_collaboration_precondition) — not just intake + fold — must count
     only MODERN comments. Otherwise a run full of legacy notes accepts a comment at intake, then drops
     it at the append recheck (comment_run_limit_reached) and never appends the domain event. This drives
     the full command path (submit -> precondition -> append), which the fold-level test does not."""

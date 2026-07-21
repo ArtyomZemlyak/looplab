@@ -543,6 +543,68 @@ button { font: inherit; }
 .hyp-stmt { font-size: 12px; line-height: 1.35; }
 .hyp-src { display: inline-flex; vertical-align: -1px; color: var(--fg-dim); }
 
+/* L6 Card lifecycle board. Seven frozen lanes stay visible; future derived statuses are inserted before
+   Dropped and the column rail scrolls horizontally instead of compressing the safe DTO into unreadable cards. */
+.card-projection-note { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--working) 55%, var(--line)); border-radius: 7px;
+  background: color-mix(in srgb, var(--working) 7%, var(--bg-2)); color: var(--working-text); font-size: 11px; }
+.card-projection-note svg { flex: none; }
+.card-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(225px, 1fr); gap: 8px;
+  align-items: start; overflow-x: auto; overscroll-behavior-inline: contain; padding: 1px 1px 8px; }
+.card-col { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px;
+  min-height: 80px; min-width: 0; }
+.card-col-h { font-weight: 600; font-size: 11px; margin-bottom: 6px;
+  text-transform: uppercase; letter-spacing: .03em; }
+.card-col.card-building .card-col-h, .card-col.card-running .card-col-h { color: var(--working-text); }
+.card-col.card-evaluated .card-col-h { color: color-mix(in srgb, var(--ok) 52%, var(--fg)); }
+.card-col.card-gated .card-col-h { color: var(--alarm-text); }
+.card-col.card-dropped .card-col-h { color: var(--fg-mut); }
+.card-kanban-card { min-width: 0; margin-bottom: 6px; padding: 7px; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--bg-3); font-size: 11px; overflow-wrap: anywhere; }
+.card-kanban-stmt { display: flex; align-items: flex-start; gap: 4px; font-size: 12px; line-height: 1.35; }
+.card-kanban-stmt > span:last-child { min-width: 0; }
+.card-kanban-meta, .card-kanban-tags, .card-kanban-blockers, .card-kanban-evidence {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 6px; }
+.card-kanban-fact { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 3px 5px; margin-top: 5px;
+  color: var(--fg-dim); line-height: 1.3; }
+.card-kanban-fact > :nth-child(n+3) { grid-column: 2; }
+.card-kanban-k { color: var(--fg-mut); }
+.card-param { font-family: ui-monospace, Consolas, monospace; }
+.card-resource-pin { margin-inline: -3px; padding: 4px 3px; border-radius: 5px;
+  background: color-mix(in srgb, var(--working) 8%, transparent); }
+.card-resource-pin .chip { margin-right: 3px; }
+.card-resource-request { display: block; margin-top: 2px; color: var(--fg-mut); font-size: 10px; }
+.card-kanban-terminal { margin-top: 6px; padding: 4px 5px; border-left: 2px solid var(--alarm);
+  background: color-mix(in srgb, var(--alarm) 6%, transparent); color: var(--fg-dim); }
+.card-kanban-unknown { margin-top: 5px; font-size: 10px; }
+.card-kanban-evidence .muted, .card-empty { font-size: 10px; }
+.card-kanban-controls { margin-top: 7px; border-top: 1px solid var(--line); padding-top: 5px; }
+.card-kanban-controls > summary { color: var(--fg-mut); cursor: pointer; font-size: 10px; }
+.card-control-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px;
+  align-items: end; margin-top: 7px; }
+.card-control-form label, .card-control-resource label { display: grid; gap: 2px; min-width: 0;
+  color: var(--fg-mut); font-size: 9px; }
+.card-control-form .text, .card-control-resource .text { min-width: 0; width: 100%; padding: 3px 5px;
+  font-size: 10px; }
+.card-control-form .btn, .card-control-resource .btn { white-space: nowrap; }
+textarea.text.card-control-statement { min-height: 48px; max-height: 120px; resize: vertical;
+  font-family: inherit; line-height: 1.3; }
+.card-control-resource { margin-top: 7px; }
+.card-control-resource fieldset { min-width: 0; margin: 0; padding: 5px; border: 1px solid var(--line);
+  border-radius: 6px; }
+.card-control-resource legend { padding: 0 3px; color: var(--fg-mut); font-size: 9px; }
+.card-control-resource-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.card-control-resource .btn { margin-top: 5px; }
+.card-control-help { margin-top: 4px; color: var(--fg-mut); font-size: 9px; line-height: 1.3; }
+.card-control-danger { margin-top: 7px; padding-top: 5px; border-top: 1px dashed var(--line-2); }
+.card-control-danger > summary { color: color-mix(in srgb, var(--fail) 52%, var(--fg)); cursor: pointer;
+  font-size: 10px; }
+.card-control-feedback { margin-top: 5px; color: var(--fg-dim); font-size: 10px; line-height: 1.3; }
+.card-control-feedback.pending { color: var(--working-text); }
+.card-control-feedback.success { color: var(--ok); }
+.card-control-feedback.error { color: var(--fail); }
+.card-empty { text-align: center; padding: 5px 0; }
+
 /* U6 live "why" strip: a one-line narration of the loop's latest autonomous decisions. */
 .why-strip { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 4px 12px;
   background: var(--bg-2); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--fg-mut); }

@@ -7,7 +7,7 @@ import types
 import anyio
 import pytest
 
-from looplab.core.models import Idea
+from looplab.core.models import Idea, NodeStatus
 from looplab.engine.resources import ResourceSchedulingMixin, detect_gpu_inventory
 
 
@@ -101,8 +101,30 @@ def test_footprint_request_preserves_unspecified_legacy_split_and_cpu_bypass():
     assert parallel._resource_request_for_node(_node(2, {"gpus": 99}))["count"] == 2
     one = _Pool(ids=(0,), parallel=2)
     assert one._acquire_gpus(1) == [0]
-    legacy = one._try_reserve_node_resources(_node(3, None))
-    assert legacy["gpu_ids"] == [] and legacy["pin"] is False  # drained pool -> old unpinned branch
+    legacy_node = _node(3, None)
+    assert one._try_reserve_node_resources(legacy_node) is None  # saturation waits; never oversubscribes
+    one._release_gpus([0])
+    legacy = one._try_reserve_node_resources(legacy_node)
+    assert legacy["gpu_ids"] == [0] and legacy["pin"] is True
+    assert one._node_resource_reservation_is_current(
+        types.SimpleNamespace(cards={}), legacy_node, legacy)
+
+
+def test_positive_explicit_gpu_requirement_stays_unavailable_on_gpu_less_host():
+    pool = _Pool(ids=(), parallel=2)
+    node = _node(0, {"gpus": 2, "gpu_mem_mib": 8_000})
+
+    assert pool._clamp_resource_footprint(node.idea.footprint) == {
+        "gpus": 2,
+        "gpu_mem_mib": 8_000,
+    }
+    request = pool._resource_request_for_node(node)
+    assert request["count"] == 2 and request["pin"] is True
+    assert request["footprint"]["gpus"] == 2
+    assert pool._try_reserve_node_resources(node) is None
+
+    cpu = pool._try_reserve_node_resources(_node(1, {"gpus": 0}))
+    assert cpu is not None and cpu["gpu_ids"] == [] and cpu["cpu_only"] is True
 
 
 def test_clamp_helper_persists_effective_nth_device_memory_envelope():
@@ -181,13 +203,207 @@ def test_dispatch_cpu_candidate_passes_a_stalled_gpu_head(monkeypatch):
     assert host._free_gpus == [0]
 
 
+def test_parallel_dispatch_releases_reservation_when_pause_lands_during_resource_wait(
+    monkeypatch,
+):
+    """A fresh run-level gate wins after a blocked parallel admission wakes."""
+
+    host = _DispatchHost()
+    assert host._acquire_gpus(1) == [0]
+    node = types.SimpleNamespace(
+        id=0,
+        attempt=0,
+        status=NodeStatus.pending,
+        tombstoned=False,
+        idea=types.SimpleNamespace(card_id=None, footprint={"gpus": 1}),
+    )
+    state = types.SimpleNamespace(
+        total_eval_seconds=0.0,
+        aborted_nodes=set(),
+        nodes={0: node},
+        cards={},
+        paused=False,
+        finished=False,
+        stop_requested=False,
+    )
+    monkeypatch.setattr("looplab.engine.orchestrator.fold", lambda _events: state)
+    from looplab.engine.orchestrator import Engine
+
+    wait_entered = threading.Event()
+    original_wait = host._wait_for_gpu_change
+
+    def observed_wait(epoch):
+        wait_entered.set()
+        original_wait(epoch)
+
+    host._wait_for_gpu_change = observed_wait
+
+    async def scenario():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                Engine._dispatch_evals,
+                host,
+                [{"node_id": 0}],
+                state,
+                None,
+            )
+            with anyio.fail_after(2):
+                assert await anyio.to_thread.run_sync(wait_entered.wait, 1.0)
+            state.paused = True
+            host._release_gpus([0])
+
+    anyio.run(scenario)
+
+    assert host.ran == []
+    assert host._free_gpus == [0]
+
+
+class _PinRaceDispatchHost(_Pool):
+    def __init__(self):
+        super().__init__(ids=(0,), mem={0: 16_000}, parallel=1)
+        self.store = types.SimpleNamespace(read_all=lambda: [])
+        self._concurrent_research_repeat = False
+        self.releases: list[list[int]] = []
+        self.started: list[tuple[int, dict | None, list[list[int]]]] = []
+
+    def _spawn_research(self, _tg, _state):
+        return None
+
+    def _skip_if_aborted(self, _action, _state):
+        return False
+
+    def _release_gpus(self, gpu_ids):
+        self.releases.append(list(gpu_ids or []))
+        super()._release_gpus(gpu_ids)
+
+    async def _evaluate(self, node_id, _limiter, _max_es):
+        reservation = self._eval_resource_reservation(node_id, 0)
+        self.started.append((node_id, reservation, list(self.releases)))
+
+
+def test_serial_dispatch_releases_stale_pin_reservation_before_eval(monkeypatch):
+    """A Card re-pin while the serial waiter sleeps cannot leak its old reservation into eval."""
+    host = _PinRaceDispatchHost()
+    card = types.SimpleNamespace(
+        resource_pin={"gpus": 1, "gpu_mem_mib": 8_000, "pinned_by": "operator"})
+    node = types.SimpleNamespace(
+        id=0,
+        attempt=0,
+        status=NodeStatus.pending,
+        tombstoned=False,
+        idea=types.SimpleNamespace(
+            card_id="card-0", footprint={"gpus": 1, "gpu_mem_mib": 8_000}),
+    )
+    state = types.SimpleNamespace(
+        total_eval_seconds=0.0,
+        aborted_nodes=set(),
+        nodes={0: node},
+        cards={"card-0": card},
+    )
+    waits: list[dict] = []
+    monkeypatch.setattr("looplab.engine.orchestrator.fold", lambda _events: state)
+    from looplab.engine.orchestrator import Engine
+
+    async def scenario():
+        wait_entered = anyio.Event()
+        pin_changed = anyio.Event()
+
+        async def reserve(nd, *, resource_pin=None, wait_once=False):
+            waits.append(dict(resource_pin or {}))
+            request = host._resource_request_for_node(nd, resource_pin=resource_pin)
+            if len(waits) == 1:
+                wait_entered.set()
+                await pin_changed.wait()
+                return {**request, "gpu_ids": [0]}
+            return {**request, "gpu_ids": []}
+
+        host._wait_reserve_node_resources = reserve
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                Engine._dispatch_evals,
+                host,
+                [{"node_id": 0}],
+                state,
+                None,
+            )
+            with anyio.fail_after(2):
+                await wait_entered.wait()
+            card.resource_pin = {"gpus": 0, "pinned_by": "operator"}
+            pin_changed.set()
+
+    anyio.run(scenario)
+
+    assert [pin["gpus"] for pin in waits] == [1, 0]
+    assert host.releases == [[0], []]
+    assert len(host.started) == 1
+    node_id, admitted, releases_at_start = host.started[0]
+    assert node_id == 0 and releases_at_start == [[0]]
+    assert admitted is not None
+    assert admitted["count"] == 0 and admitted["cpu_only"] is True
+    assert admitted["gpu_ids"] == []
+
+
+def test_serial_dispatch_refolds_pin_after_bounded_wait_without_gpu_release(monkeypatch):
+    """A GPU->CPU re-pin progresses even though the old busy GPU never changes pool epoch."""
+    host = _PinRaceDispatchHost()
+    assert host._acquire_gpus(1) == [0]              # external owner stays busy for the whole test
+    card = types.SimpleNamespace(
+        resource_pin={"gpus": 1, "gpu_mem_mib": 8_000, "pinned_by": "operator"})
+    node = types.SimpleNamespace(
+        id=0,
+        attempt=0,
+        status=NodeStatus.pending,
+        tombstoned=False,
+        idea=types.SimpleNamespace(
+            card_id="card-0", footprint={"gpus": 1, "gpu_mem_mib": 8_000}),
+    )
+    state = types.SimpleNamespace(
+        total_eval_seconds=0.0,
+        aborted_nodes=set(),
+        nodes={0: node},
+        cards={"card-0": card},
+    )
+    monkeypatch.setattr("looplab.engine.orchestrator.fold", lambda _events: state)
+    from looplab.engine.orchestrator import Engine
+
+    wait_entered = threading.Event()
+    original_wait = host._wait_for_gpu_change
+
+    def observed_wait(epoch):
+        wait_entered.set()
+        original_wait(epoch)
+
+    host._wait_for_gpu_change = observed_wait
+
+    async def scenario():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                Engine._dispatch_evals,
+                host,
+                [{"node_id": 0}],
+                state,
+                None,
+            )
+            with anyio.fail_after(2):
+                assert await anyio.to_thread.run_sync(wait_entered.wait, 1.0)
+            card.resource_pin = {"gpus": 0, "pinned_by": "operator"}
+
+    anyio.run(scenario)
+
+    assert host._free_gpus == []                    # no GPU release was needed to make progress
+    assert len(host.started) == 1
+    _, admitted, releases_at_start = host.started[0]
+    assert admitted is not None
+    assert admitted["count"] == 0 and admitted["gpu_ids"] == []
+    assert releases_at_start == []
+
+
 def test_docker_device_remap_uses_cached_runtime_probe(monkeypatch, tmp_path):
     from looplab.runtime import sandbox
     from looplab.runtime.command_eval import make_docker_wrap
 
     calls = []
     monkeypatch.setattr(sandbox, "_DOCKER_NVIDIA_RUNTIME_CACHE", None)
-    monkeypatch.setattr(sandbox, "_DOCKER_GPU_FALLBACK_WARNED", False)
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
 
     def fake_run(argv, **_kwargs):
@@ -196,39 +412,120 @@ def test_docker_device_remap_uses_cached_runtime_probe(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
     wrap = make_docker_wrap(
-        str(tmp_path), "img:gpu", env={"CUDA_VISIBLE_DEVICES": "3,7", "X": "y"})
+        str(tmp_path), "img:gpu",
+        env={"CUDA_VISIBLE_DEVICES": "3,7", "NVIDIA_VISIBLE_DEVICES": "all", "X": "y"})
     argv = wrap(["python", "train.py"], str(tmp_path))
     assert argv[argv.index("--gpus") + 1] == "device=3,7"
     assert not any("CUDA_VISIBLE_DEVICES=" in part for part in argv)
+    assert not any("NVIDIA_VISIBLE_DEVICES=" in part for part in argv)
     assert "X=y" in argv
     # A second factory reads the process cache rather than probing the daemon again.
     make_docker_wrap(str(tmp_path), "img:gpu", env={"CUDA_VISIBLE_DEVICES": "3"})
     assert len(calls) == 1
 
 
-def test_docker_gpu_probe_failure_warns_and_falls_back_unpinned(monkeypatch, tmp_path):
+def test_docker_gpu_probe_failure_rejects_scheduler_owned_pin(monkeypatch, tmp_path):
     from looplab.runtime import sandbox
     from looplab.runtime.command_eval import make_docker_wrap
 
     monkeypatch.setattr(sandbox, "_DOCKER_NVIDIA_RUNTIME_CACHE", None)
-    monkeypatch.setattr(sandbox, "_DOCKER_GPU_FALLBACK_WARNED", False)
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
     monkeypatch.setattr(
         sandbox.subprocess, "run",
         lambda *_a, **_kw: types.SimpleNamespace(returncode=0, stdout='{"runc": {}}'))
-    with pytest.warns(RuntimeWarning, match="without a Docker device pin"):
-        wrap = make_docker_wrap(
-            str(tmp_path), "img:cpu", env={"CUDA_VISIBLE_DEVICES": "3"})
-    argv = wrap(["python", "train.py"], str(tmp_path))
-    assert "--gpus" not in argv
-    assert "CUDA_VISIBLE_DEVICES=3" in argv          # legacy/unpinned fallback remains explicit
+    pool = _Pool(ids=(0,), physical={0: "3"})
+    reservation = pool._try_reserve_node_resources(_node(0, {"gpus": 1}))
+    env = pool._resource_eval_env(reservation)
+
+    with pytest.raises(RuntimeError, match="refusing to launch an unpinned container"):
+        make_docker_wrap(str(tmp_path), "img:gpu", env=env)
+
+
+def test_docker_gpu_runsc_runtime_uses_scheduler_owned_pin(monkeypatch, tmp_path):
+    from looplab.runtime import sandbox
+
+    monkeypatch.setattr(sandbox, "_DOCKER_NVIDIA_RUNTIME_CACHE", True)
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
+    seen = {}
+
+    def fake_run_argv(argv, *_args, **_kwargs):
+        seen["argv"] = list(argv)
+        return 0, '{"metric": 1.0}', "", False
+
+    monkeypatch.setattr(sandbox, "_run_argv", fake_run_argv)
+    pool = _Pool(ids=(0,), physical={0: "4"})
+    reservation = pool._try_reserve_node_resources(_node(0, {"gpus": 1}))
+    env = pool._resource_eval_env(
+        reservation, base={"NVIDIA_VISIBLE_DEVICES": "all"})
+
+    result = sandbox.DockerSandbox(image="img:gpu", runtime="runsc").run(
+        "print(1)", str(tmp_path), 30, env)
+    argv = seen["argv"]
+    assert argv[argv.index("--runtime") + 1] == "runsc"
+    assert argv[argv.index("--gpus") + 1] == "device=4"
+    assert not any("CUDA_VISIBLE_DEVICES=" in part for part in argv)
+    assert not any("NVIDIA_VISIBLE_DEVICES=" in part for part in argv)
+    assert result.metric == 1.0
+
+
+def test_docker_gpu_incompatible_runtime_rejects_scheduler_owned_pin(monkeypatch, tmp_path):
+    from looplab.runtime import sandbox
+
+    monkeypatch.setattr(sandbox, "_DOCKER_NVIDIA_RUNTIME_CACHE", True)
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
+    pool = _Pool(ids=(0,), physical={0: "4"})
+    reservation = pool._try_reserve_node_resources(_node(0, {"gpus": 1}))
+    env = pool._resource_eval_env(reservation)
+
+    with pytest.raises(RuntimeError, match="OCI runtime 'custom-no-gpu'.*refusing"):
+        sandbox.DockerSandbox(image="img:gpu", runtime="custom-no-gpu").run(
+            "print(1)", str(tmp_path), 30, env)
+
+
+def test_docker_unspecified_and_cpu_legacy_requests_need_no_gpu_runtime(monkeypatch, tmp_path):
+    from looplab.runtime import sandbox
+    from looplab.runtime.command_eval import make_docker_wrap
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        sandbox, "docker_nvidia_runtime_available",
+        lambda: pytest.fail("CPU/unspecified paths must not probe the NVIDIA runtime"))
+
+    unspecified = make_docker_wrap(str(tmp_path), "img:cpu")
+    assert "--gpus" not in unspecified(["python", "train.py"], str(tmp_path))
+
+    pool = _Pool(ids=(0,))
+    cpu_reservation = pool._try_reserve_node_resources(_node(0, {"gpus": 0}))
+    cpu_env = pool._resource_eval_env(
+        cpu_reservation, base={"NVIDIA_VISIBLE_DEVICES": "all"})
+    cpu = make_docker_wrap(str(tmp_path), "img:cpu", env=cpu_env)
+    cpu_argv = cpu(["python", "train.py"], str(tmp_path))
+    assert "--gpus" not in cpu_argv
+    assert "CUDA_VISIBLE_DEVICES=" in cpu_argv
+    assert "NVIDIA_VISIBLE_DEVICES=void" in cpu_argv
+    assert "NVIDIA_VISIBLE_DEVICES=all" not in cpu_argv
+
+    seen = {}
+
+    def fake_run_argv(argv, *_args, **_kwargs):
+        seen["argv"] = list(argv)
+        return 0, '{"metric": 1.0}', "", False
+
+    monkeypatch.setattr(sandbox, "_run_argv", fake_run_argv)
+    result = sandbox.DockerSandbox(image="img:cpu", runtime="nvidia").run(
+        "print(1)", str(tmp_path), 30, cpu_env)
+    sandbox_argv = seen["argv"]
+    assert "--gpus" not in sandbox_argv
+    assert "CUDA_VISIBLE_DEVICES=" in sandbox_argv
+    assert "NVIDIA_VISIBLE_DEVICES=void" in sandbox_argv
+    assert "NVIDIA_VISIBLE_DEVICES=all" not in sandbox_argv
+    assert result.metric == 1.0
 
 
 def test_solution_docker_sandbox_uses_same_device_remap(monkeypatch, tmp_path):
     from looplab.runtime import sandbox
 
     monkeypatch.setattr(sandbox, "_DOCKER_NVIDIA_RUNTIME_CACHE", True)
-    monkeypatch.setattr(sandbox, "_DOCKER_GPU_FALLBACK_WARNED", False)
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
     seen = {}
 
@@ -239,9 +536,11 @@ def test_solution_docker_sandbox_uses_same_device_remap(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "_run_argv", fake_run_argv)
     result = sandbox.DockerSandbox(image="img:gpu").run(
         "print(1)", str(tmp_path), 30,
-        {"CUDA_VISIBLE_DEVICES": "4", "LOOPLAB_EVAL_SEED": "2"})
+        {"CUDA_VISIBLE_DEVICES": "4", "NVIDIA_VISIBLE_DEVICES": "all",
+         "LOOPLAB_EVAL_SEED": "2"})
     argv = seen["argv"]
     assert argv[argv.index("--gpus") + 1] == "device=4"
     assert not any("CUDA_VISIBLE_DEVICES=" in part for part in argv)
+    assert not any("NVIDIA_VISIBLE_DEVICES=" in part for part in argv)
     assert "LOOPLAB_EVAL_SEED=2" in argv
     assert result.metric == 1.0

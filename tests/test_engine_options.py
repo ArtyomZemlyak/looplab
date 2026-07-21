@@ -104,6 +104,7 @@ ATTR_BY_FIELD = {
     "unified_agent": "unified_agent",
     "agent_drives_actions": "agent_drives_actions",
     "card_driven_selection": "card_driven_selection",
+    "speculation_depth": "speculation_depth",
     "inline_repair": "_inline_repair",
     "inline_repair_attempts": "_inline_repair_attempts",
     "inline_repair_stuck_repeat": "_inline_repair_stuck_repeat",
@@ -177,6 +178,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         inline_repair_attempts=6,
         seed_mode="tracked",
         card_driven_selection=True,
+        speculation_depth=4,
     )
 
     # (a) the OLD explicit-kwarg style: the literal Settings->Engine mapping cli.py::_engine used
@@ -255,6 +257,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         unified_agent=settings.unified_agent,
         agent_drives_actions=settings.agent_drives_actions,
         card_driven_selection=settings.card_driven_selection,
+        speculation_depth=settings.speculation_depth,
         # Part IV/V flags now ship ON in Settings; pass them through so the old explicit-kwarg
         # mapping reproduces the same engine as from_settings (else old=library-default False).
         concept_pivot=settings.concept_pivot,
@@ -292,6 +295,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     assert new._inline_repair_attempts == 6 and new._seed_mode == "tracked"
     assert new.lessons_every == 7 and new._novelty_epsilon == 0.2
     assert new.card_driven_selection is True
+    assert new.speculation_depth == 4
 
 
 def test_explicit_kwarg_beats_options_field(tmp_path):
@@ -306,6 +310,19 @@ def test_explicit_kwarg_beats_options_field(tmp_path):
     # that is the whole point of the _UNSET sentinel over `kwarg or options.field`).
     e3 = _mk_engine(tmp_path / "c", options=opts, memory_dir=None)
     assert e3.memory_dir is None
+
+
+def test_speculation_depth_is_bounded_and_default_run_start_bytes_stay_legacy(tmp_path):
+    off = _mk_engine(tmp_path / "spec-off")
+    assert off.speculation_depth == 0
+    assert "speculation_depth" not in off._run_start_pinned_values()
+
+    enabled = _mk_engine(tmp_path / "spec-on", speculation_depth=5)
+    assert enabled.speculation_depth == 5
+    assert enabled._run_start_pinned_values()["speculation_depth"] == 5
+
+    clamped = _mk_engine(tmp_path / "spec-clamped", speculation_depth=999)
+    assert clamped.speculation_depth == 64
 
 
 def test_default_options_reproduce_bare_engine(tmp_path):

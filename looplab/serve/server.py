@@ -5,7 +5,8 @@ browser over SSE, serves the built React assets, and turns UI actions into APPEN
 events (`EventStore.append`, the same files-as-truth primitive as `LoopLab approve`). It also
 spawns/resumes engine runs as subprocesses so a browser can drive a live run end-to-end.
 
-Reuses the canonical projections: `replay.fold`, `eventstore.iter_jsonl`, `traceview.build_trace_view`,
+Reuses the canonical projections: `replay.fold`, `eventstore.iter_event_jsonl`,
+`traceview.build_trace_view`,
 `Settings.masked_snapshot`. No new source of truth lives here.
 
 Run it via `LoopLab ui --run-root runs/` (the CLI lazily imports this so the core stays zero-dep).

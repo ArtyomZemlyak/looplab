@@ -27,8 +27,8 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.runtime.sandbox import (RunResult, STALL_SENTINEL, _to_float, docker_gpu_argv,
-                                     docker_timed_out, finite_timeout, json_line_extras, json_line_metric,
-                                     json_line_trials, run_argv)
+                                     docker_gpu_env, docker_timed_out, finite_timeout, json_line_extras,
+                                     json_line_metric, json_line_trials, run_argv)
 
 # A stage name is interpolated into a log FILE PATH (`<name>.log`) and shown in the trace, so it must
 # be a short filesystem-safe SLUG — no path separators, drive letters, control chars, NUL, or dot
@@ -615,9 +615,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         # reaches the eval — every confirm seed would read the default seed and the variance gate
         # would collapse. Mirrors DockerSandbox.run's `-e` forwarding.
         envs: list[str] = []
-        for k, v in (env or {}).items():
-            if gpu_args and k == "CUDA_VISIBLE_DEVICES":
-                continue
+        for k, v in docker_gpu_env(env, gpu_args=gpu_args).items():
             envs += ["-e", f"{k}={v}"]
         base = ["docker", "run", "--rm", "--network", network, *rt, *gpu_args,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)

@@ -31,7 +31,9 @@ from looplab.events.types import (
 )
 from looplab.serve.run_commands import run_generation_token
 
-_IGNORED_FAILURE_REASONS = {"aborted", "cancelled", "proxy_skipped", "superseded"}
+_IGNORED_FAILURE_REASONS = {
+    "aborted", "cancelled", "card_dropped", "proxy_skipped", "superseded",
+}
 _BUDGET_REASONS = {
     "time_budget": "The run reached its wall-clock budget.",
     "eval_budget": "The run reached its evaluation-compute budget.",

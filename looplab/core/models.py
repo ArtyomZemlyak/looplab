@@ -471,6 +471,49 @@ def normalize_researcher_footprint(value) -> dict | None:
     return out or None
 
 
+def effective_card_footprint(
+    footprint,
+    resource_pin,
+    *,
+    gpu_count: int | None = None,
+    gpu_memory_mib: tuple[int, ...] | list[int] = (),
+) -> dict | None:
+    """Return the quantitative Card footprint after the independent operator override.
+
+    ``Card.footprint`` is part of the immutable action ownership receipt, so an operator resource
+    command must never rewrite it. The override is merged only at admission/freshness time and is
+    optionally re-clamped to the current machine envelope. That last step makes a pin accepted on a
+    larger host safe after resume on a smaller host without mutating replayed history.
+    """
+    base = normalize_researcher_footprint(footprint) or {}
+    pin = normalize_researcher_footprint(resource_pin) or {}
+    out = {**base, **pin}
+    if not out:
+        return None
+    # An explicit CPU-only override owns the whole GPU dimension. In particular it clears inherited
+    # GPU-memory demand even when the caller only needs a merge and has no live envelope to pass.
+    if out.get("gpus") == 0:
+        out.pop("gpu_mem_mib", None)
+        return out
+    if gpu_count is None:
+        return out
+    if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 0:
+        raise ValueError("gpu_count must be a non-negative integer or None")
+    if "gpus" in out:
+        out["gpus"] = min(out["gpus"], gpu_count)
+    required = out.get("gpus", 1 if gpu_count else 0)
+    if required == 0:
+        out.pop("gpu_mem_mib", None)
+        return out
+    memory = tuple(gpu_memory_mib or ())
+    if (isinstance(out.get("gpu_mem_mib"), int)
+            and len(memory) == gpu_count
+            and all(type(value) is int and value >= 0 for value in memory)):
+        envelope = sorted(memory, reverse=True)[min(required, gpu_count) - 1]
+        out["gpu_mem_mib"] = min(out["gpu_mem_mib"], envelope)
+    return out
+
+
 def valid_researcher_footprint(value) -> bool:
     if not isinstance(value, dict) or not value or not set(value) <= {"gpus", "gpu_mem_mib"}:
         return False
@@ -991,6 +1034,11 @@ class Node(BaseModel):
     # Excluded from model dumps so Layer 4 does not perturb snapshots/public DTOs; the append-only
     # node_created/node_repaired event remains the durable authority.
     footprint_finalized: bool = Field(default=False, exclude=True)
+    # Layer 5 recovery identity. These fields are deliberately fold-internal: a speculative node is
+    # still an ordinary search node at every public boundary, while resume needs an exact durable
+    # marker to distinguish a committed producer result from an unrelated build of the same Card.
+    speculative: bool = Field(default=False, exclude=True)
+    card_build_generation: Optional[int] = Field(default=None, ge=0, exclude=True)
 
     @property
     def robust_metric(self) -> Optional[float]:
@@ -1239,7 +1287,11 @@ class Card(BaseModel):
     confidence: Optional[float] = None
     # --- Layer 1b enrichment (RESERVED; populated in 1b — defaults keep Layer 1a a pure hypotheses shadow).
     # Ref-shaped ONLY (docs/23 decision 23): no verbatim source/captured-output on the card.
-    footprint: Optional[dict] = None                    # {gpus, gpu_mem_mib, proposed_by, finalized_by, pinned_by}
+    footprint: Optional[dict] = None                    # immutable receipt-owned declaration + developer provenance
+    # Layer-6 operator resource override. Kept separate from ``footprint`` because the latter is part
+    # of the native Card action digest. Scheduling/freshness consume ``effective_card_footprint``;
+    # replay/public UI retain this independent provenance-bearing pin for audit.
+    resource_pin: Optional[dict] = None                 # {gpus?, gpu_mem_mib?, pinned_by="operator"}
     novelty_verdict: Optional[dict] = None              # {grade, level, near_node, recommendation}
     cross_run_prior: Optional[dict] = None              # {matched_concepts, prior_run_ids/outcomes} (refs)
     research_origin: Optional[str] = None               # memo id ref
@@ -1413,6 +1465,9 @@ class RunState(BaseModel):
     # Layer 3 queue owner pinned by run_started. False on old logs preserves the policy/pilot path;
     # replay never infers this selection-affecting treatment from a mutable config snapshot.
     card_driven_selection: bool = Field(False, exclude=True)
+    # Layer 5 producer/evaluator overlap treatment pinned by run_started. Hidden from the public
+    # RunState dump so legacy/default-zero logs remain byte-identical at the API/golden boundary.
+    speculation_depth: int = Field(default=0, ge=0, le=64, exclude=True)
     # D1 holdout-gated promotion (folded from run_started; False for old logs -> byte-identical
     # legacy selection). When True, best-selection prefers the holdout metric among the nodes
     # that carry one (the val-top-k re-scored on the unseen partition at finish).
@@ -1662,6 +1717,16 @@ class RunState(BaseModel):
     ablate_request_generations: list[dict] = Field(default_factory=list)
     fork_requests: list[dict] = Field(default_factory=list)     # `fork`: operator-seeded improve
     forks_done: int = 0                        # count of processed forks (replay-safe fulfillment)
+    # Layer 5's durable main-task Card producer gate. Hidden because this is execution/recovery state,
+    # not a public board payload; old logs therefore keep the exact serialized RunState shape.
+    card_build_requests: list[dict] = Field(default_factory=list, exclude=True)
+    card_builds_done: int = Field(default=0, exclude=True)
+    # Only replay-accepted exact-head give-ups enter this hidden set-like list. Runtime scheduling must
+    # never infer serial fallback from raw/orphan ``card_build_done`` rows that fold deliberately rejects.
+    card_build_producer_failed: list[str] = Field(default_factory=list, exclude=True)
+    # node_id -> exact request identity reconstructed from a successful card_build_done. Consumers use
+    # this durable link (never merely Idea.card_id) to count and freshness-check speculative work.
+    speculative_nodes: dict[int, dict] = Field(default_factory=dict, exclude=True)
     # `inject_node`: an operator-authored experiment hand-added to the tree (a manual idea +
     # optional parent + optional code). The engine materializes each one into a real pending node
     # that the policy then evaluates like any other — so a human can steer the search directly.
@@ -1764,12 +1829,6 @@ class RunState(BaseModel):
     card_priority_pins: dict[str, int] = Field(default_factory=dict)
     card_operator_edits: dict[str, dict] = Field(default_factory=dict)
     card_resource_pins: dict[str, dict] = Field(default_factory=dict)
-    # Layer 5a producer/consumer core (docs/23 §12.6 stage 8). OPEN speculative-build requests keyed by
-    # card id (value {generation, at_node}), appended by `card_build_requested` and cleared by the matching
-    # `card_build_done` — the durable request/done pair that makes `_serve_card_builds` idempotent on
-    # resume. Empty {} for pre-L5a logs and whenever `speculation_depth=0` (the election never fires), so
-    # the serial spine stays byte-identical. NEVER read by best-selection (advisory scheduling state only).
-    card_build_requests: dict[str, dict] = Field(default_factory=dict)
     # Agent-authored run report (conclusion-first; audit-only sidecar — NEVER read by best-selection).
     # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
     # UI renders the deterministic analysis from the node set and layers this narrative on top.

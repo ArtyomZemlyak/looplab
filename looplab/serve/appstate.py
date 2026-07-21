@@ -20,7 +20,7 @@ from fastapi import HTTPException
 
 from looplab.core.models import Event
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.eventstore import iter_jsonl
+from looplab.events.eventstore import iter_event_jsonl
 from looplab.events.replay import fold
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.jobs import JobRegistry
@@ -118,7 +118,7 @@ class AppState:
         return rd
 
     def events(self, rd: Path, upto_seq: Optional[int] = None) -> list[Event]:
-        evs = [Event(**o) for o in iter_jsonl(rd / "events.jsonl")]
+        evs = [Event(**o) for o in iter_event_jsonl(rd / "events.jsonl")]
         if upto_seq is not None:
             evs = [e for e in evs if e.seq <= upto_seq]
         return evs
@@ -269,7 +269,7 @@ class AppState:
         events_path = rd / "events.jsonl"
         # The first durable event is the run-generation identity.  Reading only that first JSONL line
         # is cheap and adds a semantic reset fence even on filesystems with weak/reused inode metadata.
-        generation = run_generation_token(iter_jsonl(events_path))
+        generation = run_generation_token(iter_event_jsonl(events_path))
         span_sig = _sig(sp, unavailable_raises=True)
         # CODEX AGENT: a derived response cache is never authority after source readability changes.
         # A stat-only

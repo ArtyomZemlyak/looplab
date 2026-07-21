@@ -1453,7 +1453,7 @@ class RunControlTools:
         import shutil
 
         from looplab.core.atomicio import atomic_write_text
-        from looplab.events.eventstore import EventStore, _interprocess_lock
+        from looplab.events.eventstore import EventStore, _interprocess_lock, iter_event_jsonl
         from looplab.events.replay import fold
 
         evp = rd / "events.jsonl"
@@ -1462,7 +1462,23 @@ class RunControlTools:
         # wins, no child can enter while the source-of-truth logs are rewritten.
         with (_interprocess_lock(rd / "engine.lock"),
               _interprocess_lock(Path(str(evp) + ".lock"))):
-            events = EventStore(evp).read_all()
+            source_store = EventStore(evp)
+            events = source_store.read_all()
+            source_bytes = evp.read_bytes()
+            torn_nonblank_tail = bool(
+                source_bytes
+                and not source_bytes.endswith(b"\n")
+                and source_bytes.rsplit(b"\n", 1)[-1].strip()
+            )
+            # Purge is an irreversible compaction, not an implicit log repair. The historical raw
+            # parser failed before rewriting any malformed complete row; preserve that posture for a
+            # corrupt batch and additionally refuse a torn nonblank tail that EventStore legitimately
+            # hides from ordinary replay.
+            if source_store.divergence is not None or torn_nonblank_tail:
+                return (
+                    f"(run {rid} event log has an invalid or torn tail — refusing irreversible "
+                    "purge; repair or restore the log first)"
+                )
             actual_tail = events[-1].seq if events else -1
             state = fold(events)
             if actual_tail != expected_tail or nid not in state.nodes:
@@ -1481,8 +1497,11 @@ class RunControlTools:
                 return (f"(delete scope changed while awaiting permission: approved "
                         f"{sorted(subtree)}, now {sorted(current_subtree)}; review and approve again)")
 
-            recs = [json.loads(line) for line in evp.read_text("utf-8").splitlines()
-                    if line.strip()]
+            # Work over the logical Events already decoded above. ``append_many`` is stored as one
+            # physical batch envelope; filtering physical rows would retain the whole transaction when
+            # only one nested member names the purged node. Rewriting logical rows also removes the
+            # internal storage wrapper while preserving every surviving event and sequence.
+            recs = list(iter_event_jsonl(evp))
             kept = [record for record in recs
                     if not (isinstance(record.get("data"), dict)
                             and record["data"].get("node_id") in subtree)]

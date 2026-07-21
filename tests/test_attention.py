@@ -43,14 +43,14 @@ def _store(root: Path, run_id: str = "demo", *, goal: str = "safe goal") -> Even
 
 def _node(store: EventStore, node_id: int, *, generation: int = 0,
           metric: float | None = None, failed: bool = False,
-          error: str = "candidate failed") -> None:
+          error: str = "candidate failed", reason: str = "crash") -> None:
     store.append(EV_NODE_CREATED, {
         "node_id": node_id, "generation": generation, "parent_ids": [],
         "operator": "draft", "idea": {"operator": "draft", "rationale": "test"},
     })
     if failed:
         store.append(EV_NODE_FAILED, {
-            "node_id": node_id, "generation": generation, "reason": "crash",
+            "node_id": node_id, "generation": generation, "reason": reason,
             "error": error, "eval_seconds": 0.1,
         })
     elif metric is not None:
@@ -162,6 +162,15 @@ def test_failure_spike_does_not_rebucket_old_failures_after_abort(tmp_path):
     repeated = next(item for item in project_run_attention(
         "demo", store.read_all(), engine_running=False) if item["kind"] == "failure_spike")
     assert repeated["id"] == before["id"]
+
+
+def test_operator_card_drops_do_not_create_failure_spikes(tmp_path):
+    store = _store(tmp_path)
+    for node_id in range(3):
+        _node(store, node_id, failed=True, reason="card_dropped")
+
+    items = project_run_attention("demo", store.read_all(), engine_running=False)
+    assert "failure_spike" not in _kinds(items)
 
 
 def test_modern_finish_waits_for_marker_and_driver_release(tmp_path):

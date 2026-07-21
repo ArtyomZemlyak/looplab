@@ -74,7 +74,29 @@ def _run_engine_guarded(eng: Engine):
                 eng._recover_interrupted_builds(current)
                 events = eng.store.read_all()
                 current = fold(events)
-            if not current.finished:
+            # A fatal policy/scorer exception can escape while Layer 5 owns a durable request head.
+            # Finalization is not quiescent until every exact head has a done receipt; commits are
+            # forbidden on this error path, so an already-created prefix is linked and every other
+            # request is closed stale. Bounded by the durable queue length, with one spare CAS retry.
+            head_request = getattr(eng, "_head_request", None)
+            serve_card_builds = getattr(eng, "_serve_card_builds", None)
+            if callable(head_request) and callable(serve_card_builds):
+                pending = max(
+                    0,
+                    len(getattr(current, "card_build_requests", []) or [])
+                    - int(getattr(current, "card_builds_done", 0) or 0),
+                )
+                for _request in range(pending + 1):
+                    if head_request(current) is None:
+                        break
+                    if not serve_card_builds(allow_commit=False):
+                        break
+                    events = eng.store.read_all()
+                    current = fold(events)
+                queue_quiescent = head_request(current) is None
+            else:
+                queue_quiescent = True
+            if not current.finished and queue_quiescent:
                 after_seq = events[-1].seq if events else -1
                 try:
                     eng._finish_with_report_if_quiescent(
@@ -104,7 +126,8 @@ def _run_engine_guarded(eng: Engine):
             # `run_finished` and wrap-up are distinct durable boundaries. Even when the exception
             # happened after the terminal append (or in an optional side effect), repair the exact
             # pending finish before re-raising the ORIGINAL exception.
-            finalize_run(eng, entry_finished=current.finished, start_time=started)
+            if queue_quiescent:
+                finalize_run(eng, entry_finished=current.finished, start_time=started)
         except Exception:  # noqa: BLE001 - terminal recovery must never replace the root traceback
             pass
         raise

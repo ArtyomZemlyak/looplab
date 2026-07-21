@@ -74,7 +74,7 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // dropdown of related panels; the hub button lights when its open panel is active. Report + Overview
 // stay in the view-toggle above; Settings stays a dedicated button — both are one-click essentials.
 const HUBS = [
-  ['Progress', [['queue', 'Queue'], ['hypotheses', 'Hypotheses'], ['research', 'Research'], ['failures', 'Failures']]],
+  ['Progress', [['queue', 'Queue'], ['hypotheses', 'Cards'], ['research', 'Research'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
   ['Lab', [['artifacts', 'Artifacts'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Comments & sharing'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],

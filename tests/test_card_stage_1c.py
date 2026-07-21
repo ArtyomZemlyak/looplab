@@ -21,6 +21,9 @@ def _bare_engine(tmp_path) -> Engine:
     engine = Engine.__new__(Engine)
     engine.store = EventStore(tmp_path / "events.jsonl")
     engine._id_lock = threading.Lock()
+    # This narrow constructor deliberately bypasses Engine.__init__; pin the normal configured
+    # default so the shared physical-reservation boundary remains fail-closed and deterministic.
+    engine._base_max_nodes = 8
     engine.store.append("run_started", {
         "run_id": "r", "task_id": "t", "goal": "g", "direction": "max",
     })
@@ -202,17 +205,10 @@ def test_drop_and_merge_exclusions_are_order_tolerant_and_preserve_legacy_action
     for state in (before, after):
         assert set(state.cards) == {"card-canonical"}
         card = state.cards["card-canonical"]
-        from looplab.core.models import hypothesis_id
-        # A merge folds the alias card's whole identity closure into the canonical survivor: its
-        # work-item id PLUS both cards' legacy seed-statement hashes, so any old hash-addressed
-        # control resolves to the survivor (hardened in e66b728 "harden replay card identity";
-        # mirrors test_cards.py's `hypothesis_id(a) in canon.aliases`). The pre-hardening
-        # `== ["card-alias"]` was stale — it expected only the work-item id.
-        assert card.aliases == sorted([
-            "card-alias",
-            hypothesis_id("alias direction"),
-            hypothesis_id("canonical direction"),
-        ])
+        # Public aliases contain only explicit/materialized work-item ids. Legacy statement-hash
+        # spellings remain in the private control-identity closure, so old hash-addressed controls
+        # still resolve without leaking implementation bridges into the Card audit projection.
+        assert card.aliases == ["card-alias"]
         # Compatibility `actionable` means only "not administratively dead"; a merged work item is
         # deliberately excluded by the strict queue contract without changing that legacy scalar.
         assert card.actionable is True

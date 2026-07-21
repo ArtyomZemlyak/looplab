@@ -38,6 +38,149 @@ def test_replay_is_deterministic(tmp_path):
     assert a.best().metric == 2.0
 
 
+@pytest.mark.parametrize("recorded, expected", [
+    (None, 0),
+    (0, 0),
+    (7, 7),
+    (True, 0),
+    ("7", 0),
+    (1.5, 0),
+    (-1, 0),
+    (65, 0),
+])
+def test_speculation_depth_run_start_pin_is_strict_and_legacy_hidden(recorded, expected):
+    data = {"run_id": "r", "task_id": "t", "direction": "min"}
+    if recorded is not None:
+        data["speculation_depth"] = recorded
+    state = fold([Event(type="run_started", data=data)])
+    assert state.speculation_depth == expected
+    dumped = state.model_dump(mode="json")
+    assert "speculation_depth" not in dumped
+    assert "card_build_requests" not in dumped
+    assert "card_builds_done" not in dumped
+    assert "speculative_nodes" not in dumped
+
+
+def test_card_build_request_done_fold_is_generation_fenced_and_recoverable():
+    base = [
+        Event(type="run_started", data={
+            "run_id": "r", "task_id": "t", "direction": "min", "speculation_depth": 3,
+        }),
+        # A request from another search epoch is inert; it cannot shift the positional done gate.
+        Event(type="card_build_requested", data={"card_id": "stale", "generation": 1}),
+        Event(type="card_build_requested", data={"card_id": "card-7", "generation": 0}),
+        Event(type="node_created", data={
+            "node_id": 0, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "card_id": "card-7"}, "code": "ok",
+            "speculative": True, "card_build_generation": 0,
+        }),
+    ]
+    crashed = fold(base)
+    assert crashed.speculation_depth == 3
+    assert crashed.card_build_requests == [{"card_id": "card-7", "generation": 0}]
+    assert crashed.card_builds_done == 0
+    assert crashed.speculative_nodes == {}
+    # Crash recovery can see both the outstanding durable request and its already-created node, so
+    # the main task can append only done instead of creating the node twice.
+    assert [node.id for node in crashed.nodes.values()
+            if node.idea.card_id == crashed.card_build_requests[0]["card_id"]] == [0]
+
+    completed = fold([*base, Event(type="card_build_done", data={
+        "card_id": "card-7", "generation": 0, "node_id": 0, "speculative": True,
+    })])
+    assert completed.card_builds_done == 1
+    assert completed.speculative_nodes == {0: {"card_id": "card-7", "generation": 0}}
+
+
+def test_unknown_reserved_node_abort_makes_late_create_inert():
+    events = [
+        Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+        Event(type="node_building", data={
+            "node_id": 7,
+            "operator": "draft",
+            "parent_ids": [],
+            "card_id": "card-7",
+        }),
+        # A build reservation is not a Node yet, so legacy/operator recovery can only name its id.
+        Event(type="node_abort", data={"node_id": 7}),
+        # The losing worker must not resurrect that reservation after the abort cleared its marker.
+        Event(type="node_created", data={
+            "node_id": 7,
+            "parent_ids": [],
+            "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "card_id": "card-7"},
+            "code": "late",
+        }),
+    ]
+
+    state = fold(events)
+    assert state.aborted_nodes == [7]
+    assert 7 not in state.nodes
+    assert 7 not in state.buildings
+
+
+def test_card_build_done_orphan_and_mismatch_are_inert_but_exact_give_up_advances():
+    events = [
+        Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+        # An orphan cannot pre-advance the positional counter and consume a future request.
+        Event(type="card_build_done", data={
+            "card_id": "card-1", "generation": 0, "skipped": "producer_failed",
+        }),
+        Event(type="card_build_requested", data={"card_id": "card-1", "generation": 0}),
+        Event(type="card_build_done", data={
+            "card_id": "wrong", "generation": 0, "skipped": "producer_failed",
+        }),
+        Event(type="card_build_done", data={
+            "card_id": "card-1", "generation": 0, "skipped": "producer_failed",
+        }),
+        Event(type="card_build_requested", data={"card_id": "card-2", "generation": 0}),
+        Event(type="card_build_done", data={
+            "node_id": 9, "speculative": True, "card_id": "wrong-card", "generation": 0,
+        }),
+    ]
+    state = fold(events)
+    assert state.card_builds_done == 1
+    assert len(state.card_build_requests) - state.card_builds_done == 1
+    assert state.card_build_producer_failed == ["card-1"]
+    assert state.speculative_nodes == {}
+
+
+def test_card_build_request_generation_tracks_reopened_search_epoch():
+    events = [
+        Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+        Event(type="run_finished", data={}),
+        Event(type="resume", data={}),
+        Event(type="run_finished", data={}),
+        Event(type="resume", data={}),
+        Event(type="card_build_requested", data={"card_id": "old", "generation": 1}),
+        Event(type="card_build_requested", data={"card_id": "current", "generation": 2}),
+    ]
+    state = fold(events)
+    assert state.search_epoch == 2
+    assert state.card_build_requests == [{"card_id": "current", "generation": 2}]
+
+
+@pytest.mark.parametrize(("speculative", "generation", "expected_speculative", "expected_generation"), [
+    (True, 0, True, 0),
+    (True, True, True, None),
+    (True, "0", True, None),
+    ("true", 0, False, None),
+    (False, 0, False, None),
+])
+def test_node_speculative_marker_is_strict_and_generation_is_marker_scoped(
+        speculative, generation, expected_speculative, expected_generation):
+    state = fold([
+        Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+        Event(type="node_created", data={
+            "node_id": 0, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "card_id": "card-0"},
+            "speculative": speculative, "card_build_generation": generation,
+        }),
+    ])
+    assert state.nodes[0].speculative is expected_speculative
+    assert state.nodes[0].card_build_generation == expected_generation
+
+
 def test_torn_final_line_is_ignored(tmp_path):
     """A crash mid-append leaves a partial last line; read_all must drop it and the
     surviving prefix must replay to a consistent state."""
@@ -628,6 +771,23 @@ def test_append_many_uses_one_tail_cas_and_contiguous_sequences(tmp_path):
     with pytest.raises(EventStoreConcurrencyError):
         s.append_many([("node_building", {"node_id": 2})], expected_last_seq=first.seq)
     assert [event.data.get("node_id") for event in s.read_all()[1:]] == [0, 1]
+
+
+def test_append_many_accepts_canonical_1024_wide_lane(tmp_path):
+    """The storage bound must not be narrower than Settings' valid seed/parallel fan-out."""
+
+    path = tmp_path / "e.jsonl"
+    store = EventStore(path)
+    records = [("node_building", {"node_id": node_id}) for node_id in range(1024)]
+
+    batch = store.append_many(records)
+
+    assert len(batch) == 1024
+    assert [event.seq for event in batch] == list(range(1024))
+    assert len(path.read_bytes().splitlines()) == 1
+    replayed = EventStore(path).read_all()
+    assert len(replayed) == 1024
+    assert replayed[-1].data["node_id"] == 1023
 
 
 def test_fold_eval_seconds_split_into_buckets(tmp_path):
@@ -1776,31 +1936,44 @@ def test_extra_metric_projection_rejects_hostile_numeric_adapter():
     assert normalize_extra_metrics({"hostile": HostileInt(1), "ok": 2}) == {"ok": 2.0}
 
 
-def test_card_build_request_done_pair_folds_and_clears(tmp_path):
-    # Layer 5a producer/consumer core: the durable request/done pair opens an OPEN speculative-build
-    # request and the matching done clears it, so resume-by-replay is idempotent.
+def test_card_build_request_done_pair_preserves_positional_reservation_ledger(tmp_path):
+    # Layer 5a producer/consumer core: requests remain in a positional durable ledger after done. The
+    # monotonic done cursor closes only the exact head, so replay can count every outstanding future
+    # Node reservation without a same-card dict overwrite or an orphan done consuming later work.
     p = tmp_path / "events.jsonl"
     s = EventStore(p)
     _seed(s)
-    s.append("card_build_requested", {"card_id": "card-5", "generation": 0, "at_node": 3})
+    s.append("card_build_requested", {"card_id": "card-5", "generation": 0})
     st = fold(s.read_all())
-    assert st.card_build_requests == {"card-5": {"generation": 0, "at_node": 3}}
-    # A second open request for another card coexists; the done closes only its own card.
+    assert st.card_build_requests == [{"card_id": "card-5", "generation": 0}]
+    assert st.card_builds_done == 0
+
+    # A malformed request and an orphan done are inert. An exact give-up advances the head while
+    # retaining its physical reservation history; the next valid request remains outstanding.
     s.append("card_build_requested", {"card_id": "card-6"})
-    s.append("card_build_done", {"card_id": "card-5", "node_id": 7, "speculative": True})
+    s.append("card_build_done", {
+        "card_id": "never-opened", "generation": 0, "skipped": "producer_failed",
+    })
+    s.append("card_build_done", {
+        "card_id": "card-5", "generation": 0, "skipped": "producer_failed",
+    })
+    s.append("card_build_requested", {"card_id": "card-6", "generation": 0})
     st = fold(s.read_all())
-    assert st.card_build_requests == {"card-6": {}}
-    # A malformed/future row is an honest no-op and never bricks the fold.
-    s.append("card_build_requested", {"card_id": 123})          # non-string id: skipped
-    s.append("card_build_done", {"card_id": "card-6"})           # closes card-6
-    s.append("card_build_done", {"card_id": "never-opened"})     # pop of absent key: safe
-    st = fold(s.read_all())
-    assert st.card_build_requests == {}
-    # Old logs with no L5a events carry the empty default (additive/reader-defaulted).
+    assert st.card_build_requests == [
+        {"card_id": "card-5", "generation": 0},
+        {"card_id": "card-6", "generation": 0},
+    ]
+    assert st.card_builds_done == 1
+    assert len(st.card_build_requests) - st.card_builds_done == 1
+    assert st.card_build_producer_failed == ["card-5"]
+
+    # Old logs with no L5a events carry the hidden empty-list default.
     q = tmp_path / "legacy.jsonl"
     s2 = EventStore(q)
     _seed(s2)
-    assert fold(s2.read_all()).card_build_requests == {}
+    legacy = fold(s2.read_all())
+    assert legacy.card_build_requests == []
+    assert "card_build_requests" not in legacy.model_dump(mode="json")
 
 
 def test_l6_operator_card_controls_fold_and_resolve_through_merge(tmp_path):
@@ -1816,13 +1989,16 @@ def test_l6_operator_card_controls_fold_and_resolve_through_merge(tmp_path):
     s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
     cid = next(iter(fold(s.read_all()).cards))
     # Reprioritize an ALIAS id, then merge alias->cid: the pin must follow to the canonical survivor.
-    s.append("card_reprioritized", normalize_control(None, tmp_path, "card_reprioritized",
-                                                     {"card_id": "card-alias", "priority": 9}))
+    # Replay must preserve a previously server-stamped control even when a later merge makes its id
+    # an alias. Live intake requires the Card to exist, so model that historical ordering directly.
+    s.append("card_reprioritized", {
+        "id": "card-alias", "priority": 9, "source": "operator", "pinned": True,
+    })
     s.append("card_merged", {"canonical": cid, "aliases": ["card-alias"]})
     c = fold(s.read_all()).cards[cid]
     assert c.pinned and c.priority == 9, "operator pin must resolve through the merge to the survivor"
     # Provenance is server-stamped: a client-forged dropped_by is a 400 (allowlist rejects unknown keys).
     import pytest as _pytest
     with _pytest.raises(Exception):
-        normalize_control(None, tmp_path, "card_operator_dropped",
-                          {"card_id": cid, "dropped_by": "novelty"})
+        normalize_control(None, tmp_path, "card_dropped",
+                          {"id": cid, "dropped_by": "novelty"})

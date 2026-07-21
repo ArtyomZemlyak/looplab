@@ -11,6 +11,7 @@ const TEST_MODEL_BOUNDS = {
   n_seeds: { minimum: 1, maximum: 1024 },
   eval_parallel: { minimum: 0, maximum: 1024 },
   llm_parallel: { minimum: 0, maximum: 64 },
+  speculation_depth: { minimum: 0, maximum: 64 },
   timeout: { exclusiveMinimum: 0 },
   max_eval_timeout: { exclusiveMinimum: 0, maximum: 86_400 },
   holdout_fraction: { minimum: 0, maximum: 0.9 },

@@ -14,6 +14,7 @@ attempt loop. Trust scans (reward-hack / code-leakage / critic) stay lazy, metho
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Optional
 
 import anyio
@@ -24,9 +25,43 @@ from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import snapshot_training_logs
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
 from looplab.events.replay import fold
-from looplab.events.types import (EV_DEPS_INSTALLED, EV_NODE_ABORT, EV_NODE_EVALUATED,
-                                  EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET, EV_PROXY_SCORED,
-                                  EV_REWARD_HACK_SUSPECTED, EV_SPEC_DRIFT, EV_STAGE_FINISHED)
+from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_NODE_ABORT,
+                                  EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
+                                  EV_NODE_RESET, EV_PROXY_SCORED, EV_REWARD_HACK_SUSPECTED,
+                                  EV_SPEC_DRIFT, EV_STAGE_FINISHED)
+
+
+def _card_identity_spellings(state, raw_card_id) -> frozenset[str]:
+    """Return the unambiguous spellings of one folded Card identity.
+
+    Nodes intentionally retain their immutable proposal-time ``card_id`` while replay collapses
+    merged Cards onto the canonical row.  Active controls therefore have to compare identities,
+    not just the two raw strings.  A spelling owned by more than one row is excluded, and an
+    ambiguous node subject resolves to nothing: cancellation must fail closed.
+    """
+    cards = getattr(state, "cards", None)
+    if not isinstance(raw_card_id, str) or not raw_card_id or not isinstance(cards, Mapping):
+        return frozenset()
+
+    owners: dict[str, set[str]] = {}
+    for canonical, card in cards.items():
+        if not isinstance(canonical, str) or not canonical:
+            continue
+        spellings = {canonical}
+        aliases = getattr(card, "aliases", None)
+        if isinstance(aliases, list):
+            spellings.update(alias for alias in aliases if isinstance(alias, str) and alias)
+        for spelling in spellings:
+            owners.setdefault(spelling, set()).add(canonical)
+
+    subject_owners = owners.get(raw_card_id, set())
+    if len(subject_owners) != 1:
+        return frozenset()
+    subject = next(iter(subject_owners))
+    return frozenset(
+        spelling for spelling, spelling_owners in owners.items()
+        if spelling_owners == {subject}
+    )
 
 
 class EvaluateMixin:
@@ -146,19 +181,33 @@ class EvaluateMixin:
                     (getattr(self, "_train_monitor", False) and bool(_eval_spec))
                     or (getattr(self, "_asha_live", False) and isinstance(_eval_spec, dict)))
                 _log_snapshot = snapshot_training_logs(workdir) if _watching_logs else None
-                # Mid-eval per-node intervention (v2): a watcher polls the log while the eval runs in a
-                # worker thread; if the operator appends `node_abort` for THIS node, it sets the cancel
-                # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). v1's pre-eval
+                # Mid-eval intervention: a watcher polls while the eval runs in a worker thread. An
+                # exact node lifecycle mutation or operator drop of THIS node's Card sets the cancel
+                # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
                 # skip only catches not-yet-started nodes — this kills a running one.
                 cancel = threading.Event()
                 aborted = False
                 superseded = False
+                operator_card_dropped = False
                 kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
                 async with anyio.create_task_group() as _tg:
                     def _intervention_seen() -> str | None:
                         intervention = None
-                        for e in self.store.read_all():
-                            if e.seq <= start_seq or e.data.get("node_id") != node_id:
+                        card_id = getattr(getattr(node, "idea", None), "card_id", None)
+                        current_events = self.store.read_all()
+                        operator_drop_ids: list[str] = []
+                        for e in current_events:
+                            if e.seq <= start_seq:
+                                continue
+                            if e.type == EV_CARD_DROPPED:
+                                # Only the explicit operator stop affordance is an active cancel.
+                                # Engine/freshness drops deliberately burn to terminal as evidence.
+                                drop_id = e.data.get("id")
+                                if (isinstance(drop_id, str) and drop_id
+                                        and e.data.get("dropped_by") == "operator"):
+                                    operator_drop_ids.append(drop_id)
+                                continue
+                            if e.data.get("node_id") != node_id:
                                 continue
                             raw_generation = e.data.get("generation")
                             # Controls name the lifecycle they intend to mutate. Missing stamps are
@@ -183,9 +232,21 @@ class EvaluateMixin:
                                 return "reset"
                             if e.type == EV_NODE_ABORT:
                                 intervention = "abort"
+                        if intervention is None and operator_drop_ids:
+                            # Fold only once an explicit post-start operator drop exists. This follows
+                            # merge chains added before or during the eval without making every 300 ms
+                            # watcher poll replay the complete run. Any corrupt/ambiguous ownership is
+                            # deliberately a no-op rather than a kill of the wrong worker.
+                            try:
+                                active_spellings = _card_identity_spellings(
+                                    fold(current_events), card_id)
+                            except Exception:  # noqa: BLE001 - active cancellation must fail closed
+                                active_spellings = frozenset()
+                            if any(drop_id in active_spellings for drop_id in operator_drop_ids):
+                                intervention = "card_drop"
                         return intervention
                     async def _watch():
-                        nonlocal aborted, superseded
+                        nonlocal aborted, operator_card_dropped, superseded
                         while True:
                             await anyio.sleep(0.3)
                             if cancel.is_set():
@@ -193,7 +254,8 @@ class EvaluateMixin:
                             intervention = await anyio.to_thread.run_sync(_intervention_seen)
                             if intervention is not None:
                                 superseded = intervention == "reset"
-                                aborted = intervention == "abort"
+                                operator_card_dropped = intervention == "card_drop"
+                                aborted = intervention in {"abort", "card_drop"}
                                 cancel.set()
                                 return
                     _tg.start_soon(_watch)
@@ -245,8 +307,13 @@ class EvaluateMixin:
                     async with self._write_lock:             # eval didn't already finish cleanly first)
                         self.store.append(EV_NODE_FAILED, {
                             "node_id": node_id, "generation": generation,
-                            "error": "aborted by operator (killed mid-eval)",
-                            "reason": "aborted", "eval_seconds": total_eval})
+                            "error": (
+                                "Card dropped by operator (killed mid-eval)"
+                                if operator_card_dropped
+                                else "aborted by operator (killed mid-eval)"
+                            ),
+                            "reason": "card_dropped" if operator_card_dropped else "aborted",
+                            "eval_seconds": total_eval})
                         self._maybe_crash()
                     return
                 if kill_signal.get("kill") and not ok:       # a live watchdog tree-killed the run early

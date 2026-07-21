@@ -72,6 +72,7 @@ def canonicalize_parallelism_source(values: dict) -> dict:
 # controls such as ``trust_gate`` out (that field has its own durable change event).
 RUN_START_PINNED_FIELDS = frozenset({
     "card_driven_selection",
+    "speculation_depth",
     "holdout_fraction",
     "holdout_select",
     "select_verifier",
@@ -93,6 +94,9 @@ def run_start_pinned_settings(state) -> dict:
         # Layer 3 changes which queue owns macro-action selection. Once a run starts, replay and
         # resume must keep the same owner even if the snapshot or ambient default changes later.
         "card_driven_selection": bool(getattr(state, "card_driven_selection", False)),
+        # Layer 5 overlaps Card production with evaluation only when this pinned treatment is
+        # positive. Old logs omit it and therefore retain the exact serial build/eval spine.
+        "speculation_depth": int(getattr(state, "speculation_depth", 0)),
         "select_verifier": bool(getattr(state, "select_verifier_tiebreak", False)),
         "select_verifier_samples": int(getattr(state, "select_verifier_samples", 3)),
         "verifier_ci_tie": bool(getattr(state, "verifier_ci_tie", False)),
@@ -874,6 +878,10 @@ class Settings(BaseSettings):
     # True is pinned in run_started because changing the selector on resume would mix two search
     # treatments in one run. When both this and agent_drives_actions are true, Card selection wins.
     card_driven_selection: bool = False
+    # Layer 5 bounded speculative Card buffer. Zero is a hard OFF switch and preserves the
+    # historical alternating build/eval spine; positive values are pinned by run_started so a
+    # resume cannot silently mix search treatments after a snapshot/default edit.
+    speculation_depth: int = Field(default=0, ge=0, le=64)
     # Per-stage model/endpoint overrides for the unified agent. Recognized keys (see
     # tasks.build_unified_agent): `propose` (researcher), `implement`/`repair` (developer),
     # `strategy`, `pilot`. Unlisted keys are ignored. Empty = the per-role researcher_*/developer_*

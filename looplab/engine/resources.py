@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Mapping
 from typing import Optional
 
 import anyio
 
 from looplab.core.hardware import detect_gpus
-from looplab.core.models import normalize_researcher_footprint
+from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
 
 
 def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[int, int]]:
@@ -105,11 +106,9 @@ class ResourceSchedulingMixin:
             return None
         total = len(getattr(self, "_gpu_ids", []) or [])
         out = dict(clean)
-        if "gpus" in out:
-            # CODEX AGENT: clamping a positive requirement to zero changes "needs a GPU" into a
-            # successful CPU/unpinned admission on a host with no detected devices. That is not a safe
-            # resource clamp: it makes the durable effective footprint disagree with the experiment and
-            # usually burns a full eval before failing. Preserve an unsatisfied state and reject/pause it.
+        if "gpus" in out and (total > 0 or out["gpus"] == 0):
+            # A non-empty pool bounds over-declarations.  With no detected devices, preserve a positive
+            # requirement so admission can remain unsatisfied instead of silently becoming CPU-only.
             out["gpus"] = min(out["gpus"], total)
         if isinstance(out.get("gpu_mem_mib"), int):
             requested_gpus = out.get("gpus", 1)
@@ -118,14 +117,40 @@ class ResourceSchedulingMixin:
                 out["gpu_mem_mib"] = min(out["gpu_mem_mib"], envelope)
         return out
 
-    def _resource_request_for_node(self, node) -> dict:
+    @staticmethod
+    def _card_resource_pin_for_node(state, node):
+        """Resolve the independent operator pin through a bounded canonical Card chain."""
+        card_id = getattr(getattr(node, "idea", None), "card_id", None)
+        cards = getattr(state, "cards", None)
+        if not isinstance(card_id, str) or not isinstance(cards, Mapping):
+            return None
+        card = cards.get(card_id)
+        if card is None:
+            # Replay collapses merged rows to canonical Cards and retains raw work-item ids only in
+            # ``Card.aliases``. Resolve that bounded projection without trusting an event-order map;
+            # ambiguous/corrupt ownership fails closed rather than borrowing another Card's pin.
+            match = None
+            for candidate in cards.values():
+                aliases = getattr(candidate, "aliases", None)
+                if isinstance(aliases, list) and card_id in aliases:
+                    if match is not None:
+                        return None
+                    match = candidate
+            card = match
+        return getattr(card, "resource_pin", None) if card is not None else None
+
+    def _resource_request_for_node(self, node, *, resource_pin=None) -> dict:
         """Translate a node footprint into the effective admission request.
 
         UNSPECIFIED preserves the historical split: a serial eval remains unpinned and can see the
         whole box; a parallel eval reserves one device.  Explicit ``gpus=0`` is a CPU request and
-        bypasses the GPU queue.  Explicit positive counts are clamped, never allowed to wedge it.
+        bypasses the GPU queue.  Explicit positive counts are bounded by a non-empty pool; on a
+        GPU-less host they remain positive and unavailable until operator intent changes.
         """
-        raw = normalize_researcher_footprint(getattr(getattr(node, "idea", None), "footprint", None))
+        raw = effective_card_footprint(
+            getattr(getattr(node, "idea", None), "footprint", None),
+            resource_pin,
+        )
         effective = self._clamp_resource_footprint(raw)
         declared = raw is not None and "gpus" in raw
         cpu_only = bool(declared and raw.get("gpus") == 0)
@@ -135,7 +160,7 @@ class ResourceSchedulingMixin:
         if cpu_only:
             count = 0
         elif declared:
-            count = min(int((effective or {}).get("gpus", 0)), pool_size)
+            count = int((effective or {}).get("gpus", 0))
         elif pool_size and parallel > 1:
             count = 1
         else:
@@ -149,6 +174,28 @@ class ResourceSchedulingMixin:
             "pin": bool(count > 0),
             "footprint": effective,
         }
+
+    def _node_resource_reservation_is_current(self, state, node, reservation) -> bool:
+        """Verify that a reservation was formed for the Card pin in a fresh fold.
+
+        A blocking GPU wait creates an operator-control race: the Card may be re-pinned while the
+        waiter sleeps.  Callers re-fold after admission and use this comparison before starting the
+        subprocess; a mismatch must release and retry instead of running with stale quantities.
+        """
+        if not isinstance(reservation, dict):
+            return False
+        expected = self._resource_request_for_node(
+            node,
+            resource_pin=self._card_resource_pin_for_node(state, node),
+        )
+        # ``pin`` and ``gpu_ids`` are admission outcomes, not source-request identity.  Exact device
+        # assignment may differ after a release/retry even when the Card source footprint is unchanged.
+        admitted_source = {
+            key: value for key, value in reservation.items()
+            if key not in {"gpu_ids", "pin"}
+        }
+        expected_source = {key: value for key, value in expected.items() if key != "pin"}
+        return admitted_source == expected_source
 
     def _acquire_gpus(self, n: int, mem: Optional[int] = None) -> Optional[list[int]]:
         """Atomically reserve the first ``n`` fitting logical devices.
@@ -222,31 +269,36 @@ class ResourceSchedulingMixin:
                 # A finite wait lets an abandoned anyio worker exit promptly after cancellation.
                 self._gpu_condition.wait(timeout=0.5)
 
-    def _try_reserve_node_resources(self, node) -> Optional[dict]:
-        request = self._resource_request_for_node(node)
+    def _try_reserve_node_resources(self, node, *, resource_pin=None) -> Optional[dict]:
+        request = self._resource_request_for_node(node, resource_pin=resource_pin)
+        # `_acquire_gpus` deliberately keeps its legacy primitive contract (`[]` on an empty pool).
+        # At node admission we have the declaration context, so a positive explicit requirement on a
+        # GPU-less host must stay unavailable rather than inherit that no-device compatibility result.
+        if request["count"] > 0 and not (getattr(self, "_gpu_ids", []) or []):
+            return None
         gpu_ids = self._acquire_gpus(request["count"], request["gpu_mem_mib"])
-        # Legacy parallel nodes had no resource declaration: once every detected GPU was already
-        # handed out, `_acquire_gpu` returned an unpinned eval instead of blocking.  Preserve that
-        # branch byte-for-byte; only an explicit footprint participates in strict admission.
-        if gpu_ids is None and request["unspecified"]:
-            # CODEX AGENT: this compatibility branch defeats the new reservation boundary exactly when
-            # the pool is saturated: the extra eval is launched unpinned and can see/use GPUs already
-            # owned by siblings. With max_parallel > GPU count this recreates oversubscription/OOM;
-            # unspecified work must wait, receive an explicit CPU mask, or be capped at pool width.
-            gpu_ids = []
-            request["pin"] = False
         if gpu_ids is None:
             return None
         return {**request, "gpu_ids": gpu_ids}
 
-    async def _wait_reserve_node_resources(self, node) -> dict:
+    async def _wait_reserve_node_resources(self, node, *, resource_pin=None,
+                                           wait_once: bool = False) -> Optional[dict]:
+        """Reserve resources, optionally returning after one bounded condition tick.
+
+        ``wait_once`` is used by lifecycle-aware callers.  A Card can be re-pinned from GPU to CPU
+        while a GPU is busy without changing the pool epoch; an unbounded wait on the old snapshot
+        would therefore sleep forever.  Returning ``None`` after the condition's finite tick lets the
+        caller re-fold operator intent and retry against the canonical current pin.
+        """
         while True:
             epoch = self._gpu_pool_epoch()
-            reservation = self._try_reserve_node_resources(node)
+            reservation = self._try_reserve_node_resources(node, resource_pin=resource_pin)
             if reservation is not None:
                 return reservation
             await anyio.to_thread.run_sync(self._wait_for_gpu_change, epoch,
                                            abandon_on_cancel=True)
+            if wait_once:
+                return None
 
     def _register_eval_resource_reservation(self, node_id: int, generation: int,
                                             reservation: dict) -> None:

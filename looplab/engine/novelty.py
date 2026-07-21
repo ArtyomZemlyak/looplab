@@ -18,6 +18,9 @@ import json
 import logging
 import math
 import unicodedata
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
 from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
@@ -26,6 +29,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
                                   idea_proposal_digest, idea_proposal_ref)
 from looplab.engine.action_governance import effective_researcher_eval_timeout
+from looplab.core.tracing import current_ids
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
 
@@ -41,6 +45,9 @@ _REEXAMINATION_BRIEF_CHARS = 1_500
 _REEXAMINATION_MAX_ROOTS = 4
 _REEXAMINATION_SAMPLES = 3
 _LOG = logging.getLogger(__name__)
+_PROPOSAL_EVENT_SINK: ContextVar[Optional[list[tuple[str, dict, Optional[str], Optional[str]]]]] = (
+    ContextVar("looplab_proposal_event_sink", default=None)
+)
 
 
 def _canonical_idea_identity(text: str) -> tuple[tuple[str, ...], bool]:
@@ -177,6 +184,30 @@ def _canonical_action_identity(idea, *, operator: str,
 class NoveltyGateMixin:
     """The engine's novelty/dedup gate cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
+
+    @contextmanager
+    def _capture_proposal_events(self):
+        """Buffer proposal audit events so a worker never writes the folded log.
+
+        Legacy/main-task proposal paths keep appending immediately.  Layer 5 installs this context in
+        its isolated Researcher worker, then publishes the bounded intents from the main task only if
+        the prepared Card still passes its lifecycle/cue fence.
+        """
+
+        intents: list[tuple[str, dict, Optional[str], Optional[str]]] = []
+        token = _PROPOSAL_EVENT_SINK.set(intents)
+        try:
+            yield intents
+        finally:
+            _PROPOSAL_EVENT_SINK.reset(token)
+
+    def _append_proposal_event(self, event_type: str, data: dict):
+        sink = _PROPOSAL_EVENT_SINK.get()
+        if sink is None:
+            return self.store.append(event_type, data)
+        trace_id, span_id = current_ids()
+        sink.append((event_type, deepcopy(data), trace_id, span_id))
+        return None
 
     # -------------------------------------------------------- novelty gate (E1/T5)
     @staticmethod
@@ -403,7 +434,7 @@ class NoveltyGateMixin:
             try:
                 idea = self._repropose_with_feedback(repropose, hint, idea, researcher=researcher)
             except BudgetExceeded:
-                self.store.append(EV_NOVELTY_REJECTED, {
+                self._append_proposal_event(EV_NOVELTY_REJECTED, {
                     **self._proposal_binding(state, original, prospective_node_id),
                     **self._near_binding(state, dup.id), "kind": "llm",
                     "reason": str(v.reason)[:200], "stance": self._novelty_stance,
@@ -412,7 +443,7 @@ class NoveltyGateMixin:
         final_digest = idea_proposal_digest(idea)
         action = ("reproposed" if original_digest is not None and final_digest is not None
                   and original_digest != final_digest else "kept")
-        self.store.append(EV_NOVELTY_REJECTED, {
+        self._append_proposal_event(EV_NOVELTY_REJECTED, {
             **self._proposal_binding(state, original, prospective_node_id),
             **self._near_binding(state, dup.id), "kind": "llm",
             "reason": str(v.reason)[:200], "stance": self._novelty_stance,
@@ -514,6 +545,12 @@ class NoveltyGateMixin:
         the MAIN task before the build fan-out, so it uses `self.researcher` (no pool race)."""
         n = max(1, int(n))
         self._pending_batch_dropped = []
+        # Keep the exact returned objects as a one-shot capability for the rare unreserved
+        # ``_create_node(..., preproposed=...)`` compatibility path.  The normal parallel path reserves
+        # every Idea before fan-out and never consults this list.  Identity (rather than a digest/card id)
+        # matters: an unrelated caller that later supplies an equal proposal must still pass through the
+        # ordinary novelty gate once.
+        self._pending_batch_novelty_gated = []
         native = getattr(self.researcher, "propose_batch", None)
         ideas: list = []
         dropped: list[dict] = []
@@ -539,7 +576,7 @@ class NoveltyGateMixin:
                 steering_context=getattr(self.researcher, "_steering_context", []),
             )
             if plan.disposition == "invalid":
-                self.store.append(EV_NOVELTY_REJECTED, {
+                self._append_proposal_event(EV_NOVELTY_REJECTED, {
                     "node_id": prospective_base + slot, "generation": 0,
                     "kind": "card_contract",
                     "reason": "proposal cannot form a bounded native Card action",
@@ -597,7 +634,9 @@ class NoveltyGateMixin:
                         {"_steering_context": list(_steering)} for _ in ideas[:n]
                     ]
                     self._pending_batch_dropped = dropped
-                    return ideas[:n]
+                    accepted = ideas[:n]
+                    self._pending_batch_novelty_gated = list(accepted)
+                    return accepted
             except Exception:  # noqa: BLE001 — a batch-backend hiccup falls back to sequential rolls
                 ideas = []
                 dropped = []
@@ -666,6 +705,7 @@ class NoveltyGateMixin:
                     pass
         self._pending_batch_telemetry = telem
         self._pending_batch_dropped = dropped
+        self._pending_batch_novelty_gated = list(ideas)
         return ideas
 
     def _snapshot_role_telemetry(self, attr: str):
@@ -908,7 +948,7 @@ class NoveltyGateMixin:
         if grade.level == 5 and not self._verified_failed_direction_reopen(
                 state, graph, grade.near_node, client):
             return None
-        self.store.append(EV_NOVELTY_GRADED, {
+        self._append_proposal_event(EV_NOVELTY_GRADED, {
             **self._proposal_binding(state, idea, prospective_node_id),
             "level": grade.level, "grade": grade.name,
             "recommendation": grade.recommendation,
@@ -1103,7 +1143,7 @@ class NoveltyGateMixin:
                 "source_duplicate_run_rows": int(
                     store_health.get("source_duplicate_run_rows", 0) or 0),
             }
-            self.store.append(EV_CROSS_RUN_PRIOR, {
+            self._append_proposal_event(EV_CROSS_RUN_PRIOR, {
                 "v": 2,
                 **self._proposal_binding(state, idea, prospective_node_id),
                 "matched_concepts": matched, "prior_runs": returned_runs,
@@ -1181,7 +1221,7 @@ class NoveltyGateMixin:
                         idea = self._repropose_with_feedback(
                             repropose, hint, idea, researcher=researcher)
                     except BudgetExceeded:
-                        self.store.append(EV_NOVELTY_REJECTED, {
+                        self._append_proposal_event(EV_NOVELTY_REJECTED, {
                             **self._proposal_binding(state, original, prospective_node_id),
                             **self._near_binding(state, dup.id), "kind": "semantic",
                             "similarity": round(sim, 4), "stance": self._novelty_stance,
@@ -1190,7 +1230,7 @@ class NoveltyGateMixin:
                 final_digest = idea_proposal_digest(idea)
                 action = ("reproposed" if original_digest is not None and final_digest is not None
                           and original_digest != final_digest else "kept")
-                self.store.append(EV_NOVELTY_REJECTED, {
+                self._append_proposal_event(EV_NOVELTY_REJECTED, {
                     **self._proposal_binding(state, original, prospective_node_id),
                     **self._near_binding(state, dup.id), "kind": "semantic",
                     "similarity": round(sim, 4), "stance": self._novelty_stance,
@@ -1216,7 +1256,7 @@ class NoveltyGateMixin:
         out = idea.model_copy()
         out.params = nudged
         out.rationale = (idea.rationale + " [novelty-gate: nudged off a near-duplicate]").strip()
-        self.store.append(EV_NOVELTY_REJECTED, {
+        self._append_proposal_event(EV_NOVELTY_REJECTED, {
             **self._proposal_binding(state, out, prospective_node_id),
             **self._near_binding(state, nearest), "distance": round(mind, 4),
             "stance": self._novelty_stance, "action": "nudged",

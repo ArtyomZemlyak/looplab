@@ -1539,8 +1539,8 @@ def test_report_worker_rejects_replaced_generation_before_client_creation(tmp_pa
 
 
 def _read_events(rd: Path):
-    from looplab.events.eventstore import iter_jsonl
-    return [Event(**o) for o in iter_jsonl(rd / "events.jsonl")]
+    from looplab.events.eventstore import iter_event_jsonl
+    return [Event(**o) for o in iter_event_jsonl(rd / "events.jsonl")]
 
 
 # ---- Workstream C: chat action-router (/command) ----

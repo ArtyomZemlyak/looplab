@@ -38,17 +38,20 @@ from looplab.core.concepts import (
     resolve_concept_set,
 )
 from looplab.core.atomicio import atomic_write_text
-from looplab.core.models import Event, Idea, IdeaEmission, durable_idea_payload
+from looplab.core.hardware import detect_gpus
+from looplab.core.models import (
+    Event, Idea, IdeaEmission, durable_idea_payload, effective_card_footprint,
+)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.comment_projection import (
     COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
     normalize_comment_text)
 from looplab.events.eventstore import (
-    EventStore, EventStoreConcurrencyError, EventStoreLockError, iter_jsonl)
+    EventStore, EventStoreConcurrencyError, EventStoreLockError, iter_event_jsonl)
 from looplab.events.replay import fold
 from looplab.events.types import (
-    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_CARD_EDITED,
-    EV_CARD_OPERATOR_DROPPED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED, EV_DEEP_RESEARCH,
+    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
@@ -110,12 +113,14 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
     EV_PROMOTE: _spec(EV_PROMOTE, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_ADDED: _spec(EV_HYPOTHESIS_ADDED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_UPDATED: _spec(EV_HYPOTHESIS_UPDATED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    # Layer 6 operator card-steering: advisory overlays into the reserved override maps — never spawn
-    # compute, wake a dead engine, or open a request/done counter (docs/23 §12.6 stage 10 gate).
-    EV_CARD_REPRIORITIZED: _spec(EV_CARD_REPRIORITIZED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    # Layer 6 operator Card steering never spawns compute, wakes a dead engine, or opens a
+    # request/done counter. Live selection and scheduling observe these folded intents.
+    EV_CARD_REPRIORITIZED: _spec(
+        EV_CARD_REPRIORITIZED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CARD_EDITED: _spec(EV_CARD_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_CARD_RESOURCE_PINNED: _spec(EV_CARD_RESOURCE_PINNED, EnginePolicy.NO_SPAWN, "folded_intent"),
-    EV_CARD_OPERATOR_DROPPED: _spec(EV_CARD_OPERATOR_DROPPED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_RESOURCE_PINNED: _spec(
+        EV_CARD_RESOURCE_PINNED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_DROPPED: _spec(EV_CARD_DROPPED, EnginePolicy.NO_SPAWN, "folded_intent"),
 }
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
 
@@ -154,13 +159,12 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
-    # Layer 6 operator card-steering. The CLIENT payload names the target `card_id` (+ the field it sets);
-    # provenance (`dropped_by`/`pinned_by`) is SERVER-stamped and deliberately NOT accepted from the client
-    # so a forged `source:'novelty'`/engine drop is impossible (docs/23 §12.6 stage 10 threat row).
-    EV_CARD_REPRIORITIZED: frozenset({"card_id", "priority"}),
-    EV_CARD_EDITED: frozenset({"card_id", "statement"}),
-    EV_CARD_RESOURCE_PINNED: frozenset({"card_id", "gpus", "gpu_mem_mib"}),
-    EV_CARD_OPERATOR_DROPPED: frozenset({"card_id", "reason"}),
+    # Provenance is deliberately absent: normalize_control stamps operator authority after validating
+    # the exact current Card and rejects attempts to forge source/dropped_by/pinned.
+    EV_CARD_REPRIORITIZED: frozenset({"id", "priority"}),
+    EV_CARD_EDITED: frozenset({"id", "statement"}),
+    EV_CARD_RESOURCE_PINNED: frozenset({"id", "gpus", "gpu_mem_mib"}),
+    EV_CARD_DROPPED: frozenset({"id", "reason"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_SPECS), "every control event needs a data allowlist"
 
@@ -415,6 +419,49 @@ def _normalize_finalize_data(data: dict) -> dict:
     return {"reason": reason}
 
 
+def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
+    """Return the server-visible GPU count and a complete free-memory envelope when known.
+
+    The server and spawned engine inherit the same ``CUDA_VISIBLE_DEVICES`` fence. ``nvidia-smi``
+    reports physical ids, so a numeric fence is joined explicitly; UUID fences retain a trustworthy
+    count but intentionally degrade memory validation to count-only. Detection is best-effort and
+    fails closed to a zero-GPU envelope for new operator pins.
+    """
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    tokens: list[str] | None = None
+    if cvd is not None:
+        tokens = [token.strip() for token in cvd.split(",") if token.strip()]
+        if len(tokens) == 1 and tokens[0].lower() in {"-1", "none", "nodevfiles", "void"}:
+            return 0, ()
+    try:
+        rows = detect_gpus()
+    except Exception:  # noqa: BLE001 - validation remains count-safe when inventory is unavailable
+        rows = []
+    memory_by_id = {
+        row.get("index"): row.get("mem_free_mib")
+        for row in rows if isinstance(row, dict)
+        and type(row.get("index")) is int
+        and type(row.get("mem_free_mib")) is int
+        and row["mem_free_mib"] >= 0
+    }
+    if tokens is not None:
+        count = len(tokens)
+        if all(token.isdecimal() and int(token) in memory_by_id for token in tokens):
+            return count, tuple(memory_by_id[int(token)] for token in tokens)
+        return count, ()
+    if rows:
+        indices = [row.get("index") for row in rows if isinstance(row, dict)]
+        if (len(indices) == len(rows) and len(set(indices)) == len(indices)
+                and all(index in memory_by_id for index in indices)):
+            return len(rows), tuple(memory_by_id[index] for index in indices)
+        return len(rows), ()
+    try:
+        import torch  # optional; mirrors the engine's count fallback
+        return max(0, int(torch.cuda.device_count())), ()
+    except Exception:  # noqa: BLE001
+        return 0, ()
+
+
 def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     """Validate/normalize one control payload for both /control and /commands.
 
@@ -470,6 +517,13 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         if value is not None and value not in _state().nodes:
             raise HTTPException(404, f"no node #{value} in this run")
         return value
+
+    def _card():
+        card_id = _text("id", limit=256)
+        card = _state().cards.get(card_id)
+        if card is None:
+            raise HTTPException(404, f"no Card {card_id!r} in this run")
+        return card_id, card
 
     def _text(name: str, *, required: bool = True, limit: int = 20_000) -> Optional[str]:
         value = data.get(name)
@@ -918,8 +972,8 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         lane_limits = strategy.get("llm_lane_limits")
         if lane_limits is not None:
             from looplab.core.llm_broker import LLM_LANES
-            if not isinstance(lane_limits, dict) or not lane_limits:
-                raise HTTPException(400, "strategy.llm_lane_limits must be a non-empty JSON object")
+            if not isinstance(lane_limits, dict):
+                raise HTTPException(400, "strategy.llm_lane_limits must be a JSON object")
             if any(not isinstance(lane, str) or lane not in LLM_LANES for lane in lane_limits):
                 raise HTTPException(400, "strategy.llm_lane_limits has an unknown lane")
             clean_lanes = {}
@@ -1109,37 +1163,56 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             raise HTTPException(400, "hypothesis status must be open, abandoned, or deleted")
         data["status"] = status
     elif event_type == EV_CARD_REPRIORITIZED:
-        # Operator pins a board priority. The fold overlays it LAST (operator-wins) and resolves the id
-        # through the merge-canonical map, so a stale/aliased card id lands on the survivor, never a crash.
-        data["card_id"] = _text("card_id", limit=256)
+        card_id, _card_value = _card()
         priority = _integer("priority")
-        if not 0 <= priority <= (1 << 31) - 1:
-            raise HTTPException(400, "priority must be between 0 and 2147483647")
-        data["priority"] = priority
+        if not 0 <= priority < 256:
+            raise HTTPException(400, "priority must be between 0 and 255")
+        data = {
+            "id": card_id, "priority": priority,
+            "source": "operator", "pinned": True,
+        }
     elif event_type == EV_CARD_EDITED:
-        # DISPLAY statement only — the immutable seed statement stays the hash-join key (decision 24).
-        data["card_id"] = _text("card_id", limit=256)
-        data["statement"] = _text("statement", limit=2_048)
+        card_id, card = _card()
+        statement = _text("statement", limit=4_000)
+        if statement == card.statement:
+            raise HTTPException(409, "Card display statement is unchanged")
+        data = {"id": card_id, "statement": statement, "source": "operator"}
     elif event_type == EV_CARD_RESOURCE_PINNED:
-        # Server-side sane bounds (400 on out-of-range); the L4 admission path additionally clamps the
-        # EFFECTIVE footprint to the live GPU pool envelope, so an over-pin can never wedge the scheduler.
-        data["card_id"] = _text("card_id", limit=256)
-        pinned = False
-        for field, upper in (("gpus", 1024), ("gpu_mem_mib", 1_000_000_000)):
-            if data.get(field) is not None:
-                value = _integer(field)
-                if not 0 <= value <= upper:
-                    raise HTTPException(400, f"{field} must be between 0 and {upper}")
-                data[field] = value
-                pinned = True
-        if not pinned:
-            raise HTTPException(400, "card_resource_pinned needs at least one of gpus/gpu_mem_mib")
-    elif event_type == EV_CARD_OPERATOR_DROPPED:
-        # `dropped_by='operator'` is server-STAMPED by the fold, never accepted from the client, so an
-        # operator drop can never be forged as an engine/novelty drop.
-        data["card_id"] = _text("card_id", limit=256)
-        if data.get("reason") is not None:
-            data["reason"] = _text("reason", required=False, limit=2_000)
+        card_id, card = _card()
+        if data.get("gpus") is None:
+            raise HTTPException(400, "card_resource_pinned.gpus is required")
+        gpus = _integer("gpus")
+        if gpus < 0:
+            raise HTTPException(400, "gpus must be non-negative")
+        memory = _integer("gpu_mem_mib", required=False)
+        if memory is not None and memory < 0:
+            raise HTTPException(400, "gpu_mem_mib must be non-negative")
+        if gpus == 0 and memory is not None:
+            raise HTTPException(400, "a CPU-only resource pin cannot request GPU memory")
+        gpu_count, gpu_memory = _card_resource_envelope()
+        if gpus > gpu_count:
+            raise HTTPException(
+                400, f"gpus exceeds the current visible GPU envelope ({gpu_count})")
+        requested = {"gpus": gpus}
+        if memory is not None:
+            requested["gpu_mem_mib"] = memory
+        effective = effective_card_footprint(
+            card.footprint, requested, gpu_count=gpu_count, gpu_memory_mib=gpu_memory)
+        if memory is not None and len(gpu_memory) == gpu_count and gpus > 0:
+            envelope = sorted(gpu_memory, reverse=True)[gpus - 1]
+            if memory > envelope:
+                raise HTTPException(
+                    400, f"gpu_mem_mib exceeds the {gpus}-GPU envelope ({envelope} MiB/GPU)")
+        if effective is None or effective.get("gpus") != gpus:
+            raise HTTPException(400, "resource pin cannot form a schedulable footprint")
+        data = {
+            "id": card_id, **requested,
+            "source": "operator", "pinned": True,
+        }
+    elif event_type == EV_CARD_DROPPED:
+        card_id, _card_value = _card()
+        reason = _text("reason", required=False, limit=400) or "operator dropped"
+        data = {"id": card_id, "reason": reason, "dropped_by": "operator"}
 
     try:
         # Encode INSIDE the guard: json.dumps(ensure_ascii=False) accepts a lone surrogate (valid
@@ -1302,11 +1375,11 @@ class RunCommandService:
 
         Generation identity depends only on the first durable event. Read just that record so callers
         can validate the identity while holding the run sequencer without turning every poll into an
-        O(events) critical section. ``iter_jsonl`` preserves the event store's torn/corrupt-first-line
+        O(events) critical section. ``iter_event_jsonl`` preserves the event store's torn/corrupt-first-line
         semantics; ``run_generation_token`` also validates that dictionary through ``Event`` so a
         complete JSON object with an invalid event schema remains generation-less, as in ``read_all``.
         """
-        return run_generation_token(iter_jsonl(self._events_path(rd)))
+        return run_generation_token(iter_event_jsonl(self._events_path(rd)))
 
     @contextmanager
     def run_activity(self, rd: Path, kind: str, *, generation: str):
@@ -2418,8 +2491,44 @@ class RunCommandService:
         return updated
 
     @staticmethod
-    def _comment_precondition(state, event_type: str, data: dict) -> Optional[dict]:
+    def _collaboration_precondition(state, event_type: str, data: dict) -> Optional[dict]:
         """Recheck the exact semantic subject immediately before a collaboration append."""
+        if event_type in {
+            EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
+        }:
+            card_id = data.get("id")
+            card = state.cards.get(card_id) if isinstance(card_id, str) else None
+            if card is None:
+                return _error(
+                    "card_not_found",
+                    f"the Card target {card_id!r} no longer exists in this run generation",
+                    "refresh the Card board before submitting another operator control",
+                )
+            if event_type == EV_CARD_RESOURCE_PINNED:
+                gpus = data.get("gpus")
+                memory = data.get("gpu_mem_mib")
+                gpu_count, gpu_memory = _card_resource_envelope()
+                if (type(gpus) is not int or gpus < 0 or gpus > gpu_count
+                        or (memory is not None and (type(memory) is not int or memory < 0))
+                        or (gpus == 0 and memory is not None)):
+                    return _error(
+                        "card_resource_envelope_changed",
+                        "the Card resource pin no longer fits the visible GPU envelope",
+                        "refresh hardware state and submit a new pin within the current envelope",
+                    )
+                if memory is not None and len(gpu_memory) == gpu_count and gpus > 0:
+                    envelope = sorted(gpu_memory, reverse=True)[gpus - 1]
+                    if memory > envelope:
+                        return _error(
+                            "card_resource_envelope_changed",
+                            "the Card GPU-memory pin no longer fits the visible GPU envelope",
+                            "refresh hardware state and submit a new pin within the current envelope",
+                        )
+            return None
+        if event_type == EV_RUN_CONCEPTS:
+            # The run (rather than a comment/node/Card) is the exact collaboration subject. Its
+            # generation fence is rechecked by the caller immediately before this precondition.
+            return None
         if event_type == EV_COMMENT_CREATED:
             node_id = data.get("node_id")
             generation = data.get("node_generation")
@@ -2499,10 +2608,10 @@ class RunCommandService:
 
     def _append_collaboration_intent(self, rd: Path, record: dict, event_data: dict
                                      ) -> tuple[Optional[Event], int, Optional[dict]]:
-        """Strict-lock, bounded-CAS append for a versioned comment mutation.
+        """Strict-lock, bounded-CAS append for a collaboration mutation.
 
         Engine/domain events may advance the shared log between our read and append.  Retry those
-        unrelated tail races after refolding; reject only when the run/node/comment identity moved.
+        unrelated tail races after refolding; reject only when the exact semantic subject moved.
         """
         store = EventStore(self._events_path(rd))
         baseline = -1
@@ -2513,7 +2622,8 @@ class RunCommandService:
                 error = self._generation_changed_error(record, current_generation)
                 return None, (events[-1].seq if events else -1), error
             state = fold(events)
-            error = self._comment_precondition(state, str(record.get("event_type") or ""), event_data)
+            error = self._collaboration_precondition(
+                state, str(record.get("event_type") or ""), event_data)
             if error is not None:
                 return None, (events[-1].seq if events else -1), error
             baseline = events[-1].seq if events else -1
@@ -2530,15 +2640,15 @@ class RunCommandService:
                     "restore cross-process file locking, then retry this exact command id",
                     retryable=True)
         return None, baseline, _error(
-            "comment_concurrency_busy",
-            "the event log kept changing while the comment version was being verified",
+            "collaboration_concurrency_busy",
+            "the event log kept changing while the collaboration subject was being verified",
             "retry this exact command id after the run produces less event traffic",
             retryable=True)
 
     def _decision(self, rd: Path, event_type: str) -> tuple[str, Optional[dict]]:
-        # Comments never wake or steer the engine.  Requiring a readable engine.lock here would make
-        # collaboration unavailable precisely when storage ownership diagnostics are degraded, even
-        # though the strict event append lock below is the only ownership guarantee this write needs.
+        # Command-only collaboration never requires STARTING a driver. A live driver may observe an
+        # intent (notably operator Card drop), but the strict append lock is the only ownership
+        # guarantee this write needs, even when engine.lock diagnostics are degraded.
         if event_type in COLLABORATION_EVENTS:
             return "append", None
         state = self.srv.state(rd)

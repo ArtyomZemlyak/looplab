@@ -13,11 +13,11 @@ be set four ways, in increasing priority:
 
 The resolved, **secret-masked launch settings** are written to `config.snapshot.json` in every run
 dir. `resume` loads that snapshot, but it is not the sole authority for every effective field:
-`card_driven_selection`, `holdout_fraction`, `holdout_select`, `select_verifier`,
+`card_driven_selection`, `speculation_depth`, `holdout_fraction`, `holdout_select`, `select_verifier`,
 `select_verifier_samples`, and `verifier_ci_tie` are committed by `run_started` and restored from
 the folded event log. A later
 `trust_gate_changed` event likewise owns the effective trust gate. The owner per-run config API
-overlays those folded values and marks the six run-start fields read-only; `looplab inspect`
+overlays those folded values and marks the seven run-start fields read-only; `looplab inspect`
 deliberately prints the raw on-disk launch snapshot for diagnostics.
 
 ```bash
@@ -60,8 +60,8 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **155 of the 184 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 17 high-frequency keys; search spans all 155 catalogued keys.
+server-owned curated catalogue with **156 of the 185 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 17 high-frequency keys; search spans all 156 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
 
@@ -86,7 +86,7 @@ The per-run Config editor has a separate contract. Its GET metadata includes a 6
 `expected_revision` on `PUT /api/runs/{id}/config`. Its own equivalent local/interprocess locking contract—not
 the global Settings lock—covers the
 read/compare/merge/write transaction. A stale value returns structured
-`run_config_revision_conflict` with the current revision and writes nothing. The six run-start-pinned
+`run_config_revision_conflict` with the current revision and writes nothing. The seven run-start-pinned
 selection-treatment fields and `profile` remain read-only under the rules described above.
 
 All three mutation tokens are optional at the raw HTTP boundary only for legacy clients. Omission preserves
@@ -151,6 +151,7 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `unified_agent` | `LOOPLAB_UNIFIED_AGENT` | `true` | One LLM identity plays Researcher + Developer (+ Strategist) across stages |
 | `agent_drives_actions` | `LOOPLAB_AGENT_DRIVES_ACTIONS` | `true` | The agent picks the next macro action within a pure legal-action gate |
 | `card_driven_selection` | `LOOPLAB_CARD_DRIVEN_SELECTION` | `false` | Opt in to Card-queue macro-action selection. The value is pinned by `run_started`; when both action flags are enabled, Card selection takes precedence over `agent_drives_actions`. |
+| `speculation_depth` | `LOOPLAB_SPECULATION_DEPTH` | `0` | Static live-prefetch-backlog cap: outstanding requests plus committed pending speculative Card builds not already admitted to the current consumer session (`0` = fully off, `1`–`64` = bounded overlap). A positive value takes effect only with `card_driven_selection=true`. Pinned by `run_started`, so resume cannot silently mix execution treatments after a config edit. |
 
 Set `unified_agent` and `agent_drives_actions` both to `false` for the legacy split-role behavior.
 These are no-ops unless `backend=llm`.
@@ -302,7 +303,8 @@ closed map over `build`, `deep_research`, `novelty_dedup`, `enrichment`, and the
 lane. Missing lanes are unbounded inside the shared total; supplied widths are raw durable live
 deltas in `0..64`, with `0` settling to one worker (never re-running startup AUTO). The Strategist
 may reallocate it when granted; an operator may pin the canonical totals and/or this map through
-`set_strategy`, and those exact raw values are re-applied on resume.
+`set_strategy`, and those exact raw values are re-applied on resume. An explicit
+`llm_lane_limits: {}` atomically clears every lane cap; omitting the field retains the current map.
 
 `card_scoring` is a separate Strategy-only, atomic treatment for the opt-in Card selector:
 `{stance: explore|balanced|exploit, novelty_weight: 0..1, coverage_weight: 0..1}`. It ranks only

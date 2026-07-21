@@ -26,7 +26,7 @@
 <div class="head">
   <div class="eyebrow">LoopLab · core process capability map</div>
   <h1>The core loop — defaults and optional paths</h1>
-  <p class="lede">Read the top row left→right: one node is proposed → passes the novelty stage <em>(shipped mode: LLM when a client is available)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Numbers can be caps, thresholds or cadences. Important status copy calls out selected default, opt-in and off paths; configuration remains authoritative.</p>
+  <p class="lede">Read the top row left→right: one node is proposed → passes the novelty stage <em>(shipped mode: LLM when a client is available)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the Card lifecycle board (with a legacy Hypotheses fallback), cross-run memory and the event spine hang below. Numbers can be caps, thresholds or cadences. Important status copy calls out selected default, opt-in and off paths; configuration remains authoritative.</p>
   <div class="legend">
     <span class="lg"><span class="sw" style="background:var(--r)"></span>Researcher</span>
     <span class="lg"><span class="sw" style="background:var(--d)"></span>Developer</span>
@@ -54,7 +54,7 @@ function edge(f,fs,t,ts,o){E.push([f,fs,t,ts,o||{}]);}
 /* ============ SETUP row ============ */
 box("genesis",40,44,300,72,"Genesis","⌘",C.mut,["author task from a plain goal (LLM)","composable: repo · dataset · cmd · kaggle (kind inferred)","generative kind → backend=llm (CLI + web /api/start)"]);
 box("onboard",370,44,360,58,"Onboarding · repo","□",C.ev,["agent proposes → human ratifies eval spec","ratify_freeze | autonomous | ratify_freeze_drift"]);
-box("boss",1740,44,360,72,"Boss / Assistant · UI","⌘",C.s,["steer: inject · hypothesis · approve · stop/finalize/resume","run concepts: set base · retag node","portfolio taxonomy: merge · purge/unpurge · split (approval-gated)"]);
+box("boss",1740,44,360,72,"Boss / Assistant · UI","⌘",C.s,["steer: inject · Card edit/priority/resources/drop · approve","run: stop/finalize/resume · concepts: set base/retag","portfolio taxonomy: merge · purge/unpurge · split (approval-gated)"]);
 
 /* ============ MAIN LOOP row (y=150) ============ */
 const LY=150,LH=76;
@@ -128,12 +128,12 @@ stack(2100,360,DY,[
  {id:"concept_ops",h:132,t:"Concept edits · governance",tag:"durable",c:C.s,sub:["operator retag/set-base intent → generation fence → concept_tag_edited/run_concepts","fold stamps operator provenance; explicit [] stays untagged","Assistant ConceptGovernanceTools: merge · purge/unpurge · split","approval binds normalized payload + revision; ledger CAS serializes mutation","read tools: concept_* in-run · cross_run_concept_map portfolio"]},
 ]);
 
-/* ============ HYPOTHESIS pipeline (row y≈900) ============ */
+/* ============ CARD / legacy HYPOTHESIS pipeline (row y≈900) ============ */
 const HY=920;
-box("h_state",40,HY,270,72,"State hypothesis","R",C.r,["id = slug-md5[:6] (exact hash)","src: researcher·deep-research·human·strategist"]);
+box("h_state",40,HY,270,72,"State Card","R",C.r,["Card id = durable work-item identity","immutable seed · editable display · source receipt"]);
 box("h_dedup",350,HY,340,72,"Dedup + merge","R",C.r,["exact id (fold) + agentic paraphrase merge","hybrid grep+BM25+vector RRF → agent decides (open≥4 & +2)"]);
-box("h_prio",730,HY,300,72,"Prioritize · foresight","R",C.r,["world-model ranks open board (pre-eval)","panel _MAX_ITEMS 20 · agentic max_turns 4"]);
-box("kanban",1070,HY-8,640,90,"Hypothesis board · kanban","A",C.r,["derived on every fold — never stored","open → testing → supported (Δ>0/best) → tested → abandoned"]);
+box("h_prio",730,HY,300,72,"Score + pin priority","R / A",C.r,["policy scorer ranks selectable Cards","operator priority override is applied last"]);
+box("kanban",1070,HY-8,640,104,"Card board · lifecycle kanban","A",C.r,["derived on every fold · bounded public receipt","proposed → building → coded → running → evaluated | gated | dropped","edit display · pin priority/GPU · deliberate drop · generation-fenced"]);
 
 /* ============ MEMORY WRITE (row y≈1080) ============ */
 const WY=1080;
@@ -155,7 +155,7 @@ box("g_rec",1380,GY,340,66,"Reconcile on re-eval","R",C.mem,["node_reset flips o
 
 /* ============ MEMORY TIERS (row y≈1360) ============ */
 const TY=1360;
-box("mA",40,TY,300,72,"A · Hypothesis board","in-run",C.mem,["state.hypotheses — derived each fold"]);
+box("mA",40,TY,300,72,"A · Card board","in-run",C.mem,["state.cards — lifecycle + controls derived each fold"]);
 box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + digest (the search tree)"]);
 box("mC",672,TY,320,108,"C · Cross-run evidence","cross-run",C.mem,["lessons · capsules · v3 claims + producer/read-health receipts","alias/split/tombstone taxonomy ledger with global revision","stewards @finalize: proposals only","operator CLI / approved Assistant applies governed mutations"]);
 box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · memory/cases.jsonl · abstraction+anchors"]);

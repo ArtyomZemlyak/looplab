@@ -178,9 +178,35 @@ def test_every_control_event_has_one_explicit_engine_policy():
         "comment_created", "comment_edited", "comment_resolution_changed", "concept_tag_edited",
         "run_concepts",
         "hypothesis_added", "hypothesis_updated",
-        # Layer 6 operator card-steering: advisory overlays, never spawn/wake compute.
-        "card_reprioritized", "card_edited", "card_resource_pinned", "card_operator_dropped",
+        # Layer 6 operator Card steering: folded intents never spawn or wake compute.
+        "card_reprioritized", "card_edited", "card_resource_pinned", "card_dropped",
     }
+
+
+def test_card_control_folds_without_waking_a_dead_engine(tmp_path):
+    rd = _seed(tmp_path)
+    EventStore(rd / "events.jsonl").append("card_added", {
+        "id": "card-1", "statement": "immutable seed", "source": "researcher",
+        "idea": {"operator": "draft", "params": {}, "space": {}},
+    })
+    driver = _Driver(alive=False)
+    client, _srv = _client(tmp_path, driver)
+
+    response = _post(
+        client, "card_edited", {"id": "card-1", "statement": "display only"},
+        key="card-edit-no-spawn",
+    )
+    assert response.status_code == 200
+    record = _terminal(client, response.json())
+    assert record["status"] == "succeeded"
+    assert driver.calls == []
+    event = [event for event in EventStore(rd / "events.jsonl").read_all()
+             if event.type == "card_edited"][-1]
+    assert event.data["source"] == "operator"
+    assert event.data["statement"] == "display only"
+    state = fold(EventStore(rd / "events.jsonl").read_all())
+    assert state.cards["card-1"].statement == "display only"
+    assert state.cards["card-1"].seed_statement == "immutable seed"
 
 
 def test_idempotency_is_durable_one_event_and_key_digest_only(tmp_path):
@@ -262,7 +288,7 @@ def test_run_generation_reads_only_the_first_durable_event(tmp_path, monkeypatch
         yield first.model_dump(mode="json")
         raise AssertionError("run generation consumed an event after the first durable record")
 
-    monkeypatch.setattr(run_commands_module, "iter_jsonl", first_only)
+    monkeypatch.setattr(run_commands_module, "iter_event_jsonl", first_only)
     assert srv.commands.run_generation(rd) == expected
     assert requested_paths == [rd / "events.jsonl"]
 
@@ -270,7 +296,7 @@ def test_run_generation_reads_only_the_first_durable_event(tmp_path, monkeypatch
         raise FileNotFoundError("generation replaced before open")
         yield  # pragma: no cover - keep this a generator so failure happens on first next()
 
-    monkeypatch.setattr(run_commands_module, "iter_jsonl", missing_during_open)
+    monkeypatch.setattr(run_commands_module, "iter_event_jsonl", missing_during_open)
     assert srv.commands.run_generation(rd) == ""
 
 
@@ -1119,10 +1145,13 @@ def test_set_strategy_accepts_canonical_totals_lanes_and_atomic_card_scoring(tmp
             "stance": "explore", "novelty_weight": 0.25, "coverage_weight": 1.0,
         },
     }}
+    assert normalize_control(srv, rd, "set_strategy", {
+        "strategy": {"llm_lane_limits": {}},
+    }) == {"strategy": {"llm_lane_limits": {}}}
 
     for strategy in (
         {"max_parallel": 2},
-        {"llm_lane_limits": {}},
+        {"llm_lane_limits": []},
         {"llm_lane_limits": {"unknown": 1}},
         {"llm_lane_limits": {"build": True}},
         {"llm_lane_limits": {"build": 65}},
@@ -1137,6 +1166,24 @@ def test_set_strategy_accepts_canonical_totals_lanes_and_atomic_card_scoring(tmp
         with pytest.raises(HTTPException) as exc:
             normalize_control(srv, rd, "set_strategy", {"strategy": strategy})
         assert exc.value.status_code == 400
+
+
+def test_set_strategy_command_persists_explicit_empty_lane_clear(tmp_path):
+    rd = _seed(tmp_path)
+    driver = _Driver(alive=True)
+    client, _srv = _client(tmp_path, driver)
+
+    record = _post(
+        client,
+        "set_strategy",
+        {"strategy": {"llm_lane_limits": {}}},
+        key="clear-lane-limits",
+    ).json()
+    intent = _wait_for_intent(rd, record["id"])
+
+    assert intent.data["strategy"] == {"llm_lane_limits": {}}
+    _ack_marked(rd, record["id"])
+    assert _terminal(client, record)["status"] == "succeeded"
 
 
 @pytest.mark.parametrize("event_type,data", [
