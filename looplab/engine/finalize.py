@@ -691,6 +691,14 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # when `cross_run_concepts` is also on (that flag gates the capsule write in the case step above).
         ensure_finalize_reflection(engine, scope, finish_seq)
 
+        # Layer 1b ref-only Card enrichment runs once more after run-end reflection.  This captures
+        # comparative lessons produced during finalize (and also repairs a crash gap on retry) before
+        # the terminal cost/publication steps, while Card events remain authored by the main task.
+        try:
+            engine._sync_card_enrichments(fold(engine.store.read_all()))
+        except Exception:  # noqa: BLE001 - advisory Card links must never block terminal completion
+            pass
+
         # CODEX AGENT: reflection must precede claim curation so this run's durable lessons are visible;
         # every steward still precedes llm_cost so its provider usage enters the terminal roll-up.
         if getattr(engine, "_cross_run_curation", False):

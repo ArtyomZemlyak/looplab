@@ -376,12 +376,11 @@ class LessonReconcileMixin:
         # Ledger consistency: the re-derived pairs are (re-)spent so run-end reflection won't double
         # them — recorded as a lessons_distilled(reconcile) exactly like the mid-run cadence.
         if pairs_used:
+            from looplab.core.advisory_payloads import research_lesson_receipt
             self._e.store.append(EV_LESSONS_DISTILLED, {
                 "at_node": len(state.nodes), "trigger": "reconcile", "count": len(comp),
                 "pairs": [[pr["a"], pr["b"]] for pr in pairs_used],
-                "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
-                             "claim_stance": lz.get("claim_stance"),
-                             "evidence": lz.get("evidence")} for lz in comp]})
+                "lessons": [research_lesson_receipt(lz, state) for lz in comp]})
         # Audit sidecar (fold ignores it): what drifted and what replaced it.
         self._e.store.append(EV_LESSONS_RECONCILED, {
             "at_node": len(state.nodes), "n_retired": n_retired, "n_added": len(fresh),

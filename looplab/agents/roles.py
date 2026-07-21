@@ -10,10 +10,12 @@ the real loop (draft -> run -> evaluate -> improve -> select) deterministically.
 """
 from __future__ import annotations
 
+import json
 import random
 from typing import Optional, Protocol
 
-from looplab.core.models import Idea, IdeaEmission, Node, RunState
+from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
+                                 developer_artifact_footprint, normalize_researcher_footprint)
 from looplab.core.parse import LLMClient, ParseError, extract_code, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.core.validate import AgentReport, validate_agent_code
@@ -74,6 +76,18 @@ _EVAL_TIMEOUT_GUIDANCE = (
     "so SIZE the experiment to FIT — estimate total training steps x per-step time and prefer "
     "fewer epochs, a subsample, or a short probe run to measure per-step cost first; a smaller "
     "experiment that COMPLETES beats a bigger one that gets killed.) ")
+# Hypothesis-card resource declaration (docs/23, Stage 1b). This is deliberately part of the
+# code-owned capability suffix rather than either PromptStore default: both Researcher variants
+# append that suffix after rendering an override, so a custom persona cannot hide this contract.
+# The Developer may refine the estimate later; the Researcher owns only these quantitative keys.
+_FOOTPRINT_GUIDANCE = (
+    "Optionally set `footprint` to a JSON object describing this experiment's expected resources: "
+    "{`gpus`: <non-negative integer>, `gpu_mem_mib`: <non-negative integer or null>}. Leave "
+    "`footprint` null (or omit it) when GPU needs are UNSPECIFIED; unspecified is distinct from "
+    "`gpus=1`. Use `gpus=0` only for a deliberately CPU-only experiment, and `gpus=1` only when "
+    "the experiment specifically needs one GPU. Do not put `timeout`/`eval_timeout` or authority "
+    "and provenance keys such as `proposed_by`, `finalized_by`, or `pinned_by` inside `footprint`; "
+    "wall-clock stays in the top-level `eval_timeout`, and the engine/operator own authority fields. ")
 # P14: the schema requires `operator` but the engine's policy overwrites it unconditionally
 # (orchestrator's node-creation sites) — say so, in BOTH researcher prompts, so the model
 # doesn't strategize around a dead field.
@@ -85,8 +99,9 @@ def _researcher_capability_suffix(offer_sweep: bool) -> str:
     """P6: capability prose SHARED by both researchers (`LLMResearcher` here and agent.py's
     `ToolUsingResearcher`) so the two role variants can't drift apart again: the sweep offer
     (only when the active Developer implements `idea.space` — `make_roles` decides, see
-    `_SWEEP_OFFER`) + the `eval_timeout` ask."""
-    return (_SWEEP_OFFER if offer_sweep else "") + _EVAL_TIMEOUT_GUIDANCE
+    `_SWEEP_OFFER`) + the `eval_timeout` ask + the optional resource-footprint contract."""
+    return ((_SWEEP_OFFER if offer_sweep else "") + _EVAL_TIMEOUT_GUIDANCE
+            + _FOOTPRINT_GUIDANCE)
 
 
 def _researcher_system(offer_sweep: bool = True) -> str:
@@ -97,7 +112,8 @@ def _researcher_system(offer_sweep: bool = True) -> str:
     `ToolUsingResearcher`), so the composed prompt stays byte-equal to this helper while a
     `researcher_system.md` override can never bypass the code-owned mode contract or `offer_sweep` gate. With
     `offer_sweep=True` this matches the historical `_RESEARCHER_SYSTEM` modulo the verified
-    prompt fixes (P21 numeric-grid note, P6 eval_timeout scoping, P14 operator note)."""
+    prompt fixes (P21 numeric-grid note, P6 eval_timeout scoping, Stage-1b footprint contract,
+    P14 operator note)."""
     return (_RESEARCHER_CORE + _CONCEPT_AUTHORING_GUIDANCE
             + _researcher_capability_suffix(offer_sweep) + _OPERATOR_NOTE
             + "Respond ONLY with the requested structured fields.")
@@ -139,6 +155,22 @@ _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced
                      "Seed ALL randomness (train/validation splits, CV folds, model init, "
                      "subsampling) from int(os.environ.get('LOOPLAB_EVAL_SEED', '0')) so every "
                      "evaluation is reproducible and comparable across candidates. ")
+
+
+def _developer_footprint_guidance(idea: Idea) -> str:
+    """Code-owned prompt suffix for the optional Developer resource finalization marker."""
+    proposed = normalize_researcher_footprint(getattr(idea, "footprint", None))
+    if proposed is None:
+        return ""
+    payload = json.dumps(proposed, sort_keys=True, separators=(",", ":"))
+    return (
+        "\nThe Researcher proposed this resource footprint: " + payload + ". Size the implementation "
+        "to that envelope. If the shipped code truly needs different quantities, put exactly one "
+        "comment in the first 80 lines of the Python block as `# LOOPLAB_FOOTPRINT: {\"gpus\":N,"
+        "\"gpu_mem_mib\":M}` (omit either optional key when unknown). This marker is metadata only; "
+        "never put credentials, paths, commands, or prose in it. If the proposal is already accurate, "
+        "you may omit the marker."
+    )
 # Appended to the Developer's system prompt when the Idea carries a `space` (intra-node sweep).
 _SWEEP_CONTRACT = (
     "\nThis is an INTRA-NODE SWEEP: evaluate EVERY point of the given grid in ONE process — load "
@@ -174,7 +206,7 @@ class Developer(Protocol):
 # every consumer getattr and every producer assignment must use exactly these names, and every
 # delegating wrapper (ValidatingDeveloper, best-of-N, the foresight panel) must forward them.
 DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
-    "last_files", "last_deleted",
+    "last_files", "last_deleted", "last_footprint",
     # CLI-agent (ADR-7) developer outputs: the validation report the engine's audit emitter
     # reads (engine/audit.py `_emit_agent_report`), and the seed/process/patch evidence the
     # ValidatingDeveloper's checks consume. Surfaced by the contract test's own first run —
@@ -184,7 +216,7 @@ RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
-    "_novelty_stance", "_hyp_order")
+    "_novelty_stance", "_hyp_order", "_steering_context")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
@@ -290,13 +322,16 @@ class ToyObjectiveDeveloper:
 
     def __init__(self, noise: float = 0.0):
         self.noise = noise
+        self.last_footprint: dict | None = None
 
     def implement(self, idea: Idea) -> str:
-        return _OBJECTIVE_TEMPLATE.format(
+        code = _OBJECTIVE_TEMPLATE.format(
             x=idea.params.get("x", 0.0),
             y=idea.params.get("y", 0.0),
             noise=self.noise,
         )
+        self.last_footprint = developer_artifact_footprint(idea.footprint, code)
+        return code
 
 
 # --------------------------------------------------------------------------- #
@@ -515,10 +550,11 @@ class LLMDeveloper:
         self.client = client
         self.brief = brief
         self.prompts = prompts
+        self.last_footprint: dict | None = None
 
     def implement(self, idea: Idea) -> str:
         system = (render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief
-                  + "\n\n" + _attention_points())
+                  + _developer_footprint_guidance(idea) + "\n\n" + _attention_points())
         # Render whatever params the task's Researcher proposed (task-agnostic): degree/lam
         # for regression, k for mlebench, etc. — hardcoding names dropped the value on
         # tasks that use a different hyperparameter.
@@ -535,8 +571,10 @@ class LLMDeveloper:
                     f"Parameters: {params}.\n"
                     "You own the implementation: design and write the solution code that realises "
                     "this concept.").strip()
-        return extract_code(self.client.complete_text(
+        code = extract_code(self.client.complete_text(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
+        self.last_footprint = developer_artifact_footprint(idea.footprint, code)
+        return code
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         # P8: the hardware/operational cues reach repair too (a timeout/oom repair NEEDS the real
@@ -544,7 +582,7 @@ class LLMDeveloper:
         # the implement path.
         system = (render(self.prompts, "developer_repair_prefix", "You are an expert Python debugger. ") +
                   render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief
-                  + "\n\n" + _attention_points())
+                  + _developer_footprint_guidance(idea) + "\n\n" + _attention_points())
         user = ("The script below failed. Return a corrected, complete script that runs "
                 "and prints the required JSON metric line.\n\n--- SCRIPT ---\n" + code +
                 "\n\n--- ERROR (stderr tail) ---\n" + error)
@@ -553,8 +591,10 @@ class LLMDeveloper:
         # deterministically re-fails, burning every attempt.
         if idea is not None and getattr(idea, "rationale", ""):
             user += "\n\n--- ADDITIONAL GUIDANCE ---\n" + idea.rationale
-        return extract_code(self.client.complete_text(
+        repaired = extract_code(self.client.complete_text(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
+        self.last_footprint = developer_artifact_footprint(idea.footprint, repaired)
+        return repaired
 
 
 # --------------------------------------------------------------------------- #
@@ -576,8 +616,8 @@ class WrapsDeveloper:
       `make_roles` pokes `prompts`, H3 per-role rewiring pokes `client`, T8/A0b
       merge_mode="auto" resolution reads `is_code_generating`, and the orchestrator reads
       `last_report` for the `agent_validated` audit event.
-    - `last_files` / `last_deleted`: per-call audit attributes the orchestrator reads AFTER
-      implement/repair. Wrappers own them as plain attributes: either mirrored from the
+    - `last_files` / `last_deleted` / `last_footprint`: per-call output attributes the orchestrator
+      reads AFTER implement/repair. Wrappers own them as plain attributes: either mirrored from the
       wrapped developer via `_sync_audit()`, or set by the wrapper's own logic (e.g.
       best-of-N's chosen candidate, the validator's fell-back handling).
     - `audit_extra()`: wrapper-specific audit fields merged into the `agent_validated` event.
@@ -632,9 +672,10 @@ class WrapsDeveloper:
         return fn() if callable(fn) else {}
 
     def _sync_audit(self) -> None:
-        """Mirror the wrapped developer's per-call file audit onto this wrapper."""
+        """Mirror the wrapped developer's per-call files and resource estimate onto this wrapper."""
         self.last_files = getattr(self._wrapped, "last_files", {}) or {}
         self.last_deleted = getattr(self._wrapped, "last_deleted", []) or []
+        self.last_footprint = getattr(self._wrapped, "last_footprint", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -683,6 +724,7 @@ class ValidatingDeveloper(WrapsDeveloper):
         self.last_shipped_ok: bool = False
         self.last_files: dict[str, str] = {}   # multi-file output of the shipped attempt
         self.last_deleted: list[str] = []      # accepted in-surface deletions of the shipped attempt
+        self.last_footprint: Optional[dict] = None  # resource estimate of the attempt that shipped
 
     # T8/A0b: code-generation capability follows the INNER developer (the fallback is LLM anyway)
     # — kept local: unlike the mixin's forwarder, the fallback's capability counts too.
@@ -728,6 +770,10 @@ class ValidatingDeveloper(WrapsDeveloper):
                            else dict(getattr(self.inner, "last_files", {}) or {}))
         self.last_deleted = ([] if fell_back
                              else list(getattr(self.inner, "last_deleted", []) or []))
+        # This output must describe the implementation that actually ships. In particular, a
+        # rejected agent attempt must not leak its resource estimate onto fallback code.
+        shipped = self.fallback if fell_back else self.inner
+        self.last_footprint = getattr(shipped, "last_footprint", None)
 
     def _attempt_loop(self, idea: Idea, call, fallback_call=None) -> str:
         """Run `call(idea)` (implement or repair), validate, retry-with-feedback up to

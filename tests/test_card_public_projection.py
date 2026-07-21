@@ -174,7 +174,7 @@ def test_public_cards_are_count_size_total_and_deterministic():
     }
     small_rows["card-000"].update({
         "status": "running", "verdict": "open", "actionable": True,
-        "priority": 0, "scored_against": 999,
+        "priority": 0, "pinned": True, "scored_against": 999,
     })
     first = public_cards(small_rows)
     second = public_cards(dict(reversed(list(small_rows.items()))))
@@ -190,6 +190,7 @@ def test_public_cards_are_count_size_total_and_deterministic():
     assert len(first) == PUBLIC_CARD_MAX_COUNT
     assert list(first) == ["card-000", *(f"card-{index:03d}" for index in range(45, 300))]
     assert first["card-000"]["id"] == "card-000"
+    assert first["card-000"]["pinned"] is True
     first_projection = first_envelope["cards_projection"]
     assert (first_projection["total"], first_projection["returned"],
             first_projection["omitted"]) == (300, 256, 44)

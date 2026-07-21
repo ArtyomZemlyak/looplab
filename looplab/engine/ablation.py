@@ -152,26 +152,48 @@ class AblationMixin:
             new_params[top] = proposal.params[top]
         idea = Idea(operator="refine_block", params=new_params,
                     rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})",
+                    footprint=proposal.footprint,
                     concept_mode="delta", concepts_added=[], concepts_removed=[])
+        reservation = self._reserve_node_build(
+            {
+                "kind": "refine_block",
+                "parent_id": parent_id,
+                "parent_generations": {str(parent_id): generation},
+            },
+            idea,
+            scored_against=state.best_node_id,
+            source="engine",
+        )
+        if reservation is None:
+            self._discard_node_build_telemetry()
+            return
+        node_id = reservation.node_id
+        idea = reservation.idea.model_copy(deep=True)
         # §1: a standing operator directive must steer the ablation-produced refine_block code too —
         # this is a real tree-entering node built from an idea, exactly like the improve/merge sites
         # that already thread _directed_idea (the signal_delivery registry lists the Developer as a
         # consumer, so skipping it here would silently drop the directive for every ablation child).
-        code = self._implement(self._directed_idea(idea, state), parent)
+        self._reset_developer_footprint(self.developer)
+        code = self._implement(
+            self._directed_idea(idea.model_copy(deep=True), state), parent)
+        idea, footprint_finalized = self._finalize_developer_footprint(
+            idea, self.developer, code)
         if not self._ablation_parent_current(parent_id, generation):
+            self._fail_reserved_build(
+                node_id=node_id, card_id=reservation.card_id, generation=0,
+                error="parent lifecycle changed while building", reason="superseded")
             self._discard_node_build_telemetry()
             return
-        # Mint the id AND commit node_created under _id_lock + the node_building-aware ceiling, so an
-        # ablation node can't collide with a concurrent parallel build's reserved id (Variant-1).
-        with self._id_lock:
-            _evs = self.store.read_all()
-            node_id = self._node_id_ceiling(_evs, fold(_evs))
-            self._emit_node_created(
-                node_id=node_id, parent_ids=[parent_id], operator="refine_block",
-                idea=durable_idea_payload(idea), code=code,
-                files=getattr(self.developer, "last_files", {}) or {},
-                parent_generations={str(parent_id): generation})
+        self._emit_node_created(
+            node_id=node_id, parent_ids=[parent_id], operator="refine_block",
+            idea=durable_idea_payload(idea), code=code,
+            files=getattr(self.developer, "last_files", {}) or {},
+            parent_generations={str(parent_id): generation},
+            **({"footprint_finalized": True} if footprint_finalized else {}))
         if node_id not in fold(self.store.read_all()).nodes:
+            self._fail_reserved_build(
+                node_id=node_id, card_id=reservation.card_id, generation=0,
+                error="ablation node creation was rejected during replay", reason="superseded")
             self._discard_node_build_telemetry()
             return
         self._emit_agent_report(node_id)
@@ -269,21 +291,44 @@ class AblationMixin:
         idea = Idea(operator="refine_block", params=dict(parent.idea.params),
                     rationale=("code-block ablation: refine the highest-impact pipeline block "
                                f"#{top} and keep the rest. Block:\n{top_src}"),
+                    footprint=parent.idea.footprint,
                     concept_mode="delta", concepts_added=[], concepts_removed=[])
-        new_code = self._implement(self._directed_idea(idea, state), parent)   # §1: directives (see _ablate)
-        if not self._ablation_parent_current(parent_id, generation):
+        reservation = self._reserve_node_build(
+            {
+                "kind": "refine_block",
+                "parent_id": parent_id,
+                "parent_generations": {str(parent_id): generation},
+            },
+            idea,
+            scored_against=state.best_node_id,
+            source="engine",
+        )
+        if reservation is None:
             self._discard_node_build_telemetry()
             return
-        # Mint id + commit node_created under _id_lock + the node_building-aware ceiling (Variant-1).
-        with self._id_lock:
-            _evs = self.store.read_all()
-            node_id = self._node_id_ceiling(_evs, fold(_evs))
-            self._emit_node_created(
-                node_id=node_id, parent_ids=[parent_id], operator="refine_block",
-                idea=durable_idea_payload(idea), code=new_code,
-                files=getattr(self.developer, "last_files", {}) or {},
-                parent_generations={str(parent_id): generation})
+        node_id = reservation.node_id
+        idea = reservation.idea.model_copy(deep=True)
+        self._reset_developer_footprint(self.developer)
+        new_code = self._implement(
+            self._directed_idea(idea.model_copy(deep=True), state), parent)   # §1: directives (see _ablate)
+        idea, footprint_finalized = self._finalize_developer_footprint(
+            idea, self.developer, new_code)
+        if not self._ablation_parent_current(parent_id, generation):
+            self._fail_reserved_build(
+                node_id=node_id, card_id=reservation.card_id, generation=0,
+                error="parent lifecycle changed while building", reason="superseded")
+            self._discard_node_build_telemetry()
+            return
+        self._emit_node_created(
+            node_id=node_id, parent_ids=[parent_id], operator="refine_block",
+            idea=durable_idea_payload(idea), code=new_code,
+            files=getattr(self.developer, "last_files", {}) or {},
+            parent_generations={str(parent_id): generation},
+            **({"footprint_finalized": True} if footprint_finalized else {}))
         if node_id not in fold(self.store.read_all()).nodes:
+            self._fail_reserved_build(
+                node_id=node_id, card_id=reservation.card_id, generation=0,
+                error="ablation node creation was rejected during replay", reason="superseded")
             self._discard_node_build_telemetry()
             return
         self._emit_agent_report(node_id)

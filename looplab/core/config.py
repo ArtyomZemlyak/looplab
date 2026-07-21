@@ -163,6 +163,10 @@ DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
     # duplicate defaults preserves resume authority while an explicit canonical revocation still wins.
     "eval_parallel": ["strategist"],
     "llm_parallel": ["strategist"],
+    # Strategy-only pseudo-setting: the closed per-lane allocation inside the canonical LLM total.
+    # It is not a launch Settings field; operators pin it through `set_strategy` and the Strategist
+    # may reallocate it only while this grant is present.
+    "llm_lane_limits": ["strategist"],
     "max_nodes": ["strategist", "boss"],
     "max_eval_seconds": ["strategist", "boss"],
     "policy": ["strategist"],
@@ -194,8 +198,9 @@ def default_agent_control() -> dict[str, list[str]]:
 class Settings(BaseSettings):
     """The engine settings schema (every knob a run accepts).
 
-    Timeout family — five distinct knobs, each owned by a different subsystem:
+    Timeout family — six distinct knobs, each owned by a different subsystem:
       - `timeout`:             per-eval wall-clock budget for ONE experiment's evaluation (engine/eval).
+      - `max_eval_timeout`:    hard ceiling for a governed per-node Researcher timeout override.
       - `llm_timeout`:         LLM request idle timeout — inter-token stall limit in stream mode
                                (core.llm OpenAICompatibleClient).
       - `llm_header_timeout`:  LLM first-byte (response-headers) window for stream attempts (core.llm).
@@ -272,10 +277,10 @@ class Settings(BaseSettings):
     #   `eval_parallel`: concurrent EVALS (the GPU/experiment consumer). None -> max_parallel; 0 = AUTO
     #     (one experiment per detected GPU). This is the eval-concurrency ceiling; the L4 scheduler
     #     bin-packs declared footprints against the GPU inventory as a SEPARATE, orthogonal axis.
-    #   `llm_parallel`: concurrent LLM BUILDS (the producer). None -> parallel_build; 0 = AUTO (= resolved
-    #     eval_parallel, "build as many seeds as you can eval"). Layer 5 turns this into a multi-lane
-    #     budget the Strategist re-allocates across build/research/novelty-dedup/enrichment; Layer 2 only
-    #     lands the decoupled knob (no throughput change — the spine still alternates build->eval).
+    #   `llm_parallel`: total concurrent LLM provider calls + BUILD fan-out. None -> legacy
+    #     parallel_build semantics without a shared total; 0 = startup AUTO (= resolved eval_parallel
+    #     for build fan-out, historical research overlap unbounded). A positive canonical value enables
+    #     the named-lane broker the Strategist can reallocate at cadence.
     eval_parallel: int | None = Field(default=None, ge=0, le=1024)
     llm_parallel: int | None = Field(default=None, ge=0, le=64)
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
@@ -311,6 +316,11 @@ class Settings(BaseSettings):
     asha_live_quantile: float = Field(default=0.5, ge=0.0, le=1.0)
     asha_live_min_siblings: int = Field(default=3, ge=1)
     timeout: float = Field(default=30.0, gt=0)
+    # Hard ceiling for the Researcher's governed per-node `Idea.eval_timeout`. One hour preserves the
+    # existing heavy/neural-net authoring example while staying well below the sandbox's defensive
+    # 24-hour subprocess ceiling. This is operator-owned run config: agents may request less or more,
+    # but the accepted action is always clamped here after the `agent_control.timeout` permission gate.
+    max_eval_timeout: float = Field(default=3600.0, gt=0, le=24 * 3600.0)
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).
     sweep_timeout_mult: float = Field(default=8.0, ge=1)

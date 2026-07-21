@@ -1,6 +1,6 @@
 """Prompt/capability sync (docs/PROMPT_REVIEW.md P5-P8, P14, P21, P25, P30 + the loop-nudge
-wording): the shared researcher fragments (concept mode, sweep offer, eval_timeout, operator note, hardware
-attention points) reach BOTH role variants; the sweep offer is gated on a Developer that actually
+wording): the shared researcher fragments (concept mode, sweep offer, eval_timeout, resource footprint,
+operator note, hardware attention points) reach BOTH role variants; the sweep offer is gated on a Developer that actually
 implements `idea.space`; the wasted non-repo handoff summary is skipped; the pilot menu renders
 merge parents. Offline (fake clients only)."""
 from __future__ import annotations
@@ -10,8 +10,8 @@ from pathlib import Path
 
 from looplab.core.models import Idea, RunState
 from looplab.agents.roles import (
-    _CONCEPT_AUTHORING_GUIDANCE, _EVAL_TIMEOUT_GUIDANCE, _OPERATOR_NOTE, _SWEEP_CONTRACT,
-    _SWEEP_OFFER, LLMDeveloper, LLMResearcher, _state_brief)
+    _CONCEPT_AUTHORING_GUIDANCE, _EVAL_TIMEOUT_GUIDANCE, _FOOTPRINT_GUIDANCE, _OPERATOR_NOTE,
+    _SWEEP_CONTRACT, _SWEEP_OFFER, LLMDeveloper, LLMResearcher, _state_brief)
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,6 +58,9 @@ def test_plain_researcher_sweep_offer_gated_and_numeric_note_present():
         assert _CONCEPT_AUTHORING_GUIDANCE in s                            # Part V: mode is explicit
         assert "set `eval_timeout`" in s                                 # eval_timeout ask stays
         assert "stage manifest" in s                                     # honestly scoped (P6)
+        assert _FOOTPRINT_GUIDANCE in s                                  # Stage 1b producer contract
+        assert "UNSPECIFIED" in s and "`gpus=0`" in s and "`gpus=1`" in s
+        assert "`timeout`/`eval_timeout`" in s and "`pinned_by`" in s
         assert _OPERATOR_NOTE in s                                       # P14: audit-only operator
 
 
@@ -95,12 +98,13 @@ def test_plain_researcher_override_keeps_code_owned_capability_gate(tmp_path):
 
     on = _sys(True)
     assert on.startswith("OVERRIDDEN CORE.")                              # the core IS replaced
-    assert _SWEEP_OFFER in on and _EVAL_TIMEOUT_GUIDANCE in on
+    assert _SWEEP_OFFER in on and _EVAL_TIMEOUT_GUIDANCE in on and _FOOTPRINT_GUIDANCE in on
     assert _CONCEPT_AUTHORING_GUIDANCE in on
     assert _OPERATOR_NOTE in on
     off = _sys(False)
     assert off.startswith("OVERRIDDEN CORE.")
-    assert _SWEEP_OFFER not in off and _EVAL_TIMEOUT_GUIDANCE in off      # gate stays code-owned
+    assert (_SWEEP_OFFER not in off and _EVAL_TIMEOUT_GUIDANCE in off
+            and _FOOTPRINT_GUIDANCE in off)                               # suffix stays code-owned
     assert _CONCEPT_AUTHORING_GUIDANCE in off                              # mode cannot be overridden
 
 
@@ -159,11 +163,25 @@ def test_tool_researcher_gets_shared_capability_fragments(monkeypatch):
     sys_on = _tool_researcher_call(monkeypatch)["messages"][0]["content"]
     assert _SWEEP_OFFER in sys_on                                        # P6: default researcher too
     assert _EVAL_TIMEOUT_GUIDANCE in sys_on
+    assert _FOOTPRINT_GUIDANCE in sys_on
     assert _CONCEPT_AUTHORING_GUIDANCE in sys_on                          # Part V: same mode contract
     assert _OPERATOR_NOTE in sys_on                                      # P14
     assert "Operational attention points" in sys_on                      # P8: hardware cues
     sys_off = _tool_researcher_call(monkeypatch, offer_sweep=False)["messages"][0]["content"]
-    assert _SWEEP_OFFER not in sys_off and _EVAL_TIMEOUT_GUIDANCE in sys_off
+    assert (_SWEEP_OFFER not in sys_off and _EVAL_TIMEOUT_GUIDANCE in sys_off
+            and _FOOTPRINT_GUIDANCE in sys_off)
+
+
+def test_tool_researcher_override_keeps_code_owned_footprint_contract(monkeypatch, tmp_path):
+    from looplab.core.prompts import PromptStore
+
+    (tmp_path / "tool_researcher_system.md").write_text("OVERRIDDEN TOOL CORE.", encoding="utf-8")
+    seen = _tool_researcher_call(monkeypatch, prompts=PromptStore(str(tmp_path)))
+    system = seen["messages"][0]["content"]
+    assert system.startswith("OVERRIDDEN TOOL CORE.")
+    assert _FOOTPRINT_GUIDANCE in system
+    assert "UNSPECIFIED" in system and "`gpus=0`" in system and "`gpus=1`" in system
+    assert "`timeout`/`eval_timeout`" in system and "`finalized_by`" in system
 
 
 def test_tool_researcher_prompt_names_only_real_tools(monkeypatch):

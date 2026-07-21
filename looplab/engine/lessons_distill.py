@@ -122,12 +122,11 @@ class LessonDistillMixin:
             comp, pairs = self._e._comparative_lessons(final, fp,
                                                        exclude=self._e._spent_pairs(final))
             if pairs:
+                from looplab.core.advisory_payloads import research_lesson_receipt
                 self._e.store.append(EV_LESSONS_DISTILLED, {
                     "at_node": len(final.nodes), "trigger": "run_end", "count": len(comp),
                     "pairs": [[pr["a"], pr["b"]] for pr in pairs],
-                    "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
-                                 "claim_stance": lz.get("claim_stance"),
-                                 "evidence": lz.get("evidence")} for lz in comp]})
+                    "lessons": [research_lesson_receipt(lz, final) for lz in comp]})
             lessons.extend(comp)
         # NOTE: lessons are now EXCLUSIVELY LLM-authored (the `_reflect_lessons` consolidation above +
         # the M6 comparative pass). We deliberately NO LONGER append (a) each hypothesis's statement

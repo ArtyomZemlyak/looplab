@@ -373,6 +373,24 @@ def test_canonical_operator_override_reconfigures_broker_but_legacy_does_not(tmp
     assert legacy._llm_broker.snapshot()["total"] is None
 
 
+def test_total_only_live_reconfiguration_preserves_explicit_lane_allocation(tmp_path):
+    from looplab.core.models import RunState
+
+    engine = _engine(tmp_path / "preserve-lanes", llm_parallel=4)
+    # Deliberately equals the total=4 default numerically: provenance, not value comparison, must
+    # remember that the Strategy explicitly owns this allocation when the total later changes.
+    expected = {"build": 4, "deep_research": 1, "novelty_dedup": 1,
+                "enrichment": 1, "engine": 1}
+    engine._apply_strategy({"llm_lane_limits": expected})
+    state = RunState(budget_overrides={"llm_parallel": 2})
+    # Control overrides persist in the fold and are applied each loop; neither the first nor a later
+    # pass may silently reset the durable Strategist allocation to default_llm_lane_limits(total).
+    engine._apply_control_overrides(state)
+    engine._apply_control_overrides(state)
+    assert engine._llm_broker.snapshot()["total"] == 2
+    assert engine._llm_broker.snapshot()["lane_limits"] == expected
+
+
 def test_last_canonical_total_survives_newer_legacy_build_override_and_resume(tmp_path):
     store = EventStore(tmp_path / "broker-lww-events.jsonl")
     store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})

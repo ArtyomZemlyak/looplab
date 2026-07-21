@@ -8,8 +8,11 @@ import anyio
 import looplab.engine.orchestrator as orchestrator
 from looplab.adapters.toytask import ToyTask
 from looplab.engine.orchestrator import Engine
+from looplab.core.models import card_ownership_receipt
 from looplab.events.replay import fold
 from looplab.events.types import (
+    EV_CARD_ADDED,
+    EV_CARD_DROPPED,
     EV_NODE_BUILDING,
     EV_NODE_CREATED,
     EV_NODE_FAILED,
@@ -55,8 +58,19 @@ def test_reentry_terminalizes_all_interrupted_builds_before_setup(tmp_path, monk
     eng.store.append(EV_NODE_BUILDING, {
         "node_id": 0, "generation": 1, "operator": "draft", "parent_ids": [],
     })
+    card_action = {
+        "operator": "draft", "params": {}, "space": {}, "eval_profile": None,
+        "parent_id": None, "parent_ids": [], "scored_against": None, "footprint": None,
+    }
+    eng.store.append(EV_CARD_ADDED, {
+        "id": "card-5", "statement": "interrupted native build", "source": "researcher",
+        "idea": {"operator": "draft", "params": {}, "space": {}, "eval_profile": None},
+        "parent_id": None, "parent_ids": [], "scored_against": None, "footprint": None,
+        "ownership_receipt": card_ownership_receipt(
+            "card-5", "interrupted native build", card_action),
+    })
     eng.store.append(EV_NODE_BUILDING, {
-        "node_id": 5, "operator": "draft", "parent_ids": [],
+        "node_id": 5, "operator": "draft", "parent_ids": [], "card_id": "card-5",
     })
 
     setup_observation = {}
@@ -88,4 +102,8 @@ def test_reentry_terminalizes_all_interrupted_builds_before_setup(tmp_path, monk
     ]
     assert final.buildings == {}
     assert 5 not in final.nodes                 # a bare reservation does not fabricate a candidate
+    dropped = [event for event in eng.store.read_all()
+               if event.type == EV_CARD_DROPPED and event.data.get("id") == "card-5"]
+    assert len(dropped) == 1 and dropped[0].data["reason"] == "build_interrupted"
+    assert final.cards["card-5"].status == "dropped"
     assert eng._recover_interrupted_builds(fold(eng.store.read_all())) is False  # idempotent re-entry

@@ -37,6 +37,26 @@ def test_best_of_n_picks_best_candidate():
     assert max(dev.last_n_scores) == _score(_GOOD)
 
 
+def test_best_of_n_restores_the_winning_candidates_footprint():
+    class _FootprintDev(_VaryingDev):
+        def __init__(self):
+            super().__init__([_GOOD, _BROKEN])
+            self.footprints = [{"gpus": 1, "gpu_mem_mib": 8_000}, {"gpus": 9}]
+            self.last_footprint = None
+
+        def implement(self, idea):
+            index = self.calls % len(self.outs)
+            out = super().implement(idea)
+            self.last_footprint = self.footprints[index]
+            return out
+
+    inner = _FootprintDev()
+    dev = BestOfNDeveloper(inner, n=2)
+    assert dev.implement(Idea(operator="draft")) == _GOOD
+    assert inner.last_footprint == {"gpus": 9}  # the final generated candidate lost
+    assert dev.last_footprint == {"gpus": 1, "gpu_mem_mib": 8_000}
+
+
 def test_best_of_one_is_passthrough():
     inner = _VaryingDev([_GOOD])
     dev = BestOfNDeveloper(inner, n=1)

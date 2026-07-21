@@ -140,6 +140,38 @@ def test_confirm_phase_skips_already_run_seeds(tmp_path):
     assert ran == [3]                                  # only the missing seed re-runs
 
 
+def test_confirm_seed_reserves_and_releases_through_shared_gpu_pool(tmp_path):
+    eng = _noisy_engine(tmp_path / "confirm-pool", confirm_top_k=1, confirm_seeds=1,
+                        max_nodes=1)
+    eng.store.append("run_started", {
+        "run_id": "confirm-pool", "task_id": "toy", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(operator="draft", footprint={"gpus": 1}).model_dump(mode="json"),
+        "code": ""})
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0})
+    node = fold(eng.store.read_all()).nodes[0]
+    calls = []
+
+    async def reserve(nd):
+        calls.append(("reserve", nd.id))
+        return {"gpu_ids": [7], "cpu_only": False, "pin": True}
+
+    def release(ids):
+        calls.append(("release", list(ids)))
+
+    def fake_run_eval(nd, workdir, env=None, profile=None, cancel=None):
+        calls.append(("run", env.get("CUDA_VISIBLE_DEVICES"), profile))
+        return RunResult(exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
+
+    eng._wait_reserve_node_resources = reserve
+    eng._release_gpus = release
+    eng._run_eval = fake_run_eval
+    anyio.run(eng._run_confirm_seed, node, eng.confirm_seed_base)
+    assert calls == [("reserve", 0), ("run", "7", "full"), ("release", [7])]
+
+
 @pytest.mark.parametrize("intervention,data", [
     ("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"}),
     ("node_abort", {"node_id": 0, "generation": 0}),

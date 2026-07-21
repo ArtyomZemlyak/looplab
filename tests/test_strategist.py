@@ -110,6 +110,19 @@ def test_validate_rejects_unknown_developer():
     assert "developer" not in out and out["fidelity"] == "full"
 
 
+def test_validate_strategy_keeps_raw_closed_llm_lane_allocation():
+    lanes = {"build": 0, "deep_research": 1, "novelty_dedup": 2,
+             "enrichment": 3, "engine": 4}
+    out = validate_strategy({"llm_parallel": 0, "llm_lane_limits": lanes}, _ctx())
+    assert out["llm_parallel"] == 0
+    assert out["llm_lane_limits"] == lanes  # durable Strategy stores raw zero; live apply settles it
+
+    for invalid in ({"unknown": 1}, {"build": True}, {"build": -1}, {"build": 65}):
+        cleaned = validate_strategy(
+            {"fidelity": "smoke", "llm_lane_limits": invalid}, _ctx())
+        assert "llm_lane_limits" not in cleaned
+
+
 # --------------------------------------------------------------------------- #
 # make_strategist (config-first)
 # --------------------------------------------------------------------------- #
@@ -897,7 +910,7 @@ def test_experiment_time_budget_cue_surfaces_limit_and_calibration(tmp_path):
     assert "Experiment TIME BUDGET" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
-def test_gpu_pin_cue_surfaces_single_device_constraint_under_parallel_eval(tmp_path, monkeypatch):
+def test_gpu_cue_surfaces_declared_footprint_contract(tmp_path, monkeypatch):
     # Under PARALLEL eval the engine pins each experiment to ONE GPU, so the Researcher must be told to
     # size every command to a SINGLE device — the fix for the rubertlite-v4 run that failed every node
     # by copying the repo's `--gpus 2` convention. Fires for repo tasks when pinning is active
@@ -908,22 +921,23 @@ def test_gpu_pin_cue_surfaces_single_device_constraint_under_parallel_eval(tmp_p
     st = RunState(direction="max")
     eng._set_complexity_hint(st, None)
     hint = getattr(eng.researcher, "_complexity_hint", "")
-    assert "GPU CONSTRAINT" in hint and "SINGLE GPU" in hint and "--gpus 1" in hint
+    assert "GPU RESOURCE CONTRACT" in hint and "footprint.gpus" in hint
     assert "--gpus 2" in hint                      # names the wrong convention it must override
-    # serial run (max_parallel=1) never pins -> no false alarm
+    # Serial mode gets the same declaration contract and documents its legacy whole-box branch.
     eng1 = _engine(tmp_path / "gpu-cue-serial", max_parallel=1)
     eng1._repo_spec = {"editables": []}
     eng1._set_complexity_hint(st, None)
-    assert "GPU CONSTRAINT" not in getattr(eng1.researcher, "_complexity_hint", "")
+    serial_hint = getattr(eng1.researcher, "_complexity_hint", "")
+    assert "GPU RESOURCE CONTRACT" in serial_hint and "whole visible box" in serial_hint
     # parallel but NO GPUs detected -> nothing to pin -> silent
     monkeypatch.setattr("looplab.engine.orchestrator._detect_gpu_ids", lambda: [])
     eng2 = _engine(tmp_path / "gpu-cue-nogpu", max_parallel=2)
     eng2._repo_spec = {"editables": []}
     eng2._set_complexity_hint(st, None)
-    assert "GPU CONSTRAINT" not in getattr(eng2.researcher, "_complexity_hint", "")
+    assert "GPU RESOURCE CONTRACT" not in getattr(eng2.researcher, "_complexity_hint", "")
 
 
-def test_repair_context_carries_single_gpu_constraint_under_pinning(tmp_path, monkeypatch):
+def test_repair_context_uses_finalized_gpu_count_and_legacy_fallback(tmp_path, monkeypatch):
     # The repair loop is where the rubertlite-v4 FIX-REGRESSION happened: it fixed `--gpus 2` then
     # REVERTED it on the next attempt while chasing a later error. Under pinning, every repair prompt
     # must carry the 1-GPU constraint so the single-device fix STICKS across attempts. Silent serial.
@@ -931,17 +945,22 @@ def test_repair_context_carries_single_gpu_constraint_under_pinning(tmp_path, mo
     eng = _engine(tmp_path / "rep-gpu", max_parallel=2)
     eng._repo_spec = {"editables": []}             # repo task -> command-centric directive applies
     ctx = eng._repair_error_context("crash", "RuntimeError in pick_multiple_gpus: only 1 GPU")
-    assert "exactly ONE GPU is visible" in ctx and "--gpus 1" in ctx and "KEEP it" in ctx
+    assert "legacy unspecified-footprint" in ctx and "exactly ONE" in ctx
+    explicit = Node(id=4, operator="draft",
+                    idea=Idea(operator="draft", footprint={"gpus": 2}))
+    ctx_explicit = eng._repair_error_context("crash", "DDP failed", node=explicit)
+    assert "reserved exactly 2 GPU(s)" in ctx_explicit
+    assert "exactly 2 device(s)" in ctx_explicit
     # serial run (unpinned) -> silent
     eng1 = _engine(tmp_path / "rep-serial", max_parallel=1)
     eng1._repo_spec = {"editables": []}
     ctx1 = eng1._repair_error_context("crash", "RuntimeError in pick_multiple_gpus: only 1 GPU")
-    assert "exactly ONE GPU is visible" not in ctx1
+    assert "legacy unspecified-footprint" not in ctx1
     # parallel + pinned but NOT a repo task (solution.py) -> silent (no CLI command to advise on)
     eng2 = _engine(tmp_path / "rep-nonrepo", max_parallel=2)
     eng2._repo_spec = {}
     ctx2 = eng2._repair_error_context("crash", "RuntimeError in pick_multiple_gpus: only 1 GPU")
-    assert "exactly ONE GPU is visible" not in ctx2
+    assert "legacy unspecified-footprint" not in ctx2
 
 
 def test_run_base_hint_requires_explicit_delta_mode(tmp_path):
@@ -1059,7 +1078,10 @@ def test_code_block_ablation_end_to_end(tmp_path):
     ablates = [e for e in evs if e.type == "ablate"]
     assert ablates, "expected an ablate event"
     assert any(e.data.get("mode") == "code_blocks" for e in ablates)
-    assert any(n.operator == "refine_block" for n in state.nodes.values())
+    refined = [n for n in state.nodes.values() if n.operator == "refine_block"]
+    assert refined
+    assert all(n.idea.card_id and state.cards[n.idea.card_id].identity.kind == "native"
+               for n in refined)
 
 
 # --------------------------------------------------------------------------- #
@@ -1238,6 +1260,19 @@ class _CaptureClient:
         return self.ret
 
 
+def test_llm_strategist_can_allocate_named_lanes_from_structured_output():
+    client = _CaptureClient({
+        "llm_parallel": 4,
+        "llm_lane_limits": {"build": 3, "deep_research": 1, "enrichment": 0},
+        "rationale": "reserve research while builds run",
+    })
+    out = LLMStrategist(client).decide(
+        RunState(), _ctx(llm_parallel=2, llm_lane_limits={"build": 2}))
+    assert out["llm_parallel"] == 4
+    assert out["llm_lane_limits"] == {"build": 3, "deep_research": 1, "enrichment": 0}
+    assert "LLM lanes={'build': 2}" in " ".join(m["content"] for m in client.messages)
+
+
 def test_llm_strategist_sees_pending_hints():
     client = _CaptureClient({"policy": "asha", "rationale": "explore per directive"})
     st = RunState()
@@ -1334,6 +1369,34 @@ def test_operator_pin_does_not_blanket_exempt_a_locked_strategist_knob(tmp_path)
                          "_pinned": ["policy"]})
     assert eng._policy_name == "mcts"          # the operator-pinned field applies
     assert eng._novelty_stance != "explore"    # the locked strategist field does NOT (not in _pinned)
+
+
+def test_operator_pin_owns_canonical_totals_and_raw_lane_split_across_resume(tmp_path):
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / "resource-pin"
+    rd.mkdir()
+    raw_lanes = {"build": 0, "deep_research": 2, "enrichment": 1}
+    EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {
+        "eval_parallel": 0, "llm_parallel": 0, "llm_lane_limits": raw_lanes,
+    }})
+    locks = {"eval_parallel": [], "llm_parallel": [], "llm_lane_limits": []}
+    eng = _engine(rd, agent_control=locks)
+    state = eng._maybe_consult_strategist(fold(eng.store.read_all()))
+
+    assert (eng._eval_parallel, eng._llm_parallel) == (1, 1)  # live zero never re-runs AUTO
+    broker = eng._llm_broker.snapshot()
+    assert broker["total"] == 1
+    assert broker["lane_limits"] == {"build": 1, "deep_research": 2, "enrichment": 1}
+    active = state.active_strategy
+    assert active["eval_parallel"] == active["llm_parallel"] == 0
+    assert active["llm_lane_limits"] == raw_lanes
+    assert set(active["_pinned"]) >= {"eval_parallel", "llm_parallel", "llm_lane_limits"}
+
+    resumed = _engine(tmp_path / "resource-pin-resume", agent_control=locks)
+    resumed._apply_strategy(active)
+    assert (resumed._eval_parallel, resumed._llm_parallel) == (1, 1)
+    assert resumed._llm_broker.snapshot()["lane_limits"] == broker["lane_limits"]
 
 
 def test_operator_pin_policy_wins_over_strategist(tmp_path):

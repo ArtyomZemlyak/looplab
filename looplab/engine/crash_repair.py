@@ -17,7 +17,7 @@ from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import RunState
+from looplab.core.models import RunState, normalize_researcher_footprint
 from looplab.engine.triage import _rule_triage
 
 
@@ -87,22 +87,24 @@ class CrashRepairMixin:
             if chain:
                 chain += "\n\n"
         error = chain + (error or "")
-        # GPU-pin constraint (repair-side twin of the proposal_cues GPU cue): when the engine runs
-        # evals in PARALLEL it pins each to EXACTLY ONE GPU (CUDA_VISIBLE_DEVICES), so a repair MUST
-        # NOT (re-)introduce a multi-device request. The rubertlite-v4 repair loop fixed `--gpus 2`
-        # then REVERTED it on the next attempt while chasing a later error — the fix-regression that
-        # failed EVERY node. Carry the hard constraint into every repair prompt under pinning so the
-        # single-device fix STICKS across attempts. Gated on pinning being active (max_parallel>1 +
-        # GPUs detected) — mirrors evaluate.py::_acquire_gpu — AND on a repo task (`_repo_spec`),
-        # symmetric with the proposal-cue gate: a solution.py eval has no CLI command, so this
-        # command-centric directive would be off-target there. Silent on a serial (unpinned) run.
-        if (getattr(self, "_repo_spec", None) and getattr(self, "max_parallel", 1) > 1
-                and getattr(self, "_gpu_ids", None)):
-            error += ("\n[hardware: exactly ONE GPU is visible — the engine pinned this experiment to a "
-                      "single device for parallel eval. Every training/eval command MUST use `--gpus 1` "
-                      "/ `--devices 1` / `devices=1` (a single device). Do NOT request 2+ GPUs "
-                      "(`--gpus 2`, `--gpus 0,1`, multi-GPU DDP) — it CRASHES on 1 visible GPU. If an "
-                      "earlier attempt already set the device count to 1, KEEP it there.]")
+        # Repair-side twin of the Layer-4 proposal cue. Explicit footprints own the device count;
+        # an unspecified footprint retains the historical parallel single-device rule.
+        footprint = normalize_researcher_footprint(
+            getattr(getattr(node, "idea", None), "footprint", None))
+        declared_gpus = (footprint.get("gpus") if footprint is not None
+                         and "gpus" in footprint else None)
+        if getattr(self, "_repo_spec", None) and declared_gpus is not None:
+            if declared_gpus == 0:
+                error += ("\n[hardware: this node declares `footprint.gpus=0` and runs CPU-only. "
+                          "Keep CUDA/GPU requirements disabled in every repaired command.]")
+            else:
+                error += (f"\n[hardware: this node reserved exactly {declared_gpus} GPU(s). Every "
+                          f"training/eval command must target exactly {declared_gpus} device(s); keep "
+                          "that count unchanged across repairs.]")
+        elif (getattr(self, "_repo_spec", None) and getattr(self, "max_parallel", 1) > 1
+              and getattr(self, "_gpu_ids", None)):
+            error += ("\n[hardware: this legacy unspecified-footprint node is pinned to exactly ONE "
+                      "GPU for parallel eval. Keep every training/eval command at one device.]")
         if reason == "timeout":
             # Don't quote a specific budget here: the wall-clock varies by node kind (a sweep node gets
             # timeout×sweep_timeout_mult; a RepoTask uses its own per-profile timeout), so a hardcoded

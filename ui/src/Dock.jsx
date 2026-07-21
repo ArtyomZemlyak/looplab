@@ -23,6 +23,21 @@ import { buildingGenerations, buildingMarkers } from './buildingModel.js'
 // there is no composer here — just the timeline, scrubber, filters, and transport.
 const note = (value, limit = 80) => value ? ` — ${String(value).slice(0, limit)}` : ''
 
+const strategySummary = (strategy = {}) => {
+  const s = strategy && typeof strategy === 'object' && !Array.isArray(strategy) ? strategy : {}
+  const bits = []
+  if (s.policy) bits.push(s.policy + (s.fidelity ? '/' + s.fidelity : ''))
+  else if (s.fidelity) bits.push(s.fidelity)
+  if (s.eval_parallel != null) bits.push(`eval=${s.eval_parallel}`)
+  if (s.llm_parallel != null) bits.push(`LLM=${s.llm_parallel}`)
+  const lanes = s.llm_lane_limits
+  if (lanes && typeof lanes === 'object' && !Array.isArray(lanes)) {
+    bits.push(`lanes ${Object.entries(lanes).slice(0, 5)
+      .map(([lane, width]) => `${lane}:${width}`).join(',')}`)
+  }
+  return bits.join(' / ') || 'no change'
+}
+
 const NARR = {
   run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
   node_building: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
@@ -49,9 +64,9 @@ const NARR = {
   },
   hint: (d) => `hint: ${d.text}`, promote: (d) => `promoted #${d.node_id} → ${d.alias || 'champion'}`,
   policy_decision: (d) => `chose #${d.chosen}${d.reason ? ' (' + d.reason + ')' : ''} over ${Object.keys(d.scores || {}).length} candidate(s)`,
-  strategy_decision: (d) => `strategy → ${d.strategy?.policy || '?'}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}${d.strategy?.rationale ? ' — ' + d.strategy.rationale.slice(0, 70) : ''}`,
+  strategy_decision: (d) => `strategy → ${strategySummary(d.strategy)}${d.strategy?.rationale ? ' — ' + d.strategy.rationale.slice(0, 70) : ''}`,
   rung_promoted: (d) => `ASHA rung ↑${d.rung}: promoted ${(d.survivors || []).map(s => '#' + s).join(', ')}`,
-  set_strategy: (d) => `operator pinned strategy → ${d.strategy?.policy || ''}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}`,
+  set_strategy: (d) => `operator pinned strategy → ${strategySummary(d.strategy)}`,
   deep_research: () => 'deep research requested',
   research_completed: (d) => `deep research (${d.trigger || 'auto'})${note(d.memo?.summary)}`,
   report_generated: (d) => `run report updated${note(d.content?.headline, 90)}`,
@@ -513,6 +528,12 @@ function StrategyDetail({ d }) {
         <span>policy <b>{s.policy || '?'}</b></span>
         {s.fidelity && <span>fidelity {s.fidelity}</span>}
         {s.developer && <span>developer {s.developer}</span>}
+        {s.eval_parallel != null && <span>eval parallel {s.eval_parallel}</span>}
+        {s.llm_parallel != null && <span>LLM total {s.llm_parallel}</span>}
+        {s.llm_lane_limits && typeof s.llm_lane_limits === 'object'
+          && !Array.isArray(s.llm_lane_limits)
+          && <span>LLM lanes {Object.entries(s.llm_lane_limits).slice(0, 5)
+            .map(([lane, width]) => `${lane}:${width}`).join(', ')}</span>}
         {s.source && <span>source {s.source}</span>}
       </div>
       {ctxRows.length > 0 && <>

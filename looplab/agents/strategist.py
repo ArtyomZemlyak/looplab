@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from looplab.agents.roles import _attention_points
 from looplab.core.config import PARALLELISM_ALIASES, canonicalize_parallelism_source
 from looplab.core.llm import BudgetExceeded
+from looplab.core.llm_broker import LLM_LANES
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.prompts import PromptStore, render
 
@@ -64,7 +65,8 @@ Strategy = TypedDict(
         # Layer-2 canonical parallelism names (docs/23) — prefer these; the two legacy names below stay
         # accepted for back-compat. Applied only if the agent-control matrix allows it.
         "eval_parallel": int,   # live eval width (GPU consumer); 0 settles to safe serial width 1
-        "llm_parallel": int,    # live LLM-build width (producer); 0 settles to safe serial width 1
+        "llm_parallel": int,    # live provider-call total + build width; 0 settles to safe serial 1
+        "llm_lane_limits": dict,  # per-lane LLM allotments; each live 0 settles to 1
         "max_parallel": int,    # legacy alias of eval_parallel — applied only if the matrix allows it
         "parallel_build": int,  # legacy alias of llm_parallel (live 0 -> serial 1) — if allowed
         "request_research": bool,  # ask the engine to run the Deep-Research stage before continuing
@@ -88,7 +90,12 @@ class StrategyContext(BaseModel):
     node_budget_frac: float = 0.0              # fraction of the node budget spent (P2 endgame reserve)
     current_policy: str = "greedy"             # the ACTIVE policy (for switch-back rules, D3)
     eval_parallel: int = 1                     # current settled eval width (never startup AUTO/0)
-    llm_parallel: int = 1                      # current settled LLM-build width
+    # `_llm_parallel` is also the settled build fan-out used by legacy-compatible producer code.
+    # It is *not* proof that the shared broker has a finite total: canonical-unset startup keeps
+    # the broker total unbounded while resolving this build width from eval concurrency.
+    llm_parallel: int = 1
+    llm_total: Optional[int] = None             # live shared-broker total; None = unbounded
+    llm_lane_limits: dict[str, int | None] = Field(default_factory=dict)
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
@@ -238,6 +245,20 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     lp = strat.get("llm_parallel")
     if isinstance(lp, int) and not isinstance(lp, bool) and 0 <= lp <= 64:
         out["llm_parallel"] = lp
+    lane_limits = strat.get("llm_lane_limits")
+    if isinstance(lane_limits, dict) and lane_limits:
+        # One allocation is atomic. Reject the whole mapping on an unknown lane or malformed value
+        # rather than silently applying a surprising partial paid-call budget. Values stay RAW in the
+        # durable Strategy; the live apply boundary settles 0 to one worker, just like the totals.
+        clean_lanes: dict[str, int] = {}
+        for lane, value in lane_limits.items():
+            if (lane not in LLM_LANES or isinstance(value, bool)
+                    or not isinstance(value, int) or not 0 <= value <= 64):
+                clean_lanes = {}
+                break
+            clean_lanes[lane] = value
+        if clean_lanes:
+            out["llm_lane_limits"] = clean_lanes
     pb = strat.get("parallel_build")
     if isinstance(pb, int) and not isinstance(pb, bool) and 0 <= pb <= 64:
         out["parallel_build"] = pb   # legacy alias of llm_parallel, resolved in _apply_strategy
@@ -390,9 +411,20 @@ _STRATEGIST_SYSTEM = (
     "recent window), `exploit` in the endgame or when a fresh lead is compounding, else `balanced` "
     "(== today's behavior). You may retune the two INDEPENDENT canonical concurrency axes: "
     "`eval_parallel` (0..1024, concurrent evaluations) and `llm_parallel` (0..64, concurrent LLM "
-    "builds). Emit ONLY those canonical names, never the legacy max_parallel/parallel_build aliases. "
+    "provider calls). You may also allocate that LLM budget with `llm_lane_limits` over the closed "
+    "lanes build, deep_research, novelty_dedup, enrichment, and engine (each 0..64). Emit ONLY "
+    "canonical names, never the legacy max_parallel/parallel_build aliases. "
     "A live value of 0 safely serializes that axis to 1; startup config uses 0 as hardware AUTO. "
     "Respond ONLY with the requested structured fields; pick `policy` from the provided available list."
+)
+
+# This is appended *after* PromptStore rendering.  It is a runtime/durable semantics contract, not
+# tunable strategy advice: a custom operator prompt must not accidentally turn a replacement map
+# into an apparent patch map and silently remove existing background-lane caps.
+_LLM_LANE_ALLOCATION_CONTRACT = (
+    "`llm_lane_limits` is an ATOMIC replacement map: when emitted, it replaces the previous lane "
+    "allocation. Omitted lanes are unbounded within the shared `llm_parallel` total; include every "
+    "lane whose cap must remain. Omitting `llm_lane_limits` entirely retains the current allocation."
 )
 
 
@@ -410,6 +442,24 @@ def canonicalize_strategy_parallelism(strat: Optional[dict]) -> dict:
     return out
 
 
+class _LLMLaneLimitsOut(BaseModel):
+    """Closed structured-output vocabulary for an optional per-lane allocation."""
+    model_config = ConfigDict(extra="forbid")
+
+    build: Optional[int] = Field(default=None, ge=0, le=64)
+    deep_research: Optional[int] = Field(default=None, ge=0, le=64)
+    novelty_dedup: Optional[int] = Field(default=None, ge=0, le=64)
+    enrichment: Optional[int] = Field(default=None, ge=0, le=64)
+    engine: Optional[int] = Field(default=None, ge=0, le=64)
+
+    @field_validator(*LLM_LANES, mode="before")
+    @classmethod
+    def _lane_width_is_not_boolean(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("LLM lane width must not be boolean")
+        return value
+
+
 class _StrategyOut(BaseModel):
     """Structured shape the LLM fills (a subset of Strategy; validated again by validate_strategy)."""
     model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
@@ -425,6 +475,7 @@ class _StrategyOut(BaseModel):
     timeout: Optional[float] = Field(default=None, gt=0)
     eval_parallel: Optional[int] = Field(default=None, ge=0, le=1024)
     llm_parallel: Optional[int] = Field(default=None, ge=0, le=64)
+    llm_lane_limits: Optional[_LLMLaneLimitsOut] = None
     rationale: str = ""
 
     @field_validator("timeout", "eval_parallel", "llm_parallel", mode="before")
@@ -468,8 +519,10 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"improves_since_best={ctx.improves_since_best} numeric_space={ctx.is_numeric_space} "
         f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
         f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
-        f"current canonical concurrency: eval_parallel={ctx.eval_parallel} "
-        f"llm_parallel={ctx.llm_parallel}\n"
+        f"current runtime concurrency: eval_parallel={ctx.eval_parallel}; "
+        f"LLM broker total={ctx.llm_total if ctx.llm_total is not None else 'unbounded'} "
+        f"(the value to change with canonical llm_parallel); "
+        f"current build fan-out={ctx.llm_parallel}; LLM lanes={ctx.llm_lane_limits}\n"
         f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
         + (f"bounded cross-run observations (not coverage): {ctx.cross_run_note}\n"
            if ctx.cross_run_note else "")
@@ -484,7 +537,9 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         "evals are costly and the space is numeric; set request_research=true when the run is "
         "stalled or confused and would benefit from a deep-research step over all results + the "
         "web before continuing; optional timeout (>0), eval_parallel (0..1024), and llm_parallel "
-        "(0..64). Use only those canonical parallel names. These are live deltas: 0 means serial 1; "
+        "(0..64 total provider calls), plus llm_lane_limits over build/deep_research/novelty_dedup/"
+        "enrichment/engine (each 0..64). Use only those canonical parallel names. These are live deltas: "
+        "0 means serial 1 for a total or lane; "
         "startup settings use 0 for hardware AUTO)."
     )
     # Active operator/boss directives (the same `pending_hints` the Researcher already follows,
@@ -519,6 +574,10 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         strat["eval_parallel"] = out.eval_parallel
     if out.llm_parallel is not None:
         strat["llm_parallel"] = out.llm_parallel
+    if out.llm_lane_limits is not None:
+        lanes = out.llm_lane_limits.model_dump(exclude_none=True)
+        if lanes:
+            strat["llm_lane_limits"] = lanes
     ops: dict = {}
     if out.ablate_every is not None:
         ops["ablate_every"] = out.ablate_every
@@ -549,6 +608,7 @@ class LLMStrategist:
             # P8: the Strategist decides timeouts/parallelism/fidelity, so the hardware attention
             # points reach it too — appended after the render(), like every other planning role.
             {"role": "system", "content": render(self.prompts, "strategist_system", _STRATEGIST_SYSTEM)
+                               + "\n\n" + _LLM_LANE_ALLOCATION_CONTRACT
                                + "\n\n" + _attention_points()},
             {"role": "user", "content": _strategist_brief(state, ctx)},
         ]
@@ -608,6 +668,7 @@ class ToolUsingStrategist:
             # P8: hardware attention points, after the render() like the plain LLMStrategist above.
             {"role": "system",
              "content": render(self.prompts, "tool_strategist_system", _TOOL_STRATEGIST_SYSTEM)
+                        + "\n\n" + _LLM_LANE_ALLOCATION_CONTRACT
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _strategist_brief(state, ctx)
                 + "\nInvestigate with the tools if useful, then emit the strategy."},

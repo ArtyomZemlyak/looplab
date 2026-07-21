@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
@@ -34,6 +35,56 @@ SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)"
 # misconfiguration, not an intent, so it is clamped rather than trusted — one eval must not be able
 # to wedge the loop for a week (or forever) on a fat-fingered/hostile value.
 MAX_TIMEOUT_S = 24 * 3600.0    # 24 hours
+
+_DOCKER_NVIDIA_RUNTIME_CACHE: Optional[bool] = None
+_DOCKER_GPU_FALLBACK_WARNED = False
+
+
+def docker_nvidia_runtime_available() -> bool:
+    """Whether this Docker daemon advertises the NVIDIA runtime, cached per process."""
+    global _DOCKER_NVIDIA_RUNTIME_CACHE
+    if _DOCKER_NVIDIA_RUNTIME_CACHE is not None:
+        return _DOCKER_NVIDIA_RUNTIME_CACHE
+    import shutil
+    docker = shutil.which("docker")
+    if not docker:
+        _DOCKER_NVIDIA_RUNTIME_CACHE = False
+        return False
+    try:
+        out = subprocess.run(
+            [docker, "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True, text=True, timeout=5.0)
+        _DOCKER_NVIDIA_RUNTIME_CACHE = (
+            out.returncode == 0 and "nvidia" in (out.stdout or "").lower())
+    except (OSError, subprocess.SubprocessError):
+        _DOCKER_NVIDIA_RUNTIME_CACHE = False
+    return _DOCKER_NVIDIA_RUNTIME_CACHE
+
+
+def docker_gpu_argv(env: Optional[dict], *, runtime: Optional[str] = None) -> list[str]:
+    """Translate a physical CUDA visibility pin to Docker's device request.
+
+    Unsupported daemons and non-NVIDIA isolation runtimes deliberately fall back to the historical
+    unpinned Docker launch (with a one-time warning) rather than turning a capability probe into an
+    eval crash.  The host/trusted path remains pinned through ``CUDA_VISIBLE_DEVICES`` itself.
+    """
+    global _DOCKER_GPU_FALLBACK_WARNED
+    if not isinstance(env, dict) or "CUDA_VISIBLE_DEVICES" not in env:
+        return []
+    devices = str(env.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    if not devices or devices.lower() in {"-1", "none", "nodevfiles", "void"}:
+        return []
+    supported_runtime = runtime in (None, "", "nvidia")
+    if supported_runtime and docker_nvidia_runtime_available():
+        return ["--gpus", f"device={devices}"]
+    if not _DOCKER_GPU_FALLBACK_WARNED:
+        why = (f"the configured OCI runtime {runtime!r} cannot expose NVIDIA devices"
+               if not supported_runtime else "the Docker daemon has no advertised NVIDIA runtime")
+        warnings.warn(
+            f"GPU reservation is active, but {why}; running this container without a Docker "
+            "device pin.", RuntimeWarning, stacklevel=3)
+        _DOCKER_GPU_FALLBACK_WARNED = True
+    return []
 
 
 def finite_timeout(value, default: float = 600.0) -> float:
@@ -745,8 +796,13 @@ class DockerSandbox:
         # inside host-side run_argv is too late: NaN/inf crash int(), while a huge finite value leaves
         # the daemon-owned container running long after the bounded docker CLI has been killed.
         timeout = finite_timeout(timeout, 30.0)
+        gpu_args = docker_gpu_argv(env, runtime=self.runtime)
         envs = []
         for k, v in (env or {}).items():            # pass env into the container explicitly
+            # `--gpus device=<physical>` is the visibility fence.  Re-forwarding that physical CVD
+            # inside a container whose visible set is re-indexed can hide the sole logical device.
+            if gpu_args and k == "CUDA_VISIBLE_DEVICES":
+                continue
             envs += ["-e", f"{k}={v}"]
         # In-container self-limit (coreutils `timeout`): killing the host `docker run` CLI on
         # timeout does NOT stop the daemon-owned container, so bound it from INSIDE — the
@@ -762,7 +818,7 @@ class DockerSandbox:
             caps += ["--memory", str(self.mem)]
         if self.cpus:
             caps += ["--cpus", str(self.cpus)]
-        argv = (["docker", "run", "--rm", "--network", self.network, *rt,
+        argv = (["docker", "run", "--rm", "--network", self.network, *rt, *gpu_args,
                  "--pids-limit", "1024",      # fork-bomb guard (review C1: no pids limit before)
                  *caps,
                  "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs

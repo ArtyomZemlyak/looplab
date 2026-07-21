@@ -229,8 +229,8 @@ class Idea(BaseModel):
     # belongs to. When set, `_derive_cards` links this node's evidence to the card by id (robust to
     # statement paraphrase); when None (legacy logs / not-yet-minted), it falls back to the statement
     # hash exactly like `_derive_hypotheses`. Additive + nullable, so it rides `durable_idea_payload` ->
-    # node_created -> Idea(**d["idea"]) for free and old logs fold identically. Layer 1a leaves this None
-    # (the engine mints it in a later increment); it is audit-only until Layer 3 reads the card queue.
+    # node_created -> Idea(**d["idea"]) for free and old logs fold identically. The engine stamps it from
+    # its receipt-bound Card mint; legacy/external writers may still leave it absent.
     card_id: Optional[str] = None
     # Hypothesis-card Kanban (docs/23, Layer 1b): the Researcher-PROPOSED resource footprint for this
     # experiment — {gpus, gpu_mem_mib, ...}. Audit-only in Layer 1 (surfaced on the card as proposed_by=
@@ -484,6 +484,141 @@ def valid_researcher_footprint(value) -> bool:
     return True
 
 
+DEVELOPER_FOOTPRINT_MARKER = "# LOOPLAB_FOOTPRINT:"
+
+
+def developer_artifact_footprint(proposed, code="", files=None) -> dict | None:
+    """Resolve the Developer's quantitative finalization from its shipped artifact.
+
+    An unspecified Researcher declaration deliberately stays unspecified for legacy scheduling. When
+    resources were proposed, a Developer may confirm or scale them by placing one compact JSON marker in
+    shipped code; absent/malformed markers conservatively retain the proposal. Only the two quantitative
+    keys cross this boundary, so code comments cannot forge provenance.
+    """
+    fallback = normalize_researcher_footprint(proposed)
+    if fallback is None:
+        return None
+    blobs: list[str] = [code] if isinstance(code, str) else []
+    if isinstance(files, dict):
+        for _name, body in sorted(files.items(), key=lambda row: str(row[0]))[:64]:
+            if isinstance(body, str):
+                blobs.append(body)
+    remaining = 65_536
+    for blob in blobs:
+        if remaining <= 0:
+            break
+        sample = blob[:min(8_192, remaining)]
+        remaining -= len(sample)
+        for line in sample.splitlines()[:80]:
+            text = line.strip()
+            if not text.startswith(DEVELOPER_FOOTPRINT_MARKER):
+                continue
+            raw = text[len(DEVELOPER_FOOTPRINT_MARKER):].strip()
+            if not raw or len(raw) > 256:
+                continue
+            try:
+                decoded = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if valid_researcher_footprint(decoded):
+                return normalize_researcher_footprint(decoded)
+    return fallback
+
+
+CARD_STEERING_CONTEXT_FIELDS = {
+    "complexity": {"siblings", "level"},
+    "eval_budget": {"remaining_seconds", "total_seconds", "stance"},
+    "experiment_time_budget": {"seconds"},
+    "gpu_constraint": {"mode"},
+    "failure_reflection": {"node_ids"},
+    "watchdog_reflection": set(),
+    "trust_reflection": set(),
+    "fault_localization": {"file_count"},
+    "feature_engineering": set(),
+    "reflection_prior": set(),
+    "cross_run_advisory": {"ref", "status"},
+    "cross_run_tools": set(),
+    "concept_authoring": {"mode"},
+    "concept_slug_reuse": set(),
+    "research_memo": {"ref"},
+    "strategy": {"novelty_stance", "fidelity"},
+    "sweep": set(),
+}
+_CARD_STEERING_ENUMS = {
+    "level": {"minimal", "moderate", "advanced"},
+    "stance": {"explore", "selective", "exploit"},
+    "mode": {"single_device", "declared_footprint", "delta", "full"},
+    "status": {"available", "unavailable"},
+    "novelty_stance": {"explore", "balanced", "exploit"},
+    "fidelity": {"cheap", "balanced", "full"},
+}
+
+
+def normalize_steering_context(value) -> list[dict] | None:
+    """Return one bounded ref/scalar-only Card cue snapshot, or fail the whole snapshot.
+
+    The contract lives in ``core.models`` because both live proposal writers and the durable replay
+    boundary must apply the same closed vocabulary. A future prompt/body/path field is rejected until
+    explicitly reviewed; silently projecting it away would make a false lossless receipt possible.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)) or len(value) > 32:
+        return None
+    out: list[dict] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            return None
+        kind = raw.get("kind")
+        allowed = CARD_STEERING_CONTEXT_FIELDS.get(kind) if isinstance(kind, str) else None
+        if allowed is None or "kind" not in raw or not set(raw) <= ({"kind"} | allowed):
+            return None
+        item = {"kind": kind}
+        for key in sorted(allowed):
+            if key not in raw:
+                continue
+            current = raw[key]
+            if key == "node_ids":
+                if (not isinstance(current, list) or len(current) > 16
+                        or any(type(node_id) is not int or not 0 <= node_id <= (1 << 31) - 1
+                               for node_id in current)):
+                    return None
+                item[key] = list(dict.fromkeys(current))
+            elif key in {"siblings", "file_count"}:
+                if type(current) is not int or not 0 <= current <= 1_000_000:
+                    return None
+                item[key] = current
+            elif key in {"remaining_seconds", "total_seconds", "seconds"}:
+                if (isinstance(current, bool) or not isinstance(current, (int, float))
+                        or not math.isfinite(float(current)) or not 0 <= float(current) <= 1e12):
+                    return None
+                item[key] = round(float(current), 3)
+            elif key == "ref":
+                is_digest = (
+                    isinstance(current, str)
+                    and current.startswith("sha256:")
+                    and len(current) == 71
+                    and all(ch in "0123456789abcdef" for ch in current[7:])
+                )
+                is_memo = (
+                    isinstance(current, str)
+                    and current.startswith("memo:sha256:")
+                    and len(current) == 76
+                    and all(ch in "0123456789abcdef" for ch in current[12:])
+                )
+                if not (is_memo if kind == "research_memo" else is_digest):
+                    return None
+                item[key] = current
+            elif key in _CARD_STEERING_ENUMS:
+                if current not in _CARD_STEERING_ENUMS[key]:
+                    return None
+                item[key] = current
+            else:
+                return None
+        out.append(item)
+    return out
+
+
 IDEA_PROPOSAL_DIGEST_V1_FIELDS = (
     "operator", "params", "rationale", "eval_profile", "eval_timeout", "theme",
     "concepts", "concept_mode", "concepts_added", "concepts_removed", "space",
@@ -568,8 +703,9 @@ def idea_proposal_ref(idea: Idea) -> dict | None:
 
 
 CARD_ACTION_DIGEST_V1_FIELDS = (
-    "operator", "params", "space", "eval_profile", "parent_id", "parent_ids",
-    "scored_against", "footprint",
+    "operator", "params", "space", "eval_profile", "eval_timeout", "parent_id", "parent_ids",
+    "parent_generations", "scored_against", "scored_against_generation",
+    "scored_against_empty", "footprint",
 )
 
 
@@ -633,6 +769,13 @@ def card_action_digest(card_id: str, statement: str, action: dict) -> str | None
             raise ValueError("card node anchors must be bounded integers")
         return value
 
+    def _generation(value):
+        if value is None:
+            return None
+        if type(value) is not int or not 0 <= value <= (1 << 31) - 1:
+            raise ValueError("card lifecycle generations must be bounded integers")
+        return value
+
     try:
         raw_parent_ids = action.get("parent_ids", [])
         if (not isinstance(raw_parent_ids, list) or len(raw_parent_ids) > 64
@@ -643,6 +786,31 @@ def card_action_digest(card_id: str, statement: str, action: dict) -> str | None
             return None
         parent_id = _node_id(action.get("parent_id"))
         scored_against = _node_id(action.get("scored_against"))
+        raw_parent_generations = action.get("parent_generations")
+        if raw_parent_generations is None:
+            parent_generations = None
+        else:
+            if (not isinstance(raw_parent_generations, dict)
+                    or len(raw_parent_generations) > 64
+                    or set(raw_parent_generations) != {str(parent) for parent in parent_ids}):
+                return None
+            parent_generations = {
+                key: _generation(raw_parent_generations[key])
+                for key in sorted(raw_parent_generations)
+            }
+            if any(value is None for value in parent_generations.values()):
+                return None
+        scored_against_generation = _generation(action.get("scored_against_generation"))
+        scored_against_empty = action.get("scored_against_empty", False)
+        if type(scored_against_empty) is not bool:
+            return None
+        if ((scored_against is None and scored_against_generation is not None)
+                or (scored_against is not None and scored_against_empty)):
+            return None
+        raw_eval_timeout = action.get("eval_timeout")
+        eval_timeout = None if raw_eval_timeout is None else _number(raw_eval_timeout)
+        if eval_timeout is not None and eval_timeout <= 0:
+            return None
         profile = action.get("eval_profile")
         if (profile is not None and (not isinstance(profile, str) or len(profile) > 256
                                      or not profile.isprintable())):
@@ -661,9 +829,13 @@ def card_action_digest(card_id: str, statement: str, action: dict) -> str | None
                 "params": _params(action.get("params")),
                 "space": _space(action.get("space")),
                 "eval_profile": profile,
+                "eval_timeout": eval_timeout,
                 "parent_id": parent_id,
                 "parent_ids": parent_ids,
+                "parent_generations": parent_generations,
                 "scored_against": scored_against,
+                "scored_against_generation": scored_against_generation,
+                "scored_against_empty": scored_against_empty,
                 "footprint": footprint,
             },
         }
@@ -806,6 +978,10 @@ class Node(BaseModel):
     # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
     research_origin: Optional[dict] = None
+    # Fold-internal receipt that the Developer finalized this lifecycle's quantitative footprint.
+    # Excluded from model dumps so Layer 4 does not perturb snapshots/public DTOs; the append-only
+    # node_created/node_repaired event remains the durable authority.
+    footprint_finalized: bool = Field(default=False, exclude=True)
 
     @property
     def robust_metric(self) -> Optional[float]:
@@ -1028,19 +1204,28 @@ class Card(BaseModel):
     # not-yet-built card against state.best()/rank_by_metric[:2]/breedable_nodes().
     parent_id: Optional[int] = None
     parent_ids: list[int] = Field(default_factory=list)
+    # Exact lifecycle attempts captured with the action. ``None`` is a legacy/missing fence; an
+    # explicit empty mapping is the complete modern snapshot for a no-parent action.
+    parent_generations: Optional[dict[str, int]] = None
     # Staleness fence: the best_node_id / event seq the card was scored against (Layer-5 freshness gate).
     scored_against: Optional[int] = None
+    scored_against_generation: Optional[int] = Field(default=None, ge=0)
+    # Distinguishes a modern action formed with no incumbent from a legacy missing score fence.
+    scored_against_empty: bool = False
     # The idea block (what to run) — populated from the linked node's Idea in Layer 1a.
     operator: Optional[str] = None                      # draft | improve | merge | debug
     params: dict[str, float] = Field(default_factory=dict)
     space: dict[str, list[float]] = Field(default_factory=dict)
     eval_profile: Optional[str] = None
+    eval_timeout: Optional[float] = Field(default=None, gt=0)
     concept_tags: list[str] = Field(default_factory=list)
     # CODEX AGENT: exact, additive ownership receipt for concept_tags.  Without it a merged card could
     # show the union/override from several evidence nodes beside one misleading scalar provenance tier.
     concept_source: Optional[CardConceptSource] = None
     # Board prioritization (foresight) — stamped from card_ranked in Layer 1b; audit/UI only.
     priority: Optional[int] = None
+    # True only when the final operator-priority overlay owns the priority; foresight ranks stay false.
+    pinned: bool = False
     foresight_rank: Optional[int] = None
     confidence: Optional[float] = None
     # --- Layer 1b enrichment (RESERVED; populated in 1b — defaults keep Layer 1a a pure hypotheses shadow).
@@ -1055,6 +1240,23 @@ class Card(BaseModel):
     # Compatibility scalar for existing clients. Derived only from concept_source.provenance for an exact
     # node owner; proposal-only sources keep it None, and card_enriched cannot assign it independently.
     provenance_tier: Optional[str] = None
+
+    @field_validator("parent_generations", mode="before")
+    @classmethod
+    def _bounded_parent_generations(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, dict) or len(value) > 64:
+            raise ValueError("parent_generations must be a bounded mapping")
+        out: dict[str, int] = {}
+        for key, generation in value.items():
+            if (not isinstance(key, str) or len(key) > 10
+                    or not key.isascii() or not key.isdecimal()
+                    or key != str(int(key)) or type(generation) is not int
+                    or not 0 <= generation <= (1 << 31) - 1):
+                raise ValueError("parent_generations must contain canonical bounded attempts")
+            out[key] = generation
+        return dict(sorted(out.items()))
 
     @model_validator(mode="after")
     def _selection_readiness_is_fail_closed(self) -> "Card":
@@ -1224,12 +1426,14 @@ class RunState(BaseModel):
     failure_spike_seq: Optional[int] = Field(default=None, exclude=True)
     # The node currently BEING BUILT (a `node_building` marker), shown in the UI the instant work starts
     # on it — before the dev session finishes with node_created. Transient: {node_id, operator,
-    # parent_ids, started}; cleared when that node's node_created/node_failed folds. NOT in `nodes`, so it
-    # never affects id allocation (max(nodes)+1) or resume. None when no node is mid-build.
+    # parent_ids, started, optional bounded card_id}; cleared when that node's node_created/node_failed
+    # folds. NOT in `nodes`, so it never affects id allocation (max(nodes)+1) or resume. None when no node
+    # is mid-build.
     building: Optional[dict] = None
     # ALL nodes currently being built, keyed by node_id — the `parallel_build>1` superset of the
     # singular `building` above (which stays the MOST-RECENT build, untouched, for back-compat). Each
-    # value is the SAME transient marker shape {node_id, operator, parent_ids, started, generation?}.
+    # value is the SAME transient marker shape
+    # {node_id, operator, parent_ids, started, generation?, card_id?}.
     # Under concurrent builds the singular field holds only the last-appended `node_building`, so the UI
     # would render just one ghost; this collection lets it render every in-flight build. Empty when
     # nothing is mid-build and on old logs (default_factory). Like `building`, never in `nodes`, so id

@@ -57,7 +57,7 @@ def test_card_replay_journals_are_allowlisted_and_size_bounded():
     added = state.cards_added[0]
     assert set(added) == {
         "id", "statement", "source", "rationale", "idea", "parent_ids",
-        "scored_against", "footprint", "steering_context",
+        "scored_against", "footprint", "steering_context", "_footprint_invalid",
     }
     assert added["id"] == "card-safe" and added["statement"] == "bounded proposal"
     assert set(added["idea"]) == {
@@ -74,6 +74,7 @@ def test_card_replay_journals_are_allowlisted_and_size_bounded():
     assert len(added["idea"]["parent_ids"]) == 64
     assert len(added["parent_ids"]) == 64
     assert len(added["steering_context"]) <= 64
+    assert added["_footprint_invalid"] is True
 
     assert state.cards_merged == [{"canonical": "card-safe", "aliases": aliases[:256]}]
     assert state.cards_dropped == [{"id": "card-safe"}]

@@ -80,11 +80,14 @@ def test_link_by_card_id_overrides_the_statement_hash():
     st = fold(_mk([
         ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
         ("node_created", {"node_id": 1, "operator": "draft",
-                          "idea": {"operator": "draft", "hypothesis": "x", "card_id": "card-7"}}),
+                          "idea": {"operator": "draft", "hypothesis": "x", "card_id": "card-7",
+                                   "eval_timeout": 45}}),
         ("node_evaluated", {"node_id": 1, "metric": 0.5}),
     ]))
     assert "card-7" in st.cards
     assert st.cards["card-7"].evidence == [1]
+    assert st.cards["card-7"].eval_timeout == 45.0
+    assert st.cards["card-7"].parent_generations == {}
     assert hypothesis_id("x") not in st.cards          # the hash key was NOT used
 
 
@@ -145,6 +148,45 @@ def test_card_merged_unions_evidence_into_the_canonical():
     canon = st.cards[hypothesis_id(b)]
     assert canon.evidence == [1, 2]
     assert hypothesis_id(a) in canon.aliases
+
+
+def test_transitive_card_merge_verdict_matches_one_hash_joined_hypothesis():
+    nodes = [
+        ("node_created", {"node_id": 0, "operator": "draft", "parent_ids": [],
+                          "idea": {"operator": "draft", "hypothesis": "direction A"}}),
+        ("node_evaluated", {"node_id": 0, "metric": 0.80}),
+        ("node_created", {"node_id": 1, "operator": "improve", "parent_ids": [0],
+                          "idea": {"operator": "improve", "hypothesis": "direction B"}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.90}),
+        ("node_created", {"node_id": 2, "operator": "improve", "parent_ids": [1],
+                          "idea": {"operator": "improve", "hypothesis": "direction C"}}),
+        ("node_evaluated", {"node_id": 2, "metric": 0.85}),
+    ]
+    reference_rows = [("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})]
+    for event_type, data in nodes:
+        copied = {**data}
+        if event_type == "node_created":
+            copied["idea"] = {**data["idea"], "hypothesis": "one canonical direction"}
+        reference_rows.append((event_type, copied))
+    reference = fold(_mk(reference_rows))
+    hypothesis = reference.hypotheses[hypothesis_id("one canonical direction")]
+
+    card_rows = [("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})]
+    for card_id, statement in (("card-a", "direction A"), ("card-b", "direction B"),
+                               ("card-c", "direction C")):
+        card_rows.append(("card_added", {"id": card_id, "statement": statement}))
+    for index, (event_type, data) in enumerate(nodes):
+        copied = {**data}
+        if event_type == "node_created":
+            copied["idea"] = {**data["idea"], "card_id": f"card-{'abc'[index // 2]}"}
+        card_rows.append((event_type, copied))
+    card_rows.extend([
+        ("card_merged", {"canonical": "card-b", "aliases": ["card-a"]}),
+        ("card_merged", {"canonical": "card-c", "aliases": ["card-b"]}),
+    ])
+    merged = fold(_mk(card_rows)).cards["card-c"]
+    assert (merged.verdict, merged.evidence, merged.best_delta) == (
+        hypothesis.status, hypothesis.evidence, hypothesis.best_delta)
 
 
 def test_alias_enrichment_and_drop_resolve_to_the_canonical_card():
@@ -209,6 +251,7 @@ def test_reserved_operator_override_overlay_is_applied_last():
     assert c.statement == "OPERATOR RENAME"           # DISPLAY overlaid
     assert c.seed_statement == "interaction features help"   # join key UNCHANGED
     assert c.priority == 3
+    assert c.pinned is True
     assert c.footprint == {"gpus": 2, "gpu_mem_mib": 8000, "pinned_by": "operator"}
 
 
@@ -622,9 +665,14 @@ def test_card_ranked_stamps_priority_on_open_cards_only():
     a = "an open direction with no evidence"
     st = _run(extra=[
         ("hypothesis_added", {"statement": a, "source": "deep_research"}),  # open, no node
-        ("card_ranked", {"order": [hypothesis_id(a), hypothesis_id("interaction features help")]}),
+        ("card_ranked", {
+            "order": [hypothesis_id(a), hypothesis_id("interaction features help")],
+            "confidence": 0.75,
+        }),
     ])
     assert st.cards[hypothesis_id(a)].priority == 0                 # open -> ranked
+    assert st.cards[hypothesis_id(a)].confidence == 0.75
+    assert st.cards[hypothesis_id(a)].pinned is False
     assert st.cards[hypothesis_id("interaction features help")].priority is None  # supported -> not
 
 
@@ -664,7 +712,7 @@ def test_card_enriched_bad_numeric_does_not_drop_sibling_fields():
     assert c.research_origin == "memo-1" and c.provenance_tier is None and c.confidence is None
 
 
-def test_card_enriched_deep_values_and_numeric_fields_are_bounded():
+def test_card_enriched_deep_values_and_numeric_fields_are_ref_shape_gated():
     cid = "card-bounded"
     st = _fold_with_cursor(_mk([
         ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
@@ -683,10 +731,10 @@ def test_card_enriched_deep_values_and_numeric_fields_are_bounded():
         }),
     ]))
     card = st.cards[cid]
-    assert card.steering_context == [{"note": "x" * 400}]
+    assert card.steering_context == []
     assert card.concept_tags == ["model/tree"]
     assert card.lesson_refs == ["lesson-1"] and card.claim_refs == ["claim-1"]
-    assert len(card.cross_run_prior) <= 64
+    assert card.cross_run_prior is None
     assert card.research_origin == "survives-unknown-budget"
     assert card.confidence is None and card.foresight_rank is None
     assert "aaa_unknown" not in st.cards_enriched[0]
@@ -725,6 +773,24 @@ def test_card_ranked_malformed_order_is_bounded_deduplicated_and_owns_rank():
     assert malformed.card_ranking["order"] == []
     assert malformed.cards[first].foresight_rank is None
     assert malformed.cards[second].foresight_rank is None
+
+
+def test_card_rerank_clears_stale_confidence_when_new_snapshot_omits_it():
+    first, second = "card-first", "card-second"
+    prefix = _mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": first, "statement": "first"}),
+        ("card_added", {"id": second, "statement": "second"}),
+        ("card_ranked", {"order": [first, second], "confidence": 0.8}),
+    ])
+    ranked = _fold_with_cursor(prefix)
+    assert ranked.cards[first].confidence == ranked.cards[second].confidence == 0.8
+
+    reranked = _fold_with_cursor(prefix + _mk([("card_ranked", {"order": [second]})]))
+    assert reranked.cards[first].confidence is None
+    assert reranked.cards[second].confidence is None
+    assert reranked.cards[first].foresight_rank is None
+    assert reranked.cards[second].foresight_rank == 0
 
 
 def test_huge_card_confidence_is_ignored_without_overflowing_fold():

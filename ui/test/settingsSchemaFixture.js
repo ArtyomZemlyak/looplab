@@ -12,6 +12,7 @@ const TEST_MODEL_BOUNDS = {
   eval_parallel: { minimum: 0, maximum: 1024 },
   llm_parallel: { minimum: 0, maximum: 64 },
   timeout: { exclusiveMinimum: 0 },
+  max_eval_timeout: { exclusiveMinimum: 0, maximum: 86_400 },
   holdout_fraction: { minimum: 0, maximum: 0.9 },
   select_verifier_samples: { minimum: 1, maximum: 32 },
   concept_retag_every: { minimum: 1 },

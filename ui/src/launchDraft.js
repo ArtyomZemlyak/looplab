@@ -12,7 +12,7 @@ export const LAUNCH_RUNTIME_FIELDS = Object.freeze([
   { key: 'eval_parallel', label: 'Eval parallel', type: 'int', min: 0, max: 1024,
     help: 'Concurrent evaluations; 0 = AUTO (one per detected GPU).' },
   { key: 'llm_parallel', label: 'LLM parallel', type: 'int', min: 0, max: 64,
-    help: 'Concurrent LLM builds; 0 = AUTO (track resolved eval parallelism).' },
+    help: 'Total LLM-call budget + build fan-out; 0 = launch AUTO. Positive values govern build, research, novelty, and enrichment lanes.' },
   { key: 'max_seconds', label: 'Wall-clock budget (s)', type: 'float', min: 0 },
   { key: 'max_eval_seconds', label: 'Eval budget (s)', type: 'float', min: 0 },
 ])

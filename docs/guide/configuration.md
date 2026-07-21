@@ -59,8 +59,8 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **153 of the 182 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 17 high-frequency keys; search spans all 153 catalogued keys.
+server-owned curated catalogue with **154 of the 183 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 17 high-frequency keys; search spans all 154 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
 
@@ -125,7 +125,7 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `max_parallel` | `LOOPLAB_MAX_PARALLEL` | `1` | Legacy raw-config alias for `eval_parallel`. Retained for old files, CLI arguments, environment variables, and snapshots; prefer the canonical name in new configuration and governance. |
 | `parallel_build` | `LOOPLAB_PARALLEL_BUILD` | `1` | Legacy raw-config alias for `llm_parallel`. Retained for old files, CLI arguments, environment variables, and snapshots; prefer the canonical name in new configuration and governance. |
 | `eval_parallel` | `LOOPLAB_EVAL_PARALLEL` | _(unset)_ | **Canonical** concurrent EVALUATIONS width (GPU/experiment consumer), independent from LLM concurrency. Unset (`None`) falls back to legacy `max_parallel`; launch-time `0` is AUTO (one experiment per detected GPU, at least one). A live Strategist/operator update of `0` settles to safe serial width `1` instead of re-reading mutable hardware. |
-| `llm_parallel` | `LOOPLAB_LLM_PARALLEL` | _(unset)_ | **Canonical** concurrent LLM node-BUILD width (producer), independent from eval concurrency. Unset (`None`) falls back to legacy `parallel_build`; launch-time `0` is AUTO (the resolved `eval_parallel`). A live Strategist/operator update of `0` settles to safe serial width `1`. Values above one fan draft builds across worker role pairs; without a `role_factory`, execution clamps to one. |
+| `llm_parallel` | `LOOPLAB_LLM_PARALLEL` | _(unset)_ | **Canonical** total concurrent LLM-provider-call budget, independent from eval concurrency; its settled value also controls node-build fan-out. Unset (`None`) falls back to legacy `parallel_build` for build fan-out without enabling a shared total; launch-time `0` is AUTO (build fan-out follows resolved `eval_parallel`, while historical research overlap stays unbounded). A live Strategist/operator update of `0` settles both the total and build width to `1`. A positive canonical value activates the shared multi-lane broker. |
 | `train_monitor` | `LOOPLAB_TRAIN_MONITOR` | `true` | Per-eval background observer that tails the live training log while a (long) stage runs. Advisory/observability only (no node-selection or replay impact); no-ops without an LLM client or on the solution.py path |
 | `train_monitor_interval_s` | `LOOPLAB_TRAIN_MONITOR_INTERVAL_S` | `600.0` | Base monitor tick cadence in seconds; the effective cadence adapts to the per-experiment budget and can only be tightened by this. No-op unless `train_monitor` is on |
 | `train_monitor_kill` | `LOOPLAB_TRAIN_MONITOR_KILL` | `false` | Opt-in INTERVENTION: let the monitor tree-kill a training it judges `broken` (diverged / silent CPU fallback / not learning) early. The node then fails normally (`reason=monitor_broken`). Off = observe only |
@@ -135,6 +135,7 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `asha_live_quantile` | `LOOPLAB_ASHA_LIVE_QUANTILE` | `0.5` | The rank bar sits at this quantile along a WORST→BEST ordering of finished siblings' finals: `0.5` = the median; SMALLER lowers the bar toward the WORST peer so it is more conservative (`0.0` = only stop a node worse than the worst finished peer); LARGER is more aggressive |
 | `asha_live_min_siblings` | `LOOPLAB_ASHA_LIVE_MIN_SIBLINGS` | `3` | Minimum finished sibling nodes required before ASHA ranks at all (never acts on too little evidence) |
 | `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) |
+| `max_eval_timeout` | `LOOPLAB_MAX_EVAL_TIMEOUT` | `3600.0` | Hard ceiling for a Researcher-authored per-node `eval_timeout`, applied after the `agent_control.timeout` permission gate. The run-wide `timeout` remains the fallback when no permitted override is supplied. The one-hour default admits existing heavy-model requests while remaining below the sandbox's defensive 24-hour subprocess ceiling. |
 | `sweep_timeout_mult` | `LOOPLAB_SWEEP_TIMEOUT_MULT` | `8.0` | A sweep node (a grid in one process) gets this × `timeout` |
 | `n_seeds` | `LOOPLAB_N_SEEDS` | `3` | Seeds per evaluation / rung-0 width |
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
@@ -275,7 +276,8 @@ A setting **absent** from the map is locked — only a human can change it via t
 is **enforced at runtime** (`_agent_may`) at every **agent** seam, so removing a role from a knob
 truly locks it — not just a UI hint: the Strategist's whole applied control surface (`policy`,
 `policy_params`, `ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`,
-`novelty_stance`, `developer`, `fidelity`, `timeout`, `eval_parallel`, `llm_parallel`) is gated in
+`novelty_stance`, `developer`, `fidelity`, `timeout`, `eval_parallel`, `llm_parallel`,
+`llm_lane_limits`) is gated in
 `_apply_strategy`. Old snapshots that have only `max_parallel`/`parallel_build` grants remain valid;
 an explicit canonical entry takes precedence, including an empty allow-list that revokes the grant.
 A `budget_extend`, by contrast, is a **human control intent** — the boss action-builder can only
@@ -285,8 +287,17 @@ applied after bounded validation. (A human/operator
 pin via the UI/snapshot always wins — the matrix governs the autonomous agents, not the human.) The
 default grants those resource/search-shape knobs to the agents and keeps provider infrastructure
 (`llm_model`, `llm_base_url`, credentials, `trust_mode`, `docker_image`) locked.
+The Researcher's `timeout` grant authorizes its per-node request but never authorizes changing
+`max_eval_timeout`: that operator-owned hard ceiling clamps the accepted request after governance.
 (`fidelity`/`novelty_stance`/`prefer_sweep`/`developer` are governance keys for the strategist's
 per-node dials — not 1:1 `Settings` fields, but gated the same way.)
+
+`llm_lane_limits` is likewise a Strategy-only allocation rather than a launch setting. It is a
+closed map over `build`, `deep_research`, `novelty_dedup`, `enrichment`, and the fail-safe `engine`
+lane. Missing lanes are unbounded inside the shared total; supplied widths are raw durable live
+deltas in `0..64`, with `0` settling to one worker (never re-running startup AUTO). The Strategist
+may reallocate it when granted; an operator may pin the canonical totals and/or this map through
+`set_strategy`, and those exact raw values are re-applied on resume.
 
 ## Evaluation rigor & confirmation
 

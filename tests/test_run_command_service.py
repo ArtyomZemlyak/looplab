@@ -1100,6 +1100,30 @@ def test_budget_extend_normalizes_canonical_and_legacy_parallel_axes(tmp_path):
         assert exc.value.status_code == 400
 
 
+def test_set_strategy_accepts_only_canonical_totals_and_closed_raw_lane_split(tmp_path):
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    data = normalize_control(srv, rd, "set_strategy", {"strategy": {
+        "eval_parallel": "0", "llm_parallel": 4,
+        "llm_lane_limits": {"build": "0", "deep_research": 1, "engine": 2},
+    }})
+    assert data == {"strategy": {
+        "eval_parallel": 0, "llm_parallel": 4,
+        "llm_lane_limits": {"build": 0, "deep_research": 1, "engine": 2},
+    }}
+
+    for strategy in (
+        {"max_parallel": 2},
+        {"llm_lane_limits": {}},
+        {"llm_lane_limits": {"unknown": 1}},
+        {"llm_lane_limits": {"build": True}},
+        {"llm_lane_limits": {"build": 65}},
+    ):
+        with pytest.raises(HTTPException) as exc:
+            normalize_control(srv, rd, "set_strategy", {"strategy": strategy})
+        assert exc.value.status_code == 400
+
+
 @pytest.mark.parametrize("event_type,data", [
     ("budget_extend", {"add_nodes": 0}),
     ("budget_extend", {"max_eval_seconds": "not-a-number"}),

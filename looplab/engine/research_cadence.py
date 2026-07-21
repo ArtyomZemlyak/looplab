@@ -17,7 +17,7 @@ events and stdlib (the trust/search deps are lazy, method-local imports)."""
 from __future__ import annotations
 
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import RunState
+from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.events.replay import fold
 from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_COMPLETED,
@@ -132,7 +132,11 @@ class ResearchCadenceMixin:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
         BACKGROUND_APPENDABLE."""
-        from looplab.core.advisory_payloads import sanitize_research_memo_payload
+        from looplab.core.advisory_payloads import (
+            research_claim_ref,
+            research_memo_ref,
+            sanitize_research_memo_payload,
+        )
         # Verify the same canonical, redacted payload that can be persisted. Otherwise a custom
         # researcher can expose secrets/prompt controls to the verifier and receive a verdict over
         # evidence that is later truncated into a materially different durable memo.
@@ -161,9 +165,20 @@ class ResearchCadenceMixin:
         # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
         # stripping, list caps, or the aggregate text budget before any durable derivative.
         memo_d = sanitize_research_memo_payload(memo_d)
+        # Layer 1b Card provenance is reference-only.  Mint the memo id from the FINAL canonical payload
+        # (including verification) and bind every retained claim to that exact memo + positional slot.
+        # The full bodies stay exclusively on the research timeline; Cards will carry only these ids.
+        memo_id = research_memo_ref(memo_d)
+        if memo_id is not None:
+            memo_d["memo_id"] = memo_id
+            for index, claim in enumerate(memo_d.get("claims", [])):
+                claim_id = research_claim_ref(memo_id, index, claim)
+                if claim_id is not None:
+                    claim["claim_id"] = claim_id
         assert EV_RESEARCH_COMPLETED in BACKGROUND_APPENDABLE   # see the method-level note
         self.store.append(EV_RESEARCH_COMPLETED, {
             "memo": memo_d,
+            **({"memo_id": memo_id} if memo_id is not None else {}),
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
         # Steer the next proposals: surface the memo's directions as a standing operator hint (the
         # same channel the Researcher already reads), so deep research actually informs planning.
@@ -182,6 +197,183 @@ class ResearchCadenceMixin:
                     self.store.append(EV_HYPOTHESIS_ADDED, {
                         "statement": str(direction).strip(), "source": "deep_research",
                         "at_node": memo.at_node})
+
+    @staticmethod
+    def _card_enrichment_subject(state: RunState, node_id: int):
+        """Resolve one live node to its exact canonical native Card + proposal fence."""
+        if type(node_id) is not int or node_id < 0:
+            return None
+        node = state.nodes.get(node_id)
+        if (node is None or node.tombstoned or node_id in state.aborted_nodes
+                or node.idea is None or not isinstance(node.idea.card_id, str)):
+            return None
+        raw_card_id = node.idea.card_id
+        card_id = raw_card_id if raw_card_id in state.cards else None
+        if card_id is None:
+            matches = [cid for cid, card in state.cards.items()
+                       if raw_card_id in (card.aliases or [])]
+            if len(matches) == 1:
+                card_id = matches[0]
+        proposal_ref = idea_proposal_ref(node.idea)
+        if card_id is None or proposal_ref is None:
+            return None
+        return card_id, node, proposal_ref
+
+    def _sync_card_enrichments(self, state: RunState) -> RunState:
+        """Write ref-only Card links for memos, research claims and distilled lessons.
+
+        Research may finish on a background worker, but every Layer-1 Card event is deliberately a
+        main-task write.  The run cadence calls this collector after folding all producers; it emits one
+        exact card/node/generation/proposal-fenced snapshot per changed Card and then re-folds once.
+        """
+        from looplab.core.advisory_payloads import valid_advisory_ref
+        from looplab.events.types import EV_CARD_ENRICHED
+
+        desired_lessons: dict[str, set[str]] = {}
+        desired_claims: dict[str, set[str]] = {}
+        desired_origins: dict[str, str] = {}
+        desired_footprints: dict[str, tuple] = {}
+        subjects: dict[str, tuple] = {}
+
+        # Establish a deterministic live subject per native Card.  It owns the enrichment envelope;
+        # replay independently verifies this exact lifecycle and proposal digest before applying it.
+        for node_id in sorted(state.nodes):
+            subject = self._card_enrichment_subject(state, node_id)
+            if subject is None:
+                continue
+            card_id, node, proposal_ref = subject
+            subjects.setdefault(card_id, (node, proposal_ref))
+            if node.footprint_finalized:
+                footprint = normalize_researcher_footprint(node.idea.footprint)
+                if footprint is not None:
+                    # Sorted traversal deliberately makes the newest materialized node the Card's
+                    # Developer-finalization receipt.  Operator pins are overlaid later by replay.
+                    desired_footprints[card_id] = (
+                        node, proposal_ref,
+                        {**footprint, "proposed_by": "researcher", "finalized_by": "developer"})
+            origin = node.research_origin if isinstance(node.research_origin, dict) else {}
+            memo_id = origin.get("memo_id")
+            if valid_advisory_ref(memo_id, "memo"):
+                desired_origins.setdefault(card_id, memo_id)
+
+        # Lesson audit rows now carry an opaque id plus the exact cited node generations.  Legacy rows
+        # without both remain visible on their timeline but cannot be guessed onto a Card.
+        for batch in list(state.lessons_distilled or [])[-512:]:
+            if not isinstance(batch, dict):
+                continue
+            raw_lessons = batch.get("lessons")
+            if not isinstance(raw_lessons, (list, tuple)):
+                continue
+            for lesson in raw_lessons[:64]:
+                if not isinstance(lesson, dict):
+                    continue
+                lesson_id = lesson.get("lesson_id")
+                refs = lesson.get("evidence_refs")
+                if (not valid_advisory_ref(lesson_id, "lesson")
+                        or not isinstance(refs, (list, tuple)) or len(refs) > 64):
+                    continue
+                for ref in refs:
+                    if (not isinstance(ref, dict) or set(ref) != {"node_id", "generation"}
+                            or type(ref.get("node_id")) is not int
+                            or type(ref.get("generation")) is not int):
+                        continue
+                    subject = self._card_enrichment_subject(state, ref["node_id"])
+                    if subject is None or subject[1].attempt != ref["generation"]:
+                        continue
+                    desired_lessons.setdefault(subject[0], set()).add(lesson_id)
+
+        # Claims are aligned positionally with verifier verdicts.  Only exact verifier node_refs carry
+        # a generation, so a legacy/bare numeric citation is intentionally not promoted onto a Card.
+        for memo in list(state.research or [])[-256:]:
+            if not isinstance(memo, dict):
+                continue
+            memo_id = memo.get("memo_id")
+            if not valid_advisory_ref(memo_id, "memo"):
+                continue
+            claims = memo.get("claims")
+            verification = memo.get("verification")
+            verdicts = verification.get("verdicts") if isinstance(verification, dict) else None
+            if not isinstance(claims, (list, tuple)) or not isinstance(verdicts, (list, tuple)):
+                continue
+            for index, claim in enumerate(claims[:64]):
+                if not isinstance(claim, dict) or index >= len(verdicts):
+                    continue
+                claim_id = claim.get("claim_id")
+                verdict = verdicts[index]
+                if (not valid_advisory_ref(claim_id, "claim") or not isinstance(verdict, dict)
+                        or verdict.get("statement") != claim.get("statement")):
+                    continue
+                evidence = verdict.get("evidence")
+                refs = evidence.get("node_refs") if isinstance(evidence, dict) else None
+                if not isinstance(refs, (list, tuple)) or len(refs) > 64:
+                    continue
+                for ref in refs:
+                    if (not isinstance(ref, dict) or set(ref) != {"node_id", "generation"}
+                            or type(ref.get("node_id")) is not int
+                            or type(ref.get("generation")) is not int):
+                        continue
+                    subject = self._card_enrichment_subject(state, ref["node_id"])
+                    if subject is None or subject[1].attempt != ref["generation"]:
+                        continue
+                    desired_claims.setdefault(subject[0], set()).add(claim_id)
+
+        def _footprint_receipt_exists(card_id, node, proposal_ref, target) -> bool:
+            """Compare against the durable enrichment rows, before operator-wins replay overlays."""
+            for row in reversed(list(state.cards_enriched or [])):
+                if (not isinstance(row, dict) or row.get("id") != card_id
+                        or row.get("node_id") != node.id
+                        or row.get("generation") != node.attempt
+                        or row.get("proposal_ref") != proposal_ref
+                        or not isinstance(row.get("footprint"), dict)):
+                    continue
+                raw = row["footprint"]
+                quantitative = normalize_researcher_footprint(raw)
+                persisted = ({**quantitative,
+                              **({"proposed_by": "researcher"}
+                                 if raw.get("proposed_by") == "researcher" else {}),
+                              **({"finalized_by": "developer"}
+                                 if raw.get("finalized_by") == "developer" else {})}
+                             if quantitative is not None else None)
+                return persisted == target
+            return False
+
+        appended = False
+        wanted_cards = (set(desired_lessons) | set(desired_claims) | set(desired_origins)
+                        | set(desired_footprints))
+        for card_id in sorted(wanted_cards):
+            footprint_subject = desired_footprints.get(card_id)
+            subject = ((footprint_subject[0], footprint_subject[1])
+                       if footprint_subject is not None else subjects.get(card_id))
+            card = state.cards.get(card_id)
+            if subject is None or card is None:
+                continue
+            lesson_refs = sorted(desired_lessons.get(card_id, ()))[:64]
+            claim_refs = sorted(desired_claims.get(card_id, ()))[:64]
+            origin = desired_origins.get(card_id)
+            delta = {}
+            if lesson_refs and lesson_refs != list(card.lesson_refs or []):
+                delta["lesson_refs"] = lesson_refs
+            if claim_refs and claim_refs != list(card.claim_refs or []):
+                delta["claim_refs"] = claim_refs
+            if origin is not None and origin != card.research_origin:
+                delta["research_origin"] = origin
+            if footprint_subject is not None:
+                fp_node, fp_proposal_ref, footprint = footprint_subject
+                if not _footprint_receipt_exists(
+                        card_id, fp_node, fp_proposal_ref, footprint):
+                    delta["footprint"] = footprint
+            if not delta:
+                continue
+            node, proposal_ref = subject
+            self.store.append(EV_CARD_ENRICHED, {
+                "id": card_id,
+                "node_id": node.id,
+                "generation": node.attempt,
+                "proposal_ref": proposal_ref,
+                **delta,
+            })
+            appended = True
+        return fold(self.store.read_all()) if appended else state
 
     def _due_research_trigger(self, state: RunState) -> str | None:
         """Is an AUTO deep-research trigger (cadence/strategist) due at the current node-count? Used by

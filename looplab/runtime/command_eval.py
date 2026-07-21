@@ -26,8 +26,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.sandbox import (RunResult, STALL_SENTINEL, _to_float, docker_timed_out,
-                                     finite_timeout, json_line_extras, json_line_metric,
+from looplab.runtime.sandbox import (RunResult, STALL_SENTINEL, _to_float, docker_gpu_argv,
+                                     docker_timed_out, finite_timeout, json_line_extras, json_line_metric,
                                      json_line_trials, run_argv)
 
 # A stage name is interpolated into a log FILE PATH (`<name>.log`) and shown in the trace, so it must
@@ -568,6 +568,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
             "trust_mode='untrusted' needs the docker CLI to sandbox the eval, but it was not "
             "found on PATH. Install Docker or use trust_mode='trusted_local'.")
     root = Path(mount_root).resolve()
+    gpu_args = docker_gpu_argv(env, runtime=runtime)
     extra: list[str] = []
     for p, ro in (binds or []):
         raw = os.fspath(p)
@@ -615,8 +616,10 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         # would collapse. Mirrors DockerSandbox.run's `-e` forwarding.
         envs: list[str] = []
         for k, v in (env or {}).items():
+            if gpu_args and k == "CUDA_VISIBLE_DEVICES":
+                continue
             envs += ["-e", f"{k}={v}"]
-        base = ["docker", "run", "--rm", "--network", network, *rt,
+        base = ["docker", "run", "--rm", "--network", network, *rt, *gpu_args,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
                 *caps, *envs,
                 "-v", f"{root.as_posix()}:/work", *extra, "-w", cdir]

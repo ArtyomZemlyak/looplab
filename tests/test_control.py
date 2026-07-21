@@ -172,6 +172,9 @@ def test_inject_node_creates_and_evaluates(tmp_path):
     inj = next(n for n in state.nodes.values() if n.operator == "manual")
     assert inj.status is NodeStatus.evaluated and inj.metric is not None
     assert inj.idea.params == {"x": 0.5} and inj.idea.theme == "hand-tuned"
+    assert inj.idea.card_id is not None
+    assert state.cards[inj.idea.card_id].identity.kind == "native"
+    assert state.cards[inj.idea.card_id].evidence == [inj.id]
 
 
 def test_inject_node_developer_crash_fails_and_pauses(tmp_path):

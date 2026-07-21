@@ -49,6 +49,7 @@ ATTR_BY_FIELD = {
     "asha_live_quantile": "_asha_live_quantile",
     "asha_live_min_siblings": "_asha_live_min_siblings",
     "timeout": "timeout",
+    "max_eval_timeout": "max_eval_timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
     "confirm_top_k": "confirm_top_k",
     "confirm_seeds": "confirm_seeds",
@@ -151,6 +152,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     settings = Settings(
         max_parallel=3,
         timeout=7.5,
+        max_eval_timeout=90.0,
         sweep_timeout_mult=2.0,
         confirm_top_k=2,
         confirm_seeds=4,
@@ -181,6 +183,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         tmp_path / "old",
         max_parallel=settings.max_parallel,
         timeout=settings.timeout,
+        max_eval_timeout=settings.max_eval_timeout,
         sweep_timeout_mult=settings.sweep_timeout_mult,
         confirm_top_k=settings.confirm_top_k,
         confirm_seeds=settings.confirm_seeds,
@@ -280,7 +283,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     assert old.researcher._digest_cap == new.researcher._digest_cap == 1234
     # Spot-check a few of the deliberately non-default values actually made it through (guards
     # against a both-sides-defaults false pass).
-    assert new.max_parallel == 3 and new.timeout == 7.5
+    assert new.max_parallel == 3 and new.timeout == 7.5 and new.max_eval_timeout == 90.0
     assert new._policy_name == "evolutionary" and new.max_nodes == 17
     assert new.trust_gate == "gate" and new._holdout_fraction == 0.4
     assert new._inline_repair_attempts == 6 and new._seed_mode == "tracked"
@@ -304,7 +307,7 @@ def test_explicit_kwarg_beats_options_field(tmp_path):
 def test_default_options_reproduce_bare_engine(tmp_path):
     bare = _mk_engine(tmp_path / "bare")
     dflt = _mk_engine(tmp_path / "dflt", options=EngineOptions())
-    for attr in ("max_parallel", "timeout", "sweep_timeout_mult", "confirm_top_k",
+    for attr in ("max_parallel", "timeout", "max_eval_timeout", "sweep_timeout_mult", "confirm_top_k",
                  "_holdout_fraction", "_merge_mode", "trust_gate", "_novelty_epsilon",
                  "_inline_repair_stuck_repeat", "_track_hypotheses", "lessons_every",
                  "_debug_depth", "memory_dir", "_seed_mode"):

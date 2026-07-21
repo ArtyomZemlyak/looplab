@@ -15,8 +15,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from looplab.events.types import (EV_AGENT_VALIDATED, EV_DATA_LEAKAGE, EV_FORESIGHT_SELECTED,
-                                  EV_HYPOTHESIS_RANKED, EV_NODE_EVALUATED)
+from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
+                                  EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
+                                  EV_NODE_EVALUATED)
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 
 
@@ -69,9 +70,51 @@ class AuditMixin:
         `hypothesis_ranked` event — the analysis + selection trace the UI surfaces (kanban order + the
         model's `reason`). `researcher=` (Variant-1): read THIS build's pooled researcher so a
         concurrent sibling's prediction is not cross-wired onto this node."""
-        self._emit_role_telemetry(
-            researcher if researcher is not None else self.researcher,
-            "last_hyp_priority", EV_HYPOTHESIS_RANKED, node_id, generation)
+        role = researcher if researcher is not None else self.researcher
+        pick = getattr(role, "last_hyp_priority", None)
+        if not isinstance(pick, dict):
+            return
+        pick = dict(pick)
+        tid, sid = pick.pop("_trace_id", None), pick.pop("_span_id", None)
+        hypothesis_data = {"node_id": node_id, **pick}
+        if generation is not None:
+            hypothesis_data["generation"] = generation
+        self.store.append(EV_HYPOTHESIS_RANKED, hypothesis_data, trace_id=tid, span_id=sid)
+
+        # Layer 1b producer: the foresight role still ranks the compatibility Hypothesis board, whose
+        # keys are statement hashes. Resolve that one snapshot to the live canonical Card ids after
+        # node_created. A single direction may own several immutable work items, so preserve all matches
+        # in stable id order. Only refs/scalars cross onto card_ranked; free-form analysis remains on the
+        # existing hypothesis audit event and cannot leak through the tokenless Card projection.
+        try:
+            from looplab.core.models import hypothesis_id
+            from looplab.events.replay import fold
+
+            state = fold(self.store.read_all())
+            card_order: list[str] = []
+            seen: set[str] = set()
+            raw_order = pick.get("order") if isinstance(pick.get("order"), list) else []
+            for raw in raw_order[:256]:
+                if not isinstance(raw, str):
+                    continue
+                direct = state.cards.get(raw)
+                if direct is not None and direct.merged_into is None and raw not in seen:
+                    seen.add(raw)
+                    card_order.append(raw)
+                for card_id, card in sorted(state.cards.items()):
+                    seed = card.seed_statement or card.statement
+                    if (card.merged_into is None and seed and hypothesis_id(seed) == raw
+                            and card_id not in seen):
+                        seen.add(card_id)
+                        card_order.append(card_id)
+            card_data = {"order": card_order, "at_node": node_id}
+            if "confidence" in pick:
+                card_data["confidence"] = pick["confidence"]
+            self.store.append(EV_CARD_RANKED, card_data, trace_id=tid, span_id=sid)
+        except Exception:  # noqa: BLE001 - additive Card audit must never fail a completed build
+            pass
+        finally:
+            setattr(role, "last_hyp_priority", None)
 
     def _emit_foresight_selected(self, node_id: int, generation: int | None = None,
                                  researcher=None, developer=None) -> None:

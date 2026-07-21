@@ -13,13 +13,13 @@ Invariant #2 lives in this file: exactly ONE terminal event per node, emitted at
 attempt loop. Trust scans (reward-hack / code-leakage / critic) stay lazy, method-local imports."""
 from __future__ import annotations
 
-import os
 import time
 from typing import Optional
 
 import anyio
 
-from looplab.core.models import NodeStatus, normalize_extra_metrics
+from looplab.core.models import (NodeStatus, developer_artifact_footprint,
+                                 normalize_extra_metrics)
 from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import snapshot_training_logs
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
@@ -42,24 +42,6 @@ class EvaluateMixin:
         external-agent calls by len(params) per ablation (ADR-7 cost rule)."""
         return getattr(self.developer, "inner", self.developer)
 
-    def _acquire_gpu(self) -> Optional[int]:
-        """Reserve a free GPU ordinal for ONE concurrent eval, so parallel experiments land on DISTINCT
-        GPUs (pinned via CUDA_VISIBLE_DEVICES) instead of colliding on cuda:0. Only when running in
-        parallel (max_parallel>1) AND GPUs were detected — a single-experiment run is left unpinned (uses
-        the box as-is). Never blocks: an empty pool (max_parallel>GPU count) just means this eval isn't
-        pinned and shares a GPU. See engine/orchestrator.py::_detect_gpu_ids + the `_free_gpus` pool."""
-        if self.max_parallel <= 1 or not getattr(self, "_gpu_ids", None):
-            return None
-        with self._gpu_lock:
-            return self._free_gpus.pop(0) if self._free_gpus else None
-
-    def _release_gpu(self, gpu_id: Optional[int]) -> None:
-        if gpu_id is None:
-            return
-        with self._gpu_lock:
-            if gpu_id not in self._free_gpus:
-                self._free_gpus.append(gpu_id)
-
     async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
                         max_es: Optional[float] = None) -> None:
         async with limiter:
@@ -77,6 +59,12 @@ class EvaluateMixin:
             generation = node.attempt       # immutable identity of THIS worker's node lifecycle
             start_seq = events_at_start[-1].seq if events_at_start else -1
             sp.set("operator", node.operator)
+            # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
+            # devices across every inline repair/retry prevents a repaired process from jumping onto a
+            # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
+            _resource_reservation = self._eval_resource_reservation(node_id, generation)
+            eval_env = self._resource_eval_env(
+                _resource_reservation, inherit_host=True)
             # A6 proxy/predictive scoring: cheaply predict this candidate's metric from the observed
             # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
             # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a
@@ -231,19 +219,12 @@ class EvaluateMixin:
                         _mspec = self._eval_spec.get("metric") or {}
                         _tg.start_soon(self._monitor_asha, node_id, generation, workdir, cancel,
                                        _mspec, state.direction, kill_signal, _log_snapshot)
-                    # Pin this eval to a distinct GPU when running in parallel, so concurrent nodes use
-                    # separate GPUs (CUDA_VISIBLE_DEVICES remaps the agent's cuda:0 onto the reserved
-                    # device — transparent to the config). Unpinned (eval_env=None) on a single-experiment
-                    # run. Released in `finally` so a repair re-eval / crash can't leak a GPU from the pool.
-                    _gpu = self._acquire_gpu()
-                    eval_env = ({**os.environ, "CUDA_VISIBLE_DEVICES": str(_gpu)}
-                                if _gpu is not None else None)
-                    try:
-                        res = await anyio.to_thread.run_sync(
-                            self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
-                        )
-                    finally:
-                        self._release_gpu(_gpu)
+                    # The lifecycle reservation selected by the dispatcher stays unchanged through this
+                    # retry. CUDA_VISIBLE_DEVICES contains physical ids (logical→physical remap), while
+                    # an unspecified serial eval keeps eval_env=None and sees the whole box as before.
+                    res = await anyio.to_thread.run_sync(
+                        self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
+                    )
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
@@ -377,15 +358,45 @@ class EvaluateMixin:
                 # record (and re-materialize) ANOTHER node's edits as this node's. Capture now.
                 repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
                 repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
+                repaired_footprint = developer_artifact_footprint(
+                    node.idea.footprint, new_code, repaired_files)
+                if repaired_footprint is not None:
+                    repaired_footprint = (
+                        self._clamp_resource_footprint(repaired_footprint)
+                        or repaired_footprint)
+                    # A repair keeps the dispatcher's lifecycle reservation.  It may refine the
+                    # declaration within those already-held devices, but cannot grow onto GPUs owned
+                    # by a sibling while the retry loop is live.
+                    if ((_resource_reservation or {}).get("cpu_only")
+                            and "gpus" in repaired_footprint):
+                        repaired_footprint["gpus"] = 0
+                    elif ((_resource_reservation or {}).get("pin")
+                          and "gpus" in repaired_footprint):
+                        repaired_footprint["gpus"] = min(
+                            repaired_footprint["gpus"],
+                            int(_resource_reservation.get("count", 0) or 0))
+                    held_ids = ((_resource_reservation or {}).get("gpu_ids") or [])
+                    held_mem = [getattr(self, "_gpu_mem", {}).get(gpu)
+                                for gpu in held_ids]
+                    held_mem = [value for value in held_mem if type(value) is int]
+                    if (held_mem and isinstance(repaired_footprint.get("gpu_mem_mib"), int)):
+                        repaired_footprint["gpu_mem_mib"] = min(
+                            repaired_footprint["gpu_mem_mib"], min(held_mem))
                 attempt += 1
                 async with self._write_lock:
-                    self.store.append(EV_NODE_REPAIRED, {
+                    repair_payload = {
                         "node_id": node_id, "generation": generation,
                         "attempt": attempt, "code": new_code,
                         "files": repaired_files,
                         "deleted": repaired_deleted,
                         "error_in": err, "triage_action": "repair",
-                        "rationale": str(triage.get("rationale", ""))[:300]})
+                        "rationale": str(triage.get("rationale", ""))[:300]}
+                    if repaired_footprint is not None:
+                        repair_payload.update({
+                            "idea_footprint": repaired_footprint,
+                            "footprint_finalized": True,
+                        })
+                    self.store.append(EV_NODE_REPAIRED, repair_payload)
                 node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code
                 if node.attempt != generation:
                     await _record_superseded()

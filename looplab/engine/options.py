@@ -52,7 +52,8 @@ class EngineOptions:
     parallel_build: int = 1              # Variant-1: build (research+code) N nodes concurrently (1 = serial)
     # Layer-2 canonical parallelism names (docs/23). None (both) => fall back to the legacy fields above
     # => byte-identical to today. eval_parallel = concurrent evals (GPU consumer); llm_parallel =
-    # concurrent LLM builds (producer). Same default (None) on BOTH sides -> no options-divergence.
+    # shared provider-call total whose settled value also controls LLM build fan-out. Same default
+    # (None) on BOTH sides -> no options-divergence and an unbounded broker total at startup.
     eval_parallel: Optional[int] = None
     llm_parallel: Optional[int] = None
     train_monitor: bool = False          # per-eval live training-log observer (off = today)
@@ -64,6 +65,9 @@ class EngineOptions:
     asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)
     asha_live_min_siblings: int = 3      # min finished peers before it ranks at all
     timeout: float = 30.0
+    # Hard ceiling for a governed Researcher `Idea.eval_timeout`. Keep equal to the product default:
+    # a bare Engine and EngineOptions.from_settings(Settings()) must enforce the same finite ceiling.
+    max_eval_timeout: float = 3600.0
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
     confirm_top_k: int = 0
     confirm_seeds: int = 0

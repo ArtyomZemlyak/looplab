@@ -1,9 +1,10 @@
-"""Layer 2 (docs/23): the two decoupled concurrency axes eval_parallel / llm_parallel.
+"""Layer 2 (docs/23): decoupled eval/LLM axes plus the named LLM-lane allocation.
 
 The canonical names win over the legacy max_parallel / parallel_build when set; unset (None) falls back
 to the legacy field so a bare Engine is byte-identical to today. The Strategist steers the new names, and
 either name keeps the runtime attr AND its read-through alias (_eval_parallel / _llm_parallel) in sync.
-Layer 2 delivers NO throughput change (the spine still alternates) — this only locks the plumbing."""
+Positive canonical LLM totals activate one shared provider-call broker; the Strategist can reallocate
+its closed lanes without changing replay or metric selection."""
 from __future__ import annotations
 
 import math
@@ -107,25 +108,58 @@ def test_steering_one_axis_leaves_the_other_untouched(tmp_path):
     assert e.parallel_build == 5 and e.max_parallel == 9          # eval axis unchanged by the build steer
 
 
+def test_strategy_context_reads_the_live_broker_lane_allocation(tmp_path):
+    e = _engine(tmp_path / "lane-ctx", llm_parallel=4)
+    e._apply_strategy({"llm_lane_limits": {"build": 2, "deep_research": 0}})
+    ctx = e._strategy_ctx(RunState())
+    assert ctx.llm_total == 4
+    assert ctx.llm_lane_limits == {"build": 2, "deep_research": 1}
+
+
+def test_strategy_context_distinguishes_unbounded_broker_from_build_fanout(tmp_path):
+    e = _engine(tmp_path / "unbounded-ctx", eval_parallel=4)
+    ctx = e._strategy_ctx(RunState())
+    assert ctx.llm_parallel == 4
+    assert ctx.llm_total is None
+
+
+def test_total_only_retune_preserves_explicit_lane_allocation(tmp_path):
+    e = _engine(tmp_path / "lane-total", llm_parallel=4)
+    e._apply_strategy({"llm_lane_limits": {"build": 2, "deep_research": 0}})
+    e._apply_strategy({"llm_parallel": 6})
+    snapshot = e._llm_broker.snapshot()
+    assert snapshot["total"] == 6
+    assert snapshot["lane_limits"] == {"build": 2, "deep_research": 1}
+
+
 def test_llm_and_tool_output_contract_exposes_only_canonical_parallel_names():
-    out = _StrategyOut(timeout=45.0, eval_parallel=8, llm_parallel=3, rationale="retune")
+    out = _StrategyOut(
+        timeout=45.0, eval_parallel=8, llm_parallel=3,
+        llm_lane_limits={"build": 2, "deep_research": 1}, rationale="retune")
     strat = _assemble_strategy(out)
     assert strat["timeout"] == 45.0
     assert strat["eval_parallel"] == 8
     assert strat["llm_parallel"] == 3
+    assert strat["llm_lane_limits"] == {"build": 2, "deep_research": 1}
     properties = _StrategyOut.model_json_schema()["properties"]
-    assert {"timeout", "eval_parallel", "llm_parallel"} <= set(properties)
+    assert {"timeout", "eval_parallel", "llm_parallel", "llm_lane_limits"} <= set(properties)
     assert {"max_parallel", "parallel_build"}.isdisjoint(properties)
     for bad in ({"timeout": math.inf}, {"timeout": True}, {"eval_parallel": True},
-                {"llm_parallel": True}, {"eval_parallel": 1025}, {"llm_parallel": 65}):
+                {"llm_parallel": True}, {"eval_parallel": 1025}, {"llm_parallel": 65},
+                {"llm_lane_limits": {"unknown": 1}},
+                {"llm_lane_limits": {"build": True}}):
         with pytest.raises(ValidationError):
             _StrategyOut(**bad)
 
 
 def test_strategist_brief_reports_current_independent_widths():
-    ctx = StrategyContext(eval_parallel=7, llm_parallel=2)
+    ctx = StrategyContext(eval_parallel=7, llm_parallel=2, llm_total=None,
+                          llm_lane_limits={"build": 2, "deep_research": 1})
     brief = _strategist_brief(RunState(), ctx)
-    assert "eval_parallel=7 llm_parallel=2" in brief
+    assert "eval_parallel=7" in brief
+    assert "LLM broker total=unbounded" in brief
+    assert "current build fan-out=2" in brief
+    assert "LLM lanes={'build': 2, 'deep_research': 1}" in brief
     assert "Use only those canonical parallel names" in brief
 
 

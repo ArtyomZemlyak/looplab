@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, normalize_steering_context
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.search.coverage import snapshot_matches_analytics_projection
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
@@ -63,23 +63,33 @@ class ProposalCuesMixin:
         instead of the shared `self.researcher`, so concurrent builds don't clobber each other's hints."""
         _r = researcher if researcher is not None else self.researcher
         hint = ""
+        steering: list[dict] = []
         if self._complexity_cue:
             nc = (sum(1 for n in state.nodes.values() if parent.id in n.parent_ids)
                   if parent is not None else len([n for n in state.nodes.values() if not n.parent_ids]))
-            level = ("a minimal baseline" if nc < 2 else "a moderate approach" if nc < 4
+            level_key = "minimal" if nc < 2 else "moderate" if nc < 4 else "advanced"
+            level = ("a minimal baseline" if level_key == "minimal" else "a moderate approach"
+                     if level_key == "moderate"
                      else "an advanced approach (ensembling / HPO / feature-engineering)")
             hint += (f"\nComplexity guidance: this branch already has {nc} sibling experiment(s); "
                      f"propose {level}.")
+            steering.append({"kind": "complexity", "siblings": min(nc, 1_000_000),
+                             "level": level_key})
         if self._budget_aware:
             max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
             if max_es:
                 rem = max(0.0, max_es - state.total_eval_seconds)
                 frac = rem / max_es if max_es else 1.0
-                stance = ("explore broadly — plenty of budget" if frac > 0.5 else
-                          "be selective — budget is over half spent" if frac > 0.2 else
+                stance_key = "explore" if frac > 0.5 else "selective" if frac > 0.2 else "exploit"
+                stance = ("explore broadly — plenty of budget" if stance_key == "explore" else
+                          "be selective — budget is over half spent" if stance_key == "selective" else
                           "exploit the leader with cheap experiments — budget nearly spent")
                 hint += (f"\nBudget guidance: {rem:.0f}s of {max_es:.0f}s eval budget remain "
                          f"({frac:.0%}); {stance}.")
+                if (isinstance(max_es, (int, float)) and not isinstance(max_es, bool)
+                        and math.isfinite(float(max_es)) and 0 < float(max_es) <= 1e12):
+                    steering.append({"kind": "eval_budget", "remaining_seconds": rem,
+                                     "total_seconds": float(max_es), "stance": stance_key})
         # Experiment TIME-BUDGET cue (repo tasks): a training that cannot finish inside the per-experiment
         # wall-clock limit is KILLED and yields NO metric — pure waste. Real runs configured 26h/7h
         # trainings against a ~5h limit and timed out repeatedly because no role SAW the limit or estimated
@@ -117,30 +127,23 @@ class ProposalCuesMixin:
                 f"measure it FIRST, then size epochs to fit — a smaller experiment that COMPLETES beats a "
                 f"bigger one that gets killed."
                 + (f" Measured so far — {calib}." if calib else ""))
-        # GPU-PINNING cue (repo tasks under parallel eval): when the engine runs experiments in
-        # PARALLEL it pins each eval to EXACTLY ONE GPU via CUDA_VISIBLE_DEVICES (evaluate.py::
-        # _acquire_gpu), so a training/eval command that explicitly requests MULTIPLE devices
-        # (`--gpus 2`, `--gpus 0,1`, `--devices 2`, DDP / `Trainer(devices=2)`) sees only ONE
-        # visible GPU and CRASHES in pytorch-lightning's parse_gpu_ids/pick_multiple_gpus. Repos
-        # whose README + eval command use `--gpus 2`/`--gpus 4` (the multi-GPU-box convention)
-        # mislead every role into copying it — the rubertlite-v4 run failed EVERY node this way, and
-        # the repair loop kept RE-INTRODUCING `--gpus 2` while chasing later errors (attempt 3 fixed
-        # it, attempt 4 reverted it). Surface the hard constraint so the FIRST draft sizes to a single
-        # device; the repair path carries the SAME constraint via its own twin in
-        # crash_repair.py::_repair_error_context (this `_complexity_hint` reaches the Researcher's
-        # proposal prompt, not Developer.repair). Gated on pinning being ACTIVE (max_parallel>1 + GPUs
-        # detected); silent on a serial run (unpinned — the box's real GPU count stands, so multi-GPU
-        # is legitimately available there).
-        if self._repo_spec and self.max_parallel > 1 and getattr(self, "_gpu_ids", None):
+            if limit is not None:
+                steering.append({"kind": "experiment_time_budget", "seconds": limit})
+        # Layer-4 resource cue: the Researcher declares a GPU count and the scheduler exposes that
+        # many devices. This replaces the old unconditional single-device advice while retaining the
+        # documented legacy behavior when the declaration is omitted.
+        if self._repo_spec and getattr(self, "_gpu_ids", None):
+            pool = len(self._gpu_ids)
+            legacy = ("one device in parallel mode" if self.max_parallel > 1
+                      else "the whole visible box in serial mode")
             hint += (
-                "\nGPU CONSTRAINT — this run evaluates experiments in PARALLEL, so concurrent "
-                "experiments are pinned to distinct SINGLE GPUs (CUDA_VISIBLE_DEVICES). Every "
-                "training/eval command MUST target a SINGLE device: use `--gpus 1` / `--devices 1` / "
-                "`devices=1` (or a single-GPU accelerator) — NOT `--gpus 2`, `--gpus 0,1`, or "
-                "multi-GPU DDP. A multi-device request sees only 1 visible GPU and CRASHES "
-                "(pytorch-lightning parse_gpu_ids/pick_multiple_gpus). If the repo's README or example "
-                "commands show `--gpus 2`/`--gpus 4`, that is the multi-GPU-box convention — OVERRIDE "
-                "it to 1 here.")
+                f"\nGPU RESOURCE CONTRACT — this pool exposes at most {pool} GPU(s). Set "
+                "`footprint.gpus` to the exact count this experiment needs (0 means CPU-only); its "
+                "training/eval command must target that SAME count. The scheduler clamps impossible "
+                "requests and exposes only the reserved devices through CUDA_VISIBLE_DEVICES. Do not "
+                "copy a repo README's `--gpus 2`/`--gpus 4` unless the footprint declares it. Leaving "
+                f"the footprint unspecified preserves legacy behavior: {legacy}.")
+            steering.append({"kind": "gpu_constraint", "mode": "declared_footprint"})
         if self._failure_reflection:
             fails = sorted((n for n in state.nodes.values()
                             if n.status is NodeStatus.failed and n.error_reason),
@@ -154,6 +157,8 @@ class ProposalCuesMixin:
                     return tr or (n.error or "")[:60]
                 summ = "; ".join(f"node {n.id} ({n.error_reason}): {_why(n)}" for n in fails)
                 hint += f"\nReflection — recent failures to avoid repeating: {summ}."
+                steering.append({"kind": "failure_reflection",
+                                 "node_ids": [n.id for n in fails]})
         # Signal-delivery (§1): surface the live-watchdog observations (train-monitor health verdicts +
         # ASHA intermediate-rank flags) so the next proposal reacts to a config whose TRAINING was seen
         # to be weak — even when the watchdog kills are OFF (the default) and the node ran to completion,
@@ -161,12 +166,18 @@ class ProposalCuesMixin:
         # the failure-reflection above). Reads the raw event rows (bounded/deduped inside the helper).
         if self._watchdog_reflection:
             from looplab.events.digest import watchdog_reflection
-            hint += watchdog_reflection(self.store.read_all(), state=state)
+            watchdog_hint = watchdog_reflection(self.store.read_all(), state=state)
+            hint += watchdog_hint
+            if watchdog_hint:
+                steering.append({"kind": "watchdog_reflection"})
         # Signal-delivery (§1): surface a recently trust-FLAGGED node so the next proposal reacts to
         # it (trust flags otherwise only bar a WIN — the agent never learns and keeps re-deriving the
         # flagged approach). Pure rendering lives in digest.trust_reflection so a test can exercise it.
         from looplab.events.digest import trust_reflection
-        hint += trust_reflection(state)
+        trust_hint = trust_reflection(state)
+        hint += trust_hint
+        if trust_hint:
+            steering.append({"kind": "trust_reflection"})
         if self._localize_faults and self._repo_spec.get("editables"):
             fails = sorted((n for n in state.nodes.values()
                             if n.status is NodeStatus.failed and n.error),
@@ -179,12 +190,27 @@ class ProposalCuesMixin:
                 if loc:
                     files = ", ".join(item["file"] for item in loc[:3])
                     hint += f"\nFault localization — likely files to edit: {files}."
+                    steering.append({"kind": "fault_localization",
+                                     "file_count": min(len(loc), 1_000_000)})
         if self._feature_engineering and (self.task_has_columns or self._assets):
             hint += ("\nFeature engineering: propose 1-2 semantically-meaningful engineered features "
                      "(ratios, interactions, aggregations, domain transforms) as code. The eval's "
                      "cross-validation gates them — KEEP a feature only if it improves CV; drop any "
                      "that don't (feature engineering is non-universal).")
-        hint += self._prior_note_text   # E4: cross-run meta-learned prior (empty unless enabled)
+            steering.append({"kind": "feature_engineering"})
+        prior_hint = self._prior_note_text
+        hint += prior_hint   # E4: cross-run meta-learned prior (empty unless enabled)
+        if prior_hint:
+            steering.append({"kind": "reflection_prior"})
+        # Deep-research prose/findings remain on the research timeline.  The Card records only which
+        # exact memo was active when this proposal was formed, so future delivery can drill down without
+        # copying model-authored text (or paths/source bodies) into the tokenless public Card dump.
+        if state.research:
+            from looplab.core.advisory_payloads import valid_advisory_ref
+            latest_memo = state.research[-1]
+            memo_id = latest_memo.get("memo_id") if isinstance(latest_memo, dict) else None
+            if valid_advisory_ref(memo_id, "memo"):
+                steering.append({"kind": "research_memo", "ref": memo_id})
         # §21.20 Step 5: cross-run context pack (empty unless enabled). `_cross_run_advisory_text`
         # sets `self._cross_run_advisory_receipt` as a side effect; Variant-1: hold `_advisory_lock`
         # across the compute + the capture, then stamp the receipt onto THIS build's researcher so a
@@ -202,7 +228,18 @@ class ProposalCuesMixin:
             setattr(_r, "_cross_run_advisory_receipt", _receipt)
         except Exception:  # noqa: BLE001
             pass
-        hint += self._cross_run_pointer_text()         # lean "you have cross_run_* tools" nudge (advisory-off default)
+        if isinstance(_receipt, dict) and _receipt:
+            digest = _receipt.get("corpus_digest")
+            if (isinstance(digest, str) and len(digest) == 64
+                    and all(ch in "0123456789abcdef" for ch in digest)):
+                steering.append({"kind": "cross_run_advisory", "ref": f"sha256:{digest}",
+                                 "status": "available"})
+            elif _receipt.get("status") == "unavailable":
+                steering.append({"kind": "cross_run_advisory", "status": "unavailable"})
+        pointer_hint = self._cross_run_pointer_text()
+        hint += pointer_hint         # lean "you have cross_run_* tools" nudge (advisory-off default)
+        if pointer_hint:
+            steering.append({"kind": "cross_run_tools"})
         # PART V (B): once the run has a BASE concept set, ask for the DELTA instead of the full list, so
         # per-node annotations stay minimal and inherit down the DAG. Dynamic + gated here (the static
         # system prompt keeps authoring the full set when no base exists — a base-absent run is unchanged).
@@ -222,11 +259,13 @@ class ProposalCuesMixin:
                     "lists may be empty to inherit unchanged. If you propose operator=merge, use "
                     "`concept_mode=\"full\"` because the other actual parent memberships are not supplied "
                     "in this prompt.")
+                steering.append({"kind": "concept_authoring", "mode": "delta"})
             else:
                 hint += (
                     "\nConcept authoring safety — inherited membership is UNAVAILABLE or PARTIAL. "
                     "You MUST set `concept_mode=\"full\"`, put the exact complete concept set in `concepts`, "
                     "leave both delta lists empty, and MUST NOT use delta mode for this proposal.")
+                steering.append({"kind": "concept_authoring", "mode": "full"})
         # Concept-slug REUSE (fires for EVERY node incl. node 0, which has no run base yet). A shared slug
         # vocabulary spans ALL runs (the global concept map); an agent inventing `rdrop` when
         # `regularization/r-drop` already exists silently breaks the cross-run prior overlap (exact-slug
@@ -241,6 +280,7 @@ class ProposalCuesMixin:
                      "matches — consistent slugs are what let cross-run priors recognise a repeated idea. "
                      "To DECODE a slug (what it is + where it ranked within comparable prior runs) call "
                      "concept_card('<slug>').")
+            steering.append({"kind": "concept_slug_reuse"})
         try:
             setattr(_r, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001
@@ -255,7 +295,22 @@ class ProposalCuesMixin:
             setattr(_r, "_sweep_hint", sweep_hint)
         except Exception:  # noqa: BLE001
             pass
+        if sweep_hint:
+            steering.append({"kind": "sweep"})
         self._stamp_novelty_hint(state, self._novelty_stance, researcher=_r)
+        strategy_cue = {"kind": "strategy"}
+        if self._novelty_stance in {"explore", "balanced", "exploit"}:
+            strategy_cue["novelty_stance"] = self._novelty_stance
+        fidelity = getattr(self, "_strategy_fidelity", None)
+        if fidelity in {"cheap", "balanced", "full"}:
+            strategy_cue["fidelity"] = fidelity
+        if len(strategy_cue) > 1:
+            steering.append(strategy_cue)
+        bounded_steering = normalize_steering_context(steering)
+        try:
+            setattr(_r, "_steering_context", bounded_steering or [])
+        except Exception:  # noqa: BLE001
+            pass
 
     def _cross_run_pointer_text(self) -> str:
         """PART V §22 (advisory): a LEAN, static one-line pointer telling the Researcher it holds the

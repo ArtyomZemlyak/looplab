@@ -364,8 +364,8 @@ class ForesightPanelResearcher:
 
     def __getattr__(self, name):
         """Delegate every attribute NOT defined here (implement / repair / choose_action / assets /
-        last_files / …) to the wrapped agent. This lets the panel wrap a UNIFIED agent (where the
-        researcher IS the developer): `propose` is intercepted for predict-before-execute + board
+        last_files / last_footprint / …) to the wrapped agent. This lets the panel wrap a UNIFIED
+        agent (where the researcher IS the developer): `propose` is intercepted for predict-before-execute + board
         prioritization, while the whole DEVELOPER surface passes straight through to the SAME object,
         so the two handles never diverge (the R1 hazard that made the engine skip wrappers in unified
         mode). Only reached for names missing on the instance — `base`/`client`/`propose`/… are real

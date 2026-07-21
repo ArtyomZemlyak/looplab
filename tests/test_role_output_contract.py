@@ -19,7 +19,8 @@ _ALL = set(DEVELOPER_OUTPUT_ATTRS) | set(RESEARCHER_ACTION_ATTRS)
 _CONSUMER = re.compile(r'getattr\([A-Za-z_][\w.]*,\s*"((?:last_|choose_)[a-z_]+)"')
 # Producer writes: `self.last_files = …` / `obj.last_files = …` (also catches `last_filez =`
 # style renames as long as the prefix survives — the near-miss check below covers the rest).
-_PRODUCER = re.compile(r'\.((?:last_files?|last_deleted|last_file|last_report|last_seed|last_run|last_patch|choose_action)[a-z_]*)\s*=[^=]')
+_PRODUCER = re.compile(
+    r'\.((?:last_files?|last_deleted|last_footprint|last_file|last_report|last_seed|last_run|last_patch|choose_action)[a-z_]*)\s*=[^=]')
 
 
 def _scan(pattern: re.Pattern) -> dict[str, set[str]]:
@@ -73,6 +74,7 @@ def test_foresight_panel_forwards_the_registry_attrs():
     class _Base:
         last_files = {"a.py": "x"}
         last_deleted = ["b.py"]
+        last_footprint = {"gpus": 2, "gpu_mem_mib": 16_000}
 
         def choose_action(self, state):  # pragma: no cover - identity only
             return []
@@ -90,3 +92,23 @@ def test_foresight_panel_forwards_the_registry_attrs():
     # do NOT proxy `choose_action` — the surrogate IS the chooser in its regime, so the pilot
     # reverting to the static policy behind those wrappers is by design (surrogate.py's
     # per-attr-properties rationale). Changing that is a behavior decision, not a rename guard.
+
+
+def test_unified_developer_syncs_the_registered_footprint_output():
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    class _Researcher:
+        def propose(self, state, parent):  # pragma: no cover - identity-only role stub
+            return None
+
+    class _Developer:
+        last_files = {"solution.py": "print(1)"}
+        last_deleted = []
+        last_footprint = {"gpus": 1, "gpu_mem_mib": 6_000}
+
+        def implement(self, idea):
+            return "print(1)"
+
+    agent = UnifiedAgent(researcher=_Researcher(), developer=_Developer())
+    assert agent.implement(None) == "print(1)"
+    assert agent.last_footprint == {"gpus": 1, "gpu_mem_mib": 6_000}

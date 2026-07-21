@@ -5,7 +5,7 @@ import pytest
 
 from looplab.core.models import Card, Event, card_ownership_receipt, hypothesis_id
 from looplab.events.replay import fold
-from looplab.serve.public_cards import public_cards
+from looplab.serve.public_cards import public_cards, public_cards_projection
 
 
 def _events(rows):
@@ -25,15 +25,19 @@ def _baseline():
 
 
 def _native_card_added(card_id="opaque-work-item", statement="try a bounded improvement"):
-    idea = {"operator": "improve", "params": {"lr": 0.2}}
+    idea = {"operator": "improve", "params": {"lr": 0.2}, "eval_timeout": None}
     action = {
         "operator": "improve",
         "params": {"lr": 0.2},
         "space": None,
         "eval_profile": None,
+        "eval_timeout": None,
         "parent_id": 1,
         "parent_ids": [1],
+        "parent_generations": {"1": 0},
         "scored_against": 1,
+        "scored_against_generation": 0,
+        "scored_against_empty": False,
         "footprint": None,
     }
     receipt = card_ownership_receipt(card_id, statement, action)
@@ -45,7 +49,10 @@ def _native_card_added(card_id="opaque-work-item", statement="try a bounded impr
         "idea": idea,
         "parent_id": 1,
         "parent_ids": [1],
+        "parent_generations": {"1": 0},
         "scored_against": 1,
+        "scored_against_generation": 0,
+        "scored_against_empty": False,
         "ownership_receipt": receipt,
     })
 
@@ -69,6 +76,159 @@ def test_one_receipt_bound_fresh_work_item_is_selection_ready_independent_of_id_
     }
     assert card.selection_blockers == [] and card.selection_ready is True
     assert Card.model_validate(card.model_dump(mode="json")).selection_ready is True
+
+
+def test_eval_timeout_and_lifecycle_fences_are_receipt_bound():
+    short = _native_card_added("short-timeout")[1]
+    long = _native_card_added("long-timeout")[1]
+    short["idea"]["eval_timeout"] = 60.0
+    long["idea"]["eval_timeout"] = 3600.0
+    for row in (short, long):
+        action = {
+            "operator": row["idea"]["operator"], "params": row["idea"]["params"],
+            "space": None, "eval_profile": None,
+            "eval_timeout": row["idea"]["eval_timeout"],
+            "parent_id": 1, "parent_ids": [1], "parent_generations": {"1": 0},
+            "scored_against": 1, "scored_against_generation": 0,
+            "scored_against_empty": False, "footprint": None,
+        }
+        row["ownership_receipt"] = card_ownership_receipt(row["id"], row["statement"], action)
+
+    same_identity_short = {**action, "eval_timeout": 60.0}
+    same_identity_long = {**action, "eval_timeout": 3600.0}
+    assert card_ownership_receipt(
+        "same-card", "same statement", same_identity_short,
+    )["action_digest"] != card_ownership_receipt(
+        "same-card", "same statement", same_identity_long,
+    )["action_digest"]
+    state = fold(_events([*_baseline(), ("card_added", short), ("card_added", long)]))
+    assert state.cards["short-timeout"].eval_timeout == 60.0
+    assert state.cards["long-timeout"].eval_timeout == 3600.0
+    assert state.cards["short-timeout"].selection_ready is True
+    assert state.cards["long-timeout"].selection_ready is True
+
+
+def test_lifecycle_generation_change_makes_receipt_bound_action_stale():
+    rows = [*_baseline(), _native_card_added("generation-fenced")]
+    current = fold(_events(rows)).cards["generation-fenced"]
+    assert current.selection_provenance.freshness == "current"
+
+    reset = fold(_events([
+        *rows,
+        ("node_reset", {"node_id": 1, "generation": 0, "from_stage": "eval"}),
+    ])).cards["generation-fenced"]
+    assert reset.parent_generations == {"1": 0}
+    assert reset.scored_against_generation == 0
+    assert reset.selection_provenance.freshness == "stale"
+    assert "freshness_stale" in reset.selection_blockers
+
+
+def test_sparse_receipt_missing_new_action_fences_remains_visible_but_unknown():
+    card_id, statement = "sparse-receipt", "sparse queued action"
+    sparse_action = {
+        "operator": "improve", "params": {"lr": 0.2}, "space": None,
+        "eval_profile": None, "parent_id": 1, "parent_ids": [1],
+        "scored_against": 1, "footprint": None,
+    }
+    state = fold(_events([*_baseline(), ("card_added", {
+        "id": card_id, "statement": statement,
+        "idea": {"operator": "improve", "params": {"lr": 0.2}},
+        "parent_id": 1, "parent_ids": [1], "scored_against": 1,
+        "ownership_receipt": card_ownership_receipt(card_id, statement, sparse_action),
+    })]))
+    card = state.cards[card_id]
+    assert card.identity.kind == "native"  # sparse proof stays visible but cannot enter the queue
+    assert card.parent_generations is None
+    assert card.scored_against_generation is None
+    assert card.selection_provenance.action_complete is False
+    assert card.selection_provenance.freshness == "unknown"
+    assert card.selection_ready is False
+
+
+def test_explicit_empty_score_and_parent_fences_are_current_only_while_run_is_empty():
+    statement = "first seed"
+    action = {
+        "operator": "draft", "params": {}, "space": {}, "eval_profile": None,
+        "eval_timeout": None, "parent_id": None, "parent_ids": [],
+        "parent_generations": {}, "scored_against": None,
+        "scored_against_generation": None, "scored_against_empty": True,
+        "footprint": None,
+    }
+    added = ("card_added", {
+        "id": "first-seed", "statement": statement,
+        "idea": {"operator": "draft", "params": {}, "space": {},
+                 "eval_profile": None, "eval_timeout": None},
+        "parent_id": None, "parent_ids": [], "parent_generations": {},
+        "scored_against": None, "scored_against_generation": None,
+        "scored_against_empty": True,
+        "ownership_receipt": card_ownership_receipt("first-seed", statement, action),
+    })
+    empty = fold(_events([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}), added,
+    ])).cards["first-seed"]
+    assert empty.selection_provenance.freshness == "current"
+    assert empty.selection_ready is True
+
+    with_best = fold(_events([*_baseline(), added])).cards["first-seed"]
+    assert with_best.selection_provenance.freshness == "stale"
+    assert with_best.selection_ready is False
+
+
+def test_node_building_card_link_marks_only_its_native_card_in_flight_and_fail_closed():
+    card_id = "native-building-card"
+    other_id = "native-proposed-card"
+    state = fold(_events([
+        *_baseline(),
+        _native_card_added(card_id, "proposal being implemented"),
+        _native_card_added(other_id, "independent queued proposal"),
+        ("node_building", {
+            "node_id": 2, "operator": "improve", "parent_ids": [1], "card_id": card_id,
+        }),
+    ]))
+
+    card = state.cards[card_id]
+    assert card.status == "building"
+    assert card.evidence == []  # a reservation is not node evidence
+    assert card.selection_provenance.owner_state == "in_flight"
+    assert card.selection_blockers == ["work_in_flight"]
+    assert card.selection_ready is False
+    assert state.buildings[2]["card_id"] == card_id
+
+    other = state.cards[other_id]
+    assert other.status == "proposed"
+    assert other.selection_provenance.owner_state == "none"
+    assert other.selection_blockers == [] and other.selection_ready is True
+
+
+def test_node_created_replaces_the_build_link_with_normal_card_evidence():
+    card_id = "native-build-completes"
+    statement = "proposal that finishes building"
+    rows = [
+        *_baseline(),
+        _native_card_added(card_id, statement),
+        ("node_building", {
+            "node_id": 2, "operator": "improve", "parent_ids": [1], "card_id": card_id,
+        }),
+        ("node_created", {
+            "node_id": 2,
+            "operator": "improve",
+            "parent_ids": [1],
+            "idea": {
+                "operator": "improve", "params": {"lr": 0.2},
+                "hypothesis": statement, "card_id": card_id,
+            },
+        }),
+    ]
+
+    building = fold(_events(rows[:-1])).cards[card_id]
+    assert building.status == "building" and building.evidence == []
+
+    completed = fold(_events(rows))
+    card = completed.cards[card_id]
+    assert completed.buildings == {}
+    assert card.status == "running" and card.evidence == [2]
+    assert card.selection_provenance.owner_state == "in_flight"
+    assert card.selection_ready is False
 
 
 def test_receipt_sanitizer_preserves_concept_metadata_but_rejects_lossy_future_actions():
@@ -103,6 +263,34 @@ def test_receipt_sanitizer_preserves_concept_metadata_but_rejects_lossy_future_a
     extended = state.cards["extended-receipt"]
     assert extended.identity.kind != "native"
     assert extended.selection_ready is False
+
+
+def test_native_footprint_stamps_researcher_authority_and_rejects_forged_authority():
+    valid = _native_card_added("valid-footprint")[1]
+    forged = _native_card_added("forged-footprint")[1]
+    for row, footprint in (
+        (valid, {"gpus": 2, "gpu_mem_mib": 8192}),
+        (forged, {"gpus": 2, "pinned_by": "operator"}),
+    ):
+        row["footprint"] = footprint
+        row["ownership_receipt"] = card_ownership_receipt(row["id"], row["statement"], {
+            "operator": "improve", "params": {"lr": 0.2}, "space": None,
+            "eval_profile": None, "eval_timeout": None,
+            "parent_id": 1, "parent_ids": [1], "parent_generations": {"1": 0},
+            "scored_against": 1, "scored_against_generation": 0,
+            "scored_against_empty": False, "footprint": footprint,
+        })
+
+    state = fold(_events([*_baseline(), ("card_added", valid), ("card_added", forged)]))
+    assert state.cards["valid-footprint"].footprint == {
+        "gpus": 2, "gpu_mem_mib": 8192, "proposed_by": "researcher",
+    }
+    assert state.cards["valid-footprint"].selection_ready is True
+    assert state.cards["forged-footprint"].footprint == {
+        "gpus": 2, "proposed_by": "researcher",
+    }
+    assert state.cards["forged-footprint"].selection_provenance.action_complete is False
+    assert state.cards["forged-footprint"].selection_ready is False
 
 
 def test_current_unbound_card_added_and_proposed_without_action_fail_closed():
@@ -209,8 +397,10 @@ def test_stale_and_merged_native_work_items_fail_closed():
     stale["ownership_receipt"] = card_ownership_receipt(
         stale["id"], stale["statement"], {
             "operator": "improve", "params": {"lr": 0.2}, "space": None,
-            "eval_profile": None, "parent_id": 1, "parent_ids": [1],
-            "scored_against": 0, "footprint": None,
+            "eval_profile": None, "eval_timeout": None,
+            "parent_id": 1, "parent_ids": [1], "parent_generations": {"1": 0},
+            "scored_against": 0, "scored_against_generation": 0,
+            "scored_against_empty": False, "footprint": None,
         })
     state = fold(_events([
         *_baseline(),
@@ -231,10 +421,16 @@ def test_stale_and_merged_native_work_items_fail_closed():
 def test_public_dto_allowlists_selection_proof_and_downgrades_incomplete_claims():
     card = fold(_events([*_baseline(), _native_card_added()])).cards["opaque-work-item"]
     dto = public_cards({card.id: card})[card.id]
+    envelope = public_cards_projection({card.id: card}).model_dump(mode="json")
+    assert envelope["cards_projection"]["complete"] is True
+    assert envelope["cards_projection"]["items"][card.id]["complete"] is True
     assert dto["selection_ready"] is True
     assert dto["selection_blockers"] == []
     assert dto["identity"]["kind"] == "native"
     assert dto["selection_provenance"]["owner_state"] == "none"
+    assert dto["parent_generations"] == {"1": 0}
+    assert dto["scored_against_generation"] == 0
+    assert dto["scored_against_empty"] is False
 
     hostile = public_cards({
         "forged": {
@@ -268,5 +464,6 @@ def test_card_schema_exposes_identity_readiness_and_stable_blockers():
     assert schema["properties"]["selection_provenance"]["$ref"] == (
         "#/$defs/CardSelectionProvenance")
     assert schema["properties"]["selection_ready"]["type"] == "boolean"
+    assert schema["properties"]["pinned"]["type"] == "boolean"
     blockers = schema["properties"]["selection_blockers"]["items"]["enum"]
     assert "identity_not_native" in blockers and "work_terminal" in blockers

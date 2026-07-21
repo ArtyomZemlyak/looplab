@@ -66,6 +66,14 @@ def _run_engine_guarded(eng: Engine):
         try:
             events = eng.store.read_all()
             current = fold(events)
+            # A fatal serial Developer/plugin exception may escape after card_added+node_building but
+            # before node_created. Close those reservations (Card drop first, then node failure) BEFORE
+            # run_finished clears the transient projection; otherwise reopening can resurrect a native
+            # Card as selectable work with no authoritative owner.
+            if getattr(current, "buildings", None):
+                eng._recover_interrupted_builds(current)
+                events = eng.store.read_all()
+                current = fold(events)
             if not current.finished:
                 after_seq = events[-1].seq if events else -1
                 try:

@@ -1,46 +1,50 @@
 # Hypothesis-Card Kanban re-architecture — design + Layer 1 detail (2026-07-20)
 
-Status: **partial implementation; selection remains deliberately blocked.** Grounded in four exhaustive
-code maps (idea-pipeline · strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer
-mega-review (design + adversarial verify) consolidated in **§12 — the authoritative target contract**.
-The landed-vs-deferred record below is authoritative for current code; §12 describes the target and
-supersedes §3–§8/§11 only as a design, not as a claim that those layers ship today.
+Status: **implementation in progress; Layers 1, 2 and 4 are implemented, while Card-driven selection
+remains disabled until Layer 3 lands.** Grounded in four exhaustive code maps (idea-pipeline ·
+strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review consolidated in
+**§12 — the authoritative target contract**. The ledger below is the current implementation truth;
+all implementation tests are intentionally deferred to one final gate after Layers 3/5/6, per owner
+instruction on 2026-07-21.
 
 ## 0.0.1 Current implementation truth (2026-07-21)
 
 | Area | Landed now | Still deferred / blocked |
 |---|---|---|
-| Direction board | `Hypothesis` remains the derived research-direction aggregate and the shipping UI board | no rename or Card UI migration |
-| Card read model | `Card`, `Idea.card_id`, deterministic `_derive_cards`, card event/enrichment projection, exact concept-owner receipt, bounded public DTO | native engine mint/link producer, `node_building.card_id`, lifecycle-specific build receipts |
-| Identity / readiness | receipt-bound `Card.identity`, bounded `selection_provenance`, stable `selection_blockers`, fail-closed `selection_ready` | production emits no `card_added.ownership_receipt`, so current runtime cards are never selection-ready |
-| Concurrency | canonical `eval_parallel`/`llm_parallel` control contract and shared lane-aware LLM broker | footprint scheduler and concurrent card producer/consumer |
-| Selection / UX | none; existing node policies and `HypothesisBoard` are unchanged | Layer 3 scorer, Layer 4 scheduler, Layer 5 speculation/freshness runtime, Layer 6 Card controls/UI |
+| Direction board | `Hypothesis` remains the derived research-direction aggregate and the shipping UI board | Card Kanban migration remains Layer 6 |
+| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection | Layer 5 speculative request/done lifecycle |
+| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint | speculative freshness receipts (Layer 5) and operator controls (Layer 6) |
+| Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded | Layer 3 atomic claim/selection consumer is not enabled yet |
+| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation, shared broker, memory-aware GPU pool, lifecycle reservations, Docker remap/fallback, confirm admission | concurrent Card producer/consumer remains Layer 5 |
+| Selection / UX | existing node policies and `HypothesisBoard` remain the default | Layer 3 scorer/claim, Layer 5 speculation/freshness and Layer 6 controls/UI |
 
-### Stage progress ledger (audit baseline `54ab8d60`, 2026-07-21)
+### Stage progress ledger (working baseline after `e06e45c0`, 2026-07-21)
 
-`Complete` means every acceptance item in §12.6 is implemented and covered. `Partial` does not mean
-“shipped”: it records useful landed substrate while naming the still-missing contract. Update this table
-in the same commit that changes a stage; never infer completion from a green but narrower test suite.
+`Complete` means every acceptance item in §12.6 is implemented and has passed the final gate.
+`Implemented; final gate pending` means production code and focused tests exist, but those tests have
+not yet been run because the owner asked for one consolidated test/build pass after all stages. Update
+this table in the same commit that changes a stage.
 
 | Stage | Honest status | Landed commits / evidence | Validation at this baseline | Remaining before `Complete` |
 |---|---|---|---|---|
-| **1a-extract** | **Complete** | `024358f` pure verdict helpers | unchanged golden + `test_verdict_helper`; included in the 4,523-test full pass at `c07b36c6` | none |
-| **1a-model** | **Partial** | `d4dc621` model/read projection; identity/replay hardening through `e66b728c`, `9cff2fbd`, `602a0cf2`, `54ab8d60` | current card/replay/event/golden focused suite green at `54ab8d60` | atomically mint native `card_added` + ownership receipt under `_id_lock`; carry `card_id` in `node_building`; concurrent-draft dedupe and resume coverage |
-| **1b** | **Partial** | `d10bbe1` enrichment schema/projection; concept/public hardening through `b90babd4`, `c2e73d06` | card enrichment, concept truth, public projection, replay bounds green at `54ab8d60` | reserve and forward `last_footprint`; wire bounded Researcher proposal / Developer finalization and structured steering-context producer contracts |
-| **1c** | **Partial** | `015b699` derived exclusion seam; `54ab8d60` fail-closed selection blockers | dropped/merged/gated replay and selection-guard tests green | engine-authored `card_dropped`/`card_merged`; node-less `_intra_batch_dup`; superseded lifecycle producer coverage |
-| **2** | **Partial** | `15df954` canonical axes; `5e871dc5` control hardening; `d9940342` shared lane broker | two-pool/broker/config regression surfaces green in the full pass | Strategist-owned total **and per-lane** allocation, durable/live reconfiguration parity, diagram/docs contract |
-| **4** | **Not started** (substrate only) | `Idea.footprint` exists; `hardware.detect_gpus()` exposes memory | no L4 acceptance suite exists on this baseline | full §12.6 L4: Developer footprint, memory-aware race-free bin-packing, Docker remap/fallback, timeout ceiling, prompts, confirm-path admission |
+| **1a-extract** | **Complete** | `024358f` pure verdict helpers | unchanged golden + `test_verdict_helper`; included in the prior 4,523-test full pass | none |
+| **1a-model** | **Implemented; final gate pending** | native planner/reservation, ownership receipt, drop-first recovery, parallel preplanning, rerun/inject/ablation linkage | focused lifecycle/replay tests added; not run in this implementation pass | consolidated final gate only |
+| **1b** | **Implemented; final gate pending** | strict enrichment fence/schema; structured steering; live ranking; stable memo/claim/lesson refs; Developer footprint plumbing | focused writer/public/replay/role tests added; not run in this implementation pass | consolidated final gate only |
+| **1c** | **Implemented; final gate pending** | engine-authored drop/merge mirror, node-less duplicate Cards, immediate reconciliation, CAS-safe drop and superseded lifecycle handling | focused Stage-1c/lifecycle tests added; not run in this implementation pass | consolidated final gate only |
+| **2** | **Implemented; final gate pending** | canonical axes, shared lane broker, Strategist `llm_lane_limits`, live/operator reconfiguration, UI/docs/diagram contract | focused broker/strategy/control/UI tests updated; not run in this implementation pass | consolidated final gate only |
+| **4** | **Implemented; final gate pending** | Developer-finalized footprint; timeout ceiling; memory-aware atomic GPU pool; logical/physical remap; lifecycle/confirm admission; Docker probe/fallback; footprint-conditioned prompts | `test_gpu_resources` and related focused tests added; not run in this implementation pass | consolidated final gate only |
 | **3** | **Blocked / not started** | `54ab8d60` deliberately makes legacy/shadow cards non-selectable | selection-guard tests prove fail-closed behavior only | flag-gated card scorer, exact forced-prefix/liveness, policy lanes, `Strategy.card_scoring`, budget denominator and fidelity tests |
 | **5a** | **Not started** | L2 broker is prerequisite substrate | existing serial spine remains covered | request-driven producer/consumer task group, durable request/done pair, isolated roles, main-task commit, recovery and quiescence |
 | **5b** | **Not started** | none beyond Card readiness substrate | no speculation/freshness acceptance suite | durable speculative marker, `speculation_depth`, eligibility-set freshness drop, ASHA/merge rules, resume and budget accounting |
 | **6** | **Not started** (public DTO prerequisite landed) | bounded Card DTO in `902cc6d9`, completeness receipts through `c2e73d06` | public projection/API tests green; 596 UI tests + production build green at `c2e73d06` | Card Kanban lanes, four server-stamped controls, operator-wins overlays/CAS, resource clamp, UI/docs/diagram integration |
 
-Validation receipts for the audit: backend full suite **4,523 collected / 0 failed** at `c07b36c6`;
-changed card/replay/API surfaces green through `54ab8d60`; UI **596/596** and production build green;
-`mkdocs build --strict` green. Later stage commits must replace these receipts with checks run on their
-own rebased commit before the row may advance.
+Previous validation receipt (before this implementation pass): backend **4,523 collected / 0 failed**,
+UI **596/596**, production build and strict MkDocs build green. During this pass only static inspection
+and `git diff --check` are used. One final backend/UI/build/MkDocs gate will replace this receipt after
+all stages are implemented; until then no newly implemented row is marked `Complete`.
 
-**Hard blocker:** do not feed `_derive_cards` output to Layer 3 yet. `Card.actionable` is a compatibility
+**Hard blocker:** do not feed `_derive_cards` output to selection until Layer 3's scorer and atomic
+existing-Card claim land. `Card.actionable` is a compatibility
 board flag meaning only “not dropped/gated/abandoned”; it is true for proposed-without-action, running,
 evaluated, and superseded work. It is therefore **not evidence of executability**. A future selector may
 consume only `selection_ready`, which requires all of the following:
@@ -54,9 +58,9 @@ consume only `selection_ready`, which requires all of the following:
 ID spelling is never the discriminator: even an id that resembles a statement hash is native when its
 ownership receipt is valid, while an unreceipted `card-*` string is only a synthesized shadow. Concept
 membership is independent metadata with its own completeness receipt; absent concept tags do not block
-execution. Until the atomic main-task mint/link lifecycle writes the ownership receipt, normal
-statement-hash cards, unbound `card_added` rows, and node-only `Idea.card_id` rows remain visible for
-audit but fold to `selection_ready=false` with bounded reasons.
+execution. The native writer now produces valid receipts, but Layer 3 must claim an existing Card under
+`_id_lock` without re-proposing or minting a replacement. Legacy statement-hash Cards, unbound
+`card_added` rows and node-only `Idea.card_id` rows remain visible for audit and fail closed.
 
 ## 0. Why, and the build order
 

@@ -53,6 +53,11 @@ Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene 
     applicable records. A model-authored meta-note is an explanatory hypothesis over recorded
     observations, not causal proof.
 
+    Parallel work has two independent canonical ceilings: `eval_parallel` admits experiments, while
+    `llm_parallel` governs provider calls and build fan-out. A run-local broker further divides the
+    LLM total among `build`, `deep_research`, `novelty_dedup`, `enrichment`, and the fail-safe `engine`
+    lane. The Strategist can durably reallocate both totals and that lane map; operator pins win.
+
 ## Where each piece lives in the code
 
 | Concept | Module |
@@ -60,6 +65,7 @@ Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene 
 | Control loop + crash-resume | `engine/orchestrator.py` |
 | Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Researcher / Developer / unified agent | `agents/roles.py`, `agents/unified_agent.py` |
+| Canonical eval/LLM concurrency + named-lane broker | `engine/orchestrator.py`, `core/llm_broker.py`, `engine/strategy.py` |
 | Foresight (hypothesis prioritization, predict-before-execute) | `search/foresight.py` |
 | Hybrid retrieval + agent-decided merge (lessons & hypothesis board) | `search/hybrid_merge.py` |
 | Search policies · operators | `search/policy.py`, `search/operators.py` |

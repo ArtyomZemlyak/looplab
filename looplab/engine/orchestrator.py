@@ -18,7 +18,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import anyio
 import orjson
@@ -28,12 +28,14 @@ from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.types import (
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
+    EV_CARD_ADDED, EV_CARD_DROPPED, EV_CARD_MERGED,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HOST_GRADING,
     EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_FINALIZE_STEP,
     EV_NODE_BUILDING,
-    EV_NODE_FAILED, EV_PAUSE,
+    EV_HYPOTHESIS_MERGED, EV_NODE_FAILED, EV_PAUSE,
+    EV_NOVELTY_REJECTED,
     EV_POLICY_DECISION,
     EV_REPORT_GENERATED,
     EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED,
@@ -50,7 +52,8 @@ from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.eval_stages import EvalStagesMixin
 from looplab.engine.evaluate import EvaluateMixin
 from looplab.engine.node_build import NodeBuildMixin
-from looplab.engine.proposal_cues import ProposalCuesMixin
+from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
+from looplab.engine.resources import ResourceSchedulingMixin, detect_gpu_inventory
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
 from looplab.engine.novelty import NoveltyGateMixin
@@ -74,7 +77,10 @@ from looplab.engine.workspace import WorkspaceSeeder
 from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
-from looplab.core.models import Idea, Node, NodeStatus, RunState, durable_idea_payload
+from looplab.core.models import (
+    Idea, Node, NodeStatus, RunState, card_ownership_receipt, durable_idea_payload,
+    idea_proposal_ref, normalize_researcher_footprint,
+)
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
@@ -102,6 +108,33 @@ from looplab.engine.options import _UNSET  # noqa: F401
 _DIFF_DIGEST_CAP = 8 * 1024 * 1024
 
 
+class _BuildReservation(NamedTuple):
+    """Durable node/card reservation handed from the main task to one build worker.
+
+    The first five positions preserve the historical internal tuple layout, so focused tests and
+    integrations that only read ``reservation[1]`` (the node id) keep working.  The final two fields
+    carry the exact native Card identity and already-prepared Idea; no worker is allowed to mint or
+    re-propose after the main task has committed the reservation.
+    """
+
+    state: RunState
+    node_id: int
+    kind: str
+    parent_ids: list[int]
+    parent_generations: dict[str, int]
+    card_id: Optional[str]
+    idea: Optional[Idea]
+
+
+class _CardReservationPlan(NamedTuple):
+    """Pure result of resolving one exact native Card identity against the journal."""
+
+    disposition: str  # mint | reuse | duplicate | invalid
+    card_id: Optional[str]
+    idea: Optional[Idea]
+    payload: Optional[dict]
+
+
 def _detect_gpu_ids() -> list[int]:
     """Best-effort list of usable GPU ordinals for the per-eval GPU pinning + `max_parallel=0` AUTO
     (evaluate.py). Honors an existing `CUDA_VISIBLE_DEVICES` (respect an operator/scheduler that already
@@ -110,6 +143,8 @@ def _detect_gpu_ids() -> list[int]:
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cvd is not None:
         ids = [t.strip() for t in cvd.split(",") if t.strip() != ""]
+        if len(ids) == 1 and ids[0].lower() in {"-1", "none", "nodevfiles", "void"}:
+            return []
         # Ordinals INSIDE this fenced view are 0..n-1 regardless of the physical ids named in the var.
         return list(range(len(ids)))
     try:
@@ -135,7 +170,7 @@ def _detect_gpu_ids() -> list[int]:
 # `self._ablate(...)` call site (and every test poking those names on Engine) is untouched.
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
-             AuditMixin, EvaluateMixin, NodeBuildMixin, ProposalCuesMixin,
+             AuditMixin, ResourceSchedulingMixin, EvaluateMixin, NodeBuildMixin, ProposalCuesMixin,
              TrainingMonitorMixin, AshaMonitorMixin):
     def __init__(
         self,
@@ -478,6 +513,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # parallelize, each concurrent eval is pinned to a DISTINCT GPU via CUDA_VISIBLE_DEVICES (see
         # evaluate.py::_evaluate); `max_parallel=0` means AUTO — run one experiment per detected GPU.
         self._gpu_ids: list[int] = _detect_gpu_ids()
+        self._gpu_physical_ids, self._gpu_mem = detect_gpu_inventory(self._gpu_ids)
         if max_parallel == 0:                            # AUTO: the agent/operator lets the box decide
             max_parallel = max(1, len(self._gpu_ids))
         self.max_parallel = max(1, int(max_parallel))
@@ -503,9 +539,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             total=_startup_llm_total,
             lane_limits=default_llm_lane_limits(_startup_llm_total),
         )
+        self._llm_lane_limits_explicit = False
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
         self._gpu_lock = threading.Lock()
+        self._gpu_condition = threading.Condition(self._gpu_lock)
+        self._gpu_epoch = 0
+        self._eval_gpu_reservations: dict[tuple[int, int], dict] = {}
         self.timeout = timeout
+        self.max_eval_timeout = _opt("max_eval_timeout")
         self._train_monitor = bool(train_monitor)
         self._train_monitor_interval_s = train_monitor_interval_s
         self._train_monitor_kill = bool(train_monitor_kill)
@@ -909,6 +950,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             observed_tail = self.store.read_all()
             if (observed_tail[-1].seq if observed_tail else -1) != decision_seq:
                 continue
+            # A background consolidation can land immediately before any terminal/operator/budget gate.
+            # Mirror it while this decision prefix is stable so an early exit cannot leave the durable
+            # Card board permanently behind the Hypothesis board.
+            state = self._mirror_hypothesis_card_merges(state)
+            reconciled_tail = self.store.read_all()
+            if (reconciled_tail[-1].seq if reconciled_tail else -1) != decision_seq:
+                continue
             if state.search_epoch != self._holdout_epoch:
                 # A reset/new candidate can win the finish race AFTER holdout disclosure while this
                 # same Engine process stays alive. Rebuild immediately; waiting for a CLI re-entry
@@ -1147,7 +1195,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         if _i:
                             state = fold(self.store.read_all())
                         _ideas = self._propose_batch(state, len(_chunk))
+                        _dropped_batch = list(
+                            getattr(self, "_pending_batch_dropped", None) or [])
                         if not _ideas:
+                            for _drop in _dropped_batch:
+                                if isinstance(_drop, dict) and isinstance(_drop.get("idea"), Idea):
+                                    self._record_node_less_card(
+                                        _drop["idea"],
+                                        reason=str(_drop.get("reason") or "proposal_rejected")[:160],
+                                        steering_context=_drop.get("steering_context", []),
+                                    )
+                            self._pending_batch_dropped = []
                             continue
                         # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned 1:1
                         # with _ideas), so each build emits ITS OWN hypothesis_ranked/foresight_selected.
@@ -1161,7 +1219,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if _a.get("_rung") is not None:
                                 self.store.append(EV_RUNG_PROMOTED,
                                                   {"rung": _a["_rung"], "survivors": _a.get("_promoted", [])})
-                        _reserved = [self._reserve_node_build(_a) for _a in _chunk]   # serial -> distinct ids
+                        # Proposal is complete before durable reservation: a native Card receipt must
+                        # bind the exact immutable statement/action.  The MAIN TASK serially commits
+                        # card_added -> node_building for each idea, then workers only implement.
+                        _reserved = [
+                            self._reserve_node_build(
+                                _a, _idea, scored_against=state.best_node_id,
+                                source="researcher",
+                                steering_context=(
+                                    (_tel or {}).get("_steering_context", [])
+                                    if isinstance(_tel, dict) else []),
+                            )
+                            for _a, _idea, _tel in zip(_chunk, _ideas, _telem)
+                        ]
+                        # Accepted preplanned ids are durable first. Node-less rejects then receive fresh
+                        # closed Card ids without shifting any reservation the workers are about to use.
+                        for _drop in _dropped_batch:
+                            if isinstance(_drop, dict) and isinstance(_drop.get("idea"), Idea):
+                                self._record_node_less_card(
+                                    _drop["idea"],
+                                    reason=str(_drop.get("reason") or "proposal_rejected")[:160],
+                                    steering_context=_drop.get("steering_context", []),
+                                )
+                        self._pending_batch_dropped = []
                         # Cost guardrail (Phase 4): surface the concurrent build fan-out width in the
                         # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
                         # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
@@ -1454,13 +1534,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                           else node.attempt if node is not None else 0)
             # CODEX AGENT: every durable reservation gets a terminal outcome before any new work. Merely
             # ignoring the transient projection resurrects its breathing card on every subsequent replay.
-            self.store.append(EV_NODE_FAILED, {
-                "node_id": node_id,
-                "generation": generation,
-                "error": "node build was interrupted before it committed",
-                "reason": "build_interrupted",
-                "eval_seconds": 0.0,
-            })
+            card_id = (marker.get("card_id") if isinstance(marker, dict)
+                       and isinstance(marker.get("card_id"), str) else None)
+            current_card_id = (node.idea.card_id if node is not None and node.idea is not None
+                               else None)
+            self._fail_reserved_build(
+                node_id=node_id,
+                card_id=card_id,
+                generation=generation,
+                reason="build_interrupted",
+                error="node build was interrupted before it committed",
+                # An implement-reset reuses the Node's existing Card. A propose-reset owns a newly
+                # minted Card whose marker id differs until node_created lands, so it must close just
+                # like a bare first build.
+                drop_card=(node is None or (card_id is not None and card_id != current_card_id)),
+            )
             recovered = True
         return recovered
 
@@ -1579,6 +1667,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # bad request and dies again, leaving the run unrecoverable. Record + skip it.
                 self.store.append(EV_INJECT_FAILED,
                                   {"idx": state.injects_done, "error": str(e)[:500]})
+                # The request is about to be marked done in this SAME invocation, so unlike an
+                # escaping serial build exception there may be no resume boundary to clean a partial
+                # reservation. Terminalize any surviving marker before advancing the request gate.
+                failed_state = fold(self.store.read_all())
+                if failed_state.buildings:
+                    self._recover_interrupted_builds(failed_state)
             self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
             return True
         forced_ablate = next((r for r in state.ablate_request_generations
@@ -1666,6 +1760,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # all phrasing the same idea). Hybrid-retrieve the near-dups + let the Researcher decide the
         # true merges, recorded as `hypothesis_merged` events the fold applies deterministically.
         state = self._maybe_merge_hypotheses(state)
+        state = self._mirror_hypothesis_card_merges(state)
 
         # M6 comparative lessons, live-shared (doc 13 §7 items 2+5): on a node-count cadence,
         # distill credit-assigned PAIR lessons into the SHARED cross-run store DURING the run
@@ -1681,7 +1776,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # lesson file does not. Retire + re-derive those lessons from the corrected state. Cheap
         # {node->sig}-hash gate: no-op unless a signature actually moved; LLM only on a genuine drift.
         state = self._maybe_reconcile_lessons(state)
-        return state
+        # Layer 1b: the producers above may run in background/read-only channels, while Card events are
+        # main-task-only.  Materialize their opaque memo/lesson/claim refs now, with exact Card + node
+        # lifecycle + proposal fences; no bodies or paths cross into the Card ledger.
+        return self._sync_card_enrichments(state)
 
     def _skip_if_aborted(self, a: dict, cur: RunState) -> bool:
         # Operator stopped this specific node (`node_abort`): skip the eval and record
@@ -1870,11 +1968,24 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
                         if (max_es is not None and cur.total_eval_seconds >= max_es):
                             break
-                        await self._evaluate(a["node_id"], limiter, max_es)
+                        node = cur.nodes.get(a["node_id"])
+                        reservation = None
+                        generation = None
+                        if node is not None and hasattr(self, "_wait_reserve_node_resources"):
+                            reservation = await self._wait_reserve_node_resources(node)
+                            generation = node.attempt
+                            self._register_eval_resource_reservation(
+                                node.id, generation, reservation)
+                        try:
+                            await self._evaluate(a["node_id"], limiter, max_es)
+                        finally:
+                            if reservation is not None and generation is not None:
+                                self._clear_eval_resource_reservation(a["node_id"], generation)
+                                self._release_gpus(reservation.get("gpu_ids"))
                 else:
                     # G3 distributed/parallel eval: CONTINUOUS dispatch. A pool of `max_parallel` slots
-                    # is kept FULL — the instant any eval finishes and frees its slot (and, via
-                    # `_evaluate`'s finally, its GPU back to `_free_gpus`), the producer admits the NEXT
+                    # is kept FULL — the instant any eval finishes and the dispatcher worker returns
+                    # its lifecycle reservation to `_free_gpus`, the producer admits the NEXT
                     # queued eval into that slot. This closes the head-of-line gap the old
                     # `started >= max_parallel: break` left: that break capped the batch at max_parallel
                     # STARTED and deferred the rest to a FUTURE spine iteration, so a short eval that
@@ -1890,23 +2001,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # `bg_tg`'s lifecycle and every `pending_nodes()`-keyed guarantee are unchanged.
                     slots = anyio.Semaphore(self.max_parallel, fast_acquire=True)
 
-                    async def _eval_in_slot(nid: int) -> None:
+                    async def _eval_in_slot(nid: int, generation: Optional[int],
+                                            reservation: Optional[dict]) -> None:
                         try:
                             # A private single-token limiter -> `_evaluate`'s `async with limiter` is a
                             # no-op; the outer semaphore is what bounds fan-out and drives the refill.
                             await self._evaluate(nid, anyio.CapacityLimiter(1), max_es)
                         finally:
+                            if reservation is not None and generation is not None:
+                                self._clear_eval_resource_reservation(nid, generation)
+                                self._release_gpus(reservation.get("gpu_ids"))
                             slots.release()          # free the slot -> wakes the producer to admit next
 
                     async with anyio.create_task_group() as tg:
-                        for a in evals:
+                        pending = list(evals)
+                        while pending:
                             # Fresh fold PER ADMISSION (like the serial branch, unlike the old fold-once):
                             # continuous dispatch means earlier evals in THIS batch complete mid-loop, so
                             # the abort-skip and the eval-budget guard both act on LIVE state — strictly
                             # stricter than the dead fold-once check the old comment flagged.
                             cur = fold(self.store.read_all())
-                            if self._skip_if_aborted(a, cur):
-                                continue              # skipped evals never consume a slot
                             # Budget guard (parallel path): now that `cur` reflects mid-batch completions,
                             # this actually enforces the eval-second cap — admit no more once spent. The
                             # overshoot is bounded to the ~max_parallel evals already in flight.
@@ -1917,13 +2031,59 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # wait. Re-fold while owning the freed slot so a sibling that crossed the hard
                             # eval budget (or an operator abort) cannot be followed by one more admission.
                             cur = fold(self.store.read_all())
-                            if self._skip_if_aborted(a, cur):
-                                slots.release()
-                                continue
                             if max_es is not None and cur.total_eval_seconds >= max_es:
                                 slots.release()
                                 break
-                            tg.start_soon(_eval_in_slot, a["node_id"])
+                            # Scan for the first candidate whose complete footprint fits *now*.  A
+                            # GPU-heavy head may wait while an explicit CPU node (gpus=0) behind it
+                            # starts; reservation and release both use the condition-protected pool.
+                            epoch = (self._gpu_pool_epoch()
+                                     if hasattr(self, "_gpu_pool_epoch") else 0)
+                            chosen_index = None
+                            chosen_node = None
+                            chosen_reservation = None
+                            kept = []
+                            for a in pending:
+                                if self._skip_if_aborted(a, cur):
+                                    continue
+                                kept.append(a)
+                            pending = kept
+                            for pos, a in enumerate(pending):
+                                node = cur.nodes.get(a["node_id"])
+                                if node is None or not hasattr(self, "_try_reserve_node_resources"):
+                                    chosen_index = pos
+                                    chosen_node = node
+                                    break
+                                candidate = self._try_reserve_node_resources(node)
+                                if candidate is not None:
+                                    chosen_index = pos
+                                    chosen_node = node
+                                    chosen_reservation = candidate
+                                    break
+                            if chosen_index is None:
+                                slots.release()
+                                if not pending:
+                                    break
+                                # A release between the scan and this wait changes the epoch, so the
+                                # condition returns immediately rather than losing the wake-up.
+                                await anyio.to_thread.run_sync(
+                                    self._wait_for_gpu_change, epoch, abandon_on_cancel=True)
+                                continue
+                            chosen = pending.pop(chosen_index)
+                            generation = (chosen_node.attempt if chosen_node is not None else None)
+                            if chosen_reservation is not None and generation is not None:
+                                self._register_eval_resource_reservation(
+                                    chosen["node_id"], generation, chosen_reservation)
+                            try:
+                                tg.start_soon(_eval_in_slot, chosen["node_id"], generation,
+                                              chosen_reservation)
+                            except BaseException:
+                                if chosen_reservation is not None and generation is not None:
+                                    self._clear_eval_resource_reservation(
+                                        chosen["node_id"], generation)
+                                    self._release_gpus(chosen_reservation.get("gpu_ids"))
+                                slots.release()
+                                raise
             finally:
                 # Evals have joined (or errored out) — stop the repeating research loop. One-shot
                 # research (repeat off) leaves `bg_tg` uncancelled so its single memo still records,
@@ -2115,54 +2275,560 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             default=-1)
         return max(max(state.nodes, default=-1), _max_building) + 1
 
-    def _reserve_node_build(self, action: dict):
-        """Variant-1 atomic build reservation. Under `_id_lock`: fold -> id=max(nodes)+1 -> parent
-        lifecycle check -> append `node_building`. Returns (state, node_id, kind, parents, parent_generations)
-        or None to SKIP (bad/aborted/tombstoned parent, or a generation mismatch — a reset already won).
-        Because the `node_building` append (the id's commit to the log) happens inside the lock, two
-        PARALLEL builds can never allocate the same id. FOLD-identical on the serial path (RunState
-        unchanged; lock uncontended, same events in the same order — the event's trace stamp differs since
-        node_building moved out of the create_node span, but fold ignores trace metadata). The verbatim
-        body moved out of `_create_node` — no logic change."""
+    @staticmethod
+    def _canonical_card_id(value) -> Optional[str]:
+        """Mirror replay's bounded Card-id canonicalization without copying hostile strings."""
+        if not isinstance(value, str) or len(value) > 256:
+            return None
+        bounded = value.strip()
+        return bounded if bounded and bounded.isprintable() else None
+
+    @classmethod
+    def _engine_card_number(cls, value) -> Optional[int]:
+        """Return ``k`` only for the writer-owned canonical spelling ``card-{k}``."""
+        card_id = cls._canonical_card_id(value)
+        if card_id is None or value != card_id or not card_id.startswith("card-"):
+            return None
+        suffix = card_id[5:]
+        if (not suffix or not suffix.isascii() or not suffix.isdecimal()
+                or (len(suffix) > 1 and suffix.startswith("0"))):
+            return None
+        number = int(suffix)
+        return number if card_id == f"card-{number}" else None
+
+    @classmethod
+    def _card_id_ceiling(cls, events) -> int:
+        """Next monotonic ``card-{k}`` suffix from every raw card_added receipt in the log.
+
+        Folded Cards are intentionally unsuitable for allocation: conflicts, merges and malformed
+        registrations may suppress them. The append-only log remains the durable reservation ledger.
+        Canonicalize whitespace exactly like replay before scanning, and reject oversized input before
+        ``int`` so a corrupt 5,000-digit suffix cannot trip Python's conversion guard.
+        """
+        ceiling = 0
+        for event in events:
+            if event.type != EV_CARD_ADDED:
+                continue
+            raw = cls._canonical_card_id(event.data.get("id"))
+            if raw is None or not raw.startswith("card-"):
+                continue
+            suffix = raw[5:]
+            if not suffix or not suffix.isascii() or not suffix.isdecimal():
+                continue
+            ceiling = max(ceiling, int(suffix) + 1)
+        if len(f"card-{ceiling}") > 256:
+            raise RuntimeError("native card id space is exhausted")
+        return ceiling
+
+    @staticmethod
+    def _card_statement(idea: Idea) -> Optional[str]:
+        """Return one lossless bounded seed statement, or ``None`` when it cannot be owned safely.
+
+        The node-side join uses ``Idea.hypothesis.strip()``. Silently collapsing whitespace, deleting
+        controls, or truncating here creates two seed identities under one explicit card id and makes
+        the fail-closed projection suppress the Card. Choose the first actually non-empty source and
+        reject an unrepresentable identity instead.
+        """
+        hypothesis = idea.hypothesis.strip() if isinstance(idea.hypothesis, str) else ""
+        rationale = idea.rationale.strip() if isinstance(idea.rationale, str) else ""
+        statement = hypothesis or rationale or f"{idea.operator} experiment"
+        if (not statement or len(statement) > 2_048 or not statement.isprintable()
+                or statement != statement.strip()):
+            return None
+        return statement
+
+    @staticmethod
+    def _implementation_ref(*, code=None, files=None, deleted=None) -> Optional[str]:
+        """Exact bounded digest of operator-supplied implementation material.
+
+        Ordinary Researcher/Developer builds pass no material and return ``None``. Inject requests may
+        carry ready code/files; folding two such requests merely because their Idea matches would lose
+        executable work, so the crash-prefix matcher also binds this digest.
+        """
+        if code in (None, "") and not files and not deleted:
+            return None
+        if code is not None and not isinstance(code, str):
+            raise ValueError("injected code must be text")
+        if files is None:
+            files = {}
+        if (not isinstance(files, dict)
+                or any(not isinstance(key, str) or not isinstance(value, str)
+                       for key, value in files.items())):
+            raise ValueError("injected files must be a text mapping")
+        if deleted is None:
+            deleted = []
+        if (not isinstance(deleted, list)
+                or any(not isinstance(value, str) for value in deleted)):
+            raise ValueError("injected deleted paths must be a text list")
+        encoded = orjson.dumps(
+            {"code": code or "", "files": files, "deleted": deleted},
+            option=orjson.OPT_SORT_KEYS,
+        )
+        if len(encoded) > 16 * 1024 * 1024:
+            raise ValueError("injected implementation identity is oversized")
+        return "implementation:v1:" + hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _build_parent_snapshot(state: RunState, action: dict):
+        """Validate and snapshot the exact parent generations named by one build action."""
+        kind = action.get("kind")
+        if not isinstance(kind, str) or not kind:
+            return None
+        raw_parents = action.get("parent_ids")
+        if raw_parents:
+            if not isinstance(raw_parents, list):
+                return None
+            parents = list(raw_parents)
+        else:
+            parents = [action["parent_id"]] if action.get("parent_id") is not None else []
+        if (len(parents) > 64 or len(set(parents)) != len(parents)
+                or any(type(pid) is not int or pid < 0 for pid in parents)):
+            return None
+        raw_expected = action.get("parent_generations")
+        if raw_expected is not None and not isinstance(raw_expected, dict):
+            return None
+        parent_generations: dict[str, int] = {}
+        for pid in parents:
+            parent = state.nodes.get(pid)
+            if parent is None or parent.tombstoned or pid in state.aborted_nodes:
+                return None
+            if raw_expected is not None:
+                expected = raw_expected.get(str(pid), raw_expected.get(pid))
+                if isinstance(expected, bool):
+                    return None
+                try:
+                    expected = int(expected)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if expected != parent.attempt:
+                    return None
+            parent_generations[str(pid)] = parent.attempt
+        if raw_expected is not None and len(raw_expected) != len(parent_generations):
+            return None
+        return kind, parents, parent_generations
+
+    @staticmethod
+    def _card_action(idea: Idea, parents: list[int], parent_generations: dict[str, int],
+                     scored_against: Optional[int], scored_against_generation: Optional[int],
+                     *, scored_against_empty: bool) -> dict:
+        footprint = normalize_researcher_footprint(idea.footprint)
+        return {
+            "operator": idea.operator,
+            "params": dict(idea.params or {}),
+            "space": {key: list(values) for key, values in (idea.space or {}).items()},
+            "eval_profile": idea.eval_profile,
+            "eval_timeout": idea.eval_timeout,
+            "parent_id": parents[0] if parents else None,
+            "parent_ids": list(parents),
+            "parent_generations": dict(parent_generations),
+            "scored_against": scored_against,
+            "scored_against_generation": scored_against_generation,
+            "scored_against_empty": scored_against_empty,
+            "footprint": footprint,
+        }
+
+    @staticmethod
+    def _card_added_payload(card_id: str, statement: str, action: dict, idea: Idea, *,
+                            source: str, at_node: int,
+                            implementation_ref: Optional[str] = None,
+                            steering_context=()) -> dict:
+        receipt = card_ownership_receipt(card_id, statement, action)
+        proposal_ref = idea_proposal_ref(idea)
+        bounded_steering = normalize_steering_context(steering_context)
+        if (receipt is None or proposal_ref is None
+                or bounded_steering is None
+                or not isinstance(source, str) or not source or len(source) > 64
+                or source != source.strip() or not source.isprintable()
+                or type(at_node) is not int or not 0 <= at_node <= (1 << 31) - 1):
+            raise ValueError("prepared idea cannot form a bounded native card receipt")
+        if (implementation_ref is not None
+                and (not isinstance(implementation_ref, str)
+                     or not implementation_ref.startswith("implementation:v1:")
+                     or len(implementation_ref) != len("implementation:v1:") + 64)):
+            raise ValueError("invalid implementation identity")
+        return {
+            "id": card_id,
+            "statement": statement,
+            "source": source,
+            "at_node": at_node,
+            "rationale": (idea.rationale or "")[:400],
+            # Deliberately narrow: replay treats any future executable member in this block as an
+            # incomplete v1 action rather than silently blessing lossy semantics.
+            "idea": {
+                "operator": action["operator"],
+                "params": action["params"],
+                "space": action["space"],
+                "eval_profile": action["eval_profile"],
+                "eval_timeout": action["eval_timeout"],
+            },
+            "parent_id": action["parent_id"],
+            "parent_ids": action["parent_ids"],
+            "parent_generations": action["parent_generations"],
+            "scored_against": action["scored_against"],
+            "scored_against_generation": action["scored_against_generation"],
+            "scored_against_empty": action["scored_against_empty"],
+            "footprint": action["footprint"],
+            "steering_context": bounded_steering,
+            "ownership_receipt": receipt,
+            # Full normalized Idea identity is a separate crash-reuse/dedupe proof. The v1 Card action
+            # deliberately stays compact, but two repo rationales or implementation budgets must not
+            # collapse merely because their params/profile happen to match.
+            "proposal_ref": proposal_ref,
+            **({"implementation_ref": implementation_ref} if implementation_ref else {}),
+        }
+
+    @classmethod
+    def _card_event_matches(cls, data: dict, idea: Idea, action: dict, *, source: str,
+                            at_node: int, implementation_ref: Optional[str],
+                            steering_context=()) -> bool:
+        """True only for the exact writer shape used by a crash-prefix card reservation."""
+        card_id = data.get("id")
+        if cls._engine_card_number(card_id) is None:
+            return False
+        rebound = idea.model_copy(deep=True, update={"card_id": card_id})
+        statement = cls._card_statement(rebound)
+        if statement is None:
+            return False
+        expected = cls._card_added_payload(
+            card_id, statement, action, rebound, source=source, at_node=at_node,
+            implementation_ref=implementation_ref, steering_context=steering_context,
+        )
+        # This is intentionally a writer-prefix matcher, not a loose semantic comparison. A future
+        # additive mint field must make an old writer decline reuse until that field is reviewed.
+        return data == expected
+
+    @staticmethod
+    def _card_score_snapshot(state: RunState, requested: Optional[int]):
+        score_id = state.best_node_id if requested is None else requested
+        if score_id is None:
+            return None, None, True
+        if type(score_id) is not int or not 0 <= score_id <= (1 << 31) - 1:
+            return None
+        node = state.nodes.get(score_id)
+        if node is None or node.tombstoned or score_id in state.aborted_nodes:
+            return None
+        return score_id, node.attempt, False
+
+    @classmethod
+    def _next_available_card_id(cls, events, state: RunState, excluded=()) -> str:
+        """Allocate from the raw log ceiling, skipping only exact namespace collisions.
+
+        Node-only/marker ids are not allocator authority (a stray ``card-99`` must not jump the
+        ceiling to 100), but the exact next spelling cannot be reused without joining unrelated legacy
+        evidence to a newly-native Card.
+        """
+        used = {
+            card_id
+            for event in events if event.type == EV_CARD_ADDED
+            if (card_id := cls._canonical_card_id(event.data.get("id"))) is not None
+        }
+        used.update(
+            card_id for node in state.nodes.values() if node.idea is not None
+            if (card_id := cls._canonical_card_id(node.idea.card_id)) is not None
+        )
+        used.update(
+            card_id for marker in state.buildings.values() if isinstance(marker, dict)
+            if (card_id := cls._canonical_card_id(marker.get("card_id"))) is not None
+        )
+        used.update(card_id for card_id in state.cards
+                    if cls._canonical_card_id(card_id) is not None)
+        used.update(card_id for value in excluded
+                    if (card_id := cls._canonical_card_id(value)) is not None)
+        number = cls._card_id_ceiling(events)
+        while f"card-{number}" in used:
+            number += 1
+            if len(f"card-{number}") > 256:
+                raise RuntimeError("native card id space is exhausted")
+        return f"card-{number}"
+
+    @classmethod
+    def _plan_native_card(cls, events, state: RunState, idea: Idea, *, parents: list[int],
+                          parent_generations: dict[str, int], scored_against: Optional[int],
+                          source: str, at_node: int,
+                          implementation_ref: Optional[str] = None, excluded=(),
+                          steering_context=(),
+                          superseded_card_id: Optional[str] = None) -> _CardReservationPlan:
+        """Resolve exact live dedupe, crash-prefix reuse, or a fresh engine id without appending."""
+        score_snapshot = cls._card_score_snapshot(state, scored_against)
+        if score_snapshot is None:
+            return _CardReservationPlan("invalid", None, None, None)
+        score_id, score_generation, score_empty = score_snapshot
+        statement = cls._card_statement(idea)
+        if statement is None:
+            return _CardReservationPlan("invalid", None, None, None)
+        action = cls._card_action(
+            idea, parents, parent_generations, score_id, score_generation,
+            scored_against_empty=score_empty,
+        )
+
+        registrations: dict[str, int] = {}
+        matches: list[str] = []
+        for event in events:
+            if event.type != EV_CARD_ADDED:
+                continue
+            cid = cls._canonical_card_id(event.data.get("id"))
+            if cid is not None:
+                registrations[cid] = registrations.get(cid, 0) + 1
+            try:
+                if cls._card_event_matches(
+                        event.data, idea, action, source=source, at_node=at_node,
+                        implementation_ref=implementation_ref,
+                        steering_context=steering_context):
+                    matches.append(cid)
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+        reusable: list[str] = []
+        unsafe_match = False
+        merged_aliases = {
+            alias
+            for receipt in (getattr(state, "cards_merged", None) or [])
+            if isinstance(receipt, dict)
+            for raw_alias in (receipt.get("aliases") or [])
+            if (alias := cls._canonical_card_id(raw_alias)) is not None
+            and alias != cls._canonical_card_id(receipt.get("canonical"))
+        }
+        for cid in matches:
+            if cid == superseded_card_id:
+                continue
+            if (cid is None or cls._engine_card_number(cid) is None
+                    or registrations.get(cid) != 1 or cid in excluded):
+                unsafe_match = True
+                continue
+            if cid in merged_aliases:
+                # The immutable alias registration remains in the raw journal but its work item was
+                # explicitly closed by consolidation. It is not reusable and must not permanently ban a
+                # deliberate fresh retry of the same proposal under a new monotonic Card id.
+                continue
+            projected = state.cards.get(cid)
+            if projected is None or projected.identity.kind != "native":
+                unsafe_match = True
+                continue
+            owner_state = projected.selection_provenance.owner_state
+            if owner_state in {"in_flight", "mixed", "unknown"}:
+                return _CardReservationPlan("duplicate", None, None, None)
+            if (projected.status == "dropped" or projected.merged_into
+                    or "merged_work_items" in projected.selection_blockers
+                    or projected.dropped_reason is not None or projected.evidence):
+                # Closed/historical work is immutable but does not ban a deliberate future retry.
+                continue
+            reusable.append(cid)
+
+        if unsafe_match or len(set(reusable)) > 1:
+            return _CardReservationPlan("duplicate", None, None, None)
+        card_id = reusable[0] if reusable else cls._next_available_card_id(
+            events, state, excluded)
+        reserved_idea = idea.model_copy(deep=True, update={"card_id": card_id})
+        try:
+            payload = cls._card_added_payload(
+                card_id, statement, action, reserved_idea, source=source, at_node=at_node,
+                implementation_ref=implementation_ref, steering_context=steering_context,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return _CardReservationPlan("invalid", None, None, None)
+        return _CardReservationPlan(
+            "reuse" if reusable else "mint", card_id, reserved_idea, payload)
+
+    def _reserve_node_build(self, action: dict, idea: Optional[Idea] = None, *,
+                            scored_against: Optional[int] = None,
+                            source: str = "researcher",
+                            implementation_ref: Optional[str] = None,
+                            steering_context=()):
+        """Atomically reserve one native Card and its node-building owner under ``_id_lock``.
+
+        The final Idea must already exist: the immutable statement and exact action receipt cannot be
+        minted honestly before proposal.  ``card_added`` and ``node_building{card_id}`` are appended
+        back-to-back with no slow work between them.  A crash after the first append leaves a valid
+        orphan prefix; an exact retry reuses that Card rather than duplicating registration.  ``idea``
+        remains optional only for historical internal callers/tests; production creation paths always
+        supply it and therefore always mint/link a native Card.
+        """
         with self._id_lock:
             events = self.store.read_all()
             state = fold(events)
+            parent_snapshot = self._build_parent_snapshot(state, action)
+            if parent_snapshot is None:
+                return None
+            kind, parents, parent_generations = parent_snapshot
             node_id = self._node_id_ceiling(events, state)
-            kind = action["kind"]
-            _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
-                         else ([action["parent_id"]] if action.get("parent_id") is not None else []))
-            # Snapshot the exact parent lifecycles used below before any slow Researcher/Developer work.
-            # A forced fork may also carry the generation the operator inspected; reject it before build
-            # if reset already won the race. The same snapshot is embedded in node_created so replay makes
-            # the final check atomically against event order (closing the check->append TOCTOU gap).
-            raw_expected = action.get("parent_generations")
-            if raw_expected is not None and not isinstance(raw_expected, dict):
+            if idea is None:
+                # Compatibility seam for callers that reserve only a node id. No production path uses
+                # this branch once writer-side Card minting is enabled.
+                self.store.append(EV_NODE_BUILDING, {
+                    "node_id": node_id, "operator": kind, "parent_ids": parents,
+                })
+                return _BuildReservation(
+                    state, node_id, kind, parents, parent_generations, None, None)
+
+            if not isinstance(idea, Idea):
+                idea = Idea.model_validate(idea)
+            plan = self._plan_native_card(
+                events, state, idea, parents=parents, parent_generations=parent_generations,
+                scored_against=scored_against, source=source, at_node=node_id,
+                implementation_ref=implementation_ref, steering_context=steering_context,
+            )
+            if plan.disposition == "invalid":
+                self.store.append(EV_NOVELTY_REJECTED, {
+                    "node_id": node_id, "generation": 0, "kind": "card_contract",
+                    "reason": "proposal cannot form a bounded native Card action",
+                    "action": "dropped",
+                })
                 return None
-            parent_generations: dict[str, int] = {}
-            for pid in _bparents:
-                parent = state.nodes.get(pid)
-                if parent is None or parent.tombstoned or pid in state.aborted_nodes:
-                    return None
-                if raw_expected is not None:
-                    expected = raw_expected.get(str(pid), raw_expected.get(pid))
-                    if isinstance(expected, bool):
-                        return None
-                    try:
-                        expected = int(expected)
-                    except (TypeError, ValueError, OverflowError):
-                        return None
-                    if expected != parent.attempt:
-                        return None
-                parent_generations[str(pid)] = parent.attempt
-            if raw_expected is not None and len(raw_expected) != len(parent_generations):
+            if plan.disposition == "duplicate":
                 return None
-            # Announce the node the INSTANT we reserve it — before the Researcher/Developer run — so the UI
-            # shows it (and streams its live agent-trace) immediately. Transient marker (folds to
-            # st.building, NOT st.nodes), so node-id allocation + resume are untouched; node_created
-            # supersedes it. Appended INSIDE the lock so the id is committed atomically.
-            self.store.append(EV_NODE_BUILDING,
-                              {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
-            return state, node_id, kind, _bparents, parent_generations
+            # A proposal-bound sidecar may already name this Card. Main-task-only minting means the
+            # planner and commit should agree; fail closed rather than silently rebinding its digest.
+            if idea.card_id is not None and idea.card_id != plan.card_id:
+                return None
+            card_id = plan.card_id
+            reserved_idea = plan.idea
+            if plan.disposition == "mint":
+                self.store.append(EV_CARD_ADDED, plan.payload)
+            self.store.append(EV_NODE_BUILDING, {
+                "node_id": node_id,
+                "operator": kind,
+                "parent_ids": parents,
+                "card_id": card_id,
+            })
+            return _BuildReservation(
+                state, node_id, kind, parents, parent_generations, card_id, reserved_idea)
+
+    def _drop_card_once(self, card_id: Optional[str], *, reason: str,
+                        dropped_by: str = "engine") -> None:
+        if not card_id:
+            return
+        # This helper is called both inside and outside `_id_lock`, so nesting that non-reentrant lock is
+        # unsafe. Use the EventStore's atomic tail CAS instead: concurrent callers either observe the
+        # first drop or lose the CAS and retry against its prefix.
+        for _attempt in range(64):
+            events = self.store.read_all()
+            if any(
+                    event.type == EV_CARD_DROPPED
+                    and self._canonical_card_id(event.data.get("id")) == card_id
+                    for event in events):
+                return
+            tail_seq = events[-1].seq if events else -1
+            try:
+                self.store.append(EV_CARD_DROPPED, {
+                    "id": card_id,
+                    "reason": reason,
+                    "dropped_by": dropped_by,
+                }, expected_last_seq=tail_seq)
+                return
+            except EventStoreConcurrencyError:
+                continue
+        raise RuntimeError("could not append an idempotent card drop after concurrent log movement")
+
+    def _record_node_less_card(self, idea: Idea, *, reason: str,
+                               steering_context=(), source: str = "researcher") -> Optional[str]:
+        """Mint and immediately close one rejected proposal with no Node owner.
+
+        Unlike ordinary reservation this deliberately permits an exact live sibling: the point is to
+        retain the discarded proposal and its reason without confusing it with the accepted work item.
+        Accepted batch Cards are committed first, so this fresh id cannot invalidate their preplanned ids.
+        """
+        with self._id_lock:
+            events = self.store.read_all()
+            state = fold(events)
+            clean = idea.model_copy(deep=True, update={"card_id": None})
+            statement = self._card_statement(clean)
+            score_snapshot = self._card_score_snapshot(state, state.best_node_id)
+            bounded_steering = normalize_steering_context(steering_context)
+            if statement is None or score_snapshot is None or bounded_steering is None:
+                return None
+            score_id, score_generation, score_empty = score_snapshot
+            card_id = self._next_available_card_id(events, state)
+            reserved = clean.model_copy(deep=True, update={"card_id": card_id})
+            action = self._card_action(
+                reserved, [], {}, score_id, score_generation,
+                scored_against_empty=score_empty,
+            )
+            try:
+                payload = self._card_added_payload(
+                    card_id, statement, action, reserved, source=source,
+                    at_node=self._node_id_ceiling(events, state),
+                    steering_context=bounded_steering,
+                )
+            except (TypeError, ValueError, OverflowError):
+                return None
+            # This Card is rejected before it can ever own a Node. If the process dies after the first
+            # append, an otherwise-valid receipt would resurrect it as a selectable proposal with no
+            # recovery marker. Reserve the id with an intrinsically non-executable registration, then
+            # append the normal terminal override. The full two-event prefix remains visible/auditable.
+            payload.pop("ownership_receipt", None)
+            self.store.append(EV_CARD_ADDED, payload)
+            self.store.append(EV_CARD_DROPPED, {
+                "id": card_id, "reason": reason, "dropped_by": "engine",
+            })
+            return card_id
+
+    def _mirror_hypothesis_card_merges(self, state: RunState) -> RunState:
+        """Main-task durable Card receipts for background-safe Hypothesis consolidations.
+
+        The LLM consolidation step may append ``hypothesis_merged`` from the research-overlap worker,
+        while every Card lifecycle event is main-task-only. Reconcile by source event seq at the next
+        decision boundary. Replay already understands statement-hash aliases, so this is additive audit
+        durability and idempotent across resume; no model call or selection decision occurs here.
+        """
+        with self._id_lock:
+            events = self.store.read_all()
+            mirrored = {
+                event.data.get("source_event_seq")
+                for event in events if event.type == EV_CARD_MERGED
+                if type(event.data.get("source_event_seq")) is int
+            }
+            wrote = False
+            for event in events:
+                if event.type != EV_HYPOTHESIS_MERGED or event.seq in mirrored:
+                    continue
+                canonical = self._canonical_card_id(event.data.get("canonical"))
+                raw_aliases = event.data.get("aliases")
+                if canonical is None or not isinstance(raw_aliases, list):
+                    continue
+                aliases: list[str] = []
+                for raw_alias in raw_aliases[:256]:
+                    alias = self._canonical_card_id(raw_alias)
+                    if alias is not None and alias != canonical and alias not in aliases:
+                        aliases.append(alias)
+                if not aliases:
+                    continue
+                payload = {
+                    "canonical": canonical,
+                    "aliases": aliases,
+                    "source_event_seq": event.seq,
+                    "merged_by": "engine",
+                }
+                statement = event.data.get("statement")
+                if (isinstance(statement, str) and statement.strip()
+                        and len(statement.strip()) <= 2_048 and statement.strip().isprintable()):
+                    payload["statement"] = statement.strip()
+                self.store.append(EV_CARD_MERGED, payload)
+                wrote = True
+        return fold(self.store.read_all()) if wrote else state
+
+    def _fail_reserved_build(self, *, node_id: int, card_id: Optional[str], generation: int,
+                             reason: str, error: str, drop_card: bool = True) -> None:
+        """Close a pre-node reservation and, when bare, its immutable Card work item.
+
+        A terminal on a bare ``node_building`` clears the transient marker but creates no Node evidence.
+        Without the paired card_dropped receipt that Card would resurrect as a fresh proposed item after
+        replay.  Existing-node reruns pass ``drop_card=False`` because they reuse the original lifecycle.
+        """
+        # Fail closed first. If the process dies between these two appends, the still-live build marker
+        # makes recovery retry the terminal, while the Card is already non-selectable. Skip an existing
+        # drop receipt so that prefix recovery remains idempotent.
+        if card_id and drop_card:
+            self._drop_card_once(card_id, reason=reason)
+        payload = {
+            "node_id": node_id,
+            "generation": generation,
+            "error": error,
+            "reason": reason,
+            "eval_seconds": 0.0,
+        }
+        if card_id:
+            payload["card_id"] = card_id
+        self.store.append(EV_NODE_FAILED, payload)
 
     def _resolve_parallel_build(self, value: int) -> int:
         """Resolve a startup `parallel_build` setting to a concrete build fan-out. `0` = AUTO = the (already
@@ -2204,7 +2870,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._llm_broker = LLMConcurrencyBroker(
                 total=total, lane_limits=default_llm_lane_limits(total))
             return
-        broker.reconfigure(total=total, lane_limits=default_llm_lane_limits(total))
+        snapshot = broker.snapshot()
+        current_lanes = snapshot["lane_limits"]
+        # A total-only live delta must not erase a prior Strategist/operator lane allocation (and a
+        # persistent budget override is re-applied every loop). Recompute the work-conserving defaults
+        # only until a validated Strategy has explicitly owned the split; otherwise retain that split.
+        next_lanes = (current_lanes if getattr(self, "_llm_lane_limits_explicit", False)
+                      else default_llm_lane_limits(total))
+        broker.reconfigure(total=total, lane_limits=next_lanes)
 
     def _build_role_pairs(self, n: int) -> list:
         """Up to `n` (researcher, developer) pairs for a parallel build batch: the primary (self's roles)
@@ -2235,71 +2908,213 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         bind_cost_accountants(self)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
 
+    def _prepare_node_idea(self, action: dict, state: RunState, *, researcher,
+                           prospective_node_id: int, source: str,
+                           proposal_events=None, preproposed=None) -> Optional[Idea]:
+        """Finish the concrete Idea before Card/node reservation, without implementing code.
+
+        A native ownership receipt binds the final operator/params/space/profile/footprint, so the
+        old reserve-before-propose ordering cannot produce an honest Card.  This helper is the moved
+        proposal half of ``_create_node``; every Developer call remains after durable reservation.
+        """
+        kind = action["kind"]
+        events = list(proposal_events) if proposal_events is not None else self.store.read_all()
+        try:
+            setattr(researcher, "_steering_context", [])
+        except Exception:  # noqa: BLE001 - wrappers may expose a read-only compatibility surface
+            pass
+        parent_snapshot = self._build_parent_snapshot(state, action)
+        if parent_snapshot is None:
+            return None
+        _kind, parents, parent_generations = parent_snapshot
+
+        def _link(candidate) -> Optional[Idea]:
+            if candidate is None:
+                return None
+            linked = (candidate if isinstance(candidate, Idea)
+                      else Idea.model_validate(candidate)).model_copy(deep=True)
+            linked.card_id = None  # a Researcher/plugin can never claim writer namespace authority
+            # Bind the Card and the durable Node to the action that execution will actually honor.
+            # Keeping the model-requested value here would make a 3600s request with a 90s ceiling
+            # appear as 3600s in both receipts even though eval_dispatch runs only 90s.
+            linked.eval_timeout = self._effective_researcher_eval_timeout(linked)
+            steering_context = normalize_steering_context(
+                getattr(researcher, "_steering_context", []))
+            if steering_context is None:
+                return None
+            plan = self._plan_native_card(
+                events, state, linked, parents=parents, parent_generations=parent_generations,
+                scored_against=state.best_node_id, source=source, at_node=prospective_node_id,
+                steering_context=steering_context,
+            )
+            if plan.disposition == "invalid":
+                self.store.append(EV_NOVELTY_REJECTED, {
+                    "node_id": prospective_node_id, "generation": 0,
+                    "kind": "card_contract",
+                    "reason": "proposal cannot form a bounded native Card action",
+                    "action": "dropped",
+                })
+            return plan.idea if plan.disposition in {"mint", "reuse"} else None
+
+        if preproposed is not None:
+            candidate = (self._canonicalize_draft_idea(preproposed)
+                         if kind == "draft" else preproposed)
+            return _link(candidate)
+
+        if kind == "draft":
+            self._set_complexity_hint(state, None, researcher=researcher)
+            with self.tracer.span("propose"):
+                idea = _link(self._canonicalize_draft_idea(researcher.propose(state, None)))
+            if idea is None:
+                return None
+            final = self._apply_novelty_gate(
+                state, idea,
+                repropose=lambda: _link(self._canonicalize_draft_idea(
+                    researcher.propose(state, None))),
+                researcher=researcher, prospective_node_id=prospective_node_id)
+            return _link(final)
+
+        if kind == "merge":
+            parents = list(action["parent_ids"])
+            pnodes = [state.nodes[node_id] for node_id in parents]
+            return _link(self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
+                         else merge_idea(pnodes))
+
+        parent = state.nodes[action["parent_id"]]
+        if kind == "debug":
+            repair = getattr(self.developer, "repair", None)
+            if callable(repair) and parent.error and (parent.code or parent.files or self._repo_spec):
+                idea = parent.idea.model_copy(deep=True)
+                idea.operator = "debug"
+                return _link(idea)
+            self._set_complexity_hint(state, parent, researcher=researcher)
+            # A repair proposal should not be pushed toward an unrelated direction.
+            self._stamp_novelty_hint(state, "balanced", researcher=researcher)
+            with self.tracer.span("propose"):
+                idea = self._canonicalize_idea_operator(
+                    researcher.propose(state, parent), "debug")
+            return _link(idea)
+
+        # improve / capability-expand
+        self._set_complexity_hint(state, parent, researcher=researcher)
+        authoritative_operator = "improve"
+        if (getattr(self, "_capability_expansion", False)
+                and getattr(self, "_novelty_stance", None) == "explore"):
+            from looplab.engine.proposal_cues import _LOCK_IN_STREAK
+            from looplab.search.lock_in import capability_expansion_due
+            if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
+                authoritative_operator = KIND_EXPAND
+        with self.tracer.span("propose"):
+            idea = _link(self._canonicalize_idea_operator(
+                researcher.propose(state, parent), authoritative_operator))
+        if idea is None:
+            return None
+        final = self._apply_novelty_gate(
+            state, idea,
+            repropose=lambda p=parent: _link(self._canonicalize_idea_operator(
+                researcher.propose(state, p), authoritative_operator)),
+            researcher=researcher, prospective_node_id=prospective_node_id)
+        return _link(final)
+
     @in_llm_lane("build")
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,
                      pretelemetry=None) -> None:
+        """Run proposal, reservation and implementation in one node-scoped handoff context."""
+        from looplab.agents.agent import handoff_scope
+
+        if reserved is not None:
+            trace_node_id = reserved.node_id
+        else:
+            trace_events = self.store.read_all()
+            trace_state = fold(trace_events)
+            trace_node_id = self._node_id_ceiling(trace_events, trace_state)
+        with self.tracer.span(
+                "create_node", new_trace=True, node_id=trace_node_id,
+                operator=action.get("kind")), handoff_scope(enabled=self._phase_handoff_summary):
+            return self._create_node_scoped(
+                action, roles, reserved, preproposed=preproposed,
+                pretelemetry=pretelemetry)
+
+    def _create_node_scoped(self, action: dict, roles=None, reserved=None, preproposed=None,
+                            pretelemetry=None) -> None:
         # Variant-1 parallel build: `roles` is a per-build (researcher, developer) pair from the pool
         # (isolated per-build state so concurrent drafts don't clobber each other's hints/last_files);
         # `reserved` is a pre-reserved (state, id, kind, parents, parent_generations) tuple (the parallel
         # path reserves ids up front, serially, then fans out). `preproposed` (Phase 2) is a draft Idea
         # the shared researcher already proposed + novelty-gated in the batch pass (`_propose_batch`), so
         # the fan-out only IMPLEMENTS it. All default to the serial behaviour.
-        if reserved is None:
-            reserved = self._reserve_node_build(action)
-        if reserved is None:
-            return
-        state, node_id, kind, _bparents, parent_generations = reserved
         researcher, developer = roles if roles is not None else (self.researcher, self.developer)
-        # CODEX AGENT: Native Card production is still absent at this seam: the engine reserves a node
-        # but never mints ``card_added.ownership_receipt`` or overwrites ``Idea.card_id`` before the slow
-        # implementation call. Consequently every derived Card is a legacy/hash shadow and the new
-        # fail-closed ``selection_ready`` contract can never become true; Layer 3 must not schedule from
-        # this projection until mint/link, terminalization, and crash-prefix recovery land together.
+        if reserved is None:
+            proposal_events = self.store.read_all()
+            proposal_state = fold(proposal_events)
+            if self._build_parent_snapshot(proposal_state, action) is None:
+                return
+            prospective_node_id = self._node_id_ceiling(proposal_events, proposal_state)
+            source = "engine" if action.get("kind") == "merge" else "researcher"
+            idea = self._prepare_node_idea(
+                action, proposal_state, researcher=researcher,
+                prospective_node_id=prospective_node_id,
+                source=source, proposal_events=proposal_events, preproposed=preproposed)
+            if idea is None:
+                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                return
+            steering_context = normalize_steering_context(
+                getattr(researcher, "_steering_context", []))
+            if steering_context is None:
+                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                return
+            reserved = self._reserve_node_build(
+                action, idea, scored_against=proposal_state.best_node_id,
+                source=source, steering_context=steering_context)
+        if reserved is None:
+            self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+            return
+        state = reserved.state
+        node_id = reserved.node_id
+        kind = reserved.kind
+        _bparents = reserved.parent_ids
+        parent_generations = reserved.parent_generations
+        idea = reserved.idea.model_copy(deep=True) if reserved.idea is not None else None
+        if idea is None:
+            # Legacy direct reservation: retain the historical behavior for internal callers, but do
+            # not pretend it produced a native Card. Production paths always prepare before reserve.
+            idea = self._prepare_node_idea(
+                action, state, researcher=researcher,
+                prospective_node_id=node_id,
+                source="engine" if action.get("kind") == "merge" else "researcher",
+                proposal_events=self.store.read_all(), preproposed=preproposed)
+            if idea is None:
+                self._discard_node_build_telemetry(researcher=researcher, developer=developer)
+                return
         # Phase-handoff ledger for THIS node build: propose → stages → plan → implement each distill
         # their transcript into a brief the next phase reads (see agents.agent.run_phase), so later
         # phases trust what earlier ones explored instead of re-reading the repo. Node-scoped (fresh
         # per build), and a no-op when the setting is off.
-        from looplab.agents.agent import handoff_scope
-        with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind), \
-                handoff_scope(enabled=self._phase_handoff_summary):
+        with self.tracer.span("materialize_node", node_id=node_id, operator=kind):
             # node_building was appended inside _reserve_node_build (under _id_lock) — the id is committed
             # to the log atomically, so a PARALLEL build (parallel_build>1) can never pick the same id.
+            # Restore THIS pre-proposed idea's own FOREAGENT telemetry after main-task reservation and
+            # before the worker's audit emitters consume it.
+            if pretelemetry:
+                for _attr, _val in pretelemetry.items():
+                    if _val is not None:
+                        try:
+                            setattr(researcher, _attr, _val)
+                        except Exception:  # noqa: BLE001
+                            pass
+            # Per-call output: never let a reused wrapper/backend leak another node's resource
+            # finalization into this build.  The exact pooled Developer is cleared and read below.
+            self._reset_developer_footprint(developer)
             if kind == "draft":
-                if preproposed is not None:
-                    # Phase 2: the shared researcher already proposed + novelty-gated this idea in the
-                    # batch pass; skip re-research (its complexity/novelty cues already ran on the shared
-                    # researcher) and go straight to this build's own developer.implement below.
-                    idea = self._canonicalize_draft_idea(preproposed)
-                    # Restore THIS idea's own FOREAGENT telemetry (captured per-roll during the batch
-                    # pass) onto this build's pooled researcher, so the hypothesis_ranked/foresight_selected
-                    # emitters below stamp THIS node with ITS ranking — not the last batch roll's.
-                    if pretelemetry:
-                        for _attr, _val in pretelemetry.items():
-                            if _val is not None:
-                                try:
-                                    setattr(researcher, _attr, _val)
-                                except Exception:  # noqa: BLE001
-                                    pass
-                else:
-                    self._set_complexity_hint(state, None, researcher=researcher)   # A0d complexity cue
-                    with self.tracer.span("propose"):
-                        idea = self._canonicalize_draft_idea(researcher.propose(state, None))
-                    # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
-                    idea = self._apply_novelty_gate(
-                        state, idea,
-                        repropose=lambda: self._canonicalize_draft_idea(
-                            researcher.propose(state, None)),
-                        researcher=researcher, prospective_node_id=node_id)
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
-                    code = developer.implement(self._directed_idea(idea, state))
+                    code = developer.implement(
+                        self._directed_idea(idea.model_copy(deep=True), state))
             elif kind == "merge":
                 parents = list(action["parent_ids"])
                 # A0b: real ensembling (code recombination) when configured/Strategist-selected;
                 # else the legacy mean-param merge. Toy/baseline developers degrade to mean.
                 pnodes = [state.nodes[i] for i in parents]
-                idea = (self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
-                        else merge_idea(pnodes))
                 with self.tracer.span("implement"):
                     # A code-ensemble merge must SEED from the primary parent's solution (like improve),
                     # not implement() from scratch: from-scratch gave the Developer no base, so the
@@ -2307,15 +3122,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # ("can't open file test_looplab.py" — live node 63, 3 repairs couldn't recover). Now
                     # parent[0]'s working code + entrypoint carry over and the idea directs blending in
                     # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
-                    _impl_from = getattr(self.developer, "implement_from", None)
-                    _didea = self._directed_idea(idea, state)   # §1: directives steer the merge code too
+                    _impl_from = getattr(developer, "implement_from", None)
+                    _didea = self._directed_idea(
+                        idea.model_copy(deep=True), state)   # §1: directives steer the merge code too
                     code = (_impl_from(_didea, pnodes[0])
                             if (self._merge_mode == "ensemble" and _impl_from and pnodes)
-                            else self.developer.implement(_didea))
+                            else developer.implement(_didea))
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
-                repair = getattr(self.developer, "repair", None)
+                repair = getattr(developer, "repair", None)
                 # Error-feedback debug: hand the failure back to the Developer to fix. Fires for
                 # whole-file solutions (parent.code), multi-file edits (parent.files), AND any
                 # repo task (self._repo_spec) even when a prior attempt fell back to the empty
@@ -2323,57 +3139,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # error alone (it edits requirements and the eval's setup step re-installs them).
                 if callable(repair) and parent.error and (parent.code or parent.files
                                                           or self._repo_spec):
-                    idea = parent.idea.model_copy()
-                    idea.operator = "debug"
                     # C3 deep test-driven repair (when enabled): failure taxonomy + a structured
                     # "reproduce then fix" directive, not just the raw stderr tail. Depth is already
                     # bounded by debug_depth.
                     err = self._repair_error_context(parent.error_reason, parent.error,
                                                      state=state, node=parent)
                     with self.tracer.span("repair", parent_id=parent.id):
-                        code = self._repair(parent, err, state)   # seed from parent's OWN files (repair_from)
+                        code = self._repair(
+                            parent, err, state, developer=developer)  # seed from parent's OWN files
                 else:
                     # Signal-delivery (§1): the debug re-propose now gets the SAME cross-run priors +
                     # failure-reflection + fault-localization + trust cues as draft/improve — exactly
                     # when the agent is FIXING a failure it most needs "this crash class recurred
                     # before" and "the likely files to edit". Previously this branch called only
                     # _stamp_novelty_hint, so those cues were absent on the repair proposal.
-                    self._set_complexity_hint(state, parent)
-                    # ...then FORCE a balanced novelty stance: novelty pressure ("open a new
-                    # direction") is wrong when the job is to FIX a failure, so override the stance
-                    # _set_complexity_hint just stamped (it uses the live self._novelty_stance).
-                    self._stamp_novelty_hint(state, "balanced")
-                    with self.tracer.span("propose"):
-                        idea = self.researcher.propose(state, parent)
-                    idea.operator = "debug"
                     with self.tracer.span("implement"):
-                        code = self._implement(self._directed_idea(idea, state), parent)
+                        code = self._implement(
+                            self._directed_idea(idea.model_copy(deep=True), state), parent,
+                            developer=developer)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
-                self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
-                authoritative_operator = "improve"
-                # PART IV D7 (§21.8): the expansion operator is its own measured lineage only on the
-                # same lock-in/explore condition that delivered the expansion directive. Resolve that
-                # policy-owned label before novelty writes its proposal digest: the same operator must
-                # reach the gate, any re-proposal, implementation and node_created.
-                if (getattr(self, "_capability_expansion", False)
-                        and getattr(self, "_novelty_stance", None) == "explore"):
-                    from looplab.engine.proposal_cues import _LOCK_IN_STREAK
-                    from looplab.search.lock_in import capability_expansion_due
-                    if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
-                        authoritative_operator = KIND_EXPAND
-                with self.tracer.span("propose"):
-                    idea = self._canonicalize_idea_operator(
-                        self.researcher.propose(state, parent), authoritative_operator)
-                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
-                idea = self._apply_novelty_gate(
-                    state, idea,
-                    repropose=lambda p=parent: self._canonicalize_idea_operator(
-                        self.researcher.propose(state, p), authoritative_operator),
-                    prospective_node_id=node_id)
                 parents = [parent.id]
                 with self.tracer.span("implement"):
-                    code = self._implement(self._directed_idea(idea, state), parent)
+                    code = self._implement(
+                        self._directed_idea(idea.model_copy(deep=True), state), parent,
+                        developer=developer)
+            idea, footprint_finalized = self._finalize_developer_footprint(
+                idea, developer, code)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
             # memo (its directions are the active steering) so the UI can show WHERE research landed in
             # the tree. Audit/UI only — never affects search. Coarse-but-honest (temporal proximity).
@@ -2382,7 +3174,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 _m = state.research[-1]
                 _ra = _m.get("at_node")
                 if _ra is not None and _ra <= node_id < _ra + 2:
-                    research_origin = {"at_node": _ra, "trigger": _m.get("trigger")}
+                    from looplab.core.advisory_payloads import valid_advisory_ref
+                    _memo_id = _m.get("memo_id")
+                    research_origin = {
+                        "at_node": _ra,
+                        "trigger": _m.get("trigger"),
+                        **({"memo_id": _memo_id}
+                           if valid_advisory_ref(_memo_id, "memo") else {}),
+                    }
             latest = fold(self.store.read_all())
             if any(pid not in latest.nodes
                    or latest.nodes[pid].attempt != generation
@@ -2390,11 +3189,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                    or pid in latest.aborted_nodes
                    for pid, generation in ((int(pid), gen)
                                            for pid, gen in parent_generations.items())):
-                # Clear the transient building marker without creating a child from abandoned code.
-                self.store.append(EV_NODE_FAILED, {
-                    "node_id": node_id, "generation": 0,
-                    "error": "parent lifecycle changed while building", "reason": "superseded",
-                    "eval_seconds": 0.0})
+                # Clear both the transient node owner and its immutable, now-unbuildable Card.
+                self._fail_reserved_build(
+                    node_id=node_id, card_id=reserved.card_id, generation=0,
+                    error="parent lifecycle changed while building", reason="superseded")
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
             self._emit_node_created(
@@ -2413,8 +3211,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 cross_run_receipt=(_rcpt if (_rcpt := getattr(researcher, "_cross_run_advisory_receipt", None))
                                    is not None else getattr(self, "_cross_run_advisory_receipt", {})),
                 **({"parent_generations": parent_generations} if parent_generations else {}),
+                **({"footprint_finalized": True} if footprint_finalized else {}),
             )
             if node_id not in fold(self.store.read_all()).nodes:
+                self._fail_reserved_build(
+                    node_id=node_id, card_id=reserved.card_id, generation=0,
+                    error="node creation was rejected during replay", reason="superseded")
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
             # The Developer session CRASHED when its code is the "(developer error: …)" sentinel (an
@@ -2471,10 +3273,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # terminal (developer-crash sentinel, or node_evaluated), likewise nothing to do.
             if node is None:
                 try:
-                    self.store.append(EV_NODE_FAILED, {
-                        "node_id": node_id, "generation": 0,
-                        "error": f"(build error: {exc})", "reason": "build_crash",
-                        "eval_seconds": 0.0})
+                    self._fail_reserved_build(
+                        node_id=node_id,
+                        card_id=getattr(reserved, "card_id", None),
+                        generation=0,
+                        error=f"(build error: {exc})",
+                        reason="build_crash",
+                    )
                     # An EXCEPTION out of a build (not the graceful "(developer error: …)" sentinel) is a
                     # HARD fault — an LLM client that RAISES on a 401/outage, or a real bug in implement().
                     # The serial path crashes the run on such a raise; under concurrency we can't crash
@@ -2514,22 +3319,88 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "error": "parent is missing or aborted", "reason": "parent_unavailable",
                 "eval_seconds": 0.0})
             return
+        replacement_card = stage == "propose" and node.operator != "merge"
         with self.tracer.span("create_node", new_trace=True, node_id=node.id, operator=node.operator):
-            self.store.append(EV_NODE_BUILDING,
-                              {"node_id": node.id, "generation": node.attempt,
-                               "operator": node.operator, "parent_ids": parents})
-            # "propose" re-proposes (draft/improve/debug); a merge node has no single proposable idea
-            # (it's an ensemble of parents), so a propose-reset there degrades to re-implement.
-            if stage == "propose" and node.operator != "merge":
+            if replacement_card:
+                # Re-proposal changes immutable work-item meaning. Finish the Idea first, then replace
+                # the old Card with one exact native receipt while keeping the operator-requested node id.
+                self._set_complexity_hint(state, parent)
                 with self.tracer.span("propose"):
-                    idea = self.researcher.propose(state, parent)
-                idea.operator = node.operator      # operator stays authoritative (from the original node)
-            else:                                   # "implement" (or merge): keep the idea, re-develop
-                idea = node.idea
+                    proposed = self.researcher.propose(state, parent)
+                idea = self._canonicalize_idea_operator(proposed, node.operator)
+                if idea is None:
+                    self._fail_reserved_build(
+                        node_id=node.id, card_id=node.idea.card_id, generation=generation,
+                        error="researcher returned no replacement proposal",
+                        reason="proposal_rejected", drop_card=bool(node.idea.card_id))
+                    return
+                idea = idea.model_copy(deep=True, update={
+                    "card_id": None,
+                    # Re-proposal is the same Researcher-owned action boundary as a fresh proposal.
+                    # Persist the governed value so rerun receipts cannot diverge from execution.
+                    "eval_timeout": self._effective_researcher_eval_timeout(idea),
+                })
+                with self._id_lock:
+                    events = self.store.read_all()
+                    latest = fold(events)
+                    current = latest.nodes.get(node.id)
+                    parents_current = all(
+                        pid in latest.nodes
+                        and latest.nodes[pid].attempt == parent_generation
+                        and pid not in latest.aborted_nodes
+                        and not latest.nodes[pid].tombstoned
+                        for pid, parent_generation in (
+                            (int(pid), value) for pid, value in parent_generations.items()))
+                    if (current is None or current.attempt != generation
+                            or current.rerun_from != "propose" or current.tombstoned
+                            or node.id in latest.aborted_nodes or not parents_current):
+                        self._discard_node_build_telemetry()
+                        return
+                    plan = self._plan_native_card(
+                        events, latest, idea, parents=parents,
+                        parent_generations=parent_generations,
+                        scored_against=latest.best_node_id, source="researcher", at_node=node.id,
+                        steering_context=getattr(self.researcher, "_steering_context", []),
+                        superseded_card_id=current.idea.card_id,
+                    )
+                    if plan.disposition not in {"mint", "reuse"}:
+                        self._fail_reserved_build(
+                            node_id=node.id, card_id=current.idea.card_id,
+                            generation=generation,
+                            error="replacement proposal was duplicate or outside the Card contract",
+                            reason="proposal_rejected", drop_card=bool(current.idea.card_id))
+                        self._discard_node_build_telemetry()
+                        return
+                    self._drop_card_once(current.idea.card_id, reason="reproposed")
+                    if plan.disposition == "mint":
+                        self.store.append(EV_CARD_ADDED, plan.payload)
+                    self.store.append(EV_NODE_BUILDING, {
+                        "node_id": node.id, "generation": generation,
+                        "operator": node.operator, "parent_ids": parents,
+                        "card_id": plan.card_id,
+                    })
+                    state = latest
+                    idea = plan.idea
+                    active_card_id = plan.card_id
+            else:
+                # An implement reset keeps immutable Idea/Card identity and only re-runs Developer.
+                idea = node.idea.model_copy(deep=True)
+                active_card_id = idea.card_id
+                building_payload = {
+                    "node_id": node.id, "generation": node.attempt,
+                    "operator": node.operator, "parent_ids": parents,
+                }
+                if active_card_id:
+                    building_payload["card_id"] = active_card_id
+                self.store.append(EV_NODE_BUILDING, building_payload)
+            self._reset_developer_footprint(self.developer)
             with self.tracer.span("implement"):
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
                 # steer its code too — same as the four _create_node build sites.
-                code = self._implement(self._directed_idea(idea, state), parent)
+                code = self._implement(
+                    self._directed_idea(idea.model_copy(deep=True), state), parent)
+            idea, footprint_finalized = self._finalize_developer_footprint(
+                idea, self.developer, code)
             latest = fold(self.store.read_all())
             current = latest.nodes.get(node.id)
             parents_current = all(
@@ -2539,10 +3410,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                                 for pid, gen in parent_generations.items()))
             if (current is None or current.attempt != generation
                     or current.tombstoned or node.id in latest.aborted_nodes or not parents_current):
-                self.store.append(EV_NODE_FAILED, {
-                    "node_id": node.id, "generation": generation,
-                    "error": "node lifecycle changed while rebuilding", "reason": "superseded",
-                    "eval_seconds": 0.0})
+                self._fail_reserved_build(
+                    node_id=node.id, card_id=active_card_id, generation=generation,
+                    error="node lifecycle changed while rebuilding", reason="superseded",
+                    drop_card=replacement_card)
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             self._emit_node_created(
@@ -2551,10 +3422,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 files=getattr(self.developer, "last_files", {}) or {},
                 deleted=getattr(self.developer, "last_deleted", []) or [],
                 generation=generation,
-                **({"parent_generations": parent_generations} if parent_generations else {}))
+                **({"parent_generations": parent_generations} if parent_generations else {}),
+                **({"footprint_finalized": True} if footprint_finalized else {}))
             landed = fold(self.store.read_all()).nodes.get(node.id)
             if (landed is None or landed.attempt != generation or landed.rerun_from is not None
                     or landed.code != code):
+                self._fail_reserved_build(
+                    node_id=node.id, card_id=active_card_id, generation=generation,
+                    error="rebuilt node creation was rejected during replay", reason="superseded",
+                    drop_card=replacement_card)
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             if isinstance(code, str) and code.startswith("(developer error:"):
@@ -2583,13 +3459,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         Manual injection deliberately bypasses the policy's proposal step — the human IS the
         researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
         is identical to an agent-authored node, so a hand-added winner can be selected as best."""
-        # Variant-1: use the node_building-aware ceiling under _id_lock so a forced inject never reuses an
-        # id a concurrent parallel build has reserved. (Inject is served off the parallel-build path and
-        # builds are awaited, so this is defensive; the ceiling is the correctness-relevant part.)
-        with self._id_lock:
-            _evs = self.store.read_all()
-            state = fold(_evs)
-            node_id = self._node_id_ceiling(_evs, state)
+        state = fold(self.store.read_all())
         idea_d = dict(req.get("idea") or {})
         idea_d.setdefault("operator", "manual")
         # Coerce params to floats defensively (a manual form may send strings); drop unparseable.
@@ -2635,14 +3505,47 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     else merge_idea(pnodes))
         else:
             idea = Idea(**idea_d)
+        idea = idea.model_copy(deep=True, update={"card_id": None})
+        implementation_ref = self._implementation_ref(
+            code=req.get("code"), files=req.get("files"), deleted=req.get("deleted"))
+        reservation = self._reserve_node_build(
+            {
+                "kind": idea.operator,
+                "parent_ids": parents,
+                "parent_generations": parent_generations,
+            },
+            idea,
+            scored_against=state.best_node_id,
+            source="operator",
+            implementation_ref=implementation_ref,
+        )
+        if reservation is None:
+            raise ValueError("injected idea could not reserve one exact native Card")
+        state = reservation.state
+        node_id = reservation.node_id
+        parent_generations = reservation.parent_generations
+        idea = reservation.idea.model_copy(deep=True)
         with self.tracer.span("create_node", new_trace=True, node_id=node_id,
                               operator=idea.operator, source="manual"):
-            if not code:
-                with self.tracer.span("implement"):
-                    # An injected experiment usually BUILDS ON its parent (a human picked it as the
-                    # base) — hand the parent's solution to a parent-aware developer.
-                    _pnode = state.nodes.get(parents[0]) if parents else None
-                    code = self._implement(idea, _pnode)
+            developer_called = not bool(code)
+            footprint_finalized = False
+            if developer_called:
+                try:
+                    self._reset_developer_footprint(self.developer)
+                    with self.tracer.span("implement"):
+                        # An injected experiment usually BUILDS ON its parent (a human picked it as the
+                        # base) — hand the parent's solution to a parent-aware developer. Preserve the
+                        # receipt-bound Idea by handing the plugin a deep working copy.
+                        _pnode = state.nodes.get(parents[0]) if parents else None
+                        code = self._implement(idea.model_copy(deep=True), _pnode)
+                except Exception:
+                    self._fail_reserved_build(
+                        node_id=node_id, card_id=reservation.card_id, generation=0,
+                        error="injected Developer raised before node creation", reason="build_crash")
+                    self._discard_node_build_telemetry()
+                    raise
+                idea, footprint_finalized = self._finalize_developer_footprint(
+                    idea, self.developer, code)
             latest = fold(self.store.read_all())
             if any(pid not in latest.nodes
                    or latest.nodes[pid].attempt != generation
@@ -2650,34 +3553,48 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                    or pid in latest.aborted_nodes
                    for pid, generation in ((int(pid), gen)
                                            for pid, gen in parent_generations.items())):
-                self.store.append(EV_NODE_FAILED, {
-                    "node_id": node_id, "generation": 0,
-                    "error": "parent lifecycle changed while building", "reason": "superseded",
-                    "eval_seconds": 0.0})
+                self._fail_reserved_build(
+                    node_id=node_id, card_id=reservation.card_id, generation=0,
+                    error="parent lifecycle changed while building", reason="superseded")
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
-            self._emit_node_created(
-                node_id=node_id,
-                parent_ids=parents,
-                operator=idea.operator,
-                idea=durable_idea_payload(idea),
-                code=code,
-                # Honour explicit files/deleted on the request (a cross-run `import` ships the
-                # sibling's full multi-file solution); else use the Developer's last build, and
-                # only when the Developer actually implemented (no ready-made code was supplied).
-                files=(req.get("files")
-                       or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
-                deleted=req.get("deleted") or [],
-                source="manual",
-                **({"parent_generations": parent_generations} if parent_generations else {}),
-                # Cross-run provenance: a DICT when this inject seeded from a sibling run's
-                # experiment (an `import` action), else None. Coerce defensively — a non-dict
-                # origin (a hand-authored/API inject that passed a label string) would make the
-                # folded Node fail validation and silently vanish, so the inject gate would keep
-                # re-creating the SAME node id forever.
-                origin=req.get("origin") if isinstance(req.get("origin"), dict) else None,
-            )
+            try:
+                self._emit_node_created(
+                    node_id=node_id,
+                    parent_ids=parents,
+                    operator=idea.operator,
+                    idea=durable_idea_payload(idea),
+                    code=code,
+                    # Honour explicit files/deleted on the request (a cross-run `import` ships the
+                    # sibling's full multi-file solution); else use the Developer's last build, and
+                    # only when the Developer actually implemented (no ready-made code was supplied).
+                    files=(req.get("files")
+                           or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
+                    deleted=req.get("deleted") or [],
+                    source="manual",
+                    **({"parent_generations": parent_generations} if parent_generations else {}),
+                    **({"footprint_finalized": True} if footprint_finalized else {}),
+                    # Cross-run provenance: a DICT when this inject seeded from a sibling run's
+                    # experiment (an `import` action), else None. Coerce defensively — a non-dict
+                    # origin (a hand-authored/API inject that passed a label string) would make the
+                    # folded Node fail validation and silently vanish, so the inject gate would keep
+                    # re-creating the SAME node id forever.
+                    origin=req.get("origin") if isinstance(req.get("origin"), dict) else None,
+                )
+            except Exception:
+                try:
+                    landed = node_id in fold(self.store.read_all()).nodes
+                except Exception:
+                    landed = False
+                if not landed:
+                    self._fail_reserved_build(
+                        node_id=node_id, card_id=reservation.card_id, generation=0,
+                        error="injected node append failed", reason="build_crash")
+                raise
             if node_id not in fold(self.store.read_all()).nodes:
+                self._fail_reserved_build(
+                    node_id=node_id, card_id=reservation.card_id, generation=0,
+                    error="injected node creation was rejected during replay", reason="superseded")
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the
@@ -2696,7 +3613,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "reason": "auto-paused: a Developer session crashed while building an injected node "
                               "(LLM unreachable or a hard error, unresolved within the node) — resume "
                               "once it's fixed"})
-        if not req.get("code"):
+        if developer_called:
             self._emit_agent_report(node_id)
             # consume predictive telemetry for this node so it can't leak onto the next created node
             self._emit_hypothesis_ranked(node_id, 0)

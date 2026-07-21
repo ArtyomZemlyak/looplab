@@ -104,6 +104,23 @@ def test_validator_forwards_patch_and_multifile_from_inner():
     assert any(c.name == "edit_in_surface" and c.ok for c in dev.last_report.checks)
 
 
+def test_validator_footprint_follows_the_implementation_that_ships():
+    accepted = _FakeAgent([_GOOD])
+    accepted.last_footprint = {"gpus": 2, "gpu_mem_mib": 12_000}
+    direct = ValidatingDeveloper(accepted, max_retries=0)
+    assert direct.implement(Idea(operator="draft")) == _GOOD
+    assert direct.last_footprint == accepted.last_footprint
+
+    rejected = _FakeAgent([_SEED])
+    rejected.last_footprint = {"gpus": 8}
+    fallback = _FakeFallback()
+    fallback.last_footprint = {"gpus": 0}
+    wrapped = ValidatingDeveloper(rejected, fallback=fallback, max_retries=0)
+    assert wrapped.implement(Idea(operator="draft")) == _GOOD
+    assert wrapped.last_fell_back
+    assert wrapped.last_footprint == {"gpus": 0}  # never retain the rejected agent's estimate
+
+
 def test_passes_through_valid_output_without_retry():
     agent = _FakeAgent([_GOOD])
     dev = ValidatingDeveloper(agent, max_retries=2)

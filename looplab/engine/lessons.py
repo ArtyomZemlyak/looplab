@@ -184,12 +184,11 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         # process dies between the two writes, a resume sees the gate advanced and skips — the
         # store misses one batch (best-effort memory) instead of re-invoking the LLM and
         # appending the same lessons twice. The statements ride in the event for audit.
+        from looplab.core.advisory_payloads import research_lesson_receipt
         self._e.store.append(EV_LESSONS_DISTILLED, {
             "at_node": n, "trigger": "cadence", "count": len(lessons),
             "pairs": [[pr["a"], pr["b"]] for pr in pairs],
-            "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
-                         "claim_stance": lz.get("claim_stance"),
-                         "evidence": lz.get("evidence")} for lz in lessons]})
+            "lessons": [research_lesson_receipt(lz, state) for lz in lessons]})
         # Hygiene deferred to run end: the read path dedups/quarantines already, and a full-file
         # rewrite of the shared store every few nodes would race other runs' appends for nothing.
         self._e._append_lessons(lessons, hygiene=False)

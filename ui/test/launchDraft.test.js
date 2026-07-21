@@ -87,6 +87,9 @@ test('launch controls expose canonical independent concurrency with bounded AUTO
   assert.ok(keys.has('llm_parallel'))
   assert.ok(!keys.has('max_parallel'))
   assert.ok(!keys.has('parallel_build'))
+  const llmField = LAUNCH_RUNTIME_FIELDS.find(field => field.key === 'llm_parallel')
+  assert.match(llmField.help, /total LLM-call budget/i)
+  assert.match(llmField.help, /research.*novelty.*enrichment/i)
 
   const draft = createLaunchDraft({ ...proposal, settings: { eval_parallel: 0, llm_parallel: 0 } })
   assert.equal(validateLaunchDraft(draft).ok, true)

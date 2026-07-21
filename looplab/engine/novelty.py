@@ -513,15 +513,45 @@ class NoveltyGateMixin:
         backend-agnostic; returns 1..N ideas (fewer only if the researcher can't diversify). Runs in
         the MAIN task before the build fan-out, so it uses `self.researcher` (no pool race)."""
         n = max(1, int(n))
+        self._pending_batch_dropped = []
         native = getattr(self.researcher, "propose_batch", None)
         ideas: list = []
+        dropped: list[dict] = []
         # CODEX AGENT: admission receipts belong to the slot that will actually be reserved. Advancing
         # by accepted ideas (not raw attempts) keeps retries on one slot and gives batch siblings unique ids.
         prospective_base = self._prospective_node_id(state)
+        proposal_events = self.store.read_all()
+        used_card_ids: set[str] = set()
+
+        def _link_card(candidate, slot: int):
+            if candidate is None:
+                return None
+            linked = (candidate if isinstance(candidate, Idea)
+                      else Idea.model_validate(candidate)).model_copy(deep=True)
+            linked.card_id = None
+            # The immutable Card action records the effective governed timeout, not an uncapped
+            # model request. This also makes batch dedupe and later execution share one identity.
+            linked.eval_timeout = self._effective_researcher_eval_timeout(linked)
+            plan = self._plan_native_card(
+                proposal_events, state, linked, parents=[], parent_generations={},
+                scored_against=state.best_node_id, source="researcher",
+                at_node=prospective_base + slot, excluded=used_card_ids,
+                steering_context=getattr(self.researcher, "_steering_context", []),
+            )
+            if plan.disposition == "invalid":
+                self.store.append(EV_NOVELTY_REJECTED, {
+                    "node_id": prospective_base + slot, "generation": 0,
+                    "kind": "card_contract",
+                    "reason": "proposal cannot form a bounded native Card action",
+                    "action": "dropped",
+                })
+            return plan.idea if plan.disposition in {"mint", "reuse"} else None
+
         if callable(native):
             try:
                 from itertools import islice
 
+                self._set_complexity_hint(state, None)
                 # CODEX AGENT: native batching is only a latency/diversity optimization. It must not
                 # bypass the same history/graded-novelty admission boundary as sequential proposals,
                 # and a broken backend must not make us materialize an unbounded iterable.
@@ -529,12 +559,15 @@ class NoveltyGateMixin:
 
                 def _native_repropose():
                     replacement = list(islice(native(state, 1) or (), 1))
-                    return self._canonicalize_draft_idea(replacement[0]) if replacement else None
+                    return (_link_card(self._canonicalize_draft_idea(replacement[0]), len(ideas))
+                            if replacement else None)
 
                 for idea in produced:
                     if idea is None:
                         continue
-                    idea = self._canonicalize_draft_idea(idea)
+                    idea = _link_card(self._canonicalize_draft_idea(idea), len(ideas))
+                    if idea is None:
+                        continue
                     idea = self._apply_novelty_gate(
                         state,
                         idea,
@@ -542,15 +575,32 @@ class NoveltyGateMixin:
                         researcher=self.researcher,
                         prospective_node_id=prospective_base + len(ideas),
                     )
-                    if idea is not None and not self._intra_batch_dup(idea, ideas):
-                        ideas.append(idea)
+                    idea = _link_card(idea, len(ideas))
+                    if idea is None:
+                        continue
+                    if self._intra_batch_dup(idea, ideas):
+                        dropped.append({
+                            "idea": idea.model_copy(deep=True, update={"card_id": None}),
+                            "reason": "intra_batch_duplicate",
+                            "steering_context": list(
+                                getattr(self.researcher, "_steering_context", []) or []),
+                        })
+                        continue
+                    ideas.append(idea)
+                    used_card_ids.add(idea.card_id)
                 if ideas:
                     # A native batch backend proposes all N at once, so per-idea FOREAGENT telemetry
-                    # isn't separable here — leave it to the backend to emit its own (no per-node stamp).
-                    self._pending_batch_telemetry = [None] * len(ideas[:n])
+                    # isn't separable here. The structured cue snapshot is common to the one batch call;
+                    # preserve it per reservation while leaving rank telemetry to the backend.
+                    _steering = list(getattr(self.researcher, "_steering_context", []) or [])
+                    self._pending_batch_telemetry = [
+                        {"_steering_context": list(_steering)} for _ in ideas[:n]
+                    ]
+                    self._pending_batch_dropped = dropped
                     return ideas[:n]
             except Exception:  # noqa: BLE001 — a batch-backend hiccup falls back to sequential rolls
                 ideas = []
+                dropped = []
         prev_feedback = getattr(self.researcher, "_novelty_feedback", "")
         # Capture EACH accepted roll's FOREAGENT telemetry (hypothesis ranking + foresight pick the
         # researcher set during propose) BEFORE the next roll overwrites it on the shared researcher, so
@@ -572,20 +622,34 @@ class NoveltyGateMixin:
                 idea = self.researcher.propose(state, None)
                 if idea is None:
                     continue
-                idea = self._canonicalize_draft_idea(idea)
+                idea = _link_card(self._canonicalize_draft_idea(idea), len(ideas))
+                if idea is None:
+                    continue
                 # Normal vs-history novelty gate (one informed re-propose on a semantic hit), exactly as
                 # the serial draft path runs it — then drop an intra-batch near-duplicate.
                 idea = self._apply_novelty_gate(
                     state, idea,
-                    repropose=lambda: self._canonicalize_draft_idea(
-                        self.researcher.propose(state, None)),
+                    repropose=lambda: _link_card(self._canonicalize_draft_idea(
+                        self.researcher.propose(state, None)), len(ideas)),
                     prospective_node_id=prospective_base + len(ideas))
-                if idea is None or self._intra_batch_dup(idea, ideas):
+                idea = _link_card(idea, len(ideas))
+                if idea is None:
+                    continue
+                if self._intra_batch_dup(idea, ideas):
+                    dropped.append({
+                        "idea": idea.model_copy(deep=True, update={"card_id": None}),
+                        "reason": "intra_batch_duplicate",
+                        "steering_context": list(
+                            getattr(self.researcher, "_steering_context", []) or []),
+                    })
                     continue
                 ideas.append(idea)
+                used_card_ids.add(idea.card_id)
                 telem.append({
                     "last_hyp_priority": self._snapshot_role_telemetry("last_hyp_priority"),
                     "last_foresight": self._snapshot_role_telemetry("last_foresight"),
+                    "_steering_context": list(
+                        getattr(self.researcher, "_steering_context", []) or []),
                     # THIS roll's cross-run advisory receipt (set on self by _set_complexity_hint above)
                     # so each pooled build stamps ITS OWN node_created provenance, not the last roll's.
                     "_cross_run_advisory_receipt": dict(getattr(self, "_cross_run_advisory_receipt", {}) or {}),
@@ -601,6 +665,7 @@ class NoveltyGateMixin:
                 except Exception:  # noqa: BLE001
                     pass
         self._pending_batch_telemetry = telem
+        self._pending_batch_dropped = dropped
         return ideas
 
     def _snapshot_role_telemetry(self, attr: str):

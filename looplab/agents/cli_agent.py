@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from looplab.core.models import Idea
+from looplab.core.models import Idea, developer_artifact_footprint
 from looplab.core.validate import AgentRun
 
 _SEED = 'import json\n\n# TODO: implement the solution.\nprint(json.dumps({"metric": 0.0}))\n'
@@ -162,6 +162,7 @@ class CliAgentDeveloper:
         self.last_seed: str = ""                  # file content handed to the last run
         self.last_files: dict[str, str] = {}      # accepted in-surface files (multi-file)
         self.last_deleted: list[str] = []         # accepted in-surface DELETIONS (applied at eval)
+        self.last_footprint: dict | None = None    # finalized resources for the shipped patch
         self.last_patch: Optional[dict] = None    # surface-gate verdict {ok,paths,rejected}
 
     def _argv(self, message: str, file: str) -> list[str]:
@@ -256,25 +257,36 @@ class CliAgentDeveloper:
         if self.seed_dirs:                       # RepoTask: edit the existing repo(s)
             msg = (f"Edit the repository files (within the allowed paths) to implement: "
                    f"{idea.rationale} Parameters: {idea.params}.").strip()
-            return self._run(msg, "")
+            code = self._run(msg, "")
+            self.last_footprint = developer_artifact_footprint(
+                idea.footprint, code, self.last_files)
+            return code
         # "Write … completely, overwriting" biases the agent toward its write tool. Small
         # models are unreliable with edit/diff tools (oldString-match failures leave the
         # seed unchanged or produce truncated code); a full rewrite is far more robust.
         msg = (f"Write solution.py completely, overwriting the existing file, to "
                f"implement the solution with parameters {idea.params}. {idea.rationale}"
                ).strip()
-        return self._run(msg, _SEED)
+        code = self._run(msg, _SEED)
+        self.last_footprint = developer_artifact_footprint(idea.footprint, code, self.last_files)
+        return code
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         # Fold in the idea rationale — the ValidatingDeveloper appends the validator's rejection
         # feedback to it per retry; without it a validation-retry re-sends an identical prompt.
         extra = ("\n" + idea.rationale) if (idea is not None and getattr(idea, "rationale", "")) else ""
         if self.seed_dirs:                       # RepoTask: fix the repo edits in place
-            return self._run(
+            repaired = self._run(
                 f"The eval failed with:\n{error}\nEdit the repository files to fix it.{extra}", "")
-        return self._run(
+            self.last_footprint = developer_artifact_footprint(
+                idea.footprint, repaired, self.last_files)
+            return repaired
+        repaired = self._run(
             f"Rewrite solution.py completely (overwrite the whole file) to fix this "
             f"error:\n{error}\nReturn a corrected, complete script.{extra}", code)
+        self.last_footprint = developer_artifact_footprint(
+            idea.footprint, repaired, self.last_files)
+        return repaired
 
 
 def _read_if(p: Path) -> str:

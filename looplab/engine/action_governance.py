@@ -6,7 +6,7 @@ from typing import Optional
 
 
 def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
-    """Return the finite per-node timeout override that this engine will actually honor."""
+    """Return the governed, finite and hard-clamped per-node timeout override."""
     # CODEX AGENT: identity must describe the EXECUTED action, not an untrusted model request.
     # RepoTask profiles own their timeout, and a locked researcher override is ignored by execution;
     # only the finite positive solution.py override that crosses governance is an action axis.
@@ -19,4 +19,15 @@ def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
         timeout = float(getattr(idea, "eval_timeout", None))
     except (TypeError, ValueError, OverflowError):
         return None
-    return timeout if math.isfinite(timeout) and timeout > 0 else None
+    if not math.isfinite(timeout) or timeout <= 0:
+        return None
+    # Settings validates this boundary, but Engine is also a public library seam and may be built
+    # directly. Missing/invalid direct-construction state therefore fails safe to the shipped one-hour
+    # ceiling instead of letting an untrusted Idea disable the bound with NaN/inf/a typo.
+    try:
+        ceiling = float(getattr(engine, "max_eval_timeout", 3600.0))
+    except (TypeError, ValueError, OverflowError):
+        ceiling = 3600.0
+    if not math.isfinite(ceiling) or ceiling <= 0:
+        ceiling = 3600.0
+    return min(timeout, ceiling)

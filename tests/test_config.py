@@ -42,6 +42,8 @@ def test_nonfinite_time_budgets_are_rejected_at_model_boundary():
             Settings(timeout=bad)
         with pytest.raises(ValidationError):
             Settings(max_eval_seconds=bad)
+        with pytest.raises(ValidationError):
+            Settings(max_eval_timeout=bad)
         # `Idea.eval_timeout`, by contrast, is LLM-authored data that the fold reconstructs via
         # `Idea(**d["idea"])` on EVERY replay. Rejecting there would raise inside the fold and silently
         # DROP the node from an old log (invariant-5 back-compat break, F1). It must fail SAFE instead:
@@ -49,6 +51,16 @@ def test_nonfinite_time_budgets_are_rejected_at_model_boundary():
         # the consumer already honors (`if etv and etv > 0`). Safety intent preserved (no infinite eval
         # timeout reaches the sandbox), replay preserved.
         assert Idea(operator="draft", eval_timeout=bad).eval_timeout is None
+
+
+def test_max_eval_timeout_is_a_positive_finite_operator_ceiling():
+    from pydantic import ValidationError
+
+    assert Settings().max_eval_timeout == 3600.0
+    assert Settings(max_eval_timeout=24 * 3600).max_eval_timeout == 24 * 3600
+    for bad in (0, -1, 24 * 3600 + 1):
+        with pytest.raises(ValidationError):
+            Settings(max_eval_timeout=bad)
 
 
 # C1 — resume reconstructs run-only settings from the snapshot

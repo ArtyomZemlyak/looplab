@@ -873,7 +873,10 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         strategy = data.get("strategy")
         if not isinstance(strategy, dict) or not strategy:
             raise HTTPException(400, "strategy must be a non-empty JSON object")
-        unknown_strategy = set(strategy) - {"policy", "policy_params", "fidelity"}
+        unknown_strategy = set(strategy) - {
+            "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
+            "llm_lane_limits",
+        }
         if unknown_strategy:
             raise HTTPException(
                 400, f"strategy has unknown field(s): {', '.join(sorted(unknown_strategy))}")
@@ -889,6 +892,30 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             if fidelity not in {"smoke", "full", "adaptive"}:
                 raise HTTPException(400, "strategy.fidelity must be smoke, full, or adaptive")
             clean_strategy["fidelity"] = fidelity
+        for name, upper in (("eval_parallel", 1024), ("llm_parallel", 64)):
+            if strategy.get(name) is None:
+                continue
+            value = _strict_integer(strategy[name], f"strategy.{name}")
+            if not 0 <= value <= upper:
+                raise HTTPException(400, f"strategy.{name} must be between 0 and {upper}")
+            # Store the operator's raw live delta. Zero is NOT startup AUTO here; Engine apply
+            # deterministically settles it to one without re-reading mutable hardware.
+            clean_strategy[name] = value
+        lane_limits = strategy.get("llm_lane_limits")
+        if lane_limits is not None:
+            from looplab.core.llm_broker import LLM_LANES
+            if not isinstance(lane_limits, dict) or not lane_limits:
+                raise HTTPException(400, "strategy.llm_lane_limits must be a non-empty JSON object")
+            if any(not isinstance(lane, str) or lane not in LLM_LANES for lane in lane_limits):
+                raise HTTPException(400, "strategy.llm_lane_limits has an unknown lane")
+            clean_lanes = {}
+            for lane, raw_width in lane_limits.items():
+                width = _strict_integer(raw_width, f"strategy.llm_lane_limits.{lane}")
+                if not 0 <= width <= 64:
+                    raise HTTPException(
+                        400, f"strategy.llm_lane_limits.{lane} must be between 0 and 64")
+                clean_lanes[lane] = width
+            clean_strategy["llm_lane_limits"] = clean_lanes
         params = strategy.get("policy_params")
         if params is not None:
             if not isinstance(params, dict) or not params:
@@ -917,7 +944,8 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
                 clean_params[name] = value
             clean_strategy["policy_params"] = clean_params
         if not clean_strategy:
-            raise HTTPException(400, "strategy must change policy, policy_params, or fidelity")
+            raise HTTPException(
+                400, "strategy must change policy, fidelity, or a canonical concurrency allocation")
         data["strategy"] = clean_strategy
     elif event_type == EV_INJECT_NODE:
         allowed_inject = {

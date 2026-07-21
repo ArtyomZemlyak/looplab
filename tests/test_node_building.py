@@ -32,6 +32,24 @@ def test_building_marker_not_in_nodes_and_id_allocation_safe():
     assert max(st.nodes, default=-1) + 1 == 0
 
 
+def test_building_marker_preserves_only_a_bounded_canonical_card_id():
+    valid = fold(_BASE + [_ev(
+        "node_building", node_id=5, operator="improve", parent_ids=[3], card_id=" card-7 ",
+    )])
+    assert valid.building == {
+        "node_id": 5, "operator": "improve", "parent_ids": [3], "started": 1.0,
+        "card_id": "card-7",
+    }
+    assert valid.buildings[5] is valid.building
+
+    for invalid in (7, "", "   ", "x" * 257, "card\n7"):
+        state = fold(_BASE + [_ev(
+            "node_building", node_id=6, operator="draft", parent_ids=[], card_id=invalid,
+        )])
+        assert "card_id" not in state.building
+        assert "card_id" not in state.buildings[6]
+
+
 def test_node_created_supersedes_the_marker():
     evs = _BASE + [
         _ev("node_building", node_id=0, operator="draft", parent_ids=[]),
@@ -52,6 +70,20 @@ def test_node_failed_clears_a_stale_marker():
     assert st.building is None
 
 
+def test_malformed_build_generation_degrades_to_legacy_marker_and_can_be_recovered():
+    prefix = _BASE + [_ev(
+        "node_building", node_id=12, operator="draft", parent_ids=[], generation="bad",
+    )]
+    staged = fold(prefix)
+    assert "generation" not in staged.buildings[12]
+
+    recovered = fold(prefix + [_ev(
+        "node_failed", node_id=12, reason="build_interrupted", error="resume recovery",
+    )])
+    assert recovered.building is None
+    assert recovered.buildings == {}
+
+
 def test_a_second_build_replaces_the_first_marker():
     st = fold(_BASE + [
         _ev("node_building", node_id=7, operator="improve", parent_ids=[]),
@@ -70,3 +102,13 @@ def test_run_finished_clears_a_dangling_build_marker():
     ])
     assert st.finished is True
     assert st.building is None                          # no phantom card survives the finish
+
+
+def test_error_finish_retains_crash_prefix_for_resume_recovery():
+    st = fold(_BASE + [
+        _ev("node_building", node_id=10, operator="draft", parent_ids=[], card_id="card-10"),
+        _ev("run_finished", reason="error"),
+    ])
+    assert st.finished is True
+    assert st.building is st.buildings[10]
+    assert st.building["card_id"] == "card-10"

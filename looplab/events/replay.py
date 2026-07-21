@@ -35,6 +35,7 @@ from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, NODE_CONCEPT_PROV
                      Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial, card_action_digest,
                      card_ownership_receipt, hypothesis_id, hypothesis_statement_digest,
                      idea_proposal_digest, normalize_extra_metrics, normalize_researcher_footprint,
+                     normalize_steering_context,
                      run_setup_key, valid_researcher_footprint)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
@@ -277,8 +278,14 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     marker = {"node_id": nid, "operator": d.get("operator"),
               "parent_ids": d.get("parent_ids", []), "started": e.ts}
+    card_id = _card_replay_id(d.get("card_id"))
+    if card_id is not None:
+        # Additive link for the Card queue. Keep malformed/oversized ids out of the transient
+        # RunState marker just as the durable card journals do; old node_building rows retain their
+        # exact marker shape because the key is absent unless a valid id was recorded.
+        marker["card_id"] = card_id
     generation = _event_generation(d)
-    if generation is not _MISSING:
+    if type(generation) is int and generation >= 0:
         marker["generation"] = generation
     # Set BOTH the singular back-compat marker and this node's entry in the multi-build collection
     # (same dict object). A concurrent sibling's node_building overwrites `st.building` (last wins) but
@@ -338,6 +345,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             attempt=generation,
             origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
+            footprint_finalized=d.get("footprint_finalized") is True,
         )
     except (MemoryError, RecursionError):
         # A RESOURCE glitch is NOT a corrupt-data error: it must fail LOUD, not be swallowed.
@@ -827,6 +835,12 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.files = d["files"]
         if d.get("deleted"):
             n.deleted = d["deleted"]
+        if isinstance(d.get("idea_footprint"), dict):
+            footprint = normalize_researcher_footprint(d["idea_footprint"])
+            if footprint is not None:
+                n.idea = n.idea.model_copy(deep=True, update={"footprint": footprint})
+        if d.get("footprint_finalized") is True:
+            n.footprint_finalized = True
 
 def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) -> None:
     """Make every surviving incumbent comparable on the newly-hidden partition.
@@ -2154,6 +2168,21 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
     profile = _card_replay_text(value.get("eval_profile"), max_chars=256, allow_empty=True)
     if profile is not None:
         out["eval_profile"] = profile
+    if "eval_timeout" in value:
+        raw_timeout = value.get("eval_timeout")
+        if raw_timeout is None:
+            out["eval_timeout"] = None
+        elif not isinstance(raw_timeout, bool) and isinstance(raw_timeout, (int, float)):
+            try:
+                timeout = float(raw_timeout)
+            except (TypeError, ValueError, OverflowError):
+                timeout = math.nan
+            if math.isfinite(timeout) and timeout > 0:
+                out["eval_timeout"] = timeout
+            else:
+                out["_eval_timeout_invalid"] = True
+        else:
+            out["_eval_timeout_invalid"] = True
 
     concept_key = "concept_tags" if "concept_tags" in value else "concepts" if "concepts" in value else None
     if concept_key is not None:
@@ -2178,7 +2207,8 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
         out["parent_id"] = parent_id
     if record_unknown_fields:
         known_fields = {
-            "operator", "params", "space", "eval_profile", "concept_tags", "concepts",
+            "operator", "params", "space", "eval_profile", "eval_timeout",
+            "concept_tags", "concepts",
             "parent_id", "parent_ids",
         }
         if any(field not in known_fields for field in value):
@@ -2248,19 +2278,57 @@ def _bounded_card_added_receipt(d: dict) -> dict | None:
     scored_against = _card_replay_node_id(d.get("scored_against"))
     if scored_against is not None:
         rec["scored_against"] = scored_against
-    footprint = normalize_researcher_footprint(d.get("footprint"))
+    if "parent_generations" in d:
+        raw_generations = d.get("parent_generations")
+        generations: dict[str, int] = {}
+        valid_generations = (
+            isinstance(raw_generations, dict)
+            and len(raw_generations) <= _CARD_REPLAY_ACTION_LIST_MAX
+        )
+        if valid_generations:
+            for raw_parent, raw_generation in raw_generations.items():
+                if not isinstance(raw_parent, str) or len(raw_parent) > 10:
+                    valid_generations = False
+                    break
+                parent = _card_replay_node_id(raw_parent)
+                if (parent is None or raw_parent != str(parent)
+                        or type(raw_generation) is not int
+                        or not 0 <= raw_generation <= _CARD_REPLAY_NODE_ID_MAX):
+                    valid_generations = False
+                    break
+                generations[raw_parent] = raw_generation
+        if valid_generations:
+            rec["parent_generations"] = dict(sorted(generations.items()))
+        else:
+            rec["_parent_generations_invalid"] = True
+    if "scored_against_generation" in d:
+        raw_generation = d.get("scored_against_generation")
+        if raw_generation is None:
+            rec["scored_against_generation"] = None
+        elif (type(raw_generation) is int
+              and 0 <= raw_generation <= _CARD_REPLAY_NODE_ID_MAX):
+            rec["scored_against_generation"] = raw_generation
+        else:
+            rec["_scored_against_generation_invalid"] = True
+    if "scored_against_empty" in d:
+        if type(d.get("scored_against_empty")) is bool:
+            rec["scored_against_empty"] = d["scored_against_empty"]
+        else:
+            rec["_scored_against_empty_invalid"] = True
+    raw_footprint = d.get("footprint")
+    footprint = normalize_researcher_footprint(raw_footprint)
     if footprint is not None:
         rec["footprint"] = footprint
-    if isinstance(d.get("steering_context"), list):
-        steering: list[dict] = []
-        budget = [256]
-        for item in d["steering_context"][:_CARD_REPLAY_ACTION_LIST_MAX]:
-            if not isinstance(item, dict):
-                continue
-            valid, bounded = _bounded_card_enrichment(item, budget=budget)
-            if valid and isinstance(bounded, dict):
-                steering.append(bounded)
-        rec["steering_context"] = steering
+    if (raw_footprint is not None
+            and (not isinstance(raw_footprint, dict) or len(raw_footprint) > 2
+                 or not valid_researcher_footprint(raw_footprint))):
+        rec["_footprint_invalid"] = True
+    if "steering_context" in d:
+        steering = normalize_steering_context(d.get("steering_context"))
+        if steering is not None:
+            rec["steering_context"] = steering
+        else:
+            rec["_steering_context_invalid"] = True
     ownership_receipt = _bounded_card_ownership_receipt(
         d.get("ownership_receipt"), card_id=card_id)
     if ownership_receipt is not None:
@@ -2340,6 +2408,29 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     raw_id = d.get("id")
     if isinstance(raw_id, str) and raw_id.strip() and len(raw_id.strip()) <= 256:
         rec = {"id": raw_id.strip()}
+        fence_keys = {"node_id", "generation", "proposal_ref"}
+        modern = bool(fence_keys & set(d))
+        if modern:
+            # Current engine deltas are bound to the exact Node lifecycle and proposal. A partial or
+            # malformed fence is not a legacy row; dropping it prevents an enrichment from following a
+            # numeric node slot after reset/re-proposal.
+            node_id = d.get("node_id")
+            generation = d.get("generation")
+            proposal_ref = d.get("proposal_ref")
+            digest = proposal_ref.get("digest") if isinstance(proposal_ref, dict) else None
+            if (type(node_id) is not int or not 0 <= node_id <= (1 << 31) - 1
+                    or type(generation) is not int or not 0 <= generation <= (1 << 31) - 1
+                    or not isinstance(proposal_ref, dict)
+                    or set(proposal_ref) != {"v", "digest"} or proposal_ref.get("v") != 1
+                    or not isinstance(digest, str) or not digest.startswith("idea:v1:")
+                    or len(digest) != len("idea:v1:") + 64
+                    or any(ch not in "0123456789abcdef" for ch in digest[len("idea:v1:"):])):
+                return
+            rec.update({
+                "node_id": node_id,
+                "generation": generation,
+                "proposal_ref": {"v": 1, "digest": digest},
+            })
         allowed = (
             "novelty_verdict", "cross_run_prior", "footprint", "steering_context",
             "concept_tags", "lesson_refs", "claim_refs", "research_origin",
@@ -2361,7 +2452,45 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 rec["_concept_tags_overflow"] = overflow
                 rec["_concept_tags_invalid"] = invalid
                 continue
-            valid, bounded = _bounded_card_enrichment(d[key])
+            value = d[key]
+            if key == "steering_context":
+                bounded = normalize_steering_context(value)
+                if bounded is not None:
+                    rec[key] = bounded
+                continue
+            if key == "footprint":
+                bounded = _bounded_card_footprint_enrichment(value)
+                if bounded is not None:
+                    rec[key] = bounded
+                continue
+            if key == "novelty_verdict":
+                bounded = _bounded_card_novelty_enrichment(value)
+                if bounded is not None:
+                    rec[key] = bounded
+                continue
+            if key == "cross_run_prior":
+                bounded = _bounded_card_cross_run_enrichment(value)
+                if bounded is not None:
+                    rec[key] = bounded
+                continue
+            if key == "research_origin":
+                bounded = _bounded_card_ref(value)
+                if bounded is not None and (not modern or _digest_ref(bounded, "memo")):
+                    rec[key] = bounded
+                continue
+            if key in {"lesson_refs", "claim_refs"}:
+                if not isinstance(value, list):
+                    continue
+                namespace = "lesson" if key == "lesson_refs" else "claim"
+                refs: list[str] = []
+                for item in value[:64]:
+                    bounded = _bounded_card_ref(item)
+                    if (bounded is not None and bounded not in refs
+                            and (not modern or _digest_ref(bounded, namespace))):
+                        refs.append(bounded)
+                rec[key] = refs
+                continue
+            valid, bounded = _bounded_card_enrichment(value)
             if valid:
                 rec[key] = bounded
         # CODEX AGENT: envelope seq is authoritative; physical order is the deterministic tie-break for
@@ -2582,11 +2711,12 @@ def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if not bool(d.get("finalization_required", False)):
             st.finalized_finish_seq = e.seq
     st.stop_reason = d.get("reason")
-    # Drop any dangling "building" marker(s): if a dev session died mid-build (no node_created /
-    # node_failed) the marker would otherwise persist, and the UI would show a breathing
-    # "building…" card + a false "working" pulse on a run that is over.
-    st.building = None
-    st.buildings.clear()
+    # Drop dangling markers on normal completion. Error finishes deliberately retain crash prefixes:
+    # older/external writers may need resume recovery to append the missing node_failed receipt. Other
+    # terminal reasons must not leave a false in-flight pulse on a run that is over.
+    if d.get("reason") != "error":
+        st.building = None
+        st.buildings.clear()
 
 
 def _on_finalization_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2855,7 +2985,8 @@ def _on_hint(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_set_strategy(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # A7 operator override (HITL parity with pause/hint): the human pins a Strategy. The
     # engine applies it before consulting the Strategist, so a human always wins. The pin owns
-    # only the fields it names (policy/policy_params/fidelity) and STAYS in force for the rest
+    # only the fields it names (including canonical concurrency/lane allocations) and STAYS in force
+    # for the rest
     # of the run (it is not cleared on apply) — a later set_strategy overwrites it; the
     # Strategist keeps tuning everything else (see Engine._maybe_consult_strategist).
     st.pending_strategy = d.get("strategy")
@@ -3525,6 +3656,92 @@ def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None 
     return False, None
 
 
+def _bounded_card_ref(value) -> str | None:
+    if (not isinstance(value, str) or not value or value != value.strip()
+            or len(value) > 400 or not value.isprintable()):
+        return None
+    return value
+
+
+def _digest_ref(value: str, namespace: str) -> bool:
+    prefix = f"{namespace}:sha256:"
+    return (value.startswith(prefix) and len(value) == len(prefix) + 64
+            and all(ch in "0123456789abcdef" for ch in value[len(prefix):]))
+
+
+def _bounded_card_footprint_enrichment(value) -> dict | None:
+    if (not isinstance(value, dict) or not value
+            or not set(value) <= {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by"}):
+        return None
+    quantitative = normalize_researcher_footprint(value) or {}
+    if "gpus" in value and "gpus" not in quantitative:
+        return None
+    if "gpu_mem_mib" in value and "gpu_mem_mib" not in quantitative:
+        return None
+    if "proposed_by" in value:
+        if value["proposed_by"] != "researcher":
+            return None
+        quantitative["proposed_by"] = "researcher"
+    if "finalized_by" in value:
+        if value["finalized_by"] != "developer":
+            return None
+        quantitative["finalized_by"] = "developer"
+    return quantitative or None
+
+
+def _bounded_card_novelty_enrichment(value) -> dict | None:
+    if (not isinstance(value, dict)
+            or not set(value) <= {"grade", "level", "near_node", "near_generation", "recommendation"}):
+        return None
+    out: dict = {}
+    for key in ("grade", "recommendation"):
+        raw = value.get(key)
+        if raw is not None:
+            if not isinstance(raw, str) or len(raw) > 200 or not raw.isprintable():
+                return None
+            out[key] = raw
+    for key, maximum in (("level", 16), ("near_node", (1 << 31) - 1),
+                         ("near_generation", (1 << 31) - 1)):
+        if key in value:
+            raw = value[key]
+            if type(raw) is not int or not 0 <= raw <= maximum:
+                return None
+            out[key] = raw
+    return out
+
+
+_CARD_CROSS_RUN_ROOT_KEYS = {
+    "v", "matched_concepts", "prior_runs", "prior_runs_total", "prior_runs_omitted",
+    "prior_runs_complete", "concept_source",
+}
+_CARD_CROSS_RUN_ROW_KEYS = {
+    "run", "run_id", "metric", "best_metric", "run_best_metric", "similarity", "concepts",
+    "matched_concepts", "outcomes", "matched_concept_outcomes", "source_receipt",
+}
+_CARD_CROSS_RUN_SOURCE_KEYS = {
+    "source_complete", "partial_capsules", "source_unknown_capsules", "source_concepts_omitted",
+    "source_outcomes_omitted", "source_store_complete", "source_rows_total",
+    "source_rows_quarantined", "source_malformed_rows", "source_invalid_capsule_rows",
+    "source_duplicate_run_rows",
+}
+
+
+def _bounded_card_cross_run_enrichment(value) -> dict | None:
+    if not isinstance(value, dict) or not set(value) <= _CARD_CROSS_RUN_ROOT_KEYS:
+        return None
+    runs = value.get("prior_runs", [])
+    if (not isinstance(runs, list) or len(runs) > 64
+            or any(not isinstance(row, dict) or not set(row) <= _CARD_CROSS_RUN_ROW_KEYS
+                   for row in runs)):
+        return None
+    source = value.get("concept_source", {})
+    if (not isinstance(source, dict) or not set(source) <= _CARD_CROSS_RUN_SOURCE_KEYS):
+        return None
+    # This existing projection already normalizes counts, list caps and source completeness. The closed
+    # key checks above are what prevent an arbitrary body/path from entering the Card read model.
+    return _card_cross_run_projection(value)
+
+
 def _proposal_card_concept_source(
     kind: Literal["card_added", "card_enriched"], *, present: bool,
     overflow: bool = False, invalid: bool = False,
@@ -3579,6 +3796,18 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     if isinstance(profile, str) and len(profile) <= 256:
         snapshot["eval_profile"] = profile
         owns_action = True
+    if "eval_timeout" in idea:
+        raw_timeout = idea.get("eval_timeout")
+        if raw_timeout is None:
+            snapshot["eval_timeout"] = None
+        elif not isinstance(raw_timeout, bool) and isinstance(raw_timeout, (int, float)):
+            try:
+                timeout = float(raw_timeout)
+            except (TypeError, ValueError, OverflowError):
+                timeout = math.nan
+            if math.isfinite(timeout) and timeout > 0:
+                snapshot["eval_timeout"] = timeout
+                owns_action = True
     concept_key_present = (
         "concept_tags" in idea or "concepts" in idea
         or "_concept_tags_overflow" in idea or "_concept_tags_invalid" in idea
@@ -3616,27 +3845,32 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     elif snapshot.get("parent_ids"):
         snapshot["parent_id"] = snapshot["parent_ids"][0]
 
+    if isinstance(d.get("parent_generations"), dict):
+        snapshot["parent_generations"] = dict(d["parent_generations"])
+
     scored_against = _coerce_node_id({"node_id": d.get("scored_against")})
     if scored_against is not None and 0 <= scored_against <= (1 << 31) - 1:
         snapshot["scored_against"] = scored_against
+    if d.get("scored_against_generation") is None:
+        if "scored_against_generation" in d:
+            snapshot["scored_against_generation"] = None
+    elif type(d.get("scored_against_generation")) is int:
+        snapshot["scored_against_generation"] = d["scored_against_generation"]
+    if type(d.get("scored_against_empty")) is bool:
+        snapshot["scored_against_empty"] = d["scored_against_empty"]
     if isinstance(d.get("footprint"), dict):
         footprint = normalize_researcher_footprint(d["footprint"])
         if footprint is not None:
             snapshot["footprint"] = footprint
-    if isinstance(d.get("steering_context"), list):
-        steering: list[dict] = []
-        for item in d["steering_context"][:64]:
-            if not isinstance(item, dict):
-                continue
-            valid, bounded = _bounded_card_enrichment(item)
-            if valid and isinstance(bounded, dict):
-                steering.append(bounded)
-        snapshot["steering_context"] = steering
+    if "steering_context" in d:
+        steering = normalize_steering_context(d.get("steering_context"))
+        if steering is not None:
+            snapshot["steering_context"] = steering
     return snapshot, owns_action
 
 
 _CARD_ADDED_ACTION_FIELDS = frozenset({
-    "operator", "params", "space", "eval_profile", "concept_tags", "concepts",
+    "operator", "params", "space", "eval_profile", "eval_timeout", "concept_tags", "concepts",
     "parent_id", "parent_ids", "_concept_tags_overflow", "_concept_tags_invalid",
 })
 
@@ -3667,6 +3901,18 @@ def _card_added_ownership(
     # the action complete. Concept membership is the sole exception: it is metadata with its own receipt.
     if not set(raw_idea) <= _CARD_ADDED_ACTION_FIELDS:
         return True, False, expected["action_digest"]
+    if ("eval_timeout" not in raw_idea
+            or not {"parent_generations", "scored_against_generation",
+                    "scored_against_empty"} <= set(d)
+            or any(d.get(flag) is True for flag in {
+                "_parent_generations_invalid", "_scored_against_generation_invalid",
+                "_scored_against_empty_invalid", "_footprint_invalid",
+            })):
+        return True, False, expected["action_digest"]
+    if ((d.get("scored_against") is None) != (d.get("scored_against_empty") is True)
+            or (d.get("scored_against") is not None
+                and type(d.get("scored_against_generation")) is not int)):
+        return True, False, expected["action_digest"]
     if d.get("footprint") is not None and not valid_researcher_footprint(d.get("footprint")):
         return True, False, expected["action_digest"]
     raw_action = {
@@ -3674,9 +3920,13 @@ def _card_added_ownership(
         "params": raw_idea.get("params"),
         "space": raw_idea.get("space"),
         "eval_profile": raw_idea.get("eval_profile"),
+        "eval_timeout": raw_idea.get("eval_timeout"),
         "parent_id": d.get("parent_id", raw_idea.get("parent_id")),
         "parent_ids": d.get("parent_ids", raw_idea.get("parent_ids", [])),
+        "parent_generations": d.get("parent_generations"),
         "scored_against": d.get("scored_against"),
+        "scored_against_generation": d.get("scored_against_generation"),
+        "scored_against_empty": d.get("scored_against_empty"),
         "footprint": d.get("footprint"),
     }
     raw_expected = card_ownership_receipt(card_id, statement, raw_action)
@@ -3690,9 +3940,13 @@ def _card_action_from_projection(card: Card) -> dict:
         "params": card.params,
         "space": card.space,
         "eval_profile": card.eval_profile,
+        "eval_timeout": card.eval_timeout,
         "parent_id": card.parent_id,
         "parent_ids": card.parent_ids,
+        "parent_generations": card.parent_generations,
         "scored_against": card.scored_against,
+        "scored_against_generation": card.scored_against_generation,
+        "scored_against_empty": card.scored_against_empty,
         "footprint": card.footprint,
     }
 
@@ -3719,6 +3973,68 @@ def _card_action_has_live_anchors(card: Card, breedable_node_ids: set[int]) -> b
     if len(parent_ids) != expected_parents:
         return False
     return all(parent_id in breedable_node_ids for parent_id in parent_ids)
+
+
+def _card_action_freshness(st: RunState, card: Card) -> str:
+    """Compare one action's exact lifecycle fences with the current replay state.
+
+    Missing legacy fences are ``unknown`` rather than silently rebound to the latest node attempt.
+    A known-dead anchor or a changed best/attempt is ``stale`` even when another legacy fence is
+    missing, keeping the future queue fail closed while old card shadows remain readable.
+    """
+    parent_ids = list(card.parent_ids or [])
+    if card.parent_id is not None:
+        if parent_ids and parent_ids[0] != card.parent_id:
+            parent_state = "stale"
+        else:
+            if not parent_ids:
+                parent_ids = [card.parent_id]
+            parent_state = "current"
+    else:
+        parent_state = "current"
+    if len(parent_ids) != len(set(parent_ids)):
+        parent_state = "stale"
+    expected_parent_keys = {str(parent_id) for parent_id in parent_ids}
+    parent_nodes = {parent_id: st.nodes.get(parent_id) for parent_id in parent_ids}
+    if any(node is None or node.tombstoned or parent_id in st.aborted_nodes
+           for parent_id, node in parent_nodes.items()):
+        parent_state = "stale"
+    elif card.parent_generations is None:
+        if parent_state != "stale":
+            parent_state = "unknown"
+    elif set(card.parent_generations) != expected_parent_keys:
+        parent_state = "stale"
+    elif any(
+        type(card.parent_generations.get(str(parent_id))) is not int
+        or card.parent_generations[str(parent_id)] != node.attempt
+        for parent_id, node in parent_nodes.items()
+    ):
+        parent_state = "stale"
+
+    if card.scored_against is None:
+        if card.scored_against_empty:
+            score_state = (
+                "current"
+                if card.scored_against_generation is None and st.best_node_id is None
+                else "stale"
+            )
+        else:
+            score_state = "unknown"
+    else:
+        scored_node = st.nodes.get(card.scored_against)
+        if (scored_node is None or scored_node.tombstoned
+                or card.scored_against in st.aborted_nodes
+                or st.best_node_id != card.scored_against):
+            score_state = "stale"
+        elif card.scored_against_generation is None:
+            score_state = "unknown"
+        elif card.scored_against_generation != scored_node.attempt:
+            score_state = "stale"
+        else:
+            score_state = "current"
+
+    states = {parent_state, score_state}
+    return "stale" if "stale" in states else "unknown" if "unknown" in states else "current"
 
 
 def _card_sidecar_subject(st: RunState, d: dict, node_to_card: dict[int, str], *,
@@ -4028,8 +4344,8 @@ def _derive_cards(st: RunState) -> None:
         row["all_complete"] = row["all_complete"] and complete
 
     # 1) explicitly-added cards — may start with no evidence. Coerce defensively (engine/control events
-    #    arrive verbatim; one malformed entry must not brick every fold). Until the engine mints `card_*`
-    #    events (a later increment), Layer 1a MIRRORS `_derive_hypotheses` by ALSO seeding from the
+    #    arrive verbatim; one malformed entry must not brick every fold). The compatibility projection
+    #    also MIRRORS `_derive_hypotheses` by seeding from the
     #    engine-populated `hypotheses_added` (deep-research/human directions), so a node-less hypothesis
     #    still becomes a card and `st.cards` stays a faithful shadow of `st.hypotheses`. `card_*` first so
     #    a real card_added (explicit id/source) wins the id over its hypothesis twin (dedup = first wins).
@@ -4062,6 +4378,12 @@ def _derive_cards(st: RunState) -> None:
                 _card_added_ownership(d, cid, stmt, snapshot, owns_action=owns_action)
                 if native_row else (False, False, None)
             )
+            if native_row and receipt_valid and snapshot.get("footprint") is not None:
+                # Authority is derived only after the immutable native receipt validates. Event data
+                # can declare quantities but cannot self-assign pinned/finalized/proposed provenance.
+                snapshot["footprint"] = {
+                    **snapshot["footprint"], "proposed_by": "researcher",
+                }
             if native_row:
                 _record_registration(cid, valid=receipt_valid, digest=action_digest)
                 if owns_action:
@@ -4083,6 +4405,12 @@ def _derive_cards(st: RunState) -> None:
     # 2) derive/link from nodes that state a hypothesis (evidence = the node). Link by `idea.card_id`
     #    (Layer-1a stable id) when present, else the statement hash (legacy/derived fallback), mirroring
     #    `_derive_hypotheses`. `sorted(st.nodes)` keeps evidence order == the hypothesis shadow's.
+    def _node_parent_generations(node: Node) -> dict[str, int] | None:
+        parents = list(node.parent_ids or [])
+        if any(parent_id not in st.nodes for parent_id in parents):
+            return None
+        return {str(parent_id): st.nodes[parent_id].attempt for parent_id in parents}
+
     for nid in sorted(st.nodes):
         n = st.nodes[nid]
         if n.idea is None:
@@ -4109,11 +4437,13 @@ def _derive_cards(st: RunState) -> None:
                      rationale=(n.idea.rationale or "")[:400], created_at_node=n.id,
                      operator=n.idea.operator, params=dict(n.idea.params or {}),
                      space={k: list(v) for k, v in (n.idea.space or {}).items()},
-                     eval_profile=n.idea.eval_profile, concept_tags=node_concept_tags,
+                     eval_profile=n.idea.eval_profile, eval_timeout=n.idea.eval_timeout,
+                     concept_tags=node_concept_tags,
                      concept_source=node_concept_source,
                      provenance_tier=node_concept_source.provenance,
                      parent_id=(n.parent_ids[0] if n.parent_ids else None),
-                     parent_ids=list(n.parent_ids or []))
+                     parent_ids=list(n.parent_ids or []),
+                     parent_generations=_node_parent_generations(n))
             cards[cid] = c
             card_origins[cid] = "node_card_id" if explicit_card_id else "node_statement_hash"
             action_owned_cards.add(cid)
@@ -4126,8 +4456,10 @@ def _derive_cards(st: RunState) -> None:
             c.params = dict(n.idea.params or {})
             c.space = {k: list(v) for k, v in (n.idea.space or {}).items()}
             c.eval_profile = n.idea.eval_profile
+            c.eval_timeout = n.idea.eval_timeout
             c.parent_id = n.parent_ids[0] if n.parent_ids else None
             c.parent_ids = list(n.parent_ids or [])
+            c.parent_generations = _node_parent_generations(n)
             action_owned_cards.add(cid)
         if c.concept_source is None or c.concept_source.kind != "node":
             # CODEX AGENT: the first linked node is the exact action/evidence owner.  Later evidence may
@@ -4218,8 +4550,11 @@ def _derive_cards(st: RunState) -> None:
             if action_owner_id != base_id:
                 action_owner = cards[action_owner_id].model_copy(deep=True)
                 for field in (
-                    "operator", "params", "space", "eval_profile", "concept_tags", "concept_source",
-                    "provenance_tier", "parent_id", "parent_ids", "scored_against",
+                    "operator", "params", "space", "eval_profile", "eval_timeout",
+                    "concept_tags", "concept_source", "provenance_tier",
+                    "parent_id", "parent_ids", "parent_generations",
+                    "scored_against", "scored_against_generation", "scored_against_empty",
+                    "footprint", "steering_context",
                 ):
                     setattr(tgt, field, getattr(action_owner, field))
             tgt.id = tid
@@ -4292,16 +4627,33 @@ def _derive_cards(st: RunState) -> None:
             c.dropped_reason = reason or None
             c.dropped_by = str(d.get("dropped_by") or d.get("by") or "engine")
 
+    # A build reservation is not evidence yet, so do not append its prospective node id to Card.evidence.
+    # Its explicit card_id is nevertheless the durable in-flight ownership link. Resolve it through the
+    # same merge/statement aliases as every other card control so a reservation made just before a merge
+    # follows the surviving work item. Unknown or malformed ids cannot synthesize a substance-free card.
+    building_card_ids: set[str] = set()
+    for marker in st.buildings.values():
+        if not isinstance(marker, dict):
+            continue
+        marker_card_id = _card_id(marker.get("card_id"))
+        if marker_card_id is None:
+            continue
+        canonical_id = _canon(marker_card_id)
+        if canonical_id in cards:
+            building_card_ids.add(canonical_id)
+
     # 6) lifecycle `status` lane (frozen vocab; DISTINCT from the verdict). Dropped/merged-away wins;
-    #    else a pending node -> running; else evidence all trust-gated/breed-excluded/infeasible -> gated;
-    #    else terminal evidence -> evaluated; no evidence -> proposed. (building/coded lanes need the
-    #    node_building.card_id link minted in a later increment — not populated in Layer 1a.)
+    #    else an explicit node_building.card_id reservation -> building; else a pending node -> running;
+    #    else evidence all trust-gated/breed-excluded/infeasible -> gated; else terminal evidence ->
+    #    evaluated; no evidence -> proposed.
     for cid, c in cards.items():
         if cid in dropped or c.merged_into:
             c.status = "dropped"
             continue
         ev_nodes = [st.nodes[i] for i in c.evidence if i in st.nodes and not st.nodes[i].tombstoned]
-        if not ev_nodes:
+        if cid in building_card_ids:
+            c.status = "building"
+        elif not ev_nodes:
             c.status = "proposed"
         elif any(n.status is NodeStatus.pending for n in ev_nodes):
             c.status = "running"
@@ -4328,10 +4680,14 @@ def _derive_cards(st: RunState) -> None:
             if c.footprint is None and n.idea.footprint:
                 c.footprint = {**n.idea.footprint, "proposed_by": "researcher"}
             if c.research_origin is None and isinstance(n.research_origin, dict):
-                # Node.research_origin is the deep-research provenance {at_node, trigger} (orchestrator
-                # stamps it; models.py:530). Ref-shaped by the node it was triggered at (docs/23 dec 23).
+                # Modern nodes carry the stable content-addressed memo id. Preserve the old node:<N>
+                # spelling only for historical events that predate that additive field.
+                from looplab.core.advisory_payloads import valid_advisory_ref
+                memo_id = n.research_origin.get("memo_id")
                 _at = n.research_origin.get("at_node")
-                if _at is not None:
+                if valid_advisory_ref(memo_id, "memo"):
+                    c.research_origin = memo_id
+                elif _at is not None and "memo_id" not in n.research_origin:
                     c.research_origin = f"node:{_at}"
             if c.footprint is not None and c.research_origin is not None:
                 break
@@ -4376,6 +4732,13 @@ def _derive_cards(st: RunState) -> None:
             c = None
         if c is None:
             continue
+        if {"node_id", "generation", "proposal_ref"} <= set(d):
+            # Modern engine enrichment belongs to one exact proposal lifecycle. Resolve through the
+            # same node-to-Card authority as novelty/cross-run sidecars, then require its declared Card
+            # to be that subject after merge canonicalization.
+            subject = _card_sidecar_subject(st, d, node_to_card)
+            if subject is None or _canon(bounded_id) != subject:
+                continue
         for k, v in d.items():
             if k in _ENRICH_DICT and isinstance(v, dict):
                 valid, bounded = _bounded_card_enrichment(v)
@@ -4441,9 +4804,15 @@ def _derive_cards(st: RunState) -> None:
     order = (st.card_ranking or st.hypothesis_ranking or {}).get("order") or []
     if native_card_ranking:
         # A native card_ranked event owns the foresight projection, including clearing a prior explicit
-        # enrichment for cards it no longer ranks.
+        # enrichment for cards it no longer ranks. Confidence belongs to the same ranking snapshot, so
+        # a rerank without confidence must not leave the previous decision's confidence behind.
         for c in cards.values():
             c.foresight_rank = None
+            c.confidence = None
+    ranking_confidence = (
+        st.card_ranking.get("confidence")
+        if native_card_ranking and isinstance(st.card_ranking, dict) else None
+    )
     ranked_cards: set[str] = set()
     for raw_id in order:
         bounded_id = _card_id(raw_id)
@@ -4459,6 +4828,11 @@ def _derive_cards(st: RunState) -> None:
             c.priority = rank_i
             if native_card_ranking or c.foresight_rank is None:
                 c.foresight_rank = rank_i
+            if (native_card_ranking and not isinstance(ranking_confidence, bool)
+                    and isinstance(ranking_confidence, (int, float))
+                    and math.isfinite(float(ranking_confidence))
+                    and 0.0 <= float(ranking_confidence) <= 1.0):
+                c.confidence = float(ranking_confidence)
 
     # 7) operator-override overlay — RESERVED FINAL PHASE (docs/23 decision 27: the operator wins
     #    regardless of event arrival order). The maps are empty until Layer 6 fills them, so this is a
@@ -4471,6 +4845,7 @@ def _derive_cards(st: RunState) -> None:
     for cid, pri in (st.card_priority_pins or {}).items():
         c = cards.get(cid)
         if c is not None:
+            c.pinned = True
             try:
                 c.priority = int(pri)
             except (TypeError, ValueError):
@@ -4494,8 +4869,7 @@ def _derive_cards(st: RunState) -> None:
 
     # CODEX AGENT: Step 9 fails closed at the architecture boundary. Hypothesis remains a
     # research-direction aggregate; a selectable Card must be exactly one immutable work item with a
-    # durable `card_added`
-    # ownership receipt. No current production writer emits that receipt, so legacy hash joins, unbound
+    # durable `card_added` ownership receipt. The native writer supplies it; legacy hash joins, unbound
     # card_added rows, and node-only card ids remain visible but can never become selection-ready.
     breedable_card_parent_ids = {node.id for node in st.breedable_nodes()}
     for cid, c in cards.items():
@@ -4536,14 +4910,13 @@ def _derive_cards(st: RunState) -> None:
             and projected_digest == c.identity.action_digest
             and _card_action_has_live_anchors(c, breedable_card_parent_ids)
         )
-        if c.scored_against is None or st.best_node_id is None:
-            freshness = "unknown"
-        elif c.scored_against == st.best_node_id:
-            freshness = "current"
-        else:
-            freshness = "stale"
+        freshness = _card_action_freshness(st, c)
 
         work_states: set[str] = set()
+        if cid in building_card_ids:
+            # status='building' is a display lane, not a queue exclusion proof. Carry the exact marker
+            # link into selection provenance so a future consumer fails closed on this in-flight owner.
+            work_states.add("in_flight")
         for node_id in c.evidence:
             node = st.nodes.get(node_id)
             if node is None:

@@ -90,7 +90,8 @@ class BestOfNDeveloper(WrapsDeveloper):
     Deterministic given a deterministic inner (toy); with an LLM at temperature>0 the candidates
     vary, so best-of-N actually explores. `repair` delegates to inner (single attempt).
 
-    Forwarding (brief/client/prompts/is_code_generating/last_report) comes from `WrapsDeveloper`."""
+    Forwarding (brief/client/prompts/is_code_generating/last_report) and one-candidate output sync
+    come from `WrapsDeveloper`; the N-candidate path restores the winning files/deletions/footprint."""
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
                  foresight: bool = True, direction: str = "min", goal: str = "",
@@ -114,12 +115,16 @@ class BestOfNDeveloper(WrapsDeveloper):
         self.parser = parser or "tool_call"
         self.last_files: dict = {}
         self.last_deleted: list = []
+        self.last_footprint: dict | None = None
         self.last_n_scores: list[float] = []
         # The predictive pick for THIS call (order/confidence/reason) or None when the ranker didn't
         # decide the pick — the engine reads it to emit `foresight_selected`, and `audit_extra`/the D10
         # guard derive "did foresight decide?" from `is not None` (one source of truth, no stale bool).
         self.last_foresight_pick: dict | None = None
-        self._last_candidates: list[tuple[str, dict, list]] = []   # (code, files, deleted) per N
+        # Candidate snapshots are (code, files, deleted, footprint). The footprint belongs to the
+        # selected code just as strongly as its multi-file patch; restoring the inner's final call
+        # would otherwise attach candidate N's resources to a different winning implementation.
+        self._last_candidates: list[tuple[str, dict, list, object]] = []
 
     def audit_extra(self) -> dict:
         extra = super().audit_extra()
@@ -161,15 +166,17 @@ class BestOfNDeveloper(WrapsDeveloper):
             self.last_n_scores = [_score(code)]
             return code
         self.last_n_scores = []          # per-node telemetry: reset so it holds only THIS node's N
-        cands: list[tuple[str, dict, list, float]] = []
+        cands: list[tuple[str, dict, list, object, float]] = []
         for _ in range(self.n):
             code = gen_one()
             sc = _score(code)
             self.last_n_scores.append(sc)
+            raw_footprint = getattr(self.inner, "last_footprint", None)
+            footprint = dict(raw_footprint) if isinstance(raw_footprint, dict) else raw_footprint
             cands.append((code, getattr(self.inner, "last_files", {}) or {},
-                          getattr(self.inner, "last_deleted", []) or [], sc))
-        best_score = max(c[3] for c in cands)
-        top = [c for c in cands if c[3] >= best_score - 1e-9]
+                          getattr(self.inner, "last_deleted", []) or [], footprint, sc))
+        best_score = max(c[4] for c in cands)
+        top = [c for c in cands if c[4] >= best_score - 1e-9]
         chosen = top[0]
         self.last_foresight_pick = None
         # FOREAGENT: predict-before-execute (arXiv:2601.05930). Among the top static-scorers — the
@@ -209,7 +216,7 @@ class BestOfNDeveloper(WrapsDeveloper):
             kw = {"prompts": self.prompts} if self.prompts is not None else {}
             idx = _listwise_pick(self.client, idea, [c[0] for c in top], parser=self.parser, **kw)
             chosen = top[idx]
-        self.last_files, self.last_deleted = chosen[1], chosen[2]
+        self.last_files, self.last_deleted, self.last_footprint = chosen[1], chosen[2], chosen[3]
         return chosen[0]
 
     def repair(self, idea: Idea, code: str, error: str) -> str:

@@ -35,8 +35,9 @@ _FIELDS = (
     "id", "status", "verdict", "actionable", "identity", "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
-    "dropped_reason", "dropped_by", "parent_id", "parent_ids", "scored_against", "operator",
-    "params", "space", "eval_profile", "concept_tags", "priority",
+    "dropped_reason", "dropped_by", "parent_id", "parent_ids", "parent_generations",
+    "scored_against", "scored_against_generation", "scored_against_empty", "operator",
+    "params", "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
     "foresight_rank", "confidence",
     "footprint", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
     "claim_refs", "steering_context", "provenance_tier",
@@ -52,7 +53,9 @@ _REF_FIELDS = {
     "eval_profile", "research_origin", "provenance_tier",
 }
 _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "foresight_rank"}
+_NONNEG_INT_FIELDS = {"scored_against_generation"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
+_POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
 _REF_LIST_FIELDS = {"aliases", "concept_tags", "lesson_refs", "claim_refs"}
 _INT_LIST_FIELDS = {"evidence", "parent_ids"}
 _FOOTPRINT_KEYS = {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by", "pinned_by"}
@@ -64,6 +67,10 @@ _PRIOR_RUN_KEYS = {
 _STEERING_KEYS = {
     "kind", "ref", "source", "at_node", "node_id", "card_id", "concept_id", "strategy",
     "stance", "memo_id", "trigger", "value", "label", "operator", "reason",
+    # Closed writer vocabulary from proposal_cues.normalize_steering_context. Keeping the public
+    # projection in lockstep means a production Card can prove its steering snapshot is lossless.
+    "siblings", "level", "remaining_seconds", "total_seconds", "seconds", "mode", "node_ids",
+    "file_count", "status", "novelty_stance", "fidelity",
 }
 _RECEIPT_KEYS = {
     "concept_evidence_nodes_total", "concept_evidence_nodes_incomplete", "concept_evidence_complete",
@@ -232,6 +239,33 @@ def _ints(value, *, limit: int = _MAX_ITEMS) -> list[int]:
         number = _number(item, integer=True)
         if number is not _SKIP and number is not None and number not in out:
             out.append(number)
+    return out
+
+
+def _generations(value) -> dict[str, int]:
+    """Bound one canonical node-id -> lifecycle-generation map for the public wire."""
+    if not isinstance(value, dict):
+        return {}
+    rows = heapq.nsmallest(
+        _MAX_ITEMS,
+        ((key, generation) for key, generation in value.items()
+         if isinstance(key, str) and len(key) <= 10),
+        key=lambda row: row[0],
+    )
+    out: dict[str, int] = {}
+    for key, raw_generation in rows:
+        if not key.isascii() or not key.isdecimal():
+            continue
+        try:
+            node_id = int(key)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        generation = _number(raw_generation, integer=True)
+        if (key != str(node_id) or not 0 <= node_id <= (1 << 31) - 1
+                or generation is _SKIP or generation is None
+                or not 0 <= generation <= (1 << 31) - 1):
+            continue
+        out[key] = generation
     return out
 
 
@@ -568,13 +602,23 @@ def _field_value(card, name: str):
         return None if value is None else _text(value, _MAX_REF_BYTES)
     if name in _INT_FIELDS:
         return _number(value, integer=True)
+    if name in _NONNEG_INT_FIELDS:
+        number = _number(value, integer=True)
+        return (
+            number if number is None or (
+                number is not _SKIP and 0 <= number <= (1 << 31) - 1
+            ) else _SKIP
+        )
     if name in _FLOAT_FIELDS:
         return _number(value)
+    if name in _POSITIVE_FLOAT_FIELDS:
+        number = _number(value)
+        return number if number is None or (number is not _SKIP and number > 0) else _SKIP
     if name in _REF_LIST_FIELDS:
         return _refs(value)
     if name in _INT_LIST_FIELDS:
         return _ints(value)
-    if name in {"actionable", "selection_ready"}:
+    if name in {"actionable", "selection_ready", "scored_against_empty", "pinned"}:
         return value if isinstance(value, bool) else _SKIP
     if name == "identity":
         return _card_identity(value)
@@ -586,6 +630,8 @@ def _field_value(card, name: str):
         return _params(value)
     if name == "space":
         return _space(value)
+    if name == "parent_generations":
+        return None if value is None else _generations(value)
     if name == "footprint":
         return _named_scalars(value, _FOOTPRINT_KEYS)
     if name == "novelty_verdict":
@@ -633,6 +679,10 @@ def _matched_outcomes_lossless(raw, bounded) -> bool:
     expected = []
     for item in raw:
         if not isinstance(item, dict):
+            return False
+        # Unknown future fields may be safely omitted from the bounded view, but that omission must
+        # never be reported as a complete receipt.
+        if not set(item) <= _STEERING_KEYS:
             return False
         row = {}
         if "concept" in item:
@@ -751,6 +801,33 @@ def _concept_source_lossless(raw, bounded) -> bool:
     return source_view == bounded == _card_concept_source(raw)
 
 
+def _card_identity_lossless(raw, bounded) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    allowed = {"kind", "source", "durable", "receipt_valid", "action_digest"}
+    if any(key not in allowed for key in raw):
+        return False
+    source_view = {key: raw[key] for key in allowed & raw.keys() if raw[key] is not None}
+    return source_view == bounded == _card_identity(raw)
+
+
+def _card_selection_provenance_lossless(raw, bounded) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    allowed = {
+        "action_source", "action_owner_count", "action_complete", "freshness", "owner_state",
+    }
+    return set(raw) == allowed and raw == bounded == _card_selection_provenance(raw)
+
+
+def _card_selection_blockers_lossless(raw, bounded) -> bool:
+    return (
+        isinstance(raw, (list, tuple))
+        and list(raw) == bounded
+        and _card_selection_blockers(raw) == bounded
+    )
+
+
 def _field_projection_lossless(name: str, raw, bounded) -> bool:
     raw = _json_value(raw)
     if name in _TEXT_LIMITS:
@@ -759,8 +836,13 @@ def _field_projection_lossless(name: str, raw, bounded) -> bool:
         return isinstance(raw, str) and bounded == raw
     if name in _INT_FIELDS:
         return _number(raw, integer=True) == raw == bounded
+    if name in _NONNEG_INT_FIELDS:
+        return (_number(raw, integer=True) == raw == bounded
+                and 0 <= raw <= (1 << 31) - 1)
     if name in _FLOAT_FIELDS:
         return _number(raw) == raw == bounded
+    if name in _POSITIVE_FLOAT_FIELDS:
+        return _number(raw) == raw == bounded and raw > 0
     if name in _REF_LIST_FIELDS:
         return (
             isinstance(raw, (list, tuple))
@@ -773,16 +855,20 @@ def _field_projection_lossless(name: str, raw, bounded) -> bool:
             and len(raw) <= _MAX_ITEMS
             and _ints(raw) == list(raw) == bounded
         )
-    if name == "actionable":
+    if name in {"actionable", "selection_ready", "scored_against_empty", "pinned"}:
         return isinstance(raw, bool) and bounded is raw
-    # CODEX AGENT: Modern lifecycle fields have projectors but no lossless cases in this switch.
-    # ``identity``, ``selection_provenance``, ``selection_blockers``, and ``selection_ready`` therefore
-    # make every exact native Card look incomplete and keep collection completeness permanently false.
-    # Add strict/coherent equality branches for all four before using the receipt as public authority.
+    if name == "identity":
+        return _card_identity_lossless(raw, bounded)
+    if name == "selection_provenance":
+        return _card_selection_provenance_lossless(raw, bounded)
+    if name == "selection_blockers":
+        return _card_selection_blockers_lossless(raw, bounded)
     if name == "params":
         return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
     if name == "space":
         return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and bounded == raw
+    if name == "parent_generations":
+        return isinstance(raw, dict) and len(raw) <= _MAX_ITEMS and _generations(raw) == raw == bounded
     if name == "footprint":
         return _named_scalars_lossless(raw, bounded, _FOOTPRINT_KEYS)
     if name == "novelty_verdict":
@@ -913,7 +999,11 @@ def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
         omissions[name] = _field_slice(name, raw, projected, exact=False)
 
     for group, names in {
-        "action": ("operator", "params", "space", "eval_profile"),
+        "action": (
+            "operator", "params", "space", "eval_profile", "eval_timeout",
+            "parent_id", "parent_ids", "parent_generations", "scored_against",
+            "scored_against_generation", "scored_against_empty",
+        ),
         "concepts": ("concept_tags", "concept_source", "provenance_tier"),
     }.items():
         present = [

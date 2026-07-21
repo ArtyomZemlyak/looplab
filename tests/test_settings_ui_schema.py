@@ -99,8 +99,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 153
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 182
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 154
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 183
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
@@ -110,6 +110,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert {"max_parallel", "parallel_build"}.isdisjoint(by_key)
     assert "0 = AUTO at launch" in by_key["eval_parallel"]["help"]
     assert "Live Strategist/operator updates settle 0" in by_key["llm_parallel"]["help"]
+    assert "agents" not in by_key["max_eval_timeout"]
+    assert "hard ceiling" in by_key["max_eval_timeout"]["help"].lower()
     assert set(("concept_pivot", "concept_run_base", "concept_retag_every",
                 "graded_novelty", "capability_expansion")) <= set(by_key)
     assert "does not itself rank candidates" in by_key["concept_pivot"]["help"]

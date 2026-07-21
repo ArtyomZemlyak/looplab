@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import Idea, RunState
+from looplab.core.models import Idea, RunState, normalize_researcher_footprint
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED
 from looplab.search.operators import merge_idea
 
@@ -95,16 +95,62 @@ class NodeBuildMixin:
         return [chosen]
 
     @in_llm_lane("build")
-    def _implement(self, idea, parent=None) -> str:
+    def _implement(self, idea, parent=None, *, developer=None) -> str:
         """Route an implement through `implement_from(idea, parent)` when the Developer supports it
         and a parent exists — so an IMPROVE/REFINE starts from the parent's actual solution (its
         code/files) and patches it, instead of regenerating everything from the pristine baseline
         (which loses the parent's accumulated edits and burns tokens re-deriving them). Falls back
         to the plain `implement(idea)` for developers that don't take a parent (draft, offline)."""
-        impl_from = getattr(self.developer, "implement_from", None)
+        developer = developer or self.developer
+        impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
             return impl_from(idea, parent)
-        return self.developer.implement(idea)
+        return developer.implement(idea)
+
+    @staticmethod
+    def _reset_developer_footprint(developer) -> None:
+        """Clear per-call resource output through a wrapper tree before invoking Developer.
+
+        Parallel builds use isolated role pairs, but serial reruns/repairs reuse one object.  Clearing
+        every reachable wrapper/inner/fallback prevents a backend that omits the optional output from
+        inheriting another node's finalization.
+        """
+        pending = [developer]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            if hasattr(current, "last_footprint"):
+                try:
+                    current.last_footprint = None
+                except Exception:  # noqa: BLE001 - optional audit output must never block a build
+                    pass
+            for attr in ("inner", "developer", "fallback"):
+                try:
+                    child = getattr(current, attr, None)
+                except Exception:  # noqa: BLE001 - a plugin property may be defensive/remote
+                    child = None
+                if child is not None and child is not current:
+                    pending.append(child)
+
+    def _finalize_developer_footprint(self, idea: Idea, developer, code: str) -> tuple[Idea, bool]:
+        """Merge the Developer's per-call resource estimate onto a durable Idea.
+
+        A missing optional output means the Developer accepted the Researcher's proposal.  A concrete
+        output may scale it up or down, then the detected pool clamps the effective quantities.  An
+        unspecified proposal stays unspecified so legacy scheduling remains byte-for-byte compatible.
+        """
+        proposed = normalize_researcher_footprint(getattr(idea, "footprint", None))
+        if proposed is None or (isinstance(code, str) and code.startswith("(developer error:")):
+            return idea, False
+        finalized = normalize_researcher_footprint(
+            getattr(developer, "last_footprint", None)) or proposed
+        clamp = getattr(self, "_clamp_resource_footprint", None)
+        if callable(clamp):
+            finalized = clamp(finalized) or proposed
+        return idea.model_copy(deep=True, update={"footprint": finalized}), True
 
     def _directed_idea(self, idea, state: RunState):
         """Signal-delivery (§1): fold the active operator directives into the idea HANDED TO THE
@@ -130,7 +176,7 @@ class NodeBuildMixin:
         return di
 
     @in_llm_lane("build")
-    def _repair(self, node, err: str, state: Optional[RunState] = None) -> str:
+    def _repair(self, node, err: str, state: Optional[RunState] = None, *, developer=None) -> str:
         """Route a repair through `repair_from(idea, node, error)` when the Developer supports it, so
         the fix is seeded from the FAILING NODE's OWN files — not the shared developer's `last_files`,
         which holds whatever node it built last (a batch builds every node before any eval, so
@@ -139,15 +185,17 @@ class NodeBuildMixin:
         §1: when `state` is given, standing operator directives are folded into the idea so the REPAIRED
         code honors them too (consistency with the four build sites); without it the raw idea is used."""
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
-        rf = getattr(self.developer, "repair_from", None)
+        developer = developer or self.developer
+        rf = getattr(developer, "repair_from", None)
         if callable(rf):
             return rf(idea, node, err)
-        return self.developer.repair(idea, node.code, err)
+        return developer.repair(idea, node.code, err)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
                            source=_OMIT, origin=_OMIT, generation=_OMIT,
-                           parent_generations=_OMIT, cross_run_receipt=_OMIT) -> None:
+                           parent_generations=_OMIT, cross_run_receipt=_OMIT,
+                           footprint_finalized=_OMIT) -> None:
         """The single `node_created` emitter for all four creation sites (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
         `_OMIT` sentinel and are LEFT OUT of the payload when not passed — never None-filled —
@@ -161,7 +209,8 @@ class NodeBuildMixin:
         for k, v in (("deleted", deleted), ("research_origin", research_origin),
                      ("source", source), ("origin", origin), ("generation", generation),
                      ("parent_generations", parent_generations),
-                     ("cross_run_receipt", cross_run_receipt)):
+                     ("cross_run_receipt", cross_run_receipt),
+                     ("footprint_finalized", footprint_finalized)):
             if v is not _OMIT:
                 data[k] = v
         self.store.append(EV_NODE_CREATED, data)

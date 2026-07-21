@@ -1261,8 +1261,9 @@ export const CONTROL = {
       idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` },
       parent_ids: ids, parent_generations: parentGenerations,
     }, options),
-  // A7: pin/override the Strategist's choice live (HITL parity). `strategy` = a Strategy dict
-  // {policy?, policy_params?, developer?, operators?, fidelity?, rationale?}.
+  // A7/L2: pin the Strategist live. The strict server contract accepts policy/fidelity plus canonical
+  // eval_parallel, llm_parallel, and the closed llm_lane_limits allocation (never legacy aliases).
+  // {policy?, policy_params?, fidelity?, eval_parallel?, llm_parallel?, llm_lane_limits?}.
   setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),
   // P2: ask the engine to run the Deep-Research stage now (read all results + the web, write a memo).
   deepResearch: (rid) => runCommand(rid, 'deep_research', {}),

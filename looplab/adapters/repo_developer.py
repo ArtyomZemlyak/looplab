@@ -265,6 +265,7 @@ class LLMRepoDeveloper:
                              if isinstance(s, dict) and s.get("mount")]
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
+        self.last_footprint: dict | None = None
 
     # Files most useful to PRELOAD verbatim so the agent authors the entrypoint without fumbling with
     # a (truncating) read tool. Order = priority; the rest of the surface is appended within budget.
@@ -863,9 +864,15 @@ class LLMRepoDeveloper:
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
             self.last_deleted = list(write.deleted)
+            from looplab.core.models import developer_artifact_footprint
+            self.last_footprint = developer_artifact_footprint(
+                idea.footprint, "", self.last_files)
             return f"(developer error: {e})"
         self.last_files = dict(write.files)
         self.last_deleted = list(write.deleted)
+        from looplab.core.models import developer_artifact_footprint
+        self.last_footprint = developer_artifact_footprint(
+            idea.footprint, "", self.last_files)
         return ""
 
     def implement(self, idea: Idea) -> str:

@@ -25,7 +25,7 @@ from looplab.core.config import parallelism_aliases
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
-from looplab.core.llm_broker import in_llm_lane
+from looplab.core.llm_broker import LLM_LANES, in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
                                   node_concept_event_provenance)
@@ -70,7 +70,8 @@ class StrategyCadenceMixin:
         # change to another tracked field).
         return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity",
                                       "novelty_stance", "request_research", "timeout", "max_parallel",
-                                      "parallel_build", "eval_parallel", "llm_parallel")}
+                                      "parallel_build", "eval_parallel", "llm_parallel",
+                                      "llm_lane_limits")}
 
     def _available_developers(self) -> list[str]:
         from looplab.agents.cli_agent import PRESETS
@@ -88,6 +89,10 @@ class StrategyCadenceMixin:
         ev = [n.eval_seconds for n in state.nodes.values() if n.eval_seconds]
         avg_es = (sum(ev) / len(ev)) if ev else None
         cross_run_note = self._cross_run_note_for_ctx(state)
+        # A built Engine always owns the broker. Keep this accessor direct so a wiring typo fails
+        # loudly instead of silently telling the Strategist that every lane is unbounded.
+        llm_broker = self._llm_broker.snapshot()
+        llm_lane_limits = llm_broker["lane_limits"]
         return StrategyContext(
             node_count=len(state.nodes),
             phase=run_phase(state, self.n_seeds),
@@ -101,6 +106,8 @@ class StrategyCadenceMixin:
             current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
             eval_parallel=self._eval_parallel,
             llm_parallel=self._llm_parallel,
+            llm_total=llm_broker["total"],
+            llm_lane_limits=llm_lane_limits,
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
@@ -483,6 +490,26 @@ class StrategyCadenceMixin:
                         self._reconfigure_llm_broker(_value)
                 except (TypeError, ValueError, OverflowError):
                     pass
+        # Per-lane allocation is a distinct canonical Strategist knob. It is deliberately stored raw
+        # in `strategy_decision` (including zero), while the live boundary settles every 0 to one
+        # worker. Updating the existing broker in place keeps outstanding borrowers under one atomic
+        # total+lane controller. Missing lanes are unbounded within the shared total, matching the
+        # broker's explicit partial-map contract.
+        raw_lanes = strat.get("llm_lane_limits")
+        if isinstance(raw_lanes, dict) and raw_lanes and may("llm_lane_limits"):
+            settled_lanes: dict[str, int] = {}
+            lane_values_valid = True
+            for lane, value in raw_lanes.items():
+                if (lane not in LLM_LANES or isinstance(value, bool)
+                        or not isinstance(value, int) or not 0 <= value <= 64):
+                    lane_values_valid = False
+                    break
+                settled_lanes[lane] = max(1, value)
+            if lane_values_valid and settled_lanes:
+                broker = self._llm_broker
+                broker.reconfigure(
+                    total=broker.snapshot()["total"], lane_limits=settled_lanes)
+                self._llm_lane_limits_explicit = True
         # The policy NAME and its `policy_params` are gated INDEPENDENTLY: an operator can pin
         # `policy_params` ALONE (with `policy` locked out of the strategist's grant) and that pin must
         # still take effect — the `_pinned` exemption promises "a human can always change it via the
@@ -1059,24 +1086,35 @@ class StrategyCadenceMixin:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.
         Records a `strategy_decision` and re-folds only when the strategy actually changes.
 
-        An operator/boss `set_strategy` pin owns ONLY the fields it names (policy / policy_params /
-        fidelity); those stay in force for the rest of the run (until re-pinned), while the
+        An operator/boss `set_strategy` pin owns ONLY the fields it names (including canonical
+        concurrency totals and the LLM lane allocation); those stay in force for the rest of the run
+        (until re-pinned), while the
         autonomous Strategist keeps tuning everything else. The pin is MERGED onto the live strategy
         (not reset to the bare pin) and re-asserted only when a pinned field actually drifts — that,
         plus overlaying the pinned fields onto the Strategist's own decision below, is what stops the
         pin and the Strategist from thrashing (the old "reset to bare pin on any divergence"
         oscillated the policy every consult and dropped the Strategist's fidelity/operators)."""
         pin = state.pending_strategy or {}
-        raw_pin = {k: pin[k] for k in ("policy", "policy_params", "fidelity")
+        raw_pin = {k: pin[k] for k in (
+            "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
+            "llm_lane_limits")
                    if pin.get(k) is not None}
         n = len(state.nodes)
         consulting = (self.strategist is not None and self._should_consult(state)
                       and not self._autonomous_strategy_already_recorded_at(state, n))
         active_core = self._strategy_core(state.active_strategy)
         # Cheap pre-check (no ctx/validate): a pin "drifts" if a raw pinned field differs from what's
-        # active. For an INVALID pin this is a false alarm (it can never become active), so we still
-        # validate below before acting on it.
-        pin_drift = bool(raw_pin) and any(active_core.get(k) != v for k, v in raw_pin.items())
+        # active OR if the currently recorded ownership set differs. Ownership itself is durable
+        # behavior: pinning a same-valued field must still exempt it from autonomous control, and a
+        # later set_strategy replaces (rather than accumulates) the prior field set. For an INVALID
+        # pin this can be a false alarm, so we still validate below before acting on it.
+        def pin_matches(k: str, value) -> bool:
+            return active_core.get(k) == value
+
+        active_pinned = set((state.active_strategy or {}).get("_pinned") or [])
+        pin_drift = bool(raw_pin) and (
+            any(not pin_matches(k, v) for k, v in raw_pin.items())
+            or set(raw_pin) != active_pinned)
         if not pin_drift and not consulting:
             return state
         ctx = self._strategy_ctx(state)
@@ -1089,10 +1127,14 @@ class StrategyCadenceMixin:
         # invalid pin a harmless no-op.
         vpin = validate_strategy({**raw_pin, "source": "operator"}, ctx) if raw_pin else None
         pin_fields = {k: vpin[k] for k in raw_pin if vpin and k in vpin}
-        # 1. Re-assert the pin only if a VALID pinned field isn't currently in force (merge onto active).
-        if pin_fields and any(active_core.get(k) != v for k, v in pin_fields.items()):
+        ownership_drift = bool(pin_fields) and set(pin_fields) != active_pinned
+        # 1. Re-assert the pin if a VALID pinned value or its exact ownership set isn't in force
+        # (merge onto active). Invalid historical pins remain harmless no-ops.
+        if pin_fields and (ownership_drift
+                           or any(not pin_matches(k, v) for k, v in pin_fields.items())):
             active = canonicalize_strategy_parallelism(state.active_strategy)
-            strat = validate_strategy({**active, **pin_fields, "source": "operator"}, ctx)
+            candidate = {**active, **pin_fields, "source": "operator"}
+            strat = validate_strategy(candidate, ctx)
             if strat:
                 strat.setdefault("rationale", "operator-pinned strategy")
                 strat["_pinned"] = sorted(pin_fields)   # per-field operator provenance (see may())
@@ -1112,7 +1154,7 @@ class StrategyCadenceMixin:
                     # A legacy-only partial is a NEW delta. Promote it before merging with active
                     # canonical state, or the stale canonical counterpart would shadow this update.
                     strat = canonicalize_strategy_parallelism(strat)
-                    strat.update(pin_fields)   # pinned (validated) policy/fidelity are non-negotiable
+                    strat.update(pin_fields)
                     # Record the decision MERGED onto the live/active strategy (mirror the operator-pin
                     # path above). A strategist decision is a PARTIAL dict — only the fields the model
                     # changed — and `_apply_strategy` never resets an omitted field, so the live engine

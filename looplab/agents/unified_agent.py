@@ -34,7 +34,8 @@ class UnifiedAgent(WrapsDeveloper):
     drive `choose_action` (the next macro action). Each backend is already bound to its own
     per-stage client (H3), so `propose` and `implement` can run on different models.
 
-    Developer-facing forwarding (brief/is_code_generating/client/last_report/audit_extra)
+    Developer-facing forwarding (brief/is_code_generating/client/last_report/audit_extra and
+    per-call files/deletions/footprint)
     comes from `WrapsDeveloper`, delegating to `self.developer` via `_wrapped` below.
     """
 
@@ -80,6 +81,7 @@ class UnifiedAgent(WrapsDeveloper):
         # (`last_report` is forwarded live by the WrapsDeveloper mixin).
         self.last_files: dict = {}
         self.last_deleted: list = []
+        self.last_footprint: dict | None = None
 
     # ----------------------------------------------------------- Researcher
     @property

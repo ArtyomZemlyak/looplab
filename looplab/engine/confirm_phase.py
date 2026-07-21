@@ -87,15 +87,25 @@ class ConfirmPhaseMixin:
                     # an eval that runs seconds-to-minutes.
                     await anyio.sleep(1.0)
 
+            reservation = await self._wait_reserve_node_resources(nd)
+            if not self._confirmation_node_current(nd.id, generation):
+                self._release_gpus(reservation.get("gpu_ids"))
+                return None
+            confirm_env = self._resource_eval_env(
+                reservation, base={"LOOPLAB_EVAL_SEED": str(s)})
+
             def _run():
                 return self._run_eval(
-                    nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full", cancel)
+                    nd, str(workdir), confirm_env, "full", cancel)
 
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(_watch_lifecycle)
-                res = await anyio.to_thread.run_sync(_run)
-                cancel.set()
-                tg.cancel_scope.cancel()
+            try:
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(_watch_lifecycle)
+                    res = await anyio.to_thread.run_sync(_run)
+                    cancel.set()
+                    tg.cancel_scope.cancel()
+            finally:
+                self._release_gpus(reservation.get("gpu_ids"))
 
             current = self._confirmation_node_current(nd.id, generation)
             valid = (current and res.metric is not None

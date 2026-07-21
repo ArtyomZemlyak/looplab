@@ -38,7 +38,10 @@ class _Researcher:
         self.eval_timeout = eval_timeout
 
     def propose(self, state, parent):
-        return Idea(operator="x", params={"x": 1.0}, eval_timeout=self.eval_timeout)
+        return Idea(
+            operator="x", params={"x": 1.0}, eval_timeout=self.eval_timeout,
+            rationale="exercise the governed per-node timeout",
+        )
 
 
 class _Dev:
@@ -46,11 +49,13 @@ class _Dev:
         return "print('{\"metric\": 0.1}')\n"
 
 
-def _engine(run_dir, *, eval_timeout=None, timeout=30.0, agent_control=None, sandbox=None):
+def _engine(run_dir, *, eval_timeout=None, timeout=30.0, max_eval_timeout=3600.0,
+            agent_control=None, sandbox=None, **engine_kwargs):
     return Engine(run_dir, task=ToyTask.load(TASK), researcher=_Researcher(eval_timeout),
                   developer=_Dev(), sandbox=sandbox or _RecordSandbox(), timeout=timeout,
+                  max_eval_timeout=max_eval_timeout,
                   policy=GreedyTree(n_seeds=1, max_nodes=1, debug_depth=0),
-                  agent_control=agent_control, auto_install_deps=False)
+                  agent_control=agent_control, auto_install_deps=False, **engine_kwargs)
 
 
 # ----------------------------------------------------------------- the gate
@@ -70,6 +75,34 @@ def test_researcher_eval_timeout_used_when_granted(tmp_path):
                   agent_control={"timeout": ["researcher"]}, sandbox=sb)
     anyio.run(eng.run)
     assert sb.timeouts == [123.0]            # the researcher-sized per-node budget was applied
+
+
+def test_researcher_eval_timeout_is_clamped_after_governance(tmp_path):
+    sb = _RecordSandbox()
+    eng = _engine(tmp_path / "clamped", eval_timeout=3600.0, timeout=30.0,
+                  max_eval_timeout=90.0,
+                  agent_control={"timeout": ["researcher"]}, sandbox=sb)
+    anyio.run(eng.run)
+    assert sb.timeouts == [90.0]
+    state = fold(eng.store.read_all())
+    node = next(iter(state.nodes.values()))
+    assert node.idea.eval_timeout == 90.0
+    assert state.cards[node.idea.card_id].eval_timeout == 90.0
+    added = [event for event in eng.store.read_all() if event.type == "card_added"][-1]
+    assert added.data["idea"]["eval_timeout"] == 90.0
+
+
+def test_locked_researcher_timeout_falls_back_instead_of_clamping(tmp_path):
+    sb = _RecordSandbox()
+    eng = _engine(tmp_path / "locked-clamp", eval_timeout=3600.0, timeout=30.0,
+                  max_eval_timeout=90.0,
+                  agent_control={"timeout": ["strategist"]}, sandbox=sb)
+    anyio.run(eng.run)
+    assert sb.timeouts == [30.0]
+    state = fold(eng.store.read_all())
+    node = next(iter(state.nodes.values()))
+    assert node.idea.eval_timeout is None
+    assert state.cards[node.idea.card_id].eval_timeout is None
 
 
 def test_researcher_eval_timeout_ignored_when_not_granted(tmp_path):
@@ -150,6 +183,21 @@ def test_strategist_parallel_build_blocked_when_not_granted(tmp_path):
     assert eng.parallel_build == 1                                     # unchanged (serial default)
 
 
+def test_strategist_named_lane_allocation_is_governed_and_settles_zero(tmp_path):
+    proposed = {"build": 0, "deep_research": 2, "novelty_dedup": 1}
+    locked = _engine(tmp_path / "lanes-off", llm_parallel=4, agent_control={})
+    before = locked._llm_broker.snapshot()["lane_limits"]
+    locked._apply_strategy({"llm_lane_limits": proposed})
+    assert locked._llm_broker.snapshot()["lane_limits"] == before
+
+    granted = _engine(
+        tmp_path / "lanes-on", llm_parallel=4,
+        agent_control={"llm_lane_limits": ["strategist"]})
+    granted._apply_strategy({"llm_lane_limits": proposed})
+    assert granted._llm_broker.snapshot()["lane_limits"] == {
+        "build": 1, "deep_research": 2, "novelty_dedup": 1}
+
+
 def test_strategist_search_knobs_gated_by_matrix(tmp_path):
     """M4: EVERY strategist knob (not just timeout/max_parallel) is governance-gated. Under an empty
     matrix a policy/operator/novelty change is blocked; granting it in the matrix lets it through."""
@@ -210,6 +258,7 @@ def test_default_settings_matrix_shape():
     assert "boss" in s.agent_control["max_nodes"]      # budget_extend was already a boss power
     assert s.agent_control["eval_parallel"] == ["strategist"]
     assert s.agent_control["llm_parallel"] == ["strategist"]
+    assert s.agent_control["llm_lane_limits"] == ["strategist"]
     assert "max_parallel" not in s.agent_control and "parallel_build" not in s.agent_control
     assert "llm_model" not in s.agent_control           # infra stays locked
 

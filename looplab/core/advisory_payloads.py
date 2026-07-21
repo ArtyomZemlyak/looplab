@@ -6,7 +6,9 @@ boundaries so an oversized or wrong-shaped sidecar cannot crash the engine or ex
 """
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 import math
 
 from looplab.trust.redact import is_secret_key_name, redact_persisted_text
@@ -24,6 +26,135 @@ _MAX_VERIFICATION_TEXT = 24_000
 _MAX_VERIFICATION_VERDICTS = 64
 _MAX_ADVISORY_COUNT = (1 << 63) - 1
 _VERDICTS = frozenset({"supported", "unsupported", "unclear", "cited"})
+_ADVISORY_REF_NAMESPACES = frozenset({"memo", "lesson", "claim"})
+_ADVISORY_REF_PREFIXES = {
+    namespace: f"{namespace}:sha256:" for namespace in _ADVISORY_REF_NAMESPACES
+}
+
+
+def valid_advisory_ref(value, namespace: str) -> bool:
+    """Whether ``value`` is one exact, printable, content-addressed advisory reference.
+
+    Cards expose these identifiers in the tokenless public dump, so accepting an arbitrary string would
+    recreate the body/path side channel the ref-only Card contract is intended to close.
+    """
+    prefix = _ADVISORY_REF_PREFIXES.get(namespace) if isinstance(namespace, str) else None
+    return bool(
+        prefix is not None
+        and isinstance(value, str)
+        and len(value) == len(prefix) + 64
+        and value.startswith(prefix)
+        and all(ch in "0123456789abcdef" for ch in value[len(prefix):])
+    )
+
+
+def stable_advisory_ref(namespace: str, payload) -> str | None:
+    """Return ``<namespace>:sha256:<digest>`` over deterministic bounded JSON, or ``None``.
+
+    Callers pass their already-sanitized, deliberately small identity projection.  ``allow_nan=False``
+    and a strict namespace list make malformed/future values fail closed instead of minting unstable ids.
+    """
+    prefix = _ADVISORY_REF_PREFIXES.get(namespace) if isinstance(namespace, str) else None
+    if prefix is None:
+        return None
+    try:
+        blob = json.dumps(
+            payload, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", "strict")
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    return prefix + hashlib.sha256(blob).hexdigest()
+
+
+def research_memo_ref(payload) -> str | None:
+    """Stable id for the canonical persisted memo, excluding its self-referential child ids."""
+    clean = sanitize_research_memo_payload(payload)
+    clean.pop("memo_id", None)
+    for claim in clean.get("claims", []):
+        if isinstance(claim, dict):
+            claim.pop("claim_id", None)
+    return stable_advisory_ref("memo", clean)
+
+
+def research_claim_ref(memo_id: str, index: int, claim) -> str | None:
+    """Stable, position-aware id for one claim in an exact persisted memo."""
+    if not valid_advisory_ref(memo_id, "memo") or type(index) is not int or not 0 <= index < 64:
+        return None
+    if not isinstance(claim, dict):
+        return None
+    bounded = {
+        key: claim[key]
+        for key in ("statement", "node_ids", "urls", "url_identities", "evidence_receipt")
+        if key in claim
+    }
+    return stable_advisory_ref(
+        "claim", {"memo_id": memo_id, "index": index, "claim": bounded})
+
+
+def research_lesson_ref(lesson, evidence_refs) -> str | None:
+    """Stable id for a distilled lesson bound to the exact cited node lifecycles."""
+    if not isinstance(lesson, dict) or not isinstance(evidence_refs, list) or len(evidence_refs) > 64:
+        return None
+    refs = []
+    for ref in evidence_refs:
+        if (not isinstance(ref, dict) or set(ref) != {"node_id", "generation"}
+                or type(ref.get("node_id")) is not int or ref["node_id"] < 0
+                or type(ref.get("generation")) is not int or ref["generation"] < 0):
+            return None
+        refs.append({"node_id": ref["node_id"], "generation": ref["generation"]})
+    statement = lesson.get("statement")
+    outcome = lesson.get("outcome")
+    stance = lesson.get("claim_stance")
+    if (not isinstance(statement, str) or not isinstance(outcome, str)
+            or (stance is not None and not isinstance(stance, str))):
+        return None
+    identity = {
+        "statement": statement[:4_000],
+        "outcome": outcome[:80],
+        "claim_stance": stance[:80] if stance is not None else None,
+        "evidence_refs": refs,
+    }
+    return stable_advisory_ref("lesson", identity)
+
+
+def research_lesson_receipt(lesson, state) -> dict:
+    """Project one existing lesson event row plus an exact, lifecycle-bound opaque id.
+
+    The event already carries the human-readable lesson for its audit timeline.  The additive
+    ``lesson_id``/``evidence_refs`` members are the only pieces the Card enrichment writer consumes.
+    Missing or stale evidence deliberately produces no id, so a numeric node slot can never re-home an
+    old lesson after reset/retry.
+    """
+    raw = lesson if isinstance(lesson, dict) else {}
+    row = {
+        "statement": raw.get("statement", ""),
+        "outcome": raw.get("outcome", ""),
+        "claim_stance": raw.get("claim_stance"),
+        "evidence": raw.get("evidence"),
+    }
+    raw_evidence = raw.get("evidence")
+    if not isinstance(raw_evidence, (list, tuple)) or len(raw_evidence) > 64:
+        return row
+    evidence_refs = []
+    seen: set[int] = set()
+    nodes = getattr(state, "nodes", {}) if state is not None else {}
+    aborted = getattr(state, "aborted_nodes", set()) if state is not None else set()
+    for raw_node_id in raw_evidence:
+        if type(raw_node_id) is not int or raw_node_id < 0 or raw_node_id in seen:
+            return row
+        node = nodes.get(raw_node_id)
+        if (node is None or getattr(node, "tombstoned", False) or raw_node_id in aborted
+                or type(getattr(node, "attempt", None)) is not int
+                or getattr(node, "idea", None) is None):
+            return row
+        seen.add(raw_node_id)
+        evidence_refs.append({"node_id": raw_node_id, "generation": node.attempt})
+    lesson_id = research_lesson_ref(raw, evidence_refs)
+    if lesson_id is not None:
+        row["lesson_id"] = lesson_id
+        row["evidence_refs"] = evidence_refs
+    return row
 
 
 def _bounded_source(value) -> tuple[tuple | list, int, bool]:
@@ -268,6 +399,8 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
                     and 0 <= src.get("at_node") <= (1 << 63) - 1 else None),
         "trigger": _text(src.get("trigger", ""), 64, budget, single_line=True),
     }
+    if valid_advisory_ref(src.get("memo_id"), "memo"):
+        out["memo_id"] = src["memo_id"]
     if "verification" in src:
         # Reserve a bounded slice for trust output before model narrative/proposals. The shared 64k
         # cap must not persist recommendations while silently erasing unsupported verdicts.
@@ -313,6 +446,8 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dic
             "urls": urls,
             "url_identities": url_identities,
         }
+        if valid_advisory_ref(claim.get("claim_id"), "claim"):
+            projected_claim["claim_id"] = claim["claim_id"]
         if add_receipts or "evidence_receipt" in claim:
             projected_claim["evidence_receipt"] = evidence_receipt
         out["claims"].append(projected_claim)
