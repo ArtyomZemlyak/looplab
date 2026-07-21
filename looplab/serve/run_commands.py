@@ -875,7 +875,7 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             raise HTTPException(400, "strategy must be a non-empty JSON object")
         unknown_strategy = set(strategy) - {
             "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
-            "llm_lane_limits",
+            "llm_lane_limits", "card_scoring",
         }
         if unknown_strategy:
             raise HTTPException(
@@ -916,6 +916,18 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
                         400, f"strategy.llm_lane_limits.{lane} must be between 0 and 64")
                 clean_lanes[lane] = width
             clean_strategy["llm_lane_limits"] = clean_lanes
+        card_scoring = strategy.get("card_scoring")
+        if card_scoring is not None:
+            from looplab.agents.strategist import validate_card_scoring
+            clean_card_scoring = validate_card_scoring(card_scoring)
+            if clean_card_scoring is None:
+                raise HTTPException(
+                    400,
+                    "strategy.card_scoring must be the complete object "
+                    "{stance: explore|balanced|exploit, novelty_weight: 0..1, "
+                    "coverage_weight: 0..1}",
+                )
+            clean_strategy["card_scoring"] = clean_card_scoring
         params = strategy.get("policy_params")
         if params is not None:
             if not isinstance(params, dict) or not params:
@@ -945,7 +957,8 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             clean_strategy["policy_params"] = clean_params
         if not clean_strategy:
             raise HTTPException(
-                400, "strategy must change policy, fidelity, or a canonical concurrency allocation")
+                400, "strategy must change policy, fidelity, Card scoring, "
+                     "or a canonical concurrency allocation")
         data["strategy"] = clean_strategy
     elif event_type == EV_INJECT_NODE:
         allowed_inject = {

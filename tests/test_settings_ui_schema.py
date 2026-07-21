@@ -99,14 +99,16 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 154
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 183
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 155
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 184
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
     # CODEX AGENT: curated settings expose the two independent canonical axes; legacy aliases still
     # parse in raw config/snapshots but must not remain as competing operator controls.
     assert {"eval_parallel", "llm_parallel"} <= set(by_key)
+    assert by_key["card_driven_selection"]["type"] == "bool"
+    assert "pinned at run start" in by_key["card_driven_selection"]["help"]
     assert {"max_parallel", "parallel_build"}.isdisjoint(by_key)
     assert "0 = AUTO at launch" in by_key["eval_parallel"]["help"]
     assert "Live Strategist/operator updates settle 0" in by_key["llm_parallel"]["help"]

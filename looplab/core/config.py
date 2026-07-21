@@ -71,6 +71,7 @@ def canonicalize_parallelism_source(values: dict) -> dict:
 # The HTTP config editor and the engine both consume this one contract; keep deliberately mutable
 # controls such as ``trust_gate`` out (that field has its own durable change event).
 RUN_START_PINNED_FIELDS = frozenset({
+    "card_driven_selection",
     "holdout_fraction",
     "holdout_select",
     "select_verifier",
@@ -89,6 +90,9 @@ def run_start_pinned_settings(state) -> dict:
     if not getattr(state, "run_id", ""):
         return {}
     values = {
+        # Layer 3 changes which queue owns macro-action selection. Once a run starts, replay and
+        # resume must keep the same owner even if the snapshot or ambient default changes later.
+        "card_driven_selection": bool(getattr(state, "card_driven_selection", False)),
         "select_verifier": bool(getattr(state, "select_verifier_tiebreak", False)),
         "select_verifier_samples": int(getattr(state, "select_verifier_samples", 3)),
         "verifier_ci_tie": bool(getattr(state, "verifier_ci_tie", False)),
@@ -440,7 +444,9 @@ class Settings(BaseSettings):
     # Roles: "strategist" (A7 meta-controller; run-wide), "boss" (run-chat operator-proxy; run-wide),
     # "researcher" (per-experiment proposer; PER-NODE — e.g. set a longer eval timeout for a neural-net
     # idea). A setting ABSENT from this map is LOCKED — no agent may change it, only a human via the
-    # snapshot/UI. The gate is ENFORCED at every AGENT seam via `_agent_may` — the strategist's whole
+    # snapshot/UI. The sole conditional exception is Strategy-only `card_scoring`: Card mode grants
+    # it implicitly without changing the default flag-off snapshot, while an explicit [] revokes it.
+    # The gate is ENFORCED at every AGENT seam via `_agent_may` — the strategist's whole
     # control surface (policy/operators/novelty_stance/prefer_sweep/developer/fidelity/timeout/
     # eval_parallel/llm_parallel) is checked in `_apply_strategy`, so removing a role from a knob locks it,
     # not just greys out the UI pill. The boss/max_* grants document boss-relevant knobs, but a
@@ -864,6 +870,10 @@ class Settings(BaseSettings):
     # to False for the legacy byte-identical split-role behavior. (No-op unless backend="llm".)
     unified_agent: bool = True
     agent_drives_actions: bool = True
+    # Layer 3 Card queue ownership. False preserves the existing policy/unified-pilot action path.
+    # True is pinned in run_started because changing the selector on resume would mix two search
+    # treatments in one run. When both this and agent_drives_actions are true, Card selection wins.
+    card_driven_selection: bool = False
     # Per-stage model/endpoint overrides for the unified agent. Recognized keys (see
     # tasks.build_unified_agent): `propose` (researcher), `implement`/`repair` (developer),
     # `strategy`, `pilot`. Unlisted keys are ignored. Empty = the per-role researcher_*/developer_*

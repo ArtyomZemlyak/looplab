@@ -5,6 +5,8 @@ import pytest
 
 from looplab.core.models import Card, Event, card_ownership_receipt, hypothesis_id
 from looplab.events.replay import fold
+from looplab.search.card_selection import card_action, eligible_cards
+from looplab.search.policy import GreedyTree
 from looplab.serve.public_cards import public_cards, public_cards_projection
 
 
@@ -57,6 +59,45 @@ def _native_card_added(card_id="opaque-work-item", statement="try a bounded impr
     })
 
 
+def _native_operator_card_added(
+    card_id: str,
+    statement: str,
+    operator: str,
+    parent_ids: list[int],
+):
+    parent_id = parent_ids[0] if parent_ids else None
+    idea = {"operator": operator, "params": {}, "eval_timeout": None}
+    action = {
+        "operator": operator,
+        "params": {},
+        "space": None,
+        "eval_profile": None,
+        "eval_timeout": None,
+        "parent_id": parent_id,
+        "parent_ids": parent_ids,
+        "parent_generations": {str(parent): 0 for parent in parent_ids},
+        "scored_against": 1,
+        "scored_against_generation": 0,
+        "scored_against_empty": False,
+        "footprint": None,
+    }
+    receipt = card_ownership_receipt(card_id, statement, action)
+    assert receipt is not None
+    return ("card_added", {
+        "id": card_id,
+        "statement": statement,
+        "source": "engine",
+        "idea": idea,
+        "parent_id": parent_id,
+        "parent_ids": parent_ids,
+        "parent_generations": action["parent_generations"],
+        "scored_against": 1,
+        "scored_against_generation": 0,
+        "scored_against_empty": False,
+        "ownership_receipt": receipt,
+    })
+
+
 def test_one_receipt_bound_fresh_work_item_is_selection_ready_independent_of_id_shape():
     # A native id may happen to look exactly like a legacy statement hash. Receipt ownership, not
     # spelling, is the discriminator.
@@ -76,6 +117,86 @@ def test_one_receipt_bound_fresh_work_item_is_selection_ready_independent_of_id_
     }
     assert card.selection_blockers == [] and card.selection_ready is True
     assert Card.model_validate(card.model_dump(mode="json")).selection_ready is True
+
+
+def test_receipt_bound_debug_card_accepts_failed_leaf_without_broadening_mutating_anchors():
+    state = fold(_events([
+        *_baseline(),
+        ("node_created", {
+            "node_id": 2,
+            "operator": "improve",
+            "parent_ids": [1],
+            "idea": {"operator": "improve", "hypothesis": "broken candidate"},
+        }),
+        ("node_failed", {"node_id": 2, "reason": "crash", "eval_seconds": 0}),
+        _native_operator_card_added(
+            "debug-failed", "repair the failed candidate", "debug", [2]),
+        _native_operator_card_added(
+            "improve-failed", "mutate the failed candidate", "improve", [2]),
+        _native_operator_card_added(
+            "merge-failed", "merge with the failed candidate", "merge", [1, 2]),
+    ]))
+
+    assert [node.id for node in state.breedable_nodes()] == [1]
+    debug = state.cards["debug-failed"]
+    assert debug.selection_provenance.action_complete is True
+    assert debug.selection_blockers == []
+    assert debug.selection_ready is True
+    assert state.cards["improve-failed"].selection_ready is False
+    assert "action_receipt_incomplete" in state.cards["improve-failed"].selection_blockers
+    assert state.cards["merge-failed"].selection_ready is False
+    assert "action_receipt_incomplete" in state.cards["merge-failed"].selection_blockers
+    assert [card.id for card in eligible_cards(
+        state, GreedyTree(n_seeds=1, max_nodes=5, debug_depth=1),
+    )] == ["debug-failed"]
+
+
+def test_receipt_bound_expand_card_uses_improve_macro_but_preserves_idea_operator():
+    state = fold(_events([
+        *_baseline(),
+        _native_operator_card_added(
+            "expand-ready", "add a missing capability", "expand", [1]),
+    ]))
+
+    card = state.cards["expand-ready"]
+    assert card.selection_ready is True
+    assert card.operator == "expand"
+    assert card_action(card) == {
+        "kind": "improve", "parent_id": 1, "_card_id": "expand-ready",
+    }
+
+
+@pytest.mark.parametrize("disqualifying_rows", [
+    [
+        ("node_created", {
+            "node_id": 3,
+            "operator": "debug",
+            "parent_ids": [2],
+            "idea": {"operator": "debug", "hypothesis": "existing repair child"},
+        }),
+    ],
+    [],
+])
+def test_debug_card_closes_when_failed_anchor_is_not_an_eligible_leaf(disqualifying_rows):
+    failed_reason = "crash" if disqualifying_rows else "idea_rejected"
+    state = fold(_events([
+        *_baseline(),
+        ("node_created", {
+            "node_id": 2,
+            "operator": "improve",
+            "parent_ids": [1],
+            "idea": {"operator": "improve", "hypothesis": "broken candidate"},
+        }),
+        ("node_failed", {"node_id": 2, "reason": failed_reason, "eval_seconds": 0}),
+        _native_operator_card_added(
+            "debug-closed", "repair a no-longer-eligible failure", "debug", [2]),
+        *disqualifying_rows,
+    ]))
+
+    card = state.cards["debug-closed"]
+    assert card.selection_ready is False
+    assert card.selection_provenance.action_complete is False
+    assert "action_receipt_incomplete" in card.selection_blockers
 
 
 def test_eval_timeout_and_lifecycle_fences_are_receipt_bound():

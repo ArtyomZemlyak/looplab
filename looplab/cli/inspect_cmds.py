@@ -304,7 +304,7 @@ def timings(run_dir: Path = typer.Argument(...),
 def inspect(run_dir: Path = typer.Argument(...)):
     """Show the raw launch config snapshot + the run's current folded best result.
 
-    Five holdout/verifier settings are committed by ``run_started`` and can therefore differ from
+    Six selection-treatment settings are committed by ``run_started`` and can therefore differ from
     an old or hand-edited snapshot. The owner config API overlays those effective folded values;
     this diagnostic deliberately prints the on-disk snapshot verbatim for inspection.
     """
@@ -346,7 +346,7 @@ def _settings_for_run(run_dir=None, model=None):
     endpoint recorded for that run, not a possibly different ambient endpoint. Falls back to ambient
     Settings when the snapshot is absent/unreadable; ``model`` is the only explicit override.
 
-    This helper needs endpoint/model provenance, not the five event-pinned holdout/verifier fields;
+    This helper needs endpoint/model provenance, not the six event-pinned selection-treatment fields;
     the effective per-run config API owns that latter overlay.
     """
     from looplab.core.config import Settings

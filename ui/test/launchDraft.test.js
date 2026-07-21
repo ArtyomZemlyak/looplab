@@ -99,6 +99,18 @@ test('launch controls expose canonical independent concurrency with bounded AUTO
   assert.match(errors['settings.llm_parallel'], /between 0 and 64/)
 })
 
+test('launch controls expose the run-pinned Card selector as a strict boolean', () => {
+  const field = LAUNCH_RUNTIME_FIELDS.find(item => item.key === 'card_driven_selection')
+  assert.equal(field.type, 'bool')
+  const enabled = updateRuntimeValue(createLaunchDraft(proposal), field, true)
+  assert.equal(enabled.ok, true)
+  assert.equal(runtimeValue(enabled.draft, field.key), true)
+  assert.equal(validateLaunchDraft(enabled.draft).ok, true)
+
+  const invalid = createLaunchDraft({ ...proposal, settings: { card_driven_selection: 'true' } })
+  assert.match(validateLaunchDraft(invalid).errors['settings.card_driven_selection'], /boolean/)
+})
+
 test('the validation fingerprint is semantic, stable, and includes provenance chat', () => {
   const one = createLaunchDraft(proposal)
   const reordered = {

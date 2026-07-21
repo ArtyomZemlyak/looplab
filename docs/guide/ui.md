@@ -175,14 +175,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   empty states separately. Full recorded span dictionaries remain only in `spans.jsonl` and are not downloadable
   through these routes.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
-  launch snapshot for the next restart (not the global UI defaults). Five holdout/verifier fields are
+  launch snapshot for the next restart (not the global UI defaults). Six run-start selection fields are
   read-only after `run_started` and come from the folded event log; the API overlays/repairs those values.
   `trust_gate` is changed through a durable event as well as the snapshot, so its effective state is replayable.
   The GET returns a 64-character `config_revision`; the current editor sends it as `expected_revision`.
   Read/compare/merge/write is covered by its own equivalent local/interprocess locking contract (separate from
   global Settings), and a stale editor receives a
   structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
-- **Settings page** — a versioned, server-owned editor catalogue with 143 of the 166 direct
+- **Settings page** — a versioned, server-owned editor catalogue with 155 of the 184 direct
   `Settings` fields in 10 groups. The default **Essential** view contains 17 high-frequency keys, while
   search spans the complete catalogue. It is intentionally curated, not an exhaustive mirror: fields outside
   the catalogue remain configurable through environment/config inputs and are preserved by sparse writes.

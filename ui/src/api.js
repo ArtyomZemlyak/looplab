@@ -1262,8 +1262,9 @@ export const CONTROL = {
       parent_ids: ids, parent_generations: parentGenerations,
     }, options),
   // A7/L2: pin the Strategist live. The strict server contract accepts policy/fidelity plus canonical
-  // eval_parallel, llm_parallel, and the closed llm_lane_limits allocation (never legacy aliases).
-  // {policy?, policy_params?, fidelity?, eval_parallel?, llm_parallel?, llm_lane_limits?}.
+  // eval_parallel, llm_parallel, the closed llm_lane_limits allocation, and the atomic Card-scoring
+  // treatment (never legacy aliases).
+  // {policy?, policy_params?, fidelity?, eval_parallel?, llm_parallel?, llm_lane_limits?, card_scoring?}.
   setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),
   // P2: ask the engine to run the Deep-Research stage now (read all results + the web, write a memo).
   deepResearch: (rid) => runCommand(rid, 'deep_research', {}),

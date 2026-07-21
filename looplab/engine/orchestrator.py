@@ -78,13 +78,17 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
-    Idea, Node, NodeStatus, RunState, card_ownership_receipt, durable_idea_payload,
-    idea_proposal_ref, normalize_researcher_footprint,
+    Idea, Node, NodeStatus, RunState, card_action_digest, card_ownership_receipt,
+    durable_idea_payload, idea_proposal_ref, normalize_researcher_footprint,
 )
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
+from looplab.search.card_selection import (
+    META_CARD_ID, card_action as projected_card_action, card_budget_used,
+    card_next_actions, card_selection_set, eligible_cards, forced_card_actions,
+)
 from looplab.search.operators import merge_idea
 from looplab.search.policy import KIND_EXPAND, SearchPolicy
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
@@ -306,6 +310,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         surrogate_explore = _opt("surrogate_explore")
         unified_agent = _opt("unified_agent")
         agent_drives_actions = _opt("agent_drives_actions")
+        card_driven_selection = _opt("card_driven_selection")
         inline_repair = _opt("inline_repair")
         inline_repair_attempts = _opt("inline_repair_attempts")
         inline_repair_stuck_repeat = _opt("inline_repair_stuck_repeat")
@@ -507,6 +512,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # both roles); `agent_drives_actions` additionally lets it pick the next macro action.
         self.unified_agent = unified_agent
         self.agent_drives_actions = unified_agent and agent_drives_actions
+        # The receipt-backed Card authority wins when both opt-in selectors are enabled. Letting the
+        # free-form agent arm pre-empt it would silently bypass the atomic existing-work claim below.
+        self.card_driven_selection = bool(card_driven_selection)
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
         # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
@@ -1088,17 +1096,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # nodes") raises the policy's max_nodes so a reopened/resumed run keeps proposing
             # experiments instead of immediately re-finishing. Applied HERE — AFTER any in-loop policy
             # swap (strategist / set_strategy above, which rebuilds the policy un-extended) and right
-            # before action selection — so the override is never dropped on a swap iteration. Floored
-            # at the current node count so a stale/negative delta can't shrink the gate below work done.
+            # before action selection — so the override is never dropped on a swap iteration. Card mode
+            # uses its effective denominator; tombstoned/trust-gated attempts must not inflate capacity.
+            # The legacy flag-off branch retains the historical raw-node floor byte-for-byte.
+            _budget_used = card_budget_used(state) if self.card_driven_selection else len(state.nodes)
             self.policy.max_nodes = max(
-                len(state.nodes),
+                _budget_used,
                 self._base_max_nodes + int(state.budget_overrides.get("add_nodes", 0) or 0))
 
-            # Action selection: the pure policy decides, UNLESS the unified agent self-drives —
-            # in which case it picks one action from the policy-derived legal-action gate (so the
-            # pipeline stays disciplined no matter what the agent chooses).
-            actions = (self._agent_next_actions(state) if self.agent_drives_actions
-                       else self.policy.next_actions(state))
+            actions = self._select_actions(state)
             if not actions:
                 # Optional multi-seed confirmation pass (I12) before finishing:
                 # re-evaluate the top-k under several seeds and record robust metrics.
@@ -1176,9 +1182,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # worker threads). Non-draft creates (improve/merge/debug depend on a parent's result and
                 # use role helpers not yet pool-threaded) and the no-pool config fall through to the serial
                 # loop below — byte-identical to before.
+                _card_reservations: Optional[list[_BuildReservation]] = None
+                if any(META_CARD_ID in action for action in creates):
+                    # A Card lane is one authority decision. Mixing receipt-owned and proposer-owned
+                    # work in it would make the score-to-claim fence ambiguous, so fail closed.
+                    if not all(META_CARD_ID in action for action in creates):
+                        _created_no_terminal -= len(creates)
+                        continue
+                    _card_reservations = self._claim_existing_card_builds(creates)
+                    if _card_reservations is None:
+                        _created_no_terminal -= len(creates)
+                        continue
+                _card_reservation_by_id = {
+                    reservation.card_id: reservation
+                    for reservation in (_card_reservations or [])
+                }
                 _pb_pairs = (self._build_role_pairs(min(self.parallel_build, len(creates)))
                              if (self.parallel_build > 1 and len(creates) > 1
-                                 and all(a.get("kind") == "draft" for a in creates)) else None)
+                                 and all(a.get("kind") == "draft" for a in creates)
+                                 and not any(META_CARD_ID in a for a in creates)) else None)
                 if _pb_pairs and len(_pb_pairs) > 1:
                     _fan = len(_pb_pairs)
                     for _i in range(0, len(creates), _fan):
@@ -1267,7 +1289,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         if self._create_paused:
                             break
                     continue
-                for a in creates:
+                for _create_index, a in enumerate(creates):
+                    reservation = (_card_reservation_by_id.get(a.get(META_CARD_ID))
+                                   if META_CARD_ID in a else None)
+                    if META_CARD_ID in a and reservation is None:
+                        continue
                     if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
                         self.store.append(EV_POLICY_DECISION,
                                           {"scores": a["_scores"], "chosen": a.get("_chosen"),
@@ -1275,8 +1301,32 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
                         self.store.append(EV_RUNG_PROMOTED,
                                           {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
-                    self._create_node(a)  # sequential -> deterministic ids/proposals
+                    if META_CARD_ID in a:
+                        # The complete Card lane was claimed atomically above, before the first slow
+                        # build could make its siblings ineligible through the evaluate-all prefix.
+                        try:
+                            self._create_node(a, reserved=reservation)
+                        except BaseException:
+                            for later in (_card_reservations or [])[_create_index + 1:]:
+                                self._fail_reserved_build(
+                                    node_id=later.node_id,
+                                    card_id=later.card_id,
+                                    generation=0,
+                                    error="Card build batch stopped by an unexpected build error",
+                                    reason="build_batch_cancelled",
+                                )
+                            raise
+                    else:
+                        self._create_node(a)  # sequential -> deterministic ids/proposals
                     if self._create_paused:
+                        for later in (_card_reservations or [])[_create_index + 1:]:
+                            self._fail_reserved_build(
+                                node_id=later.node_id,
+                                card_id=later.card_id,
+                                generation=0,
+                                error="Card build batch stopped after a Developer crash",
+                                reason="build_batch_cancelled",
+                            )
                         # A developer_crash auto-PAUSED the run (LLM unreachable / hard error). STOP the
                         # rest of the batch instead of building every seed and paying the full within-call
                         # retry/backoff on each — honouring the "PAUSE on the FIRST developer_crash"
@@ -1297,6 +1347,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # loop body reads as a table of guarded steps. No behavior/ordering/gating change — every event
     # emission, _write_lock point, and fold site stays exactly where it was in the original run().
 
+    def _select_actions(self, state: RunState) -> list[dict]:
+        """Apply the explicit macro-selection authority order for one fresh fold."""
+        # Receipt-backed Card selection is the narrowest authority and therefore wins when both opt-in
+        # selectors are enabled. The default false flag takes the exact historical branches below.
+        if self.card_driven_selection:
+            return card_next_actions(
+                state, self.policy, self.policy.max_nodes,
+                scoring=getattr(self, "_card_scoring", None),
+            )
+        if self.agent_drives_actions:
+            return self._agent_next_actions(state)
+        return self.policy.next_actions(state)
+
     def _run_start_pinned_values(self) -> dict:
         """The config values whose run-start record, not a later snapshot, owns re-entry semantics."""
         values = {
@@ -1306,8 +1369,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "select_verifier_samples": self._select_verifier_samples,
             "verifier_ci_tie": self._verifier_ci_tie,
         }
-        if values.keys() != RUN_START_PINNED_FIELDS:
+        legacy_fields = RUN_START_PINNED_FIELDS - {"card_driven_selection"}
+        if values.keys() != legacy_fields:
             raise RuntimeError("run-start pinned settings contract drifted")
+        # Keep the default run_started payload byte-identical. Replay treats an absent key as false;
+        # only the opt-in path needs an additive durable marker.
+        if self.card_driven_selection:
+            values["card_driven_selection"] = True
         return values
 
     def _setup_phase(self, state: RunState) -> None:
@@ -1472,6 +1540,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # write run_finished(aborted) and re-run budget/archive/case/cost wrap-up exactly once.
         entry_finished = bool(_entry.finished and self._pending_finalize_scope is None and not (
             _entry.stop_requested and str(_entry.stop_reason or "").lower() == "error"))
+        # Restore Card authority before replaying the active Strategy: its conditional governance
+        # grant for card_scoring depends on this run-start-pinned value, not the ambient snapshot.
+        if _entry.run_id:
+            self.card_driven_selection = _entry.card_driven_selection
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
         if _entry.active_strategy:
@@ -2692,6 +2764,185 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             })
             return _BuildReservation(
                 state, node_id, kind, parents, parent_generations, card_id, reserved_idea)
+
+    @staticmethod
+    def _card_claim_receipt_action(card) -> dict:
+        """Rebuild the exact immutable action whose digest makes a native Card selectable."""
+        return {
+            "operator": card.operator,
+            "params": dict(card.params or {}),
+            "space": {key: list(values) for key, values in (card.space or {}).items()},
+            "eval_profile": card.eval_profile,
+            "eval_timeout": card.eval_timeout,
+            "parent_id": card.parent_id,
+            "parent_ids": list(card.parent_ids or []),
+            "parent_generations": (
+                dict(card.parent_generations) if isinstance(card.parent_generations, dict) else None
+            ),
+            "scored_against": card.scored_against,
+            "scored_against_generation": card.scored_against_generation,
+            "scored_against_empty": card.scored_against_empty,
+            "footprint": normalize_researcher_footprint(card.footprint),
+        }
+
+    def _prepare_existing_card_claim(self, events, state: RunState, action: dict, card,
+                                     node_id: int) -> Optional[_BuildReservation]:
+        """Validate and reconstruct one Card claim against an already-fenced snapshot."""
+        raw_card_id = action.get(META_CARD_ID)
+        card_id = self._canonical_card_id(raw_card_id)
+        if card_id is None or raw_card_id != card_id:
+            return None
+        if card.id != card_id or not card.selection_ready:
+            return None
+
+        expected_macro = projected_card_action(card)
+        if expected_macro is None or expected_macro.get(META_CARD_ID) != card_id:
+            return None
+        if any(
+                not isinstance(key, str)
+                or (key not in expected_macro and not key.startswith("_"))
+                for key in action):
+            return None
+        if any(action.get(key) != value for key, value in expected_macro.items()):
+            return None
+
+        # A modern selectable action always carries the complete generation fence, including an
+        # explicit empty map for drafts. Rechecking it through the ordinary reservation validator
+        # closes the score-to-claim race for resets, tombstones, aborts and parent replacement.
+        if not isinstance(card.parent_generations, dict):
+            return None
+        claim_action = {**expected_macro, "parent_generations": card.parent_generations}
+        parent_snapshot = self._build_parent_snapshot(state, claim_action)
+        if parent_snapshot is None:
+            return None
+        kind, parents, parent_generations = parent_snapshot
+        if parent_generations != card.parent_generations:
+            return None
+
+        receipt_action = self._card_claim_receipt_action(card)
+        digest = card_action_digest(card.id, card.seed_statement, receipt_action)
+        expected_receipt = card_ownership_receipt(card.id, card.seed_statement, receipt_action)
+        if (digest is None or expected_receipt is None
+                or digest != card.identity.action_digest):
+            return None
+        registrations = [
+            event for event in events
+            if event.type == EV_CARD_ADDED
+            and self._canonical_card_id(event.data.get("id")) == card_id
+        ]
+        if (len(registrations) != 1
+                or registrations[0].data.get("id") != card_id
+                or registrations[0].data.get("statement") != card.seed_statement
+                or registrations[0].data.get("ownership_receipt") != expected_receipt):
+            return None
+
+        try:
+            idea = Idea(
+                operator=card.operator,
+                params=dict(card.params or {}),
+                space={key: list(values) for key, values in (card.space or {}).items()},
+                rationale=card.rationale,
+                eval_profile=card.eval_profile,
+                eval_timeout=card.eval_timeout,
+                hypothesis=card.seed_statement,
+                card_id=card.id,
+                footprint=normalize_researcher_footprint(card.footprint),
+            )
+        except Exception:  # hostile/future Card data cannot escape the closed Idea schema
+            return None
+        rebuilt_action = self._card_action(
+            idea, parents, parent_generations,
+            card.scored_against, card.scored_against_generation,
+            scored_against_empty=card.scored_against_empty,
+        )
+        if (self._card_statement(idea) != card.seed_statement
+                or rebuilt_action != receipt_action):
+            return None
+        return _BuildReservation(
+            state, node_id, kind, parents, parent_generations, card_id, idea)
+
+    def _claim_existing_card_builds(
+        self, actions: list[dict],
+    ) -> Optional[list[_BuildReservation]]:
+        """Atomically claim the complete Card lane selected from one fresh snapshot.
+
+        A population policy may select several Cards at once. Claiming and building them one-by-one
+        would make the first pending node engage the evaluate-all forced gate and invalidate its
+        siblings. The whole lane is therefore revalidated under ``_id_lock`` and its ``node_building``
+        owners are appended as one tail-CAS group before any slow Developer work begins.
+        """
+        if not actions:
+            return []
+        with self._id_lock:
+            events = self.store.read_all()
+            state = fold(events)
+            try:
+                max_nodes = max(0, int(self.policy.max_nodes))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            remaining = max_nodes - card_budget_used(state)
+            if remaining < len(actions):
+                return None
+
+            requested_ids: list[str] = []
+            for action in actions:
+                raw_card_id = action.get(META_CARD_ID)
+                card_id = self._canonical_card_id(raw_card_id)
+                if card_id is None or raw_card_id != card_id or card_id in requested_ids:
+                    return None
+                requested_ids.append(card_id)
+
+            try:
+                live = {card.id: card for card in eligible_cards(state, self.policy)}
+                forced = forced_card_actions(state, self.policy, max_nodes)
+                if forced is not None:
+                    current_ids = [
+                        candidate.get(META_CARD_ID) for candidate in forced
+                        if isinstance(candidate, dict) and META_CARD_ID in candidate
+                    ]
+                else:
+                    treatment = getattr(self, "_card_scoring", None)
+                    current_ids = [
+                        candidate.id for candidate in card_selection_set(
+                            state, self.policy, max_nodes, scoring=treatment)
+                    ]
+            except Exception:  # policy/Card hooks must never weaken the ownership boundary
+                return None
+            if requested_ids != current_ids:
+                return None
+
+            first_node_id = self._node_id_ceiling(events, state)
+            reservations: list[_BuildReservation] = []
+            for offset, (action, card_id) in enumerate(zip(actions, requested_ids)):
+                card = live.get(card_id)
+                if card is None:
+                    return None
+                reservation = self._prepare_existing_card_claim(
+                    events, state, action, card, first_node_id + offset)
+                if reservation is None:
+                    return None
+                reservations.append(reservation)
+
+            records = [
+                (EV_NODE_BUILDING, {
+                    "node_id": reservation.node_id,
+                    "operator": reservation.kind,
+                    "parent_ids": reservation.parent_ids,
+                    "card_id": reservation.card_id,
+                })
+                for reservation in reservations
+            ]
+            try:
+                self.store.append_many(
+                    records, expected_last_seq=events[-1].seq if events else -1)
+            except EventStoreConcurrencyError:
+                return None
+            return reservations
+
+    def _claim_existing_card_build(self, action: dict):
+        """Compatibility wrapper for callers that claim one selected Card."""
+        reservations = self._claim_existing_card_builds([action])
+        return reservations[0] if reservations else None
 
     def _drop_card_once(self, card_id: Optional[str], *, reason: str,
                         dropped_by: str = "engine") -> None:

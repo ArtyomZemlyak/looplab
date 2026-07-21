@@ -411,6 +411,11 @@ export default function LaunchCard({
                   onChange={event => changeRuntime(field, event.target.value)}>
                   <EnumOptions field={field} value={value} />
                 </select>
+              : field.type === 'bool'
+                ? <input id={id} checked={value === true} disabled={locked || !settingsParsed.ok}
+                    type="checkbox" aria-invalid={fieldError ? 'true' : undefined}
+                    aria-describedby={describedBy}
+                    onChange={event => changeRuntime(field, event.target.checked)} />
               : <input id={id} className="text" value={value} disabled={locked || !settingsParsed.ok}
                   type={field.type === 'text' ? 'text' : 'number'} min={field.min}
                   step={field.type === 'int' ? 1 : field.type === 'float' ? 'any' : undefined}

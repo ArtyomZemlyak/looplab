@@ -22,7 +22,7 @@ Two backends:
 from __future__ import annotations
 
 import math
-from typing import Optional, Protocol, TypedDict
+from typing import Literal, Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -39,6 +39,31 @@ from looplab.core.prompts import PromptStore, render
 # "balanced" == today's behavior. (The `== "explore"` READ-side checks in the proposer / foresight /
 # novelty gate stay inline literals — each is exercised by tests, so a typo there fails loudly.)
 NOVELTY_STANCES: tuple[str, ...] = ("explore", "balanced", "exploit")
+CARD_SCORING_STANCES: tuple[str, ...] = ("explore", "balanced", "exploit")
+
+_CARD_SCORING_FIELDS = frozenset({"stance", "novelty_weight", "coverage_weight"})
+
+
+def validate_card_scoring(value: object) -> Optional[dict]:
+    """Validate one atomic ``Strategy.card_scoring`` treatment.
+
+    The scorer is selection-affecting, so partial, extended, boolean-as-number and non-finite maps
+    fail closed instead of inheriting implicit values. Weights are independent bounded coefficients;
+    they need not sum to one because the pure scorer normalizes their relative contribution.
+    """
+    if not isinstance(value, dict) or set(value) != _CARD_SCORING_FIELDS:
+        return None
+    stance = value.get("stance")
+    if stance not in CARD_SCORING_STANCES:
+        return None
+    clean: dict = {"stance": stance}
+    for name in ("novelty_weight", "coverage_weight"):
+        raw = value.get(name)
+        if (isinstance(raw, bool) or not isinstance(raw, (int, float))
+                or not math.isfinite(float(raw)) or not 0.0 <= float(raw) <= 1.0):
+            return None
+        clean[name] = float(raw)
+    return clean
 
 # A fully-serializable description of the active search machinery. Every field maps to an existing
 # config knob, so a Strategy is just "a settings delta the engine applies live".
@@ -58,6 +83,7 @@ Strategy = TypedDict(
         "developer": str,       # "default"|"llm"|"opencode"|... (whatever the dev factory knows)
         "operators": dict,      # {"ablate_every":int, "merge_mode":str, "complexity_cue":bool, ...}
         "fidelity": str,        # "smoke"|"full"|"adaptive"
+        "card_scoring": dict,   # atomic {stance, novelty_weight, coverage_weight} Card treatment
         "novelty_stance": str,  # "explore"|"balanced"|"exploit" — how much novelty pressure to apply
                                 # downstream (researcher proposal + foresight rank + novelty gate).
                                 # "balanced" == today's behavior; the Strategist owns this dial.
@@ -96,6 +122,12 @@ class StrategyContext(BaseModel):
     llm_parallel: int = 1
     llm_total: Optional[int] = None             # live shared-broker total; None = unbounded
     llm_lane_limits: dict[str, int | None] = Field(default_factory=dict)
+    card_driven_selection: bool = False
+    # Current live Card treatment. Distinct from policy and novelty_stance: it only ranks already
+    # eligible Cards and is inert while the run-start-pinned Card selector is off.
+    card_scoring: dict = Field(default_factory=lambda: {
+        "stance": "balanced", "novelty_weight": 0.5, "coverage_weight": 0.5,
+    })
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
@@ -227,6 +259,9 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     ns = strat.get("novelty_stance")
     if ns in NOVELTY_STANCES:
         out["novelty_stance"] = ns
+    card_scoring = validate_card_scoring(strat.get("card_scoring"))
+    if ctx.card_driven_selection and card_scoring is not None:
+        out["card_scoring"] = card_scoring
     # Resource budgets (bounds match config: timeout>0, eval parallelism >=0). Whitelisted here for shape;
     # the engine's _apply_strategy applies them ONLY if the governance matrix grants the strategist.
     tmo = strat.get("timeout")
@@ -297,6 +332,25 @@ class RuleStrategist:
             strat.setdefault("source", "rule")
             strat.setdefault("rationale", f"novelty_stance={ns} (coverage-driven)")
             strat["novelty_stance"] = ns
+        if ctx.card_driven_selection:
+            strat = dict(strat or {})
+            strat.setdefault("source", "rule")
+            strat.setdefault("rationale", "card_scoring=balanced (neutral coverage signal)")
+            # Always author the complete treatment in Card mode. Strategy decisions merge onto the
+            # active record, so omitting this field when coverage returns to neutral would retain a
+            # stale explore/exploit treatment from an earlier cadence.
+            if ns == "explore":
+                strat["card_scoring"] = {
+                    "stance": "explore", "novelty_weight": 0.55, "coverage_weight": 0.75,
+                }
+            elif ns == "exploit":
+                strat["card_scoring"] = {
+                    "stance": "exploit", "novelty_weight": 0.25, "coverage_weight": 0.25,
+                }
+            else:
+                strat["card_scoring"] = {
+                    "stance": "balanced", "novelty_weight": 0.5, "coverage_weight": 0.5,
+                }
         return strat or None
 
     def _decide_machinery(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
@@ -460,6 +514,22 @@ class _LLMLaneLimitsOut(BaseModel):
         return value
 
 
+class _CardScoringOut(BaseModel):
+    """Closed, atomic structured-output vocabulary for Card queue treatment."""
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+
+    stance: Literal["explore", "balanced", "exploit"]
+    novelty_weight: float = Field(ge=0.0, le=1.0)
+    coverage_weight: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("novelty_weight", "coverage_weight", mode="before")
+    @classmethod
+    def _weight_is_not_boolean(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Card scoring weight must not be boolean")
+        return value
+
+
 class _StrategyOut(BaseModel):
     """Structured shape the LLM fills (a subset of Strategy; validated again by validate_strategy)."""
     model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
@@ -486,6 +556,15 @@ class _StrategyOut(BaseModel):
         if isinstance(value, bool):
             raise ValueError("resource scalar must not be boolean")
         return value
+
+
+class _CardStrategyOut(_StrategyOut):
+    """Flag-on extension; the legacy schema remains byte-identical while Card selection is off."""
+    card_scoring: Optional[_CardScoringOut] = None
+
+
+def _strategy_output_model(ctx: StrategyContext):
+    return _CardStrategyOut if ctx.card_driven_selection else _StrategyOut
 
 
 def _fmt_operator_yields(yields: dict) -> str:
@@ -542,6 +621,13 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         "0 means serial 1 for a total or lane; "
         "startup settings use 0 for hardware AUTO)."
     )
+    if ctx.card_driven_selection:
+        brief += (
+            "\nCard-driven selection is enabled. Current Card scoring treatment="
+            f"{ctx.card_scoring}. You may independently return card_scoring as the COMPLETE ATOMIC "
+            "object {stance: explore|balanced|exploit, novelty_weight: 0..1, "
+            "coverage_weight: 0..1}; it ranks already-eligible Cards and is distinct from policy."
+        )
     # Active operator/boss directives (the same `pending_hints` the Researcher already follows,
     # rendered the same way so recency/precedence read identically): the Strategist owns the
     # policy/fidelity, so it MUST weigh standing directives or it will fight them — e.g. answer a
@@ -578,6 +664,9 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         lanes = out.llm_lane_limits.model_dump(exclude_none=True)
         if lanes:
             strat["llm_lane_limits"] = lanes
+    card_scoring = getattr(out, "card_scoring", None)
+    if card_scoring is not None:
+        strat["card_scoring"] = card_scoring.model_dump()
     ops: dict = {}
     if out.ablate_every is not None:
         ops["ablate_every"] = out.ablate_every
@@ -604,6 +693,7 @@ class LLMStrategist:
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from looplab.core.parse import ParseError, parse_structured
+        output_model = _strategy_output_model(ctx)
         messages = [
             # P8: the Strategist decides timeouts/parallelism/fidelity, so the hardware attention
             # points reach it too — appended after the render(), like every other planning role.
@@ -613,7 +703,7 @@ class LLMStrategist:
             {"role": "user", "content": _strategist_brief(state, ctx)},
         ]
         try:
-            out = parse_structured(self.client, messages, _StrategyOut, self.parser)
+            out = parse_structured(self.client, messages, output_model, self.parser)
         except BudgetExceeded:      # a hard budget stop must end the run, not degrade to the rule
             raise
         except (ParseError, Exception):  # noqa: BLE001 — never crash the run on a strategy call
@@ -655,13 +745,14 @@ class ToolUsingStrategist:
         self.loop_opts = dict(loop_opts or {})
         self.loop_opts.setdefault("context_budget_chars", context_budget_chars)
 
-    def _emit_spec(self) -> dict:
+    def _emit_spec(self, ctx: StrategyContext) -> dict:
         return {"type": "function", "function": {
             "name": "emit", "description": "Emit the chosen search strategy.",
-            "parameters": _StrategyOut.model_json_schema()}}
+            "parameters": _strategy_output_model(ctx).model_json_schema()}}
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from looplab.agents.agent import drive_tool_loop
+        output_model = _strategy_output_model(ctx)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)        # let the run-aware tools read the current search
         messages = [
@@ -676,7 +767,7 @@ class ToolUsingStrategist:
 
         def _finalize(args: dict) -> Optional[Strategy]:
             try:
-                return _assemble_strategy(_StrategyOut.model_validate(args), source="agent")
+                return _assemble_strategy(output_model.model_validate(args), source="agent")
             except Exception:  # noqa: BLE001 — a junk emit must not crash the run
                 return self._rule.decide(state, ctx)
 
@@ -687,7 +778,7 @@ class ToolUsingStrategist:
             # context_budget_chars is folded into self.loop_opts once in __init__ (see there) — pass the
             # merged opts straight through, no per-call re-merge, no double-keyword collision.
             return drive_tool_loop(
-                self.client, self.tools, messages, self._emit_spec(),
+                self.client, self.tools, messages, self._emit_spec(ctx),
                 max_turns=self.max_turns, time_budget_s=self.time_budget_s,
                 finalize=_finalize, fallback=_fallback, **self.loop_opts)
         except BudgetExceeded:      # a hard budget stop must end the run, not degrade to the rule

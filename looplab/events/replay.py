@@ -234,6 +234,10 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.dirty_inputs = _di if isinstance(_di, list) else []   # P0-5 uncommitted-input enumeration
     _tg = str(d.get("trust_gate", "audit")).strip().lower()
     st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
+    # Layer 3 queue ownership is selection-affecting and therefore pinned by the event log. Accept
+    # only the JSON boolean true: strings and integers in malformed/legacy rows fail closed to the
+    # byte-identical policy/pilot path.
+    st.card_driven_selection = d.get("card_driven_selection") is True
     # D1: recorded at start so replay applies the same selection rule. Absent in old
     # logs -> False -> byte-identical legacy selection.
     st.holdout_select = bool(d.get("holdout_select", False))
@@ -3951,7 +3955,36 @@ def _card_action_from_projection(card: Card) -> dict:
     }
 
 
-def _card_action_has_live_anchors(card: Card, breedable_node_ids: set[int]) -> bool:
+def _card_debuggable_leaf_ids(st: RunState) -> set[int]:
+    """Failed leaves that may still anchor one inter-node debug action.
+
+    Failed nodes are deliberately absent from ``RunState.breedable_nodes()``.  Treating ``debug``
+    like ``improve`` therefore made every receipt-bound debug Card permanently incomplete.  Keep
+    this replay-side shape gate aligned with the policy's non-depth-specific eligibility rules; the
+    policy-specific depth bound and deterministic first-leaf choice are rechecked by the Layer-3
+    selector before an existing Card is claimed.
+    """
+    has_child: set[int] = set()
+    for node in st.nodes.values():
+        has_child.update(node.parent_ids)
+    return {
+        node.id
+        for node in st.nodes.values()
+        if (
+            node.status is NodeStatus.failed
+            and not node.tombstoned
+            and node.id not in st.aborted_nodes
+            and node.id not in has_child
+            and node.error_reason != "idea_rejected"
+        )
+    }
+
+
+def _card_action_has_live_anchors(
+    card: Card,
+    breedable_node_ids: set[int],
+    debuggable_leaf_ids: set[int],
+) -> bool:
     """Whether the bounded action has one executable operator/parent shape right now."""
     operator = card.operator
     parent_ids = list(card.parent_ids or [])
@@ -3964,15 +3997,19 @@ def _card_action_has_live_anchors(card: Card, breedable_node_ids: set[int]) -> b
         return False
     if operator == "draft":
         return not parent_ids
-    if operator in {"improve", "debug"}:
-        expected_parents = 1
-    elif operator == "merge":
-        expected_parents = 2
-    else:
-        return False
-    if len(parent_ids) != expected_parents:
-        return False
-    return all(parent_id in breedable_node_ids for parent_id in parent_ids)
+    if operator in {"improve", "expand"}:
+        return len(parent_ids) == 1 and parent_ids[0] in breedable_node_ids
+    if operator == "debug":
+        # A failed node can never be breedable.  It is executable only while it is still a current
+        # failed leaf; once reset, aborted, rejected by triage, tombstoned, or given a child, replay
+        # closes this Card again.  Layer 3 further narrows this set to the policy's first eligible
+        # failed leaf under its configured debug-depth bound.
+        return len(parent_ids) == 1 and parent_ids[0] in debuggable_leaf_ids
+    if operator == "merge":
+        return len(parent_ids) == 2 and all(
+            parent_id in breedable_node_ids for parent_id in parent_ids
+        )
+    return False
 
 
 def _card_action_freshness(st: RunState, card: Card) -> str:
@@ -4872,6 +4909,7 @@ def _derive_cards(st: RunState) -> None:
     # durable `card_added` ownership receipt. The native writer supplies it; legacy hash joins, unbound
     # card_added rows, and node-only card ids remain visible but can never become selection-ready.
     breedable_card_parent_ids = {node.id for node in st.breedable_nodes()}
+    debuggable_card_parent_ids = _card_debuggable_leaf_ids(st)
     for cid, c in cards.items():
         registration = card_registrations.get(cid, {})
         if (registration.get("count") == 1 and registration.get("valid_count") == 1
@@ -4908,7 +4946,8 @@ def _derive_cards(st: RunState) -> None:
             and owner["all_complete"]
             and c.identity.kind == "native"
             and projected_digest == c.identity.action_digest
-            and _card_action_has_live_anchors(c, breedable_card_parent_ids)
+            and _card_action_has_live_anchors(
+                c, breedable_card_parent_ids, debuggable_card_parent_ids)
         )
         freshness = _card_action_freshness(st, c)
 

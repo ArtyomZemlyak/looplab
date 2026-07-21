@@ -1935,6 +1935,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
         "holdout_fraction": 0.4, "holdout_select": True,
         "select_verifier": True, "verifier_ci_tie": True,
         "select_verifier_samples": 7,
+        "card_driven_selection": True,
     })
     snapshot = Settings(
         timeout=30.0, holdout_fraction=0.1, holdout_select=False,
@@ -1947,6 +1948,7 @@ def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tm
     assert shown["holdout_fraction"] == 0.4 and shown["holdout_select"] is True
     assert shown["select_verifier"] is True and shown["verifier_ci_tie"] is True
     assert shown["select_verifier_samples"] == 7
+    assert shown["card_driven_selection"] is True
     meta = shown["_looplab_config_meta"]
     assert set(meta["run_start_pinned_fields"]) == RUN_START_PINNED_FIELDS
     assert set(meta["snapshot_mismatch_fields"]) == RUN_START_PINNED_FIELDS
@@ -1968,6 +1970,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "holdout_fraction": 0.4, "holdout_select": True,
         "select_verifier": True, "verifier_ci_tie": True,
         "select_verifier_samples": 7,
+        "card_driven_selection": True,
     })
     (rd / "config.snapshot.json").write_text(
         json.dumps(Settings().masked_snapshot()), encoding="utf-8")
@@ -1978,6 +1981,7 @@ def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
         "select_verifier": False,
         "verifier_ci_tie": False,
         "select_verifier_samples": 2,
+        "card_driven_selection": False,
     }
 
     assert set(attempted) == RUN_START_PINNED_FIELDS

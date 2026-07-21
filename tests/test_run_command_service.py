@@ -1100,16 +1100,22 @@ def test_budget_extend_normalizes_canonical_and_legacy_parallel_axes(tmp_path):
         assert exc.value.status_code == 400
 
 
-def test_set_strategy_accepts_only_canonical_totals_and_closed_raw_lane_split(tmp_path):
+def test_set_strategy_accepts_canonical_totals_lanes_and_atomic_card_scoring(tmp_path):
     rd = _seed(tmp_path)
     _client_unused, srv = _client(tmp_path, _Driver())
     data = normalize_control(srv, rd, "set_strategy", {"strategy": {
         "eval_parallel": "0", "llm_parallel": 4,
         "llm_lane_limits": {"build": "0", "deep_research": 1, "engine": 2},
+        "card_scoring": {
+            "stance": "explore", "novelty_weight": 0.25, "coverage_weight": 1,
+        },
     }})
     assert data == {"strategy": {
         "eval_parallel": 0, "llm_parallel": 4,
         "llm_lane_limits": {"build": 0, "deep_research": 1, "engine": 2},
+        "card_scoring": {
+            "stance": "explore", "novelty_weight": 0.25, "coverage_weight": 1.0,
+        },
     }}
 
     for strategy in (
@@ -1118,6 +1124,13 @@ def test_set_strategy_accepts_only_canonical_totals_and_closed_raw_lane_split(tm
         {"llm_lane_limits": {"unknown": 1}},
         {"llm_lane_limits": {"build": True}},
         {"llm_lane_limits": {"build": 65}},
+        {"card_scoring": {"stance": "explore", "novelty_weight": 0.5}},
+        {"card_scoring": {
+            "stance": "wild", "novelty_weight": 0.5, "coverage_weight": 0.5,
+        }},
+        {"card_scoring": {
+            "stance": "explore", "novelty_weight": True, "coverage_weight": 0.5,
+        }},
     ):
         with pytest.raises(HTTPException) as exc:
             normalize_control(srv, rd, "set_strategy", {"strategy": strategy})

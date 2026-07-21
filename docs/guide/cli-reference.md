@@ -154,8 +154,9 @@ looplab resume RUN_DIR [OPTIONS]
 | `--max-nodes N` | from the snapshot | Override the node budget on resume |
 
 The original launch settings are restored from `config.snapshot.json`, so run-only flags are not silently
-dropped. Five comparison/selection fields (`holdout_fraction`, `holdout_select`, `select_verifier`,
-`select_verifier_samples`, `verifier_ci_tie`) are then restored from the folded `run_started` record;
+dropped. Six comparison/selection fields (`card_driven_selection`, `holdout_fraction`,
+`holdout_select`, `select_verifier`, `select_verifier_samples`, `verifier_ci_tie`) are then restored
+from the folded `run_started` record;
 `trust_gate_changed` owns later trust-gate edits. Those event-pinned semantics win over a stale or hand-edited
 snapshot.
 
@@ -210,7 +211,7 @@ looplab repair-log RUN_DIR
 ## `inspect`
 
 Print the raw on-disk launch config snapshot and the run's current folded best result. This is a diagnostic
-view, not the effective per-run config API: the latter overlays the five `run_started`-pinned fields and the
+view, not the effective per-run config API: the latter overlays the six `run_started`-pinned fields and the
 event-sourced trust gate.
 
 ```bash

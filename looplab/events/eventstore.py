@@ -11,7 +11,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Sequence
 
 import orjson
 
@@ -631,6 +631,65 @@ class EventStore:
             # Incremental read makes this O(the single new record), not a full rescan.
             self.read_all()
         return e
+
+    def append_many(self, records: Sequence[tuple[str, dict[str, Any]]], *,
+                    trace_id: "str | None" = _UNSET_TRACE,
+                    span_id: "str | None" = _UNSET_TRACE,
+                    expected_last_seq: "int | None" = None,
+                    require_lock: bool = False,
+                    require_durable: bool = False) -> list[Event]:
+        """Append a bounded group of events under one tail CAS and writer lock.
+
+        The group is serialized into one contiguous JSONL write while the same interprocess lock used
+        by :meth:`append` is held. This is the event-log transaction needed when several durable
+        ownership claims were selected from one snapshot: another writer can land before the group or
+        after it, never between its records. An empty group is a no-op.
+        """
+        if not records:
+            return []
+        if trace_id is _UNSET_TRACE:
+            trace_id, span_id = current_ids()
+        with self._append_lock, _interprocess_lock(
+                Path(str(self.path) + ".lock"), required=require_lock):
+            self.read_all()
+            if self._divergence is not None:
+                raise EventLogCorruptionError(self.path, self._divergence)
+            self._heal_torn_tail()
+            cur = max(self._seq, self._disk_last_seq())
+            if expected_last_seq is not None and cur != expected_last_seq:
+                raise EventStoreConcurrencyError(self.path, expected_last_seq, cur)
+
+            events = [
+                Event(
+                    seq=cur + offset,
+                    ts=time.time(),
+                    type=event_type,
+                    data=data,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                )
+                for offset, (event_type, data) in enumerate(records, start=1)
+            ]
+            payload = b"".join(
+                orjson.dumps(event.model_dump(mode="json")) + b"\n" for event in events
+            )
+            accepted = False
+            try:
+                with open(self.path, "ab") as f:
+                    f.write(payload)
+                    accepted = True
+                    f.flush()
+                    if require_durable:
+                        strict_fsync(f.fileno())
+                    else:
+                        best_effort_fsync(f.fileno())
+            except BaseException:
+                if accepted:
+                    self._mark_uncertain_append(events[-1].seq)
+                raise
+            self._seq = events[-1].seq
+            self.read_all()
+        return events
 
     def read_all(self) -> list[Event]:
         """Return every Event on disk (up to the first torn/corrupt line), served from an incremental

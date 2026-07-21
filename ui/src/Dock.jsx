@@ -35,6 +35,10 @@ const strategySummary = (strategy = {}) => {
     bits.push(`lanes ${Object.entries(lanes).slice(0, 5)
       .map(([lane, width]) => `${lane}:${width}`).join(',')}`)
   }
+  const cardScoring = s.card_scoring
+  if (cardScoring && typeof cardScoring === 'object' && !Array.isArray(cardScoring)) {
+    bits.push(`cards ${cardScoring.stance || 'balanced'} n:${cardScoring.novelty_weight} c:${cardScoring.coverage_weight}`)
+  }
   return bits.join(' / ') || 'no change'
 }
 
@@ -534,6 +538,9 @@ function StrategyDetail({ d }) {
           && !Array.isArray(s.llm_lane_limits)
           && <span>LLM lanes {Object.entries(s.llm_lane_limits).slice(0, 5)
             .map(([lane, width]) => `${lane}:${width}`).join(', ')}</span>}
+        {s.card_scoring && typeof s.card_scoring === 'object' && !Array.isArray(s.card_scoring)
+          && <span>Card scoring {s.card_scoring.stance || 'balanced'} · novelty {s.card_scoring.novelty_weight}
+            {' · '}coverage {s.card_scoring.coverage_weight}</span>}
         {s.source && <span>source {s.source}</span>}
       </div>
       {ctxRows.length > 0 && <>

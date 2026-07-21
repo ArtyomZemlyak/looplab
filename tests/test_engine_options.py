@@ -103,6 +103,7 @@ ATTR_BY_FIELD = {
     "surrogate_explore": "_surrogate_explore",
     "unified_agent": "unified_agent",
     "agent_drives_actions": "agent_drives_actions",
+    "card_driven_selection": "card_driven_selection",
     "inline_repair": "_inline_repair",
     "inline_repair_attempts": "_inline_repair_attempts",
     "inline_repair_stuck_repeat": "_inline_repair_stuck_repeat",
@@ -175,6 +176,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         digest_char_cap=1234,
         inline_repair_attempts=6,
         seed_mode="tracked",
+        card_driven_selection=True,
     )
 
     # (a) the OLD explicit-kwarg style: the literal Settings->Engine mapping cli.py::_engine used
@@ -252,6 +254,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         surrogate_explore=settings.surrogate_explore,
         unified_agent=settings.unified_agent,
         agent_drives_actions=settings.agent_drives_actions,
+        card_driven_selection=settings.card_driven_selection,
         # Part IV/V flags now ship ON in Settings; pass them through so the old explicit-kwarg
         # mapping reproduces the same engine as from_settings (else old=library-default False).
         concept_pivot=settings.concept_pivot,
@@ -288,6 +291,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     assert new.trust_gate == "gate" and new._holdout_fraction == 0.4
     assert new._inline_repair_attempts == 6 and new._seed_mode == "tracked"
     assert new.lessons_every == 7 and new._novelty_epsilon == 0.2
+    assert new.card_driven_selection is True
 
 
 def test_explicit_kwarg_beats_options_field(tmp_path):

@@ -19,6 +19,7 @@ from looplab.agents.strategist import (
     RuleStrategist,
     StrategyContext,
     make_strategist,
+    validate_card_scoring,
     validate_strategy,
 )
 from looplab.adapters.tasks import build_strategist_tools
@@ -123,6 +124,57 @@ def test_validate_strategy_keeps_raw_closed_llm_lane_allocation():
         assert "llm_lane_limits" not in cleaned
 
 
+def test_card_scoring_is_atomic_strict_and_only_available_in_card_mode():
+    treatment = {
+        "stance": "explore", "novelty_weight": 0.25, "coverage_weight": 0.75,
+    }
+    assert validate_card_scoring(treatment) == treatment
+    assert validate_strategy({"card_scoring": treatment}, _ctx()) is None
+    assert validate_strategy(
+        {"card_scoring": treatment}, _ctx(card_driven_selection=True),
+    )["card_scoring"] == treatment
+    for invalid in (
+        {"stance": "explore", "novelty_weight": 0.5},
+        {**treatment, "unknown": 1},
+        {**treatment, "stance": "wild"},
+        {**treatment, "novelty_weight": True},
+        {**treatment, "coverage_weight": float("nan")},
+        {**treatment, "coverage_weight": 1.01},
+    ):
+        assert validate_card_scoring(invalid) is None
+
+
+def test_rule_card_scoring_authoring_is_flag_gated():
+    coverage = {"nodes": 4, "recent_dominant_frac": 0.8}
+    legacy = RuleStrategist().decide(RunState(), _ctx(phase="explore", coverage=coverage))
+    enabled = RuleStrategist().decide(
+        RunState(), _ctx(phase="explore", coverage=coverage, card_driven_selection=True),
+    )
+    assert "card_scoring" not in legacy
+    assert enabled["card_scoring"]["stance"] == "explore"
+
+
+def test_rule_neutral_card_scoring_explicitly_replaces_stale_explore_treatment():
+    stale = {
+        "stance": "explore", "novelty_weight": 0.55, "coverage_weight": 0.75,
+    }
+    neutral_coverage = {"nodes": 4, "recent_dominant_frac": 0.25,
+                        "dominant_theme_frac": 0.25}
+    delta = RuleStrategist().decide(
+        RunState(), _ctx(
+            phase="exploit", coverage=neutral_coverage, card_driven_selection=True,
+            card_scoring=stale,
+        ),
+    )
+    assert delta["card_scoring"] == {
+        "stance": "balanced", "novelty_weight": 0.5, "coverage_weight": 0.5,
+    }
+    # StrategyCadenceMixin merges partial decisions over the active Strategy. The explicit field is
+    # the regression: omission here would silently retain the old explore treatment.
+    merged = {"card_scoring": stale, **delta}
+    assert merged["card_scoring"]["stance"] == "balanced"
+
+
 # --------------------------------------------------------------------------- #
 # make_strategist (config-first)
 # --------------------------------------------------------------------------- #
@@ -187,6 +239,21 @@ def _engine(run_dir, *, strategist=None, policy=None, **kw):
                   sandbox=SubprocessSandbox(),
                   policy=policy or GreedyTree(n_seeds=3, max_nodes=8),
                   n_seeds=3, max_nodes=8, strategist=strategist, **kw)
+
+
+def test_strategy_context_uses_effective_card_budget_only_in_card_mode(tmp_path):
+    state = RunState(nodes={
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=1.0),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=0.9, tombstoned=True),
+        2: Node(id=2, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=0.8, feasible=False),
+    })
+    card = _engine(tmp_path / "card-budget", card_driven_selection=True)
+    legacy = _engine(tmp_path / "legacy-budget", card_driven_selection=False)
+    assert card._strategy_ctx(state).node_budget_frac == 1 / card.policy.max_nodes
+    assert legacy._strategy_ctx(state).node_budget_frac == 3 / legacy.policy.max_nodes
 
 
 def test_off_emits_no_strategy_decision(tmp_path):
@@ -1254,9 +1321,11 @@ class _CaptureClient:
     def __init__(self, ret):
         self.ret = ret
         self.messages = None
+        self.schema = None
 
     def complete_tool(self, messages, schema):
         self.messages = messages
+        self.schema = schema
         return self.ret
 
 
@@ -1271,6 +1340,25 @@ def test_llm_strategist_can_allocate_named_lanes_from_structured_output():
     assert out["llm_parallel"] == 4
     assert out["llm_lane_limits"] == {"build": 3, "deep_research": 1, "enrichment": 0}
     assert "LLM lanes={'build': 2}" in " ".join(m["content"] for m in client.messages)
+
+
+def test_llm_card_scoring_prompt_and_schema_are_flag_gated():
+    legacy = _CaptureClient({"policy": "greedy", "rationale": "legacy"})
+    LLMStrategist(legacy).decide(RunState(), _ctx())
+    assert "card_scoring" not in legacy.schema["properties"]
+    assert "Card scoring treatment" not in " ".join(m["content"] for m in legacy.messages)
+
+    treatment = {
+        "stance": "explore", "novelty_weight": 0.4, "coverage_weight": 0.8,
+    }
+    enabled = _CaptureClient({"card_scoring": treatment, "rationale": "widen"})
+    out = LLMStrategist(enabled).decide(
+        RunState(), _ctx(card_driven_selection=True, card_scoring=treatment),
+    )
+    assert "card_scoring" in enabled.schema["properties"]
+    assert "Current Card scoring treatment" in " ".join(
+        m["content"] for m in enabled.messages)
+    assert out["card_scoring"] == treatment
 
 
 def test_llm_strategist_sees_pending_hints():

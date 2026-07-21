@@ -498,6 +498,12 @@ untrusted tier.
   rank (break near-ties toward the more divergent candidate), and the novelty gate (engage a soft
   dedup + one informed re-propose even when the static gate is off) — so novelty pressure is one
   meta-decision, applied coherently, and always via the LLM roles rather than a hard-coded rule.
+- **Card-driven selection** (`card_driven_selection`, off by default) — lets the receipt-backed Card
+  queue own the next macro action instead of the policy/pilot arm. The run-start record pins this
+  choice, and Card authority wins if `agent_drives_actions` is also enabled. The Strategist can shape
+  the separate atomic `card_scoring` treatment (explore/balanced/exploit plus bounded novelty and
+  coverage weights); it ranks only Cards that have already passed durable readiness and live-anchor
+  checks.
 - **Unified agent** (`unified_agent`, on by default) — one LLM identity plays Researcher +
   Developer (+ Strategist) across stages, choosing its model/toolset per stage and driving the next
   macro action within a *pure legal-action gate* that keeps pipeline discipline. Set

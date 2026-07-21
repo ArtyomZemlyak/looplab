@@ -123,6 +123,8 @@ class EngineOptions:
     surrogate_explore: float = 0.1       # A2/A3: explore weight for a lazily-wired BOHB surrogate
     unified_agent: bool = False          # one agent plays Researcher+Developer(+Strategist)
     agent_drives_actions: bool = False   # agent picks the next macro action (within a legal gate)
+    # Layer 3: opt-in Card queue owns macro-action selection; false preserves the legacy policy/pilot path.
+    card_driven_selection: bool = False
     inline_repair: bool = True           # hybrid: triage + repair a crashed node IN PLACE (no new node)
     inline_repair_attempts: int = 0      # max in-place repair retries per node (0 = UNLIMITED)
     inline_repair_stuck_repeat: int = 4  # abandon when the SAME error repeats this many times in a row

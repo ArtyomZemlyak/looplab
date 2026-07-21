@@ -1401,6 +1401,9 @@ class RunState(BaseModel):
     # T2 trust enforcement (folded from run_started; "audit" for old logs). "gate"/"block" make
     # best-selection exclude nodes flagged for a reward-hack / data-leakage signal (not critic).
     trust_gate: str = "audit"
+    # Layer 3 queue owner pinned by run_started. False on old logs preserves the policy/pilot path;
+    # replay never infers this selection-affecting treatment from a mutable config snapshot.
+    card_driven_selection: bool = Field(False, exclude=True)
     # D1 holdout-gated promotion (folded from run_started; False for old logs -> byte-identical
     # legacy selection). When True, best-selection prefers the holdout metric among the nodes
     # that carry one (the val-top-k re-scored on the unseen partition at finish).

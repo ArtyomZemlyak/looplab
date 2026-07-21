@@ -612,6 +612,24 @@ def test_append_expected_last_seq_cas(tmp_path):
     assert [ev.type for ev in s.read_all()][-1] == "resume"
 
 
+def test_append_many_uses_one_tail_cas_and_contiguous_sequences(tmp_path):
+    import pytest
+    from looplab.events.eventstore import EventStoreConcurrencyError
+
+    s = EventStore(tmp_path / "e.jsonl")
+    first = s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    batch = s.append_many([
+        ("node_building", {"node_id": 0}),
+        ("node_building", {"node_id": 1}),
+    ], expected_last_seq=first.seq)
+    assert [event.seq for event in batch] == [first.seq + 1, first.seq + 2]
+    assert [event.data["node_id"] for event in batch] == [0, 1]
+
+    with pytest.raises(EventStoreConcurrencyError):
+        s.append_many([("node_building", {"node_id": 2})], expected_last_seq=first.seq)
+    assert [event.data.get("node_id") for event in s.read_all()[1:]] == [0, 1]
+
+
 def test_fold_eval_seconds_split_into_buckets(tmp_path):
     # P1-2: total_eval_seconds is ALSO split by category (node vs confirm) for observability; the
     # buckets sum to the total, and confirm-seed cost is tracked apart from node-eval cost.

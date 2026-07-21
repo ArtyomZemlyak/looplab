@@ -20,7 +20,7 @@ from typing import Optional
 from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
                                        canonicalize_strategy_parallelism, failure_rate,
                                        improves_since_best, is_numeric_space, run_phase,
-                                       validate_strategy)
+                                       validate_card_scoring, validate_strategy)
 from looplab.core.config import parallelism_aliases
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
@@ -69,7 +69,7 @@ class StrategyCadenceMixin:
         # was never recorded or applied (the P8 live-budget retune silently no-op'd unless bundled with a
         # change to another tracked field).
         return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity",
-                                      "novelty_stance", "request_research", "timeout", "max_parallel",
+                                      "novelty_stance", "card_scoring", "request_research", "timeout", "max_parallel",
                                       "parallel_build", "eval_parallel", "llm_parallel",
                                       "llm_lane_limits")}
 
@@ -81,7 +81,20 @@ class StrategyCadenceMixin:
     def _strategy_ctx(self, state: RunState) -> StrategyContext:
         max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
         rem = (max_es - state.total_eval_seconds) if max_es is not None else None
-        defaults = {"policy": self._policy_name, "operators": {"ablate_every": self._ablate_every}}
+        card_driven = bool(getattr(self, "card_driven_selection", False))
+        if card_driven:
+            from looplab.search.card_selection import card_budget_used
+            node_budget_used = card_budget_used(state)
+        else:
+            node_budget_used = len(state.nodes)
+        current_card_scoring = dict(getattr(self, "_card_scoring", {
+            "stance": "balanced", "novelty_weight": 0.5, "coverage_weight": 0.5,
+        }))
+        defaults = {
+            "policy": self._policy_name,
+            "operators": {"ablate_every": self._ablate_every},
+            "card_scoring": current_card_scoring,
+        }
         if max_es:
             defaults["_budget_frac"] = max(0.0, (rem or 0.0) / max_es)
         # Mean per-node eval cost so far — the cost signal the Strategist uses to bias toward an
@@ -101,13 +114,15 @@ class StrategyCadenceMixin:
             improves_since_best=improves_since_best(state),
             is_numeric_space=is_numeric_space(state),
             avg_eval_seconds=avg_es,
-            node_budget_frac=(len(state.nodes) / self.policy.max_nodes
+            node_budget_frac=(node_budget_used / self.policy.max_nodes
                               if getattr(self.policy, "max_nodes", 0) else 0.0),  # P2 endgame reserve
             current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
             eval_parallel=self._eval_parallel,
             llm_parallel=self._llm_parallel,
             llm_total=llm_broker["total"],
             llm_lane_limits=llm_lane_limits,
+            card_driven_selection=card_driven,
+            card_scoring=current_card_scoring,
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
@@ -366,11 +381,13 @@ class StrategyCadenceMixin:
         # CODEX AGENT: every newly recorded decision has one canonical spelling per concurrency
         # axis. Legacy records remain replayable, but stale aliases cannot survive into the next merge.
         strat = canonicalize_strategy_parallelism(strat)
+        ctx_fields = {"phase", "eval_budget_remaining", "failure_rate", "cross_run_receipt"}
+        if ctx is not None and ctx.card_driven_selection:
+            ctx_fields.add("card_scoring")
         self.store.append(EV_STRATEGY_DECISION, {
             "strategy": strat,
             "at_node": len(state.nodes),
-            "ctx": (ctx.model_dump(include={"phase", "eval_budget_remaining", "failure_rate",
-                                            "cross_run_receipt"})
+            "ctx": (ctx.model_dump(include=ctx_fields)
                     if ctx is not None else None),
         })
         self._apply_strategy(strat)
@@ -417,10 +434,22 @@ class StrategyCadenceMixin:
         pinned = set(strat.get("_pinned") or [])
 
         def may(k):
-            return (any(alias in pinned for alias in parallelism_aliases(k))
-                    or self._agent_may("strategist", k))
+            if any(alias in pinned for alias in parallelism_aliases(k)):
+                return True
+            if k == "card_scoring":
+                # Keep the shipped agent_control snapshot byte-identical while Card mode is off.
+                # Enabling the run-start-pinned selector grants its dedicated treatment to the
+                # Strategist implicitly, unless the operator explicitly supplies a card_scoring
+                # entry (including [] as a revocation). A `_pinned` human value already won above.
+                controls = self._agent_control if isinstance(self._agent_control, dict) else {}
+                if self.card_driven_selection and k not in controls:
+                    return True
+            return self._agent_may("strategist", k)
         if may("novelty_stance") and strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
+        card_scoring = validate_card_scoring(strat.get("card_scoring"))
+        if card_scoring is not None and may("card_scoring"):
+            self._card_scoring = card_scoring
         ops = strat.get("operators") or {}
         if "ablate_every" in ops and may("ablate_every"):
             self._ablate_every = int(ops["ablate_every"])
@@ -1097,7 +1126,7 @@ class StrategyCadenceMixin:
         pin = state.pending_strategy or {}
         raw_pin = {k: pin[k] for k in (
             "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
-            "llm_lane_limits")
+            "llm_lane_limits", "card_scoring")
                    if pin.get(k) is not None}
         n = len(state.nodes)
         consulting = (self.strategist is not None and self._should_consult(state)

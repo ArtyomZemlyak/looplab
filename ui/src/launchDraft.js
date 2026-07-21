@@ -7,6 +7,8 @@ export const LAUNCH_RUNTIME_FIELDS = Object.freeze([
   { key: 'backend', label: 'Backend', type: 'enum', options: ['toy', 'llm'] },
   { key: 'llm_model', label: 'Model', type: 'text', placeholder: 'inherit configured model' },
   { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb'] },
+  { key: 'card_driven_selection', label: 'Card queue selection', type: 'bool',
+    help: 'Opt in to the Card scorer as the macro-action owner. Pinned at run start; when enabled it takes precedence over agent-driven actions.' },
   { key: 'max_nodes', label: 'Max nodes', type: 'int', min: 1 },
   { key: 'n_seeds', label: 'Seeds', type: 'int', min: 1 },
   { key: 'eval_parallel', label: 'Eval parallel', type: 'int', min: 0, max: 1024,
@@ -102,6 +104,9 @@ export function validateLaunchDraft(draft) {
           || (field.min != null && value <= field.min))) {
         errors[`settings.${field.key}`] = `${field.label} must be a number greater than ${field.min}`
       }
+      if (field.type === 'bool' && typeof value !== 'boolean') {
+        errors[`settings.${field.key}`] = `${field.label} must be a boolean`
+      }
     }
   }
   return { ok: Object.keys(errors).length === 0, errors, task, settings }
@@ -148,6 +153,10 @@ export function updateRuntimeValue(draft, field, rawValue) {
   if (!parsed.ok) return { ok: false, error: parsed.error }
   const settings = clone(parsed.value)
   if (rawValue === '' || rawValue == null) delete settings[field.key]
+  else if (field.type === 'bool') {
+    if (typeof rawValue !== 'boolean') return { ok: false, error: `${field.label} must be a boolean` }
+    settings[field.key] = rawValue
+  }
   else if (field.type === 'int' || field.type === 'float') {
     // Number(), not parseInt(): "3.5" must remain 3.5 so validation rejects a non-integer instead of
     // silently changing the user's budget to 3.

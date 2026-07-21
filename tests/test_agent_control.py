@@ -259,8 +259,35 @@ def test_default_settings_matrix_shape():
     assert s.agent_control["eval_parallel"] == ["strategist"]
     assert s.agent_control["llm_parallel"] == ["strategist"]
     assert s.agent_control["llm_lane_limits"] == ["strategist"]
+    assert "card_scoring" not in s.agent_control  # implicit only while Card mode is enabled
     assert "max_parallel" not in s.agent_control and "parallel_build" not in s.agent_control
     assert "llm_model" not in s.agent_control           # infra stays locked
+
+
+def test_card_scoring_live_apply_honors_its_distinct_governance_grant(tmp_path):
+    treatment = {
+        "stance": "explore", "novelty_weight": 0.2, "coverage_weight": 0.8,
+    }
+    off = _engine(tmp_path / "card-off", card_driven_selection=False)
+    off._apply_strategy({"card_scoring": treatment})
+    assert getattr(off, "_card_scoring", None) is None
+
+    granted = _engine(tmp_path / "card-granted", card_driven_selection=True)
+    granted._apply_strategy({"card_scoring": treatment})
+    assert granted._card_scoring == treatment
+
+    revoked = _engine(
+        tmp_path / "card-revoked", card_driven_selection=True,
+        agent_control={"card_scoring": []},
+    )
+    revoked._apply_strategy({"card_scoring": treatment})
+    assert getattr(revoked, "_card_scoring", None) is None
+
+    pinned = _engine(
+        tmp_path / "card-pinned", card_driven_selection=False, agent_control={},
+    )
+    pinned._apply_strategy({"card_scoring": treatment, "_pinned": ["card_scoring"]})
+    assert pinned._card_scoring == treatment
 
 
 def test_budget_extend_is_a_human_intent_applied_regardless_of_matrix(tmp_path):
