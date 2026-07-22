@@ -83,6 +83,14 @@ def _task_facets_prompt_payload(goal: str, kind: str) -> dict:
     }
 
 
+def task_facets_goal_is_empty(goal: str, kind: str) -> bool:
+    """Whether the REDACTED classification goal is empty — the SAME emptiness test `propose_task_facets`
+    uses to short-circuit (`not payload["goal"].strip()`). A pre-LLM cost guard must call this rather
+    than test the raw goal: since redaction maps control chars / signed URLs to spaces and can collapse
+    to "", a raw `goal.strip()` can be truthy while the proposer treats the redacted goal as empty."""
+    return not _task_facets_prompt_payload(goal, kind)["goal"].strip()
+
+
 def task_facets_input_digest(goal: str, kind: str) -> str:
     """Digest the exact bounded model-visible task description."""
     envelope = {

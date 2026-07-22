@@ -490,11 +490,22 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
             targets.append(dflt)
         if len(set(targets)) != len(targets):
             raise ValueError("split targets must be distinct")
-        # CODEX AGENT: split children can later become split sources, so A→B then B→C (or B→A)
-        # passes this validation while canonicalize_concept applies only one split. That fragments
-        # canonical UIDs, Atlas counts and retrieval. Reject split-graph chains/cycles here, or resolve
-        # them transitively with bounded cycle detection under the same governance snapshot.
+        # Reject split-graph chains/cycles. canonicalize_concept applies at most ONE split hop
+        # (resolve_split does a single lookup, no fixpoint), so a chain (A→B then B→C, or a cycle B→A)
+        # would leave observations split inconsistently and fragment canonical UIDs / Atlas counts /
+        # retrieval. Under this same governance snapshot: (a) the source must not itself be the child of
+        # an existing split; (b) no target may itself be an existing split source.
+        split_children = {rule.get("to") for spec in splits.values() for rule in spec.get("rules", [])}
+        split_children.update(spec.get("default") for spec in splits.values())
+        if src in split_children:
+            raise ValueError(
+                f"split source {src!r} is already a split target of an existing split; splitting it "
+                "would form a chain — split the ultimate canonical concept instead")
         for target in targets:
+            if target in splits:
+                raise ValueError(
+                    f"split target {target!r} is itself a split source; this would form a split chain "
+                    "— choose a terminal target")
             resolved_target = resolve_slug(target, aliases)
             if resolved_target is None:
                 raise ValueError(

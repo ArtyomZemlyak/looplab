@@ -1308,12 +1308,15 @@ def _reserved_speculative_slots(state: RunState, excluded_card_ids: frozenset[st
     """Count request/build reservations not represented by a Node budget row yet."""
 
     reserved = 0
-    # CODEX AGENT: excluded_card_ids also contains durable producer-failed ids. If a node-less failed
-    # Card is later dropped or merged, no live request/build owns a slot, yet the absent/closed Card is
-    # counted forever and can drive speculative capacity to zero. Count exact outstanding ownership
-    # (or a proven open serial-fallback owner), not every excluded id without evidence.
+    # `excluded_card_ids` also carries durable producer-failed ids (append-only). A live Card with no Node
+    # budget row yet IS a genuine outstanding request/build reservation, so it counts. But an
+    # administratively-dead Card (operator-dropped, status=="dropped", or merged, merged_into set) owns no
+    # live request/build: a producer-failed id that is later dropped/merged would otherwise be counted as
+    # an outstanding reservation FOREVER and monotonically starve speculative capacity. Exclude those.
     for card_id in excluded_card_ids:
         card = state.cards.get(card_id)
+        if card is not None and (card.status == "dropped" or card.merged_into is not None):
+            continue
         if card is None or not card.evidence:
             reserved += 1
     return reserved

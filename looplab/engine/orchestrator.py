@@ -3146,6 +3146,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     or getattr(waiting, "finished", False)
                                     or getattr(waiting, "stop_requested", None)
                                 )
+                                # Close a Node whose owning Card an operator dropped at ZERO cost, before
+                                # reserving a GPU or launching a paid eval: a pre-start operator Card drop
+                                # does not abort/tombstone the Node, so without this the reservation is
+                                # granted and _evaluate starts (the mid-eval watcher then kills it — real,
+                                # but wasteful). Only an operator drop cancels (see
+                                # _operator_card_dropped_for_node); engine/freshness drops deliberately
+                                # burn to a terminal.
                                 lifecycle_current = bool(
                                     live is not None
                                     and live.attempt == generation
@@ -3153,6 +3160,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     and not live.tombstoned
                                     and live.id not in waiting.aborted_nodes
                                     and not terminal
+                                    and not self._operator_card_dropped_for_node(waiting, live)
                                     and not (max_es is not None
                                              and waiting.total_eval_seconds >= max_es)
                                 )
@@ -3188,6 +3196,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     or live.tombstoned
                                     or live.id in admitted.aborted_nodes
                                     or terminal
+                                    or self._operator_card_dropped_for_node(admitted, live)
                                     or (max_es is not None
                                         and admitted.total_eval_seconds >= max_es)
                                 ):

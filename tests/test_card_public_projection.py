@@ -495,6 +495,24 @@ def test_cross_run_default_insertion_is_not_receipted_as_exact_source_data():
     assert receipt["omissions"]["cross_run_prior"]["omitted"] >= 1
 
 
+def test_cross_run_prior_runs_receipt_recomputed_over_transport_cap():
+    """When the transport re-caps prior_runs, the nested completeness receipt must describe the rows that
+    SURVIVED — not forward the replay value's pre-cap total/omitted/complete (a "showed you everything"
+    lie). A source-declared complete 40-row value capped to 32 must report omitted>=8 / complete=false."""
+    prior = [{"run": f"r{i}", "metric": 0.1 * i} for i in range(40)]
+    envelope = public_cards_projection({
+        "card-many": {"cross_run_prior": {
+            "v": 2, "prior_runs": prior,
+            "prior_runs_total": 40, "prior_runs_omitted": 0, "prior_runs_complete": True,
+        }},
+    }).model_dump(mode="json")
+    cr = envelope["cards"]["card-many"]["cross_run_prior"]
+    assert len(cr["prior_runs"]) == 32                    # capped by the public transport
+    assert cr["prior_runs_total"] == 40                   # true total preserved
+    assert cr["prior_runs_omitted"] == 8                  # 40 - 32 shown
+    assert cr["prior_runs_complete"] is False             # no longer a "complete" claim
+
+
 def test_projection_fails_closed_for_a_malformed_collection_source():
     envelope = public_cards_projection(None).model_dump(mode="json")
     assert envelope["cards"] == {}

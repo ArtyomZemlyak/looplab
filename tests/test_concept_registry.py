@@ -269,6 +269,27 @@ def test_split_rejects_no_progress_and_empty(tmp_path):
         record_concept_split(str(tmp_path), from_concept="x", rules=[], default="x")
 
 
+def test_split_rejects_chain_formation(tmp_path):
+    """canonicalize_concept applies at most ONE split hop, so chains (A→B then B→C) or cycles (B→A)
+    would fragment canonical UIDs. _validate_targets must reject both a source that is already a split
+    child and a target that is itself a split source."""
+    record_concept_split(
+        str(tmp_path), from_concept="coarse", rules=[{"to": "child", "when_any": ["x"]}],
+        default="coarse-rest")
+    # (b) a target that is itself an existing split source → would chain forward.
+    with pytest.raises(ValueError, match="split chain"):
+        record_concept_split(
+            str(tmp_path), from_concept="other", rules=[{"to": "coarse", "when_any": ["y"]}],
+            default="other-rest")
+    # (a) splitting a concept that is already a split child → would chain from it.
+    with pytest.raises(ValueError, match="chain"):
+        record_concept_split(
+            str(tmp_path), from_concept="child", rules=[{"to": "grandchild", "when_any": ["z"]}],
+            default="child-rest")
+    # The original split is the only one recorded.
+    assert set(load_concept_splits(str(tmp_path))) == {"coarse"}
+
+
 def test_split_rejects_purged_rule_and_default_targets(tmp_path):
     record_concept_alias(str(tmp_path), from_concept="retired", to_concept="")
     with pytest.raises(ValueError, match="target .* purged"):

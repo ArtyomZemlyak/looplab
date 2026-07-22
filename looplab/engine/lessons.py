@@ -996,6 +996,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 TASK_FACETS_INPUT_SCHEMA,
                 load_task_facets,
                 propose_task_facets,
+                task_facets_goal_is_empty,
                 task_facets_input_digest,
             )
 
@@ -1025,7 +1026,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                         "auto_requested": auto_requested,
                         "proposals": {"task_id": tid, "facets": current}, "receipt": None})
                     return
-                if not goal[:4000].strip():
+                if task_facets_goal_is_empty(goal, kind):
                     provenance = self._curation_provenance(
                         input_digest=input_digest, input_schema=TASK_FACETS_INPUT_SCHEMA,
                         client=None)

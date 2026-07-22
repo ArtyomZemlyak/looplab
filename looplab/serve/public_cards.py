@@ -409,20 +409,26 @@ def _cross_run(value):
         out["v"] = version
     out["matched_concepts"] = _refs(value.get("matched_concepts"))
     raw_runs = value.get("prior_runs")
-    # CODEX AGENT: this transport applies a second row cap but forwards prior_runs_total/omitted/
-    # complete below unchanged. A complete 40-row replay value can therefore become 32 rows beside
-    # complete=true and omitted=0. Recompute the nested receipt from the rows that survive this
-    # projection, even when the outer Card item is separately marked partial.
-    out["prior_runs"] = (
-        [_prior_run(item) for item in raw_runs[:_MAX_ITEMS] if isinstance(item, dict)]
-        if isinstance(raw_runs, (list, tuple)) else []
-    )
-    for key in ("prior_runs_total", "prior_runs_omitted"):
-        number = _number(value.get(key), integer=True)
-        if number is not _SKIP and number is not None:
-            out[key] = number
-    if isinstance(value.get("prior_runs_complete"), bool):
-        out["prior_runs_complete"] = value["prior_runs_complete"]
+    raw_list = list(raw_runs) if isinstance(raw_runs, (list, tuple)) else []
+    out["prior_runs"] = [_prior_run(item) for item in raw_list[:_MAX_ITEMS] if isinstance(item, dict)]
+    shown = len(out["prior_runs"])
+    # Emit the completeness receipt ONLY when the source declared one OR this transport actually capped
+    # rows — never fabricate a "complete" receipt on a value that carried none (that is itself a lie, and
+    # the reason a default cross_run insertion must stay unreceipted). When it IS emitted, recompute it
+    # over the rows that SURVIVED: forwarding the replay value's pre-cap total/omitted/complete verbatim
+    # would let a complete 40-row value ship as 32 rows still labelled complete=true / omitted=0.
+    src_total = _number(value.get("prior_runs_total"), integer=True)
+    src_omitted = _number(value.get("prior_runs_omitted"), integer=True)
+    has_src_receipt = any(
+        k in value for k in ("prior_runs_total", "prior_runs_omitted", "prior_runs_complete"))
+    if has_src_receipt or len(raw_list) > _MAX_ITEMS:
+        pre_cap = len(raw_list) + (
+            src_omitted if src_omitted not in (_SKIP, None) and src_omitted >= 0 else 0)
+        total = src_total if (src_total not in (_SKIP, None) and src_total >= shown) else pre_cap
+        total = max(total, shown)
+        out["prior_runs_total"] = total
+        out["prior_runs_omitted"] = total - shown
+        out["prior_runs_complete"] = total == shown
     if isinstance(value.get("concept_source"), dict):
         out["concept_source"] = _named_scalars(value["concept_source"], _CONCEPT_SOURCE_KEYS) or {}
     return out

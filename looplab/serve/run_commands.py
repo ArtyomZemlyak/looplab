@@ -2913,10 +2913,12 @@ class RunCommandService:
                                     f"GET /commands/{existing_id}; if it is retryable failed/timed_out, "
                                     f"POST /commands/{existing_id}/retry."),
                             })
-                    # CODEX AGENT: collaboration controls are independent append-only intents. In
-                    # particular, Card drop must be able to land while a long driver command is still
-                    # executing so the evaluator can cancel paid work. Driver commands remain globally
-                    # serialized; collaboration relies on its generation/subject/tail CAS below.
+                    # Serialize DRIVER commands only. This global in-progress gate must NOT block a
+                    # collaboration-only control (e.g. an operator Card drop): while a long engine command
+                    # remains `executing` — a pause whose postcondition waits out an in-flight eval —
+                    # blocking the Card drop would keep _evaluate from ever seeing the event it watches to
+                    # cancel its paid subprocess. Collaboration has its own strict-lock generation/subject/
+                    # tail CAS in _append_collaboration_intent, so it stays serialized without this gate.
                     if event_type not in COLLABORATION_EVENTS:
                         _active_path, active = self._active_record(rd)
                         if active is not None:
