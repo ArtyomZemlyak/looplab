@@ -150,8 +150,9 @@ def is_hard_signal(sig: str) -> bool:
 
 
 def hard_flagged_ids(st: RunState) -> set:
-    """Node ids carrying a HIGH-PRECISION (non-`critic:`, non-`perfect_metric`) cheating/leakage
-    signal, INDEPENDENT of `trust_gate` mode. `flagged_node_ids` uses it for gate/block selection
+    """Node ids carrying a HIGH-PRECISION cheating/leakage signal, including the narrow
+    ``critic:hardcoded_metric`` exception but excluding other ``critic:*`` and ``perfect_metric``
+    heuristics, INDEPENDENT of `trust_gate` mode. `flagged_node_ids` uses it for gate/block selection
     exclusion; the agent-facing trust-reflection hint (signal-delivery §1) uses it to warn the
     Researcher about a flagged lineage even under `audit`, where nothing is gate-excluded."""
     def _has_current_hard_signal(rh: dict) -> bool:

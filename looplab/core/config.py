@@ -567,8 +567,9 @@ class Settings(BaseSettings):
     #             FEASIBLE so it still counts for diversity/audit — closes the "a hacked/leaky node can
     #             win OR seed its lineage" hole;
     #   "block" = additionally mark it fully INFEASIBLE (removed from feasible_nodes entirely).
-    # Deliberately gates only high-precision CHEATING/LEAKAGE signals; the heuristic `critic` signal
-    # stays advisory (audit) in every mode — the field is a per-node quality hint, not proof of a hack.
+    # Deliberately gates only high-precision CHEATING/LEAKAGE signals. Broad `critic:*` findings stay
+    # advisory; CODEX AGENT: `critic:hardcoded_metric` is the one narrow high-precision critic exception
+    # and gates because it requires a literal metric with no computed assignment anywhere.
     trust_gate: str = "audit"
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
@@ -580,11 +581,14 @@ class Settings(BaseSettings):
     # D8 decoupled research Verifier: check every Deep-Research memo's CLAIMS against their cited
     # evidence (node ids / urls) before recording — synthesis is the documented weak link (Kosmos
     # 57.9% accurate). Deterministic layer always; an LLM rubric pass when the DeepResearcher has a
-    # client. Audit-only (verdicts ride inside the memo). ON by default (no-op with no memo/claims).
+    # client. The verdict cannot change this run's node/champion, but finalize uses aligned supported
+    # verdicts as the evidence gate for persisted D8 cross-run claims; unavailable/misaligned stays
+    # unverified. ON by default (no-op with no memo/claims).
     research_verify: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
-    # surfaced in the Trust panel. Audit-only. Off by default.
+    # surfaced in the Trust panel. Broad findings are advisory; `critic:hardcoded_metric` can gate under
+    # trust_gate=gate/block. Off by default.
     critic_check: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
@@ -1090,18 +1094,19 @@ class Settings(BaseSettings):
     # think with the GPU-bound eval, so the cadence costs LLM tokens but no wall-clock on the search.
     deep_research_every: int = 3
     # Overlap a DUE deep-research "think" with the GPU-bound eval instead of running it in its own
-    # serial step (the agent is otherwise idle while a node trains). research() is pure compute on a
-    # state snapshot — the engine still records the memo as the sole writer AFTER the eval, so the
-    # event log stays single-writer. ON by default: the LLM is typically remote (no GPU contention
-    # with eval), so overlapping is a free intelligence win over the long per-node training time.
+    # serial step (the agent is otherwise idle while a node trains). research() computes from a state
+    # snapshot; CODEX AGENT: the joined background task records only allowlisted, order-tolerant
+    # research/hint/hypothesis events as soon as the memo finishes. ON by default: the LLM is typically
+    # remote (no GPU contention with eval), so overlapping hides latency behind long training.
     concurrent_research: bool = True
     # Concurrent-research REPEAT — don't idle a multi-DAY eval. The overlapped "think" fires ONCE per
     # window by default; ON here, it RE-RUNS on an adaptive time cadence for the WHOLE eval window
     # (a two-day training must not leave the reasoning agents idle after one memo). Self-paced: it
     # only records a memo whose CONTENT is new (identical re-runs are skipped, so the log/board don't
     # bloat) and backs off geometrically as the analysis converges, capped so it always re-checks.
-    # Advisory-only (BACKGROUND_APPENDABLE — never touches node selection or replay). The library
-    # default is one-shot (== today, byte-identical); this product default turns the repetition on.
+    # The appended records never rewrite the current metric champion, but their hints/open hypotheses
+    # deliberately steer later proposals and replay reconstructs that advice. The library default is
+    # one-shot (== today, byte-identical); this product default turns the repetition on.
     concurrent_research_repeat: bool = True
     # Base cadence (seconds) between repeated concurrent-research passes. Research is EXPENSIVE
     # (multi-turn LLM + web/arXiv), so this is a FLOOR, not a ceiling: the effective cadence is

@@ -150,7 +150,8 @@ class ResearchCadenceMixin:
         # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
         # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).
         # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a
-        # client is wired. Verdicts ride INSIDE the memo dict (audit-only; fold untouched).
+        # client is wired. Verdicts ride INSIDE the folded memo and cannot change this run's champion;
+        # CODEX AGENT: finalize later uses their aligned support as the gate for positive D8 evidence.
         if self._research_verify and memo_d.get("claims"):
             try:
                 from looplab.trust.verify import verify_memo

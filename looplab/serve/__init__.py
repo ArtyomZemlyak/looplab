@@ -1,1 +1,1 @@
-"""The UI server, assistant and read-only views over run data."""
+"""The UI server, owner control/governance APIs, assistant, and bounded run/reviewer views."""

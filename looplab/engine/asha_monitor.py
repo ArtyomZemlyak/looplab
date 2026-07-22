@@ -6,9 +6,10 @@ stricter: the metric spec must explicitly name ``resource_key`` and enough compl
 retain metric observations at exactly the same resource value. An early point is never treated as
 comparable to a finished endpoint merely because both contain the objective metric.
 
-Advisory by default: each rank-state transition records a fold-IGNORED `EV_ASHA_RANK` diagnostic event (so its
-thread-schedule-dependent position never touches replay/selection — splice-neutral by construction) and
-a `asha_monitor` trace span. An opt-in `asha_live_kill` lets it tree-kill an underperformer early,
+Advisory by default: each rank-state transition records a fold-IGNORED `EV_ASHA_RANK` diagnostic event,
+so its thread-schedule-dependent position cannot directly alter lifecycle/champion/replay. The raw
+diagnostic may still advise a later Researcher prompt when `watchdog_reflection` is enabled. A matching
+`asha_monitor` trace span is also emitted. An opt-in `asha_live_kill` lets it tree-kill an underperformer early,
 reusing the training monitor's `kill_signal` + the single `_evaluate` terminal (reason
 `asha_underperforming`), so replay reads that terminal and never re-invokes this watchdog.
 

@@ -284,7 +284,8 @@ EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 # completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;
 # only enough underperforming same-resource evidence may trigger the opt-in kill. DIAGNOSTIC / fold-
 # ignored; intervention is recorded by the node's single `node_failed` terminal, so concurrent append
-# remains splice-neutral and replay-safe.
+# remains splice-neutral and replay-safe. The raw advisory row can still feed a later proposal through
+# watchdog_reflection; that prompt effect is separate from fold/champion semantics.
 EV_ASHA_RANK = "asha_rank"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(

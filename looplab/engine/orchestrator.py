@@ -3026,8 +3026,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         think on an adaptive cadence, records ONLY memos whose content is NEW (identical re-runs are
         skipped so the log/hypothesis board don't bloat), backs off geometrically as the analysis
         converges (capped so it always re-checks — new sibling-eval results or cross-run lessons can
-        land mid-window), and stops calling the LLM past the per-window cap. Advisory-only
-        (BACKGROUND_APPENDABLE via `_record_deep_research`) so it never touches selection or replay.
+        land mid-window), and stops calling the LLM past the per-window cap. Its allowlisted
+        BACKGROUND_APPENDABLE records are order-tolerant and never rewrite the current champion, while
+        their hints/open hypotheses deliberately steer later proposals and are reconstructed by replay.
         Runs in `_dispatch_evals`'s background task group; cancelled when the evals join."""
         from looplab.engine.research_cadence import research_memo_sig
         from looplab.engine.train_monitor import next_monitor_sleep

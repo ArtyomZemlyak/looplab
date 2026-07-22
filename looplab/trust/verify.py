@@ -11,9 +11,11 @@ overlooked"). This module checks a ResearchMemo's claims against their CITED evi
    multi-agent research evaluation), grading each claim supported/unsupported/unclear against
    the evidence text assembled from the run itself.
 
-Audit-only: verdicts ride inside the memo dict on the `research_completed` event; they never
-touch nodes or best-selection. Best-effort: any model failure downgrades to the deterministic
-verdicts rather than blocking the memo.
+Current-run selection-neutral: verdicts ride inside the memo dict on the `research_completed` event
+and never rewrite nodes or the current champion. They are not merely decorative, however: finalize
+uses an aligned `supported` verdict as the evidence gate for persisted D8 cross-run claims, which can
+inform later runs. Best-effort: model failure degrades to deterministic/unverified evidence rather
+than blocking the memo.
 """
 from __future__ import annotations
 

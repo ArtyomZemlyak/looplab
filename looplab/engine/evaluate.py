@@ -611,9 +611,9 @@ class EvaluateMixin:
                          # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
                          "trials": res.trials or []},
                     )
-                    # B5 reward-hacking detector + I3 code-leakage scan (audit-only): flag a
-                    # suspicious win / leaky pipeline without ever changing selection. Both surface in
-                    # the Trust panel via the same reward_hack_suspected event.
+                    # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
+                    # CODEX AGENT: emission does not rewrite the metric, but the folded trust_gate policy
+                    # can exclude high-precision signals from champion/breeding under gate/block.
                     sigs = []
                     # Scan the WHOLE solution surface, not just solution.py — a patch-gated multi-file
                     # agent can hide answer-key access / leakage / the real computation in an in-surface
