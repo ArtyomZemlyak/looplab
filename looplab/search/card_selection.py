@@ -1218,6 +1218,15 @@ def _counterfactual_owned_selection_state(
             and link.get("generation") == generation
         ):
             continue
+        # An administratively-dead sibling (operator-dropped or merged, so its Card is absent/closed)
+        # will itself be terminalized by the freshness gate on its own turn. Including it here would make
+        # `_counterfactual_owned_card_state` return None and fail the WHOLE counterfactual closed —
+        # spuriously superseding a HEALTHY sibling in the same speculative population (the L6-drop /
+        # card_merged x L5a-speculation interaction). Skip it so only genuinely-owned pairs are reopened.
+        sibling_card = state.cards.get(sibling_card_id)
+        if (sibling_card is None or sibling_card.dropped_reason is not None
+                or sibling_card.merged_into is not None):
+            continue
         pairs.append((sibling_card_id, sibling_id))
 
     selection_state = state

@@ -233,11 +233,15 @@ class EvaluateMixin:
                                 return "reset"
                             if e.type == EV_NODE_ABORT:
                                 intervention = "abort"
-                        if intervention is None and operator_drop_ids:
-                            # Fold only once an explicit post-start operator drop exists. This follows
-                            # merge chains added before or during the eval without making every 300 ms
-                            # watcher poll replay the complete run. Any corrupt/ambiguous ownership is
-                            # deliberately a no-op rather than a kill of the wrong worker.
+                        if (intervention is None and operator_drop_ids
+                                and isinstance(card_id, str) and card_id):
+                            # Fold only once an explicit post-start operator drop exists AND this node
+                            # actually carries a Card identity to match — a card-less worker can never
+                            # be a drop target (`_card_identity_spellings` returns nothing for a missing
+                            # id), so skipping the fold there is behaviour-preserving, not just cheaper.
+                            # This follows merge chains added before or during the eval without making
+                            # every 300 ms watcher poll replay the complete run. Any corrupt/ambiguous
+                            # ownership is deliberately a no-op rather than a kill of the wrong worker.
                             try:
                                 active_spellings = _card_identity_spellings(
                                     fold(current_events), card_id)

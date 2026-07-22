@@ -391,12 +391,19 @@ def test_consumed_speculative_sibling_stays_masked_from_next_prefetch_population
     ) is False
 
 
-@pytest.mark.parametrize("terminal_exclusion", ["aborted", "tombstoned"])
+@pytest.mark.parametrize("terminal_exclusion", ["aborted", "tombstoned", "dropped", "merged"])
 def test_terminally_excluded_speculative_sibling_does_not_poison_common_population(
     terminal_exclusion,
 ):
     subject = _owned(_ready_card("subject", concepts=("subject",)), 2)
     excluded = _owned(_ready_card("excluded", concepts=("excluded",)), 3)
+    # A sibling whose CARD is administratively dead (operator-dropped or merged) must NOT poison the
+    # subject's freshness counterfactual — it is terminalized by the gate on its own turn. The node
+    # itself stays pending in these two cases (only the Card carries the closure).
+    if terminal_exclusion == "dropped":
+        excluded = excluded.model_copy(update={"status": "dropped", "dropped_reason": "operator dropped"})
+    elif terminal_exclusion == "merged":
+        excluded = excluded.model_copy(update={"merged_into": "subject"})
     subject_node = _node(
         2, parents=(0,), operator="improve", status=NodeStatus.pending,
         metric=None, card_id="subject",
