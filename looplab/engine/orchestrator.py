@@ -3719,6 +3719,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "rationale": (idea.rationale or "")[:400],
             # Deliberately narrow: replay treats any future executable member in this block as an
             # incomplete v1 action rather than silently blessing lossy semantics.
+            # CODEX AGENT: the production writer also drops Idea.concepts, while novelty/card-enriched
+            # signals gain a Card subject only after a Node exists. Such a Card is then work-owned and
+            # no longer selection-ready, so real selectable Cards reach novelty/coverage scoring empty.
+            # Persist bounded proposal-time scoring receipts, or remove these terms from live ranking.
             "idea": {
                 "operator": action["operator"],
                 "params": action["params"],
@@ -3965,6 +3969,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return None
             card_id = plan.card_id
             reserved_idea = plan.idea
+            # CODEX AGENT: _id_lock is process-local and these unconditional appends are not one log
+            # transaction. A UI control can land between Card mint and build claim, after which paid
+            # work proceeds from stale authority. Commit mint+claim with append_many against the folded
+            # tail (and tail-CAS reuse-only claims) so interleaving forces a fresh plan.
             if plan.disposition == "mint":
                 self.store.append(EV_CARD_ADDED, plan.payload)
             self.store.append(EV_NODE_BUILDING, {

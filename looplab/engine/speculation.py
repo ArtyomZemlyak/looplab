@@ -1422,6 +1422,10 @@ class SpeculationMixin:
                             or key in self._spec_builds
                         ):
                             return False
+                        # CODEX AGENT: recovery may have terminalized this head's interrupted
+                        # node_building after it consumed the final physical Node id. The request then
+                        # has no result but capacity remains zero, so no worker can close it and this
+                        # session polls forever. Close recovered unbuildable heads before this gate.
                         if self._node_reservation_slots_remaining(
                             current, consume_request=True,
                         ) < 1:

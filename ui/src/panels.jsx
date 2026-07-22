@@ -1174,6 +1174,10 @@ const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', 
 
 const _CARD_COLUMNS = [
   ['proposed', 'Proposed', 'work item is open and has not started'],
+  // CODEX AGENT: these speculative lanes are unreachable from the production Card projection:
+  // requested/done receipts live only in recovery journals, while public status derives from
+  // proposed/building/running/gated/evaluated/dropped. Paid in-flight or commit-buffered work therefore
+  // appears Proposed; project a bounded speculative owner state before advertising these lanes.
   ['speculating', 'Speculating', 'speculative build requested'],
   ['building', 'Building', 'code is being produced'],
   ['built-awaiting-commit', 'Awaiting commit', 'build finished; durable node commit is pending'],
