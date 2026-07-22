@@ -2517,7 +2517,12 @@ def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         d.get("statement"), max_chars=_CARD_REPLAY_STATEMENT_MAX, strip=True)
     if card_id is not None and statement is not None and d.get("source") == "operator":
         st.card_operator_edits.pop(card_id, None)
-        st.card_operator_edits[card_id] = {"statement": statement, "source": "operator"}
+        edit = {"statement": statement, "source": "operator"}
+        # Legacy/in-memory Event objects may not carry a durable sequence. Never manufacture an
+        # acknowledgement for those rows; modern EventStore records always take this exact branch.
+        if type(e.seq) is int and e.seq >= 0:
+            edit["event_seq"] = e.seq
+        st.card_operator_edits[card_id] = edit
 
 
 def _on_card_resource_pinned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -5122,6 +5127,9 @@ def _derive_cards(st: RunState) -> None:
         c = cards.get(_canon(bounded_id)) if bounded_id is not None else None
         if c is not None and isinstance(edit, dict) and edit.get("statement"):
             c.statement = str(edit["statement"])
+            event_seq = edit.get("event_seq")
+            if type(event_seq) is int and 0 <= event_seq <= (1 << 31) - 1:
+                c.statement_edit_seq = event_seq
     for raw_id, pri in (st.card_priority_pins or {}).items():
         bounded_id = _card_id(raw_id)
         c = cards.get(_canon(bounded_id)) if bounded_id is not None else None

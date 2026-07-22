@@ -42,7 +42,8 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
         freshness: 'current', owner_state: 'none',
       },
       selection_ready: false, selection_blockers: ['work_in_flight', 'freshness_stale'],
-      evidence: [7, 8], best_delta: 0.25, parent_ids: [3], scored_against: 3,
+      evidence: [7, 8], best_delta: 0.25, parent_ids: [3], parent_generations: { 3: 2 },
+      scored_against: 3, scored_against_generation: 4,
       concept_tags: ['model/tree'], novelty_verdict: { grade: 'ALLOW' }, provenance_tier: 'native',
       // These are deliberately hostile body-shaped fields. The Card UI is an explicit allowlist and
       // must not render them even if a malformed caller bypasses the server projection in a unit test.
@@ -71,6 +72,9 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
 
   assert.match(markup, /aria-label="Cards"/)
   assert.match(markup, /aria-label="Card lifecycle kanban"/)
+  assert.match(markup, /role="region" aria-label="Card lifecycle kanban"/)
+  assert.match(markup, /aria-labelledby="card-lane-proposed"/)
+  assert.match(markup, /<h3 id="card-lane-proposed"/)
   for (const lane of ['Proposed', 'Building', 'Coded', 'Running', 'Evaluated', 'Gated', 'Dropped']) {
     assert.match(markup, new RegExp(`>${lane} <`))
   }
@@ -86,7 +90,9 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
   assert.match(markup, /Provenance[\s\S]*identity native[\s\S]*action card_added[\s\S]*resource pin operator/)
   assert.match(markup, /freshness stale|freshness current/)
   assert.match(markup, /work in flight/)
-  assert.match(markup, /partial DTO/)
+  assert.match(markup, /partial details/)
+  assert.match(markup, /parent #3 · attempt 2/)
+  assert.match(markup, /scored vs #3 · attempt 4/)
   assert.match(markup, /aria-label="Open evidence node #7"/)
   assert.match(markup, /Operator controls/)
   for (const label of ['Save text', 'Pin priority', 'Pin resources', 'Confirm drop']) {
@@ -136,6 +142,7 @@ test('Card controls use only generation-fenced command helpers and never client 
   ]) assert.match(controls, new RegExp(`runCommand\\([^)]*['"]${eventType}['"]`, 's'))
   assert.doesNotMatch(controls, /source\s*:|dropped_by\s*:|pinned\s*:/)
   assert.match(runView, /\['hypotheses', 'Cards'\]/)
+  assert.match(runView, /runGeneration=\{generation\}/)
 })
 
 test('Card optimistic controls retain uncertain commands and roll back only the failed operation', async () => {
@@ -155,7 +162,7 @@ test('An uncertain (confirmation-unknown) command does not freeze controls on th
   assert.match(board, /const globalPending = [\s\S]*?pending\.phase !== 'confirmation-unknown'/)
 })
 
-test('Edit reflection needs the card to move off the submit-time baseline (no extend-edit false clear)', async () => {
+test('Edit reflection prefers the durable event receipt and safely falls back for legacy folds', async () => {
   // CODEX AGENT: this is a source-text regex test, so it never submits two edits or delivers the two
   // SSE folds in the problematic order; an equivalent-looking but incorrect predicate (or even dead
   // code) can satisfy it. Render the board with a mocked CONTROL transport and assert the optimistic
@@ -163,6 +170,7 @@ test('Edit reflection needs the card to move off the submit-time baseline (no ex
   const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
   const reflected = source.slice(
     source.indexOf('function _cardControlReflected'), source.indexOf('function _cardWithOptimisticControls'))
+  assert.match(reflected, /statement_edit_seq[\s\S]*foldedEventSeq >= expected/)
   // The clipped-prefix branch counts as landed only when the card is a prefix of the submission but NOT
   // a prefix of the baseline — so an extend edit's pre-value (and a still-in-flight earlier chained edit
   // whose value is a prefix of this submission) cannot read as already-landed.
@@ -173,6 +181,18 @@ test('Edit reflection needs the card to move off the submit-time baseline (no ex
   assert.match(board, /const sentEditRef = useRef\(\{\}\)/)
   assert.match(board, /let editBaseline/)
   assert.match(board, /prior\.startsWith\(card\.statement\)\) \? prior : card\.statement/)
+  assert.match(board, /record\?\.event_seq/)
+  assert.match(board, /commandRecord\?\.event_seq/)
+})
+
+test('Card optimistic state is scoped to run generation and ignores late unmounted completions', async () => {
+  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
+  const owner = source.slice(source.indexOf('export function HypothesisBoard'), source.indexOf('// Module scope'))
+  assert.match(owner, /const scopeKey = `\$\{runId \|\| ''\}:\$\{runGeneration \|\| ''\}`/)
+  assert.match(owner, /key=\{`cards:\$\{scopeKey\}`\}/)
+  assert.match(board, /activeRef\.current = false/)
+  assert.match(board, /if \(!activeRef\.current\) return \{ kind: 'stale'/)
 })
 
 test('Each Card control draft re-seeds only from its own folded source (no cross-field clobber)', async () => {

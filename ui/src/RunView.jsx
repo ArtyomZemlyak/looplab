@@ -1306,7 +1306,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} readOnly={readOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'hypotheses' && panelAllowed('hypotheses') && <HypothesisBoard state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
+      {panel === 'hypotheses' && panelAllowed('hypotheses') && <HypothesisBoard state={state}
+        runId={runId} runGeneration={generation} onSelect={selectNode} onToast={showToast}
+        onClose={closePanel} />}
       {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNode} onClose={closePanel} />}
       {panel === 'importance' && panelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
       {panel === 'failures' && panelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNode} onClose={closePanel} />}

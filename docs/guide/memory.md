@@ -255,5 +255,6 @@ necessarily exposed as an on-demand tool.
 - `LOOPLAB_RESEARCHER_TOOLS` — master switch for the tool-using Researcher (agentic retrieval); off → a plain researcher that only sees the injected memory.
 
 The assistant can grow the knowledge base directly: share experiment results/lessons and ask it to
-remember them, and it distils + saves a note via its `remember` tool (works in any mode). See
+remember them, and it distils + saves a note via its `remember` tool. The tool is unavailable in
+Plan mode and remains subject to the active mode's write permissions in mutating modes. See
 [LLM & coding agents](llm-and-agents.md).

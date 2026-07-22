@@ -553,7 +553,7 @@ button { font: inherit; }
   align-items: start; overflow-x: auto; overscroll-behavior-inline: contain; padding: 1px 1px 8px; }
 .card-col { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px;
   min-height: 80px; min-width: 0; }
-.card-col-h { font-weight: 600; font-size: 11px; margin-bottom: 6px;
+.card-col-h { font-weight: 600; font-size: 11px; margin: 0 0 6px;
   text-transform: uppercase; letter-spacing: .03em; }
 .card-col.card-building .card-col-h, .card-col.card-running .card-col-h { color: var(--working-text); }
 .card-col.card-evaluated .card-col-h { color: color-mix(in srgb, var(--ok) 52%, var(--fg)); }

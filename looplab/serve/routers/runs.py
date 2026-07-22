@@ -61,6 +61,7 @@ from looplab.serve.protocol import (
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.paid_work import (
     RunCostAccountingPending, metered_run_client, run_directory_identity)
+from looplab.serve.public_cards import PublicCardsProjectionMetadata
 from looplab.serve.run_commands import run_generation_token
 
 # Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
@@ -139,6 +140,27 @@ class RunConfigUpdateResponse(BaseModel):
     normalized_pinned: list[str]
     trust_gate_event_appended: bool
     engine_running: bool | None
+
+
+class PublicRunStateBody(BaseModel):
+    """Typed Card seam inside the intentionally extensible legacy run-state object."""
+
+    model_config = ConfigDict(extra="allow")
+
+    cards: dict[str, dict[str, Any]]
+    cards_projection: PublicCardsProjectionMetadata
+
+
+class PublicRunStateResponse(BaseModel):
+    """Stable owner-state envelope; ``state`` keeps additive legacy fields discoverable at runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: PublicRunStateBody
+    seq: int = Field(ge=-1)
+    max_seq: int = Field(ge=-1)
+    event_count: int = Field(ge=0)
+    generation: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 def _run_config_request_body_contract() -> dict[str, Any]:
@@ -802,11 +824,7 @@ def build_router(srv) -> APIRouter:
     srv.list_runs_fn = list_runs
 
     # ------------------------------------------------------------------ state + time-travel
-    # CODEX AGENT: This is the advertised public Card read contract, but without a response model OpenAPI
-    # cannot expose ``PublicCardsEnvelope``/``cards_projection`` to generated clients. Add a typed state
-    # envelope (with an intentional compatibility extension point for legacy fields) so consumers can
-    # discover and validate the completeness contract instead of reverse-engineering runtime JSON.
-    @router.get("/api/runs/{run_id}/state")
+    @router.get("/api/runs/{run_id}/state", response_model=PublicRunStateResponse)
     def get_state(run_id: str, seq: Optional[int] = None):
         """Return the bounded public run state.
 

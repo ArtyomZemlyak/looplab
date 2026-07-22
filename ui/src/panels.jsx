@@ -1261,13 +1261,17 @@ function _sameCardResourceValues(left, right) {
   ))
 }
 
-function _cardControlReflected(card, kind, patch, baseline) {
+function _cardControlReflected(card, kind, patch, baseline, expectedEventSeq) {
   if (!card || !isRecord(patch)) return false
   if (kind === 'edit') {
+    // Modern folds publish the exact durable event that owns the display overlay. This remains
+    // reliable when public-state secret redaction transforms the text into a non-prefix value.
+    const foldedEventSeq = _cardInt(card.statement_edit_seq)
+    const expected = _cardInt(expectedEventSeq)
+    if (expected != null && foldedEventSeq != null && foldedEventSeq >= expected) return true
     // The server clips the display statement (fold cap) and may redact secrets, so the folded value is
     // not always byte-equal to what the operator typed. Treat an exact match OR a non-empty clipped
-    // PREFIX of the submitted text as reflected — otherwise the optimistic override (and its aria-busy
-    // pending state) would never clear when the statement was clipped.
+    // prefix of the submitted text as reflected for pre-receipt logs.
     if (typeof card.statement !== 'string' || typeof patch.statement !== 'string') return false
     if (card.statement === patch.statement) return true
     // A clipped/redacted fold is a PROPER prefix of the submitted text — but so is the PRE-EDIT value for
@@ -1280,10 +1284,6 @@ function _cardControlReflected(card, kind, patch, baseline) {
     // entry) only an exact match reflects.
     return typeof baseline === 'string'
       && card.statement.length > 0 && patch.statement.startsWith(card.statement)
-      // CODEX AGENT: secret redaction is not guaranteed to preserve a submitted-text prefix. If an
-      // uncertain request actually lands as a non-prefix normalized value, this predicate can never
-      // reflect it and the Card remains `confirmation-unknown` forever. Sequence/command identity from
-      // the folded event is the reliable acknowledgement; string-shape heuristics cannot close this state.
       && !baseline.startsWith(card.statement)
   }
   if (kind === 'priority') return card.priority === patch.priority && card.pinned === true
@@ -1365,7 +1365,15 @@ function _CardKanbanCard({
   const parents = _cardNodes(card.parent_ids)
   const parent = _cardInt(card.parent_id)
   if (parent != null && !parents.includes(parent)) parents.unshift(parent)
+  const parentGenerations = isRecord(card.parent_generations) ? card.parent_generations : null
   const scoredAgainst = _cardInt(card.scored_against)
+  const scoredAgainstGeneration = _cardInt(card.scored_against_generation)
+  const parentLineage = parents.map(id => {
+    const attempt = parentGenerations ? _cardInt(parentGenerations[String(id)]) : null
+    return `#${id} · attempt ${attempt == null ? 'unknown' : attempt}`
+  }).join(', ')
+  const scoredLineage = scoredAgainst == null ? ''
+    : `#${scoredAgainst} · attempt ${scoredAgainstGeneration == null ? 'unknown' : scoredAgainstGeneration}`
   const bestDelta = _cardNumber(card.best_delta)
   const priority = _cardNumber(card.priority)
   const novelty = isRecord(card.novelty_verdict) ? _cardText(card.novelty_verdict.grade) : null
@@ -1462,7 +1470,7 @@ function _CardKanbanCard({
           : <span className="chip xs" title="selection readiness was not present in the public projection">readiness unknown</span>}
       {receipt && receipt.complete !== true && <span className="chip xs warn"
         title={`${omissionCount} public field omission${omissionCount === 1 ? '' : 's'}`}>
-        partial DTO{omissionCount ? ` · ${omissionCount}` : ''}</span>}
+        partial details{omissionCount ? ` · ${omissionCount}` : ''}</span>}
     </div>
     {(operator || evalProfile || params.length || spaceCount) && <div className="card-kanban-fact">
       <span className="card-kanban-k">Action</span>
@@ -1500,8 +1508,8 @@ function _CardKanbanCard({
     {!blockersKnown && <div className="muted card-kanban-unknown">Selection blockers unavailable</div>}
     {(parents.length > 0 || scoredAgainst != null) && <div className="card-kanban-fact">
       <span className="card-kanban-k">Lineage</span>
-      <span>{parents.length ? `parent ${parents.map(id => `#${id}`).join(', ')}` : ''}
-        {scoredAgainst != null ? `${parents.length ? ' · ' : ''}scored vs #${scoredAgainst}` : ''}</span>
+      <span>{parents.length ? `parent ${parentLineage}` : ''}
+        {scoredAgainst != null ? `${parents.length ? ' · ' : ''}scored vs ${scoredLineage}` : ''}</span>
     </div>}
     {(concepts.length > 0 || novelty) && <div className="card-kanban-tags">
       {novelty && <span className="chip xs">novelty {novelty}</span>}
@@ -1576,13 +1584,13 @@ function _CardKanbanCard({
 }
 
 function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
-  // CODEX AGENT: all three mutation trackers below are keyed only by Card id and survive a `runId`
-  // change. Card ids are content-derived and can legitimately repeat across runs, so a late response
-  // from run A can clear/replace optimistic state for the same id in run B; `sentEditRef` can also supply
-  // B with A's edit baseline. Key this state by run+generation and fence async completions, or remount/reset
-  // the board atomically on runId before accepting another control.
   const [optim, setOptim] = useState({})
   const inFlight = useRef(new Set())
+  const activeRef = useRef(true)
+  useEffect(() => {
+    activeRef.current = true
+    return () => { activeRef.current = false }
+  }, [])
   // Last edit statement SUBMITTED per card id. It outlives the optimistic override (which clears on a
   // success ack before the SSE fold arrives), so a chained extend edit can baseline against the prior
   // in-flight submission instead of a stale fold — see the editBaseline capture in cardControl.
@@ -1607,7 +1615,8 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         const updates = { ...(entry.updates || {}) }
         for (const kind of _CARD_CONTROL_KINDS) {
           if (updates[kind]
-              && _cardControlReflected(card, kind, updates[kind], entry.editBaseline)) {
+              && _cardControlReflected(
+                card, kind, updates[kind], entry.editBaseline, entry.editEventSeq)) {
             delete updates[kind]
             changed = true
           }
@@ -1678,22 +1687,26 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
           : kind === 'resources'
             ? await CONTROL.pinCardResources(runId, card.id, data.gpus, data.gpu_mem_mib)
             : await CONTROL.dropCard(runId, card.id, data.reason)
+      if (!activeRef.current) return { kind: 'stale', message: 'Card board scope changed' }
       const feedback = commandFeedback(record, {
         success: labels.success, noop: `${labels.success} (already current)`,
         executing: `${labels.success} — waiting for the live fold`, failure: labels.failure,
       })
+      const recordEditSeq = kind === 'edit' ? _cardInt(record?.event_seq) : null
       onToast?.(feedback.message)
       setOptim(current => {
         const entry = current[card.id]
         if (!entry) return current
         const updates = { ...(entry.updates || {}) }
         const rawCard = cardsByIdRef.current.get(card.id)
+        const editEventSeq = recordEditSeq ?? entry.editEventSeq
         // Clear the optimistic override once the command DEFINITIVELY settles (success/noop/error) — not
         // only on an exact fold reflection: the server may clip/redact the value, so waiting for a
         // byte-equal fold would leave the card stuck showing operator text with its controls disabled.
         // Only a 'pending' (accepted, engine will apply later) settle keeps the override until the fold.
         const settled = ['error', 'success', 'noop'].includes(feedback.kind)
-        if (settled || _cardControlReflected(rawCard, kind, patch, entry.editBaseline)) {
+        if (settled || _cardControlReflected(
+          rawCard, kind, patch, entry.editBaseline, editEventSeq)) {
           delete updates[kind]
         }
         const pending = feedback.kind === 'pending' && updates[kind]
@@ -1701,12 +1714,17 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         const notice = feedback.kind === 'error'
           ? { tone: 'error', text: feedback.message }
           : { tone: feedback.kind === 'pending' ? 'pending' : 'success', text: feedback.message }
-        return { ...current, [card.id]: { ...entry, updates, pending, notice } }
+        return { ...current, [card.id]: {
+          ...entry, updates, pending, notice,
+          ...(editEventSeq == null ? {} : { editEventSeq }),
+        } }
       })
       return feedback
     } catch (error) {
+      if (!activeRef.current) return { kind: 'stale', message: 'Card board scope changed' }
       const uncertain = error?.submissionMayHaveSucceeded === true || error?.commandUnknown === true
         || ['accepted', 'executing'].includes(error?.commandRecord?.status)
+      const commandEditSeq = kind === 'edit' ? _cardInt(error?.commandRecord?.event_seq) : null
       const message = uncertain
         ? `${labels.success} may still complete — waiting for the live fold`
         : `${labels.failure}: ${error?.message || error}`
@@ -1718,6 +1736,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         if (!uncertain) delete updates[kind]
         return { ...current, [card.id]: {
           ...entry, updates,
+          ...(commandEditSeq == null ? {} : { editEventSeq: commandEditSeq }),
           pending: uncertain ? { kind, phase: 'confirmation-unknown' } : null,
           notice: { tone: uncertain ? 'pending' : 'error', text: message },
         } }
@@ -1735,12 +1754,15 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
     ? `${visibleCards.length} of ${total} public work items` : `${visibleCards.length} work item${visibleCards.length === 1 ? '' : 's'}`
   return <Panel title="Cards" sub={sub} onClose={onClose} wide>
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
-    <div className="card-board" aria-label="Card lifecycle kanban">
+    <div className="card-board" role="region" aria-label="Card lifecycle kanban">
       {lanes.map(([key, label, hint]) => {
         const rows = visibleCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
         const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
-        return <section key={key} className={'card-col' + tone} aria-label={`${label}: ${rows.length}`}>
-          <div className="card-col-h" title={hint}>{label} <span className="muted">{rows.length}</span></div>
+        const laneId = `card-lane-${encodeURIComponent(key)}`
+        return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
+          <h3 id={laneId} className="card-col-h" title={hint}>
+            {label} <span className="muted">{rows.length}</span>
+          </h3>
           {rows.map(card => <_CardKanbanCard key={card.id} card={card}
             receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
             controlState={optim[card.id]} controlsLocked={globalPending && !optim[card.id]?.pending}
@@ -1869,17 +1891,21 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
   )
 }
 
-export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
+export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose, onToast }) {
   const cards = _cardRows(state)
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
   // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.
   const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0
     || projection?.source_valid === false
+  // Card ids can repeat across runs and after an in-place reset. Remount every optimistic/ref tracker
+  // at that exact scope boundary; the child also ignores completions after unmount.
+  const scopeKey = `${runId || ''}:${runGeneration || ''}`
   return hasAuthoritativeCards
-    ? <_CardKanban state={state} cards={cards} runId={runId} onSelect={onSelect}
+    ? <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId} onSelect={onSelect}
       onClose={onClose} onToast={onToast} />
-    : <_HypothesisFallback state={state} runId={runId} onSelect={onSelect} onClose={onClose} onToast={onToast} />
+    : <_HypothesisFallback key={`hypotheses:${scopeKey}`} state={state} runId={runId}
+      onSelect={onSelect} onClose={onClose} onToast={onToast} />
 }
 
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live

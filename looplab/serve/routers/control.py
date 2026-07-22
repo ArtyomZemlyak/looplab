@@ -9,12 +9,13 @@ import secrets
 import stat
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Literal, Optional
 
 import anyio
 import orjson
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
@@ -41,6 +42,82 @@ from looplab.serve.protocol import (
     COLLABORATION_EVENTS, CONTROL_EVENTS, EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE)
 from looplab.serve.run_commands import normalize_control
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+
+
+class RunCommandRequest(BaseModel):
+    """Documented command body; raw parsing below preserves established HTTP 400 behavior."""
+
+    # Older API clients may attach correlation metadata at this envelope level. It is ignored rather
+    # than persisted; event-specific ``data`` remains closed and server-normalized.
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    data: dict[str, Any] | None = None
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+
+class RunCommandError(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    code: str
+    message: str
+    # Older HTTP conflict details omitted one or both advisory fields; durable command errors include
+    # them explicitly. Defaults keep the shared documentation schema honest for both envelopes.
+    retryable: bool = False
+    remediation: str = ""
+
+
+class RunCommandRecord(BaseModel):
+    """Public durable command record; additive observation fields remain forward compatible."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(pattern=r"^cmd_[0-9a-f]{32}$")
+    status: Literal[
+        "accepted", "executing", "succeeded", "noop", "failed", "rejected", "timed_out",
+    ]
+    event_type: str
+    error: RunCommandError | None
+    # Pre-generation command records remain readable as terminal history.
+    run_generation: Optional[str] = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    created_at: float
+    updated_at: float
+    event_seq: Optional[int] = Field(default=None, ge=0)
+
+
+class RunCommandHTTPError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    detail: str | RunCommandError
+
+
+def _command_post_openapi() -> dict[str, Any]:
+    """Expose the manual header/body contract without replacing its compatibility parser."""
+    return {
+        "parameters": [{
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": True,
+            "description": "Opaque command identity; reuse it only for an exact retry.",
+            "schema": {"type": "string", "minLength": 1, "maxLength": 512},
+        }],
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": RunCommandRequest.model_json_schema()},
+            },
+        },
+    }
+
+
+def _command_responses(description: str) -> dict[int, dict[str, Any]]:
+    return {
+        200: {"model": RunCommandRecord, "description": description},
+        400: {"model": RunCommandHTTPError, "description": "Malformed command request"},
+        404: {"model": RunCommandHTTPError, "description": "Run or command not found"},
+        409: {"model": RunCommandHTTPError, "description": "Generation or lifecycle conflict"},
+        503: {"model": RunCommandHTTPError, "description": "Durability or ownership unavailable"},
+    }
 
 
 def _spawn_engine(*args, **kwargs):
@@ -187,11 +264,11 @@ def build_router(srv) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
 
-    # CODEX AGENT: this is the sole public Card-control entry, but raw Request/manual Idempotency-Key and
-    # no response_model publish no usable request/header/response contract in OpenAPI. Add strict typed
-    # models (retaining the manual 400 parser if needed) so generated clients can submit and observe the
-    # command lifecycle.
-    @router.post("/api/runs/{run_id}/commands")
+    @router.post(
+        "/api/runs/{run_id}/commands",
+        responses=_command_responses("Durable command record"),
+        openapi_extra=_command_post_openapi(),
+    )
     async def submit_command(run_id: str, request: Request, response: Response):
         _command_response_headers(response)
         rd = _run_dir(run_id)
@@ -207,12 +284,18 @@ def build_router(srv) -> APIRouter:
             rd, idem, body.get("type"), body.get("data"),
             expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD)))
 
-    @router.get("/api/runs/{run_id}/commands/{command_id}")
+    @router.get(
+        "/api/runs/{run_id}/commands/{command_id}",
+        responses=_command_responses("Current durable command record"),
+    )
     def get_command(run_id: str, command_id: str, response: Response):
         _command_response_headers(response)
         return srv.commands.get(_run_dir(run_id), command_id)
 
-    @router.post("/api/runs/{run_id}/commands/{command_id}/retry")
+    @router.post(
+        "/api/runs/{run_id}/commands/{command_id}/retry",
+        responses=_command_responses("Retried durable command record"),
+    )
     def retry_command(run_id: str, command_id: str, response: Response):
         _command_response_headers(response)
         return srv.commands.retry(_run_dir(run_id), command_id)

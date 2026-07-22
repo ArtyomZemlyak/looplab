@@ -295,8 +295,9 @@ byte-identical to today; the card store is pure additive folded state.
 The target architecture has two deliberately different identities:
 
 - `Hypothesis` is the research-direction aggregate: it may collect many experiments and verdicts.
-- `Card` is exactly one immutable proposal/work item: its native id owns one action receipt and one
-  lifecycle. Merging directions must not silently merge executable actions.
+- `Card` is exactly one stable-identity proposal/work item: its native id owns one immutable seed/action
+  receipt and one replay-derived lifecycle. Display text, priority, configured resources, and lifecycle
+  are explicit overlays; merging directions must not silently merge executable actions.
 
 The currently landed `RunState.cards: dict[str, Card]` is a **migration read model** derived by
 `_derive_cards`. For compatibility it still mirrors hash-joined hypotheses, unions legacy evidence,
@@ -307,7 +308,7 @@ Layer 3 must remain disabled until the native mint/link lifecycle removes that a
 | Card field | Filled by (producer → today's home) | Layer-1 status |
 |---|---|---|
 | `id` (opaque, stable, wording-independent) | engine-minted at `card_added` (§4) | new |
-| `statement`, `rationale`, `source` | `Idea.hypothesis`/`rationale` + `hypothesis_added.source` | reuse |
+| `statement`, `statement_edit_seq`, `rationale`, `source` | `Idea.hypothesis`/`rationale` + `hypothesis_added.source`; the sequence acknowledges the latest operator display overlay | reuse + receipt |
 | `idea` block: `operator, params, space, eval_profile` | `Idea` (`models.py:166-218`) via the built node | link |
 | `concept_tags` + exact `concept_source` receipt (`provenance_tier` compatibility scalar) | one deterministic action/evidence owner's folded `node_concepts`; node-less proposal snapshot until linked | link |
 | `novelty_verdict` (grade/level, near_node, recommendation) | `novelty_graded`/`novelty_rejected` — **re-home** | new field |

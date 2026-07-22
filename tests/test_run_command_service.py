@@ -121,6 +121,50 @@ def _types(rd):
     return [event.type for event in EventStore(rd / "events.jsonl").read_all()]
 
 
+def test_command_openapi_describes_manual_body_header_records_and_errors(tmp_path):
+    rd = _seed(tmp_path)
+    app = make_app(tmp_path)
+    spec = app.openapi()
+    paths = spec["paths"]
+    components = spec["components"]["schemas"]
+    command_path = "/api/runs/{run_id}/commands"
+    record_path = "/api/runs/{run_id}/commands/{command_id}"
+    retry_path = record_path + "/retry"
+
+    post = paths[command_path]["post"]
+    header = next(item for item in post["parameters"]
+                  if item["in"] == "header" and item["name"] == "Idempotency-Key")
+    assert header["required"] is True
+    assert header["schema"]["minLength"] == 1
+    assert header["schema"]["maxLength"] == 512
+    body = post["requestBody"]["content"]["application/json"]["schema"]
+    assert body["additionalProperties"] is True
+    assert set(body["required"]) == {"type", "expected_generation"}
+    assert body["properties"]["expected_generation"]["pattern"] == r"^[0-9a-fA-F]{64}$"
+
+    for path, method in ((command_path, "post"), (record_path, "get"), (retry_path, "post")):
+        responses = paths[path][method]["responses"]
+        assert responses["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+            "/RunCommandRecord")
+        assert responses["409"]["content"]["application/json"]["schema"]["$ref"].endswith(
+            "/RunCommandHTTPError")
+
+    record = components["RunCommandRecord"]
+    assert record["additionalProperties"] is True
+    assert set(record["properties"]["status"]["enum"]) == {
+        "accepted", "executing", "succeeded", "noop", "failed", "rejected", "timed_out",
+    }
+    assert components["RunCommandError"]["additionalProperties"] is True
+
+    # The documentation-only response models must not alter the existing manual parser/wire payload.
+    client, _srv = _client(tmp_path, _Driver())
+    response = _post(client, "hint", {"text": "schema probe"}, key="schema-probe")
+    assert response.status_code == 200
+    row = response.json()
+    assert row["status"] == "succeeded" and isinstance(row["event_seq"], int)
+    assert EventStore(rd / "events.jsonl").read_all()[-1].type == "hint"
+
+
 def test_task_file_for_prefers_immutable_snapshot_and_validates_legacy_target(tmp_path):
     rd = tmp_path / "run"
     rd.mkdir()

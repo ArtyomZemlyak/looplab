@@ -33,7 +33,8 @@ _SKIP = object()
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
     "id", "status", "verdict", "actionable", "identity", "selection_provenance",
-    "selection_blockers", "selection_ready", "concept_source", "statement", "seed_statement", "source",
+    "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
+    "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
     "dropped_reason", "dropped_by", "parent_id", "parent_ids", "parent_generations",
     "scored_against", "scored_against_generation", "scored_against_empty", "operator",
@@ -53,7 +54,7 @@ _REF_FIELDS = {
     "eval_profile", "research_origin", "provenance_tier",
 }
 _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "foresight_rank"}
-_NONNEG_INT_FIELDS = {"scored_against_generation"}
+_NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
 _POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
 _REF_LIST_FIELDS = {"aliases", "concept_tags", "lesson_refs", "claim_refs"}

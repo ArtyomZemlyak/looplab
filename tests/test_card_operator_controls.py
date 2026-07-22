@@ -17,6 +17,7 @@ from looplab.events.types import (  # noqa: E402
     EV_CARD_RESOURCE_PINNED,
 )
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS  # noqa: E402
+from looplab.serve.public_cards import public_cards  # noqa: E402
 from looplab.serve.run_commands import (  # noqa: E402
     CONTROL_DATA_FIELDS, CONTROL_SPECS, EnginePolicy, RunCommandService,
     normalize_control, run_generation_token,
@@ -231,7 +232,7 @@ def test_operator_overlays_win_without_mutating_seed_or_action_footprint(tmp_pat
     store.append(EV_CARD_REPRIORITIZED, {
         "id": "card-1", "priority": 7, "source": "operator", "pinned": True,
     })
-    store.append(EV_CARD_EDITED, {
+    edit_event = store.append(EV_CARD_EDITED, {
         "id": "card-1", "statement": "display paraphrase", "source": "operator",
     })
     store.append(EV_CARD_RESOURCE_PINNED, {
@@ -252,6 +253,8 @@ def test_operator_overlays_win_without_mutating_seed_or_action_footprint(tmp_pat
 
     assert card.seed_statement == "immutable seed"
     assert card.statement == "display paraphrase"
+    assert card.statement_edit_seq == edit_event.seq
+    assert public_cards(state.cards)["card-1"]["statement_edit_seq"] == edit_event.seq
     assert card.priority == 7 and card.pinned is True
     assert card.footprint == {"gpus": 2, "gpu_mem_mib": 12_000}
     assert card.resource_pin == {
@@ -259,6 +262,7 @@ def test_operator_overlays_win_without_mutating_seed_or_action_footprint(tmp_pat
     }
     assert 0 in card.evidence
     assert state.card_operator_edits["card-1"]["statement"] == "display paraphrase"
+    assert state.card_operator_edits["card-1"]["event_seq"] == edit_event.seq
     assert state.card_priority_pins["card-1"] == 7
     assert state.card_resource_pins["card-1"]["gpus"] == 1
 

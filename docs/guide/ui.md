@@ -162,15 +162,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   lanes are reserved UI vocabulary until durable ownership/eval-start events make them derivable;
   unknown future statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
-  edit display text, pin the 1-based visible priority, pin an effective GPU envelope, or deliberately
+  edit display text, pin the 1-based visible priority, pin a configured GPU request, or deliberately
   drop a Card. All four actions use the same generation-fenced command lifecycle as the rest of the
-  <!-- # CODEX AGENT: the server command is generation-fenced, but the browser's optimistic maps and
-  async completion callbacks are keyed only by Card id and survive runId changes. Until that state is
-  run-scoped, this sentence must not imply the end-to-end UI lifecycle is fenced across run switches. -->
   workspace; accepted/executing actions remain visibly pending across SSE lag, while a definite
-  failure rolls back only that optimistic field. Resource display keeps the immutable declared
-  `footprint` separate from the effective `resource_pin`; the browser sends only quantitative values
-  and the server stamps operator provenance and validates the live GPU envelope. Dropping a Card is
+  failure rolls back only that optimistic field. Browser state is scoped to run + event-log generation,
+  so a late response from a replaced run cannot mutate the new board. Resource display keeps the
+  receipt-owned declared `footprint` separate from the configured `resource_pin`; the browser sends
+  only quantitative values and the server stamps operator provenance and validates the current GPU
+  envelope. The eventual scheduler allocation may still be smaller or re-clamped. Dropping a Card is
   the explicit stop-now affordance for its matching in-flight eval; engine/freshness drops still burn
   to a valid terminal result. An exact empty Card
   projection keeps the legacy **Hypotheses** add/abandon board as a compatibility fallback for old or

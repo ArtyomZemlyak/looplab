@@ -1281,16 +1281,20 @@ class CardSelectionProvenance(BaseModel):
 
 
 class Card(BaseModel):
-    """One immutable proposal/work item in the target Card queue (docs/23).
+    """One stable-identity proposal/work item in the target Card queue (docs/23).
 
     ``Hypothesis`` remains the many-experiment research-direction aggregate. The projection also
     materializes legacy/hash/synthesized Card shadows so old logs retain a useful board, but those rows
     are advisory and never selection-ready. Only a unique receipt-bound ``card_added`` establishes
     native work-item identity. Current Card selection consumes ``selection_ready`` and never infers
-    executability from the compatibility ``actionable`` flag.
+    executability from the compatibility ``actionable`` flag. The seed/action receipt is immutable;
+    display text, priority, configured resources, and lifecycle are explicit replay-derived overlays.
     """
     id: str                                             # native engine-minted `card-{k}` or legacy statement hash
     statement: str                                      # the DISPLAY statement (operator-editable in L6)
+    # Exact durable event that owns the current operator display edit. Public clients use this receipt
+    # to acknowledge an edit even when secret redaction makes the displayed text non-prefix-equivalent.
+    statement_edit_seq: Optional[int] = Field(default=None, ge=0)
     # The IMMUTABLE seed statement captured at card_added — the stable statement-hash JOIN key, held
     # separate from `statement` so an operator paraphrase (L6 card_edited) overlays DISPLAY only and never
     # un-links the card's hash-joined evidence. Defaults to `statement` for derived/legacy cards.

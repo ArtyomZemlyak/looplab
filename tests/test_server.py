@@ -1651,6 +1651,19 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
     assert response_ref("/api/runs/{run_id}/config", "get").endswith("/RunConfigResponse")
     assert response_ref("/api/runs/{run_id}/config", "put").endswith(
         "/RunConfigUpdateResponse")
+    assert response_ref("/api/runs/{run_id}/state", "get").endswith(
+        "/PublicRunStateResponse")
+
+    state_envelope = components["PublicRunStateResponse"]
+    assert state_envelope["additionalProperties"] is False
+    assert set(state_envelope["required"]) == {
+        "state", "seq", "max_seq", "event_count", "generation",
+    }
+    state_body = components["PublicRunStateBody"]
+    assert state_body["additionalProperties"] is True
+    assert {"cards", "cards_projection"} <= set(state_body["required"])
+    assert state_body["properties"]["cards_projection"]["$ref"].endswith(
+        "/PublicCardsProjectionMetadata")
 
     # CODEX AGENT: canonical envelopes are strict, while the second documented variant preserves
     # pre-editor-v2 flat dictionaries; both paths still reach the same manual 400/CAS parser.
@@ -1695,6 +1708,9 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
         "pattern"] == r"^[0-9a-f]{64}$"
 
     client = TestClient(app)
+    public_state = client.get("/api/runs/demo/state")
+    assert public_state.status_code == 200
+    assert public_state.json()["state"]["cards_projection"]["source_valid"] is True
     ui_schema = client.get(f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION}")
     assert ui_schema.status_code == 200 and ui_schema.json()["revision"]
     settings = client.get("/api/settings").json()
