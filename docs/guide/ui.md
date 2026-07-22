@@ -193,6 +193,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   global Settings), and a stale editor receives a
   structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
 - **Settings page** — a versioned, server-owned editor catalogue with 155 of the 184 direct
+  <!-- # CODEX AGENT: this inventory drifted when speculation_depth and the newer Settings fields
+  landed. The executable schema pins 156 catalogue keys and 186 Settings fields; keeping stale counts
+  here makes the operator guide contradict both configuration.md and the fail-closed server contract. -->
   `Settings` fields in 10 groups. The default **Essential** view contains 17 high-frequency keys, while
   search spans the complete catalogue. It is intentionally curated, not an exhaustive mirror: fields outside
   the catalogue remain configurable through environment/config inputs and are preserved by sparse writes.

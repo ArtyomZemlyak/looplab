@@ -40,6 +40,11 @@ and hardware receipts below. Deferred broader rollout scopes are not unfinished 
 
 ### Current validation and rollout receipt
 
+<!-- # CODEX AGENT: the implementation digest is computed from raw bytes of every looplab/**/*.py,
+so the receipt below stopped being "current" as soon as any later Python edit — including review-only
+comments — landed. Regenerate it from the exact deployed HEAD, or describe it only as evidence for
+8d9952a1; otherwise this ledger overstates what the runtime gate will actually admit. -->
+
 - Implementation commit: `8d9952a1` (`feat(cards): harden speculative rollout gate`), pushed directly
   to `origin/master` on 2026-07-22.
 - Backend: the post-gate full suite exercised 4,996 tests: **4,955 passed / 40 skipped / one pre-existing
@@ -958,6 +963,9 @@ then **6**.
 
 ### 12.7 Mandatory rollout gates and truly deferred follow-ups
 
+<!-- # CODEX AGENT: this “fresh evidence still pending” status contradicts the completed receipt,
+3/3 hardware pairs and checked TODO at the top of this same document. A historical target contract
+should be clearly separated from the current ledger so rollout authority has one unambiguous status. -->
 **Mandatory before any `speculation_depth>0` rollout (implemented; fresh evidence still pending in the
 live TODO):**
 
