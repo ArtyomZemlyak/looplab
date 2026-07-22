@@ -220,7 +220,12 @@ _FINALIZE_INPUT_SCHEMAS = {
         "finalize-claim-curation/v2",
         "finalize-claim-curation/v3",
     )),
-    "facets": frozenset(("finalize-task-facets/v1",)),
+    # v2 applies the external-provider redaction boundary before both digesting and sending task prose;
+    # v1 remains readable so an upgrade never invalidates an already-paid durable invocation receipt.
+    "facets": frozenset((
+        "finalize-task-facets/v1",
+        "finalize-task-facets/v2",
+    )),
 }
 _FINALIZE_DIAGNOSTIC_SCHEMAS = {
     "concept": "finalize-concept-curation/input-unavailable",

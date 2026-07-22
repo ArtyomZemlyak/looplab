@@ -5,11 +5,14 @@ index — CR0 rebuild stays byte-identical), and facet overlap widens cross-task
 from __future__ import annotations
 
 import json
+import hashlib
 import orjson
 import pytest
 
 from looplab.engine.task_facets import (
-    FACET_AXES, facet_overlap, load_task_facets, propose_task_facets, record_task_facets, steward_task_facets,
+    FACET_AXES, TASK_FACETS_INPUT_SCHEMA, facet_overlap, load_task_facets,
+    propose_task_facets, record_task_facets, steward_task_facets,
+    task_facets_input_digest,
 )
 
 
@@ -50,6 +53,40 @@ def test_untrusted_goal_is_data_not_a_system_instruction():
     assert propose_task_facets(goal, "dataset", client) == {"domain": "ir"}
     assert goal not in client.messages[0]["content"]
     assert "UNTRUSTED" in client.messages[0]["content"] and goal in client.messages[1]["content"]
+
+
+def test_provider_and_paid_call_digest_share_one_redacted_task_envelope():
+    opaque_secret = "Aa0Bb1Cc2Dd3Ee4Ff5Gg6Hh7Ii8Jj9Kk"
+    goal = (
+        "rank private rows Authorization: Bearer secret-token-1234567890 "
+        "password=hunter2 https://alice:supersecret@example.test/data "
+        f"opaque={opaque_secret}"
+    )
+    kind = "dataset password=kind-secret"
+
+    class _Capture(_Client):
+        messages = None
+
+        def complete_tool(self, messages, json_schema):
+            self.messages = messages
+            return {"facets": self._f}
+
+    client = _Capture({"domain": "ranking"})
+    assert propose_task_facets(goal, kind, client) == {"domain": "ranking"}
+    prefix = "UNTRUSTED_TASK_DATA_JSON\n"
+    assert client.messages[1]["content"].startswith(prefix)
+    visible = json.loads(client.messages[1]["content"][len(prefix):])
+    visible_json = json.dumps(visible, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    for secret in (
+            "secret-token-1234567890", "hunter2", "supersecret", opaque_secret, "kind-secret"):
+        assert secret not in visible_json
+    assert "***" in visible_json
+
+    encoded = json.dumps(
+        {"schema": TASK_FACETS_INPUT_SCHEMA, "task": visible},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    assert task_facets_input_digest(goal, kind) == hashlib.sha256(encoded).hexdigest()
 
 
 def test_bad_output_degrades_to_empty():

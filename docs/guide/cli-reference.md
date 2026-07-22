@@ -811,16 +811,17 @@ visibility and do not change retrieval order. `build_index` stays byte-identical
 (consistent with `concept-steward`/`claim-steward`, §22.4 — the agentic steward only proposes): it classifies +
 prints; `--apply` is deprecated/rejected. Record the reviewed facets deterministically with `task-facets-set`.
 Needs a reachable LLM. It uses the same required action-id and durable begun/terminal recovery contract as the
-other paid steward CLIs.
+other paid steward CLIs. Proposal-only means it does not update `task_facets.jsonl` or ratify governance; the
+command still appends its paid-call begun/outcome/proposal audit to `task_facets_curation_log.jsonl`.
 
 ```bash
-looplab task-facets MEMORY_DIR "GOAL" --action-id ID [--kind K] [--model M] # propose (LLM), no write
+looplab task-facets MEMORY_DIR "GOAL" --action-id ID [--kind K] [--model M] # propose + durable audit
 looplab task-facets-set MEMORY_DIR TASK_ID --domain … --language … …     # operator record (deterministic)
 ```
 
 | Argument / Option | Default | Description |
 |---|---|---|
-| `MEMORY_DIR` | *(required)* | Cross-run memory dir (where `task_facets.jsonl` lives) |
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir; the command reads/writes `task_facets_curation_log.jsonl`, while only `task-facets-set` writes `task_facets.jsonl` |
 | `GOAL` | *(required)* | The task goal to classify |
 | `--kind` | `""` | Task kind (dataset/repo/…) — a hint for the classifier |
 | `--apply` | off | **Deprecated and disabled.** Exits before client construction or paid work; record reviewed facets with `task-facets-set` |

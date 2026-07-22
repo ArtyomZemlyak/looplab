@@ -1182,7 +1182,8 @@ def claim_decide_cmd(
 
 @app.command(name="task-facets")
 def task_facets_cmd(
-    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where task_facets.jsonl lives)."),
+    memory_dir: Path = typer.Argument(
+        ..., help="Cross-run memory dir; writes paid-call audit to task_facets_curation_log.jsonl."),
     goal: str = typer.Argument(..., help="The task goal to classify."),
     kind: str = typer.Option("", "--kind", help="Task kind (dataset/repo/...) — a hint for the classifier."),
     apply: bool = typer.Option(False, "--apply", help="DEPRECATED compatibility option; rejected before any "
@@ -1194,10 +1195,11 @@ def task_facets_cmd(
     """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM PROPOSES a task's facets
     (domain/language/modality/interaction/objective) so the system can recognize when two differently-worded
     tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
-    fingerprint). PROPOSAL-ONLY, consistent with concept-steward/claim-steward (§22.4 — the agentic steward
-    only proposes; it never writes cross-run state): review the classification, then record it deterministically
-    with `task-facets-set`. Finalize may queue another proposal but cannot ratify it. A stable action id
-    durably fences this paid call across crash/retry."""
+    fingerprint). PROPOSAL-ONLY, consistent with concept-steward/claim-steward (§22.4): it never changes
+    `task_facets.jsonl` or governance by itself. It does durably record the begun/outcome/proposal audit in
+    `task_facets_curation_log.jsonl`; review the classification, then record it deterministically with
+    `task-facets-set`. Finalize may queue another proposal but cannot ratify it. A stable action id durably
+    fences this paid call across crash/retry."""
     from looplab.core.config import Settings
     from looplab.engine.governance_health import read_curation_rows
     from looplab.engine.task_facets import steward_task_facets, task_facets_input_digest

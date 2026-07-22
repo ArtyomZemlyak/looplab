@@ -20,10 +20,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+
+from looplab.trust.cross_run import cross_run_text
 # The controlled facet AXES — a small, fixed vocabulary so facets from different tasks are comparable. The
 # VALUES are free-form (the LLM's short slug), but the axes are fixed (an unknown axis is dropped).
 FACET_AXES = ("domain", "language", "modality", "interaction", "objective")
-TASK_FACETS_INPUT_SCHEMA = "finalize-task-facets/v1"
+TASK_FACETS_INPUT_SCHEMA = "finalize-task-facets/v2"
 _MAX_TASK_ID = 500
 _MAX_FACET = 60
 _MAX_ACTOR = 120
@@ -70,10 +72,15 @@ def _read_task_facet_rows(path: Path) -> list[dict]:
 
 def _task_facets_prompt_payload(goal: str, kind: str) -> dict:
     """Return the exact bounded data envelope shown to the model."""
-    # CODEX AGENT: External-provider privacy gap: slicing bounds cost but does not redact credentials,
-    # signed URLs, or local paths embedded in a task goal. Apply the same versioned secret-redaction
-    # boundary used by the concept/claim stewards before both digesting and sending this envelope.
-    return {"kind": str(kind or "")[:120], "goal": str(goal or "")[:4000]}
+    # CODEX AGENT: task faceting runs automatically during finalize and may use an external provider.
+    # Redact before bounding, digesting and sending so the paid-call identity and provider-visible JSON
+    # are one exact envelope; a raw slice would retain credentials and signed URLs from task prose.
+    return {
+        "kind": cross_run_text(
+            kind, max_chars=120, single_line=True, entropy=True),
+        "goal": cross_run_text(
+            goal, max_chars=4_000, single_line=True, entropy=True),
+    }
 
 
 def task_facets_input_digest(goal: str, kind: str) -> str:
