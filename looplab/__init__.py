@@ -215,7 +215,7 @@ _LAYOUT = {
     "toytask": "adapters",
     "traceview": "events",
     "tracing": "core",
-    "train_monitor": "engine",   # per-eval training-log monitor scaffold (Phase 0, observability)
+    "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
     "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory + opt-in kill)
     "triage": "engine",
     "tui": "serve",

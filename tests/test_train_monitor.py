@@ -1,6 +1,6 @@
-"""Phase 0 of the training-log monitor (`engine/train_monitor.py`): pure log-digest helpers + the
-per-eval observer coroutine. Phase 0 is advisory-only — it emits a `train_monitor` TRACE span per tick
-and touches NO event store, so `off == today` and even ON it never changes folded state."""
+"""Training-log monitor contracts: bounded digest/observation, diagnostic verdicts, adaptive cadence,
+and the separately opt-in early-kill path. Diagnostic events remain fold-ignored; only an enabled,
+confident `broken` intervention changes the node lifecycle through the ordinary terminal contract."""
 from __future__ import annotations
 
 import json

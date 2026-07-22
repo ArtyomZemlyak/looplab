@@ -1,11 +1,12 @@
-"""Concept-graph diagnostic (PART IV D5 keystone, §21.11) — the offline coverage / uncovered-region
-signal over a multi-label concept DAG.
+"""Concept-graph read-model (PART IV D5 keystone, §21.11) — coverage / uncovered-region signals over a
+multi-label concept DAG, shared by offline inspection and live engine consumers.
 
 These lock in the three validated behaviours (§21.10/§21.11): the heuristic tagger keys on primary-lever
 LINEAGE (all `dcl-*` variants -> one family, so concentration reads the branch not the leaf); the pure
 analytics are deterministic over (RunState, graph, tags); and the *uncovered winning-region* alarm fires
 on the exact regions the `rubertlite` run never entered, from the first node — the decisive PART IV
-signal. The analytics never write events or touch selection (Phase 0 = offline diagnostic)."""
+signal. The pure analytics never write events or choose a champion themselves; engine-owned producers
+persist their bounded inputs/receipts and live admission/cue consumers apply them."""
 from __future__ import annotations
 
 from pathlib import Path

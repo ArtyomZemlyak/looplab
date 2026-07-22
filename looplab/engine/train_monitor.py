@@ -4,20 +4,25 @@ family, sibling of `runtime/sandbox._StageHealthMonitor`).
 A repo eval's declared training stage runs for a long time (often multi-hour) while the engine's async
 loop is otherwise idle — `_evaluate` runs the eval in a worker thread. This mixin adds a periodic task
 in that same task group (alongside the mid-eval intervention `_watch`) that tails the stage's live log
-and, per phase:
+and implements the complete bounded phase stack:
 
-- Phase 0 (here): read the live-log tail on a timer and emit a `train_monitor` TRACE span. No LLM, no
-  domain events, no intervention — pure observability, so `off == today` and even ON it is byte-identical
-  in events.jsonl (spans are a sidecar, never folded).
+- Phase 0: read the live-log tail on a timer and emit a `train_monitor` TRACE span;
+- Phase 1: when a client is available, classify the bounded digest and append fold-ignored
+  `train_monitor_alert` diagnostics for non-healthy verdicts;
+- Phase 2: self-pace later observations from the run budget, healthy streak, and bounded model hint;
+- Phase 3: only when `train_monitor_kill` is explicitly enabled, claim the first sufficiently confident
+  `broken` verdict and reuse the evaluation cancel/tree-kill path. The node still terminates once with
+  `reason=monitor_broken`.
+
+With intervention off, the monitor never changes the metric champion or node lifecycle. Diagnostics can
+still feed the separately configured watchdog-reflection prompt cue on a later proposal.
 
 Design constraints this file must keep (engine invariants):
 - **The runtime never calls the LLM** (layering: `runtime` imports nothing above itself), so an LLM-driven
   watchdog CANNOT live in the sandbox — it lives here, in the engine, reading the log FILE the sandbox
   already writes (`_tee_drain(log_path=…)`).
-- Later phases record a VERDICT: it will be a DIAGNOSTIC event (fold-ignored) so its thread-dependent
-  splice position never changes folded state, and any early-KILL will reuse the existing `cancel` →
-  tree-kill path so the node still emits exactly ONE terminal event (`node_failed`); replay reads that
-  terminal and NEVER re-invokes the LLM.
+- Verdicts are DIAGNOSTIC events (fold-ignored), so their thread-dependent splice position never changes
+  folded state. Replay reads the ordinary terminal event and NEVER re-invokes the monitor LLM.
 """
 from __future__ import annotations
 
