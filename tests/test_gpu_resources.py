@@ -110,18 +110,23 @@ def test_footprint_request_preserves_unspecified_legacy_split_and_cpu_bypass():
         types.SimpleNamespace(cards={}), legacy_node, legacy)
 
 
-def test_positive_explicit_gpu_requirement_stays_unavailable_on_gpu_less_host():
+def test_positive_explicit_gpu_requirement_clamps_to_cpu_only_on_gpu_less_host():
+    # A positive GPU declaration on a host with NO detected devices must clamp to CPU-only (count 0),
+    # never stay "unsatisfiable": an unsatisfiable positive request spins the serial dispatcher forever
+    # (the pool epoch never bumps, so `_wait_reserve_node_resources` retries with no terminal ever
+    # written — a whole-run hang). A node that genuinely needs CUDA fails NATURALLY at eval instead.
     pool = _Pool(ids=(), parallel=2)
     node = _node(0, {"gpus": 2, "gpu_mem_mib": 8_000})
 
     assert pool._clamp_resource_footprint(node.idea.footprint) == {
-        "gpus": 2,
+        "gpus": 0,
         "gpu_mem_mib": 8_000,
     }
     request = pool._resource_request_for_node(node)
-    assert request["count"] == 2 and request["pin"] is True
-    assert request["footprint"]["gpus"] == 2
-    assert pool._try_reserve_node_resources(node) is None
+    assert request["count"] == 0 and request["pin"] is False
+    assert request["footprint"]["gpus"] == 0
+    reservation = pool._try_reserve_node_resources(node)
+    assert reservation is not None and reservation["gpu_ids"] == [] and reservation["pin"] is False
 
     cpu = pool._try_reserve_node_resources(_node(1, {"gpus": 0}))
     assert cpu is not None and cpu["gpu_ids"] == [] and cpu["cpu_only"] is True

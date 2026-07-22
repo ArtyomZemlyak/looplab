@@ -59,6 +59,16 @@ def docker_nvidia_runtime_available() -> bool:
     return _DOCKER_NVIDIA_RUNTIME_CACHE
 
 
+class GpuPinUnenforceable(RuntimeError):
+    """A reserved physical GPU pin cannot be enforced by the Docker daemon/runtime.
+
+    Fail-closed is correct (never launch an unpinned container for a pinned node), but the eval path
+    catches THIS type specifically to terminalize the ONE affected node as node_failed instead of
+    letting a bare RuntimeError tear down the whole eval task group (cancelling in-flight siblings) and
+    re-crash deterministically on every resume.
+    """
+
+
 def docker_gpu_argv(env: Optional[dict], *, runtime: Optional[str] = None) -> list[str]:
     """Translate a physical CUDA visibility pin to Docker's device request.
 
@@ -80,7 +90,7 @@ def docker_gpu_argv(env: Optional[dict], *, runtime: Optional[str] = None) -> li
         return ["--gpus", f"device={devices}"]
     why = (f"the configured OCI runtime {runtime!r} cannot expose NVIDIA devices"
            if not supported_runtime else "the Docker daemon has no advertised NVIDIA runtime")
-    raise RuntimeError(
+    raise GpuPinUnenforceable(
         f"GPU device pin {devices!r} was requested, but {why}; "
         "refusing to launch an unpinned container.")
 

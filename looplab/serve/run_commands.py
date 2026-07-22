@@ -1187,6 +1187,12 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         memory = _integer("gpu_mem_mib", required=False)
         if memory is not None and memory < 0:
             raise HTTPException(400, "gpu_mem_mib must be non-negative")
+        # Cap at the fold's acceptance range (`_CARD_REPLAY_NODE_ID_MAX` = 2**31-1). In count-only mode
+        # (no memory inventory) the per-GPU envelope check below is skipped, so without this bound a
+        # larger value would be accepted as a "successful" command yet SILENTLY discard the whole pin at
+        # fold time (`_on_card_resource_pinned` returns early on an out-of-range field).
+        if memory is not None and memory > (1 << 31) - 1:
+            raise HTTPException(400, "gpu_mem_mib exceeds the maximum (2147483647)")
         if gpus == 0 and memory is not None:
             raise HTTPException(400, "a CPU-only resource pin cannot request GPU memory")
         gpu_count, gpu_memory = _card_resource_envelope()

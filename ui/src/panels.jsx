@@ -1259,7 +1259,15 @@ function _sameCardResourceValues(left, right) {
 
 function _cardControlReflected(card, kind, patch) {
   if (!card || !isRecord(patch)) return false
-  if (kind === 'edit') return card.statement === patch.statement
+  if (kind === 'edit') {
+    // The server clips the display statement (fold cap) and may redact secrets, so the folded value is
+    // not always byte-equal to what the operator typed. Treat an exact match OR a non-empty clipped
+    // PREFIX of the submitted text as reflected — otherwise the optimistic override (and its aria-busy
+    // pending state) would never clear when the statement was clipped.
+    if (typeof card.statement !== 'string' || typeof patch.statement !== 'string') return false
+    return card.statement === patch.statement
+      || (card.statement.length > 0 && patch.statement.startsWith(card.statement))
+  }
   if (kind === 'priority') return card.priority === patch.priority && card.pinned === true
   if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
   if (kind === 'drop') return card.status === 'dropped'
@@ -1615,7 +1623,12 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         if (!entry) return current
         const updates = { ...(entry.updates || {}) }
         const rawCard = cardsByIdRef.current.get(card.id)
-        if (feedback.kind === 'error' || _cardControlReflected(rawCard, kind, patch)) delete updates[kind]
+        // Clear the optimistic override once the command DEFINITIVELY settles (success/noop/error) — not
+        // only on an exact fold reflection: the server may clip/redact the value, so waiting for a
+        // byte-equal fold would leave the card stuck showing operator text with its controls disabled.
+        // Only a 'pending' (accepted, engine will apply later) settle keeps the override until the fold.
+        const settled = ['error', 'success', 'noop'].includes(feedback.kind)
+        if (settled || _cardControlReflected(rawCard, kind, patch)) delete updates[kind]
         const pending = feedback.kind === 'pending' && updates[kind]
           ? { kind, phase: 'waiting-for-fold' } : null
         const notice = feedback.kind === 'error'

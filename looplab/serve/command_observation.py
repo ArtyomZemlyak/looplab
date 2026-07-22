@@ -30,7 +30,7 @@ from looplab.core.models import Event, RunState
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import decode_event_record
 from looplab.events.replay import fold
-from looplab.events.types import EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
+from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
 from looplab.serve.protocol import CONTROL_EVENTS
 
 
@@ -167,9 +167,15 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
 
     for event in events:
         index.latest_seq = event.seq
-        if event.type not in CONTROL_EVENTS:
-            max_non_control = max(max_non_control, event.seq)
         data = event.data or {}
+        # `card_dropped` is DUAL-USE: the engine writes its OWN domain drops with this type, and the L6
+        # operator control reuses it (dropped_by='operator'). Only the operator intent is a control
+        # event; an engine-authored drop is real domain progress and must still bump max_non_control_seq
+        # (else has_domain_progress misses it — the misclassification the type-only check introduced).
+        engine_card_drop = (event.type == EV_CARD_DROPPED
+                            and data.get("dropped_by") != "operator")
+        if event.type not in CONTROL_EVENTS or engine_card_drop:
+            max_non_control = max(max_non_control, event.seq)
         marker = data.get("_command_id")
         if isinstance(marker, str):
             if intents is None:

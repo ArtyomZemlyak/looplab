@@ -106,9 +106,11 @@ class ResourceSchedulingMixin:
             return None
         total = len(getattr(self, "_gpu_ids", []) or [])
         out = dict(clean)
-        if "gpus" in out and (total > 0 or out["gpus"] == 0):
-            # A non-empty pool bounds over-declarations.  With no detected devices, preserve a positive
-            # requirement so admission can remain unsatisfied instead of silently becoming CPU-only.
+        if "gpus" in out:
+            # Clamp the declared count to the detected pool (0 on a GPU-less host). Keeping a positive
+            # requirement "unsatisfiable" instead hangs the serial dispatcher forever (the pool epoch
+            # never bumps, no terminal is ever written). Degrading to CPU-only/fewer GPUs is graceful: a
+            # node that genuinely needs CUDA fails NATURALLY at eval (a real node_failed), never a spin.
             out["gpus"] = min(out["gpus"], total)
         if isinstance(out.get("gpu_mem_mib"), int):
             requested_gpus = out.get("gpus", 1)
@@ -270,11 +272,9 @@ class ResourceSchedulingMixin:
 
     def _try_reserve_node_resources(self, node, *, resource_pin=None) -> Optional[dict]:
         request = self._resource_request_for_node(node, resource_pin=resource_pin)
-        # `_acquire_gpus` deliberately keeps its legacy primitive contract (`[]` on an empty pool).
-        # At node admission we have the declaration context, so a positive explicit requirement on a
-        # GPU-less host must stay unavailable rather than inherit that no-device compatibility result.
-        if request["count"] > 0 and not (getattr(self, "_gpu_ids", []) or []):
-            return None
+        # `count` is already clamped to the detected pool (`_clamp_resource_footprint`), so a GPU-less
+        # host yields count=0 (CPU-only) rather than a positive requirement that can never be admitted —
+        # which would spin this reservation wait forever.
         gpu_ids = self._acquire_gpus(request["count"], request["gpu_mem_mib"])
         if gpu_ids is None:
             return None

@@ -25,6 +25,7 @@ from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import snapshot_training_logs
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
 from looplab.events.replay import fold
+from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_NODE_ABORT,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
                                   EV_NODE_RESET, EV_PROXY_SCORED, EV_REWARD_HACK_SUSPECTED,
@@ -284,9 +285,24 @@ class EvaluateMixin:
                     # The lifecycle reservation selected by the dispatcher stays unchanged through this
                     # retry. CUDA_VISIBLE_DEVICES contains physical ids (logical→physical remap), while
                     # an unspecified serial eval keeps eval_env=None and sees the whole box as before.
-                    res = await anyio.to_thread.run_sync(
-                        self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
-                    )
+                    try:
+                        res = await anyio.to_thread.run_sync(
+                            self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
+                        )
+                    except GpuPinUnenforceable as exc:
+                        # Fail-closed device pin the Docker daemon/runtime cannot enforce. Terminalize
+                        # THIS node instead of letting the raise cancel every in-flight sibling eval in
+                        # the batch and re-crash deterministically on every resume; the reservation is
+                        # still released by the dispatcher's finally.
+                        cancel.set()
+                        _tg.cancel_scope.cancel()
+                        async with self._write_lock:
+                            self.store.append(EV_NODE_FAILED, {
+                                "node_id": node_id, "generation": generation,
+                                "error": str(exc)[:400], "reason": "gpu_unpinnable",
+                                "eval_seconds": total_eval})
+                            self._maybe_crash()
+                        return
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
