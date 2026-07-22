@@ -12,12 +12,24 @@ export const ATLAS_RENDER_LIMITS = Object.freeze({
 export const ATLAS_SOURCE_KEYS = Object.freeze([
   'atlas', 'claims', 'conceptCuration', 'claimCuration',
 ])
+const PORTFOLIO_ID_RE = /^portfolio-sha256:[0-9a-f]{64}$/
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 const list = value => Array.isArray(value) ? value : []
 // # CODEX AGENT: JSON booleans and numeric strings are not receipt counts. Number-coercing them would
 // fabricate evidence (true -> 1) or let an untyped total hide rows omitted by the client projection.
 const count = (value, fallback = 0) => Number.isSafeInteger(value) && value >= 0 ? value : fallback
+
+export const atlasPortfolioId = value => {
+  const identity = record(value).portfolio_id
+  return typeof identity === 'string' && PORTFOLIO_ID_RE.test(identity) ? identity : ''
+}
+
+export const researchAtlasPayloadPortfolioId = value => {
+  const payload = record(value)
+  const identities = new Set(ATLAS_SOURCE_KEYS.map(key => atlasPortfolioId(payload[key])).filter(Boolean))
+  return identities.size === 1 ? [...identities][0] : ''
+}
 
 const thinProjectionTotal = (atlas, included, fallback) => {
   const total = atlas.thin_coverage_total
@@ -148,6 +160,9 @@ const sourceRevision = (key, value) => {
 
 export function isValidAtlasSourceEnvelope(key, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  // All four independently fetched slices must name the same configured portfolio. Without this opaque
+  // replacement fence, equal ledger revisions can make a settings switch look like one coherent preview.
+  if (!atlasPortfolioId(value)) return false
   // # CODEX AGENT: Atlas/claims validation accepts arbitrarily large arrays and later retains the raw
   // envelope in React state before `take()` applies render caps. Enforce route maxima + receipt equations
   // here, or immediately project to a bounded allowlist, so a malformed 200 cannot turn the advertised
@@ -340,9 +355,22 @@ export function mergeCurationLogs(conceptValue, claimValue) {
   return { entries, n: total }
 }
 
-export function mergeResearchAtlasPayload(previousValue, successfulValue) {
-  const previous = record(previousValue)
+export function mergeResearchAtlasPayload(previousValue, successfulValue,
+  { allowPortfolioSwitch = false } = {}) {
+  let previous = record(previousValue)
   const successful = record(successfulValue)
+  const incomingIdentities = new Set(
+    ATLAS_SOURCE_KEYS.filter(key => Object.hasOwn(successful, key))
+      .map(key => atlasPortfolioId(successful[key])).filter(Boolean))
+  const previousIdentity = researchAtlasPayloadPortfolioId(previous)
+  if (incomingIdentities.size > 1) return previous
+  const incomingIdentity = incomingIdentities.size === 1 ? [...incomingIdentities][0] : ''
+  if (previousIdentity && incomingIdentity && previousIdentity !== incomingIdentity) {
+    if (!allowPortfolioSwitch) return previous
+    // A full refresh may intentionally move to newly configured storage. Drop every old slice before
+    // accepting the first replacement response; later responses in that request batch are identity-fenced.
+    previous = {}
+  }
   const source = key => Object.hasOwn(successful, key)
     ? record(successful[key])
     : record(previous[key])

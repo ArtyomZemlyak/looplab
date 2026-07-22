@@ -250,8 +250,11 @@ def test_steward_nested_payload_is_redacted_before_receipt_persistence(
         "receipt": {"nested": {"access_token": "tiny-secret"}},
     })
 
-    response = TestClient(make_app(tmp_path)).post(
-        "/api/cross-run/claim-steward", params={"action_id": "nested-security"})
+    client = TestClient(make_app(tmp_path))
+    portfolio_id = client.get("/api/cross-run/claim-curation-log").json()["portfolio_id"]
+    response = client.post(
+        "/api/cross-run/claim-steward", params={
+            "action_id": "nested-security", "expected_portfolio_id": portfolio_id})
     persisted = (Path(os.environ["LOOPLAB_MEMORY_DIR"]) /
                  "claim_curation_log.jsonl").read_text(encoding="utf-8")
     rendered = response.text + persisted

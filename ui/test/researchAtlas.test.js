@@ -14,6 +14,7 @@ import {
   mergeCurationLogs,
   mergeResearchAtlasPayload,
   reconcileAtlasSourceStatuses,
+  researchAtlasPayloadPortfolioId,
 } from '../src/researchAtlasModel.js'
 import {
   getCrossRunAtlas, getCrossRunClaims, getCrossRunCurationLog, getCrossRunClaimCurationLog,
@@ -21,6 +22,8 @@ import {
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+const PORTFOLIO_ID = `portfolio-sha256:${'a'.repeat(64)}`
+const REPLACEMENT_PORTFOLIO_ID = `portfolio-sha256:${'b'.repeat(64)}`
 const completeReadSegment = Object.freeze({
   read_complete: true,
   rows_total: 1,
@@ -69,6 +72,7 @@ const completeConceptSource = Object.freeze({
   source_malformed_rows: 0, source_invalid_capsule_rows: 0, source_duplicate_run_rows: 0,
 })
 const curationEnvelope = (entries = [], overrides = {}) => ({
+  portfolio_id: PORTFOLIO_ID,
   v: 1, status: 'complete', complete: true, entries, n: entries.length, limit: 20,
   ...overrides,
 })
@@ -689,8 +693,12 @@ test('a partial refresh replaces successful slices and preserves last-good faile
 
 test('malformed fulfilled Atlas envelopes are rejected and retain last-good source data', () => {
   assert.equal(isValidAtlasSourceEnvelope('claims', {}), false)
-  assert.equal(isValidAtlasSourceEnvelope('claims', { claims: [] }), true)
+  assert.equal(isValidAtlasSourceEnvelope('claims', { claims: [] }), false)
+  assert.equal(isValidAtlasSourceEnvelope('claims', {
+    portfolio_id: PORTFOLIO_ID, claims: [],
+  }), true)
   assert.equal(isValidAtlasSourceEnvelope('atlas', {
+    portfolio_id: PORTFOLIO_ID,
     explored: [], thin_coverage: [], contradictions: [],
   }), true)
   assert.equal(isValidAtlasSourceEnvelope('conceptCuration', { entries: [] }), false)
@@ -708,6 +716,7 @@ test('malformed fulfilled Atlas envelopes are rejected and retain last-good sour
 test('curation source health is atomic, bounded, and rejects legacy envelopes', () => {
   const entry = { run_id: 'run-1', outcome: 'proposed' }
   const healthy = {
+    portfolio_id: PORTFOLIO_ID,
     v: 1, status: 'complete', complete: true, entries: [entry], n: 1, limit: 20,
   }
   assert.equal(isValidAtlasSourceEnvelope('conceptCuration', healthy), true)
@@ -745,6 +754,27 @@ test('curation source health is atomic, bounded, and rejects legacy envelopes', 
   assert.equal(merged.conceptCuration, healthy)
   assert.equal(after.conceptCuration.state, 'retained-stale')
   assert.equal(after.conceptCuration.loadedAt, 'before')
+})
+
+test('portfolio identity prevents partial mixing and permits an atomic full-refresh switch', () => {
+  const previous = {
+    atlas: { portfolio_id: PORTFOLIO_ID, explored: [] },
+    claims: { portfolio_id: PORTFOLIO_ID, claims: [claim(1)] },
+  }
+  const replacementClaims = {
+    portfolio_id: REPLACEMENT_PORTFOLIO_ID, claims: [claim(2)],
+  }
+
+  const partial = mergeResearchAtlasPayload(previous, { claims: replacementClaims })
+  assert.equal(partial.claims, previous.claims)
+  assert.equal(partial.atlas, previous.atlas)
+  assert.equal(researchAtlasPayloadPortfolioId(partial), PORTFOLIO_ID)
+
+  const switched = mergeResearchAtlasPayload(
+    previous, { claims: replacementClaims }, { allowPortfolioSwitch: true })
+  assert.deepEqual(switched.atlas, {})
+  assert.equal(switched.claims, replacementClaims)
+  assert.equal(researchAtlasPayloadPortfolioId(switched), REPLACEMENT_PORTFOLIO_ID)
 })
 
 test('Atlas source provenance distinguishes current, retained-stale, and failed slices', () => {
@@ -960,9 +990,12 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     await Promise.resolve(); await Promise.resolve()
   })
   const atlasEnvelope = concept => ({
+    portfolio_id: PORTFOLIO_ID,
     explored: [{ concept, n_runs: 1, runs: [] }], thin_coverage: [], contradictions: [],
   })
-  const claimsEnvelope = statement => ({ claims: [{ ...claim(70), statement }] })
+  const claimsEnvelope = statement => ({
+    portfolio_id: PORTFOLIO_ID, claims: [{ ...claim(70), statement }],
+  })
   const requestFor = (batch, path) => batch.find(item => item.url.includes(path))
   const sourceNote = label => [...document.querySelectorAll('.atlas-source-note')]
     .find(node => node.textContent.includes(label))

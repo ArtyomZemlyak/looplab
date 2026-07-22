@@ -15,9 +15,44 @@ import orjson
 import pytest
 
 pytest.importorskip("fastapi")
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient as _FastApiTestClient  # noqa: E402
 
+from looplab.serve.routers.cross_run import _portfolio_identity  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
+
+
+_GOVERNED_BODY_PATHS = frozenset({
+    "/api/cross-run/claim-decide",
+    "/api/cross-run/concept-merge",
+    "/api/cross-run/concept-purge",
+    "/api/cross-run/concept-alias-clear",
+    "/api/cross-run/concept-split",
+    "/api/cross-run/concept-split-clear",
+})
+_PAID_STEWARD_PATHS = frozenset({
+    "/api/cross-run/concept-steward",
+    "/api/cross-run/claim-steward",
+})
+
+
+class TestClient(_FastApiTestClient):
+    """Owner-client fixture: propagate the portfolio identity read by a current UI/client."""
+
+    @staticmethod
+    def _portfolio_id() -> str:
+        return _portfolio_identity(Path(os.environ["LOOPLAB_MEMORY_DIR"]))[1]
+
+    def post(self, url, *args, **kwargs):
+        path = str(url).split("?", 1)[0]
+        if path in _GOVERNED_BODY_PATHS:
+            body = dict(kwargs.get("json") or {})
+            body.setdefault("expected_portfolio_id", self._portfolio_id())
+            kwargs["json"] = body
+        elif path in _PAID_STEWARD_PATHS:
+            params = dict(kwargs.get("params") or {})
+            params.setdefault("expected_portfolio_id", self._portfolio_id())
+            kwargs["params"] = params
+        return super().post(url, *args, **kwargs)
 
 
 def _seed_memory(statement="hard-neg helps"):
@@ -60,7 +95,7 @@ def test_part_iv_v_openapi_publishes_response_envelopes_and_governance_inputs(tm
 
     components = schema["components"]["schemas"]
     assert set(components["CrossRunClaimsResponse"]["required"]) >= {
-        "claims", "n", "returned", "offset", "limit", "claim_source", "revision",
+        "portfolio_id", "claims", "n", "returned", "offset", "limit", "claim_source", "revision",
     }
     # Completeness/source receipts and visible evidence rows are decision authority, not arbitrary JSON.
     # Generated clients must see their versioned fields and enums instead of duplicating server equations
@@ -80,10 +115,13 @@ def test_part_iv_v_openapi_publishes_response_envelopes_and_governance_inputs(tm
         "application/json"]["schema"]["$ref"]
     decision_schema = components[decision_ref.rsplit("/", 1)[-1]]
     assert set(decision_schema["required"]) >= {
-        "claim_uid", "evidence_digest", "expected_revision", "action_id", "decision",
+        "expected_portfolio_id", "claim_uid", "evidence_digest", "expected_revision",
+        "action_id", "decision",
     }
     steward_parameters = paths["/api/cross-run/concept-steward"]["post"]["parameters"]
     assert any(item["name"] == "action_id" and item["required"] is True
+               for item in steward_parameters)
+    assert any(item["name"] == "expected_portfolio_id" and item["required"] is True
                for item in steward_parameters)
 
 
@@ -95,11 +133,43 @@ def test_claims_and_atlas_read(tmp_path):
     claim = next(c for c in r.json()["claims"] if "hard-neg helps" in c["statement"])
     assert claim["claim_uid"].startswith("clm_") and claim["scope"] == "t"
     assert r.json()["limit"] == 80 and r.json()["revision"] == 0
+    assert r.json()["portfolio_id"].startswith("portfolio-sha256:")
     assert len(r.json()["claim_source"]["snapshot_digest"]) == 64
     a = client.get("/api/cross-run/atlas")
     assert a.status_code == 200 and a.json()["n_claims"] >= 1
     assert a.json()["projection"] == "live" and a.json()["page"]["limit"] == 24
+    assert a.json()["portfolio_id"] == r.json()["portfolio_id"]
     assert a.json()["claim_source"]["snapshot_digest"] == r.json()["claim_source"]["snapshot_digest"]
+
+
+def test_delayed_governance_write_cannot_cross_portfolio_reconfiguration(
+        tmp_path, monkeypatch):
+    first = _seed_memory()
+    app = make_app(tmp_path)
+    raw_client = _FastApiTestClient(app)
+    observed = raw_client.get("/api/cross-run/atlas").json()
+    first_id = observed["portfolio_id"]
+
+    replacement = tmp_path / "replacement-memory"
+    replacement.mkdir()
+    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(replacement))
+    replacement_id = _portfolio_identity(replacement)[1]
+    assert replacement_id != first_id and first != replacement
+
+    response = raw_client.post("/api/cross-run/concept-merge", json={
+        "expected_portfolio_id": first_id,
+        "from_concept": "hn", "to_concept": "hard-neg",
+        "expected_revision": 0, "expected_governance_revision": 0,
+        "action_id": "formed-against-first-portfolio",
+    })
+
+    assert response.status_code == 409
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["detail"] == {
+        "code": "portfolio_identity_conflict",
+        "current_portfolio_id": replacement_id,
+    }
+    assert not (replacement / "concept_aliases.jsonl").exists()
 
 
 @pytest.mark.parametrize("endpoint", ["/api/cross-run/claims", "/api/cross-run/atlas"])

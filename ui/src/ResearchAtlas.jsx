@@ -3,8 +3,9 @@ import {
   getCrossRunAtlas, getCrossRunClaims, getCrossRunCurationLog, getCrossRunClaimCurationLog,
 } from './api.js'
 import {
+  atlasPortfolioId,
   buildResearchAtlasView, mergeCurationLogs, mergeResearchAtlasPayload,
-  isValidAtlasSourceEnvelope, reconcileAtlasSourceStatuses,
+  isValidAtlasSourceEnvelope, reconcileAtlasSourceStatuses, researchAtlasPayloadPortfolioId,
 } from './researchAtlasModel.js'
 import './research-atlas.css'
 import { deadlineRequest } from './requestDeadline.js'
@@ -195,27 +196,37 @@ export default function ResearchAtlas({ onBack }) {
     const id = ++requestId.current
     const requestedSources = request.key ? SOURCES.filter(source => source.key === request.key) : SOURCES
     const keys = requestedSources.map(source => source.key)
+    const fullRefresh = keys.length === SOURCES.length
+    let batchPortfolioId = ''
     let remaining = requestedSources.length
     busyRef.current = true
     setResource(current => ({ ...current, status: current.view ? 'refreshing' : 'loading',
       errors: current.errors.filter(error => !keys.includes(error.key)), pending: keys }))
     const settle = (source, value, error) => {
       if (!active || id !== requestId.current) return
-      const valid = isValidAtlasSourceEnvelope(source.key, value)
-      const successful = valid ? { [source.key]: value } : {}
-      const failed = valid ? [] : [{ key: source.key, status: error?.status }]
+      let valid = isValidAtlasSourceEnvelope(source.key, value)
+      const incomingPortfolioId = valid ? atlasPortfolioId(value) : ''
+      if (valid && batchPortfolioId && incomingPortfolioId !== batchPortfolioId) valid = false
+      if (valid && !batchPortfolioId) batchPortfolioId = incomingPortfolioId
       const last = --remaining === 0
       if (last) busyRef.current = false
       setResource(current => {
-        const payload = valid ? mergeResearchAtlasPayload(current.payload, successful) : current.payload
-        const view = valid ? buildResearchAtlasView(payload.atlas, payload.claims,
+        const priorPortfolioId = researchAtlasPayloadPortfolioId(current.payload)
+        const candidate = valid ? mergeResearchAtlasPayload(
+          current.payload, { [source.key]: value }, { allowPortfolioSwitch: fullRefresh }) : current.payload
+        const accepted = valid && candidate?.[source.key] === value
+        const successful = accepted ? { [source.key]: value } : {}
+        const failed = accepted ? [] : [{ key: source.key, status: error?.status }]
+        const switched = accepted && priorPortfolioId && priorPortfolioId !== incomingPortfolioId
+        const payload = accepted ? candidate : current.payload
+        const view = accepted ? buildResearchAtlasView(payload.atlas, payload.claims,
           mergeCurationLogs(payload.conceptCuration, payload.claimCuration)) : current.view
         return {
           ...current, payload, view,
           status: last ? (view ? 'ready' : 'error') : (view ? 'refreshing' : 'loading'),
           errors: [...current.errors.filter(item => item.key !== source.key), ...failed],
           pending: current.pending.filter(key => key !== source.key),
-          sourceStates: reconcileAtlasSourceStatuses(current.sourceStates, successful,
+          sourceStates: reconcileAtlasSourceStatuses(switched ? {} : current.sourceStates, successful,
             new Date().toISOString(), [source.key]),
         }
       })

@@ -208,7 +208,11 @@ The Research Atlas preview reads bounded concept/claim projections plus recent t
 ledgers. It displays proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse to
 generic proposal copy.
 It neither fetches the task-facets ledger nor exposes the semantic key, input digest/schema, source key, model
-or parser, so the UI is not an identity or billing audit surface.
+or parser, so the UI is not a billing audit surface. Each read does expose one opaque, replacement-sensitive
+`portfolio_id` derived from the resolved configured directory identity. The browser refuses to mix identities
+across its four independent slices. Typed governance bodies and paid steward queries must echo it as
+`expected_portfolio_id`; a live `memory_dir`, symlink-target or directory replacement fails with 409 before
+any write/provider setup. This storage fence is not a frozen corpus watermark or atomic evidence snapshot.
 
 The run-end dependency order is: case/research claims/concept capsule → reflection → concept steward →
 claim steward → task facets → final `llm_cost` → completion. Thus the claim steward sees the current
