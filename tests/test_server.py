@@ -863,6 +863,43 @@ def test_reset_spawn_failure_restores_archived_run(tmp_path, monkeypatch):
     assert not list(rd.glob("*.reset-*"))
 
 
+def test_reset_replays_legacy_snapshot_with_off_defaults_and_explicit_null_aliases(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import control as control_router
+
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _make_resumable(rd)
+    raw = {"timeout": 30.0, "max_parallel": 4, "parallel_build": 3}
+    snapshot = rd / "config.snapshot.json"
+    snapshot.write_text(json.dumps(raw), encoding="utf-8")
+    before = snapshot.read_bytes()
+    spawns = []
+
+    def capture_spawn(args, **kwargs):
+        spawns.append((args, kwargs))
+        return 4242
+
+    monkeypatch.setattr(control_router, "_spawn_engine", capture_spawn)
+    with TestClient(make_app(tmp_path)) as client:
+        response = client.post("/api/runs/demo/reset")
+
+    assert response.status_code == 200
+    assert len(spawns) == 1
+    args, kwargs = spawns[0]
+    assert args.count("--set") == 2
+    assert "eval_parallel=null" in args and "llm_parallel=null" in args
+    env = kwargs["env"]
+    for key in (
+            "LOOPLAB_TRAIN_MONITOR", "LOOPLAB_ASHA_LIVE",
+            "LOOPLAB_WATCHDOG_REFLECTION", "LOOPLAB_CARD_DRIVEN_SELECTION",
+            "LOOPLAB_CONCURRENT_RESEARCH_REPEAT", "LOOPLAB_CONCURRENT_CONSOLIDATE"):
+        assert env[key] == "false"
+    assert env["LOOPLAB_MAX_EVAL_TIMEOUT"] == str(24 * 3600.0)
+    assert "LOOPLAB_EVAL_PARALLEL" not in env and "LOOPLAB_LLM_PARALLEL" not in env
+    assert snapshot.read_bytes() == before
+
+
 def test_resume_shutdown_hook_precedes_jupyter_reaper(tmp_path):
     app = make_app(tmp_path)
     names = [getattr(handler, "__name__", "") for handler in app.router.on_shutdown]
@@ -1684,7 +1721,7 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
 
 def test_put_run_config_edits_snapshot_for_resume(tmp_path):
     import json
-    from looplab.core.config import Settings
+    from looplab.core.config import settings_from_snapshot
     _build_run(tmp_path)
     rd = tmp_path / "demo"
     # the problematic run's real shape: short timeout, timeout-repair NOT yet enabled
@@ -1699,11 +1736,50 @@ def test_put_run_config_edits_snapshot_for_resume(tmp_path):
     # sending an UNCHANGED value is a no-op (only real diffs are written)
     r2 = client.put("/api/runs/demo/config", json={"settings": {"timeout": 120.0}})
     assert r2.json()["changed"] == []
-    # persisted to the snapshot that resume re-reads via Settings(**snap)
+    # persisted to the snapshot that resume re-reads through the compatibility loader
     snap = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
     assert snap["timeout"] == 120.0 and snap["inline_repair_reasons"] == ["crash", "timeout"]
-    rebuilt = Settings(**{k: v for k, v in snap.items() if k != "llm_api_key"})
+    rebuilt = settings_from_snapshot(snap)
     assert rebuilt.timeout == 120.0      # what Engine() would get on resume
+
+
+def test_legacy_sparse_run_config_is_effective_but_never_backfilled_by_get_or_unrelated_put(
+        tmp_path):
+    import hashlib
+    import json
+
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    raw = {"timeout": 30.0, "max_parallel": 4, "parallel_build": 3}
+    snapshot = rd / "config.snapshot.json"
+    snapshot.write_text(json.dumps(raw, separators=(",", ":")), encoding="utf-8")
+    before = snapshot.read_bytes()
+    expected_revision = hashlib.sha256(json.dumps(
+        raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    client = TestClient(make_app(tmp_path))
+
+    shown = client.get("/api/runs/demo/config")
+    assert shown.status_code == 200
+    body = shown.json()
+    assert body["train_monitor"] is False and body["asha_live"] is False
+    assert body["watchdog_reflection"] is False
+    assert body["concurrent_research_repeat"] is False
+    assert body["concurrent_consolidate"] is False
+    assert body["eval_parallel"] is None and body["llm_parallel"] is None
+    assert body["max_eval_timeout"] == 24 * 3600.0
+    assert body["_looplab_config_meta"]["config_revision"] == expected_revision
+    assert snapshot.read_bytes() == before
+
+    saved = client.put("/api/runs/demo/config", json={"settings": {"timeout": 45.0}})
+    assert saved.status_code == 200
+    persisted = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert persisted["timeout"] == 45.0
+    for field in (
+            "train_monitor", "asha_live", "watchdog_reflection",
+            "concurrent_research_repeat", "concurrent_consolidate",
+            "eval_parallel", "llm_parallel", "max_eval_timeout"):
+        assert field not in persisted
 
 
 def test_run_config_cas_rejects_an_old_delayed_put(tmp_path):

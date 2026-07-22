@@ -410,15 +410,14 @@ def _settings_for_run(run_dir=None, model=None):
     This helper needs endpoint/model provenance, not the seven event-pinned selection-treatment fields;
     the effective per-run config API owns that latter overlay.
     """
-    from looplab.core.config import Settings
+    from looplab.core.config import Settings, settings_from_snapshot
     settings = None
     try:
         snap = (Path(run_dir) / "config.snapshot.json") if run_dir is not None else None
         if snap is not None and snap.exists():
             import json
             data = json.loads(snap.read_text(encoding="utf-8"))
-            data.pop("llm_api_key", None)   # masked in the snapshot; re-read from env/default
-            settings = Settings(**data)
+            settings = settings_from_snapshot(data)
     except Exception:  # noqa: BLE001 — any snapshot issue -> ambient fallback
         settings = None
     if settings is None:

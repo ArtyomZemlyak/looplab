@@ -17,7 +17,7 @@ import typer
 from pydantic import ValidationError
 
 from looplab.core.atomicio import atomic_write_text
-from looplab.core.config import Settings
+from looplab.core.config import Settings, settings_from_snapshot
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RESUME_SERVED,
                                   EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
@@ -211,9 +211,8 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
     if not isinstance(config_data, dict):
         raise typer.BadParameter(
             f"cannot load original config snapshot {config_snap}: expected a JSON object")
-    config_data.pop("llm_api_key", None)  # snapshot holds a mask; resolve a real secret normally
     try:
-        recovery_settings = Settings(**config_data)
+        recovery_settings = settings_from_snapshot(config_data)
     except ValidationError as exc:
         raise typer.BadParameter(
             f"cannot load original config snapshot {config_snap}: {exc}") from exc
@@ -639,12 +638,7 @@ def resume(
     snap = run_dir / "config.snapshot.json"
     if snap.exists():
         data = json.loads(snap.read_text(encoding="utf-8"))
-        data.pop("llm_api_key", None)   # masked in the snapshot; re-read from env/default
-        # CODEX AGENT: a pre-upgrade snapshot cannot preserve fields that did not exist yet. Pydantic
-        # fills them with today's product-on defaults, so resume can silently enable ASHA and repeated
-        # paid background research in an old run. Version snapshots and migrate absent fields to their
-        # historical off semantics before constructing Settings.
-        settings = Settings(**data)
+        settings = settings_from_snapshot(data)
     if max_nodes is not None:
         settings.max_nodes = max_nodes
     eng = _engine(run_dir, task, settings, crash_after=None)
@@ -776,8 +770,7 @@ def finalize(
     csnap = run_dir / "config.snapshot.json"
     if csnap.exists():
         data = json.loads(csnap.read_text(encoding="utf-8"))
-        data.pop("llm_api_key", None)
-        settings = Settings(**data)
+        settings = settings_from_snapshot(data)
     eng = _engine(run_dir, _load_task(snap), settings, crash_after=None)
     _preflight_speculation_authority(eng)
     with _engine_singleton(run_dir) as ok:

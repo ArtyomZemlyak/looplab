@@ -361,7 +361,10 @@ def _install_cli_engine(monkeypatch, run_dir: Path):
     import looplab.cli.run_cmds as cmds
 
     eng = _EngineStub(run_dir)
-    monkeypatch.setattr(cli, "_engine", lambda *_a, **_k: eng)
+    def _capture_engine(_out, _task, settings, crash_after=None, **_kwargs):
+        eng.settings = settings
+        return eng
+    monkeypatch.setattr(cli, "_engine", _capture_engine)
     monkeypatch.setattr(cmds, "_load_task", lambda _p: object())
     return eng
 
@@ -371,6 +374,7 @@ def test_cli_finalize_repairs_pending_finish_without_resume_or_new_finish(tmp_pa
 
     run_dir = tmp_path / "run"
     store, finish_seq = _terminal_store(run_dir)
+    (run_dir / "config.snapshot.json").write_text("{}", encoding="utf-8")
     eng = _install_cli_engine(monkeypatch, run_dir)
 
     cmds.finalize(run_dir)
@@ -381,6 +385,9 @@ def test_cli_finalize_repairs_pending_finish_without_resume_or_new_finish(tmp_pa
     state = fold(events)
     assert not state.finalization_pending() and state.search_epoch == 0
     assert eng.finish_calls == 0
+    assert eng.settings.train_monitor is False and eng.settings.asha_live is False
+    assert eng.settings.concurrent_research_repeat is False
+    assert eng.settings.concurrent_consolidate is False
 
 
 def test_cli_finalize_fully_complete_is_a_pure_noop(tmp_path):
@@ -447,6 +454,9 @@ def test_direct_cli_resume_waits_for_finished_owner_tail(tmp_path, monkeypatch):
 
     run_dir = tmp_path / "run"
     store, _ = _terminal_store(run_dir, marked=True)
+    snapshot = run_dir / "config.snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    snapshot_before = snapshot.read_bytes()
     eng = _install_cli_engine(monkeypatch, run_dir)
     attempts = []
 
@@ -473,6 +483,11 @@ def test_direct_cli_resume_waits_for_finished_owner_tail(tmp_path, monkeypatch):
     assert sum(e.type == "resume" for e in events) == 1
     assert not fold(events).finished
     assert eng.store.path == store.path
+    assert snapshot.read_bytes() == snapshot_before
+    assert eng.settings.train_monitor is False and eng.settings.asha_live is False
+    assert eng.settings.watchdog_reflection is False
+    assert eng.settings.concurrent_research_repeat is False
+    assert eng.settings.concurrent_consolidate is False
 
 
 @pytest.mark.parametrize("entry", ["run", "resume"])
@@ -515,7 +530,7 @@ def test_cli_run_pending_finalize_preserves_and_uses_original_snapshots(
     from looplab import cli
     from looplab.cli import app
     import looplab.cli.run_cmds as cmds
-    from looplab.core.config import Settings
+    from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings
 
     run_dir = tmp_path / f"pending-{protocol}"
     run_dir.mkdir()
@@ -538,8 +553,10 @@ def test_cli_run_pending_finalize_preserves_and_uses_original_snapshots(
     task_snap = run_dir / "task.snapshot.json"
     config_snap = run_dir / "config.snapshot.json"
     task_snap.write_text(json.dumps(old_task, indent=2), encoding="utf-8")
-    config_snap.write_text(
-        json.dumps(Settings(max_nodes=3).masked_snapshot(), indent=2), encoding="utf-8")
+    legacy_config = Settings(max_nodes=3).masked_snapshot()
+    for field in LEGACY_CONFIG_SNAPSHOT_DEFAULTS:
+        legacy_config.pop(field, None)
+    config_snap.write_text(json.dumps(legacy_config, indent=2), encoding="utf-8")
     task_before, config_before = task_snap.read_bytes(), config_snap.read_bytes()
     new_task_file = tmp_path / f"new-{protocol}.json"
     new_task_file.write_text(json.dumps(new_task), encoding="utf-8")
@@ -565,6 +582,14 @@ def test_cli_run_pending_finalize_preserves_and_uses_original_snapshots(
     assert captured["run_path"] == run_dir
     assert captured["task"].id == "t" and captured["task"].goal == "old goal"
     assert captured["settings"].max_nodes == 3
+    assert captured["settings"].train_monitor is False
+    assert captured["settings"].asha_live is False
+    assert captured["settings"].watchdog_reflection is False
+    assert captured["settings"].card_driven_selection is False
+    assert captured["settings"].concurrent_research_repeat is False
+    assert captured["settings"].concurrent_consolidate is False
+    assert captured["settings"].eval_parallel is None
+    assert captured["settings"].llm_parallel is None
     assert captured["crash_after"] is None
 
 

@@ -21,7 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
-    RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings)
+    RUN_START_PINNED_FIELDS, Settings, migrate_config_snapshot,
+    run_start_pinned_settings, settings_from_snapshot)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
@@ -2263,8 +2264,10 @@ def build_router(srv) -> APIRouter:
         Python contract in JavaScript.
         """
         pinned = run_start_pinned_settings(srv.state(rd))
-        mismatches = sorted(k for k, value in pinned.items() if snapshot.get(k) != value)
-        effective = dict(snapshot)
+        # Keep revision bound to the exact on-disk object, but expose the same historically-safe
+        # missing-field projection that resume consumes. GET is read-only and never backfills bytes.
+        effective = migrate_config_snapshot(snapshot)
+        mismatches = sorted(k for k, value in pinned.items() if effective.get(k) != value)
         effective.update(pinned)
         effective["_looplab_config_meta"] = {
             "config_revision": _run_config_revision(snapshot),
@@ -2359,8 +2362,10 @@ def build_router(srv) -> APIRouter:
         # Validate the merged config before persistence. Optional fields may deliberately be cleared
         # with null; required fields remain protected by Settings' schema.
         try:
-            Settings(**{key: value for key, value in updated.items()
-                        if key in allowed and key not in secret})
+            settings_from_snapshot({
+                key: value for key, value in updated.items()
+                if key in allowed and key not in secret
+            })
         except ValidationError as exc:
             fields = "; ".join(
                 f"{'.'.join(str(x) for x in error['loc']) or '?'}: {error['msg']}"
@@ -2395,7 +2400,8 @@ def build_router(srv) -> APIRouter:
     )
     async def put_run_config(run_id: str, request: Request):
         """Per-run settings edit: rewrite THIS run's config.snapshot.json so a later RESUME re-enters
-        the loop with the new values. Resume reads the snapshot via `Settings(**data)` (cli.py) — it
+        the loop with the new values. Resume reads it via `settings_from_snapshot` (cli.py), preserving
+        historical defaults for fields absent from an older snapshot. It
         does NOT read the UI's global new-run defaults — so editing the snapshot is the only way to
         change a specific run's settings (e.g. raise `timeout`, enable timeout repair) before continuing it.
 

@@ -8,7 +8,12 @@ import json
 
 import pytest
 
-from looplab.core.config import Settings
+from looplab.core.config import (
+    LEGACY_CONFIG_SNAPSHOT_DEFAULTS,
+    Settings,
+    migrate_config_snapshot,
+    settings_from_snapshot,
+)
 
 
 def test_config_lower_bounds():
@@ -78,6 +83,48 @@ def test_settings_roundtrip_through_snapshot():
     snap.pop("llm_api_key", None)
     s2 = Settings(**snap)
     assert s2.require_approval is True and s2.trust_mode == "untrusted" and s2.confirm_seeds == 4
+
+
+def test_legacy_snapshot_migration_is_copy_only_and_preserves_historical_effects(monkeypatch):
+    raw = {"max_parallel": 4, "backend": "toy", "llm_api_key": "***"}
+    original = dict(raw)
+    migrated = migrate_config_snapshot(raw)
+
+    assert raw == original
+    assert migrated is not raw
+    for key, value in LEGACY_CONFIG_SNAPSHOT_DEFAULTS.items():
+        assert migrated[key] == value
+
+    # Init kwargs from the migrated snapshot outrank ambient env and keep canonical None meaningful;
+    # legacy parallel_build must not accidentally enable the shared LLM broker.
+    monkeypatch.setenv("LOOPLAB_EVAL_PARALLEL", "7")
+    monkeypatch.setenv("LOOPLAB_LLM_PARALLEL", "5")
+    settings = settings_from_snapshot(raw)
+    for key, value in LEGACY_CONFIG_SNAPSHOT_DEFAULTS.items():
+        assert getattr(settings, key) == value
+    assert settings.max_parallel == 4
+    assert settings.eval_parallel is None and settings.llm_parallel is None
+
+
+def test_snapshot_migration_never_overrides_explicit_modern_values():
+    explicit = {
+        "parallel_build": 3,
+        "eval_parallel": 2,
+        "llm_parallel": 4,
+        "train_monitor": True,
+        "asha_live": True,
+        "max_eval_timeout": 7200.0,
+        "watchdog_reflection": True,
+        "card_driven_selection": True,
+        "speculation_depth": 2,
+        "speculation_gate_receipt": "receipt.json",
+        "concurrent_research_repeat": True,
+        "concurrent_research_max_calls": 9,
+        "concurrent_consolidate": True,
+    }
+    settings = settings_from_snapshot(explicit)
+    for key, value in explicit.items():
+        assert getattr(settings, key) == value
 
 
 def test_novelty_mode_rejected_when_out_of_set():

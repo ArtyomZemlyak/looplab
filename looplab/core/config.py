@@ -1197,3 +1197,49 @@ class Settings(BaseSettings):
         else:
             d["llm_api_key"] = None
         return d
+
+
+# Pre-versioned snapshots are full Settings dumps, so absence is a reliable per-field version marker.
+# Keep their historical effective behavior when newer product defaults become active: re-entry must not
+# silently add paid calls, interventions, concurrency or a different selection policy to an old run.
+LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
+    "parallel_build": 1,
+    "eval_parallel": None,
+    "llm_parallel": None,
+    "train_monitor": False,
+    "train_monitor_interval_s": 600.0,
+    "train_monitor_kill": False,
+    "train_monitor_kill_confidence": 0.8,
+    "asha_live": False,
+    "asha_live_kill": False,
+    "asha_live_quantile": 0.5,
+    "asha_live_min_siblings": 3,
+    # Before this operator ceiling existed, the sandbox's 24-hour process limit was authoritative.
+    "max_eval_timeout": 24 * 3600.0,
+    "watchdog_reflection": False,
+    "card_driven_selection": False,
+    "speculation_depth": 0,
+    "speculation_gate_receipt": None,
+    "concurrent_research_repeat": False,
+    "concurrent_research_interval_s": 1800.0,
+    # Zero means unlimited; 40 was the first bounded default, and is latent while repeat is disabled.
+    "concurrent_research_max_calls": 40,
+    "concurrent_consolidate": False,
+}
+
+
+def migrate_config_snapshot(data: dict) -> dict:
+    """Return an effective copy of one legacy/current snapshot without rewriting evidence bytes."""
+    if not isinstance(data, dict):
+        raise TypeError("config snapshot must be a JSON object")
+    migrated = dict(data)
+    for key, value in LEGACY_CONFIG_SNAPSHOT_DEFAULTS.items():
+        migrated.setdefault(key, value)
+    return migrated
+
+
+def settings_from_snapshot(data: dict) -> Settings:
+    """Build re-entry Settings from a masked snapshot under its historical missing-field contract."""
+    migrated = migrate_config_snapshot(data)
+    migrated.pop("llm_api_key", None)
+    return Settings(**migrated)

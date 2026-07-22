@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
-from looplab.core.config import Settings
+from looplab.core.config import Settings, migrate_config_snapshot
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, decode_event_record,
     write_jsonl_atomic)
@@ -451,16 +451,23 @@ def build_router(srv) -> APIRouter:
                 srv.invalidate_trace_view(rd)
 
                 env: Optional[dict] = None
+                spawn_args = ["run", str(task_file), "--out", str(rd)]
                 snap = rd / "config.snapshot.json"
                 if snap.exists():
                     try:
                         cfg = json.loads(snap.read_text(encoding="utf-8"))
                         if isinstance(cfg, dict):
+                            cfg = migrate_config_snapshot(cfg)
                             env = srv.settings.settings_env({
                                 key: value for key, value in cfg.items()
                                 if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS
                                 and value is not None
                             })
+                            # settings_env intentionally omits None. Pin the canonical aliases at CLI
+                            # precedence so parallel_build/max_parallel cannot re-promote them on Replay.
+                            for key in ("eval_parallel", "llm_parallel"):
+                                if cfg.get(key) is None:
+                                    spawn_args.extend(["--set", f"{key}=null"])
                     except (OSError, json.JSONDecodeError, ValueError):
                         env = None
 
@@ -471,8 +478,7 @@ def build_router(srv) -> APIRouter:
                     _mark_run_launching(rd)
                     srv.commands.begin_external_spawn(rd, "reset")
                     popen_attempted = True
-                    pid = _spawn_engine(
-                        ["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
+                    pid = _spawn_engine(spawn_args, env=env, run_dir=rd)
                     spawned = True
                     srv.commands.record_external_spawn(rd, "reset", pid)
                 except BaseException as exc:
