@@ -109,8 +109,8 @@ def test_shrink_rebases_seq_and_rejects_pre_reset_cas(tmp_path):
     assert s.append("current", {}, expected_last_seq=0).seq == 1
 
 
-def test_same_size_rewrite_rebases_seq_for_cas(tmp_path):
-    from looplab.events.eventstore import EventStoreConcurrencyError
+def test_same_size_rewrite_with_seq_gap_fails_closed(tmp_path):
+    from looplab.events.eventstore import EventLogCorruptionError
     import os
     import time
 
@@ -123,9 +123,13 @@ def test_same_size_rewrite_rebases_seq_for_cas(tmp_path):
     future = time.time_ns() + 2_000_000_000
     os.utime(p, ns=(future, future))
 
-    with pytest.raises(EventStoreConcurrencyError):
+    with pytest.raises(EventLogCorruptionError):
         s.append("stale", {}, expected_last_seq=1)
-    assert s.append("current", {}, expected_last_seq=7).seq == 8
+    with pytest.raises(EventLogCorruptionError):
+        s.append("current", {}, expected_last_seq=7)
+    assert s.divergence == {
+        "good_records": 1, "corrupt_line": 2, "dropped_lines": 0,
+    }
 
 
 def test_atomic_file_replacement_rebases_seq_for_cas(tmp_path):

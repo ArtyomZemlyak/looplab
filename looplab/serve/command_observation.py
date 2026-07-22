@@ -7,8 +7,9 @@ event byte once, retains only eight active run indexes, and gives one stable log
 all helpers in a monitor iteration.
 
 The scanner deliberately mirrors :func:`looplab.events.eventstore.iter_event_jsonl`: the first partial,
-invalid, non-object, invalid-Event, or malformed batch row ends the recoverable prefix. A later append resumes from
-the last valid byte boundary, so completing a torn tail is observed without re-reading the prefix.
+invalid, non-object, invalid-Event, malformed batch, or non-dense sequence row ends the recoverable
+prefix. A later append resumes from the last valid byte boundary, so completing a torn tail is observed
+without re-reading the prefix.
 Replacement, shrink, and a sampled same-size sentinel change rebuild the index before it is trusted.
 """
 from __future__ import annotations
@@ -28,7 +29,7 @@ import orjson
 
 from looplab.core.models import Event, RunState
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.eventstore import decode_event_record
+from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
 from looplab.serve.protocol import CONTROL_EVENTS
@@ -218,6 +219,7 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int,
     parsed = 0
     stopped = False
     valid_end = index.valid_end
+    expected_seq = index.latest_seq + 1
     while handle.tell() < snapshot_size:
         start = handle.tell()
         raw = handle.readline(snapshot_size - start)
@@ -232,10 +234,14 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int,
             stopped = True
             break
         # Blank complete rows are part of the valid byte prefix but not EventStore events.
-        valid_end = end
         if events is not None:
+            if not event_sequence_continues(events, expected_seq):
+                stopped = True
+                break
             delta.extend(events)
             parsed += len(events)
+            expected_seq += len(events)
+        valid_end = end
 
     index.valid_end = valid_end
     index.observed_size = snapshot_size

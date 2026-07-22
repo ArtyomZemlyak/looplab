@@ -28,9 +28,16 @@ _UNSET_TRACE = object()
 
 # ``append_many`` is a logical transaction, not a promise that one ``write`` syscall cannot tear. Keep
 # its members in one newline-delimited envelope so the existing torn-final-line rule exposes either the
-# complete batch or none of it. The type is reserved and decoded below before any caller sees Events.
+# complete batch or none of it. The guarded type is reserved and decoded below before any caller sees
+# Events; its non-string disk shape makes pre-batch readers stop instead of dropping the members.
 _EVENT_BATCH_TYPE = "__looplab_event_batch_v1__"
 _EVENT_BATCH_SCHEMA = "looplab.event-batch/v1"
+# New writers encode the reserved type as a one-item JSON array.  That shape is deliberately invalid
+# for the historical ``Event.type: str`` contract: a pre-batch binary therefore hits its complete-row
+# corruption fence and refuses to append, instead of accepting one unknown event while losing every
+# nested lifecycle action.  Current readers normalize both this guarded marker and the short-lived
+# string marker already present in logs written during the initial rollout.
+_EVENT_BATCH_GUARD_TYPE = (_EVENT_BATCH_TYPE,)
 # Keep construction/validation CPU and memory bounded independently of serialized size, while staying
 # above every canonical fan-out knob (Settings.n_seeds/max_parallel allow 1024). Custom policy lanes may
 # be wider, so retain generous headroom; the byte ceiling below remains the tighter bound for rich rows.
@@ -46,18 +53,23 @@ _EVENT_BATCH_DATA_FIELDS = frozenset({"schema", "count", "first_seq", "last_seq"
 def is_event_batch_record(obj: object) -> bool:
     """Whether a parsed physical event-log object claims the reserved batch protocol."""
 
-    return isinstance(obj, dict) and obj.get("type") == _EVENT_BATCH_TYPE
+    if not isinstance(obj, dict):
+        return False
+    marker = obj.get("type")
+    return marker == _EVENT_BATCH_TYPE or marker == list(_EVENT_BATCH_GUARD_TYPE)
 
 
 def _decode_batch_envelope(obj: dict) -> list[Event]:
     """Strictly validate and expand one internal crash-atomic batch envelope."""
 
-    if set(obj) != _EVENT_FIELDS or obj.get("type") != _EVENT_BATCH_TYPE:
+    if set(obj) != _EVENT_FIELDS or not is_event_batch_record(obj):
         raise ValueError("invalid event batch envelope")
     # This is an internal v1 storage protocol, not an ordinary backwards-compatible Event row.  Never
     # let Pydantic coercion make a non-canonical envelope valid (notably ``True == 1`` for seq/version).
-    outer = Event.model_validate(obj, strict=True)
-    if outer.model_dump(mode="json") != obj:
+    canonical_outer = dict(obj)
+    canonical_outer["type"] = _EVENT_BATCH_TYPE
+    outer = Event.model_validate(canonical_outer, strict=True)
+    if outer.model_dump(mode="json") != canonical_outer:
         raise ValueError("non-canonical event batch envelope")
     if outer.v != 1:
         raise ValueError("unsupported event batch envelope version")
@@ -107,8 +119,19 @@ def decode_event_record(obj: dict, *, strict: bool = False) -> list[Event]:
     the same ``type`` string without being an event envelope.
     """
 
+    if is_event_batch_record(obj):
+        return _decode_batch_envelope(obj)
     event = Event.model_validate(obj, strict=True) if strict else Event(**obj)
-    return _decode_batch_envelope(obj) if is_event_batch_record(obj) else [event]
+    return [event]
+
+
+def event_sequence_continues(events: Sequence[Event], expected_seq: int) -> bool:
+    """Whether logical events form the dense prefix beginning at ``expected_seq``."""
+
+    return all(
+        type(event.seq) is int and event.seq == expected_seq + offset
+        for offset, event in enumerate(events)
+    )
 
 
 # Private compatibility name for older internal call sites.  New event-specific readers should import the
@@ -240,15 +263,20 @@ def iter_event_jsonl(path: str | os.PathLike) -> Iterator[dict]:
     """Yield logical event envelopes while preserving ``iter_jsonl`` torn-tail semantics.
 
     A physical ``append_many`` envelope is an implementation detail and expands atomically: malformed
-    batches end the recoverable prefix and no member is exposed.  Keeping this event-aware behavior out of
-    ``iter_jsonl`` is required for non-event JSONL stores that share the generic reader.
+    batches or non-dense logical sequences end the recoverable prefix and no rejected-row member is
+    exposed. Keeping this event-aware behavior out of ``iter_jsonl`` is required for non-event JSONL
+    stores that share the generic reader.
     """
 
+    expected_seq = 0
     for obj in iter_jsonl(path):
         try:
             events = decode_event_record(obj)
         except Exception:  # noqa: BLE001 - malformed event/batch envelope is log corruption
             break
+        if not event_sequence_continues(events, expected_seq):
+            break
+        expected_seq += len(events)
         if is_event_batch_record(obj):
             for event in events:
                 yield event.model_dump(mode="json")
@@ -439,6 +467,7 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
     # element is the torn/partial final line. Either way, only the elements BEFORE the last are
     # newline-terminated ("complete") records that iter_jsonl would consume.
     complete = lines[:-1]
+    expected_seq = 0
     for i, line in enumerate(complete):
         s = line.strip()
         if not s:
@@ -457,13 +486,16 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
             ok = isinstance(obj, dict)
             if ok:
                 try:
-                    _decode_event_record(obj)
+                    events = _decode_event_record(obj)
                 except Exception:  # noqa: BLE001 — a dict that isn't a valid Event is where read_all stops
                     ok = False
+                else:
+                    ok = event_sequence_continues(events, expected_seq)
         if not ok:
             dropped = sum(1 for later in complete[i + 1:] if later.strip())
             return {"good_records": sum(1 for e in complete[:i] if e.strip()),
                     "corrupt_line": i + 1, "dropped_lines": dropped}
+        expected_seq += len(events)
     return None
 
 
@@ -763,9 +795,10 @@ class EventStore:
 
         The group is serialized into one bounded internal JSONL envelope while the same interprocess
         lock used by :meth:`append` is held. Readers strictly validate and expand that one record before
-        returning Events. A torn final line therefore exposes zero members, while a complete envelope
-        preserves the historical contiguous sequences and return value. Another writer can land before
-        the group or after it, never between its records. An empty group is a no-op.
+        returning Events. Its guarded disk type makes pre-batch readers fail closed. A torn final line
+        therefore exposes zero members, while a complete envelope preserves the historical contiguous
+        sequences and return value. Another writer can land before the group or after it, never between
+        its records. An empty group is a no-op.
         """
         if not records:
             return []
@@ -796,10 +829,6 @@ class EventStore:
                 )
                 for offset, (event_type, data) in enumerate(records, start=1)
             ]
-            # CODEX AGENT: this is an on-disk grammar change, not merely an additive event type.
-            # Pre-batch readers accept the envelope as one unknown event, discard every nested action,
-            # yet advance to last_seq; rollback/resume can repeat paid work from lost state. Keep the
-            # one-row grammar or add a migration boundary that old binaries fail closed on.
             envelope = Event(
                 seq=events[-1].seq,
                 ts=events[-1].ts,
@@ -814,7 +843,9 @@ class EventStore:
                 trace_id=trace_id,
                 span_id=span_id,
             )
-            payload = orjson.dumps(envelope.model_dump(mode="json")) + b"\n"
+            physical_envelope = envelope.model_dump(mode="json")
+            physical_envelope["type"] = list(_EVENT_BATCH_GUARD_TYPE)
+            payload = orjson.dumps(physical_envelope) + b"\n"
             if len(payload) > _MAX_EVENT_BATCH_BYTES:
                 raise ValueError(f"event batch exceeds {_MAX_EVENT_BATCH_BYTES} serialized bytes")
             accepted = False
@@ -838,8 +869,9 @@ class EventStore:
     def read_all(self) -> list[Event]:
         """Return every Event on disk (up to the first torn/corrupt line), served from an incremental
         cache. Only bytes appended since the previous call are read+parsed; the returned sequence is
-        byte-for-byte identical to a full `iter_jsonl` scan. Falls back to a full rescan if the file
-        shrank/was replaced (a heal-truncate or a fresh file) so the cache can never go stale."""
+        identical to a full event-aware scan, including its dense-sequence boundary. Falls back to a
+        full rescan if the file shrank/was replaced (a heal-truncate or a fresh file) so the cache can
+        never go stale."""
         with self._read_lock:
             try:
                 st = self.path.stat() if self.path.exists() else None
@@ -875,15 +907,16 @@ class EventStore:
                 # and re-appending the same prefix on every later call.
                 evs: list[Event] = []
                 ok_bytes = 0
-                # CODEX AGENT: envelope validation does not prove continuity across physical rows.
-                # A complete, schema-valid duplicate/backward/gapped seq currently survives both
-                # read_all and log_divergence; _scan_last_seq then trusts that tail and the next append
-                # may reuse an existing seq. Reject the first logical seq != previous + 1 everywhere.
+                expected_seq = self._cache[-1].seq + 1 if self._cache else 0
                 for o, end in objs:
                     try:
-                        evs.extend(_decode_event_record(o))
+                        record_events = _decode_event_record(o)
                     except Exception:  # noqa: BLE001
                         break
+                    if not event_sequence_continues(record_events, expected_seq):
+                        break
+                    evs.extend(record_events)
+                    expected_seq += len(record_events)
                     ok_bytes = end
                 else:
                     ok_bytes = consumed   # all records valid — trailing blanks count too

@@ -15,11 +15,11 @@ truth and wins wherever the original target text differs from shipped behavior.
 | Area | Landed now | Remaining |
 |---|---|---|
 | Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | none |
-| Card read model | native monotonic Card mint/link under a process-local `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; bounded per-event input and public projection; durable request/done queue | Card mint and build claim are consecutive appends, not one cross-process atomic/CAS transaction; an exact retry repairs the crash prefix. The folded `cards_enriched` replay journal is not yet capped |
+| Card read model | native monotonic Card mint/link under a process-local `_id_lock` and log-tail CAS; a fresh Card mint + build claim is one crash-atomic batch, while reuse is one CAS append; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; bounded per-event input and public projection; durable request/done queue | The folded `cards_enriched` replay journal is not yet capped |
 | Enrichment | structured steering snapshots; memo/claim/lesson refs; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays; schema seams for novelty/cross-run/concept projection | proposal-time selectable Cards do not yet carry trusted novelty/coverage memberships, so those ranking terms are zero until a linked Node supplies later evidence |
 | Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
 | Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, confirm admission, isolated Card producer/consumer | positive-GPU discovery failure can still launch an unspecified request without a pin; `required-but-unavailable` is not represented separately |
-| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, and optimistic edit/priority/resource/drop controls | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events; browser optimistic state is not yet scoped by run id |
+| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events |
 
 ### Stage progress ledger (validated implementation, 2026-07-22)
 
@@ -136,12 +136,15 @@ Receipt identity is exact: self digest
 - `EventStore.append_many` exposes a complete logical batch or none of it after a torn write. EventStore,
   replay, command observation, scope/report capture, SSE, timeline paging, run caches and maintenance tools
   expand the bounded storage envelope consistently; generic non-event JSONL readers remain format-agnostic.
+  New envelopes carry a guarded non-string type so pre-batch binaries stop at their corruption fence;
+  current readers also accept the initial string marker and reject non-dense logical sequences.
 - Coverage scoring consumes only complete authorized current memberships and canonicalizes Card aliases,
   case and spacing through the same concept-identity projection.
 
-**Partially resolved Layer-3 safety boundary:** the selector now consumes only `selection_ready`, and the
-existing-Card writer re-folds and claims the complete selected lane under a process-local `_id_lock`.
-The Card mint and `node_building` claim remain separate unconditional appends without a shared tail CAS.
+**Layer-3 safety boundary:** the selector consumes only `selection_ready`, and the writer re-folds and
+claims the complete selected lane under a process-local `_id_lock` plus log-tail CAS. A fresh Card mint
+and `node_building` claim are one crash-atomic batch; an existing-Card claim is one CAS append. Any
+intervening lifecycle/control authority returns the caller to selection rather than retrying stale work.
 `Card.actionable` remains a compatibility board flag meaning only “not dropped/gated/abandoned”; it
 is true for proposed-without-action, running,
 evaluated, and superseded work. It is therefore **not evidence of executability**. The selector may
@@ -517,7 +520,7 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
   resume. The main-task commit branch `_serve_card_builds` (sibling of `_serve_forced_requests`,
   orchestrator.py:1430) is **crash-recovery-first** (a node with `idea.card_id==K` at gen G already
   exists → only append `card_build_done`, never double-create), else reserves the exact
-  `node_building` under the short process-local `_id_lock` (without a tail CAS shared with Card mint), commits the ready buffer via the reserved
+  `node_building` under the short process-local `_id_lock` and tail CAS (the Card was already staged), commits the ready buffer via the reserved
   `_create_node(precoded=…)` outside that lock, then appends
   `card_build_done{node_id, speculative:true}`; otherwise it
   advances the counter with `card_build_done{skipped:'producer_failed'|'stale'}` — mirroring

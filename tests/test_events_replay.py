@@ -867,6 +867,31 @@ def test_log_divergence_detects_mid_file_corruption(tmp_path):
     assert log_divergence(p) == {"good_records": 2, "corrupt_line": 3, "dropped_lines": 1}
 
 
+@pytest.mark.parametrize("bad_seq", [0, 2, 10])
+def test_duplicate_or_gapped_logical_sequence_fails_closed(tmp_path, bad_seq):
+    from looplab.events.eventstore import (
+        EventLogCorruptionError,
+        iter_event_jsonl,
+        log_divergence,
+    )
+
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(
+        b'{"seq":0,"type":"a"}\n'
+        + f'{{"seq":{bad_seq},"type":"bad"}}\n'.encode()
+        + f'{{"seq":{bad_seq + 1},"type":"hidden"}}\n'.encode()
+    )
+
+    assert [row["type"] for row in iter_event_jsonl(p)] == ["a"]
+    store = EventStore(p)
+    assert [event.type for event in store.read_all()] == ["a"]
+    assert log_divergence(p) == {
+        "good_records": 1, "corrupt_line": 2, "dropped_lines": 1,
+    }
+    with pytest.raises(EventLogCorruptionError):
+        store.append("resume", {})
+
+
 def test_log_divergence_ignores_a_torn_tail(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

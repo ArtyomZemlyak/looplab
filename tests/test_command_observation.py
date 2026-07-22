@@ -81,6 +81,20 @@ def test_atomic_batch_counts_and_indexes_each_logical_event_with_physical_valid_
     assert index.metrics.last_records_parsed == 3
 
 
+def test_sequence_gap_ends_command_observation_at_the_eventstore_prefix(tmp_path):
+    path = tmp_path / "events.jsonl"
+    first = _row(0, "run_started", {"run_id": "r"})
+    path.write_bytes(first + _row(2, "resume") + _row(3, "command_ack"))
+
+    observed = CommandObservationIndex().observe(path)
+
+    assert observed.event_count == 1
+    assert observed.latest_seq == 0
+    assert observed.valid_end == len(first)
+    assert observed.torn_tail is True
+    assert [event.type for event in observed.events()] == ["run_started"]
+
+
 def test_exact_intent_ack_finish_and_abort_facts_preserve_command_semantics(tmp_path):
     path = tmp_path / "events.jsonl"
     command_id = "cmd_" + "a" * 32
