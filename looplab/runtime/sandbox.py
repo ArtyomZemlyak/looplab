@@ -106,7 +106,12 @@ def docker_gpu_env(env: Optional[dict], *, gpu_args: list[str]) -> dict:
     widen/conflict with it, and do not re-forward the physical CUDA ordinal into the re-indexed child.
     Truly unspecified legacy environments retain their historical forwarding behavior.
     """
-    clean = dict(env or {}) if isinstance(env, dict) else {}
+    # SECURITY: this is THE env boundary for the untrusted Docker tiers. `docker run` does not inherit
+    # the host env, so only what BOTH callers (make_docker_wrap and DockerSandbox.run) forward via `-e`
+    # from this dict reaches candidate code. Strip secret-named vars at this single choke point — the same
+    # guard `run_argv` applies to os.environ — so a host LLM_API_KEY / cloud cred that rode in via `env`
+    # is never handed to adversarial code, and neither caller has to re-implement the filter.
+    clean = {k: v for k, v in env.items() if not SECRET_ENV.search(k)} if isinstance(env, dict) else {}
     if "CUDA_VISIBLE_DEVICES" not in clean:
         return clean
     devices = str(clean.get("CUDA_VISIBLE_DEVICES") or "").strip()

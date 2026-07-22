@@ -1267,12 +1267,16 @@ function _cardControlReflected(card, kind, patch, baseline) {
     if (typeof card.statement !== 'string' || typeof patch.statement !== 'string') return false
     if (card.statement === patch.statement) return true
     // A clipped/redacted fold is a PROPER prefix of the submitted text — but so is the PRE-EDIT value for
-    // a common extend edit ("foo" -> "foobar"): matching the prefix alone would clear the override before
-    // the write is even folded, letting an unrelated SSE frame drop the waiting-for-fold fence against
-    // stale UI truth. Require the card to have actually MOVED off the submit-time baseline before a prefix
-    // counts as this write landing; without a baseline (legacy entry) only an exact match reflects.
-    return typeof baseline === 'string' && card.statement !== baseline
+    // an extend edit ("foo" -> "foobar"), AND so is a still-in-flight EARLIER chained edit whose landed
+    // value is a prefix of this submission. Matching the prefix alone would clear the override before the
+    // write folds, dropping the waiting-for-fold fence against stale UI truth. So a clipped prefix counts
+    // as THIS write landing only when the card has moved PAST the baseline (the value it showed just
+    // before this edit — the prior in-flight submission for chained edits, see cardControl): `card` must
+    // be a prefix of the submission but NOT itself a prefix of that baseline. Without a baseline (legacy
+    // entry) only an exact match reflects.
+    return typeof baseline === 'string'
       && card.statement.length > 0 && patch.statement.startsWith(card.statement)
+      && !baseline.startsWith(card.statement)
   }
   if (kind === 'priority') return card.priority === patch.priority && card.pinned === true
   if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
@@ -1568,6 +1572,10 @@ function _CardKanbanCard({
 function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
   const [optim, setOptim] = useState({})
   const inFlight = useRef(new Set())
+  // Last edit statement SUBMITTED per card id. It outlives the optimistic override (which clears on a
+  // success ack before the SSE fold arrives), so a chained extend edit can baseline against the prior
+  // in-flight submission instead of a stale fold — see the editBaseline capture in cardControl.
+  const sentEditRef = useRef({})
   const cardsById = new Map(cards.map(card => [card.id, card]))
   const cardsByIdRef = useRef(cardsById)
   cardsByIdRef.current = cardsById
@@ -1581,7 +1589,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         const updates = { ...(entry.updates || {}) }
         for (const kind of _CARD_CONTROL_KINDS) {
           if (updates[kind]
-              && _cardControlReflected(card, kind, updates[kind], entry.baselines?.[kind])) {
+              && _cardControlReflected(card, kind, updates[kind], entry.editBaseline)) {
             delete updates[kind]
             changed = true
           }
@@ -1619,18 +1627,25 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
       return { kind: 'pending', message }
     }
     inFlight.current.add(card.id)
-    // Snapshot the card's CURRENT statement so a later clipped/redacted fold of THIS edit is
-    // distinguishable from the not-yet-folded state (see `_cardControlReflected`): a landed edit moves
-    // the card off this baseline, whereas an extend edit's pre-value still prefix-matches the submission.
-    const editBaseline = kind === 'edit' && typeof card.statement === 'string'
-      ? card.statement : undefined
+    // Baseline for edit-reflection = the value the card shows JUST BEFORE this edit. Normally that is the
+    // current fold, but for a CHAINED edit the prior edit may not have folded yet, so the visible fold is
+    // stale (one step behind). Use the prior SUBMITTED statement when the current card is a proper prefix
+    // of it (we are still catching up to that earlier edit); otherwise the card has already moved on, so
+    // the current statement is right. This self-cleans: once the fold reaches the prior submission the
+    // prefix test fails and we fall back to the fold. (See `_cardControlReflected`.)
+    let editBaseline
+    if (kind === 'edit' && typeof card.statement === 'string') {
+      const prior = sentEditRef.current[card.id]
+      editBaseline = (typeof prior === 'string' && prior !== card.statement
+        && prior.startsWith(card.statement)) ? prior : card.statement
+      if (typeof patch.statement === 'string') sentEditRef.current[card.id] = patch.statement
+    }
     setOptim(current => {
       const entry = current[card.id] || {}
       return { ...current, [card.id]: {
         ...entry,
         updates: { ...(entry.updates || {}), [kind]: patch },
-        baselines: { ...(entry.baselines || {}),
-          ...(editBaseline !== undefined ? { edit: editBaseline } : {}) },
+        ...(editBaseline !== undefined ? { editBaseline } : {}),
         pending: { kind, phase: 'submitting' },
         notice: { tone: 'pending', text: labels.saving },
       } }
@@ -1658,7 +1673,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         // byte-equal fold would leave the card stuck showing operator text with its controls disabled.
         // Only a 'pending' (accepted, engine will apply later) settle keeps the override until the fold.
         const settled = ['error', 'success', 'noop'].includes(feedback.kind)
-        if (settled || _cardControlReflected(rawCard, kind, patch, entry.baselines?.[kind])) {
+        if (settled || _cardControlReflected(rawCard, kind, patch, entry.editBaseline)) {
           delete updates[kind]
         }
         const pending = feedback.kind === 'pending' && updates[kind]

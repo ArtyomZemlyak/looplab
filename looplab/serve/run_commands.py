@@ -2509,8 +2509,13 @@ class RunCommandService:
         return updated
 
     @staticmethod
-    def _collaboration_precondition(state, event_type: str, data: dict) -> Optional[dict]:
-        """Recheck the exact semantic subject immediately before a collaboration append."""
+    def _collaboration_precondition(state, event_type: str, data: dict,
+                                    envelope: Optional[tuple] = None) -> Optional[dict]:
+        """Recheck the exact semantic subject immediately before a collaboration append.
+
+        `envelope` is the pre-computed `_card_resource_envelope()` tuple; the bounded-CAS caller passes
+        it so a resource-pin re-check does not re-spawn nvidia-smi on every log-race retry. When omitted
+        (direct callers/tests) the envelope is queried on demand."""
         if event_type in {
             EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
         }:
@@ -2539,7 +2544,8 @@ class RunCommandService:
             if event_type == EV_CARD_RESOURCE_PINNED:
                 gpus = data.get("gpus")
                 memory = data.get("gpu_mem_mib")
-                gpu_count, gpu_memory = _card_resource_envelope()
+                gpu_count, gpu_memory = (
+                    envelope if envelope is not None else _card_resource_envelope())
                 if (type(gpus) is not int or gpus < 0 or gpus > gpu_count
                         or (memory is not None and (type(memory) is not int or memory < 0))
                         or (gpus == 0 and memory is not None)):
@@ -2647,6 +2653,11 @@ class RunCommandService:
         """
         store = EventStore(self._events_path(rd))
         baseline = -1
+        # The GPU free-memory envelope is hardware state, invariant across the CAS loop's log-race
+        # refolds — compute it ONCE (only for a resource pin, its sole consumer) rather than re-spawning
+        # the uncached nvidia-smi query on every retry.
+        envelope = (_card_resource_envelope()
+                    if record.get("event_type") == EV_CARD_RESOURCE_PINNED else None)
         for _ in range(8):
             events = store.read_all()
             current_generation = run_generation_token(events)
@@ -2655,7 +2666,7 @@ class RunCommandService:
                 return None, (events[-1].seq if events else -1), error
             state = fold(events)
             error = self._collaboration_precondition(
-                state, str(record.get("event_type") or ""), event_data)
+                state, str(record.get("event_type") or ""), event_data, envelope=envelope)
             if error is not None:
                 return None, (events[-1].seq if events else -1), error
             baseline = events[-1].seq if events else -1

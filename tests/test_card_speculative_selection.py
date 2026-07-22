@@ -391,7 +391,9 @@ def test_consumed_speculative_sibling_stays_masked_from_next_prefetch_population
     ) is False
 
 
-@pytest.mark.parametrize("terminal_exclusion", ["aborted", "tombstoned", "dropped", "merged"])
+@pytest.mark.parametrize(
+    "terminal_exclusion",
+    ["aborted", "tombstoned", "dropped", "dropped_no_reason", "merged"])
 def test_terminally_excluded_speculative_sibling_does_not_poison_common_population(
     terminal_exclusion,
 ):
@@ -399,9 +401,14 @@ def test_terminally_excluded_speculative_sibling_does_not_poison_common_populati
     excluded = _owned(_ready_card("excluded", concepts=("excluded",)), 3)
     # A sibling whose CARD is administratively dead (operator-dropped or merged) must NOT poison the
     # subject's freshness counterfactual — it is terminalized by the gate on its own turn. The node
-    # itself stays pending in these two cases (only the Card carries the closure).
+    # itself stays pending in these cases (only the Card carries the closure). `dropped_no_reason` is the
+    # regression guard for the reachable folded state a card_dropped event with an empty/missing reason
+    # produces (status="dropped" but dropped_reason=None): a reason-keyed skip would miss it, so the gate
+    # must key on status. `merged` exercises the defensive merged_into disjunct on a hand-built state.
     if terminal_exclusion == "dropped":
         excluded = excluded.model_copy(update={"status": "dropped", "dropped_reason": "operator dropped"})
+    elif terminal_exclusion == "dropped_no_reason":
+        excluded = excluded.model_copy(update={"status": "dropped", "dropped_reason": None})
     elif terminal_exclusion == "merged":
         excluded = excluded.model_copy(update={"merged_into": "subject"})
     subject_node = _node(

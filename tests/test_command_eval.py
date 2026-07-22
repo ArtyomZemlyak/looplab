@@ -304,6 +304,21 @@ def test_docker_wrap_never_forwards_secret_named_env(monkeypatch):
     assert "sk-secret" not in joined and "creds" not in joined and "ghp_x" not in joined
 
 
+def test_docker_gpu_env_strips_secrets_at_the_shared_choke_point():
+    """SECURITY: the secret-strip lives in docker_gpu_env — the ONE choke point BOTH untrusted Docker
+    callers (command_eval.make_docker_wrap and sandbox.DockerSandbox.run) forward via -e — so neither
+    tier can leak a host credential to candidate code, and neither re-implements the filter."""
+    from looplab.runtime.sandbox import docker_gpu_env
+    env = {"LOOPLAB_EVAL_SEED": "7", "PATH": "/usr/bin", "LLM_API_KEY": "sk-secret",
+           "AWS_SECRET_ACCESS_KEY": "creds", "HF_TOKEN": "hf_x", "CUDA_VISIBLE_DEVICES": "0"}
+    # Positive pin: docker_gpu_argv owns the fence, so CUDA/NVIDIA are dropped; secrets are stripped too.
+    out = docker_gpu_env(env, gpu_args=["--gpus", "device=0"])
+    assert out == {"LOOPLAB_EVAL_SEED": "7", "PATH": "/usr/bin"}
+    # No-GPU path (early return branch) must strip secrets just the same.
+    out2 = docker_gpu_env({"LLM_API_KEY": "sk", "LOOPLAB_EVAL_SEED": "1"}, gpu_args=[])
+    assert out2 == {"LOOPLAB_EVAL_SEED": "1"}
+
+
 def test_docker_wrap_preserves_posix_absolute_bind_path(monkeypatch, tmp_path):
     """A Windows Docker client must not prefix a Linux symlink target with its current drive."""
     import shutil

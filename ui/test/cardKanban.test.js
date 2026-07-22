@@ -159,13 +159,16 @@ test('Edit reflection needs the card to move off the submit-time baseline (no ex
   const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
   const reflected = source.slice(
     source.indexOf('function _cardControlReflected'), source.indexOf('function _cardWithOptimisticControls'))
-  // The clipped-prefix branch must require card.statement !== baseline so a common extend edit
-  // ("foo" -> "foobar"), whose pre-value still prefix-matches, cannot read as already-landed.
-  assert.match(reflected, /card\.statement !== baseline[\s\S]*patch\.statement\.startsWith\(card\.statement\)/)
-  // The submit path captures the baseline so the reflection check has it.
+  // The clipped-prefix branch counts as landed only when the card is a prefix of the submission but NOT
+  // a prefix of the baseline — so an extend edit's pre-value (and a still-in-flight earlier chained edit
+  // whose value is a prefix of this submission) cannot read as already-landed.
+  assert.match(reflected, /patch\.statement\.startsWith\(card\.statement\)[\s\S]*!baseline\.startsWith\(card\.statement\)/)
+  // The submit path baselines against the prior in-flight submission (via sentEditRef), not the stale
+  // fold, so a chained extend edit is not falsely reflected by the earlier edit's landing.
   const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
-  assert.match(board, /const editBaseline = kind === 'edit'/)
-  assert.match(board, /baselines: \{ \.\.\.\(entry\.baselines \|\| \{\}\)/)
+  assert.match(board, /const sentEditRef = useRef\(\{\}\)/)
+  assert.match(board, /let editBaseline/)
+  assert.match(board, /prior\.startsWith\(card\.statement\)\) \? prior : card\.statement/)
 })
 
 test('Each Card control draft re-seeds only from its own folded source (no cross-field clobber)', async () => {

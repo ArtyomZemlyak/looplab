@@ -147,24 +147,31 @@ class ConfirmPhaseMixin:
             try:
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(_watch_lifecycle)
-                    res = await anyio.to_thread.run_sync(_run)
+                    try:
+                        res = await anyio.to_thread.run_sync(_run)
+                    except GpuPinUnenforceable as exc:
+                        # A durable resource pin the Docker daemon/runtime cannot enforce must NOT crash
+                        # the run() spine (confirm has no surrounding try — it would abort the engine and
+                        # re-crash on every resume, since the operator pin is durable). Terminalize THIS
+                        # seed: append a null confirm_eval so the seed is durably accounted (resume skips
+                        # it via confirm_seed_results) and the node simply fails to gain a confirmed metric.
+                        # Catch INSIDE the task group around the await — a bare `except` OUTSIDE it would
+                        # never match the ExceptionGroup anyio wraps a task-group body error in (dead code).
+                        # Shield the write-lock append so scope cancellation cannot preempt the checkpoint;
+                        # `_release_gpus` still runs in the finally below (do not double-release).
+                        cancel.set()
+                        tg.cancel_scope.cancel()
+                        still_current = self._confirmation_node_current(nd.id, generation)
+                        with anyio.CancelScope(shield=True):
+                            async with self._write_lock:
+                                self.store.append(EV_CONFIRM_EVAL, {
+                                    "node_id": nd.id, "generation": generation, "seed": s,
+                                    "eval_seconds": round(time.time() - _t0, 3), "metric": None,
+                                    "reason": "gpu_unpinnable", "error": str(exc)[:400],
+                                    **({"superseded": True} if not still_current else {})})
+                        return None
                     cancel.set()
                     tg.cancel_scope.cancel()
-            except GpuPinUnenforceable as exc:
-                # A durable resource pin the Docker daemon/runtime cannot enforce must NOT crash the
-                # run() spine (unlike the main eval, confirm has no surrounding try — it would abort the
-                # engine and re-crash on every resume, since the operator pin is durable). Terminalize
-                # THIS seed instead: record a null confirm_eval so the seed is durably accounted (resume
-                # skips it via confirm_seed_results) and the node simply fails to gain a confirmed metric.
-                # `_release_gpus` still runs in the finally below (do not double-release here).
-                still_current = self._confirmation_node_current(nd.id, generation)
-                async with self._write_lock:
-                    self.store.append(EV_CONFIRM_EVAL, {
-                        "node_id": nd.id, "generation": generation, "seed": s,
-                        "eval_seconds": round(time.time() - _t0, 3), "metric": None,
-                        "reason": "gpu_unpinnable", "error": str(exc)[:400],
-                        **({"superseded": True} if not still_current else {})})
-                return None
             finally:
                 self._release_gpus(reservation.get("gpu_ids"))
 
