@@ -28,7 +28,7 @@ class ProposalCuesMixin:
     def _experiment_time_budget(self):
         """The operative per-experiment wall-clock CEILING (seconds) a training must finish within,
         resolved the SAME way the eval dispatcher resolves it — NOT the config `timeout` (default 30s,
-        the solution.py path; config.py:195 states 'RepoTasks use their per-profile timeout'). For a repo
+        the solution.py path; config.py:333 states 'RepoTasks use their per-profile timeout'). For a repo
         task with an ACTIVATED eval_spec the ceiling is the LARGEST profile/base timeout
         `command_eval.build_command` could apply (a node runs under whichever profile it selects, so the
         largest is the real ceiling a training must fit); when no eval_spec is active the solution.py

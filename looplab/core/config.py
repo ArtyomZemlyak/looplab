@@ -659,7 +659,9 @@ class Settings(BaseSettings):
     # Deterministic, cheap, and purely additive context — no search-behavior change on its own. On by
     # default (like the rest of the always-on situational context). See search/coverage.py.
     coverage_context: bool = True
-    # PART IV Phase 2a live steering (§21.11/§21.13). When on, the strategist cadence records a
+    # PART IV Phase 2a live steering (§21.11/§21.13). When on, the `concept_retag_every` cadence (NOT
+    # `strategist_every` — the producer gates on `_should_consult_concepts`, which uses the seed boundary
+    # + `concept_retag_every`, default 30) records a
     # concept-graph coverage + uncovered-region snapshot (deterministic heuristic tagger over the
     # task-type skeleton) and, on an `explore` stance, the Researcher's novelty hint names the exact
     # uncovered regions ("0 coverage in {negatives/external-mining, distillation} — go there") instead

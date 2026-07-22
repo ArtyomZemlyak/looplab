@@ -664,7 +664,8 @@ class StrategyCadenceMixin:
     @in_llm_lane("enrichment")
     def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
         """PART IV Phase 2a: record a compact concept-graph coverage + uncovered-region snapshot at the
-        strategist cadence when `concept_pivot` is on. The producer is LLM-backed when a client is wired,
+        `concept_retag_every` cadence (via `_should_consult_concepts`, NOT `strategist_every`) when
+        `concept_pivot` is on. The producer is LLM-backed when a client is wired,
         with a deterministic heuristic fallback; recording the result makes replay deterministic. The
         folded record does not select a node directly, but its explore-stance directive can change future
         Researcher candidates. Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op
