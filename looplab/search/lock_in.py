@@ -1,4 +1,4 @@
-"""Action-space lock-in detector (PART IV D7, §21.8/§21.10 — Phase 1a, offline analytic).
+"""Action-space lock-in detector (PART IV D7, §21.8/§21.10 — pure live read-model).
 
 **Why this exists.** The deepest cause of the `rubertlite` collapse: with full freedom to edit any file,
 the agent only ever touched ONE subsystem (`loss.py`). node_48's champion was expanded 19 times, 14 of

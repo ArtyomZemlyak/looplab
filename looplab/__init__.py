@@ -47,9 +47,9 @@ _LAYOUT = {
     "artifacts": "serve",
     "paid_work": "serve",
     "settings_ui_schema": "serve",
-    "asset_brief": "tools",   # PART IV D1 seed-time asset/prior-art brief (offline)
+    "asset_brief": "tools",   # PART IV D1 bounded local asset/prior-art brief
     "audit": "engine",   # engine audit/trust-emitter mixin
-    "concept_graph": "search",   # PART IV D5 concept-graph coverage diagnostic (offline)
+    "concept_graph": "search",   # PART IV D5 pure concept-graph projection used offline and live
     "concept_projection": "search",  # receipt/lifecycle-aware CURRENT membership boundary
     "coverage": "search",
     "graded_novelty": "search",   # PART IV D3 graded novelty + failed-direction re-exam (advisory)

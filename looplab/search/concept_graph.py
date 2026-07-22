@@ -35,9 +35,11 @@ alias-based (no-LLM) tagger that keys on primary-lever LINEAGE (all `dcl-*` → 
 fires early; `tag_nodes_llm` is the richer optional harness that also GROWS the vocabulary. Both return
 `{node_id: frozenset[concept_id]}` and feed the same pure analytics.
 
-**Phase 0 scope (early lane, §6.6 / §21.13).** This is an OFFLINE diagnostic — it reads a completed
-run's folded state and reports; it does NOT write domain events or touch selection. The lock-in detector
-(D7, 1a) and the live Strategist-pivot wiring (2a) read this graph but are separate later phases.
+**Current scope.** The primitives in this module remain pure and never write domain events themselves,
+but they are not offline-only: engine-owned producers persist bounded concept memberships and coverage
+snapshots, and live consumers use the resulting graph for Strategist coverage cues, graded-novelty
+admission, Card scoring, and capability-expansion guidance. Offline inspection calls the same pure
+functions over a completed fold; event writing and policy gates stay in their owning engine modules.
 """
 from __future__ import annotations
 

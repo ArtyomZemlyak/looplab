@@ -22,14 +22,18 @@ steers must be **grounded + repeated + criteria-decomposed**, never a single bli
     §17 distance-from-seed); the optional tool-reading variant additionally lets the judge READ the run
     it is scoring (mirrors `trust/verify.py::verify_memo`).
 
-**Discipline (normative, §21.7).** Strictly ADVISORY / audit — a `VerdictReport` never overrides a
-fixed-metric ground truth and is not read by best-selection. Best-effort: no client, or any model
-failure, degrades to an explicit `method="unavailable"` report rather than blocking the caller. The
-critic is a *primitive the Strategist consults*, not a Strategist sub-mode (the §4 ownership split).
+**Discipline (normative, §21.7).** A `VerdictReport` never overrides a strictly better fixed-metric
+result. Best-effort: no client, or any model failure, degrades to an unavailable/abstaining result
+rather than blocking the caller. The primitive is nevertheless no longer audit-only: current opt-in
+consumers use it for grounded failed-direction re-examination, foresight confidence, and the atomic
+soundness tie-break among nodes already tied by the recorded exact/CI metric contract. The lesson guard
+and calibration harness remain observational. Every selection-affecting consumer owns its own
+completeness/agreement gate; this generic scorer deliberately does not decide policy.
 
-**Phase 0 scope.** Offline foundation: the scorer + a `calibrate` harness that measures whether the
-score tracks a labelled gold outcome (§12's own evaluation gate — "calibrate on the run's labelled
-cases"). Wiring it into live selection (foresight replacement, novelty re-exam) is Phase 1c/2c.
+**Current scope.** The scorer and `calibrate` harness are the shared foundation. Live wiring exists in
+`search/graded_novelty.py`, `search/foresight.py`, and `engine/strategy.py`; `trust/lesson_guard.py`
+exposes the audit-only lesson checks. None of those consumers may infer a clean negative from an
+unavailable or partially parsed verdict.
 """
 from __future__ import annotations
 
