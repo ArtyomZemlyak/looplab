@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +42,46 @@ INDEX_CACHE_SCHEMA_VERSION = 3
 # Version 2 excludes proposer-authored concept claims from the portfolio evidence projection.
 INDEX_PROJECTOR_VERSION = 2
 _DIGEST_CHUNK_BYTES = 1024 * 1024
+# A task snapshot carries only adapter identity/config metadata. Bounding it independently prevents a
+# malformed or hostile run directory from turning a portfolio refresh into an unbounded allocation.
+_MAX_TASK_SNAPSHOT_BYTES = 4 * 1024 * 1024
+# The persisted index is a disposable cache. An implausibly large cache is cheaper and safer to rebuild
+# than to materialise before its schema/checksums can be validated.
+_MAX_INDEX_CACHE_BYTES = 256 * 1024 * 1024
+
+
+def _read_bounded_regular_bytes(path: Path, *, maximum: int, label: str) -> bytes:
+    """Read one bounded regular file, rejecting links/devices and growth beyond the advertised size."""
+    if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError(f"{label} must be a regular file")
+    with path.open("rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{label} must be a regular file")
+        if info.st_size > maximum:
+            raise ValueError(f"{label} exceeds {maximum} bytes")
+        payload = handle.read(maximum + 1)
+    if len(payload) > maximum:
+        raise ValueError(f"{label} exceeds {maximum} bytes")
+    return payload
+
+
+def _safe_skip_reason(exc: Exception) -> str:
+    """Return diagnostic classes without reflecting filesystem paths or corrupt source contents."""
+    message = str(exc)
+    for safe in (
+        "torn event-log tail (unterminated physical record)",
+        "corrupt complete event record",
+        "run source changed while validating cached facts",
+        "run source changed while building facts",
+        f"task snapshot exceeds {_MAX_TASK_SNAPSHOT_BYTES} bytes",
+        "task snapshot must be a regular file",
+        "event log must be a regular file",
+        "run directory must be a regular directory",
+    ):
+        if safe in message:
+            return f"{type(exc).__name__}: {safe}"
+    return type(exc).__name__
 
 
 def _cache_contract(*, universal: bool) -> dict:
@@ -149,10 +191,13 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
     """Best-effort (kind, metric) from a run's `task.snapshot.json` — tolerant of the legacy `kind` enum
     and the newer nested `metric.{reader,kind}` spelling (see adapters/tasks.py). Never raises."""
     try:
-        # CODEX AGENT: A portfolio scan reads this file without a regular-file check or byte cap; one
-        # hostile/accidental giant snapshot can exhaust the index worker even though digesting was streamed.
-        # Parse the same bounded frozen bytes used by the cache identity and receipt any omission/failure.
-        snap = json.loads((run_dir / "task.snapshot.json").read_text(encoding="utf-8"))
+        # CODEX AGENT: parse only the same bounded regular-file contract used by source identity. The
+        # final digest recheck in ``build_index_incremental`` fences replacement between these two reads.
+        path = run_dir / "task.snapshot.json"
+        snap = json.loads(_read_bounded_regular_bytes(
+            path, maximum=_MAX_TASK_SNAPSHOT_BYTES, label="task snapshot").decode("utf-8"))
+        if not isinstance(snap, dict):
+            return "", ""
     except Exception:  # noqa: BLE001 — a missing/garbled snapshot just yields empty facets (see NOTE below)
         # NOTE (CODEX): "" here is indistinguishable from a genuinely empty facet; a full record would carry
         # explicit degraded/error provenance so an incomplete passport isn't treated as compatible evidence.
@@ -213,6 +258,8 @@ def run_source_digest(run_dir: str | Path) -> str:
     Content-addressed (not size+mtime) so it is deterministic and copy-stable; hashing bytes is far cheaper
     than re-folding, which is what the cache actually saves."""
     d = Path(run_dir)
+    if d.is_symlink():
+        raise ValueError("run directory must be a regular directory")
     ev = d / "events.jsonl"
     if not ev.exists():
         return ""
@@ -221,15 +268,22 @@ def run_source_digest(run_dir: str | Path) -> str:
     def _update(path: Path) -> None:
         # Run logs can grow well beyond memory-sized payloads.  Stream both inputs so computing the cache
         # key has bounded memory use and never materialises a second full copy of a log.
+        if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError("event log must be a regular file")
         with path.open("rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                raise ValueError("event log must be a regular file")
             while chunk := fh.read(_DIGEST_CHUNK_BYTES):
                 h.update(chunk)
 
     _update(ev)
     h.update(b"\x00snapshot\x00")
     snap = d / "task.snapshot.json"
+    if snap.is_symlink():
+        raise ValueError("task snapshot must be a regular file")
     if snap.exists():
-        _update(snap)
+        h.update(_read_bounded_regular_bytes(
+            snap, maximum=_MAX_TASK_SNAPSHOT_BYTES, label="task snapshot"))
     return "s_" + h.hexdigest()
 
 
@@ -243,7 +297,11 @@ def _event_log_tail_is_complete(path: Path) -> bool:
     case handled by the projection guard below.
     """
 
+    if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError("event log must be a regular file")
     with path.open("rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("event log must be a regular file")
         handle.seek(0, 2)
         if handle.tell() == 0:
             return True
@@ -310,7 +368,7 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
                     or run_source_digest(ev.parent) != digest):
                 raise RuntimeError("run source changed while building facts")
         except Exception as e:  # noqa: BLE001 — an unreadable run becomes an explicit skip receipt, not a gap
-            receipts["skipped"].append({"dir": name, "reason": f"{type(e).__name__}: {e}"[:200]})
+            receipts["skipped"].append({"dir": name, "reason": _safe_skip_reason(e)})
             continue
         # A torn log folds LENIENTLY to an identity-less empty state (no run_started parsed): the lenient
         # reader never raised, but a run with no run_id AND no attempts cannot be joined/deduped and would
@@ -353,7 +411,8 @@ def load_index(path: str | Path) -> Optional[dict]:
     if not p.exists():
         return None
     try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
+        payload = json.loads(_read_bounded_regular_bytes(
+            p, maximum=_MAX_INDEX_CACHE_BYTES, label="index cache").decode("utf-8"))
     except Exception:  # noqa: BLE001 — a torn cache forces a clean rebuild
         return None
     if not isinstance(payload, dict) or payload.get("fp_mode") not in {"universal", "legacy"}:

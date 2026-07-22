@@ -476,6 +476,12 @@ latest folded node rows with optional metric and best, from `<run_root>/*/events
 Rebuild ordering is content-deterministic even when copied runs share coarse keys. `--incremental` reuses a
 source-digest cache and prints built/cached/skipped receipts for unusable run projections.
 
+Portfolio scanning accepts only ordinary, non-symlink event logs and task snapshots. Event logs are hashed
+as a stream; `task.snapshot.json` is capped at 4 MiB before JSON materialization. An oversized/non-regular
+snapshot or event log is excluded with a bounded skip reason that never reflects a source path or damaged
+content. The disposable incremental cache is likewise rejected and rebuilt before parsing when it exceeds
+256 MiB or is not a regular file.
+
 This is still not the full CR0 corpus-health/per-generation measurement index: reset generations collapse
 to the latest folded attempt, duplicate run identities are not deduplicated, and a missing/garbled task
 snapshot degrades its kind/metric fields to empty without a dedicated receipt. The default non-incremental

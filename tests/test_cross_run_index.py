@@ -12,8 +12,8 @@ from pathlib import Path
 import orjson
 
 from looplab.engine.cross_run_index import (
-    build_index, build_index_incremental, load_index, rebuild_index_from_run_root, run_facts,
-    run_source_digest, save_index, scope_profile,
+    _MAX_INDEX_CACHE_BYTES, _MAX_TASK_SNAPSHOT_BYTES, build_index, build_index_incremental,
+    load_index, rebuild_index_from_run_root, run_facts, run_source_digest, save_index, scope_profile,
 )
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -168,6 +168,23 @@ def test_source_digest_streams_large_inputs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "read_bytes", _whole_file_read_is_a_bug)
     assert run_source_digest(run) == "s_" + expected
+
+
+def test_oversized_task_snapshot_is_reported_without_materialising_it(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "oversized", "t1", "goal", "max", "recall", [(0, {}, 0.8)])
+    snapshot = root / "oversized" / "task.snapshot.json"
+    with snapshot.open("wb") as handle:
+        handle.seek(_MAX_TASK_SNAPSHOT_BYTES)
+        handle.write(b"}")
+
+    result = build_index_incremental(root)
+
+    assert result["index"] == [] and result["receipts"]["built"] == []
+    assert result["receipts"]["skipped"] == [{
+        "dir": "oversized",
+        "reason": f"ValueError: task snapshot exceeds {_MAX_TASK_SNAPSHOT_BYTES} bytes",
+    }]
 
 
 def test_incremental_reuses_unchanged_and_rebuilds_changed(tmp_path):
@@ -327,6 +344,15 @@ def test_load_index_rejects_stale_schema_version(tmp_path):
     p = tmp_path / "idx.json"
     p.write_bytes(_oj.dumps({"v": 999, "runs": {"ra": {"digest": "s_x", "facts": {"run_id": "ra"}}}}))
     assert load_index(p) is None                     # incompatible version -> None (forces full rebuild)
+
+
+def test_load_index_rejects_oversized_disposable_cache_before_json_decode(tmp_path):
+    cache = tmp_path / "oversized-index.json"
+    with cache.open("wb") as handle:
+        handle.seek(_MAX_INDEX_CACHE_BYTES)
+        handle.write(b"}")
+
+    assert load_index(cache) is None
 
 
 def test_cli_cross_run_index_incremental(tmp_path):
