@@ -79,6 +79,10 @@ class AuditMixin:
         hypothesis_data = {"node_id": node_id, **pick}
         if generation is not None:
             hypothesis_data["generation"] = generation
+        # CODEX AGENT: hypothesis_ranked and card_ranked below are two projections of one foresight
+        # decision, but separate appends plus the swallowed second failure can persist the new
+        # Hypothesis order beside stale Card selection priority. Build both payloads first and commit
+        # them with append_many so replay never observes a half-published ranking decision.
         self.store.append(EV_HYPOTHESIS_RANKED, hypothesis_data, trace_id=tid, span_id=sid)
 
         # Layer 1b producer: the foresight role still ranks the compatibility Hypothesis board, whose

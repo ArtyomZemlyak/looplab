@@ -456,6 +456,10 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
         # the path with a directory so unlink raises IsADirectoryError) turn a normal timeout into an
         # engine-visible crash on the untrusted eval path.
         try:
+            # CODEX AGENT: divergence/stall watchdogs also force-kill the local docker client, but
+            # deliberately return timed_out=False. That skips daemon-container removal, deletes the
+            # only cidfile, and can release the GPU while the container keeps running. Track forced
+            # termination separately and rm -f Docker containers for every parent-side kill reason.
             if timed_out:
                 _remove_docker_container(str(argv[0]), docker_cidfile)
             docker_cidfile.unlink(missing_ok=True)

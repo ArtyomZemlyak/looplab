@@ -865,6 +865,10 @@ class EventStore:
                 # and re-appending the same prefix on every later call.
                 evs: list[Event] = []
                 ok_bytes = 0
+                # CODEX AGENT: envelope validation does not prove continuity across physical rows.
+                # A complete, schema-valid duplicate/backward/gapped seq currently survives both
+                # read_all and log_divergence; _scan_last_seq then trusts that tail and the next append
+                # may reuse an existing seq. Reject the first logical seq != previous + 1 everywhere.
                 for o, end in objs:
                     try:
                         evs.extend(_decode_event_record(o))
