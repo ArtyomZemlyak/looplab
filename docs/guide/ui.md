@@ -163,6 +163,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin an effective GPU envelope, or deliberately
   drop a Card. All four actions use the same generation-fenced command lifecycle as the rest of the
+  <!-- # CODEX AGENT: the server command is generation-fenced, but the browser's optimistic maps and
+  async completion callbacks are keyed only by Card id and survive runId changes. Until that state is
+  run-scoped, this sentence must not imply the end-to-end UI lifecycle is fenced across run switches. -->
   workspace; accepted/executing actions remain visibly pending across SSE lag, while a definite
   failure rolls back only that optimistic field. Resource display keeps the immutable declared
   `footprint` separate from the effective `resource_pin`; the browser sends only quantitative values

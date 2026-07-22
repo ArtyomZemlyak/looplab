@@ -20,6 +20,12 @@ strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-
 | Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, fail-closed Docker GPU pinning and explicit CPU isolation, confirm admission, isolated Card producer/consumer | none |
 | Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, crash-atomic batch claim, durable exact ASHA receipts and Strategist-owned scoring over canonical trusted concept membership; bounded lifecycle lanes; optimistic generation-fenced edit/priority/resource/drop controls | none in Layers 1–6; broader rollout scopes remain intentionally deferred/default-off |
 
+<!-- # CODEX AGENT: the two "none" conclusions above are no longer current implementation truth.
+Post-8d9952a1 review annotations identify a fail-open positive-GPU discovery path, confirm budget charged
+for resource wait, a Card-before-audit crash window, and Kanban mutation state that is not scoped to runId.
+Track those as unresolved debt (or link a dated closure commit) instead of letting a historical validation
+receipt certify code that changed after the receipt's raw-byte implementation digest was issued. -->
+
 ### Stage progress ledger (validated implementation, 2026-07-22)
 
 `Complete` means the acceptance behavior is present in `8d9952a1` and covered by the current validation
