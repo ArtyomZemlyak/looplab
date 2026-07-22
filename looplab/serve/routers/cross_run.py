@@ -68,9 +68,196 @@ class _ConceptSplit(_ConceptSource):
 
 
 class _CrossRunResponse(BaseModel):
-    """Typed top-level contract while nested evidence rows remain versioned projections."""
+    """Version-tolerant response envelope; nested authority fields have explicit models below."""
 
     model_config = ConfigDict(extra="allow")
+
+
+class _CrossRunProjection(BaseModel):
+    """Version-tolerant projection with executable types for every authority-bearing field."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class CrossRunSourceSegment(_CrossRunProjection):
+    read_complete: bool
+    rows_total: int = Field(ge=0)
+    rows_retained: int = Field(ge=0)
+    rows_quarantined: int = Field(ge=0)
+    malformed_rows: int = Field(ge=0)
+    invalid_rows: int = Field(ge=0)
+
+
+class CrossRunResearchSource(_CrossRunProjection):
+    source_complete: bool
+    producer_receipt_known: bool
+    producer_complete: bool
+    producer_runs: int = Field(ge=0)
+    producer_partial_runs: int = Field(ge=0)
+    producer_unknown_runs: int = Field(ge=0)
+    producer_claims_total: int = Field(ge=0)
+    producer_claims_retained: int = Field(ge=0)
+    producer_claims_omitted: int = Field(ge=0)
+    read_health_v: int = Field(ge=0)
+    read_complete: bool
+    rows_total: int = Field(ge=0)
+    rows_retained: int = Field(ge=0)
+    rows_quarantined: int = Field(ge=0)
+    malformed_rows: int = Field(ge=0)
+    invalid_rows: int = Field(ge=0)
+    snapshot_digest: str = Field(pattern=r"^(?:[0-9a-f]{64})?$")
+
+
+class CrossRunClaimSource(_CrossRunProjection):
+    v: int = Field(ge=1)
+    receipt_known: bool
+    source_complete: bool
+    read_complete: bool
+    research_source_complete: bool
+    lessons: CrossRunSourceSegment
+    research: CrossRunSourceSegment
+    snapshot_digest: str = Field(pattern=r"^(?:[0-9a-f]{64})?$")
+
+
+class CrossRunConceptSource(_CrossRunProjection):
+    source_complete: bool
+    partial_capsules: int = Field(ge=0)
+    source_unknown_capsules: int = Field(ge=0)
+    source_concepts_omitted: int = Field(ge=0)
+    source_outcomes_omitted: int = Field(ge=0)
+    source_store_complete: bool
+    source_rows_total: int = Field(ge=0)
+    source_rows_quarantined: int = Field(ge=0)
+    source_malformed_rows: int = Field(ge=0)
+    source_invalid_capsule_rows: int = Field(ge=0)
+    source_duplicate_run_rows: int = Field(ge=0)
+
+
+class CrossRunConceptRun(_CrossRunProjection):
+    run_id: str
+    metric: int | float | None = None
+    direction: Literal["min", "max"]
+    sign: Literal[-1, 0, 1] | None = None
+
+
+class CrossRunExploredConcept(_CrossRunProjection):
+    concept: str
+    n_runs: int = Field(ge=0)
+    n_helped: int = Field(ge=0)
+    n_neutral: int = Field(ge=0)
+    n_hurt: int = Field(ge=0)
+    runs: list[CrossRunConceptRun]
+    runs_omitted: int = Field(default=0, ge=0)
+
+
+class CrossRunClaimDecision(_CrossRunProjection):
+    statement: str
+    claim_uid: str = ""
+    scope: str = ""
+    metric: str = ""
+    decision: Literal["ratified", "rejected", "pinned", "clear"]
+    note: str = ""
+    by: str = ""
+    at: str = ""
+    action_id: str = ""
+    evidence_digest: str = ""
+    revision: int = Field(ge=0)
+
+
+class CrossRunClaim(_CrossRunProjection):
+    statement: str
+    epistemic: Literal["supported", "refuted", "mixed", "inconclusive"]
+    maturity: Literal[
+        "machine-proposed", "operator-ratified", "operator-rejected", "operator-pinned"
+    ]
+    support: list[str]
+    oppose: list[str]
+    n_support: int = Field(ge=0)
+    n_oppose: int = Field(ge=0)
+    unverified: list[str]
+    n_unverified: int = Field(ge=0)
+    runs: list[str]
+    scopes: list[str]
+    sources: list[str]
+    verification: list[str]
+    claim_uid: str
+    scope: str
+    polarity: Literal[-1, 1]
+    metric: str
+    decision: CrossRunClaimDecision | None
+    contradicts: list[str]
+    research_source: CrossRunResearchSource
+    claim_source: CrossRunClaimSource
+    evidence_digest: str
+    decision_fresh: bool | None
+    n_contradicts: int = Field(ge=0)
+    nested_omitted: dict[str, int] = Field(default_factory=dict)
+
+
+class CrossRunContextClaim(_CrossRunProjection):
+    statement: str
+    epistemic: Literal["supported", "refuted", "mixed", "inconclusive"]
+    maturity: Literal[
+        "machine-proposed", "operator-ratified", "operator-rejected", "operator-pinned"
+    ]
+    claim_uid: str
+    scope: str
+    evidence_digest: str
+    decision_fresh: bool | None
+    metric: str
+    polarity: Literal[-1, 1]
+    n_support: int = Field(ge=0)
+    n_oppose: int = Field(ge=0)
+    n_unverified: int = Field(ge=0)
+    support: list[str]
+    oppose: list[str]
+    unverified: list[str]
+    contradicts: list[str]
+    runs: list[str]
+    scopes: list[str]
+
+
+class CrossRunCoverage(_CrossRunProjection):
+    n_runs: int = Field(ge=0)
+    n_concepts: int = Field(ge=0)
+    source_complete: bool
+    partial_capsules: int = Field(ge=0)
+    source_unknown_capsules: int = Field(ge=0)
+    source_concepts_omitted: int = Field(ge=0)
+    source_outcomes_omitted: int = Field(ge=0)
+    source_store_complete: bool
+    source_rows_total: int = Field(ge=0)
+    source_rows_quarantined: int = Field(ge=0)
+    source_malformed_rows: int = Field(ge=0)
+    source_invalid_capsule_rows: int = Field(ge=0)
+    source_duplicate_run_rows: int = Field(ge=0)
+    top_concepts: list[str]
+    helps: list[str]
+    hurts: list[str]
+
+
+class CrossRunContextPack(_CrossRunProjection):
+    claims: list[CrossRunContextClaim]
+    n_claims_total: int = Field(ge=0)
+    n_contested: int = Field(ge=0)
+    n_pinned_total: int = Field(ge=0)
+    n_pinned_omitted: int = Field(ge=0)
+    research_source: CrossRunResearchSource
+    claim_source: CrossRunClaimSource
+    coverage: CrossRunCoverage
+
+
+class CrossRunRevisions(_CrossRunProjection):
+    claims: int = Field(ge=0)
+    concept_aliases: int = Field(ge=0)
+    concept_splits: int = Field(ge=0)
+    concept_governance: int = Field(ge=0)
+
+
+class CrossRunGovernance(_CrossRunProjection):
+    status: Literal["complete"]
+    complete: Literal[True]
+    revisions: CrossRunRevisions
 
 
 class CrossRunAtlasResponse(_CrossRunResponse):
@@ -78,44 +265,44 @@ class CrossRunAtlasResponse(_CrossRunResponse):
     n_concepts: int
     n_claims: int
     n_contested: int
-    # CODEX AGENT: These receipts are semantic UI authority, not opaque payloads. Promote their versioned
-    # shapes/invariants (and visible row projections below) to strict Pydantic models so OpenAPI can express
-    # complete/partial/unknown; today the browser duplicates undocumented server equations over ``Any``.
-    concept_source: dict[str, Any]
-    research_source: dict[str, Any]
-    claim_source: dict[str, Any]
-    explored: list[dict[str, Any]]
+    # CODEX AGENT: these receipts are semantic UI authority, not opaque payloads. Their executable
+    # response models keep generated clients aligned with the complete/partial/unknown contract while
+    # allowing additive versioned fields.
+    concept_source: CrossRunConceptSource
+    research_source: CrossRunResearchSource
+    claim_source: CrossRunClaimSource
+    explored: list[CrossRunExploredConcept]
     explored_total: int
     explored_omitted: int
     thin_coverage: list[str]
     thin_coverage_total: int
     thin_coverage_omitted: int
-    contradictions: list[dict[str, Any]]
+    contradictions: list[CrossRunClaim]
     contradictions_total: int
     contradictions_omitted: int
-    context_pack: dict[str, Any]
-    governance: dict[str, Any]
+    context_pack: CrossRunContextPack
+    governance: CrossRunGovernance
     projection: Literal["live"]
     scope_task: str
     page: dict[str, int]
-    revisions: dict[str, int]
+    revisions: CrossRunRevisions
 
 
 class CrossRunClaimsResponse(_CrossRunResponse):
-    claims: list[dict[str, Any]]
+    claims: list[CrossRunClaim]
     n: int
     returned: int
     offset: int
     limit: int
     scope_task: str
-    research_source: dict[str, Any]
-    claim_source: dict[str, Any]
+    research_source: CrossRunResearchSource
+    claim_source: CrossRunClaimSource
     revision: int
 
 
 class ClaimDecisionResponse(_CrossRunResponse):
     ok: bool
-    decision: dict[str, Any]
+    decision: CrossRunClaimDecision
     revision: int
 
 

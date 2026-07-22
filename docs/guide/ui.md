@@ -324,7 +324,10 @@ work.
 The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
 `GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and
 `looplab cross-run-search`. See the [CLI reference](cli-reference.md#atlas) for their scope and evidence
-limitations. The owner React route does not turn those bounded whole-store summaries into the complete
+limitations. The owner HTTP OpenAPI contract types the nested concept, research and combined-claim source
+receipts, governance revisions, visible claim rows and bounded context pack; consumers may accept additive
+fields but must not replace those authority-bearing shapes with arbitrary JSON. The owner React route does
+not turn those bounded whole-store summaries into the complete
 Part-IV Research Space/Atlas contract. A bounded per-run Concepts tree/table is shipped, but the canonical
 Research Space, focused multi-relation concept map and cross-run interactive concept graph are not. Do not
 interpret the home Map, primary concept axis grouping, per-run Concepts table, or Atlas preview as the complete

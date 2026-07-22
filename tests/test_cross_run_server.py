@@ -62,6 +62,20 @@ def test_part_iv_v_openapi_publishes_response_envelopes_and_governance_inputs(tm
     assert set(components["CrossRunClaimsResponse"]["required"]) >= {
         "claims", "n", "returned", "offset", "limit", "claim_source", "revision",
     }
+    # Completeness/source receipts and visible evidence rows are decision authority, not arbitrary JSON.
+    # Generated clients must see their versioned fields and enums instead of duplicating server equations
+    # over ``Any``.
+    claims_schema = components["CrossRunClaimsResponse"]["properties"]
+    assert claims_schema["claims"]["items"]["$ref"].endswith("/CrossRunClaim")
+    assert claims_schema["claim_source"]["$ref"].endswith("/CrossRunClaimSource")
+    claim_schema = components["CrossRunClaim"]
+    assert {"epistemic", "maturity", "claim_uid", "evidence_digest",
+            "decision_fresh", "research_source", "claim_source"} <= set(
+                claim_schema["required"])
+    atlas_schema = components["CrossRunAtlasResponse"]["properties"]
+    assert atlas_schema["concept_source"]["$ref"].endswith("/CrossRunConceptSource")
+    assert atlas_schema["context_pack"]["$ref"].endswith("/CrossRunContextPack")
+    assert atlas_schema["governance"]["$ref"].endswith("/CrossRunGovernance")
     decision_ref = paths["/api/cross-run/claim-decide"]["post"]["requestBody"]["content"][
         "application/json"]["schema"]["$ref"]
     decision_schema = components[decision_ref.rsplit("/", 1)[-1]]
