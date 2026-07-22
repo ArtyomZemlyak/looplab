@@ -266,6 +266,9 @@ class ResourceSchedulingMixin:
             return None
         card = cards.get(card_id)
         if card is None:
+            # Replay collapses merged rows to canonical Cards and retains raw work-item ids only in
+            # ``Card.aliases``. Resolve that bounded projection without trusting an event-order map;
+            # ambiguous/corrupt ownership fails closed rather than borrowing another Card's pin.
             match = None
             for candidate in cards.values():
                 aliases = getattr(candidate, "aliases", None)

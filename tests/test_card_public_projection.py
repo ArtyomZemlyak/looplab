@@ -513,6 +513,25 @@ def test_cross_run_prior_runs_receipt_recomputed_over_transport_cap():
     assert cr["prior_runs_complete"] is False             # no longer a "complete" claim
 
 
+def test_cross_run_prior_runs_incomplete_without_total_is_not_flipped_to_complete():
+    """A source that declares prior_runs_complete=false but supplies no total/omitted (a legacy cross_run
+    value normalized by replay, which always emits those three keys) must NOT be republished as
+    complete=true. `complete` is affirmative evidence — recomputing `total == shown` alone would
+    fabricate a "showed you everything" receipt, the exact inverse of the transport-cap lie above."""
+    prior = [{"run": f"r{i}", "metric": 0.1 * i} for i in range(3)]
+    envelope = public_cards_projection({
+        "card-legacy": {"cross_run_prior": {
+            "v": 2, "prior_runs": prior,
+            "prior_runs_total": None, "prior_runs_omitted": None, "prior_runs_complete": False,
+        }},
+    }).model_dump(mode="json")
+    cr = envelope["cards"]["card-legacy"]["cross_run_prior"]
+    assert len(cr["prior_runs"]) == 3
+    assert cr["prior_runs_complete"] is False             # explicit incompleteness preserved, not flipped
+    # No total to recompute over -> no fabricated exact count is emitted.
+    assert "prior_runs_total" not in cr and "prior_runs_omitted" not in cr
+
+
 def test_projection_fails_closed_for_a_malformed_collection_source():
     envelope = public_cards_projection(None).model_dump(mode="json")
     assert envelope["cards"] == {}

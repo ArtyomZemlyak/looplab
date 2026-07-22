@@ -409,26 +409,35 @@ def _cross_run(value):
         out["v"] = version
     out["matched_concepts"] = _refs(value.get("matched_concepts"))
     raw_runs = value.get("prior_runs")
-    raw_list = list(raw_runs) if isinstance(raw_runs, (list, tuple)) else []
-    out["prior_runs"] = [_prior_run(item) for item in raw_list[:_MAX_ITEMS] if isinstance(item, dict)]
+    # Read len()/slice directly off the source sequence; don't materialize a full copy of a large
+    # prior_runs list just to count it (this projection runs on every /state response and SSE frame).
+    raw_seq = raw_runs if isinstance(raw_runs, (list, tuple)) else ()
+    out["prior_runs"] = [_prior_run(item) for item in raw_seq[:_MAX_ITEMS] if isinstance(item, dict)]
     shown = len(out["prior_runs"])
     # Emit the completeness receipt ONLY when the source declared one OR this transport actually capped
-    # rows — never fabricate a "complete" receipt on a value that carried none (that is itself a lie, and
-    # the reason a default cross_run insertion must stay unreceipted). When it IS emitted, recompute it
-    # over the rows that SURVIVED: forwarding the replay value's pre-cap total/omitted/complete verbatim
-    # would let a complete 40-row value ship as 32 rows still labelled complete=true / omitted=0.
+    # rows — never fabricate a receipt on a value that carried none (that is itself a lie, and the reason
+    # a default cross_run insertion must stay unreceipted). `complete` is AFFIRMATIVE evidence (mirroring
+    # replay._bounded_card_enrichment): claim it only when the source itself declared complete AND every
+    # row survived (total == shown, no transport cap). Recomputing `total == shown` alone would both let
+    # a complete 40-row value shipped as 32 rows stay complete=true AND fabricate completeness for a
+    # source that supplied no total yet declared complete=false — the same lie, inverted.
     src_total = _number(value.get("prior_runs_total"), integer=True)
     src_omitted = _number(value.get("prior_runs_omitted"), integer=True)
-    has_src_receipt = any(
-        k in value for k in ("prior_runs_total", "prior_runs_omitted", "prior_runs_complete"))
-    if has_src_receipt or len(raw_list) > _MAX_ITEMS:
-        pre_cap = len(raw_list) + (
-            src_omitted if src_omitted not in (_SKIP, None) and src_omitted >= 0 else 0)
-        total = src_total if (src_total not in (_SKIP, None) and src_total >= shown) else pre_cap
-        total = max(total, shown)
+    has_total = src_total not in (_SKIP, None) and src_total >= shown
+    has_omitted = src_omitted not in (_SKIP, None) and src_omitted >= 0
+    capped = len(raw_seq) > _MAX_ITEMS
+    if has_total or has_omitted or capped:
+        pre_cap = len(raw_seq) + (src_omitted if has_omitted else 0)
+        total = max(src_total if has_total else pre_cap, shown)
         out["prior_runs_total"] = total
         out["prior_runs_omitted"] = total - shown
-        out["prior_runs_complete"] = total == shown
+        out["prior_runs_complete"] = (
+            value.get("prior_runs_complete") is True and total == shown and not capped)
+    elif any(k in value for k in ("prior_runs_total", "prior_runs_omitted", "prior_runs_complete")):
+        # A receipt key was present but carried no total/omitted to recompute over (e.g. a legacy value
+        # that only declared prior_runs_complete). We cannot quantify a truthful count over the
+        # survivors, so signal incompleteness and never fabricate an exact "showed everything" receipt.
+        out["prior_runs_complete"] = False
     if isinstance(value.get("concept_source"), dict):
         out["concept_source"] = _named_scalars(value["concept_source"], _CONCEPT_SOURCE_KEYS) or {}
     return out

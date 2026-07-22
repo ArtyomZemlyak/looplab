@@ -290,6 +290,31 @@ def test_split_rejects_chain_formation(tmp_path):
     assert set(load_concept_splits(str(tmp_path))) == {"coarse"}
 
 
+def test_split_refines_partial_split_with_identity_default(tmp_path):
+    """A partial split may keep unmatched rows under its own source (default == from_concept). That
+    identity default is NOT a re-tag child, so re-recording the split to refine its rules (splits are
+    last-write-per-source) must succeed — the chain rejection must not treat the source as the child of
+    its own split, nor treat the identity default as a target that chains onto an existing source."""
+    record_concept_split(
+        str(tmp_path), from_concept="coarse",
+        rules=[{"to": "coarse/a", "when_any": ["x"]}], default="coarse")
+    # Refine the SAME source (add a rule) while keeping the identity default — a legitimate update that
+    # the chain guard previously rejected as a spurious "coarse is already a split target" chain.
+    record_concept_split(
+        str(tmp_path), from_concept="coarse",
+        rules=[{"to": "coarse/a", "when_any": ["x"]},
+               {"to": "coarse/b", "when_any": ["y"]}], default="coarse")
+    splits = load_concept_splits(str(tmp_path))
+    assert set(splits) == {"coarse"}
+    assert splits["coarse"]["default"] == "coarse"
+    assert [r["to"] for r in splits["coarse"]["rules"]] == ["coarse/a", "coarse/b"]
+    # A genuine forward chain onto the source is still rejected: another split re-tagging INTO coarse.
+    with pytest.raises(ValueError, match="chain"):
+        record_concept_split(
+            str(tmp_path), from_concept="other",
+            rules=[{"to": "coarse", "when_any": ["z"]}], default="other-rest")
+
+
 def test_split_rejects_purged_rule_and_default_targets(tmp_path):
     record_concept_alias(str(tmp_path), from_concept="retired", to_concept="")
     with pytest.raises(ValueError, match="target .* purged"):

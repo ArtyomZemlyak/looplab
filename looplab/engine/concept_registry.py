@@ -495,14 +495,25 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
         # would leave observations split inconsistently and fragment canonical UIDs / Atlas counts /
         # retrieval. Under this same governance snapshot: (a) the source must not itself be the child of
         # an existing split; (b) no target may itself be an existing split source.
+        # A split's RULE targets are always re-tag children. Its DEFAULT is a child ONLY when it
+        # re-tags (default != source): an identity default (default == source) keeps unmatched rows
+        # under the original concept — the partial-split contract acknowledged below — so it must not
+        # make the source look like the child of its own split. Otherwise refining that split (splits
+        # are last-write-per-source, see load_concept_splits) would be permanently rejected as a chain.
         split_children = {rule.get("to") for spec in splits.values() for rule in spec.get("rules", [])}
-        split_children.update(spec.get("default") for spec in splits.values())
+        split_children.update(
+            default_slug for source, spec in splits.items()
+            if (default_slug := spec.get("default")) and default_slug != source)
         if src in split_children:
             raise ValueError(
                 f"split source {src!r} is already a split target of an existing split; splitting it "
                 "would form a chain — split the ultimate canonical concept instead")
         for target in targets:
-            if target in splits:
+            # `target == src` is the source RE-SPLITTING itself (a last-write-wins refinement, including
+            # an identity default that keeps unmatched rows under src): it REPLACES the source's own
+            # split, it does not chain onto a different source. A rule target that equals src is still
+            # rejected as "no progress" below.
+            if target in splits and target != src:
                 raise ValueError(
                     f"split target {target!r} is itself a split source; this would form a split chain "
                     "— choose a terminal target")

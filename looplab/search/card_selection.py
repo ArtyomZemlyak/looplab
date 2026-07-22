@@ -1170,6 +1170,14 @@ def _counterfactual_owned_card_state(
     })
 
 
+def _card_administratively_dead(card) -> bool:
+    """Whether a PRESENT Card is closed to further work: operator/engine/freshness/novelty dropped
+    (``status == "dropped"``) or merged into a canonical row (``merged_into`` set). Deliberately keys
+    on the FOLDED status, not ``dropped_reason`` — a reason-less card_dropped folds to status="dropped"
+    with dropped_reason=None, so a reason-keyed check would let it slip through."""
+    return card.status == "dropped" or card.merged_into is not None
+
+
 def _counterfactual_owned_selection_state(
     state: RunState,
     card_id: str,
@@ -1247,7 +1255,7 @@ def _counterfactual_owned_selection_state(
         # unproven common population.
         sibling_card = state.cards.get(sibling_card_id)
         if sibling_card is not None:
-            if sibling_card.status == "dropped" or sibling_card.merged_into is not None:
+            if _card_administratively_dead(sibling_card):
                 continue
         elif sibling_card_id in merged_alias_ids:
             continue
@@ -1315,7 +1323,7 @@ def _reserved_speculative_slots(state: RunState, excluded_card_ids: frozenset[st
     # an outstanding reservation FOREVER and monotonically starve speculative capacity. Exclude those.
     for card_id in excluded_card_ids:
         card = state.cards.get(card_id)
-        if card is not None and (card.status == "dropped" or card.merged_into is not None):
+        if card is not None and _card_administratively_dead(card):
             continue
         if card is None or not card.evidence:
             reserved += 1
