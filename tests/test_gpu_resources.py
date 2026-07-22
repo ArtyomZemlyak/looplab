@@ -8,7 +8,8 @@ import anyio
 import pytest
 
 from looplab.core.models import Idea, NodeStatus
-from looplab.engine.resources import ResourceSchedulingMixin, detect_gpu_inventory
+from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
+                                      detect_gpu_inventory)
 from looplab.runtime.sandbox import GpuPinUnenforceable
 
 
@@ -56,6 +57,28 @@ def test_inventory_degrades_whole_memory_join_to_count_only(monkeypatch):
     physical, memory = detect_gpu_inventory([0, 1])
     assert physical == {0: "GPU-a", 1: "GPU-b"}
     assert memory == {}                              # UUID rows cannot be guessed by numeric index
+
+
+@pytest.mark.parametrize("selector", [
+    "3,3", "03,3", "GPU-a,gpu-A", "0,,1", "void,0",
+])
+def test_visibility_selector_aliases_and_malformed_lists_fail_closed(monkeypatch, selector):
+    from looplab.engine.orchestrator import _detect_gpu_ids
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", selector)
+    assert cuda_visible_device_tokens(selector) == []
+    assert _detect_gpu_ids() == []
+    assert detect_gpu_inventory([0, 1]) == ({}, {})
+
+
+def test_physical_gpu_mapping_must_be_complete_and_unique():
+    duplicate = _Pool(ids=(0, 1), physical={0: "3", 1: "03"})
+    with pytest.raises(GpuPinUnenforceable, match="malformed or not unique"):
+        duplicate._resource_eval_env({"gpu_ids": [0, 1], "cpu_only": False})
+
+    missing = _Pool(ids=(0, 1), physical={0: "3"})
+    with pytest.raises(GpuPinUnenforceable, match="no trustworthy physical selector"):
+        missing._resource_eval_env({"gpu_ids": [0, 1], "cpu_only": False})
 
 
 def test_all_or_nothing_first_fit_and_overdeclaration_clamp():

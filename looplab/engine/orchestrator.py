@@ -55,7 +55,8 @@ from looplab.engine.eval_stages import EvalStagesMixin
 from looplab.engine.evaluate import EvaluateMixin
 from looplab.engine.node_build import NodeBuildMixin
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
-from looplab.engine.resources import ResourceSchedulingMixin, detect_gpu_inventory
+from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
+                                      detect_gpu_inventory)
 from looplab.engine.speculation import SpeculationMixin
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
@@ -413,9 +414,7 @@ def _detect_gpu_ids() -> list[int]:
     detection unavailable) — the caller then simply never pins and AUTO collapses to 1. Never raises."""
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cvd is not None:
-        ids = [t.strip() for t in cvd.split(",") if t.strip() != ""]
-        if len(ids) == 1 and ids[0].lower() in {"-1", "none", "nodevfiles", "void"}:
-            return []
+        ids = cuda_visible_device_tokens(cvd) or []
         # Ordinals INSIDE this fenced view are 0..n-1 regardless of the physical ids named in the var.
         return list(range(len(ids)))
     try:

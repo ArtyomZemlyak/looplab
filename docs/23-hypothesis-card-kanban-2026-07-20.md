@@ -133,7 +133,9 @@ Receipt identity is exact: self digest
   writes a retryable audit row and leaves completion open. A saturated unspecified request waits instead
   of launching unpinned. Docker also refuses a known positive pin it cannot enforce; that confirm refusal
   remains retryable, and resource-queue time is excluded from `eval_seconds`. Only explicit `gpus=0`
-  selects CPU isolation and injects `NVIDIA_VISIBLE_DEVICES=void`.
+  selects CPU isolation and injects `NVIDIA_VISIBLE_DEVICES=void`. Empty, malformed, disabled or duplicate
+  `CUDA_VISIBLE_DEVICES` selectors expose zero schedulable devices; a missing/duplicate physical mapping is
+  refused before launch, so two logical reservations cannot silently target the same GPU.
 - `EventStore.append_many` exposes a complete logical batch or none of it after a torn write. EventStore,
   replay, command observation, scope/report capture, SSE, timeline paging, run caches and maintenance tools
   expand the bounded storage envelope consistently; generic non-event JSONL readers remain format-agnostic.

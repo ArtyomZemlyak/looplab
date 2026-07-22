@@ -19,6 +19,40 @@ from looplab.core.models import effective_card_footprint, normalize_researcher_f
 from looplab.runtime.sandbox import GpuPinUnenforceable, SECRET_ENV
 
 
+_CUDA_DISABLED_SELECTORS = frozenset({"-1", "none", "nodevfiles", "void"})
+
+
+def cuda_visible_device_tokens(value: object) -> Optional[list[str]]:
+    """Validate a ``CUDA_VISIBLE_DEVICES`` value without guessing device identity.
+
+    ``None`` means the variable is absent and callers may use another inventory probe. An empty,
+    disabled, malformed, or duplicate selector list means no schedulable devices. Numeric aliases are
+    canonicalized for duplicate detection (``03`` and ``3`` name the same ordinal); UUID/MIG tokens are
+    compared case-insensitively. Unknown non-empty token syntax remains CUDA's responsibility.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return []
+    raw = value.split(",")
+    tokens = [token.strip() for token in raw]
+    if not tokens or any(not token for token in tokens):
+        return []
+    lowered = [token.casefold() for token in tokens]
+    if any(token in _CUDA_DISABLED_SELECTORS for token in lowered):
+        # A singleton disabled token is a normal CPU fence; mixing one with devices is malformed. Both
+        # expose zero schedulable devices and must not be filtered into a positive-capacity list.
+        return []
+    seen: set[tuple[str, object]] = set()
+    for token, folded in zip(tokens, lowered):
+        identity: tuple[str, object] = (
+            ("ordinal", int(token, 10)) if token.isdecimal() else ("token", folded))
+        if identity in seen:
+            return []
+        seen.add(identity)
+    return tokens
+
+
 def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[int, int]]:
     """Return ``(logical -> physical, logical -> free MiB)`` for the visible GPU set.
 
@@ -30,15 +64,12 @@ def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[i
     ids = list(logical_ids or [])
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cvd is not None:
-        # CODEX AGENT: validate selector uniqueness before constructing logical slots. A duplicated
-        # CUDA_VISIBLE_DEVICES token currently becomes two scheduler reservations mapped to the same
-        # physical device, so concurrent children appear disjoint while both run on one GPU. Reject
-        # duplicate or ambiguous selectors instead of multiplying advertised capacity.
-        tokens = [token.strip() for token in cvd.split(",") if token.strip()]
+        tokens = cuda_visible_device_tokens(cvd) or []
         # _detect_gpu_ids derives the same count.  A mismatch means one of the probes changed or the
-        # environment was malformed; retain safe logical identity and do not invent a memory join.
+        # environment was malformed; an empty mapping makes any independently forged reservation fail
+        # closed instead of escaping the operator's visibility fence through logical-id fallback.
         if len(tokens) != len(ids):
-            return ({logical: str(logical) for logical in ids}, {})
+            return ({}, {})
         physical = {logical: tokens[pos] for pos, logical in enumerate(ids)}
     else:
         physical = {logical: str(logical) for logical in ids}
@@ -349,7 +380,18 @@ class ResourceSchedulingMixin:
 
     def _physical_gpu_ids(self, logical_ids) -> list[str]:
         mapping = getattr(self, "_gpu_physical_ids", {})
-        return [str(mapping.get(gpu, gpu)) for gpu in (logical_ids or [])]
+        logical = list(logical_ids or [])
+        try:
+            physical = [str(mapping[gpu]).strip() for gpu in logical]
+        except (KeyError, TypeError):
+            raise GpuPinUnenforceable(
+                "reserved GPU has no trustworthy physical selector") from None
+        # Defense in depth for manually constructed/resumed engines: a missing, disabled, malformed or
+        # duplicate physical map must not make two scheduler leases target one device (or escape a fence).
+        if logical and cuda_visible_device_tokens(",".join(physical)) != physical:
+            raise GpuPinUnenforceable(
+                "reserved GPU physical selectors are malformed or not unique")
+        return physical
 
     def _resource_eval_env(self, reservation: Optional[dict], *, base: Optional[dict] = None,
                            inherit_host: bool = False) -> Optional[dict]:
