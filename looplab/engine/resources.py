@@ -146,8 +146,8 @@ class ResourceSchedulingMixin:
 
         UNSPECIFIED preserves the historical split: a serial eval remains unpinned and can see the
         whole box; a parallel eval reserves one device.  Explicit ``gpus=0`` is a CPU request and
-        bypasses the GPU queue.  Explicit positive counts are bounded by a non-empty pool; on a
-        GPU-less host they remain positive and unavailable until operator intent changes.
+        bypasses the GPU queue.  Explicit positive counts are clamped to the detected pool (0 on a
+        GPU-less host -> CPU-only), so admission can never wait forever for capacity that cannot exist.
         """
         raw = effective_card_footprint(
             getattr(getattr(node, "idea", None), "footprint", None),
