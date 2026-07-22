@@ -408,6 +408,10 @@ def _cross_run(value):
         out["v"] = version
     out["matched_concepts"] = _refs(value.get("matched_concepts"))
     raw_runs = value.get("prior_runs")
+    # CODEX AGENT: this transport applies a second row cap but forwards prior_runs_total/omitted/
+    # complete below unchanged. A complete 40-row replay value can therefore become 32 rows beside
+    # complete=true and omitted=0. Recompute the nested receipt from the rows that survive this
+    # projection, even when the outer Card item is separately marked partial.
     out["prior_runs"] = (
         [_prior_run(item) for item in raw_runs[:_MAX_ITEMS] if isinstance(item, dict)]
         if isinstance(raw_runs, (list, tuple)) else []

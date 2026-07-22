@@ -740,6 +740,10 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     try:
         import psutil  # optional (extras: proc)
 
+        # CODEX AGENT: production installs psutil, but this branch snapshots descendants while the
+        # parent can still fork. A late DataLoader worker can escape after children() returns, then keep
+        # using a GPU the scheduler releases. Kill through the process-group/Job boundary (or suspend
+        # and reap to a stable tree), and cover the proc-extra path with a fork-during-kill regression.
         parent = psutil.Process(proc.pid)
         for child in parent.children(recursive=True):
             child.kill()

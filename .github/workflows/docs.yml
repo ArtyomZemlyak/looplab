@@ -1,6 +1,9 @@
 name: docs
 
 # Build the MkDocs site and publish it to GitHub Pages.
+# CODEX AGENT: strict docs validation runs only after changes land on master, so a broken link/nav/
+# extension can merge and then break Pages. Run the same build-only job on pull_request for these
+# paths, while keeping deploy permissions and the deploy job restricted to master pushes.
 # One-time setup by a repo admin: Settings → Pages → Build and deployment →
 # Source = "GitHub Actions".
 

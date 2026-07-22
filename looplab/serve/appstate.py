@@ -174,6 +174,10 @@ class AppState:
         # change publish counts that do not describe the actual mapping in this SSE/state frame.
         card_fragment = public_cards_projection(st.cards).model_dump(mode="json")
         d.update(card_fragment)
+        # CODEX AGENT: this recursive scrub also walks the already-receipted Card DTO. Valid action
+        # params/search dimensions named "raw" or "code" are removed after projection declared them
+        # exact, so /state and SSE publish a lying completeness receipt. Preserve the canonical Card
+        # fragment through this pass, or recompute its receipt from the scrubbed value.
         d = _public_state_value(d)
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.trust.redact import redact_secrets

@@ -415,6 +415,10 @@ class ResearchCadenceMixin:
         (asserted below; proven selection-neutral by `tests/test_background_appendable.py`), and the
         background loop is cancelled before the main task runs the serial pass — so the two never race
         on `_last_hyp_merge_n`."""
+        # CODEX AGENT: hypothesis_merged is no longer selection-neutral in Card mode: _derive_cards
+        # combines native action owners and adds merged_work_items/action_owner_ambiguous blockers.
+        # A timing-dependent background append can therefore remove ready work from the next action;
+        # serialize it at the selection boundary or exclude selectable native Card identities.
         if not self._track_hypotheses:
             return state
         client = self._reflect_client()
