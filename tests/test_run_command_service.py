@@ -475,15 +475,23 @@ def test_runs_summary_cache_invalidates_same_size_and_mtime_log_replacement(tmp_
 def test_state_event_count_is_full_folded_projection_count_for_gaps_cache_hits_and_prefixes(tmp_path):
     rd = _seed(tmp_path)
     log = rd / "events.jsonl"
+    # Append a third dense row, then break the *tail* seq. A non-dense logical tail now fails closed
+    # (5f011a2: a seq gap is corruption, not a tolerated repair artifact), so the recoverable
+    # projection is the dense seq-0..1 prefix while the gapped third row is dropped. event_count must
+    # still report that full recoverable count -- never the raw row total, never a per-request
+    # history-prefix length.
+    EventStore(log).append("node_created", {
+        "node_id": 1, "parent_ids": [0], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "b"}, "code": "print(2)"})
     rows = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
-    rows[-1]["seq"] = 7  # repaired logs may be monotonic while retaining legitimate seq gaps
+    rows[-1]["seq"] = 7  # tail gap -> the third row is dropped from the recoverable prefix
     log.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows),
                    encoding="utf-8")
     client, srv = _client(tmp_path, _Driver())
 
     first = client.get("/api/runs/demo/state").json()
-    assert first["event_count"] == len(rows) == 2
-    assert first["seq"] == first["max_seq"] == 7
+    assert first["event_count"] == 2 and len(rows) == 3  # recoverable folded count, not len(rows)
+    assert first["seq"] == first["max_seq"] == 1
 
     original_events = srv.events
     srv.events = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache miss"))
@@ -491,7 +499,7 @@ def test_state_event_count_is_full_folded_projection_count_for_gaps_cache_hits_a
         cached = client.get("/api/runs/demo/state").json()
     finally:
         srv.events = original_events
-    assert cached["event_count"] == 2 and cached["seq"] == 7
+    assert cached["event_count"] == 2 and cached["seq"] == 1
 
     historical = client.get("/api/runs/demo/state", params={"seq": 0}).json()
     assert historical["seq"] == 0
@@ -1417,9 +1425,15 @@ def test_legacy_guard_reconciles_late_ack_and_ignores_safe_nonretryable_failure(
     # record by reconciliation.  It likewise cannot become a permanent legacy lock.
     from looplab.events.eventstore import write_jsonl_atomic
     events = EventStore(rd / "events.jsonl").read_all()
-    write_jsonl_atomic(rd / "events.jsonl", [
-        event.model_dump(mode="json") for event in events
-        if (event.data or {}).get("_command_id") != command["id"]])
+    # Drop the command's exact durable intent while keeping the surviving log densely sequenced. A
+    # non-dense logical sequence now fails closed (5f011a2: a mid-log seq hole is corruption, not a
+    # torn tail), and the scenario under test is a *missing intent*, not a gapped log -- a real
+    # repaired/compacted log renumbers its survivors, so mirror that here.
+    surviving = [event.model_dump(mode="json") for event in events
+                 if (event.data or {}).get("_command_id") != command["id"]]
+    for new_seq, row in enumerate(surviving):
+        row["seq"] = new_seq
+    write_jsonl_atomic(rd / "events.jsonl", surviving)
     record_path = rd / ".commands" / f"{command['id']}.json"
     row = json.loads(record_path.read_text(encoding="utf-8"))
     row["status"] = "failed"
