@@ -2879,8 +2879,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _run_cadences(self, state: RunState) -> RunState:
         # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
         # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
-        # context and (b) lands in the log for the UI / historical-replay measurement. Audit-only,
-        # replay-safe (at_node gate); no-op when coverage_context is off. See search/coverage.py.
+        # context and (b) lands in the log for the UI / historical-replay measurement. It never
+        # re-ranks the current champion directly, but it can change later policy/proposal cues;
+        # replay-safe (at_node gate), no-op when coverage_context is off. See search/coverage.py.
         state = self._maybe_snapshot_coverage(state)
 
         # PART IV Phase 2a: concept-graph coverage + uncovered-region snapshot (the "0 coverage in {X}"
@@ -2923,8 +2924,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # M6 comparative lessons, live-shared (doc 13 §7 items 2+5): on a node-count cadence,
         # distill credit-assigned PAIR lessons into the SHARED cross-run store DURING the run
         # (write side), and re-read the store so lessons distilled by CONCURRENT runs reach
-        # this run's proposals (read side). Audit-only sidecars; replay-safe (at_node gates);
-        # no-op when the cadences are 0.
+        # this run's proposals (read side). The receipts do not re-rank current nodes, but they gate
+        # paid cadence work and their shared-store output steers later proposals; replay-safe
+        # (at_node gates), no-op when the cadences are 0.
         state = self._maybe_distill_lessons(state)
         state = self._maybe_refresh_lessons(state)
 

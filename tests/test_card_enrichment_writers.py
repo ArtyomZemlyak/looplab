@@ -104,7 +104,8 @@ def test_card_enriched_rejects_body_shaped_values_at_the_fold_boundary():
     assert "body" not in (card.cross_run_prior or {})
 
 
-def test_live_card_ranked_maps_hypothesis_hashes_to_native_cards_and_clears_confidence(tmp_path):
+def test_live_card_ranked_maps_hypothesis_hashes_atomically_and_clears_confidence(
+        tmp_path, monkeypatch):
     store = EventStore(tmp_path / "events.jsonl")
     store.append("run_started", {
         "run_id": "r", "task_id": "t", "goal": "g", "direction": "max",
@@ -127,7 +128,12 @@ def test_live_card_ranked_maps_hypothesis_hashes_to_native_cards_and_clears_conf
     engine = Engine.__new__(Engine)
     engine.store = store
     engine.researcher = _Researcher()
+    physical_before = len(store.path.read_bytes().splitlines())
+    # CODEX AGENT: a regression to two append() calls can publish a new Hypothesis order while Card
+    # selection retains its previous priority. Production must use the one-envelope append_many path.
+    monkeypatch.setattr(store, "append", lambda *_a, **_kw: pytest.fail("ranking used non-atomic append"))
     engine._emit_hypothesis_ranked(7, generation=0)
+    assert len(store.path.read_bytes().splitlines()) == physical_before + 1
 
     emitted = store.read_all()
     hypothesis_event = [event for event in emitted if event.type == "hypothesis_ranked"][-1]

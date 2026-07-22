@@ -698,9 +698,9 @@ class Settings(BaseSettings):
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
     # ESCALATES from "broaden" to "expand the ACTION SPACE — build the missing infra (external mining,
-    # a new data pipeline, a different eval), do NOT swap another {locked} lever." Prompt-cue only, on
-    # top of the already-mode-gated explore hint; never adds a scored policy action and never touches
-    # selection (the SCORED capability-expansion operator waits on the R1/SearchFitness gates, §21.13).
+    # a new data pipeline, a different eval), do NOT swap another {locked} lever." CODEX AGENT: the same
+    # gate also stamps the proposal's authoritative operator as `expand`; that node competes normally
+    # under SearchFitness and its separate operator yield is measured. It does not force a winner.
     # Reads the 2a concept-coverage snapshot, so it needs `concept_pivot` to record one. OPT-IN
     # (default off). See engine/proposal_cues.py + search/lock_in.py.
     capability_expansion: bool = False

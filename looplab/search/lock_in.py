@@ -41,8 +41,9 @@ def capability_expansion_due(state, *, streak_threshold: int) -> tuple:
     """PART IV D7 (§21.8): read the LATEST recorded concept-coverage snapshot's action-space lock-in and
     decide whether a capability-EXPANSION is due — the search has been confined to ONE subsystem for
     >= streak_threshold consecutive experiments. Returns `(due, locked_axis, streak)`. Pure; `(False, None,
-    0)` with no snapshot. The CURRENT streak clears after a successful pivot, so this self-resets. The caller
-    gates on the `capability_expansion` flag (this reads only the recorded audit snapshot, never selection)."""
+    0)` with no snapshot. The CURRENT streak clears after a successful pivot, so this self-resets. The
+    helper itself only reads state; callers gate on `capability_expansion` and use the result both for the
+    proposal cue and for the authoritative scored `expand` operator."""
     snaps = getattr(state, "concept_coverage_snapshots", None) or []
     # CODEX AGENT: The producer de-duplicates against ANY exact projection receipt, but this consumer
     # checks only the last row. After A→B→A retagging at one node count, cadence reuses A while B stays
@@ -111,7 +112,8 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
             # exploration — and conversely a genuinely multi-branch node contributes to more than one axis'
             # streak. This reads as "how long SOME subsystem stayed continuously in play" — a deliberate
             # over-estimate for a hint. Distinguishing one ancestor-chain from several independent branches
-            # needs the DAG parent map here; not worth it for a diagnostic that NEVER touches selection.
+            # needs the DAG parent map here. This approximation can steer an `expand` proposal, so it is
+            # intentionally conservative and opt-in; the resulting node still competes normally.
             if ax in s:
                 if run == 0:
                     run_start = i

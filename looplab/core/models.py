@@ -220,9 +220,10 @@ class Idea(BaseModel):
     space: dict[str, list[float]] = Field(default_factory=dict)
 
     # Hypothesis ledger (P1): a one-line statement of WHAT THIS EXPERIMENT TESTS ("residual features
-    # help", "a deeper tree overfits here"). Optional and audit-only — it turns the search from
-    # "propose the next mutation" into "run experiments that resolve open questions". When set, the
-    # fold derives/links a Hypothesis (id = slug of the statement) and tracks it to a verdict from the
+    # help", "a deeper tree overfits here"). Optional and neutral for direct metric ranking, but the
+    # resulting open board is prompt input: it turns the search from "propose the next mutation" into
+    # "run experiments that resolve open questions". When set, the fold derives/links a Hypothesis
+    # (id = slug of the statement) and tracks it to a verdict from the
     # node's outcome. Flows through the event log on the Idea automatically; None => today's behavior.
     hypothesis: Optional[str] = None
     # Hypothesis-card Kanban re-architecture (docs/23, Layer 1a): the STABLE card id this experiment
@@ -1154,8 +1155,9 @@ def run_setup_key(command) -> str:
 
 
 class Hypothesis(BaseModel):
-    """A first-class research hypothesis (P1). Audit-only — it never affects best-selection; it makes
-    the run legible ("what have we learned?") and gives the UI a board. Mostly DERIVED by the fold
+    """A first-class research hypothesis (P1). It never directly re-ranks evaluated nodes, but open
+    hypotheses are shown to the Researcher and may be foresight-ordered, so the board can steer later
+    proposals. It also makes the run legible ("what have we learned?"). Mostly DERIVED by the fold
     from nodes whose `idea.hypothesis` is set (evidence + verdict computed from their outcomes); an
     `hypothesis_added` event can also register one with no evidence yet (a human ask, or a
     deep-research direction) that later accrues evidence when a matching node runs."""
@@ -1171,8 +1173,8 @@ class Hypothesis(BaseModel):
     best_delta: Optional[float] = None  # best improvement-over-parent among evidence (audit)
     # FOREAGENT board prioritization (search/foresight.py): 0-based rank among the OPEN hypotheses in
     # the latest `hypothesis_ranked` event — 0 = predicted highest payoff. DERIVED each fold from that
-    # event; None when unranked (no predictor run, or the card isn't open). Audit/UI only — the kanban
-    # sorts open cards by it; never read by best-selection.
+    # event; None when unranked (no predictor run, or the card isn't open). This Hypothesis-view field
+    # drives UI order; the same atomic ranking receipt also produces Card priority for Card selection.
     priority: Optional[int] = None
 
 
@@ -1419,10 +1421,11 @@ class Card(BaseModel):
 
 class ResearchMemo(BaseModel):
     """Output of the Deep-Research stage (Phase 2): the model reads across ALL results so far +
-    the literature/web and writes a strategic memo that steers the next batch. Audit-only — it is
-    recorded as a `research_completed` event folded into `RunState.research`, NEVER into the search
-    DAG, so best-selection/policies are untouched. The UI renders it as a node and surfaces the
-    `summary`/`findings`/`recommended_directions` as the conclusion; `reasoning` is debug-only."""
+    the literature/web and writes a strategic memo that steers the next batch. It is recorded as a
+    `research_completed` event folded into `RunState.research`, NEVER as a search-DAG node and never
+    directly re-ranks the current champion. Its directions feed later proposal hints, while aligned
+    supported claims may feed cross-run evidence at finalization. The UI renders it as a node and
+    surfaces `summary`/`findings`/`recommended_directions`; `reasoning` is debug-only."""
     summary: str = ""                                   # one-paragraph conclusion (the takeaway)
     reasoning: str = ""                                 # the "think hard" narrative (debug-only)
     findings: list[str] = Field(default_factory=list)   # concrete observations across results/web
@@ -1500,7 +1503,9 @@ class RunState(BaseModel):
       1. core run state (below)            — selection-relevant: nodes/best/gates/budget;
       2. live operator control             — the `<x>_requests`/`<x>s_done` counter pairs (see
          engine invariant #3: every side effect gates on a domain event);
-      3. audit-only sidecars               — folded for the UI/exports; NEVER touch selection;
+      3. advisory/control receipts         — folded for replay/UI/exports; none directly computes the
+                                             current best, but some gate resume/cadence or feed later
+                                             prompts, policies and trust enforcement;
       4. read helpers                      — derived views, no mutation."""
     # --- core run state (selection-relevant) ---
     run_id: str = ""
@@ -1719,8 +1724,9 @@ class RunState(BaseModel):
     hypothesis_concepts_at_vocab: dict[str, int] = Field(default_factory=dict)
     # PART IV D5 (§21.18 B3): the accumulated concept-consolidation rename map (raw_id -> canonical_id).
     # Reused by later cadences so consolidation decisions stay FIXED (stable vocabulary, no flapping / B1
-    # churn). Populated only when `concept_pivot` is on; audit-only. Additive/reader-defaulted: empty on
-    # old logs -> byte-identical fold.
+    # churn). Populated only when `concept_pivot` is on. The map canonicalizes materialized memberships
+    # and therefore can change later coverage/proposal cues; it never directly re-ranks evaluated nodes.
+    # Additive/reader-defaulted: empty on old logs -> byte-identical fold.
     concept_consolidation: dict[str, str] = Field(default_factory=dict)
     # PART IV concept-edge substrate: the typed concept graph (src, rel, dst) -> {provenance, confidence},
     # keyed by "src\trel\tdst". Makes hierarchy a swappable projection (project_hierarchy). Folded
@@ -1840,8 +1846,8 @@ class RunState(BaseModel):
     policy_scores: dict[int, float] = Field(default_factory=dict)  # latest policy_decision candidate scores
     policy_chosen: Optional[int] = None                  # node the policy expanded ("why this node")
     policy_reason: str = ""                               # short why-this-node label (exploit/merge/promote/…)
-    # A7 Strategist (audit-only; never read by best-selection). `active_strategy` is the latest
-    # applied Strategy dict; `strategy_history` is the timeline of switches for the "why this
+    # A7 Strategist replay control. `active_strategy` is the latest applied Strategy dict and is
+    # re-applied on engine entry; `strategy_history` is the timeline of switches for the "why this
     # strategy" panel. `pending_strategy` is an operator override (set_strategy control event) that
     # the engine applies before consulting the Strategist (human-wins parity with pause/hint).
     active_strategy: Optional[dict] = None
@@ -1849,7 +1855,7 @@ class RunState(BaseModel):
     pending_strategy: Optional[dict] = None
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
-    # --- audit-only sidecars (folded for the UI/exports; NEVER touch selection) ---
+    # --- advisory/control receipts (no direct objective ranking; downstream effects noted per field) ---
     # Unified self-driving agent (audit-only; never read by best-selection): timeline of the agent's
     # macro-action choices {at_node, chosen, legal, recommended, rationale} for the "why this action"
     # view. Additive — old event logs without `agent_decision` events fold to an empty list.
@@ -1857,13 +1863,14 @@ class RunState(BaseModel):
     # A6 proxy/predictive scoring: per-node early-signal scores + which candidates were skipped.
     proxy_scores: dict[int, float] = Field(default_factory=dict)
     proxy_skipped: list[int] = Field(default_factory=list)
-    # B5 reward-hacking detector (audit-only; never changes selection): flagged suspicious wins
-    # {node_id, signals:[{signal, detail}]} for the Trust panel.
+    # B5 reward-hacking detector: flagged suspicious wins {node_id, signals:[{signal, detail}]} for
+    # the Trust panel. Under trust_gate=audit they are advisory; hard signals under gate/block exclude
+    # best-selection/breeding and may mark the node infeasible.
     reward_hacks: list[dict] = Field(default_factory=list)
     # FOREAGENT predict-before-execute picks {node_id, confidence, chosen, ...}, folded from
-    # `foresight_selected` events. Audit-only — never touches selection — but the fold keeps them so
-    # the world model can be primed with its OWN track record (did past predicted-best picks beat
-    # their parent?), closing the open predict→outcome loop (signal-delivery, §1). Additive.
+    # `foresight_selected` events. They do not re-rank evaluated nodes; the fold keeps them so the
+    # world model can be primed with its OWN track record (did past predicted-best picks beat their
+    # parent?), which can change later pre-execution picks (signal-delivery, §1). Additive.
     foresight_selected: list[dict] = Field(default_factory=list)
     # E1 novelty/dedup gate: near-duplicate proposals that were nudged off {node_id, near_node, ...}.
     novelty_events: list[dict] = Field(default_factory=list)
@@ -1875,16 +1882,16 @@ class RunState(BaseModel):
     # surfaced (never rejected) so the trace/researcher sees "tried in run X -> metric Y". Populated only
     # under `cross_run_concepts`; audit-only sidecar, never read by best-selection. Additive.
     cross_run_priors: list[dict] = Field(default_factory=list)
-    # Deep-Research stage (Phase 2, audit-only sidecar — NEVER read by best-selection). `research`
-    # is the timeline of completed memos (each a ResearchMemo dump); `research_requests` are pending
+    # Deep-Research stage (Phase 2). `research` does not directly rank evaluated nodes, but its latest
+    # memo is proposal context and verified claims may feed cross-run evidence. `research_requests` are pending
     # manual `deep_research` control events and `research_served` how many have been fulfilled (the
     # replay-safe gate, mirroring inject_requests/injects_done).
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
-    # Hypothesis ledger (P1, audit-only — NEVER read by best-selection). Derived each fold: from every
-    # node whose `idea.hypothesis` is set, plus any explicit `hypothesis_added` events (human /
-    # deep-research directions). Keyed by `hypothesis_id`. The UI renders it as a board.
+    # Hypothesis ledger (P1). It never directly ranks evaluated nodes; open entries are shown to the
+    # Researcher and can steer later proposals. Derived each fold from every node whose
+    # `idea.hypothesis` is set plus explicit `hypothesis_added` events. Keyed by `hypothesis_id`.
     hypotheses: dict[str, Hypothesis] = Field(default_factory=dict)
     # Explicitly-added hypotheses (human `add_hypothesis` control event or a deep-research direction),
     # kept separately so the derived-from-nodes pass can merge evidence into them. `abandoned` ids are
@@ -1897,10 +1904,10 @@ class RunState(BaseModel):
     # Human-DELETED hypotheses (hypothesis_updated status=deleted): removed from the board entirely,
     # unlike `abandoned` (which stays visible in its own column). Excluded from `hypotheses` on fold.
     hypotheses_deleted: list[str] = Field(default_factory=list)
-    # FOREAGENT board prioritization (audit-only — NEVER read by best-selection). The latest
-    # `hypothesis_ranked` event: {at_node, order:[ids], confidence, reason, ranked:[{id,statement}]}.
-    # `_derive_hypotheses` stamps each open card's `priority` from `order`; the UI kanban sorts by it
-    # and shows `reason` as the "why this order" analysis trace. None until the predictor first runs.
+    # FOREAGENT board prioritization. The latest `hypothesis_ranked` event carries
+    # {at_node, order:[ids], confidence, reason, ranked:[{id,statement}]}. It never re-ranks evaluated
+    # nodes, but orders open hypotheses for later proposal context and is the compatibility fallback
+    # for Card priority; native writers publish the corresponding card_ranked event atomically.
     hypothesis_ranking: Optional[dict] = None
     # Card ledger derived each fold by `_derive_cards`, keyed by card id. It never directly chooses the
     # metric champion; when card_driven_selection is enabled, the engine consumes selection-ready rows
@@ -1929,7 +1936,8 @@ class RunState(BaseModel):
     # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
     # UI renders the deterministic analysis from the node set and layers this narrative on top.
     report: Optional[dict] = None
-    # M6 comparative-lesson sidecars (audit-only — NEVER read by best-selection).
+    # M6 comparative-lesson replay receipts. They do not directly rank evaluated nodes, but they gate
+    # paid cadence work and the shared lesson store subsequently feeds proposal prompts.
     # `lessons_distilled` records each mid-run distillation (at_node + the (child, parent) node-id
     # pairs spent + the statements) — it is BOTH the replay-safe cadence gate and the ledger that
     # stops a later firing (or run-end reflection) from re-distilling the same pair.

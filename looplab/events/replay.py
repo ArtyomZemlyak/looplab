@@ -1522,7 +1522,8 @@ def _on_diversity_archive(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     st.archive = d
 
 def _on_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.coverage_snapshots.append(d)   # audit-only breadth curve; the at_node gate dedups on resume
+    # CODEX AGENT: direct-best-neutral, not behaviorally inert: Strategist/proposal cues read it.
+    st.coverage_snapshots.append(d)   # at_node/projection gates dedup and reject stale snapshots
 
 _MAX_LLM_COUNTER = (1 << 63) - 1
 _MAX_LLM_COST = 1.7976931348623157e308
@@ -1952,7 +1953,9 @@ def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") ->
 
 def _on_concept_consolidation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D5 B3 (§21.18): ACCUMULATE the consolidation rename map so decisions stay fixed across
-    # cadences (stable vocabulary). Audit-only. Idempotent + malformed-safe. ORDER-TOLERANT (invariant 5):
+    # cadences (stable vocabulary). It canonicalizes later membership/coverage inputs and can therefore
+    # steer later proposals, without directly re-ranking evaluated nodes. Idempotent + malformed-safe.
+    # ORDER-TOLERANT (invariant 5):
     # a CONFLICTING re-map of the same raw id (raw->a in one event, raw->b in another) resolves to a
     # DETERMINISTIC winner — the lexicographically smallest canonical — never last-write, so
     # fold(perm(events)) is byte-identical. The B3 producer fixes each decision once and never re-maps an
@@ -2088,16 +2091,16 @@ def _on_policy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     st.policy_reason = d.get("reason") or ""
 
 def _on_strategy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # A7 Strategist (audit-only): the engine recorded the chosen Strategy. Replay rebuilds
-    # active_strategy WITHOUT re-calling the LLM (the decision is config, not selection).
+    # A7 Strategist behavioral replay state: rebuild the chosen Strategy without re-calling the LLM;
+    # engine re-entry applies active_strategy before the next decision/evaluation boundary.
     st.active_strategy = d.get("strategy")
     st.strategy_history.append({"strategy": d.get("strategy"), "at_node": d.get("at_node"),
                                 "ctx": d.get("ctx")})
 
 def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # FOREAGENT board prioritization (audit-only): the engine recorded how the world model
-    # ordered the OPEN hypotheses (order of ids + confidence + analysis trace). Latest-wins
-    # (like policy_scores); `_derive_hypotheses` stamps each card's `priority` from `order`.
+    # FOREAGENT board prioritization: latest wins. The order does not re-rank evaluated nodes, but
+    # `_derive_hypotheses` exposes it to later proposal context and `_derive_cards` uses it as the
+    # compatibility priority fallback when no native card_ranked receipt exists.
     n = _node_for_event(st, d)
     generation = _event_generation(d)
     if generation is not _MISSING and (
@@ -2130,9 +2133,8 @@ def _on_reward_hack_suspected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") 
     st.reward_hacks.append(record)
 
 def _on_foresight_selected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # FOREAGENT predict-before-execute pick (audit-only). Kept so the world model can be
-    # primed with its OWN calibration (did the picked node beat its parent?), closing the
-    # predict→outcome loop. Store only the small fields the scoreboard needs; never selection.
+    # FOREAGENT receipt: does not re-rank evaluated nodes, but primes later world-model picks with
+    # its OWN calibration (did the picked node beat its parent?), closing the predict→outcome loop.
     nid = _coerce_node_id(d)
     n = st.nodes.get(nid) if nid is not None else None
     generation = _event_generation(d)
@@ -3244,8 +3246,8 @@ def _on_deep_research(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.research_requests.append(d)       # manual "go think hard" request (control event)
 
 def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Deep-Research memo (audit-only sidecar; NEVER touches nodes/best). `served_manual`
-    # advances the manual-request gate so a resume never re-runs a served request.
+    # Deep-Research memo: never re-ranks current nodes/best; later proposal context and cross-run
+    # evidence may read it. `served_manual` also prevents replay from re-serving the request.
     from looplab.core.advisory_payloads import sanitize_research_memo_payload
     # CODEX AGENT: old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
@@ -3254,12 +3256,12 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
         st.research_served += 1
 
 def _on_lessons_distilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # M6 mid-run comparative-lesson distillation (audit-only sidecar; NEVER touches
-    # nodes/best). at_node + pair ids are the replay-safe gates (cadence + no re-distill).
+    # M6 does not re-rank current nodes/best; at_node + pair ids are behavioral replay gates that
+    # prevent paid re-distillation, while the shared lesson output can steer later proposals.
     st.lessons_distilled.append(d)
 
 def _on_lessons_refreshed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.lessons_refreshed.append(d)   # M6 shared-store re-read (audit-only cadence gate)
+    st.lessons_refreshed.append(d)   # M6 shared-store re-read cadence/replay gate
 
 def _on_report_generated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Agent-authored run report (audit-only sidecar; NEVER touches nodes/best). Latest wins —
@@ -3463,7 +3465,8 @@ def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
     flagged = _apply_trust_gate(st)
     _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)
 
-    _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
+    # P1 derives after best so it cannot re-rank this fold; later proposal prompts consume open rows.
+    _derive_hypotheses(st)
     _derive_cards(st)        # docs/23 Layer 1a: the card ledger (mirrors hypotheses); advisory, after best
     return st
 

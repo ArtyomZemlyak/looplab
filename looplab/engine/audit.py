@@ -65,7 +65,8 @@ class AuditMixin:
 
     def _emit_hypothesis_ranked(self, node_id: int, generation: int | None = None,
                                 researcher=None) -> None:
-        """FOREAGENT board prioritization audit: if the active Researcher (a `ForesightPanelResearcher`)
+        """Persist one FOREAGENT board-prioritization decision. If the active Researcher
+        (a `ForesightPanelResearcher`)
         predicted an order over the OPEN-hypothesis board while proposing THIS node, record it as a
         `hypothesis_ranked` event — the analysis + selection trace the UI surfaces (kanban order + the
         model's `reason`). `researcher=` (Variant-1): read THIS build's pooled researcher so a
@@ -79,17 +80,11 @@ class AuditMixin:
         hypothesis_data = {"node_id": node_id, **pick}
         if generation is not None:
             hypothesis_data["generation"] = generation
-        # CODEX AGENT: hypothesis_ranked and card_ranked below are two projections of one foresight
-        # decision, but separate appends plus the swallowed second failure can persist the new
-        # Hypothesis order beside stale Card selection priority. Build both payloads first and commit
-        # them with append_many so replay never observes a half-published ranking decision.
-        self.store.append(EV_HYPOTHESIS_RANKED, hypothesis_data, trace_id=tid, span_id=sid)
-
         # Layer 1b producer: the foresight role still ranks the compatibility Hypothesis board, whose
         # keys are statement hashes. Resolve that one snapshot to the live canonical Card ids after
         # node_created. A single direction may own several immutable work items, so preserve all matches
         # in stable id order. Only refs/scalars cross onto card_ranked; free-form analysis remains on the
-        # existing hypothesis audit event and cannot leak through the tokenless Card projection.
+        # hypothesis event and cannot leak through the tokenless Card projection.
         try:
             from looplab.core.models import hypothesis_id
             from looplab.events.replay import fold
@@ -114,15 +109,22 @@ class AuditMixin:
             card_data = {"order": card_order, "at_node": node_id}
             if "confidence" in pick:
                 card_data["confidence"] = pick["confidence"]
-            self.store.append(EV_CARD_RANKED, card_data, trace_id=tid, span_id=sid)
-        except Exception:  # noqa: BLE001 - additive Card audit must never fail a completed build
-            pass
+            # CODEX AGENT: these are two projections of ONE ranking decision. One physical batch keeps
+            # a crash/torn tail from exposing a new Hypothesis order beside stale Card selection priority.
+            self.store.append_many([
+                (EV_HYPOTHESIS_RANKED, hypothesis_data),
+                (EV_CARD_RANKED, card_data),
+            ], trace_id=tid, span_id=sid)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Projection construction is additive and must not fail an already-completed node build.
+            # Publish neither side: a lone hypothesis order would fall back into Card priority on replay.
+            return
         finally:
             setattr(role, "last_hyp_priority", None)
 
     def _emit_foresight_selected(self, node_id: int, generation: int | None = None,
                                  researcher=None, developer=None) -> None:
-        """FOREAGENT predict-before-execute audit: when the world model picked WHICH candidate becomes
+        """FOREAGENT predict-before-execute receipt: when the world model picked WHICH candidate becomes
         this node — the best of K generated ideas (the researcher panel) or of N code implementations
         (best-of-N) — record the ranking + confidence + the model's reasoning as a `foresight_selected`
         event. Without it the choice and its discarded alternatives vanish (only the winner survives in

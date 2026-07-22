@@ -391,6 +391,12 @@ def test_engine_emits_and_consumes_hypothesis_ranked():
         def append(self, t, d, **kw):
             self.events.append((t, d))
 
+        def append_many(self, records, **kw):
+            self.events.extend(records)
+
+        def read_all(self):
+            return []
+
     class _Researcher:
         last_hyp_priority = {"order": ["a", "b"], "confidence": 0.7, "reason": "r", "n": 2}
 
