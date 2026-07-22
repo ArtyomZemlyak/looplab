@@ -164,6 +164,11 @@ class ConfirmPhaseMixin:
                         still_current = self._confirmation_node_current(nd.id, generation)
                         with anyio.CancelScope(shield=True):
                             async with self._write_lock:
+                                # CODEX AGENT: confirm_seed_results is keyed only by node/generation/seed,
+                                # so this infrastructure failure becomes an ordinary durable `None` memo.
+                                # A later operator re-pin (or repaired Docker runtime) cannot retry the seed;
+                                # the phase skips it and may still emit best_confirmed with zero valid checks.
+                                # Keep unpinnable retryable, or bind the terminal memo to the resource revision.
                                 self.store.append(EV_CONFIRM_EVAL, {
                                     "node_id": nd.id, "generation": generation, "seed": s,
                                     "eval_seconds": round(time.time() - _t0, 3), "metric": None,

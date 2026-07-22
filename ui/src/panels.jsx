@@ -1276,6 +1276,10 @@ function _cardControlReflected(card, kind, patch, baseline) {
     // entry) only an exact match reflects.
     return typeof baseline === 'string'
       && card.statement.length > 0 && patch.statement.startsWith(card.statement)
+      // CODEX AGENT: secret redaction is not guaranteed to preserve a submitted-text prefix. If an
+      // uncertain request actually lands as a non-prefix normalized value, this predicate can never
+      // reflect it and the Card remains `confirmation-unknown` forever. Sequence/command identity from
+      // the folded event is the reliable acknowledgement; string-shape heuristics cannot close this state.
       && !baseline.startsWith(card.statement)
   }
   if (kind === 'priority') return card.priority === patch.priority && card.pinned === true
