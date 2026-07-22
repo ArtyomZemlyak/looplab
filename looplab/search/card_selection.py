@@ -1228,6 +1228,11 @@ def _counterfactual_owned_selection_state(
         # folds to status="dropped" with dropped_reason=None (replay: `dropped_reason = reason or None`),
         # so a reason-keyed check would let a reason-less drop slip through and reintroduce the bug.
         sibling_card = state.cards.get(sibling_card_id)
+        # CODEX AGENT: `None` is not proof that this sibling was administratively merged away; it is
+        # also the observable state for a corrupt/partial ownership chain whose speculative marker names
+        # a Card that never existed. Silently skipping both cases contradicts the fail-closed contract
+        # above and lets the healthy subject proceed with an unproven common population. Verify an exact
+        # merge/alias receipt before skipping a missing Card; otherwise reject the counterfactual.
         if (sibling_card is None or sibling_card.status == "dropped"
                 or sibling_card.merged_into is not None):
             continue

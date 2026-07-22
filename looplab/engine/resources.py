@@ -330,6 +330,10 @@ class ResourceSchedulingMixin:
         # device. Fencing it here would have to reconcile with the deliberately-divergent
         # `effective_card_footprint` zero-host branch (models.py) that the freshness projection relies on
         # and that is test-locked, so it is intentionally left to a maintainer rather than fixed inline.
+        # CODEX AGENT: this is still a fail-open security boundary, not merely a projection mismatch:
+        # an explicit positive GPU requirement can reach candidate code with the host's full GPU view
+        # after discovery failure. Preserve an explicit "required but unavailable" reservation state and
+        # refuse launch; a test-locked divergent helper is evidence to repair the contract, not to inherit it.
         if not reservation or (not reservation.get("cpu_only") and not reservation.get("gpu_ids")):
             return dict(base) if base is not None else None
         # SECURITY: `inherit_host` shovels the host environment into the eval env so a pinned/CPU

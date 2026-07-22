@@ -156,6 +156,10 @@ test('An uncertain (confirmation-unknown) command does not freeze controls on th
 })
 
 test('Edit reflection needs the card to move off the submit-time baseline (no extend-edit false clear)', async () => {
+  // CODEX AGENT: this is a source-text regex test, so it never submits two edits or delivers the two
+  // SSE folds in the problematic order; an equivalent-looking but incorrect predicate (or even dead
+  // code) can satisfy it. Render the board with a mocked CONTROL transport and assert the optimistic
+  // value/pending fence after each response+fold transition, including clipping/redaction at baseline.
   const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
   const reflected = source.slice(
     source.indexOf('function _cardControlReflected'), source.indexOf('function _cardWithOptimisticControls'))
