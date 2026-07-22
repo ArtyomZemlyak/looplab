@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from looplab.core.concepts import normalized_concept_materialization_receipt
-from looplab.core.models import hypothesis_id
+from looplab.core.models import hypothesis_id, valid_card_action_digest
 
 
 # CODEX AGENT: these are replay inputs/override journals, not a public read model. Excluding them before
@@ -522,12 +522,7 @@ def _card_identity(value):
     digest = _text(value.get("action_digest"), 128)
     if digest is not _SKIP and digest:
         out["action_digest"] = digest
-    valid_digest = (
-        isinstance(out.get("action_digest"), str)
-        and out["action_digest"].startswith("card-action:v1:")
-        and len(out["action_digest"]) == len("card-action:v1:") + 64
-        and all(char in "0123456789abcdef" for char in out["action_digest"][-64:])
-    )
+    valid_digest = valid_card_action_digest(out.get("action_digest"))
     native = kind == "native"
     coherent = native == (
         source == "card_added_receipt" and out["durable"]

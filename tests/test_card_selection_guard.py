@@ -102,7 +102,10 @@ def test_one_receipt_bound_fresh_work_item_is_selection_ready_independent_of_id_
     # A native id may happen to look exactly like a legacy statement hash. Receipt ownership, not
     # spelling, is the discriminator.
     card_id = hypothesis_id("some unrelated direction")
-    state = fold(_events([*_baseline(), _native_card_added(card_id)]))
+    added = _native_card_added(card_id)
+    assert added[1]["ownership_receipt"]["v"] == 2
+    assert added[1]["ownership_receipt"]["action_digest"].startswith("card-action:v2:")
+    state = fold(_events([*_baseline(), added]))
 
     card = state.cards[card_id]
     assert card.identity.kind == "native"
@@ -264,6 +267,86 @@ def test_sparse_receipt_missing_new_action_fences_remains_visible_but_unknown():
     assert card.selection_provenance.action_complete is False
     assert card.selection_provenance.freshness == "unknown"
     assert card.selection_ready is False
+
+
+def test_frozen_legacy_v1_receipt_stays_native_but_cannot_claim_new_fences():
+    # Fixture produced by the pre-lifecycle-fence writer. Keep the digest literal: deriving it through
+    # today's helper would let a future accidental v1 preimage change rewrite both sides of the test.
+    card_id = "legacy-v1"
+    statement = "legacy queued improvement"
+    legacy_receipt = {
+        "v": 1,
+        "card_id": card_id,
+        "action_digest": (
+            "card-action:v1:b11eab546c7801b0d8407cf3a65ab4ff"
+            "9550498de48eaf62c395f85e5dc0d6a6"
+        ),
+    }
+    state = fold(_events([*_baseline(), ("card_added", {
+        "id": card_id,
+        "statement": statement,
+        "source": "researcher",
+        "idea": {
+            "operator": "improve",
+            "params": {"lr": 0.2},
+            "space": {},
+            "eval_profile": None,
+        },
+        "parent_id": 1,
+        "parent_ids": [1],
+        "scored_against": 1,
+        "ownership_receipt": legacy_receipt,
+    })]))
+
+    card = state.cards[card_id]
+    assert card.identity.kind == "native"
+    assert card.identity.receipt_valid is True
+    assert card.identity.action_digest == legacy_receipt["action_digest"]
+    assert card.selection_provenance.action_complete is False
+    assert card.selection_provenance.freshness == "unknown"
+    assert "action_receipt_incomplete" in card.selection_blockers
+    assert card.selection_ready is False
+
+
+def test_short_lived_expanded_v1_receipt_remains_current_during_v2_upgrade():
+    # A few releases minted the expanded lifecycle-fenced preimage with the old v1 label. Accept those
+    # exact durable rows during replay, while every new writer emits v2 (asserted above).
+    card_id = "expanded-v1"
+    statement = "transition queued improvement"
+    state = fold(_events([*_baseline(), ("card_added", {
+        "id": card_id,
+        "statement": statement,
+        "source": "researcher",
+        "idea": {
+            "operator": "improve",
+            "params": {"lr": 0.2},
+            "space": {},
+            "eval_profile": None,
+            "eval_timeout": 60.0,
+        },
+        "parent_id": 1,
+        "parent_ids": [1],
+        "parent_generations": {"1": 0},
+        "scored_against": 1,
+        "scored_against_generation": 0,
+        "scored_against_empty": False,
+        "ownership_receipt": {
+            "v": 1,
+            "card_id": card_id,
+            "action_digest": (
+                "card-action:v1:6302a6d374bf49ff2faaa5738f743e04"
+                "7ae93a1132d19680a4212bc60e6d714c"
+            ),
+        },
+    })]))
+
+    card = state.cards[card_id]
+    assert card.identity.kind == "native"
+    assert card.identity.receipt_valid is True
+    assert card.selection_provenance.action_complete is True
+    assert card.selection_provenance.freshness == "current"
+    assert card.selection_blockers == []
+    assert card.selection_ready is True
 
 
 def test_explicit_empty_score_and_parent_fences_are_current_only_while_run_is_empty():

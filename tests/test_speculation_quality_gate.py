@@ -16,7 +16,7 @@ from looplab.agents.roles import (
     SPECULATION_CUDA_PROBE_STATIC_EXTRA_METRICS,
 )
 from looplab.core.models import (
-    CARD_ACTION_DIGEST_V1_FIELDS,
+    CARD_ACTION_DIGEST_V2_FIELDS,
     Idea,
     card_ownership_receipt,
     idea_proposal_ref,
@@ -1018,7 +1018,7 @@ def test_card_score_authority_is_bound_to_its_immediate_event_prefix(tmp_path):
         data["scored_against_empty"] = True
         action = {
             field: data["idea"][field] if field in data["idea"] else data[field]
-            for field in CARD_ACTION_DIGEST_V1_FIELDS
+            for field in CARD_ACTION_DIGEST_V2_FIELDS
         }
         data["ownership_receipt"] = card_ownership_receipt(
             data["id"], data["statement"], action,

@@ -27,17 +27,21 @@ from looplab.core.concepts import (
 )
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   verifier_evidence_digest)
-from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, NODE_CONCEPT_PROVENANCE_AUTHORED,
+from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
+                     NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
                      NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      node_concept_event_provenance,
                      Card, CardConceptSource, CardIdentityProvenance, CardSelectionProvenance,
                      Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial, card_action_digest,
-                     card_ownership_receipt, hypothesis_id, hypothesis_statement_digest,
+                     card_ownership_receipt, legacy_card_ownership_receipt_v1,
+                     transitional_card_action_digest_v1,
+                     transitional_card_ownership_receipt_v1,
+                     hypothesis_id, hypothesis_statement_digest,
                      idea_proposal_digest, normalize_extra_metrics, normalize_researcher_footprint,
                      normalize_steering_context,
-                     run_setup_key, valid_researcher_footprint)
+                     run_setup_key, valid_card_action_digest, valid_researcher_footprint)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
@@ -2314,20 +2318,17 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
 
 
 def _bounded_card_ownership_receipt(value, *, card_id: str | None) -> dict | None:
-    """Retain one exact, constant-size v1 ownership proof and reject every extension."""
+    """Retain one exact, constant-size supported ownership proof and reject every extension."""
     keys = {"v", "card_id", "action_digest"}
     if not isinstance(value, dict) or set(value) != keys or card_id is None:
         return None
     digest = value.get("action_digest")
-    prefix = "card-action:v1:"
-    if (type(value.get("v")) is not int or value["v"] != 1
+    version = value.get("v")
+    if (type(version) is not int or version not in {1, 2}
             or value.get("card_id") != card_id
-            or not isinstance(digest, str)
-            or len(digest) != len(prefix) + 64
-            or not digest.startswith(prefix)
-            or any(char not in "0123456789abcdef" for char in digest[len(prefix):])):
+            or not valid_card_action_digest(digest, version=version)):
         return None
-    return {"v": 1, "card_id": card_id, "action_digest": digest}
+    return {"v": version, "card_id": card_id, "action_digest": digest}
 
 
 def _bounded_card_added_receipt(d: dict) -> dict | None:
@@ -4073,15 +4074,16 @@ _CARD_ADDED_ACTION_FIELDS = frozenset({
 })
 
 
-def _card_action_receipt_payload(snapshot: dict) -> dict:
-    """Extract exactly the immutable action subset covered by the v1 ownership digest."""
-    # Preserve absence: the v1 digest owns canonical defaults for sparse historical receipts (notably
+def _card_action_receipt_payload(snapshot: dict, *, version: int) -> dict:
+    """Extract exactly the immutable action subset covered by one receipt version."""
+    # Preserve absence: each digest owns canonical defaults for sparse historical receipts (notably
     # ``scored_against_empty=False`` and ``parent_ids=[]``). Materialising every missing member as None
     # changes those semantics and incorrectly demotes a structurally-valid but incomplete native receipt
     # to a synthesized shadow. Completeness is checked independently below and still fails closed.
+    fields = CARD_ACTION_DIGEST_V1_FIELDS if version == 1 else CARD_ACTION_DIGEST_V2_FIELDS
     return {
         field: snapshot[field]
-        for field in CARD_ACTION_DIGEST_V1_FIELDS
+        for field in fields
         if field in snapshot
     }
 
@@ -4091,16 +4093,38 @@ def _card_added_ownership(
 ) -> tuple[bool, bool, str | None]:
     """Validate a native identity receipt and whether its action was losslessly represented."""
     explicit_id = d.get("id")
-    expected = card_ownership_receipt(card_id, statement, _card_action_receipt_payload(snapshot))
+    receipt = d.get("ownership_receipt")
+    receipt_version = receipt.get("v") if isinstance(receipt, dict) else None
+    receipt_variant = None
+    expected = None
+    if receipt_version == 1:
+        legacy_expected = legacy_card_ownership_receipt_v1(
+            card_id, statement, _card_action_receipt_payload(snapshot, version=1))
+        transitional_expected = transitional_card_ownership_receipt_v1(
+            card_id, statement, _card_action_receipt_payload(snapshot, version=2))
+        if receipt == legacy_expected:
+            expected, receipt_variant = legacy_expected, "legacy-v1"
+        elif receipt == transitional_expected:
+            expected, receipt_variant = transitional_expected, "expanded-v1"
+    elif receipt_version == 2:
+        expected = card_ownership_receipt(
+            card_id, statement, _card_action_receipt_payload(snapshot, version=2))
+        if receipt == expected:
+            receipt_variant = "v2"
     receipt_valid = bool(
         isinstance(explicit_id, str)
         and explicit_id == card_id
         and expected is not None
-        and d.get("ownership_receipt") == expected
+        and receipt == expected
     )
     raw_idea = d.get("idea")
     if not receipt_valid or not owns_action or not isinstance(raw_idea, dict):
-        return receipt_valid, False, expected.get("action_digest") if expected else None
+        return receipt_valid, False, expected["action_digest"] if expected else None
+
+    # A valid legacy v1 proof establishes durable native identity, but it predates timeout and lifecycle
+    # fences. Keep it visible after upgrade while failing closed for execution/freshness decisions.
+    if receipt_variant == "legacy-v1":
+        return True, False, expected["action_digest"]
 
     # CODEX AGENT: the receipt covers the complete executable subset. Unknown Idea members may gain
     # execution meaning in a later schema, so an old reader cannot silently discard them and still call
@@ -4135,7 +4159,11 @@ def _card_added_ownership(
         "scored_against_empty": d.get("scored_against_empty"),
         "footprint": d.get("footprint"),
     }
-    raw_expected = card_ownership_receipt(card_id, statement, raw_action)
+    raw_expected = (
+        transitional_card_ownership_receipt_v1(card_id, statement, raw_action)
+        if receipt_variant == "expanded-v1"
+        else card_ownership_receipt(card_id, statement, raw_action)
+    )
     action_complete = raw_expected == expected
     return True, action_complete, expected["action_digest"]
 
@@ -5156,8 +5184,13 @@ def _derive_cards(st: RunState) -> None:
         else:
             action_source = "mixed"
 
-        projected_digest = card_action_digest(
-            c.id, c.seed_statement, _card_action_from_projection(c))
+        projected_action = _card_action_from_projection(c)
+        projected_digest = (
+            transitional_card_action_digest_v1(c.id, c.seed_statement, projected_action)
+            if (isinstance(c.identity.action_digest, str)
+                and c.identity.action_digest.startswith("card-action:v1:"))
+            else card_action_digest(c.id, c.seed_statement, projected_action)
+        )
         action_complete = bool(
             owner_count == 1
             and owner["all_complete"]

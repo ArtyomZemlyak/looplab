@@ -763,19 +763,24 @@ def idea_proposal_ref(idea: Idea) -> dict | None:
     return {"v": 1, "digest": digest} if digest is not None else None
 
 
-# CODEX AGENT: this expanded the preimage of already-persisted card-action:v1 receipts. Earlier writers
-# omitted lifecycle generations, eval_timeout and scored_against_empty; current replay recomputes the
-# new shape and demotes those native Cards on upgrade. Freeze the old v1 verifier and mint v2 for the
-# expanded action, accepting both versions during replay.
+# The shipped v1 preimage is immutable. Lifecycle generations, eval_timeout and scored_against_empty were
+# added later and therefore belong to v2; changing this tuple would invalidate durable historical Cards.
 CARD_ACTION_DIGEST_V1_FIELDS = (
+    "operator", "params", "space", "eval_profile", "parent_id", "parent_ids",
+    "scored_against", "footprint",
+)
+CARD_ACTION_DIGEST_V2_FIELDS = (
     "operator", "params", "space", "eval_profile", "eval_timeout", "parent_id", "parent_ids",
     "parent_generations", "scored_against", "scored_against_generation",
     "scored_against_empty", "footprint",
 )
+_CARD_ACTION_DIGEST_VERSIONS = frozenset({1, 2})
 
 
-def card_action_digest(card_id: str, statement: str, action: dict) -> str | None:
-    """Return the exact bounded identity of one card work item.
+def _card_action_digest(
+        card_id: str, statement: str, action: dict, *, version: int,
+        expanded_v1: bool = False) -> str | None:
+    """Return one versioned exact bounded identity of a Card work item.
 
     This is deliberately narrower than :func:`idea_proposal_digest`: a card is a queued work item,
     not the aggregate research direction represented by ``Hypothesis``.  The digest binds the stable
@@ -783,7 +788,9 @@ def card_action_digest(card_id: str, statement: str, action: dict) -> str | None
     Concept membership is metadata with its own completeness receipt and is intentionally not a
     prerequisite for execution.
     """
-    if (not isinstance(card_id, str) or not card_id or card_id != card_id.strip()
+    if (version not in _CARD_ACTION_DIGEST_VERSIONS
+            or (expanded_v1 and version != 1)
+            or not isinstance(card_id, str) or not card_id or card_id != card_id.strip()
             or len(card_id) > 256 or not card_id.isprintable()
             or not isinstance(statement, str) or not statement.strip()
             or statement != statement.strip() or len(statement) > 2_048
@@ -851,31 +858,6 @@ def card_action_digest(card_id: str, statement: str, action: dict) -> str | None
             return None
         parent_id = _node_id(action.get("parent_id"))
         scored_against = _node_id(action.get("scored_against"))
-        raw_parent_generations = action.get("parent_generations")
-        if raw_parent_generations is None:
-            parent_generations = None
-        else:
-            if (not isinstance(raw_parent_generations, dict)
-                    or len(raw_parent_generations) > 64
-                    or set(raw_parent_generations) != {str(parent) for parent in parent_ids}):
-                return None
-            parent_generations = {
-                key: _generation(raw_parent_generations[key])
-                for key in sorted(raw_parent_generations)
-            }
-            if any(value is None for value in parent_generations.values()):
-                return None
-        scored_against_generation = _generation(action.get("scored_against_generation"))
-        scored_against_empty = action.get("scored_against_empty", False)
-        if type(scored_against_empty) is not bool:
-            return None
-        if ((scored_against is None and scored_against_generation is not None)
-                or (scored_against is not None and scored_against_empty)):
-            return None
-        raw_eval_timeout = action.get("eval_timeout")
-        eval_timeout = None if raw_eval_timeout is None else _number(raw_eval_timeout)
-        if eval_timeout is not None and eval_timeout <= 0:
-            return None
         profile = action.get("eval_profile")
         if (profile is not None and (not isinstance(profile, str) or len(profile) > 256
                                      or not profile.isprintable())):
@@ -885,24 +867,53 @@ def card_action_digest(card_id: str, statement: str, action: dict) -> str | None
             footprint = normalize_researcher_footprint(footprint)
             if footprint is None:
                 return None
-        payload = {
-            "v": 1,
-            "card_id": card_id,
-            "statement": statement,
-            "action": {
-                "operator": operator,
-                "params": _params(action.get("params")),
-                "space": _space(action.get("space")),
-                "eval_profile": profile,
+        action_payload = {
+            "operator": operator,
+            "params": _params(action.get("params")),
+            "space": _space(action.get("space")),
+            "eval_profile": profile,
+            "parent_id": parent_id,
+            "parent_ids": parent_ids,
+            "scored_against": scored_against,
+            "footprint": footprint,
+        }
+        if version == 2 or expanded_v1:
+            raw_parent_generations = action.get("parent_generations")
+            if raw_parent_generations is None:
+                parent_generations = None
+            else:
+                if (not isinstance(raw_parent_generations, dict)
+                        or len(raw_parent_generations) > 64
+                        or set(raw_parent_generations) != {str(parent) for parent in parent_ids}):
+                    return None
+                parent_generations = {
+                    key: _generation(raw_parent_generations[key])
+                    for key in sorted(raw_parent_generations)
+                }
+                if any(value is None for value in parent_generations.values()):
+                    return None
+            scored_against_generation = _generation(action.get("scored_against_generation"))
+            scored_against_empty = action.get("scored_against_empty", False)
+            if type(scored_against_empty) is not bool:
+                return None
+            if ((scored_against is None and scored_against_generation is not None)
+                    or (scored_against is not None and scored_against_empty)):
+                return None
+            raw_eval_timeout = action.get("eval_timeout")
+            eval_timeout = None if raw_eval_timeout is None else _number(raw_eval_timeout)
+            if eval_timeout is not None and eval_timeout <= 0:
+                return None
+            action_payload.update({
                 "eval_timeout": eval_timeout,
-                "parent_id": parent_id,
-                "parent_ids": parent_ids,
                 "parent_generations": parent_generations,
-                "scored_against": scored_against,
                 "scored_against_generation": scored_against_generation,
                 "scored_against_empty": scored_against_empty,
-                "footprint": footprint,
-            },
+            })
+        payload = {
+            "v": version,
+            "card_id": card_id,
+            "statement": statement,
+            "action": action_payload,
         }
         encoded = json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
@@ -911,12 +922,60 @@ def card_action_digest(card_id: str, statement: str, action: dict) -> str | None
         return None
     if len(encoded) > 131_072:
         return None
-    return "card-action:v1:" + hashlib.sha256(encoded).hexdigest()
+    return f"card-action:v{version}:" + hashlib.sha256(encoded).hexdigest()
+
+
+def card_action_digest(card_id: str, statement: str, action: dict) -> str | None:
+    """Mint the current v2 Card action identity, including lifecycle and timeout fences."""
+    return _card_action_digest(card_id, statement, action, version=2)
+
+
+def legacy_card_action_digest_v1(card_id: str, statement: str, action: dict) -> str | None:
+    """Recompute the frozen historical v1 Card action identity for replay verification only."""
+    return _card_action_digest(card_id, statement, action, version=1)
+
+
+def transitional_card_action_digest_v1(card_id: str, statement: str, action: dict) -> str | None:
+    """Verify receipts minted by the short-lived expanded-v1 writer before v2 was introduced."""
+    return _card_action_digest(card_id, statement, action, version=1, expanded_v1=True)
+
+
+def valid_card_action_digest(value: object, *, version: int | None = None) -> bool:
+    """Whether ``value`` is one canonical supported Card action digest."""
+    versions = (version,) if version is not None else tuple(sorted(_CARD_ACTION_DIGEST_VERSIONS))
+    if not isinstance(value, str):
+        return False
+    for candidate in versions:
+        if candidate not in _CARD_ACTION_DIGEST_VERSIONS:
+            continue
+        prefix = f"card-action:v{candidate}:"
+        if (len(value) == len(prefix) + 64 and value.startswith(prefix)
+                and all(char in "0123456789abcdef" for char in value[len(prefix):])):
+            return True
+    return False
 
 
 def card_ownership_receipt(card_id: str, statement: str, action: dict) -> dict | None:
-    """Create the v1 durable ``card_added`` ownership receipt for a concrete work item."""
+    """Create the current v2 durable ``card_added`` ownership receipt for a concrete work item."""
     digest = card_action_digest(card_id, statement, action)
+    if digest is None:
+        return None
+    return {"v": 2, "card_id": card_id, "action_digest": digest}
+
+
+def legacy_card_ownership_receipt_v1(
+        card_id: str, statement: str, action: dict) -> dict | None:
+    """Recompute a frozen historical v1 ownership receipt for replay verification only."""
+    digest = legacy_card_action_digest_v1(card_id, statement, action)
+    if digest is None:
+        return None
+    return {"v": 1, "card_id": card_id, "action_digest": digest}
+
+
+def transitional_card_ownership_receipt_v1(
+        card_id: str, statement: str, action: dict) -> dict | None:
+    """Verify a short-lived expanded-v1 ownership receipt; new writers must never call this."""
+    digest = transitional_card_action_digest_v1(card_id, statement, action)
     if digest is None:
         return None
     return {"v": 1, "card_id": card_id, "action_digest": digest}
@@ -1181,12 +1240,7 @@ class CardIdentityProvenance(BaseModel):
     @model_validator(mode="after")
     def _coherent_identity(self) -> "CardIdentityProvenance":
         native = self.kind == "native"
-        valid_digest = (
-            isinstance(self.action_digest, str)
-            and self.action_digest.startswith("card-action:v1:")
-            and len(self.action_digest) == len("card-action:v1:") + 64
-            and all(char in "0123456789abcdef" for char in self.action_digest[-64:])
-        )
+        valid_digest = valid_card_action_digest(self.action_digest)
         if native != (
                 self.source == "card_added_receipt" and self.durable
                 and self.receipt_valid and valid_digest):

@@ -24,7 +24,7 @@ from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.hardware import effective_gpu_inventory
 from looplab.core.models import (
-    CARD_ACTION_DIGEST_V1_FIELDS,
+    CARD_ACTION_DIGEST_V2_FIELDS,
     Event,
     NodeStatus,
     card_ownership_receipt,
@@ -1168,7 +1168,7 @@ def _validate_calibration_card_owners(
             raise ValueError("calibration card_added is not one exact native registration")
         action = {
             field: (idea[field] if field in _CALIBRATION_CARD_IDEA_FIELDS else data[field])
-            for field in CARD_ACTION_DIGEST_V1_FIELDS
+            for field in CARD_ACTION_DIGEST_V2_FIELDS
         }
         expected_receipt = card_ownership_receipt(card_id, data.get("statement"), action)
         proposal_ref = data.get("proposal_ref")
