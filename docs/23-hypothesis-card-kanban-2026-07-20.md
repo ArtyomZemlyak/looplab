@@ -1,47 +1,90 @@
 # Hypothesis-Card Kanban re-architecture — design and implementation ledger (2026-07-20)
 
-Status: **Layers 1–6 are implemented. The current fail-closed speculation hardening is still in
-progress and has not yet received its fresh consolidated validation receipt. Card-driven selection
-remains a default-off, run-start-pinned opt-in; positive-depth speculation remains unavailable until
-the exact scorer-fidelity and real-GPU A/B quality gates issue a current, scope-bound receipt.**
+Status: **Layers 1–6 are implemented and validated in implementation commit `8d9952a1`, which is
+pushed to `master`. Card-driven selection remains a default-off, run-start-pinned opt-in. Positive-
+depth speculation is admitted only by the current scope-bound receipt for the exact measured Greedy /
+quadratic-Toy / depth-1 / max-nodes-12 runtime; every broader workload, policy, depth and budget remains
+default-off and fail-closed.**
 Grounded in four exhaustive code maps (idea-pipeline ·
 strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review consolidated in
 **§12 — the authoritative target contract**. The ledger below is the validated implementation truth.
 
-## 0.0.1 Current implementation truth (2026-07-21)
+## 0.0.1 Current implementation truth (2026-07-22)
 
 | Area | Landed now | Remaining |
 |---|---|---|
-| Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | final validation |
-| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | final validation |
-| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays | final validation |
-| Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | final validation |
-| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, fail-closed Docker GPU pinning and explicit CPU isolation, confirm admission, isolated Card producer/consumer | final validation |
-| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, crash-atomic batch claim, durable exact ASHA receipts and Strategist-owned scoring over canonical trusted concept membership; bounded lifecycle lanes; optimistic generation-fenced edit/priority/resource/drop controls | final validation plus scoped rollout receipt |
+| Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | none |
+| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | none |
+| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays | none |
+| Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
+| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, fail-closed Docker GPU pinning and explicit CPU isolation, confirm admission, isolated Card producer/consumer | none |
+| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, crash-atomic batch claim, durable exact ASHA receipts and Strategist-owned scoring over canonical trusted concept membership; bounded lifecycle lanes; optimistic generation-fenced edit/priority/resource/drop controls | none in Layers 1–6; broader rollout scopes remain intentionally deferred/default-off |
 
-### Stage progress ledger (implementation working tree, 2026-07-21)
+### Stage progress ledger (validated implementation, 2026-07-22)
 
-`Implemented` means the acceptance behavior is present in the working tree. It does **not** mean that
-the current uncommitted snapshot has passed the final suite; that distinction is explicit below.
+`Complete` means the acceptance behavior is present in `8d9952a1` and covered by the current validation
+and hardware receipts below. Deferred broader rollout scopes are not unfinished work in Layers 1–6.
 
 | Stage | Honest status | Landed commits / evidence | Final validation | Remaining |
 |---|---|---|---|---|
-| **1a-extract** | **Complete** | `024358f` pure verdict helpers | historical + unchanged | none |
-| **1a-model** | **Implemented** | `d4dc621f`, `e66b728c`, `9b1cdb8f`, `bb176cb9`; native planner/reservation and ownership linkage | current receipt pending | final one-shot validation |
-| **1b** | **Implemented** | `d10bbe11`, `9cff2fbd`, `b90babd4`, `bb176cb9`; enrichment fence/schema and footprint plumbing | current receipt pending | final one-shot validation |
-| **1c** | **Implemented** | `015b699f`, `54ab8d60`, `fb0b438b`, `bb176cb9`; lifecycle reconciliation | current receipt pending | final one-shot validation |
-| **2** | **Implemented** | `15df954b`, `5e871dc5`, `d9940342`; canonical axes and shared lane broker | current receipt pending | final one-shot validation |
-| **4** | **Implemented** | `547b8d0f`, `bb176cb9`; footprint-aware scheduling and lifecycle reservations | current receipt pending | final one-shot validation |
-| **3** | **Implemented** | `212b1a64`, `4a3bf96b`, `bb176cb9`; Card selector, policy fidelity and atomic claim | current receipt pending | scorer-fidelity receipt + final suite |
-| **5a** | **Implemented** | `cc3a666e`, `bb176cb9`; durable isolated producer/consumer | current receipt pending | final one-shot validation |
-| **5b** | **Implemented; rollout closed** | `bb176cb9` plus current fail-closed receipt/profile/GPU hardening | current receipt pending | real-GPU 3-pair A/B gate and receipt |
-| **6** | **Implemented** | `0ff29fed`, `bb176cb9`; Kanban and generation-fenced controls | current receipt pending | final one-shot validation |
+| **1a-extract** | **Complete** | `024358f`; retained by `8d9952a1` | current receipt | none |
+| **1a-model** | **Complete** | `d4dc621f`, `e66b728c`, `9b1cdb8f`, `bb176cb9`, `8d9952a1` | current receipt | none |
+| **1b** | **Complete** | `d10bbe11`, `9cff2fbd`, `b90babd4`, `bb176cb9`, `8d9952a1` | current receipt | none |
+| **1c** | **Complete** | `015b699f`, `54ab8d60`, `fb0b438b`, `bb176cb9`, `8d9952a1` | current receipt | none |
+| **2** | **Complete** | `15df954b`, `5e871dc5`, `d9940342`, `8d9952a1` | current receipt | none |
+| **4** | **Complete** | `547b8d0f`, `bb176cb9`, `8d9952a1` | current receipt | none |
+| **3** | **Complete** | `212b1a64`, `4a3bf96b`, `bb176cb9`, `8d9952a1` | 15/15 scorer cases + current receipt | none |
+| **5a** | **Complete** | `cc3a666e`, `bb176cb9`, `8d9952a1` | current receipt | none |
+| **5b** | **Complete; exact scope admitted** | `bb176cb9`, `8d9952a1`; fail-closed runtime + receipt gate | 3/3 real-GPU A/B pairs | broader scopes remain intentionally unadmitted |
+| **6** | **Complete** | `0ff29fed`, `bb176cb9`, `8d9952a1` | current receipt | none |
 
-Historical validation receipt for commit `bb176cb9` (2026-07-21): backend **4,775 passed / 40 skipped /
-0 failed**, UI **602/602**, production Vite build green (**270 modules transformed**), strict MkDocs
-build green, and `git diff --check` green. This receipt is retained as history and does **not** validate
-the current hardening working tree. A new receipt will replace this paragraph only after the TODO below
-is complete.
+### Current validation and rollout receipt
+
+- Implementation commit: `8d9952a1` (`feat(cards): harden speculative rollout gate`), pushed directly
+  to `origin/master` on 2026-07-22.
+- Backend: the post-gate full suite exercised 4,996 tests: **4,955 passed / 40 skipped / one pre-existing
+  Windows `ChangeTime` timing test flaked**. Independent repetition reproduced that test at 14 pass / 6
+  fail; its Windows metadata-token precondition was made deterministic without changing production
+  code, after which the complete module passed **33 / 2 skipped**. The composite current result is
+  therefore **4,956 passed / 40 skipped / 0 unresolved failures**. The complete speculation-quality
+  module separately passed **80/80**.
+- UI: **602/602** tests passed. Production Vite build passed with **270 modules transformed**.
+- Documentation: strict MkDocs build and `git diff --check` are green for this ledger snapshot.
+- Hardware evidence root: `runs/speculation-gate-20260722/`; canonical receipt:
+  `runs/speculation-gate-20260722/speculation-quality.receipt.json` (**24,160 bytes**).
+- Effective device: NVIDIA GeForce RTX 5090, UUID
+  `GPU-8db535f8-6a6c-d4db-e76b-04b3b9978a10`, PCI `0000:01:00.0`, 32,606 MiB,
+  driver `595.79`, CUDA driver version `13020`. Every one of the **64 evaluated nodes** created a real
+  CUDA context and allocated/freed exactly 4,096 bytes.
+- Evidence totals: **72 physical nodes** across six fresh runs; baselines evaluated 36/36; treatments
+  accepted/closed/committed 36/36 exact Card requests, evaluated 28, and recorded 8 zero-cost freshness
+  terminals. Scorer fidelity passed **15/15** cases with **0 mismatches**.
+- Gate aggregates: mean normalized regret `0.025643226511689373` (limit `0.05`), maximum pair regret
+  `0.06747920872708314` (limit `0.10`), mean hit rate `0.7777777777777778` (minimum `0.70`), maximum
+  divergence `0.25` (limit `0.34`), minimum trusted coverage ratio `1.0` (minimum `0.90`).
+
+| Seed | Evaluated depth 0 / 1 | Requests closed/committed | Freshness terminals | Normalized regret | Hit rate | Divergence | Coverage ratio |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 12 / 9 | 12 / 12 | 3 | `0.00542002124061201` | `0.75` | `0.25` | `1.0` |
+| 1 | 12 / 10 | 12 / 12 | 2 | `0.004030449567372964` | `0.8333333333333334` | `0.16666666666666666` | `1.0` |
+| 2 | 12 / 9 | 12 / 12 | 3 | `0.06747920872708314` | `0.75` | `0.25` | `1.0` |
+
+Receipt identity is exact: self digest
+`sha256:81bd99000ac63a8422429042ecc34384be048a0d96371e210c7b2d9df43d61e9`, implementation
+`sha256:2515754ee4f2996dbe74b956a413b22dfc30e9b819db3bf799df95974114f492`, environment
+`sha256:dcab88f14c781a4aa604ea0c3c0e06381744be61a211069eee62065dabf31739`, task profile
+`sha256:06029a36f753322c3bff70160938b67c1bd687795989eb98c3c598798d6f456a`, runtime scope
+`sha256:b6bbc33fd3538d53ee20dbf5e7c02fba8b15f22f2a5e77188e5bf77c9bd91fb8`, and calibration profile
+`sha256:ec3a5b2b925a8019e814d795122f272dc2146a3ae0f70984a9f0b9c8d69ad47a`.
+
+| Evidence directory | Events bytes | Events SHA-256 | Config SHA-256 | Task SHA-256 |
+|---|---:|---|---|---|
+| `seed-0-depth-0` | 108,822 | `sha256:37065185af8b22af2c371edb677884da623755c10f1b98c2a6dede030890b008` | `sha256:9ada7c44e23f6d3763929cf39ae612dd3d58e098278f671f4b812e5de126d408` | `sha256:874d7f29db0d6d5d2941db153c2f648d0fefb2c19b173ca6a011cb557cb1c1b6` |
+| `seed-0-depth-1` | 111,462 | `sha256:0a79fccdec016f0084e27fbae2376d94a5b61b401321f824836452a4fe3a5990` | `sha256:c8f3cb3f1973909286785d2f5b15e01e8a37c59c564bb2171bab0c67609c804d` | `sha256:874d7f29db0d6d5d2941db153c2f648d0fefb2c19b173ca6a011cb557cb1c1b6` |
+| `seed-1-depth-0` | 108,446 | `sha256:6706e5bb89eb3dead88cee9c473333c5639c57030582fdbaab58f2d27d1fede3` | `sha256:9ada7c44e23f6d3763929cf39ae612dd3d58e098278f671f4b812e5de126d408` | `sha256:e169ce703d85d31095a0c62ca25b822c93fc23b427fa3098b014d8445a4a8e9a` |
+| `seed-1-depth-1` | 111,638 | `sha256:456c3d2b0d2d9e12ebb6e80f0db943ed44ea5a691f47416d188cdb0a30fb501e` | `sha256:c8f3cb3f1973909286785d2f5b15e01e8a37c59c564bb2171bab0c67609c804d` | `sha256:e169ce703d85d31095a0c62ca25b822c93fc23b427fa3098b014d8445a4a8e9a` |
+| `seed-2-depth-0` | 108,658 | `sha256:a032d55e1a908e9536f35394aeb55398befb5581f2ed609b6d7a363a8d38e0fe` | `sha256:9ada7c44e23f6d3763929cf39ae612dd3d58e098278f671f4b812e5de126d408` | `sha256:0fa712dd8b40a839cd1d7a38520ff45eee6b0e6bdb3f486e91c5c5dd42fe8cd3` |
+| `seed-2-depth-1` | 111,375 | `sha256:11d068375c5492e3bd7c9eec155f5602b12cf697be8227e03037d15b6e789931` | `sha256:c8f3cb3f1973909286785d2f5b15e01e8a37c59c564bb2171bab0c67609c804d` | `sha256:0fa712dd8b40a839cd1d7a38520ff45eee6b0e6bdb3f486e91c5c5dd42fe8cd3` |
 
 ### Live implementation TODO
 
@@ -60,10 +103,11 @@ is complete.
 - [x] Replace the utility-only GPU check with an exact CUDA context/allocation receipt and stable UUID identity.
 - [x] Bind public admission/resume to the exact tested max-nodes/runtime envelope and fixed seed set.
 - [x] Finish the adversarial fail-closed audit after those three boundaries land.
-- [ ] Run one consolidated backend/UI/build/strict-MkDocs validation after implementation freezes.
-- [ ] Run three fresh depth-0/positive-depth pairs on the effective real GPU and issue the receipt.
-- [ ] Replace the historical receipt above with exact current counts, evidence paths and digests.
-- [ ] Commit the validated implementation/docs and push directly to `master`.
+- [x] Run one consolidated backend/UI/build/strict-MkDocs validation after implementation freezes.
+- [x] Run three fresh depth-0/positive-depth pairs on the effective real GPU and issue the receipt.
+- [x] Replace the historical receipt above with exact current counts, evidence paths and digests.
+- [x] Commit the validated implementation and push it directly to `master` (`8d9952a1`).
+- [ ] Commit this final validation ledger and push it directly to `master`.
 
 ### Post-review hardening receipt
 
