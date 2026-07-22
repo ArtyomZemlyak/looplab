@@ -37,7 +37,7 @@ explored and how they descend from one another.
 runs/demo/
 ├── events.jsonl          # append-only event log — replay authority for RunState
 ├── config.snapshot.json  # the exact resolved settings (secret-masked)
-├── task.snapshot.json    # a verbatim copy of the task (makes the run self-describing)
+├── task.snapshot.json    # canonical resolved task after overlays + comparison normalization; resume input
 ├── tree.html             # static lineage view
 └── spans.jsonl           # diagnostic trace spans (never read by replay)
 ```

@@ -63,7 +63,7 @@ def canonicalize_parallelism_source(values: dict) -> dict:
         # snapshot contains llm_parallel:null plus parallel_build:1; reloading it here promotes null to
         # 1 and unexpectedly enables the global one-call broker. Promote aliases only when the
         # canonical key is absent, and pin snapshot round-trip parity.
-        if out.get(canonical) is None and out.get(legacy) is not None:
+        if canonical not in out and out.get(legacy) is not None:
             # CODEX AGENT: canonicalize inside each precedence layer, never across the flattened
             # result. The alias migration must not invert CLI > file > env precedence.
             out[canonical] = out[legacy]

@@ -26,7 +26,8 @@ authoritative for replayable `RunState`, not for every value shown in the produc
 A boxes-and-arrows flowchart of one turn of the engine and its main adjacent systems. Read the top row
 left→right: **Propose → Novelty stage → Implement → Evaluate → Score · Trust → Refine**, then loop.
 Under each stage sit its detail boxes (the memory funnel under Propose, the trust/confirm stack under
-Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene → the five tiers) and the
+Score, …); the **Card lifecycle board** (with a legacy Hypotheses fallback), **cross-run memory**
+(write → hygiene → the five tiers) and the
 **event spine** hang below. Colour = which agent acts.
 
 [:material-open-in-new: Open the diagram full-screen](../infographic/agent-architecture.html){ .md-button .md-button--primary .ll-open target="_blank" }
@@ -66,6 +67,9 @@ Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene 
 | Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Researcher / Developer / unified agent | `agents/roles.py`, `agents/unified_agent.py` |
 | Canonical eval/LLM concurrency + named-lane broker | `engine/orchestrator.py`, `core/llm_broker.py`, `engine/strategy.py` |
+| Card model · replay/public projection · selection | `core/models.py`, `events/replay.py`, `serve/public_cards.py`, `search/card_selection.py` |
+| Resource admission · GPU lifecycle reservations | `engine/resources.py`, `core/hardware.py` |
+| Speculative Card producer/consumer · freshness/quality gates | `engine/speculation.py`, `search/speculation_quality.py`, `search/speculation_calibration.py` |
 | Foresight (hypothesis prioritization, predict-before-execute) | `search/foresight.py` |
 | Hybrid retrieval + agent-decided merge (lessons & hypothesis board) | `search/hybrid_merge.py` |
 | Search policies · operators | `search/policy.py`, `search/operators.py` |

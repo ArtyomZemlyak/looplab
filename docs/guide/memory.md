@@ -39,6 +39,9 @@ LoopLab also ships an **experimental Part-IV slice enabled by default in product
 bare-library `EngineOptions` defaults remain off): rebuildable run passports/facts, per-run
 concept capsules with alias/split overlays, v3 persisted D8 claims, task-facet overlays, bounded hybrid
 cross-run retrieval, and backend Atlas/claims projections. Bound pull tools apply role and compatible direction;
+capsule upsert identity is currently the display `run_id` alone. Because the default store is global,
+two independent run roots that reuse a local run id can replace each other's capsule; there is not yet a
+persisted portfolio-wide run-incarnation UID.
 lessons/capsules accept exact task or a strict related-goal fingerprint, while v3 D8 (which stores no goal
 fingerprint) is exact-task-only. Task facets are metadata reserved for future post-scope ranking and currently
 neither grant visibility nor change ordering. External coding-agent Developer backends receive no D8 provider,

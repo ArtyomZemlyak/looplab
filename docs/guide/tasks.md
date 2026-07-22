@@ -318,7 +318,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `eval.setup` | Optional command run **before** each eval to install **dependencies** (e.g. `pip install -r requirements.txt`). **Not for training** — training is a stage the agent declares (see below). |
 | `eval.metric.reader` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `auto`. (Legacy `eval.metric.kind` still works.) |
 | `eval.metric.key` | The JSON key / regex / file path to read |
-| `eval.metric.resource_key` | Optional JSON key for an explicit training resource (for example `step`). ASHA live kill compares only observations carrying the same declared resource value; without it endpoint ranking is advisory only. |
+| `eval.metric.resource_key` | Optional JSON key for an explicit training resource (for example `step`). ASHA live kill is supported only by `stdout_json` and compares observations carrying the same declared resource value; without it endpoint ranking is advisory only. `stdout_regex` supports advisory ranking but never kill; the other readers have no live-watchdog path. |
 | `eval.timeout` | Per-eval timeout (seconds) — set it generously for training (often 7200–14400) |
 | `data` / `dataset` | `name → path` map, **read-only symlink-mounted** at `./name` by default; a value may be a [per-source permission object](#per-source-data-permissions). `~`/`$VARS` expand |
 | `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` copies to `./name`, `false` is context-only |

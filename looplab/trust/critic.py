@@ -1,8 +1,9 @@
 """C4 · Independent critic (ADR-7). A cheap, execution-free critic pass over a generated solution
 BEFORE it's trusted: does the code plausibly do what the Idea claims, and is it not an obvious no-op?
 Catches the failure modes a validator's syntax check misses — a model that returns a stub, hard-codes
-the metric, or ignores the requested hyperparameters. Audit-only (surfaced in the Trust panel via the
-same reward_hack_suspected event); never changes selection. Ties to B5.
+the metric, or ignores the requested hyperparameters. Broad critic warnings remain advisory, while the
+narrow ``critic:hardcoded_metric`` signal can exclude selection/breeding or block under
+``trust_gate=gate|block``. Findings use the same ``reward_hack_suspected`` event as B5.
 """
 from __future__ import annotations
 

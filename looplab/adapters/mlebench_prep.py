@@ -1,7 +1,7 @@
 """Prepare a real MLE-bench competition locally — without the kaggle client.
 
 mle-bench's own ``download_and_prepare_dataset`` downloads via the kaggle PyPI client, which
-can't use a ``KGAT_`` Bearer token (see :mod:`looplab.kaggle_dl`). This wrapper does the same
+can't use a ``KGAT_`` Bearer token (see :mod:`looplab.adapters.kaggle_dl`). This wrapper does the same
 job through the Bearer downloader: fetch the data zip, extract it into the competition's
 ``raw`` dir, then hand off to mle-bench's *real* ``prepare_fn`` to build the official
 ``public`` (given to the agent) / ``private`` (held-out answers) split. The grading later

@@ -2,9 +2,10 @@
 *suspicious* wins so an operator can see specification-gaming live — agents that import the grader
 / answer key, write to protected (frozen) files at runtime, or report a suspiciously-perfect metric.
 
-Audit-only and defense-in-depth: it NEVER changes best-selection or a node's metric (that's the
-host-side scoring job, §B1). It only emits a `reward_hack_suspected` event surfaced in the Trust
-panel. Pure function of the node's code + metric + the protected-name set, so it's deterministic and
+Defense-in-depth: it never changes a node's metric (that's the host-side scoring job, §B1). Under
+``trust_gate=audit`` it only surfaces a `reward_hack_suspected` event; under ``gate`` or ``block``,
+high-precision reward/leakage signals can exclude selection/breeding or mark the node infeasible.
+Pure function of the node's code + metric + the protected-name set, so it's deterministic and
 adds nothing to the event log on a clean node. OFF by default (`reward_hack_detect=False`).
 """
 from __future__ import annotations

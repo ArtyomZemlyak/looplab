@@ -1,13 +1,14 @@
-# A7 · Strategist role — technical design (implementation-ready)
+# A7 · Strategist role — implemented design record
 
-**Status:** design · **Date:** 2026-06-24 · **Roadmap:** [ROADMAP.md](ROADMAP.md) A7,
+**Status:** implemented / historical design record · **Date:** 2026-06-24 · **Roadmap:** [ROADMAP.md](ROADMAP.md) A7,
 [BACKLOG.md](BACKLOG.md) Theme A · **Decision:** config-first, strategist-optional (default OFF).
 
 > The Strategist is an **optional meta-controller** that, at a bounded cadence, reads the folded run
 > state and decides *which search machinery to use next* — search policy/allocator, Developer backend
 > (agentless vs agentic vs in-house LLM), operator mix, and fidelity. It never selects a node itself
-> and never writes a domain event; it only emits an **audit-only `strategy_decision`** that swaps the
-> active policy/Developer. **Everything it can decide is also a direct config knob** — the Strategist
+> and does not select a winner itself. It writes a folded `strategy_decision` control/config event that
+> changes live behavior and is reapplied on resume without re-calling the LLM; the event is not
+> audit-only even though folding it has no external side effect. **Everything it can decide is also a direct config knob** — the Strategist
 > is a convenience layer over the same settings, fully hand-overridable, and `off` ⇒ today's behavior.
 
 ---

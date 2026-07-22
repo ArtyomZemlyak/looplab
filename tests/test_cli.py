@@ -575,6 +575,25 @@ def test_parallel_aliases_preserve_cli_file_snapshot_over_env_precedence(monkeyp
     assert cli_legacy.eval_parallel == 2      # CLI legacy beats lower-priority file canonical
 
 
+def test_explicit_null_parallelism_survives_legacy_aliases(monkeypatch):
+    from looplab.core.appconfig import build_settings
+
+    monkeypatch.delenv("LOOPLAB_EVAL_PARALLEL", raising=False)
+    monkeypatch.delenv("LOOPLAB_LLM_PARALLEL", raising=False)
+    settings = build_settings(
+        {
+            "eval_parallel": None,
+            "max_parallel": 7,
+            "llm_parallel": None,
+            "parallel_build": 3,
+        },
+        {},
+        {},
+    )
+    assert settings.eval_parallel is None
+    assert settings.llm_parallel is None
+
+
 def test_out_flag_overrides_file_out(tmp_path):
     cfg = tmp_path / "r.yaml"
     cfg.write_text(f"out: {tmp_path / 'fromfile'}\n"

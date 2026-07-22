@@ -12,6 +12,7 @@ looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
 looplab inspect         Show the raw launch snapshot + current folded best result
 looplab replay          Pure fold of the event log → state (read-only)
+looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
 looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
@@ -45,17 +46,19 @@ looplab tensorboard     Serve TensorBoard over per-node training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
 ```
 
-Anything set on the command line can also be set via a `LOOPLAB_*` environment variable or the
-`settings:` block of a config file — see [Configuration](configuration.md). Precedence: `--set`/flags
-win over the file, which wins over env vars, for that run. Add `--version` to print the version.
+Every engine setting supplied through `run -s/--set` (and the typed setting overrides) can also come
+from a `LOOPLAB_*` environment variable or the `settings:` block of a config file — see
+[Configuration](configuration.md). Task inputs (`--goal`, `--kind`, `--data`) and command-specific
+options such as `--out` are CLI/file concerns, not `Settings` fields. Precedence for engine settings is
+CLI over file over environment. Add `--version` to print the version.
 
 ---
 
 ## `init`
 
 Scaffold a documented config template (YAML) you can edit and run. The template leads with the task
-and the knobs most runs touch (each commented), then lists every remaining setting at its default —
-so it doubles as living documentation.
+and active values for the common knobs, then lists every remaining setting commented out at its
+default. Active template values override matching `LOOPLAB_*` variables until edited or removed.
 
 ```bash
 looplab init [--out looplab.yaml] [--kind dataset] [--force]
@@ -112,8 +115,8 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 | `--validate-agent / --no-validate-agent` | on | Validate external-agent output, retry with feedback, fall back to the in-house Developer |
 | `--agent-patch-gate / --no-agent-patch-gate` | on | Run the agent in a git worktree and surface-gate its diff |
 | `--agent-surface GLOBS` | `*.py` | Comma-separated edit-surface allow-list for the agent |
-| `--knowledge-dir DIR` | — | Notes directory for agentic retrieval (grep/kb_search/read tools) |
-| `--memory-dir DIR` | — | Cross-run case-memory directory |
+| `--knowledge-dir DIR` | `~/.looplab/knowledge` | Notes directory for agentic retrieval (grep/kb_search/read tools). The flag overrides the Settings/env default. |
+| `--memory-dir DIR` | `~/.looplab/memory` | Cross-run case-memory directory. The flag overrides the Settings/env default. |
 | `--max-seconds SECS` | — | Wall-clock budget; the run aborts cleanly when exceeded |
 | `--ablate-every N` | `0` | Run ablation-driven refinement every N improvements (0 = off) |
 | `--confirm-top-k K` | `0` | Confirm the top-k candidates under multiple seeds before finishing |
@@ -296,10 +299,10 @@ changed during analysis is rejected rather than receiving stale tags.
 **Agentic by default** (agentic-first concept): the LLM builds the map — it grows the concept vocabulary
 from the actual experiments (reading each node's code/logs), so **it sends node code/logs to the configured
 LLM endpoint by default**. Pass `--offline` for the fully local, no-network deterministic heuristic (coarser:
-needs a curated `--task-type` pack and cannot derive per-task importance). The five other Part IV diagnostics
-below (`lock-in`, `board-dedup`, `research-targets`, `novelty-recall`, `lesson-guard`) share this
-`--offline` opt-out contract; `asset-brief` is the exception — it stays offline-by-default (`--llm` opt-in)
-because its agentic path is a heavier full tool-loop.
+needs a curated `--task-type` pack and cannot derive per-task importance). Four other Part IV diagnostics
+below (`lock-in`, `board-dedup`, `research-targets`, `novelty-recall`) share this `--offline` opt-out
+contract. `lesson-guard` is LLM-only and has no offline verdict path. `asset-brief` is the other exception:
+it stays offline-by-default (`--llm` opt-in) because its agentic path is a heavier full tool-loop.
 
 ```bash
 looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--model ID] [--repo PATH]
@@ -893,7 +896,8 @@ It handles two pause points:
 looplab approve RUN_DIR [--node-id N]
 ```
 
-`--node-id` selects which node to approve (defaults to the current best).
+For final-result approval, omitting `--node-id` approves the exact pending approval subject recorded in
+the event log; it does not recompute the current best. `--node-id` does not apply to eval-spec approval.
 
 ---
 

@@ -14,17 +14,11 @@ strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-
 | Area | Landed now | Remaining |
 |---|---|---|
 | Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | none |
-| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | none |
-| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays | none |
+| Card read model | native monotonic Card mint/link under a process-local `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | Card mint and build claim are consecutive appends, not one cross-process atomic/CAS transaction; an exact retry repairs the crash prefix |
+| Enrichment | structured steering snapshots; memo/claim/lesson refs; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays; schema seams for novelty/cross-run/concept projection | proposal-time selectable Cards do not yet carry trusted novelty/coverage memberships, so those ranking terms are zero until a linked Node supplies later evidence |
 | Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
-| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, fail-closed Docker GPU pinning and explicit CPU isolation, confirm admission, isolated Card producer/consumer | none |
-| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, crash-atomic batch claim, durable exact ASHA receipts and Strategist-owned scoring over canonical trusted concept membership; bounded lifecycle lanes; optimistic generation-fenced edit/priority/resource/drop controls | none in Layers 1–6; broader rollout scopes remain intentionally deferred/default-off |
-
-<!-- # CODEX AGENT: the two "none" conclusions above are no longer current implementation truth.
-Post-8d9952a1 review annotations identify a fail-open positive-GPU discovery path, confirm budget charged
-for resource wait, a Card-before-audit crash window, and Kanban mutation state that is not scoped to runId.
-Track those as unresolved debt (or link a dated closure commit) instead of letting a historical validation
-receipt certify code that changed after the receipt's raw-byte implementation digest was issued. -->
+| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, confirm admission, isolated Card producer/consumer | positive-GPU discovery failure can still launch an unspecified request without a pin; `required-but-unavailable` is not represented separately |
+| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, and optimistic edit/priority/resource/drop controls | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events; browser optimistic state is not yet scoped by run id |
 
 ### Stage progress ledger (validated implementation, 2026-07-22)
 
@@ -130,17 +124,20 @@ Receipt identity is exact: self digest
   The Card selector still ranks an effective filtered view, but only `budget_extend` creates new physical
   capacity. Fork, inject, ablation, serial, parallel and speculative admission share this boundary.
 - Widened and speculative ASHA paths deduplicate exact rung/survivor receipts against the durable log.
-- Positive explicit GPU work remains unavailable on a zero-GPU host; a saturated unspecified parallel
-  request waits instead of launching unpinned. Docker refuses a positive pin it cannot enforce, while an
-  explicit CPU reservation injects `NVIDIA_VISIBLE_DEVICES=void`.
+- With a successfully discovered inventory, positive explicit GPU work remains unavailable on a zero-GPU
+  host and a saturated unspecified request waits instead of launching unpinned. Docker refuses a known
+  positive pin it cannot enforce, while an explicit CPU reservation injects
+  `NVIDIA_VISIBLE_DEVICES=void`. Discovery failure is still an unresolved fail-open boundary for an
+  unspecified positive request.
 - `EventStore.append_many` exposes a complete logical batch or none of it after a torn write. EventStore,
   replay, command observation, scope/report capture, SSE, timeline paging, run caches and maintenance tools
   expand the bounded storage envelope consistently; generic non-event JSONL readers remain format-agnostic.
 - Coverage scoring consumes only complete authorized current memberships and canonicalizes Card aliases,
   case and spacing through the same concept-identity projection.
 
-**Resolved Layer-3 safety boundary:** the selector now consumes only `selection_ready`, and the
-existing-Card writer re-folds and claims the complete selected lane under `_id_lock` with a tail CAS.
+**Partially resolved Layer-3 safety boundary:** the selector now consumes only `selection_ready`, and the
+existing-Card writer re-folds and claims the complete selected lane under a process-local `_id_lock`.
+The Card mint and `node_building` claim remain separate unconditional appends without a shared tail CAS.
 `Card.actionable` remains a compatibility board flag meaning only “not dropped/gated/abandoned”; it
 is true for proposed-without-action, running,
 evaluated, and superseded work. It is therefore **not evidence of executability**. The selector may
@@ -162,9 +159,9 @@ Layer 5 does not reuse the ready-only selection set verbatim for freshness: once
 intentionally in-flight. The implemented gate uses the counterfactual/include-owned API plus the exact
 durable `card_build_done → node_id` link before every scorer consult and again before GPU admission.
 
-## 0. Why, and the build order
+## 0. Pre-implementation baseline, motivation and build order
 
-Today the spine strictly alternates `build-batch → eval-batch`; in steady state every policy proposes
+Before Layers 1–6, the spine strictly alternated `build-batch → eval-batch`; in steady state every policy proposed
 **one** node per iteration (almost always `state.best()`), so GPUs idle during every propose. The
 hypothesis board (`state.hypotheses`, `Hypothesis.priority`) is **derived every fold and never read by
 node selection** — it is advice, not a work queue. Resources are hardcoded (1 GPU per eval), which is
@@ -504,7 +501,7 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
   resume. The main-task commit branch `_serve_card_builds` (sibling of `_serve_forced_requests`,
   orchestrator.py:1430) is **crash-recovery-first** (a node with `idea.card_id==K` at gen G already
   exists → only append `card_build_done`, never double-create), else reserves the exact
-  `node_building` under the short `_id_lock` tail CAS, commits the ready buffer via the reserved
+  `node_building` under the short process-local `_id_lock` (without a tail CAS shared with Card mint), commits the ready buffer via the reserved
   `_create_node(precoded=…)` outside that lock, then appends
   `card_build_done{node_id, speculative:true}`; otherwise it
   advances the counter with `card_build_done{skipped:'producer_failed'|'stale'}` — mirroring

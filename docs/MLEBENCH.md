@@ -51,7 +51,7 @@ export LOOPLAB_KAGGLE_TOKEN="KGAT_…"
 # or:  ~/.kaggle/kaggle.json  ->  {"username":"x","key":"KGAT_…"}   (username is ignored for Bearer)
 ```
 
-Sanity check: `python -c "from looplab.kaggle_dl import check_auth; print(check_auth())"` → `True`.
+Sanity check: `python -c "from looplab.adapters.kaggle_dl import check_auth; print(check_auth())"` → `True`.
 
 ## ⚠️ Accept competition rules (manual, per competition)
 

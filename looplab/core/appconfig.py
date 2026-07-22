@@ -15,8 +15,9 @@
 
 Design (why this is a thin *converter*, not a new source of truth):
 
-- **Back-compat.** A document with no top-level ``task:`` key is treated as a bare task dict — the
-  legacy JSON task format — so every existing ``examples/*.json`` keeps working unchanged.
+- **Back-compat.** A document with neither a top-level ``task:`` nor ``settings:`` key is treated as a
+  bare task dict — the legacy JSON task format — so every existing ``examples/*.json`` keeps working
+  unchanged. Either discriminator makes the document unified; a settings-only document has no task.
 - **YAML is input-only.** The task and settings become the same dicts the engine already consumes,
   and the run dir still records canonical JSON snapshots, so ``replay``/``resume`` are untouched.
 - **One precedence order** (canonical — stated in full only here), highest first: explicit CLI
@@ -66,7 +67,7 @@ def _read_doc(path: Path) -> dict:
 def split_document(doc: dict) -> tuple[dict, dict, Optional[str]]:
     """Split a loaded document into ``(task, settings, out)``.
 
-    A *unified* document has a ``task:`` (and optionally ``settings:`` / ``out:``) key. Anything else
+    A *unified* document has a ``task:`` or ``settings:`` key (and optionally ``out:``). Anything else
     is a *bare task* (the legacy format) — the whole dict is the task, with no settings or out."""
     if "task" in doc or "settings" in doc:
         task = dict(doc.get("task") or {})
@@ -257,9 +258,11 @@ def _render_default(name: str, field) -> str:
 
 
 def render_template(kind: str = "dataset") -> str:
-    """Build a documented config template: a curated, commented `settings:` section with the knobs
-    most runs touch, then a complete (commented-out) appendix of every remaining setting at its
-    default — so the file is both approachable and exhaustive, doubling as living documentation."""
+    """Build a documented config template with active common settings and a commented appendix.
+
+    Active common values are runnable defaults for the generated file and therefore override matching
+    environment variables. Every remaining setting appears commented out at its field default.
+    """
     task_block = _task_block(kind)
     # Curated common knobs shown live with a one-line comment each.
     common = [

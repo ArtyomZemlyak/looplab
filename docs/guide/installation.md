@@ -13,8 +13,7 @@ From a clone of the repository:
 pip install -e .
 ```
 
-This installs the engine and the `looplab` command. The core dependencies are small and
-pure-Python:
+This installs the engine and the `looplab` command. The core dependency set is intentionally small:
 
 | Package | Why |
 |---|---|
@@ -22,6 +21,11 @@ pure-Python:
 | `orjson` | Fast JSON for the event log |
 | `anyio` | The async control loop |
 | `typer` | The CLI |
+| `PyYAML` | YAML configuration input |
+| `openai` / `httpx` | OpenAI-compatible live transport (import-safe for offline replay) |
+
+`orjson` and transitive packages such as `pydantic-core` use prebuilt native wheels on common
+platforms, so the dependency set should not be described as pure Python.
 
 ## Optional extras
 
@@ -38,7 +42,7 @@ You can combine them: `pip install -e ".[ui,otel,dev]"`.
 
 | Extra | Unlocks | Without it |
 |---|---|---|
-| `ui` | `looplab ui` — the live React control plane | CLI + static `tree.html` still work |
+| `ui` | `looplab ui` and local auto-start for `looplab tui` — the live control planes | Core CLI + static `tree.html` still work; TUI can target an existing server with `--server URL` |
 | `otel` | Sends spans to any OTLP collector (Jaeger/Tempo/Honeycomb) | Spans still written to `spans.jsonl` (files-as-truth) |
 | `proc` | Cross-platform process-tree termination on timeout | Falls back to best-effort kill |
 | `dev` | Runs the test suite | — |

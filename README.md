@@ -49,7 +49,7 @@ plane is deterministic, and the Search / Memory / Knowledge stores feed the loop
 
 ```bash
 pip install -e .                 # core engine + CLI
-pip install -e ".[ui]"           # + live React web UI  (FastAPI/uvicorn)
+pip install -e ".[ui]"           # + live React UI and local TUI auto-start (FastAPI/uvicorn)
 pip install -e ".[otel]"         # + OpenTelemetry span export
 pip install -e ".[dev]"          # + test deps (pytest, httpx, FastAPI/uvicorn)
 ```
@@ -162,7 +162,7 @@ looplab smoke                            # ping the configured LLM endpoint
 looplab approve RUN_DIR                  # ratify a paused run (HITL / onboarding)
 looplab bench   TASK.json ...            # capability self-benchmark across tasks
 looplab ui                               # serve the live React UI (auto-builds the bundle; needs [ui])
-looplab          # (or `looplab tui`) terminal control plane: start/steer runs by chat, no browser
+looplab          # terminal control plane; local auto-start needs [ui], or use `tui --server URL`
 looplab export-mlflow    RUN_DIR         # log the champion to MLflow
 looplab export-notebook  RUN_DIR         # export the champion as a runnable .ipynb
 ```

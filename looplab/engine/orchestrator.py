@@ -3918,12 +3918,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             source: str = "researcher",
                             implementation_ref: Optional[str] = None,
                             steering_context=(), cross_run_receipt=None):
-        """Atomically reserve one native Card and its node-building owner under ``_id_lock``.
+        """Reserve one native Card and its node-building owner under process-local ``_id_lock``.
 
         The final Idea must already exist: the immutable statement and exact action receipt cannot be
-        minted honestly before proposal.  ``card_added`` and ``node_building{card_id}`` are appended
-        back-to-back with no slow work between them.  A crash after the first append leaves a valid
-        orphan prefix; an exact retry reuses that Card rather than duplicating registration.  ``idea``
+        minted honestly before proposal. ``card_added`` and ``node_building{card_id}`` are two
+        consecutive appends with no slow work between them; they are not one cross-process log
+        transaction. A crash after the first append leaves a valid orphan prefix, and an exact retry
+        reuses that Card rather than duplicating registration. ``idea``
         remains optional only for historical internal callers/tests; production creation paths always
         supply it and therefore always mint/link a native Card.
         """

@@ -896,8 +896,9 @@ def init(
 ):
     """Scaffold a documented config file (YAML) you can edit and `looplab run`.
 
-    The template leads with the task and the knobs most runs touch (each commented), then lists every
-    remaining setting at its default — so it doubles as living documentation. Run it with
+    The template leads with the task and active values for the knobs most runs touch, then lists every
+    remaining setting commented out at its default. Active values override matching environment
+    variables. Run it with
     `looplab run looplab.yaml`."""
     if out.exists() and not force:
         typer.echo(f"{out} already exists (use --force to overwrite)")

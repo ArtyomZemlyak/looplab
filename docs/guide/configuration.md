@@ -7,7 +7,8 @@ be set four ways, in increasing priority:
 2. **Environment variable** — uppercase the field name and prefix with `LOOPLAB_`
    (e.g. `max_nodes` → `LOOPLAB_MAX_NODES`). A `.env` file in the working directory is read too.
 3. **A config file** — the `settings:` block of a unified YAML/JSON file passed to `looplab run`
-   (see below). `looplab init` scaffolds a fully-commented template.
+   (see below). `looplab init` scaffolds a documented template whose common settings are active and
+   whose long-form appendix is commented out; those active values override matching env vars.
 4. **CLI flag** — a named flag for the common knobs, **or** `-s/--set key=value` (repeatable) for
    **any** setting by its exact field name.
 
@@ -50,8 +51,9 @@ settings:                 # HOW to run it (any Settings field on this page)
   policy: asha
 ```
 
-A file with no top-level `task:` key is treated as a bare task (the legacy JSON format), so existing
-task files keep working. The file is **input only** — the run dir still records canonical JSON
+A file with neither a top-level `task:` nor `settings:` key is treated as a bare task (the legacy JSON
+format), so existing task files keep working. A document with either key is unified; a settings-only
+document therefore has no task and is rejected by `run`. The file is **input only** — the run dir still records canonical JSON
 snapshots, so `resume`/`replay` are unchanged. Precedence within one run: `--set`/flags **>** the
 file's `settings:` **>** env/`.env` **>** defaults.
 
@@ -131,8 +133,8 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `train_monitor_interval_s` | `LOOPLAB_TRAIN_MONITOR_INTERVAL_S` | `600.0` | Base monitor tick cadence in seconds; the effective cadence adapts to the per-experiment budget and can only be tightened by this. No-op unless `train_monitor` is on |
 | `train_monitor_kill` | `LOOPLAB_TRAIN_MONITOR_KILL` | `false` | Opt-in INTERVENTION: let the monitor tree-kill a training it judges `broken` (diverged / silent CPU fallback / not learning) early. The node then fails normally (`reason=monitor_broken`). Off = observe only |
 | `train_monitor_kill_confidence` | `LOOPLAB_TRAIN_MONITOR_KILL_CONFIDENCE` | `0.8` | Minimum verdict confidence (0–1) required before a `broken` verdict triggers an early kill |
-| `asha_live` | `LOOPLAB_ASHA_LIVE` | `true` | ASHA live-curve watchdog: read the latest INTERMEDIATE objective metric off the live log (reusing the eval's own metric reader) and RANK it against finished siblings' finals; a node already worse than the `_quantile` of finished peers is unlikely to catch up. Advisory (records a fold-ignored `asha_rank` diagnostic + span) unless `asha_live_kill`. Needs the command-eval path + enough finished siblings. Library default off |
-| `asha_live_kill` | `LOOPLAB_ASHA_LIVE_KILL` | `false` | Opt-in INTERVENTION: tree-kill a node whose intermediate metric stays below the bar past a short grace window (fails it `reason=asha_underperforming`). Off = the watchdog only SURFACES the rank |
+| `asha_live` | `LOOPLAB_ASHA_LIVE` | `true` | ASHA live-curve watchdog for command evals using `stdout_json` or `stdout_regex`: read the latest intermediate objective metric and rank it against finished siblings at the same declared resource value. Other metric readers have no live observation path. Advisory (a fold-ignored `asha_rank` diagnostic + span) unless the stricter kill contract below is satisfied. Needs at least `asha_live_min_siblings` comparable finished nodes. Library default off |
+| `asha_live_kill` | `LOOPLAB_ASHA_LIVE_KILL` | `false` | Opt-in intervention only for `stdout_json` with an explicit `metric.resource_key`: tree-kill a node whose comparable intermediate metric stays below the bar past the grace window (fails it `reason=asha_underperforming`). `stdout_regex` can be ranked but not killed; without a resource key the watchdog remains advisory |
 | `asha_live_quantile` | `LOOPLAB_ASHA_LIVE_QUANTILE` | `0.5` | The rank bar sits at this quantile along a WORST→BEST ordering of finished siblings' finals: `0.5` = the median; SMALLER lowers the bar toward the WORST peer so it is more conservative (`0.0` = only stop a node worse than the worst finished peer); LARGER is more aggressive |
 | `asha_live_min_siblings` | `LOOPLAB_ASHA_LIVE_MIN_SIBLINGS` | `3` | Minimum finished sibling nodes required before ASHA ranks at all (never acts on too little evidence) |
 | `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) |

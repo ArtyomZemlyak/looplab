@@ -1,5 +1,5 @@
 # LoopLab full-stack deploy (optional). Brings up:
-#   sglang  — Qwen3.6-35B-A3B (4-bit) on the GPU, OpenAI-compatible API
+#   sglang  — Qwen3-Coder-30B-A3B (4-bit) on the GPU, OpenAI-compatible API
 #   ui      — the live React UI + control-plane (FastAPI), served on the host
 #   run     — one-shot engine runner (profile "tasks"; started on demand)
 #
@@ -25,6 +25,9 @@ x-llm-env: &llm-env
   # set LOOPLAB_LLM_GUIDED_JSON=1 in .env if a weaker model needs constrained decoding.
   LOOPLAB_LLM_GUIDED_JSON: "${LOOPLAB_LLM_GUIDED_JSON:-0}"
   LOOPLAB_LLM_TEMPERATURE: "${LOOPLAB_LLM_TEMPERATURE:-0.6}"
+  # Real MLE-bench downloads use this modern Kaggle Bearer token. The UI can launch runs too,
+  # so keep it in the shared environment rather than only on the one-shot runner.
+  LOOPLAB_KAGGLE_TOKEN: "${LOOPLAB_KAGGLE_TOKEN:-}"
 
 services:
   # ---- LLM server: Qwen3-Coder-30B-A3B (4-bit AWQ) via SGLang ----------------
