@@ -434,6 +434,10 @@ def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
         if len(tokens) == 1 and tokens[0].lower() in {"-1", "none", "nodevfiles", "void"}:
             return 0, ()
     try:
+        # CODEX AGENT: detect_gpus() caches memory.free for the lifetime of this server process, yet
+        # this value is used as the "current" append-time admission envelope below. A long-running UI
+        # can therefore accept a pin after memory was consumed, or reject it after memory was freed;
+        # cache only static identity/capacity or perform an uncached free-memory query at admission.
         rows = detect_gpus()
     except Exception:  # noqa: BLE001 - validation remains count-safe when inventory is unavailable
         rows = []
@@ -2510,6 +2514,10 @@ class RunCommandService:
                     f"the Card target {card_id!r} no longer exists in this run generation",
                     "refresh the Card board before submitting another operator control",
                 )
+            # CODEX AGENT: the React client hides controls for dropped/merged Cards, but this durable
+            # append-time guard checks only existence. A stale client or direct API caller can still
+            # edit, reprioritize, re-pin, or drop an already-terminal Card and append contradictory
+            # history; enforce the terminal lifecycle here, where all clients share the same contract.
             if event_type == EV_CARD_RESOURCE_PINNED:
                 gpus = data.get("gpus")
                 memory = data.get("gpu_mem_mib")

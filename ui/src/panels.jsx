@@ -1330,6 +1330,10 @@ function _CardKanbanCard({
   const footprintKnown = Object.hasOwn(card, 'footprint')
   const baseFootprint = isRecord(card.footprint) ? card.footprint : null
   const resourcePin = isRecord(card.resource_pin) ? card.resource_pin : null
+  // CODEX AGENT: this is only a client-side merge of requested values, not the scheduler's effective
+  // footprint after host-capacity clamping. Rendering it as "Effective pin" can overstate GPU memory
+  // whenever the server accepted a partial pin and clamped the inherited footprint; project the
+  // server-computed effective allocation, or label this explicitly as a requested/configured merge.
   const effectiveFootprint = baseFootprint || resourcePin
     ? { ...(_cardResourceValues(baseFootprint) || {}), ...(_cardResourceValues(resourcePin) || {}) }
     : null

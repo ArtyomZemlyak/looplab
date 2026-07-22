@@ -81,6 +81,9 @@ _STEERING_KEYS = {
 # The exact closed vocabulary of a matched_concept_outcome row (see `_matched_outcomes`). This is
 # NOT the steering vocabulary: guarding these rows against `_STEERING_KEYS` (which lacks every one of
 # these keys) makes every real row look lossy and falsely reports the whole card projection incomplete.
+# CODEX AGENT: this second assignment shadows the frozenset declared above, so the first declaration
+# is dead and the closed wire vocabulary becomes mutable by accident. Keep one canonical definition;
+# otherwise a future schema edit can easily update the declaration that runtime never reads.
 _MATCHED_OUTCOME_KEYS = {"concept", "outcome_retained", "outcome"}
 _RECEIPT_KEYS = {
     "concept_evidence_nodes_total", "concept_evidence_nodes_incomplete", "concept_evidence_complete",
