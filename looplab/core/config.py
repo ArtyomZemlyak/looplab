@@ -526,7 +526,9 @@ class Settings(BaseSettings):
     operator_bandit: bool = False
     # P1 hypothesis ledger: ask the Researcher to state the one-line hypothesis each experiment tests,
     # register deep-research directions as hypotheses, and track them to a verdict on the board. ON by
-    # default (audit-only — never changes selection). Set False to drop the prompt nudge + registration.
+    # default. CODEX AGENT: the board is shown to the Researcher and can be foresight-ordered, so it can
+    # steer later proposals even though it never directly re-ranks already-evaluated nodes. Set False
+    # to drop the prompt nudge + registration.
     track_hypotheses: bool = True
     # E4/M2/M3 reflection-memory -> priors (gradient-free cross-run meta-learning): at run end distill
     # the winner into `<memory_dir>/meta_notes.jsonl` AND structured lessons (incl. NEGATIVE results:
@@ -1087,8 +1089,8 @@ class Settings(BaseSettings):
     # tool (DuckDuckGo) on top of arXiv to read across results + the web before steering the next
     # batch. Off by default (egress is unreliable on some boxes); fails gracefully when blocked.
     web_search: bool = False
-    # Cadence for the Deep-Research stage: run it automatically every N created nodes (0 = off; it
-    # still fires on a manual `deep_research` control event or a Strategist `request_research`).
+    # Cadence for the Deep-Research stage: run it automatically every N created nodes. Zero disables
+    # only the cadence; manual `deep_research` and Strategist `request_research` triggers still fire.
     # Default 3: deep research analyzes the accumulating results and steers the next batch (its
     # directions become hints + open hypotheses); paired with `concurrent_research` it overlaps the
     # think with the GPU-bound eval, so the cadence costs LLM tokens but no wall-clock on the search.

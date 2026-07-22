@@ -2961,10 +2961,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """Overlap a DUE deep-research 'think' with the in-flight eval(s), INDEPENDENT of max_parallel.
         The memo is computed on a `state` snapshot in a worker thread, then RECORDED IMMEDIATELY when
         research finishes — NOT coupled to the eval completing — so its directions steer the very next
-        proposal instead of landing ~an eval later. Recording from the research task is safe: it's an
-        AUDIT-only event (the fold ignores it for node selection) and `EventStore.append` serializes
-        writers under an interprocess lock with collision-safe seq derivation. No-op when
-        concurrent_research is off.
+        proposal instead of landing ~an eval later. Recording from the research task is safe because
+        `_record_deep_research` admits only `BACKGROUND_APPENDABLE` event types and
+        `EventStore.append` serializes writers under an interprocess lock with collision-safe seq
+        derivation. Those records never rewrite the current champion, but their hints/open hypotheses
+        deliberately steer later proposals. No-op when concurrent_research is off.
 
         Two modes: the library default fires ONCE per window when a trigger is due (== today,
         byte-identical). With `concurrent_research_repeat` on, the overlapped think RE-RUNS on an

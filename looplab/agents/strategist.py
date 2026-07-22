@@ -3,9 +3,10 @@
 The Strategist is an OPTIONAL meta-controller that, at a bounded cadence, reads the folded
 `RunState` and decides *which search machinery to use next*: the search policy/allocator, the
 operator mix, the eval fidelity, and (when a Developer factory is wired) the Developer backend.
-It never selects a node itself and never writes a domain event — it emits an audit-only
-`strategy_decision` that swaps the active policy/operators. Every field it can decide is also a
-direct `Settings` knob, so the Strategist is a convenience layer over the same config, fully
+The backend never selects a node itself or writes a domain event; it returns a `Strategy` to the
+engine. The engine records a `strategy_decision` and applies it to the active policy/operators, so
+that record is behavioral replay state, not an audit-only sidecar. Every field it can decide is also
+a direct `Settings` knob, so the Strategist is a convenience layer over the same config, fully
 hand-overridable, and `backend="off"` is byte-identical to today's legacy static-config
 behavior (the shipped default is `"agent"` — the tool-using agentic meta-controller consulted at
 cadence; `"llm"`/`"rule"` are the lighter single-shot backends).

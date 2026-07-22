@@ -53,8 +53,9 @@ class ResearchCadenceMixin:
         """Run the Deep-Research stage when there's demand, then re-fold. Three triggers, each gated
         for replay safety: a MANUAL `deep_research` control event (counter gate), a CADENCE
         (`deep_research_every`, once per node-count), or a Strategist `request_research` decided at
-        this node-count. No-op when the stage is off or already served. Records `research_completed`
-        (audit-only sidecar) and feeds the memo's directions back as a standing hint."""
+        this node-count. No-op when the stage is off or already served. Records a
+        `research_completed` memo that is neutral for direct node/champion ranking and feeds its
+        directions back as standing hints that can steer later proposals."""
         n = len(state.nodes)
         # Manual: serve outstanding requests first, regardless of node-count (operator asked now).
         if len(state.research_requests) > state.research_served:
@@ -120,7 +121,7 @@ class ResearchCadenceMixin:
                 with self.tracer.span("deep_research", new_trace=True, trigger=trigger):
                     return self.deep_researcher.research(state, trigger=trigger)
             return self.deep_researcher.research(state, trigger=trigger)
-        except Exception as exc:  # noqa: BLE001 — advisory sidecar must never kill the run
+        except Exception as exc:  # noqa: BLE001 — best-effort research must never kill the run
             return ResearchMemo(at_node=len(state.nodes), trigger=trigger,
                                 summary=f"(deep research failed: {exc})")
 

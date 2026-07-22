@@ -144,6 +144,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert Settings.model_fields["concurrent_research"].default is True
     assert "on by default" in by_key["concurrent_research"]["help"]
     assert "off by default" not in by_key["concurrent_research"]["help"]
+    # CODEX AGENT: fold-neutral telemetry is not necessarily behaviorally inert. These defaults feed
+    # later prompts/portfolio evidence, so UI copy must disclose that indirect effect precisely.
+    assert "steer the next proposal" in by_key["concurrent_research"]["help"]
+    assert "steer later proposals" in by_key["concurrent_research_repeat"]["help"]
+    assert "steer later proposals" in by_key["track_hypotheses"]["help"]
+    assert "positive D8 cross-run claim evidence" in by_key["research_verify"]["help"]
     assert by_key["deep_research_every"]["placeholder"] == str(
         Settings.model_fields["deep_research_every"].default)
     assert packaged["agent_role_pills"]["researcher"]["short"] == "R"

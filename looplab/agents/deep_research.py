@@ -7,9 +7,12 @@ failure) and grounds it in external sources (arXiv via `LiteratureTools`, the we
 local notes via `KnowledgeTools`). It reuses the same multi-turn tool-calling shape as
 `agent.ToolUsingResearcher`: the model MAY call tools, then calls `emit` once with the memo.
 
-Recorded as an audit-only `research_completed` event (folded into `RunState.research`), NEVER into
-the search DAG — so best-selection/policies are untouched. Degrades gracefully: any transport/parse
-failure (or no model) yields a minimal memo rather than crashing the run.
+`research_completed` is selection-neutral for the current run's node/champion ranking and is NEVER
+a search-DAG node.  It is not behaviorally inert, however: the engine projects redacted
+`recommended_directions` into standing hints/open hypotheses that can steer later proposals, and an
+aligned supported verdict can gate positive cross-run claim evidence at finalization. Concurrent mode
+may persist that advice while an eval is still running. Any transport/parse failure (or no model)
+degrades to a minimal memo rather than crashing the run.
 """
 from __future__ import annotations
 
