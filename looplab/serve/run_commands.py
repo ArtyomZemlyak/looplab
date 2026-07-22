@@ -447,6 +447,10 @@ def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
         live_free = gpu_free_mib_uncached()
     except Exception:  # noqa: BLE001 - stay count-safe if the live query is unavailable
         live_free = {}
+    # CODEX AGENT: even a successful live probe is a different authority from the Engine scheduler,
+    # which initializes `_gpu_mem` once via detect_gpu_inventory/detect_gpus. A pin accepted after VRAM
+    # is freed can still wait forever against the engine's older lower ceiling, while the opposite drift
+    # can admit work the host no longer fits. Admission and scheduling need one capacity/reservation model.
     memory_by_id = {}
     for row in rows:
         if not isinstance(row, dict) or type(row.get("index")) is not int:

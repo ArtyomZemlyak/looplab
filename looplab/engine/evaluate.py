@@ -294,6 +294,10 @@ class EvaluateMixin:
                             self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
                         )
                     except GpuPinUnenforceable as exc:
+                        # CODEX AGENT: the shield/return path has no focused async regression test that
+                        # forces GpuPinUnenforceable while watcher siblings are live, then proves exactly
+                        # one terminal, reservation release, and no unbound-result fallthrough. This is
+                        # the cancellation topology the prior broad suite failed to exercise.
                         # Fail-closed device pin the Docker daemon/runtime cannot enforce. Terminalize
                         # THIS node instead of letting the raise cancel every in-flight sibling eval in
                         # the batch and re-crash deterministically on every resume; the reservation is

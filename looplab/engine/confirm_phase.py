@@ -150,6 +150,10 @@ class ConfirmPhaseMixin:
                     try:
                         res = await anyio.to_thread.run_sync(_run)
                     except GpuPinUnenforceable as exc:
+                        # CODEX AGENT: no focused test currently raises this exception inside a real
+                        # anyio task group and asserts one memo + one release + no ExceptionGroup escape.
+                        # The previous outside-group handler passed the broad suite while being dead;
+                        # lock the actual cancellation/exception topology, not only helper-level behavior.
                         # A durable resource pin the Docker daemon/runtime cannot enforce must NOT crash
                         # the run() spine (confirm has no surrounding try — it would abort the engine and
                         # re-crash on every resume, since the operator pin is durable). Terminalize THIS
