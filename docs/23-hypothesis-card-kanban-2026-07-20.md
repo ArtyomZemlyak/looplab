@@ -18,7 +18,7 @@ truth and wins wherever the original target text differs from shipped behavior.
 | Card read model | native monotonic Card mint/link under a process-local `_id_lock` and log-tail CAS; a fresh Card mint + build claim is one crash-atomic batch, while reuse is one CAS append; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; bounded per-event input and public projection; durable request/done queue | The folded `cards_enriched` replay journal is not yet capped |
 | Enrichment | structured steering snapshots; memo/claim/lesson refs; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays; schema seams for novelty/cross-run/concept projection | proposal-time selectable Cards do not yet carry trusted novelty/coverage memberships, so those ranking terms are zero until a linked Node supplies later evidence |
 | Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
-| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, confirm admission, isolated Card producer/consumer | positive-GPU discovery failure can still launch an unspecified request without a pin; `required-but-unavailable` is not represented separately |
+| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, fail-closed zero-device admission, confirm admission, isolated Card producer/consumer | GPU leases remain process-local; independently started Engine processes can still contend for the same host device |
 | Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events |
 
 ### Stage progress ledger (validated implementation, 2026-07-22)
@@ -128,11 +128,12 @@ Receipt identity is exact: self digest
   The Card selector still ranks an effective filtered view, but only `budget_extend` creates new physical
   capacity. Fork, inject, ablation, serial, parallel and speculative admission share this boundary.
 - Widened and speculative ASHA paths deduplicate exact rung/survivor receipts against the durable log.
-- With a successfully discovered inventory, positive explicit GPU work remains unavailable on a zero-GPU
-  host and a saturated unspecified request waits instead of launching unpinned. Docker refuses a known
-  positive pin it cannot enforce, while an explicit CPU reservation injects
-  `NVIDIA_VISIBLE_DEVICES=void`. Discovery failure is still an unresolved fail-open boundary for an
-  unspecified positive request.
+- Positive explicit GPU work remains positive on a zero-device inventory and receives an immediate
+  fail-closed reservation marker: search writes one zero-compute `gpu_unavailable` terminal, while confirm
+  writes a retryable audit row and leaves completion open. A saturated unspecified request waits instead
+  of launching unpinned. Docker also refuses a known positive pin it cannot enforce; that confirm refusal
+  remains retryable, and resource-queue time is excluded from `eval_seconds`. Only explicit `gpus=0`
+  selects CPU isolation and injects `NVIDIA_VISIBLE_DEVICES=void`.
 - `EventStore.append_many` exposes a complete logical batch or none of it after a torn write. EventStore,
   replay, command observation, scope/report capture, SSE, timeline paging, run caches and maintenance tools
   expand the bounded storage envelope consistently; generic non-event JSONL readers remain format-agnostic.
@@ -602,9 +603,10 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     an explicit `gpus=1`; only an explicit declaration pins/packs.
 17. **Over-declaration is clamped, never allowed to wedge.** `_acquire_gpus` is all-or-nothing, so a
     hallucinated `gpus>len(_gpu_ids)` can never satisfy and hangs the task group forever. Clamp
-    `need=max(0, min(need, len(_gpu_ids)))` on a non-empty pool + a proposal/repair cue; keep empty-pool
-    →`[]`. In L6 clamp operator `card_resource_pinned` to the feasible envelope (reject out-of-range with
-    HTTP 400; re-clamp on resume against the possibly-shrunk envelope).
+    `need=max(0, min(need, len(_gpu_ids)))` on a non-empty pool + a proposal/repair cue. On an empty pool,
+    preserve the positive request and admit only a zero-device fail-closed marker; explicit `gpus=0` is
+    the sole CPU declaration. In L6 clamp operator `card_resource_pinned` to the feasible envelope (reject
+    out-of-range with HTTP 400; re-clamp on resume against the possibly-shrunk envelope).
 18. GPU-admission primitive is a **race-free** wait (Semaphore + re-check-after-acquire, OR an
     `anyio.Condition` with `notify_all` under lock) — the hand-rolled "re-created + set in `finally`"
     `anyio.Event` is a lost-wakeup deadlock and is **rejected**.

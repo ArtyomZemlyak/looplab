@@ -14,7 +14,7 @@ from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
 from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
 from looplab.adapters.repo_task import EvalSpec, RepoTask
-from looplab.runtime.sandbox import RunResult, SubprocessSandbox
+from looplab.runtime.sandbox import GpuPinUnenforceable, RunResult, SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
 
 _M = {"kind": "stdout_json", "key": "metric"}
@@ -171,6 +171,98 @@ def test_confirm_seed_reserves_and_releases_through_shared_gpu_pool(tmp_path):
     eng._run_eval = fake_run_eval
     anyio.run(eng._run_confirm_seed, node, eng.confirm_seed_base)
     assert calls == [("reserve", 0), ("run", "7", "full"), ("release", [7])]
+
+
+def test_eval_gpu_pin_refusal_terminalizes_once_and_dispatch_releases(tmp_path):
+    """A runtime pin refusal inside the live task group must not escape or leak its lease."""
+    eng = _noisy_engine(tmp_path / "eval-unpinnable", confirm_top_k=0, confirm_seeds=0,
+                        max_nodes=1)
+    eng._gpu_ids = [0]
+    eng._gpu_physical_ids = {0: "0"}
+    eng._gpu_mem = {0: 16_000}
+    eng._free_gpus = [0]
+    eng._gpu_epoch = 0
+    eng._eval_gpu_reservations = {}
+    eng.concurrent_research = False
+    eng.store.append("run_started", {
+        "run_id": "eval-unpinnable", "task_id": "toy", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(operator="draft", footprint={"gpus": 1}).model_dump(mode="json"),
+        "code": ""})
+
+    calls = []
+
+    def refuse_pin(*_args, **_kwargs):
+        calls.append("run")
+        raise GpuPinUnenforceable("container runtime cannot enforce GPU 0")
+
+    eng._run_eval = refuse_pin
+    state = fold(eng.store.read_all())
+    anyio.run(eng._dispatch_evals, [{"node_id": 0}], state, None)
+
+    events = eng.store.read_all()
+    failures = [event for event in events if event.type == "node_failed"]
+    assert calls == ["run"]
+    assert len(failures) == 1 and failures[0].data["reason"] == "gpu_unpinnable"
+    assert not any(event.type == "node_evaluated" for event in events)
+    assert eng._free_gpus == [0]
+    assert eng._eval_gpu_reservations == {}
+
+
+def test_confirm_gpu_pin_refusal_is_audited_retryable_and_releases(tmp_path):
+    """An infrastructure refusal is charged/audited but retries the same seed after repair."""
+    eng = _noisy_engine(tmp_path / "confirm-unpinnable", confirm_top_k=1, confirm_seeds=1,
+                        max_nodes=1)
+    eng._gpu_ids = [0]
+    eng._gpu_physical_ids = {0: "0"}
+    eng._gpu_mem = {0: 16_000}
+    eng._free_gpus = [0]
+    eng._gpu_epoch = 0
+    eng._eval_gpu_reservations = {}
+    eng.store.append("run_started", {
+        "run_id": "confirm-unpinnable", "task_id": "toy", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(operator="draft", footprint={"gpus": 1}).model_dump(mode="json"),
+        "code": ""})
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0})
+    attempted_seeds: list[int] = []
+
+    def refuse_pin(_node, _workdir, env=None, profile=None, cancel=None):
+        attempted_seeds.append(int((env or {})["LOOPLAB_EVAL_SEED"]))
+        raise GpuPinUnenforceable("container runtime cannot enforce GPU 0")
+
+    eng._run_eval = refuse_pin
+    anyio.run(eng._confirm_phase, fold(eng.store.read_all()))
+
+    first_events = eng.store.read_all()
+    refusals = [event for event in first_events
+                if event.type == "confirm_eval"
+                and event.data.get("reason") == "gpu_unpinnable"]
+    first_state = fold(first_events)
+    assert len(refusals) == 1
+    assert attempted_seeds == [eng.confirm_seed_base]
+    assert 0 not in first_state.confirm_seed_results
+    assert not any(event.type in {"node_confirmed", "best_confirmed", "confirm_done"}
+                   for event in first_events)
+    assert eng._free_gpus == [0]
+
+    def repaired_eval(_node, _workdir, env=None, profile=None, cancel=None):
+        attempted_seeds.append(int((env or {})["LOOPLAB_EVAL_SEED"]))
+        return RunResult(exit_code=0, stdout="", stderr="", metric=0.75, timed_out=False)
+
+    eng._run_eval = repaired_eval
+    anyio.run(eng._confirm_phase, fold(eng.store.read_all()))
+
+    final_events = eng.store.read_all()
+    final_state = fold(final_events)
+    assert attempted_seeds == [eng.confirm_seed_base, eng.confirm_seed_base]
+    assert final_state.confirm_seed_results[0] == {eng.confirm_seed_base: 0.75}
+    assert any(event.type == "node_confirmed" for event in final_events)
+    assert any(event.type == "best_confirmed" for event in final_events)
+    assert eng._free_gpus == [0]
 
 
 def test_confirm_seed_releases_stale_pin_reservation_before_eval(tmp_path):

@@ -1312,7 +1312,11 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # add idempotent; an un-keyed confirm_eval has no memo slot, so a duplicate/re-fold would
     # double-count total_eval_seconds (order/duplication-sensitive — the fold must not be). The sole
     # emitter always writes both keys, so this only guards a future/foreign/hand-edited un-keyed event.
-    if keyed:                                                # per-seed resume memo (#0)
+    # Retryable infrastructure refusals still charge any admitted setup/probe time above, but they are
+    # not completed seed evidence. Excluding them from the resume memo lets an unchanged seed retry after
+    # GPU discovery, a Card re-pin, or the container runtime is repaired.
+    retryable_infrastructure = d.get("reason") in {"gpu_unavailable", "gpu_unpinnable"}
+    if keyed and not retryable_infrastructure:               # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(nid, {})[seed] = _finite_metric(d.get("metric"))
 
 def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

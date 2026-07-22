@@ -107,8 +107,20 @@ class EvaluateMixin:
             # devices across every inline repair/retry prevents a repaired process from jumping onto a
             # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
             _resource_reservation = self._eval_resource_reservation(node_id, generation)
-            eval_env = self._resource_eval_env(
-                _resource_reservation, inherit_host=True)
+            try:
+                eval_env = self._resource_eval_env(
+                    _resource_reservation, inherit_host=True)
+            except GpuPinUnenforceable as exc:
+                # CODEX AGENT: an explicit positive declaration on a zero-device inventory is a
+                # fail-closed, zero-compute terminal — never an unpinned launch and never an endless
+                # resource wait. The dispatcher's finally still releases/clears the marker exactly once.
+                async with self._write_lock:
+                    self.store.append(EV_NODE_FAILED, {
+                        "node_id": node_id, "generation": generation,
+                        "error": str(exc)[:400], "reason": "gpu_unavailable",
+                        "eval_seconds": 0.0})
+                    self._maybe_crash()
+                return
             # A6 proxy/predictive scoring: cheaply predict this candidate's metric from the observed
             # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
             # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a

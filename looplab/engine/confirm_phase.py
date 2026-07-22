@@ -30,6 +30,9 @@ from looplab.trust.confirm import robust_selection
 from looplab.trust.cv import cv_summary
 
 
+_CONFIRM_RETRYABLE = object()
+
+
 class ConfirmPhaseMixin:
     """The engine's confirm-phase cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -56,8 +59,9 @@ class ConfirmPhaseMixin:
         """One confirm-seed evaluation of node `nd` under seed `s`: materialize a fresh confirm
         workdir, run the FULL-profile eval, and record the `confirm_eval` (+ any `spec_drift`)
         events — the per-seed body `_confirm_phase` and `_confirm_node` each ran verbatim before
-        the extraction, so the event emission here is byte-identical for both callers. Returns
-        the metric when the seed run was valid, else None (valid implies a non-None metric)."""
+        the extraction, so the event emission here is byte-identical for both callers. Returns the
+        metric when the seed run was valid, None for a completed invalid/cancelled seed, or a private
+        retry sentinel when infrastructure refused the run before useful work could complete."""
         generation = nd.attempt
         if not self._confirmation_node_current(nd.id, generation):
             return None
@@ -68,14 +72,9 @@ class ConfirmPhaseMixin:
         self._materialize(nd, workdir)
         if not self._confirmation_node_current(nd.id, generation):
             return None
-        # Confirmation uses the FULL eval profile (robust check on the leaders),
-        # regardless of the cheaper profile the Researcher used during search.
-        # CODEX AGENT: this clock starts BEFORE the potentially unbounded resource-wait loop below, yet
-        # its elapsed value is persisted as `confirm_eval.eval_seconds` and folded into the immutable
-        # eval budget. GPU queue contention therefore consumes `max_eval_seconds` as if the model had
-        # executed and can skip later confirmation candidates without doing that work. Track queue time
-        # separately, or start the billed eval clock only after the reservation is admitted/current.
-        _t0 = time.time()
+        # Confirmation uses the FULL eval profile (robust check on the leaders), regardless of the
+        # cheaper profile the Researcher used during search. Resource queue time is deliberately outside
+        # the billed eval clock; only admitted setup/execution enters immutable ``eval_seconds``.
         # Keep the per-seed events INSIDE the span so they carry its trace/span id
         # (events<->spans UI join), consistent with the _evaluate path.
         with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
@@ -142,8 +141,23 @@ class ConfirmPhaseMixin:
                     resource_node = current
                     continue
                 break
-            confirm_env = self._resource_eval_env(
-                reservation, base={"LOOPLAB_EVAL_SEED": str(s)})
+            _t0 = time.time()
+            try:
+                confirm_env = self._resource_eval_env(
+                    reservation, base={"LOOPLAB_EVAL_SEED": str(s)})
+            except GpuPinUnenforceable as exc:
+                # A zero-device inventory is retryable infrastructure state, not a completed seed memo.
+                # Record an audit row, but replay deliberately excludes this reason from
+                # ``confirm_seed_results`` so a later re-pin/runtime repair can retry the same seed.
+                try:
+                    async with self._write_lock:
+                        self.store.append(EV_CONFIRM_EVAL, {
+                            "node_id": nd.id, "generation": generation, "seed": s,
+                            "eval_seconds": 0.0, "metric": None,
+                            "reason": "gpu_unavailable", "error": str(exc)[:400]})
+                finally:
+                    self._release_gpus(reservation.get("gpu_ids"))
+                return _CONFIRM_RETRYABLE
 
             def _run():
                 return self._run_eval(
@@ -155,15 +169,10 @@ class ConfirmPhaseMixin:
                     try:
                         res = await anyio.to_thread.run_sync(_run)
                     except GpuPinUnenforceable as exc:
-                        # CODEX AGENT: no focused test currently raises this exception inside a real
-                        # anyio task group and asserts one memo + one release + no ExceptionGroup escape.
-                        # The previous outside-group handler passed the broad suite while being dead;
-                        # lock the actual cancellation/exception topology, not only helper-level behavior.
                         # A durable resource pin the Docker daemon/runtime cannot enforce must NOT crash
                         # the run() spine (confirm has no surrounding try — it would abort the engine and
-                        # re-crash on every resume, since the operator pin is durable). Terminalize THIS
-                        # seed: append a null confirm_eval so the seed is durably accounted (resume skips
-                        # it via confirm_seed_results) and the node simply fails to gain a confirmed metric.
+                        # re-crash on every resume, since the operator pin is durable). Audit THIS attempt,
+                        # but do not memoize it as a completed seed: a later runtime repair/re-pin must retry.
                         # Catch INSIDE the task group around the await — a bare `except` OUTSIDE it would
                         # never match the ExceptionGroup anyio wraps a task-group body error in (dead code).
                         # Shield the write-lock append so scope cancellation cannot preempt the checkpoint;
@@ -173,17 +182,12 @@ class ConfirmPhaseMixin:
                         still_current = self._confirmation_node_current(nd.id, generation)
                         with anyio.CancelScope(shield=True):
                             async with self._write_lock:
-                                # CODEX AGENT: confirm_seed_results is keyed only by node/generation/seed,
-                                # so this infrastructure failure becomes an ordinary durable `None` memo.
-                                # A later operator re-pin (or repaired Docker runtime) cannot retry the seed;
-                                # the phase skips it and may still emit best_confirmed with zero valid checks.
-                                # Keep unpinnable retryable, or bind the terminal memo to the resource revision.
                                 self.store.append(EV_CONFIRM_EVAL, {
                                     "node_id": nd.id, "generation": generation, "seed": s,
                                     "eval_seconds": round(time.time() - _t0, 3), "metric": None,
                                     "reason": "gpu_unpinnable", "error": str(exc)[:400],
                                     **({"superseded": True} if not still_current else {})})
-                        return None
+                        return _CONFIRM_RETRYABLE
                     cancel.set()
                     tg.cancel_scope.cancel()
             finally:
@@ -209,9 +213,9 @@ class ConfirmPhaseMixin:
         the robust winner (best confirmed MEAN), demoting any seed-lucky leader; the
         variance gate records whether that demotion is statistically significant.
 
-        Resume-safe: nodes already confirmed (from an earlier crashed attempt) are
-        reused, and a `best_confirmed` event is ALWAYS emitted to mark completion — so a
-        confirm pass where every seed run fails can't loop forever."""
+        Resume-safe: nodes already confirmed (from an earlier crashed attempt) are reused, and a
+        completed pass emits `best_confirmed` even when every actual seed run returns an invalid
+        metric. A retryable infrastructure refusal deliberately leaves the pass open."""
         # Only confirm BREEDABLE leaders (#5, §2.2): spending the expensive full-profile seed budget on
         # a constraint-violating OR trust-gated node is wasted — a gate-flagged cheater can never be
         # promoted to best, so it must not take a confirm slot from an honest node either.
@@ -241,9 +245,9 @@ class ConfirmPhaseMixin:
         # permanently disabling confirmation even across a budget-extending resume, and kept the
         # un-demoted seed-lucky leader. So ALWAYS confirm at least the top `min(2, len(topk))` leaders
         # (enough for a demotion decision — a bounded, one-time overrun); the budget break applies only
-        # to the lower-ranked tail. `spent` is folded ONCE (re-folding the whole log per node was
-        # O(topk×events) on a repo run whose node_created events embed full file sets) then accrued from
-        # each node's wall-clock confirm cost, so a large confirm_top_k can't overshoot unbounded.
+        # to the lower-ranked tail. `spent` is read from the immutable charged total after each small
+        # top-k item. This is slightly more replay work than wall-clock accrual, but it excludes resource
+        # queue time and keeps the budget contract exact even when an audited attempt is retryable.
         max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
         spent = fold(self.store.read_all()).total_eval_seconds
         must_confirm = min(2, len(topk))
@@ -277,7 +281,6 @@ class ConfirmPhaseMixin:
             # D1 seed-holdout: confirm seeds start at confirm_seed_base (default 1) so every
             # confirm split is DISJOINT from the search's implicit seed 0 — the confirm metric
             # is a generalization signal, not a re-measurement of what the search optimized.
-            _t0 = time.time()
             for s in range(self.confirm_seed_base, self.confirm_seed_base + self.confirm_seeds):
                 if s in done:                         # already evaluated this seed earlier
                     continue
@@ -288,9 +291,13 @@ class ConfirmPhaseMixin:
                 if (not self._confirmation_snapshot_current(generations)
                         or not self._confirmation_node_current(nd.id, nd.attempt)):
                     return
+                if m is _CONFIRM_RETRYABLE:
+                    # Infrastructure refusal is neither a completed seed nor confirmation completion.
+                    # Leave the phase open so the same seed can run after a re-pin/runtime repair.
+                    return
                 if m is not None:
                     scores.append(m)
-            spent += time.time() - _t0        # accrue this node's confirm cost (avoids the O(n²) re-fold)
+            spent = fold(self.store.read_all()).total_eval_seconds
             if scores:
                 summ = cv_summary(scores)
                 summaries.append({"node_id": nd.id, **summ})
@@ -334,8 +341,10 @@ class ConfirmPhaseMixin:
                 continue
             if not self._confirmation_node_current(nd.id, generation):
                 return
-            await self._run_confirm_seed(nd, s)
+            result = await self._run_confirm_seed(nd, s)
             if not self._confirmation_node_current(nd.id, generation):
+                return
+            if result is _CONFIRM_RETRYABLE:
                 return
         async with self._write_lock:
             if not self._confirmation_node_current(nd.id, generation):

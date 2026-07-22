@@ -16,7 +16,7 @@ import anyio
 
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
-from looplab.runtime.sandbox import SECRET_ENV
+from looplab.runtime.sandbox import GpuPinUnenforceable, SECRET_ENV
 
 
 def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[int, int]]:
@@ -115,11 +115,10 @@ class ResourceSchedulingMixin:
             return None
         total = len(getattr(self, "_gpu_ids", []) or [])
         out = dict(clean)
-        if "gpus" in out:
-            # Clamp the declared count to the detected pool (0 on a GPU-less host). Keeping a positive
-            # requirement "unsatisfiable" instead hangs the serial dispatcher forever (the pool epoch
-            # never bumps, no terminal is ever written). Degrading to CPU-only/fewer GPUs is graceful: a
-            # node that genuinely needs CUDA fails NATURALLY at eval (a real node_failed), never a spin.
+        if "gpus" in out and (total > 0 or out["gpus"] == 0):
+            # Clamp over-declaration to a NON-EMPTY pool, but preserve a positive requirement when
+            # discovery found no devices. The request layer below turns that state into an immediate
+            # fail-closed reservation, so it neither spins forever nor silently runs as CPU/whole-box work.
             out["gpus"] = min(out["gpus"], total)
         if isinstance(out.get("gpu_mem_mib"), int):
             requested_gpus = out.get("gpus", 1)
@@ -172,7 +171,8 @@ class ResourceSchedulingMixin:
         UNSPECIFIED preserves the historical split: a serial eval remains unpinned and can see the
         whole box; a parallel eval reserves one device.  Explicit ``gpus=0`` is a CPU request and
         bypasses the GPU queue.  Explicit positive counts are clamped to the detected pool (0 on a
-        GPU-less host -> CPU-only), so admission can never wait forever for capacity that cannot exist.
+        GPU-less host -> ``required_unavailable``), so admission can fail closed without waiting forever
+        for capacity that cannot exist or silently changing an explicit positive requirement into CPU work.
         """
         raw = effective_card_footprint(
             getattr(getattr(node, "idea", None), "footprint", None),
@@ -182,9 +182,12 @@ class ResourceSchedulingMixin:
         declared = raw is not None and "gpus" in raw
         cpu_only = bool(declared and raw.get("gpus") == 0)
         pool_size = len(getattr(self, "_gpu_ids", []) or [])
+        required_unavailable = bool(declared and raw.get("gpus", 0) > 0 and pool_size == 0)
         parallel = max(1, int(self._eval_parallel or 1))
         if cpu_only:
             count = 0
+        elif required_unavailable:
+            count = int(raw["gpus"])
         elif declared:
             count = int((effective or {}).get("gpus", 0))
         elif pool_size and parallel > 1:
@@ -196,8 +199,9 @@ class ResourceSchedulingMixin:
             "count": count,
             "gpu_mem_mib": memory if isinstance(memory, int) else None,
             "cpu_only": cpu_only,
+            "required_unavailable": required_unavailable,
             "unspecified": not declared,
-            "pin": bool(count > 0),
+            "pin": bool(count > 0 and not required_unavailable),
             "footprint": effective,
         }
 
@@ -297,9 +301,11 @@ class ResourceSchedulingMixin:
 
     def _try_reserve_node_resources(self, node, *, resource_pin=None) -> Optional[dict]:
         request = self._resource_request_for_node(node, resource_pin=resource_pin)
-        # `count` is already clamped to the detected pool (`_clamp_resource_footprint`), so a GPU-less
-        # host yields count=0 (CPU-only) rather than a positive requirement that can never be admitted —
-        # which would spin this reservation wait forever.
+        # A known positive requirement on an empty detected pool is admitted only as an immediate
+        # fail-closed marker. Evaluate/confirm terminalize it without launching candidate code; returning
+        # a marker (rather than None) avoids polling an epoch that can never move.
+        if request["required_unavailable"]:
+            return {**request, "gpu_ids": []}
         gpu_ids = self._acquire_gpus(request["count"], request["gpu_mem_mib"])
         if gpu_ids is None:
             return None
@@ -348,16 +354,12 @@ class ResourceSchedulingMixin:
     def _resource_eval_env(self, reservation: Optional[dict], *, base: Optional[dict] = None,
                            inherit_host: bool = False) -> Optional[dict]:
         """Build the child env for a reservation without changing the unpinned legacy branch."""
-        # KNOWN (separate, low): a node that DECLARED gpus>0 but was clamped to zero on a host where
-        # discovery returned no ids (cpu_only=False, gpu_ids=[]) falls into this unpinned branch and, if
-        # such a host actually has GPUs (torch absent AND nvidia-smi unavailable), the child sees every
-        # device. Fencing it here would have to reconcile with the deliberately-divergent
-        # `effective_card_footprint` zero-host branch (models.py) that the freshness projection relies on
-        # and that is test-locked, so it is intentionally left to a maintainer rather than fixed inline.
-        # CODEX AGENT: this is still a fail-open security boundary, not merely a projection mismatch:
-        # an explicit positive GPU requirement can reach candidate code with the host's full GPU view
-        # after discovery failure. Preserve an explicit "required but unavailable" reservation state and
-        # refuse launch; a test-locked divergent helper is evidence to repair the contract, not to inherit it.
+        if reservation and reservation.get("required_unavailable"):
+            # CODEX AGENT: discovery failure must not turn an explicit positive declaration into an
+            # unpinned full-host launch. Evaluate/confirm convert this defensive refusal into their
+            # durable terminal/retry contracts before any candidate process is started.
+            raise GpuPinUnenforceable(
+                "explicit GPU requirement cannot be satisfied: no GPUs were detected")
         if not reservation or (not reservation.get("cpu_only") and not reservation.get("gpu_ids")):
             return dict(base) if base is not None else None
         # SECURITY (source-side strip): `inherit_host` shovels the host environment into the eval env so

@@ -499,11 +499,9 @@ def effective_card_footprint(
         return out
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 0:
         raise ValueError("gpu_count must be a non-negative integer or None")
-    # CODEX AGENT: this zero-host branch no longer matches ResourceSchedulingMixin: the scheduler
-    # now clamps every positive declaration to zero, while this shared Card/freshness projection
-    # deliberately preserves it. Consequently the same Card is runnable as CPU work in the serial
-    # lane but permanently stale in speculative selection. Pick one fail-open/fail-closed contract
-    # and make both admission paths consume this single implementation before expanding rollout.
+    # CODEX AGENT: a positive declaration on a zero-device host remains explicitly unavailable. The
+    # scheduler consumes the same contract and emits a fail-closed reservation marker; only a genuine
+    # operator/researcher ``gpus=0`` declaration owns CPU-only semantics.
     if "gpus" in out and (gpu_count > 0 or out["gpus"] == 0):
         # Match scheduler admission on a GPU-less host: an explicit positive declaration remains
         # unavailable instead of being silently rewritten into a CPU-only action. A genuine zero pin
