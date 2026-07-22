@@ -55,9 +55,15 @@ class TestClient(_FastApiTestClient):
         return super().post(url, *args, **kwargs)
 
 
-def _seed_memory(statement="hard-neg helps"):
-    md = Path(os.environ["LOOPLAB_MEMORY_DIR"])   # conftest points this at a tmp dir
+def _initialize_memory():
+    """Create the per-test portfolio directory without seeding evidence."""
+    md = Path(os.environ["LOOPLAB_MEMORY_DIR"])
     md.mkdir(parents=True, exist_ok=True)
+    return md
+
+
+def _seed_memory(statement="hard-neg helps"):
+    md = _initialize_memory()
     (md / "lessons.jsonl").write_bytes(orjson.dumps(
         {"statement": statement, "outcome": "supported", "evidence": [1],
          "run_id": "r1", "task_id": "t"}) + b"\n")
@@ -170,6 +176,48 @@ def test_delayed_governance_write_cannot_cross_portfolio_reconfiguration(
         "current_portfolio_id": replacement_id,
     }
     assert not (replacement / "concept_aliases.jsonl").exists()
+
+
+def test_missing_portfolio_refuses_mutation_before_provider_or_storage_initialization(
+        tmp_path, monkeypatch):
+    import looplab.core.llm as llm_module
+
+    memory = Path(os.environ["LOOPLAB_MEMORY_DIR"])
+    assert not memory.exists()
+    client_creations: list[int] = []
+    monkeypatch.setattr(
+        llm_module, "make_llm_client",
+        lambda *_args, **_kwargs: client_creations.append(1) or object(),
+    )
+    client = _FastApiTestClient(make_app(tmp_path))
+    observed = client.get("/api/cross-run/curation-log")
+    assert observed.status_code == 200
+    portfolio_id = observed.json()["portfolio_id"]
+
+    responses = [
+        client.post("/api/cross-run/concept-steward", params={
+            "action_id": "must-not-initialize", "expected_portfolio_id": portfolio_id,
+        }),
+        client.post("/api/cross-run/concept-merge", json={
+            "expected_portfolio_id": portfolio_id,
+            "from_concept": "x", "to_concept": "y", "expected_revision": 0,
+            "expected_governance_revision": 0, "action_id": "must-not-write",
+        }),
+    ]
+
+    expected = {
+        "code": "portfolio_not_initialized",
+        "current_portfolio_id": portfolio_id,
+        "message": "the observed cross-run portfolio directory does not exist yet",
+        "remediation": (
+            "initialize the configured memory directory, refresh the portfolio, and form a new "
+            "action with its replacement identity"),
+    }
+    assert all(response.status_code == 409 for response in responses)
+    assert all(response.headers["cache-control"] == "no-store" for response in responses)
+    assert all(response.json()["detail"] == expected for response in responses)
+    assert client_creations == []
+    assert not memory.exists()
 
 
 @pytest.mark.parametrize("endpoint", ["/api/cross-run/claims", "/api/cross-run/atlas"])
@@ -765,6 +813,7 @@ def test_steward_error_is_redacted_in_response_and_audit_log(tmp_path, monkeypat
     import looplab.core.llm as llm_module
     import looplab.engine.concept_steward as steward_module
 
+    _initialize_memory()
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     monkeypatch.setattr(llm_module, "make_llm_client", lambda *args, **kwargs: object())
 
@@ -870,6 +919,7 @@ def test_concurrent_steward_retry_pays_for_one_llm_invocation(tmp_path, monkeypa
     import looplab.core.llm as llm_module
     import looplab.engine.concept_steward as steward_module
 
+    _initialize_memory()
     entered, release, counter_lock = Event(), Event(), Lock()
     calls: list[int] = []
 
@@ -902,6 +952,7 @@ def test_steward_paid_call_without_terminal_receipt_is_not_replayed(tmp_path, mo
     import looplab.engine.concept_registry as registry_module
     import looplab.engine.concept_steward as steward_module
 
+    _initialize_memory()
     calls: list[int] = []
 
     def fake_steward(*_args, **_kwargs):
@@ -940,6 +991,7 @@ def test_steward_does_not_start_paid_call_without_durable_begin_claim(tmp_path, 
     import looplab.core.llm as llm_module
     import looplab.engine.concept_steward as steward_module
 
+    _initialize_memory()
     calls: list[int] = []
 
     def fake_steward(*_args, **_kwargs):

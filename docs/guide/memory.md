@@ -212,7 +212,10 @@ or parser, so the UI is not a billing audit surface. Each read does expose one o
 `portfolio_id` derived from the resolved configured directory identity. The browser refuses to mix identities
 across its four independent slices. Typed governance bodies and paid steward queries must echo it as
 `expected_portfolio_id`; a live `memory_dir`, symlink-target or directory replacement fails with 409 before
-any write/provider setup. This storage fence is not a frozen corpus watermark or atomic evidence snapshot.
+any write/provider setup. A read may expose an empty identity for a configured directory that does not yet
+exist, but mutation against that provisional identity fails with `409 portfolio_not_initialized` before
+ledger/provider setup; initialize the directory, refresh all slices, and form a new action against the
+replacement identity. This storage fence is not a frozen corpus watermark or atomic evidence snapshot.
 
 The run-end dependency order is: case/research claims/concept capsule → reflection → concept steward →
 claim steward → task facets → final `llm_cost` → completion. Thus the claim steward sees the current

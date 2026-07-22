@@ -243,6 +243,7 @@ def test_steward_nested_payload_is_redacted_before_receipt_persistence(
     import looplab.engine.claim_steward as steward_module
     from looplab.serve.server import make_app
 
+    Path(os.environ["LOOPLAB_MEMORY_DIR"]).mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(llm_module, "make_llm_client", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(steward_module, "steward_claims", lambda *_args, **_kwargs: {
         "proposals": {"reviews": [{"api_key": "short-secret",

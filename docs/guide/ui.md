@@ -360,6 +360,9 @@ use typed claim/concept governance POSTs: they require the opaque `portfolio_id`
 ledger revision and an idempotent action ID; concept actions also require the shared governance revision so
 alias and split ledgers cannot race. A settings/symlink/directory replacement returns
 `409 portfolio_identity_conflict` before any target ledger write, even when its revision happens to match.
+An observed but not-yet-created memory directory is read-only: governance/steward POSTs return
+`409 portfolio_not_initialized` without creating storage or a provider client; initialize it and refresh
+the complete Atlas before forming a new action.
 The server derives actor/time, returns 409 on stale/colliding actions, and provides explicit clear
 operations. A claim decision must also name a currently projected structured claim and its observed evidence
 digest. Structured decisions resolve exact scope+metric, scope-only, global metric, then global, so an unscoped

@@ -26,12 +26,14 @@ from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projectio
 _PORTFOLIO_ID_PATTERN = r"^portfolio-sha256:[0-9a-f]{64}$"
 
 
-def _portfolio_identity(memory_dir: object) -> tuple[str, str]:
-    """Return one canonical target path and opaque replacement-sensitive portfolio identity.
+def _resolved_portfolio_identity(memory_dir: object) -> tuple[str, str, bool]:
+    """Return canonical target, opaque identity, and whether its directory exists.
 
     The digest deliberately contains no source path. It binds the normalized real path and, when the
     directory exists, its filesystem identity. Switching settings, repointing a symlink, or replacing the
     directory therefore invalidates a delayed mutation even when the new ledgers have equal revisions.
+    The existence bit comes from the same stat observation as the digest: mutation callers must not infer
+    it with a second path check that can race directory creation.
     """
     raw = os.fspath(memory_dir)
     canonical = os.path.normcase(os.path.realpath(os.path.abspath(raw)))
@@ -40,13 +42,21 @@ def _portfolio_identity(memory_dir: object) -> tuple[str, str]:
         status = target.stat()
     except FileNotFoundError:
         directory_identity = b"missing"
+        initialized = False
     else:
         if not stat.S_ISDIR(status.st_mode):
             raise NotADirectoryError(canonical)
         directory_identity = (
             f"{int(status.st_dev)}:{int(status.st_ino)}:{int(status.st_mode)}".encode("ascii"))
+        initialized = True
     material = b"looplab-cross-run-portfolio-v1\0" + os.fsencode(canonical) + b"\0" + directory_identity
-    return canonical, "portfolio-sha256:" + hashlib.sha256(material).hexdigest()
+    return canonical, "portfolio-sha256:" + hashlib.sha256(material).hexdigest(), initialized
+
+
+def _portfolio_identity(memory_dir: object) -> tuple[str, str]:
+    """Compatibility helper returning the public two-field portfolio identity tuple."""
+    target, portfolio_id, _initialized = _resolved_portfolio_identity(memory_dir)
+    return target, portfolio_id
 
 
 def _public_cross_run_row(value):
@@ -377,7 +387,7 @@ def build_router(srv) -> APIRouter:
         if not memory_dir:
             raise HTTPException(400, "no memory_dir configured")
         try:
-            target, portfolio_id = _portfolio_identity(memory_dir)
+            target, portfolio_id, initialized = _resolved_portfolio_identity(memory_dir)
         except (OSError, RuntimeError, TypeError, ValueError, UnicodeError) as exc:
             raise HTTPException(503, detail={
                 "code": "cross_run_portfolio_unavailable",
@@ -390,6 +400,18 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(409, detail={
                 "code": "portfolio_identity_conflict",
                 "current_portfolio_id": portfolio_id,
+            }, headers={"Cache-Control": "no-store"})
+        if expected_portfolio_id is not None and not initialized:
+            # A read may honestly project an empty, not-yet-created target without side effects. A write
+            # cannot: its first mkdir would replace the observed `missing` identity before the durable
+            # action/provider receipt exists, making a lost-response retry conflict with its own work.
+            raise HTTPException(409, detail={
+                "code": "portfolio_not_initialized",
+                "current_portfolio_id": portfolio_id,
+                "message": "the observed cross-run portfolio directory does not exist yet",
+                "remediation": (
+                    "initialize the configured memory directory, refresh the portfolio, and form a new "
+                    "action with its replacement identity"),
             }, headers={"Cache-Control": "no-store"})
         return target, portfolio_id
 
