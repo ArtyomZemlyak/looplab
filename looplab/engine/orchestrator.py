@@ -1030,6 +1030,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # The receipt is intentionally scoped to the shipped quadratic adapter, not merely
                 # to an arbitrary TaskAdapter/subclass that can spoof the same model_dump while
                 # executing a different workload.
+                # CODEX AGENT: the public positive-depth path currently admits only the calibration
+                # toy itself; every real Dataset/Repo/Command TaskAdapter is rejected here. Thus the
+                # generic Settings/UI knob is not a product rollout at all, only a replay of its own
+                # benchmark. Keep it explicitly maintainer-only or define workload-scoped evidence
+                # before users can reasonably interpret speculation_depth as usable functionality.
                 or type(task) is not ToyTask
                 or _gate_receipt.get("task_profile_sha256")
                 != speculation_task_profile_digest(task)

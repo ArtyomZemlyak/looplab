@@ -295,6 +295,12 @@ class EvaluateMixin:
                         # the batch and re-crash deterministically on every resume; the reservation is
                         # still released by the dispatcher's finally.
                         cancel.set()
+                        # CODEX AGENT: cancelling the task-group scope also cancels this host task at
+                        # its next checkpoint. The awaited write-lock acquisition below is such a
+                        # checkpoint, so the promised node_failed append can be skipped; after the
+                        # scope suppresses its own cancellation, execution may then continue with
+                        # `res` unbound. Persist the terminal under a shield before cancelling the
+                        # watcher, or give the watcher its own child scope to cancel independently.
                         _tg.cancel_scope.cancel()
                         async with self._write_lock:
                             self.store.append(EV_NODE_FAILED, {

@@ -323,6 +323,11 @@ class ResourceSchedulingMixin:
     def _resource_eval_env(self, reservation: Optional[dict], *, base: Optional[dict] = None,
                            inherit_host: bool = False) -> Optional[dict]:
         """Build the child env for a reservation without changing the unpinned legacy branch."""
+        # CODEX AGENT: an explicit positive GPU request clamped to zero has cpu_only=False and
+        # gpu_ids=[], so it falls into this legacy unpinned branch. If discovery failed on a machine
+        # that actually has GPUs, the child inherits the host environment and can see every device,
+        # bypassing both the reservation pool and Docker's fail-closed pinning. Preserve an explicit
+        # "GPU required but unavailable" state instead of conflating it with unspecified legacy work.
         if not reservation or (not reservation.get("cpu_only") and not reservation.get("gpu_ids")):
             return dict(base) if base is not None else None
         env = ({**os.environ, **(base or {})} if inherit_host else dict(base or {}))

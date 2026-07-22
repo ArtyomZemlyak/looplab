@@ -1947,6 +1947,11 @@ def speculation_implementation_digest() -> str:
         # package root directly instead of assuming a repository checkout surrounds it.
         package_root = Path(__file__).resolve().parents[1]
         root = package_root.parent
+    # CODEX AGENT: hashing raw source bytes makes comments, formatting and line-ending conversion
+    # revoke every previously issued receipt even when runtime semantics are identical. That turns
+    # review-only commits into an operational stop/resume outage and forces six fresh GPU calibration
+    # runs after documentation edits. Bind a versioned semantic/runtime manifest (or an explicit
+    # rollout protocol version) while retaining exact hashes only for files that affect execution.
     paths = list(package_root.rglob("*.py"))
     for relative in _IMPLEMENTATION_REQUIRED_PACKAGE_FILES:
         resource = package_root / relative
