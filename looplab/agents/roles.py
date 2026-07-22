@@ -639,6 +639,10 @@ class LLMResearcher:
         cues = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback",
                                         "_novelty_hint"))
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
+        # CODEX AGENT: cues can contain persisted cross-run model/web/repository text. Redaction,
+        # one-line normalization and an UNTRUSTED_MEMORY label do not make embedded instructions inert.
+        # Append a code-owned system rule that treats every memory/tool string as quoted evidence and
+        # never follows its instructions; mirror the rule in ToolUsingResearcher.
         messages = [
             {"role": "system",
              # Part V/P6: the explicit concept-mode contract, capability suffix (sweep offer — gated on

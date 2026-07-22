@@ -3138,6 +3138,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     or getattr(waiting, "finished", False)
                                     or getattr(waiting, "stop_requested", None)
                                 )
+                                # CODEX AGENT: this admission gate ignores the Card lifecycle. If an
+                                # operator drops a pending Card while it waits for a GPU, its Node is
+                                # still launched and _evaluate ignores that pre-start drop by seq. Close
+                                # it at zero cost here and mirror the check in parallel/Card admission.
                                 lifecycle_current = bool(
                                     live is not None
                                     and live.attempt == generation

@@ -30,6 +30,10 @@ def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[i
     ids = list(logical_ids or [])
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cvd is not None:
+        # CODEX AGENT: validate selector uniqueness before constructing logical slots. A duplicated
+        # CUDA_VISIBLE_DEVICES token currently becomes two scheduler reservations mapped to the same
+        # physical device, so concurrent children appear disjoint while both run on one GPU. Reject
+        # duplicate or ambiguous selectors instead of multiplying advertised capacity.
         tokens = [token.strip() for token in cvd.split(",") if token.strip()]
         # _detect_gpu_ids derives the same count.  A mismatch means one of the probes changed or the
         # environment was malformed; retain safe logical identity and do not invent a memory join.
@@ -76,6 +80,10 @@ class ResourceSchedulingMixin:
         if not hasattr(self, "_gpu_mem"):
             self._gpu_mem = {}
         if not hasattr(self, "_free_gpus"):
+            # CODEX AGENT: this free list is process-local, while the server can run one Engine process
+            # per run. Concurrent runs therefore initialize the same visible physical GPUs as free and
+            # can reserve them simultaneously. Use a host-wide lease keyed by stable GPU identity with
+            # owner-liveness/crash cleanup, or explicitly serialize GPU-owning runs.
             self._free_gpus = list(self._gpu_ids)
         if not hasattr(self, "_gpu_lock"):
             self._gpu_lock = threading.Lock()

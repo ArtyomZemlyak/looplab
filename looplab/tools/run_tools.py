@@ -742,6 +742,10 @@ class SiblingRunTools:
         return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
 
     def _read(self, run_id, nid: int, trials_arg=None) -> str:
+        # CODEX AGENT: discovery is same-task scoped, but this direct lookup is not. A caller that
+        # guesses a run_id can bypass _sibling_ids() and read another task (or this run); enforce
+        # membership/task_id equality here and in _code, because the model-supplied id is the actual
+        # authorization boundary rather than evidence that list_sibling_runs was used first.
         st = self._state(run_id)
         if st is None:
             return f"(no such sibling run: {run_id!r})"
