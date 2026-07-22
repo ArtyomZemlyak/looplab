@@ -2427,6 +2427,10 @@ def build_router(srv) -> APIRouter:
         if not isinstance(incoming, dict):
             raise HTTPException(400, "settings must be a JSON object")
         try:
+            # CODEX AGENT: expected_revision fences only snapshot bytes, not run generation. Reset keeps
+            # this file, so a delayed PUT from generation A can rewrite generation B or race reset's env
+            # read. Require expected_generation and serialize this transaction with the reset-visible
+            # run lifecycle/command lease in addition to the snapshot lock.
             # The required OS lock is the cross-process guarantee; the bounded stripe supplies the
             # same guarantee to multiple threads in this process on every supported platform.
             with (_run_config_thread_lock(snap),

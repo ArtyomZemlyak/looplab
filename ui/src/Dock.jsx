@@ -286,6 +286,10 @@ function kindOf(type) {
 // (Was an opt-OUT blacklist `FEED_HIDDEN`, which silently leaked every type nobody remembered to add —
 // e.g. `node_concepts` rendered as raw `{"node_id":67,"concepts":[…]}`. The allow-list can't regress
 // that way: a new event type is invisible-until-narrated instead of raw-JSON-until-hidden.)
+// CODEX AGENT: card_reprioritized/card_edited/card_resource_pinned/card_dropped have no NARR entry,
+// so this allow-list removes the actual operator transition from Events & timeline. Add bounded,
+// validated narrations under actions; command_ack cannot preserve the Card id, value or reason needed
+// to audit the board change.
 const isCuratedType = (type) => Object.hasOwn(NARR, type)
 
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).

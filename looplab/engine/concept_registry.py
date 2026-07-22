@@ -490,6 +490,10 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
             targets.append(dflt)
         if len(set(targets)) != len(targets):
             raise ValueError("split targets must be distinct")
+        # CODEX AGENT: split children can later become split sources, so A→B then B→C (or B→A)
+        # passes this validation while canonicalize_concept applies only one split. That fragments
+        # canonical UIDs, Atlas counts and retrieval. Reject split-graph chains/cycles here, or resolve
+        # them transitively with bounded cycle detection under the same governance snapshot.
         for target in targets:
             resolved_target = resolve_slug(target, aliases)
             if resolved_target is None:

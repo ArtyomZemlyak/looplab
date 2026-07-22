@@ -152,6 +152,10 @@ class StewardProposalResponse(_CrossRunResponse):
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     def _memory_dir() -> str:
+        # CODEX AGENT: ledger counters are not portfolio identity. memory_dir is live-editable, so a
+        # delayed mutation formed from portfolio A can resolve portfolio B here and pass when revisions
+        # happen to match. Publish a stable portfolio/source digest on reads and require it on every
+        # governed or paid mutation before resolving the target directory.
         memory_dir = getattr(srv.global_settings(), "memory_dir", None)
         if not memory_dir:
             raise HTTPException(400, "no memory_dir configured")

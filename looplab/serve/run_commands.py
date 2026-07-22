@@ -2915,6 +2915,10 @@ class RunCommandService:
                                     f"GET /commands/{existing_id}; if it is retryable failed/timed_out, "
                                     f"POST /commands/{existing_id}/retry."),
                             })
+                    # CODEX AGENT: this global driver gate also blocks collaboration-only controls.
+                    # While a long engine command remains executing, an operator Card drop cannot append
+                    # the event that _evaluate watches to cancel its paid subprocess. Serialize driver
+                    # commands here, but let collaboration use its own generation/subject/tail CAS.
                     _active_path, active = self._active_record(rd)
                     if active is not None:
                         existing_id = str(active.get("id") or "")
