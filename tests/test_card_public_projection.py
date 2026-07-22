@@ -32,7 +32,9 @@ def _seed_run(root):
     store.append("card_added", {
         "id": "card-safe", "statement": "a public direction", "source": "engine",
         "rationale": f"candidate note {_SECRET}",
-        "idea": {"operator": "improve", "params": {"lr": 0.2}},
+        # These are valid user-authored parameter names, not state-level raw-source fields. The
+        # canonical Card projection receipts them before AppState's broad scrub and must preserve them.
+        "idea": {"operator": "improve", "params": {"lr": 0.2, "raw": 3, "code": 4}},
         # Body-shaped producer data must never ride the shared /state/SSE/review Card DTO. This is the
         # Card-side analogue of AppState's heavy node trim, even when such keys reach the event journal.
         "code": _PRIVATE_MARKER, "files": {"private.py": _PRIVATE_MARKER},
@@ -102,7 +104,8 @@ def _assert_public_card_payload(payload: dict) -> None:
     assert "steering_context" not in card_projection["omissions"]
     card = state["cards"]["card-safe"]
     assert card["statement"] == "a public direction"
-    assert card["operator"] == "improve" and card["params"] == {"lr": 0.2}
+    assert card["operator"] == "improve"
+    assert card["params"] == {"code": 4, "lr": 0.2, "raw": 3}
     assert card["footprint"] == {"gpus": 2}
     assert card["resource_pin"] == {
         "gpus": 1, "gpu_mem_mib": 4_000, "pinned_by": "operator",

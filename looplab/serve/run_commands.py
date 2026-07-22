@@ -2913,22 +2913,23 @@ class RunCommandService:
                                     f"GET /commands/{existing_id}; if it is retryable failed/timed_out, "
                                     f"POST /commands/{existing_id}/retry."),
                             })
-                    # CODEX AGENT: this global driver gate also blocks collaboration-only controls.
-                    # While a long engine command remains executing, an operator Card drop cannot append
-                    # the event that _evaluate watches to cancel its paid subprocess. Serialize driver
-                    # commands here, but let collaboration use its own generation/subject/tail CAS.
-                    _active_path, active = self._active_record(rd)
-                    if active is not None:
-                        existing_id = str(active.get("id") or "")
-                        raise HTTPException(409, {
-                            "code": "command_in_progress",
-                            "existing_command_id": existing_id,
-                            "current_status": active.get("status"),
-                            "message": "Another state-changing run command is still in progress.",
-                            "remediation": (
-                                f"GET /commands/{existing_id} to a terminal status before submitting "
-                                "the next command."),
-                        })
+                    # CODEX AGENT: collaboration controls are independent append-only intents. In
+                    # particular, Card drop must be able to land while a long driver command is still
+                    # executing so the evaluator can cancel paid work. Driver commands remain globally
+                    # serialized; collaboration relies on its generation/subject/tail CAS below.
+                    if event_type not in COLLABORATION_EVENTS:
+                        _active_path, active = self._active_record(rd)
+                        if active is not None:
+                            existing_id = str(active.get("id") or "")
+                            raise HTTPException(409, {
+                                "code": "command_in_progress",
+                                "existing_command_id": existing_id,
+                                "current_status": active.get("status"),
+                                "message": "Another state-changing run command is still in progress.",
+                                "remediation": (
+                                    f"GET /commands/{existing_id} to a terminal status before submitting "
+                                    "the next command."),
+                            })
                     now = time.time()
                     record = {
                         "id": command_id,
@@ -3068,17 +3069,21 @@ class RunCommandService:
                     "message": "Only retryable failed/timed_out commands can be retried.",
                     "remediation": f"GET /commands/{command_id} and observe its current status.",
                 })
-            _active_path, active = self._active_record(rd)
-            if active is not None and str(active.get("id") or "") != command_id:
-                active_id = str(active.get("id") or "")
-                raise HTTPException(409, {
-                    "code": "command_in_progress",
-                    "existing_command_id": active_id,
-                    "current_status": active.get("status"),
-                    "message": "Another state-changing run command is still in progress.",
-                    "remediation": (
-                        f"GET /commands/{active_id} to a terminal status before retrying {command_id}."),
-                })
+            # CODEX AGENT: retry preserves the same concurrency contract as first admission. A
+            # collaboration append may overtake a live driver command, but a driver retry may not.
+            if record.get("event_type") not in COLLABORATION_EVENTS:
+                _active_path, active = self._active_record(rd)
+                if active is not None and str(active.get("id") or "") != command_id:
+                    active_id = str(active.get("id") or "")
+                    raise HTTPException(409, {
+                        "code": "command_in_progress",
+                        "existing_command_id": active_id,
+                        "current_status": active.get("status"),
+                        "message": "Another state-changing run command is still in progress.",
+                        "remediation": (
+                            f"GET /commands/{active_id} to a terminal status before retrying "
+                            f"{command_id}."),
+                    })
             record = self._safe_retry(rd, path, record)
         if record.get("event_type") in COLLABORATION_EVENTS \
                 and self._claim_execution(rd, str(record["id"])):

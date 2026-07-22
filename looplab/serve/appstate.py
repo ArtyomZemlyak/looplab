@@ -169,16 +169,16 @@ class AppState:
         # CODEX AGENT: exclude open event journals before Pydantic copies them, then publish only the
         # bounded derived DTO. This shared boundary feeds owner state, SSE, and review state.
         d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
+        # Scrub the broad folded state before inserting the independently bounded/redacted Card DTO.
+        # Otherwise valid action params/search dimensions named "raw" or "code" are removed after the
+        # Card projection has declared them exact, leaving a completeness receipt that describes data
+        # no longer present on the wire.
+        d = _public_state_value(d)
         # CODEX AGENT: `cards` and its completeness receipt must come from one projection invocation.
         # Re-projecting the two halves separately would let mutable caller input or a later selector
         # change publish counts that do not describe the actual mapping in this SSE/state frame.
         card_fragment = public_cards_projection(st.cards).model_dump(mode="json")
         d.update(card_fragment)
-        # CODEX AGENT: this recursive scrub also walks the already-receipted Card DTO. Valid action
-        # params/search dimensions named "raw" or "code" are removed after projection declared them
-        # exact, so /state and SSE publish a lying completeness receipt. Preserve the canonical Card
-        # fragment through this pass, or recompute its receipt from the scrubbed value.
-        d = _public_state_value(d)
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.trust.redact import redact_secrets
         for n in d.get("nodes", {}).values():

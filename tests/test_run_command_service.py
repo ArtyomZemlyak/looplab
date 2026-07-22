@@ -1556,6 +1556,34 @@ def test_preappend_active_command_blocks_stale_contradictory_preflight(tmp_path)
     assert _types(rd).count("run_abort") == 0
 
 
+def test_card_drop_bypasses_active_driver_gate_and_cancels_live_work(tmp_path):
+    rd = _seed(tmp_path, paused=True)
+    EventStore(rd / "events.jsonl").append("card_added", {
+        "id": "card-live", "statement": "candidate under evaluation", "source": "engine",
+        "idea": {"operator": "draft", "params": {}, "space": {}},
+    })
+    client, srv = _client(tmp_path, _Driver())
+    # Hold a driver command before its intent append. Collaboration must not share this global gate:
+    # the evaluator watches card_dropped specifically to terminate already-running paid work.
+    srv.commands._start_worker = lambda *_args, **_kwargs: None
+    active = _post(client, "resume", key="held-driver")
+    assert active.status_code == 200 and active.json()["status"] == "accepted"
+
+    dropped = _post(
+        client, "card_dropped", {"id": "card-live", "reason": "operator cancelled"},
+        key="drop-during-driver",
+    )
+    assert dropped.status_code == 200
+    assert dropped.json()["status"] == "succeeded"
+    events = EventStore(rd / "events.jsonl").read_all()
+    drop = [event for event in events if event.type == "card_dropped"][-1]
+    assert drop.data == {
+        "id": "card-live", "reason": "operator cancelled", "dropped_by": "operator",
+        "_command_id": dropped.json()["id"],
+    }
+    assert fold(events).cards["card-live"].status == "dropped"
+
+
 def test_explicit_retry_is_blocked_while_a_different_command_is_active(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(error=OSError("start failed"))
