@@ -107,7 +107,7 @@ Receipt identity is exact: self digest
 - [x] Run three fresh depth-0/positive-depth pairs on the effective real GPU and issue the receipt.
 - [x] Replace the historical receipt above with exact current counts, evidence paths and digests.
 - [x] Commit the validated implementation and push it directly to `master` (`8d9952a1`).
-- [ ] Commit this final validation ledger and push it directly to `master`.
+- [x] Commit this final validation ledger and push it directly to `master` (`b5e55a43`).
 
 ### Post-review hardening receipt
 
