@@ -7,7 +7,8 @@ quadratic-Toy / depth-1 / max-nodes-12 runtime; every broader workload, policy, 
 default-off and fail-closed.**
 Grounded in four exhaustive code maps (idea-pipeline ·
 strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review consolidated in
-**§12 — the authoritative target contract**. The ledger below is the validated implementation truth.
+**§12 — the historical target contract**. The ledger below is the validated current implementation
+truth and wins wherever the original target text differs from shipped behavior.
 
 ## 0.0.1 Current implementation truth (2026-07-22)
 
@@ -146,8 +147,11 @@ is true for proposed-without-action, running,
 evaluated, and superseded work. It is therefore **not evidence of executability**. The selector may
 consume only `selection_ready`, which requires all of the following:
 
-1. one unique `card_added` carrying an exact v1 `ownership_receipt` bound to the card id, immutable seed
-   statement, concrete action, parent anchors, resource declaration and complete score fence;
+1. one unique `card_added` carrying an exact current v2 `ownership_receipt` (or the preserved
+   expanded-v1 transition form) bound to the card id, immutable seed statement, concrete action,
+   parent anchors, resource declaration and complete score fence. The frozen original v1 receipt
+   establishes legacy identity only and deliberately remains non-selectable because it predates the
+   timeout and lifecycle fences;
 2. one complete concrete action owner with a supported operator/parent shape and matching
    `parent_generations` for every anchored attempt;
 3. with an incumbent, `scored_against` and `scored_against_generation` match its current id/attempt;
@@ -192,10 +196,11 @@ Owner decisions locked: readiness is a derived read-model (`selection_ready`), n
 footprint = an accreted resource field — **Researcher proposes it, Developer finalizes from code**;
 speculation depth = enough to keep GPUs utilized, freshness gate on; **stable `card_id` immediately**.
 
-## 0.5. Design-review resolutions (2026-07-20) — AUTHORITATIVE
+## 0.5. Historical design-review resolutions (2026-07-20)
 
-Two adversarial design reviews (replay-safety + completeness) found real defects; **this section
-supersedes any flagged claim in §3–§8 below.** Resolutions:
+Two adversarial design reviews (replay-safety + completeness) found real defects. This section records
+the design target that superseded flagged claims in §3–§8 at the time; the current implementation
+ledger in §0.0.1 and explicit post-review caveats later in this document supersede this section.
 
 **Split Layer 1 into three shippable increments** (was one over-large layer):
 
@@ -210,7 +215,7 @@ supersedes any flagged claim in §3–§8 below.** Resolutions:
 - **1c — dropped/rejected + node-less intra-batch dup.** Isolated behind its own review (identity
   question below).
 
-**`card_id` — monotonic, main-task-only, atomic (resolves the load-bearing defect).** A monotonic
+**Historical target: `card_id` — monotonic, main-task-only, with an atomic mint.** A monotonic
 `card-{k}` id CANNOT be background-appendable (a bg mint races on `max+1`; the splice test cannot catch
 a write-time id race — it only proves fold-order tolerance of an already-written event). Decision:
 engine-minted monotonic, **main-task-only**, reserved+appended **atomically under the shared
@@ -220,6 +225,9 @@ mint**; heavy enrichment defers to `card_enriched`. NEVER mint → slow work →
 deterministic (counter = max-over-log + 1). All Layer-1 card events are main-task-written; background
 Layer 5 slow workers never reserve ids or append Card lifecycle events: they return bounded in-memory
 proposal/build results and the main task revalidates and commits under the normal lock/CAS boundary.
+Here “atomic” covers only reserving and appending the `card_added` mint. The later
+`node_building.card_id` claim is a separate append and is not one cross-process atomic/CAS transaction
+with the mint; §0.0.1 records that shipped limitation and its exact-retry recovery behavior.
 
 **`card_id` on `Idea` ONLY (not `Node`).** It flows through `node_created` for free
 (`durable_idea_payload` + replay `Idea(**d["idea"])`). `_derive_cards` links via `idea.card_id`. Never
@@ -456,7 +464,7 @@ data field). Decide at review whether Layer 1 introduces any knob at all (leanin
 > Q3 → **all Layer-1 card events are main-task-written; NONE are `BACKGROUND_APPENDABLE`** (a monotonic
 > `card_id` cannot be background-minted); Q4 → defer K-1 foresight rejects.
 
-## 12. Mega-review consolidation (2026-07-20) — FINAL & AUTHORITATIVE
+## 12. Mega-review consolidation (2026-07-20) — historical target contract
 
 An 18-agent mega-review ran a **design + independent adversarial verifier** for each of eight targets —
 the concurrent producer/consumer **core** (spans L2/L3/L5), **L2** two-pools, **L3** card-driven
@@ -465,8 +473,10 @@ board UX, a cross-cutting **search-quality** lane, and **L1 residuals** (cost/se
 Every layer came back **sound-with-fixes** (46 confirmed flaws total); a consolidation pass resolved the
 cross-layer interlocks and a finalize pass produced the build contract below.
 
-**This section is the authoritative build contract. Where it conflicts with §3–§8 or §11, §12 wins.**
-It extends §0.5; it does **not** loosen the §1 invariants. Highlights that overturn earlier text:
+**This section was the authoritative build contract on 2026-07-20.** It still supersedes the earlier
+proposal text in §3–§8 and §11, but the current implementation ledger in §0.0.1 and explicit
+post-review caveats supersede it where shipped behavior differs. It extends §0.5; it does **not**
+loosen the §1 invariants. Highlights that overturned earlier text:
 `card_added` is monotonic **main-task-only** (not background-appendable — §5's "BACKGROUND_APPENDABLE-
 eligible" wording is retracted); `_derive_cards`' internal order is **merge-union BEFORE verdict** (§6's
 step order is retracted); `node_building` must **carry `card_id`** and the card is minted for speculative

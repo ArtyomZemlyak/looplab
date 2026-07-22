@@ -28,16 +28,16 @@ A candidate solution is a **node**. Each turn expands one node into a child; the
 hand work around the wheel, and every arrow also appends one event to `events.jsonl`.
 
 <div class="ll-loopsvg">
-<svg viewBox="0 0 960 330" role="img" aria-label="The LoopLab loop: Researcher to Developer to Sandbox to Evaluator, the policy picks the next node and repeats, with repair and merge edges, ending in a confirmed champion." style="width:100%;height:auto;font-family:var(--md-code-font-family)">
+<svg viewBox="0 0 960 330" role="img" aria-label="The LoopLab loop: Researcher to Developer to Sandbox to Evaluator, then the configured Card, agent, or policy authority picks the next action and repeats, with repair and merge edges, ending in a confirmed champion." style="width:100%;height:auto;font-family:var(--md-code-font-family)">
   <defs>
     <marker id="a" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto"><path d="M1 1 L7 4.5 L1 8" fill="none" style="stroke:var(--md-default-fg-color--light)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="ar" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto"><path d="M1 1 L7 4.5 L1 8" fill="none" style="stroke:#c0554f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="ag" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto"><path d="M1 1 L7 4.5 L1 8" fill="none" style="stroke:#b5842a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
 
-  <!-- return arc: Evaluator -> Researcher (policy picks next) -->
+  <!-- return arc: Evaluator -> Researcher (configured selection authority picks next) -->
   <path d="M760 120 C 760 46 470 40 250 40 C 140 40 95 66 95 118" fill="none" style="stroke:var(--md-default-fg-color--light)" stroke-width="1.7" stroke-dasharray="1 0" marker-end="url(#a)"/>
-  <text x="430" y="32" text-anchor="middle" font-size="12" style="fill:var(--md-default-fg-color--light)">policy picks the next node · repeat ↺</text>
+  <text x="430" y="32" text-anchor="middle" font-size="12" style="fill:var(--md-default-fg-color--light)">Card → agent → policy authority · repeat ↺</text>
 
   <!-- forward arrows -->
   <path d="M170 150 L212 150" fill="none" style="stroke:var(--md-default-fg-color--light)" stroke-width="1.8" marker-end="url(#a)"/>

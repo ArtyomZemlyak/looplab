@@ -61,7 +61,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
                           append to events.jsonl
                        (RunState authority · serialized)
                                      │
-                  policy picks the next node → repeat
+             Card queue → agent pilot → policy fallback → repeat
                                      │
                        confirm top-k → champion
 ```

@@ -78,7 +78,7 @@
     <text x="1320" y="466" text-anchor="middle" fill="#4fb8ac">⚙ SCORE</text>
   </g>
   <g font-family="'DejaVu Sans',sans-serif" text-anchor="middle">
-    <text x="360"  y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Policy</text><text x="360"  y="511" font-size="11.5" fill="#9dabb3">pick node to expand</text><text x="360"  y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">greedy tree · pure fn</text>
+    <text x="360"  y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Select authority</text><text x="360"  y="511" font-size="11.5" fill="#9dabb3">Card → agent → policy</text><text x="360"  y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">explicit priority · fenced</text>
     <text x="700"  y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Create node</text><text x="700"  y="511" font-size="11.5" fill="#9dabb3">apply patch · git commit</text><text x="700"  y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">edit-surface gate</text>
     <text x="1010" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Sandbox</text><text x="1010" y="511" font-size="11.5" fill="#9dabb3">run · isolated · timed</text><text x="1010" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">one search eval · tree-kill</text>
     <text x="1320" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Evaluate</text><text x="1320" y="511" font-size="11.5" fill="#9dabb3">raw metric · trust signals</text><text x="1320" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">holdout / confirm when available</text>
@@ -174,7 +174,7 @@
     <!-- budget spent -->
     <g><rect x="1412" y="441" width="100" height="21" rx="10" fill="#0c1219" stroke="#2d4653"/><text x="1462" y="452" text-anchor="middle" dominant-baseline="central" fill="#93a4ab">budget spent</text></g>
     <!-- return -->
-    <g><rect x="452" y="609" width="616" height="22" rx="11" fill="#0e1721" stroke="#2d4653"/><text x="760" y="621" text-anchor="middle" dominant-baseline="central" fill="#9dabb3">policy picks the next node ↺   ·   RunState = deterministic event fold</text></g>
+    <g><rect x="452" y="609" width="616" height="22" rx="11" fill="#0e1721" stroke="#2d4653"/><text x="760" y="621" text-anchor="middle" dominant-baseline="central" fill="#9dabb3">Card → agent → policy picks next ↺   ·   RunState = deterministic event fold</text></g>
     <!-- retrieve -->
     <g><rect x="1152" y="590" width="112" height="21" rx="10" fill="#0e1721" stroke="#23394f"/><text x="1208" y="601" text-anchor="middle" dominant-baseline="central" fill="#5aa6f5">retrieve · tools</text></g>
     <!-- store -->

@@ -3960,7 +3960,7 @@ def _proposal_card_concept_source(
 
 
 def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
-    """Tolerantly decode one atomic, node-less card action snapshot."""
+    """Tolerantly decode one bounded, node-less card action snapshot."""
     idea = d.get("idea") if isinstance(d.get("idea"), dict) else d
     snapshot: dict = {}
     owns_action = False

@@ -71,7 +71,7 @@ box("novelty",410,LY,210,LH,"NOVELTY STAGE","llm",C.r,["shipped mode: LLM if cli
 box("implement",660,LY,300,LH,"DEVELOPER","D",C.d,["stages → plan → implement (fresh repo node)","repair = 1 session · every edit auto-compiled"]);
 box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run one isolated search evaluation","repair a mechanical crash in place"]);
 box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → host-graded holdout when available","then the configured rigor layer (below)"]);
-box("refine",1760,LY,300,LH,"REFINE","R",C.r,["policy picks next move over the DAG","improve · merge · ablate · debug"]);
+box("refine",1760,LY,300,LH,"REFINE","R",C.r,["Card → agent → policy selects next move","improve · merge · ablate · debug"]);
 
 /* ============ detail stacks under each loop stage ============ */
 const DY=300;
@@ -198,7 +198,7 @@ edge("novelty","r","implement","l",{c:C.sig,wide:1});
 edge("implement","r","evaluate","l",{c:C.sig,wide:1});
 edge("evaluate","r","score","l",{c:C.sig,wide:1});
 edge("score","r","refine","l",{c:C.sig,wide:1});
-edge("refine","t","propose","t",{c:C.sig,label:"↺ next node — until budget",arc:110});
+edge("refine","t","propose","t",{c:C.sig,label:"↺ next action — until budget",arc:110});
 // stage → its detail head (down)
 edge("propose","b","f_meta","t",{c:C.mem,thin:1,dash:1,label:"reads"});
 edge("novelty","b","n_sem","t",{c:C.r,thin:1});

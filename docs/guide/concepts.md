@@ -23,12 +23,14 @@ A run is an `Engine` (orchestrator) driving four roles in a cycle:
 5. **Evaluator** — scores it (cross-validation, a held-out grader, or a repo's own eval command);
    then the trust gates + optional multi-seed confirmation decide what may be selected best.
 
-The **policy** then picks the next node to expand, and the cycle repeats until a budget is hit. At
-the end, the top candidates can be **confirmed** under multiple seeds, and the best becomes the
-**champion**.
+The engine then chooses the next macro action through one explicit authority order: the receipt-backed
+**Card queue** when `card_driven_selection` is enabled, otherwise the unified-agent **pilot** when
+`agent_drives_actions` is enabled, otherwise the configured search **policy**. The cycle repeats until
+a budget is hit. At the end, the top candidates can be **confirmed** under multiple seeds, and the best
+becomes the **champion**.
 
 ```
-Researcher → Novelty gate → Developer → Sandbox → Evaluator → trust/confirm → policy picks next → repeat → champion
+Researcher → Novelty gate → Developer → Sandbox → Evaluator → trust/confirm → Card | agent | policy → repeat → champion
 ```
 
 ## Event log = canonical replay state
@@ -334,8 +336,9 @@ allocation or resume) that streams the node's live agent-trace right away, then 
 
 ## Search policies
 
-The policy decides which node to expand next. It's pluggable (`make_policy`) and swapping it changes
-no other part of the loop:
+The policy defines deterministic node-expansion semantics and is the direct selector when both Card
+and agent action ownership are disabled. It is pluggable (`make_policy`); the Card selector also uses
+the configured policy's legal lanes and budget semantics rather than inventing a separate search tree:
 
 | `policy` | Behavior |
 |---|---|

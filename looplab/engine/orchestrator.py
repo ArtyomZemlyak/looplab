@@ -3739,8 +3739,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "footprint": action["footprint"],
             "steering_context": bounded_steering,
             "ownership_receipt": receipt,
-            # Full normalized Idea identity is a separate crash-reuse/dedupe proof. The v1 Card action
-            # deliberately stays compact, but two repo rationales or implementation budgets must not
+            # Full normalized Idea identity is a separate crash-reuse/dedupe proof. The receipt-bound
+            # Card action deliberately stays compact, but two repo rationales or implementation budgets must not
             # collapse merely because their params/profile happen to match.
             "proposal_ref": proposal_ref,
             **({"implementation_ref": implementation_ref} if implementation_ref else {}),

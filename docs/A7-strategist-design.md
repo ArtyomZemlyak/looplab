@@ -196,13 +196,14 @@ via the existing structured-output path (`llm.complete_tool` / `parse.parse_stru
 ## 7. Config (`config.Settings`)
 
 ```python
-strategist_backend: str = "off"      # "off"(default) | "rule" | "llm"   — config-first
+strategist_backend: str = "agent"    # "off" | "rule" | "llm" | "agent" — config-first
 strategist_every:   int = Field(default=3, ge=1)   # consult cadence (created nodes)
 # existing knobs (policy, ablate_every, developer_backend, n_seeds, max_nodes, …) become the
 # *defaults* the Strategist may override within; with backend="off" they're authoritative (== today).
 ```
-Exposed in the Settings UI (`settingsSchema.js`) under "Search & policy" as a preset
-(`off / rule / llm`) + cadence. No new required deps (`rule` is stdlib; `llm` reuses the LLM stack).
+Exposed by `serve/settings_ui_schema.json` in the Settings UI under "Strategist & operators" as
+`off / rule / llm / agent` (the Settings default is `agent`) plus cadence. No new required deps
+(`rule` is stdlib; `llm` and `agent` reuse the LLM stack).
 
 ---
 
