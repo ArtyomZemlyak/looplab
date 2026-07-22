@@ -56,7 +56,7 @@ from looplab.engine.evaluate import EvaluateMixin
 from looplab.engine.node_build import NodeBuildMixin
 from looplab.engine.proposal_cues import ProposalCuesMixin, normalize_steering_context
 from looplab.engine.resources import (ResourceSchedulingMixin, cuda_visible_device_tokens,
-                                      detect_gpu_inventory)
+                                      default_gpu_host_lease_path, detect_gpu_inventory)
 from looplab.engine.speculation import SpeculationMixin
 from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.asha_monitor import AshaMonitorMixin
@@ -1082,6 +1082,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         )
         self._llm_lane_limits_explicit = False
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
+        # Every local Engine process otherwise sees the same physical devices as independently free.
+        # Hold one crash-released OS lease while this Engine has any GPU reservation. It intentionally
+        # serializes separate Runs at pool granularity because ordinal/UUID/MIG aliases are not safely
+        # comparable across independently configured CUDA_VISIBLE_DEVICES environments.
+        self._gpu_host_lease_path = (
+            default_gpu_host_lease_path() if self._gpu_ids else None)
+        self._gpu_host_lease_handle = None
         self._gpu_lock = threading.Lock()
         self._gpu_condition = threading.Condition(self._gpu_lock)
         self._gpu_epoch = 0

@@ -14,11 +14,13 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 
 
 class _Pool(ResourceSchedulingMixin):
-    def __init__(self, ids=(0, 1), mem=None, *, parallel=2, physical=None):
+    def __init__(self, ids=(0, 1), mem=None, *, parallel=2, physical=None, lease_path=None):
         self._gpu_ids = list(ids)
         self._gpu_physical_ids = physical or {gpu: str(gpu) for gpu in ids}
         self._gpu_mem = dict(mem or {})
         self._free_gpus = list(ids)
+        self._gpu_host_lease_path = lease_path
+        self._gpu_host_lease_handle = None
         self._gpu_lock = threading.Lock()
         self._gpu_condition = threading.Condition(self._gpu_lock)
         self._gpu_epoch = 0
@@ -90,6 +92,38 @@ def test_all_or_nothing_first_fit_and_overdeclaration_clamp():
     pool._release_gpus([1, 2])
     # 99 GPUs / impossible memory clamps to the three-device, 8-GiB-per-device pool envelope.
     assert pool._acquire_gpus(99, 99_999) == [0, 1, 2]
+
+
+def test_host_gpu_pool_lease_serializes_engines_and_releases_after_last_device(tmp_path):
+    lease = tmp_path / "gpu-pool.lock"
+    first = _Pool(ids=(0, 1), lease_path=lease)
+    second = _Pool(ids=(0, 1), lease_path=lease)
+
+    assert first._acquire_gpus(1) == [0]
+    assert first._acquire_gpus(1) == [1]       # one Engine may still fill its own visible pool
+    assert second._acquire_gpus(1) is None     # a separate Engine cannot double-allocate it
+    first._release_gpus([0])
+    assert second._acquire_gpus(1) is None     # lease lives until the final local reservation ends
+    first._release_gpus([1])
+    assert second._acquire_gpus(1) == [0]
+    second._release_gpus([0])
+
+
+def test_serial_unspecified_eval_holds_whole_pool_without_changing_visibility(tmp_path):
+    lease = tmp_path / "gpu-pool.lock"
+    serial = _Pool(ids=(0, 1), parallel=1, lease_path=lease)
+    sibling = _Pool(ids=(0, 1), parallel=2, lease_path=lease)
+
+    reservation = serial._try_reserve_node_resources(_node(0, None))
+    assert reservation is not None
+    assert reservation["count"] == 0 and reservation["pin"] is False
+    assert reservation["whole_pool_unpinned"] is True
+    assert reservation["gpu_ids"] == [0, 1]   # internal ownership, still an unpinned child env
+    assert serial._resource_eval_env(reservation) is None
+    assert sibling._acquire_gpus(1) is None
+    serial._release_gpus(reservation["gpu_ids"])
+    assert sibling._acquire_gpus(1) == [0]
+    sibling._release_gpus([0])
 
 
 def test_all_or_nothing_wait_has_no_lost_wakeup_under_concurrent_releases():

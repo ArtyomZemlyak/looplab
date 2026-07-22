@@ -143,6 +143,10 @@ def test_confirm_phase_skips_already_run_seeds(tmp_path):
 def test_confirm_seed_reserves_and_releases_through_shared_gpu_pool(tmp_path):
     eng = _noisy_engine(tmp_path / "confirm-pool", confirm_top_k=1, confirm_seeds=1,
                         max_nodes=1)
+    eng._gpu_ids = [0]
+    eng._gpu_physical_ids = {0: "7"}
+    eng._gpu_mem = {0: 16_000}
+    eng._free_gpus = [0]
     eng.store.append("run_started", {
         "run_id": "confirm-pool", "task_id": "toy", "direction": "min"})
     eng.store.append("node_created", {
@@ -157,7 +161,7 @@ def test_confirm_seed_reserves_and_releases_through_shared_gpu_pool(tmp_path):
     async def reserve(nd, *, resource_pin=None, wait_once=False):
         calls.append(("reserve", nd.id))
         request = eng._resource_request_for_node(nd, resource_pin=resource_pin)
-        return {**request, "gpu_ids": [7]}
+        return {**request, "gpu_ids": [0]}
 
     def release(ids):
         calls.append(("release", list(ids)))
@@ -170,7 +174,7 @@ def test_confirm_seed_reserves_and_releases_through_shared_gpu_pool(tmp_path):
     eng._release_gpus = release
     eng._run_eval = fake_run_eval
     anyio.run(eng._run_confirm_seed, node, eng.confirm_seed_base)
-    assert calls == [("reserve", 0), ("run", "7", "full"), ("release", [7])]
+    assert calls == [("reserve", 0), ("run", "7", "full"), ("release", [0])]
 
 
 def test_eval_gpu_pin_refusal_terminalizes_once_and_dispatch_releases(tmp_path):

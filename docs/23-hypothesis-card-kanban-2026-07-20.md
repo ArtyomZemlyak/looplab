@@ -18,7 +18,7 @@ truth and wins wherever the original target text differs from shipped behavior.
 | Card read model | native monotonic Card mint/link under a process-local `_id_lock` and log-tail CAS; a fresh Card mint + build claim is one crash-atomic batch, while reuse is one CAS append; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; bounded per-event input and public projection; durable request/done queue | The folded `cards_enriched` replay journal is not yet capped |
 | Enrichment | structured steering snapshots; memo/claim/lesson refs; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays; schema seams for novelty/cross-run/concept projection | proposal-time selectable Cards do not yet carry trusted novelty/coverage memberships, so those ranking terms are zero until a linked Node supplies later evidence |
 | Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
-| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, fail-closed zero-device admission, confirm admission, isolated Card producer/consumer | GPU leases remain process-local; independently started Engine processes can still contend for the same host device |
+| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, fail-closed zero-device admission, confirm admission, isolated Card producer/consumer; local Engine processes sharing one OS-user filesystem namespace hold a crash-released pool-wide lease, so separate Runs cannot double-allocate the same GPU | The deliberately conservative lease serializes GPU-owning Runs; cross-user/container/host scheduling remains the external execution backend's responsibility |
 | Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events |
 
 ### Stage progress ledger (validated implementation, 2026-07-22)
@@ -620,6 +620,13 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     `anyio.Event` is a lost-wakeup deadlock and is **rejected**.
 19. **CPU-only (`gpus=0`) cards must not head-of-line-block** behind a stalled large-GPU card: admit by
     **pop-first-fitting** (scan for the first eval whose footprint currently fits).
+    Local Engine processes also take one non-blocking, OS-released lease for the complete visible GPU
+    pool while any lifecycle reservation is live. This pool-wide granularity deliberately avoids unsafe
+    ordinal/UUID/MIG alias matching: concurrency within a Run remains inventory-packed, while a sibling
+    Run waits and polls. A serial UNSPECIFIED evaluation reserves the whole local pool internally but
+    leaves its child CUDA visibility untouched. The lease coordinates only processes that share the same
+    OS-user temp/filesystem namespace; containers, different users, and remote workers require the
+    external scheduler described in [§20](20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md).
 
 **D — Card schema & the fold projection:**
 20. `_derive_cards` internal order mirrors `_derive_hypotheses` **exactly**: (1) seed + node-link (id

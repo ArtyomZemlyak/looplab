@@ -7,10 +7,14 @@ visible logical set, admission falls back to count-only instead of guessing.
 """
 from __future__ import annotations
 
+import errno
 import os
+import stat
+import tempfile
 import threading
 from collections.abc import Mapping
-from typing import Optional
+from pathlib import Path
+from typing import BinaryIO, Optional
 
 import anyio
 
@@ -20,6 +24,99 @@ from looplab.runtime.sandbox import GpuPinUnenforceable, SECRET_ENV
 
 
 _CUDA_DISABLED_SELECTORS = frozenset({"-1", "none", "nodevfiles", "void"})
+
+
+def default_gpu_host_lease_path() -> Path:
+    """Return the per-OS-user lease that serializes local Engine GPU pools.
+
+    A single lease is deliberately more conservative than one file per selector.  Two processes can
+    name the same device by ordinal, GPU UUID, or MIG UUID; one pool-wide file cannot accidentally
+    treat those aliases as distinct hardware.  Container/OS-user boundaries still require their own
+    external scheduler because they need not share this filesystem namespace.
+    """
+    suffix = str(os.getuid()) if hasattr(os, "getuid") else "user"
+    return Path(tempfile.gettempdir()) / f"looplab-gpu-pool-{suffix}.lock"
+
+
+def _try_acquire_gpu_host_lease(path: Path) -> Optional[BinaryIO]:
+    """Try to lock ``path`` without blocking; return its live descriptor or ``None`` on contention.
+
+    The descriptor is the ownership token: a normal release closes it explicitly and an abrupt process
+    exit lets the OS release it.  Unsupported or untrustworthy locking fails closed because silently
+    falling back to the process-local free list would reintroduce GPU over-allocation.
+    """
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise GpuPinUnenforceable(
+            f"host GPU allocation lease cannot be opened: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        entry = path.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(entry.st_mode)
+                or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)):
+            raise GpuPinUnenforceable(
+                "host GPU allocation lease is not a stable regular file")
+        if opened.st_size == 0:
+            os.write(descriptor, b"\0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        handle = os.fdopen(descriptor, "r+b", buffering=0)
+        descriptor = -1
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            contention = (
+                isinstance(exc, BlockingIOError)
+                or exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+                or getattr(exc, "winerror", None) in {33, 36, 158}
+            )
+            if contention:
+                handle.close()
+                return None
+            raise GpuPinUnenforceable(
+                f"host GPU allocation lease is unsupported: {exc}") from exc
+        except (ImportError, AttributeError, NotImplementedError, ValueError) as exc:
+            raise GpuPinUnenforceable(
+                f"host GPU allocation lease is unsupported: {exc}") from exc
+        return handle
+    except BaseException:
+        try:
+            if "handle" in locals():
+                handle.close()
+            elif descriptor >= 0:
+                os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _release_gpu_host_lease(handle: BinaryIO) -> None:
+    """Release a live host lease; closing the descriptor is the authoritative crash-safe backstop."""
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, ImportError, AttributeError, NotImplementedError, ValueError):
+        pass
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
 
 
 def cuda_visible_device_tokens(value: object) -> Optional[list[str]]:
@@ -111,11 +208,13 @@ class ResourceSchedulingMixin:
         if not hasattr(self, "_gpu_mem"):
             self._gpu_mem = {}
         if not hasattr(self, "_free_gpus"):
-            # CODEX AGENT: this free list is process-local, while the server can run one Engine process
-            # per run. Concurrent runs therefore initialize the same visible physical GPUs as free and
-            # can reserve them simultaneously. Use a host-wide lease keyed by stable GPU identity with
-            # owner-liveness/crash cleanup, or explicitly serialize GPU-owning runs.
             self._free_gpus = list(self._gpu_ids)
+        if not hasattr(self, "_gpu_host_lease_path"):
+            # Focused mixin users stay process-local unless they opt in. Engine always installs the
+            # default path when it detects a GPU pool.
+            self._gpu_host_lease_path = None
+        if not hasattr(self, "_gpu_host_lease_handle"):
+            self._gpu_host_lease_handle = None
         if not hasattr(self, "_gpu_lock"):
             self._gpu_lock = threading.Lock()
         if not hasattr(self, "_gpu_condition"):
@@ -250,7 +349,7 @@ class ResourceSchedulingMixin:
         # assignment may differ after a release/retry even when the Card source footprint is unchanged.
         admitted_source = {
             key: value for key, value in reservation.items()
-            if key not in {"gpu_ids", "pin"}
+            if key not in {"gpu_ids", "pin", "whole_pool_unpinned"}
         }
         expected_source = {key: value for key, value in expected.items() if key != "pin"}
         return admitted_source == expected_source
@@ -284,6 +383,12 @@ class ResourceSchedulingMixin:
                        or self._gpu_mem.get(gpu, -1) >= requested_mem]
             if len(fitting) < count:
                 return None
+            lease_path = self._gpu_host_lease_path
+            if lease_path is not None and self._gpu_host_lease_handle is None:
+                handle = _try_acquire_gpu_host_lease(Path(lease_path))
+                if handle is None:
+                    return None
+                self._gpu_host_lease_handle = handle
             chosen = fitting[:count]
             chosen_set = set(chosen)
             self._free_gpus[:] = [gpu for gpu in self._free_gpus if gpu not in chosen_set]
@@ -301,6 +406,11 @@ class ResourceSchedulingMixin:
                     self._free_gpus.append(gpu)
             order = {gpu: pos for pos, gpu in enumerate(self._gpu_ids)}
             self._free_gpus.sort(key=lambda gpu: order[gpu])
+            if (len(self._free_gpus) == len(self._gpu_ids)
+                    and self._gpu_host_lease_handle is not None):
+                handle = self._gpu_host_lease_handle
+                self._gpu_host_lease_handle = None
+                _release_gpu_host_lease(handle)
             self._gpu_epoch += 1
             self._gpu_condition.notify_all()
 
@@ -334,10 +444,22 @@ class ResourceSchedulingMixin:
         # a marker (rather than None) avoids polling an epoch that can never move.
         if request["required_unavailable"]:
             return {**request, "gpu_ids": []}
-        gpu_ids = self._acquire_gpus(request["count"], request["gpu_mem_mib"])
+        reserve_count = request["count"]
+        whole_pool_unpinned = bool(
+            request["unspecified"] and reserve_count == 0 and self._gpu_ids)
+        if whole_pool_unpinned:
+            # Legacy serial execution intentionally leaves CUDA visibility untouched so one candidate
+            # may use the whole box. Reserve every logical device internally for the same lifecycle;
+            # otherwise an unpinned serial Run could bypass both the local pool and the host lease.
+            reserve_count = len(self._gpu_ids)
+        gpu_ids = self._acquire_gpus(reserve_count, request["gpu_mem_mib"])
         if gpu_ids is None:
             return None
-        return {**request, "gpu_ids": gpu_ids}
+        return {
+            **request,
+            "gpu_ids": gpu_ids,
+            **({"whole_pool_unpinned": True} if whole_pool_unpinned else {}),
+        }
 
     async def _wait_reserve_node_resources(self, node, *, resource_pin=None,
                                            wait_once: bool = False) -> Optional[dict]:
@@ -399,7 +521,8 @@ class ResourceSchedulingMixin:
             # durable terminal/retry contracts before any candidate process is started.
             raise GpuPinUnenforceable(
                 "explicit GPU requirement cannot be satisfied: no GPUs were detected")
-        if not reservation or (not reservation.get("cpu_only") and not reservation.get("gpu_ids")):
+        if (not reservation or reservation.get("whole_pool_unpinned")
+                or (not reservation.get("cpu_only") and not reservation.get("gpu_ids"))):
             return dict(base) if base is not None else None
         # SECURITY (source-side strip): `inherit_host` shovels the host environment into the eval env so
         # a pinned/CPU reservation can override CUDA_VISIBLE_DEVICES. But the host env holds LLM_API_KEY /
