@@ -105,7 +105,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
     # CODEX AGENT: curated settings expose the two independent canonical axes; legacy aliases still
-    # parse in raw config/snapshots but must not remain as competing operator controls.
+    # parse in raw config/snapshots but must not remain as competing operator controls. Eval width is
+    # per Run, while the conservative same-user host lease is a separate cross-Run admission layer.
     assert {"eval_parallel", "llm_parallel"} <= set(by_key)
     assert by_key["card_driven_selection"]["type"] == "bool"
     assert "pinned at run start" in by_key["card_driven_selection"]["help"]
@@ -117,6 +118,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert "speculation_gate_receipt" not in by_key
     assert {"max_parallel", "parallel_build"}.isdisjoint(by_key)
     assert "0 = AUTO at launch" in by_key["eval_parallel"]["help"]
+    assert "inside one Run" in by_key["eval_parallel"]["help"]
+    assert "host lease" in by_key["eval_parallel"]["help"]
     assert "Live Strategist/operator updates settle 0" in by_key["llm_parallel"]["help"]
     assert "agents" not in by_key["max_eval_timeout"]
     assert "hard ceiling" in by_key["max_eval_timeout"]["help"].lower()
