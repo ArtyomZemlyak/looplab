@@ -1265,6 +1265,11 @@ function _cardControlReflected(card, kind, patch) {
     // PREFIX of the submitted text as reflected — otherwise the optimistic override (and its aria-busy
     // pending state) would never clear when the statement was clipped.
     if (typeof card.statement !== 'string' || typeof patch.statement !== 'string') return false
+    // CODEX AGENT: prefix equality is already true before the command for a common edit such as
+    // "foo" -> "foobar". Any unrelated SSE frame can therefore clear the optimistic value and
+    // waiting-for-fold fence while the edit is still unobserved, permitting a second control against
+    // stale UI truth. Bind reflection to the command/event sequence (or returned normalized value);
+    // the pre-existing statement cannot be evidence that this particular write landed.
     return card.statement === patch.statement
       || (card.statement.length > 0 && patch.statement.startsWith(card.statement))
   }

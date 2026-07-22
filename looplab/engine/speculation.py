@@ -1033,6 +1033,11 @@ class SpeculationMixin:
             return
         try:
             try:
+                # CODEX AGENT: abandon_on_cancel=False makes pause/abort wait for the entire blocking
+                # Developer/provider call even after the main task has durably closed this request as
+                # stale. The session's exit gate still counts _spec_build_inflight, so an unavailable
+                # provider can make an operator stop take the full transport timeout. Use a genuinely
+                # cancellable producer or quarantine/abandon this isolated role pair after cancellation.
                 result = await anyio.to_thread.run_sync(
                     functools.partial(self._build_requested_card, dict(request), roles),
                     abandon_on_cancel=False,
