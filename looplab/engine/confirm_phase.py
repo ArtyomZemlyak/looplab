@@ -70,6 +70,11 @@ class ConfirmPhaseMixin:
             return None
         # Confirmation uses the FULL eval profile (robust check on the leaders),
         # regardless of the cheaper profile the Researcher used during search.
+        # CODEX AGENT: this clock starts BEFORE the potentially unbounded resource-wait loop below, yet
+        # its elapsed value is persisted as `confirm_eval.eval_seconds` and folded into the immutable
+        # eval budget. GPU queue contention therefore consumes `max_eval_seconds` as if the model had
+        # executed and can skip later confirmation candidates without doing that work. Track queue time
+        # separately, or start the billed eval clock only after the reservation is admitted/current.
         _t0 = time.time()
         # Keep the per-seed events INSIDE the span so they carry its trace/span id
         # (events<->spans UI join), consistent with the _evaluate path.

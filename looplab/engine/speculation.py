@@ -1200,6 +1200,11 @@ class SpeculationMixin:
         )
         if card_id is None:
             return True, False
+        # CODEX AGENT: the Card commit above and these proposal-audit events are separate appends. A crash
+        # or append failure after EV_CARD_ADDED leaves an executable durable Card whose novelty/governance
+        # audit prefix was silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot
+        # repair it. Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
+        # durable proposal receipt plus recovery gate that keeps the Card non-selectable until it is closed.
         for event_type, data, trace_id, span_id in result.audit_events:
             self.store.append(
                 event_type,

@@ -1574,6 +1574,11 @@ function _CardKanbanCard({
 }
 
 function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
+  // CODEX AGENT: all three mutation trackers below are keyed only by Card id and survive a `runId`
+  // change. Card ids are content-derived and can legitimately repeat across runs, so a late response
+  // from run A can clear/replace optimistic state for the same id in run B; `sentEditRef` can also supply
+  // B with A's edit baseline. Key this state by run+generation and fence async completions, or remount/reset
+  // the board atomically on runId before accepting another control.
   const [optim, setOptim] = useState({})
   const inFlight = useRef(new Set())
   // Last edit statement SUBMITTED per card id. It outlives the optimistic override (which clears on a
