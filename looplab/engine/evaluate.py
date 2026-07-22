@@ -85,6 +85,14 @@ class EvaluateMixin:
             events_at_start = self.store.read_all()
             state = fold(events_at_start)
             node = state.nodes.get(node_id)
+            # The dispatcher checks this before and after resource admission, but _evaluate is also a
+            # defensive public seam used by recovery/tests. An operator Card drop that predates this
+            # worker must close the pending lifecycle at zero cost; the watcher below intentionally
+            # considers only post-start events so it can charge genuinely consumed compute.
+            prestart_stop = getattr(self, "_skip_if_aborted", None)
+            if node is not None and callable(prestart_stop) \
+                    and prestart_stop({"node_id": node_id}, state):
+                return
             # A batch is selected from an earlier fold. Before this worker actually starts, reset
             # (especially implement/propose), abort, tombstone, pause or finish may have won. Never
             # evaluate blank/not-yet-rebuilt code or terminalize a superseded lifecycle.

@@ -426,9 +426,8 @@ def test_active_card_alias_resolution_fails_closed_for_ambiguous_owner():
 @pytest.mark.parametrize(("event", "before_start"), [
     ({"id": "card-1", "reason": "engine decision", "dropped_by": "engine"}, False),
     ({"id": "card-other", "reason": "stop now", "dropped_by": "operator"}, False),
-    ({"id": "card-1", "reason": "already visible", "dropped_by": "operator"}, True),
 ])
-def test_card_drop_watcher_ignores_non_operator_unrelated_and_prestart_events(
+def test_card_drop_watcher_ignores_non_operator_and_unrelated_events(
         tmp_path, event, before_start):
     sandbox = _BlockingCardEvalSandbox()
     eng = _engine(tmp_path / f"ignored-{event['dropped_by']}-{event['id']}-{before_start}",
@@ -443,6 +442,23 @@ def test_card_drop_watcher_ignores_non_operator_unrelated_and_prestart_events(
 
     node = fold(eng.store.read_all()).nodes[0]
     assert node.status is NodeStatus.evaluated and node.metric == 0.25
+
+
+def test_operator_card_drop_before_eval_closes_pending_node_without_compute(tmp_path):
+    sandbox = _BlockingCardEvalSandbox()
+    eng = _engine(tmp_path / "prestart-operator-card-drop", sandbox=sandbox)
+    _seed_pending_card_eval(eng)
+    eng.store.append("card_dropped", {
+        "id": "card-1", "reason": "already visible", "dropped_by": "operator",
+    })
+
+    anyio.run(eng._evaluate, 0, anyio.CapacityLimiter(1), None)
+
+    assert sandbox.started.is_set() is False
+    terminal = [event for event in eng.store.read_all() if event.type == "node_failed"][-1]
+    assert terminal.data["reason"] == "card_dropped"
+    assert terminal.data["eval_seconds"] == 0.0
+    assert fold(eng.store.read_all()).nodes[0].status is NodeStatus.failed
 
 
 class _BlockingProbeSandbox:

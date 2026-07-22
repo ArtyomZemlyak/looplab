@@ -26,6 +26,7 @@ from looplab.events.types import (
     EV_NODE_RESET,
     EV_NOVELTY_GRADED,
     EV_NOVELTY_REJECTED,
+    EV_PAUSE,
 )
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
@@ -380,12 +381,20 @@ def test_batch_prereservations_mint_on_main_thread_and_dedupe_exact_active_work(
     main_thread = threading.get_ident()
     append_threads: list[tuple[str, int]] = []
     original_append = engine.store.append
+    original_append_many = engine.store.append_many
 
     def _recording_append(event_type, data, **kwargs):
         append_threads.append((event_type, threading.get_ident()))
         return original_append(event_type, data, **kwargs)
 
     monkeypatch.setattr(engine.store, "append", _recording_append)
+
+    def _recording_append_many(records, **kwargs):
+        append_threads.extend(
+            (event_type, threading.get_ident()) for event_type, _data in records)
+        return original_append_many(records, **kwargs)
+
+    monkeypatch.setattr(engine.store, "append_many", _recording_append_many)
 
     # Production does this serially before fan-out: monotonic card events are never worker-written.
     reservations = [
@@ -445,6 +454,32 @@ def test_batch_prereservations_mint_on_main_thread_and_dedupe_exact_active_work(
     card_writes = [thread_id for event_type, thread_id in append_threads
                    if event_type in {EV_CARD_ADDED, EV_NODE_BUILDING}]
     assert card_writes and set(card_writes) == {main_thread}
+
+
+def test_mint_and_build_claim_tail_cas_rejects_a_pause_winning_after_plan(
+        tmp_path, monkeypatch):
+    engine = _engine(tmp_path / "mint-claim-pause")
+    _start(engine)
+    original_append_many = engine.store.append_many
+    append = engine.store.append
+    raced = False
+
+    def _pause_before_batch(records, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            append(EV_PAUSE, {})
+        return original_append_many(records, **kwargs)
+
+    monkeypatch.setattr(engine.store, "append_many", _pause_before_batch)
+    reservation = engine._reserve_node_build(
+        {"kind": "draft"}, idea=_idea("must not cross pause", 4.0))
+
+    assert raced is True
+    assert reservation is None
+    events = engine.store.read_all()
+    assert [event.type for event in events][-1] == EV_PAUSE
+    assert not any(event.type in {EV_CARD_ADDED, EV_NODE_BUILDING} for event in events)
 
 
 def test_invalid_long_and_oversized_batch_ideas_do_not_strand_a_valid_sibling(tmp_path):

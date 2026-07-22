@@ -278,6 +278,16 @@ def test_loop_consolidates_the_board_each_tick_when_enabled():
     assert merges["n"] >= 2                       # ran on the active ticks, before the research cap
 
 
+def test_loop_defers_consolidation_to_main_task_in_card_selection_mode():
+    merges = {"n": 0}
+    stub = _LoopStub([_memo("A"), _memo("B")], cap=2)
+    stub._concurrent_consolidate = True
+    stub.card_driven_selection = True
+    stub._maybe_merge_hypotheses = lambda state: merges.__setitem__("n", merges["n"] + 1)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert merges["n"] == 0
+
+
 def test_loop_does_not_consolidate_when_disabled():
     # Default (flag absent/False): the board consolidation is NOT invoked from the loop (== today).
     merges = {"n": 0}

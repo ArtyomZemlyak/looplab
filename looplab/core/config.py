@@ -1115,8 +1115,9 @@ class Settings(BaseSettings):
     # Concurrent hypothesis-board CONSOLIDATION during the eval window. Repeated research keeps ADDING
     # near-duplicate directions to the open board (each memo registers up to 5 as open hypotheses), so a
     # long eval's board bloats before the between-nodes merge runs. This dedups/merges it on the SAME
-    # background loop so the board stays clean for the next proposal. Advisory-only (EV_HYPOTHESIS_MERGED
-    # is BACKGROUND_APPENDABLE — proven selection-neutral); needs the reflect client + `track_hypotheses`.
+    # background loop so the board stays clean for the next proposal. In Card-driven mode the same merge
+    # changes ownership/readiness, so it is deferred to the joined main-task cadence instead. Needs the
+    # reflect client + `track_hypotheses`.
     # Only active while `concurrent_research` runs the overlap loop. Library default off (== today).
     concurrent_consolidate: bool = True
     # Cadence for the agent-authored run report: regenerate the conclusion-first narrative every N

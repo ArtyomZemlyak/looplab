@@ -2934,17 +2934,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return self._sync_card_enrichments(state)
 
     def _skip_if_aborted(self, a: dict, cur: RunState) -> bool:
-        # Operator stopped this specific node (`node_abort`): skip the eval and record
-        # the effect as a node_failed reason="aborted" (cooperative pre-eval skip; a
-        # mid-eval kill of an in-flight subprocess is the deferred v2). An aborted node
-        # keeps no metric, so replay excludes it from best-selection.
-        if a["node_id"] in cur.aborted_nodes:
-            n = cur.nodes.get(a["node_id"])
+        # Both explicit stop affordances close not-yet-started work at zero cost. A mid-eval abort/drop
+        # is handled by EvaluateMixin's watcher and records the time already spent.
+        node_id = a["node_id"]
+        n = cur.nodes.get(node_id)
+        node_aborted = node_id in cur.aborted_nodes
+        card_dropped = bool(
+            n is not None and self._operator_card_dropped_for_node(cur, n))
+        if node_aborted or card_dropped:
             if n is not None and n.status is NodeStatus.pending:
+                reason = "aborted" if node_aborted else "card_dropped"
+                error = "aborted by operator" if node_aborted else "Card dropped by operator"
                 self.store.append(EV_NODE_FAILED, {
-                    "node_id": a["node_id"], "generation": n.attempt,
-                    "error": "aborted by operator",
-                    "reason": "aborted", "eval_seconds": 0.0})
+                    "node_id": node_id, "generation": n.attempt,
+                    "error": error, "reason": reason, "eval_seconds": 0.0})
             return True
         return False
 
@@ -3043,8 +3046,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # ADDING near-duplicate directions as open hypotheses, so dedup/merge them on the same
                 # loop instead of only between nodes. `_maybe_merge_hypotheses` self-gates (open board
                 # >= 4 AND grown >= 2 since its last pass) so it no-ops until there is something to
-                # merge, and appends only EV_HYPOTHESIS_MERGED (BACKGROUND_APPENDABLE — proven
-                # selection-neutral). NOT abandon_on_cancel — this is REQUIRED for safety, not style:
+                # merge. This overlap is allowed only for legacy Hypothesis/Policy selection;
+                # hypothesis_merged changes native Card ownership/readiness and therefore runs only
+                # later on Card mode's joined main-task cadence. NOT abandon_on_cancel — this is
+                # REQUIRED for safety, not style:
                 # an abandoned merge worker could append EV_HYPOTHESIS_MERGED (and set _last_hyp_merge_n)
                 # AFTER _dispatch_evals returns, concurrently with the main task's serial merge, which
                 # is exactly the race the "background joined before _run_cadences" argument rules out.
@@ -3053,7 +3058,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # thread, not shorter). The self-gate keeps this rare: a converged tick whose board did
                 # not grow no-ops fast. Runs before the research cap so a capped-out window still keeps
                 # the board tidy. No-op when off / no reflect client / board small.
-                if getattr(self, "_concurrent_consolidate", False):
+                if (getattr(self, "_concurrent_consolidate", False)
+                        and not getattr(self, "card_driven_selection", False)):
                     await anyio.to_thread.run_sync(
                         functools.partial(self._maybe_merge_hypotheses, snap))
                 if cap > 0 and calls >= cap:
@@ -3133,15 +3139,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # exact lifecycle plus run-level operator gates before retrying.
                                 waiting = fold(self.store.read_all())
                                 live = waiting.nodes.get(node.id)
+                                if self._skip_if_aborted(a, waiting):
+                                    skip_eval = True
+                                    break
                                 terminal = bool(
                                     getattr(waiting, "paused", False)
                                     or getattr(waiting, "finished", False)
                                     or getattr(waiting, "stop_requested", None)
                                 )
-                                # CODEX AGENT: this admission gate ignores the Card lifecycle. If an
-                                # operator drops a pending Card while it waits for a GPU, its Node is
-                                # still launched and _evaluate ignores that pre-start drop by seq. Close
-                                # it at zero cost here and mirror the check in parallel/Card admission.
                                 lifecycle_current = bool(
                                     live is not None
                                     and live.attempt == generation
@@ -3167,6 +3172,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     continue
                                 admitted = fold(self.store.read_all())
                                 live = admitted.nodes.get(node.id)
+                                if self._skip_if_aborted(a, admitted):
+                                    self._release_gpus(reservation.get("gpu_ids"))
+                                    reservation = None
+                                    skip_eval = True
+                                    break
                                 terminal = bool(
                                     getattr(admitted, "paused", False)
                                     or getattr(admitted, "finished", False)
@@ -3299,6 +3309,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if chosen_node is not None and chosen_reservation is not None:
                                 admitted = fold(self.store.read_all())
                                 live = admitted.nodes.get(chosen_node.id)
+                                if self._skip_if_aborted(pending[chosen_index], admitted):
+                                    self._release_gpus(chosen_reservation.get("gpu_ids"))
+                                    pending.pop(chosen_index)
+                                    slots.release()
+                                    continue
                                 terminal_gate = bool(
                                     getattr(admitted, "paused", False)
                                     or getattr(admitted, "finished", False)
@@ -3918,72 +3933,96 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             source: str = "researcher",
                             implementation_ref: Optional[str] = None,
                             steering_context=(), cross_run_receipt=None):
-        """Reserve one native Card and its node-building owner under process-local ``_id_lock``.
+        """Reserve one native Card and its node-building owner under one log-tail CAS.
 
         The final Idea must already exist: the immutable statement and exact action receipt cannot be
-        minted honestly before proposal. ``card_added`` and ``node_building{card_id}`` are two
-        consecutive appends with no slow work between them; they are not one cross-process log
-        transaction. A crash after the first append leaves a valid orphan prefix, and an exact retry
-        reuses that Card rather than duplicating registration. ``idea``
-        remains optional only for historical internal callers/tests; production creation paths always
-        supply it and therefore always mint/link a native Card.
+        minted honestly before proposal. A new ``card_added`` and its ``node_building{card_id}`` claim
+        are one bounded EventStore batch, so another process can land before or after them, never between.
+        Legacy orphan registrations remain reusable by an exact retry. ``idea`` remains optional only
+        for historical internal callers/tests; production creation paths always supply it.
         """
+        if idea is not None and not isinstance(idea, Idea):
+            idea = Idea.model_validate(idea)
         with self._id_lock:
-            events = self.store.read_all()
-            state = fold(events)
-            if self._node_reservation_slots_remaining(state, events=events) < 1:
-                return None
-            parent_snapshot = self._build_parent_snapshot(state, action)
-            if parent_snapshot is None:
-                return None
-            kind, parents, parent_generations = parent_snapshot
-            node_id = self._node_id_ceiling(events, state)
-            if idea is None:
-                # Compatibility seam for callers that reserve only a node id. No production path uses
-                # this branch once writer-side Card minting is enabled.
-                self.store.append(EV_NODE_BUILDING, {
-                    "node_id": node_id, "operator": kind, "parent_ids": parents,
-                })
-                return _BuildReservation(
-                    state, node_id, kind, parents, parent_generations, None, None)
+            proposal_authority_seq = None
+            for _attempt in range(64):
+                events = self.store.read_all()
+                tail = events[-1].seq if events else -1
+                authority_seq = self._proposal_authority_seq(events)
+                if proposal_authority_seq is None:
+                    proposal_authority_seq = authority_seq
+                elif authority_seq != proposal_authority_seq:
+                    # A control/research/lifecycle event won the CAS. The caller must return to the
+                    # selection boundary; silently minting a replacement for a just-dropped orphan
+                    # would defeat the operator's stop intent. LLM accounting alone may be retried.
+                    return None
+                state = fold(events)
+                if state.paused or state.finished or state.stop_requested:
+                    return None
+                if self._node_reservation_slots_remaining(state, events=events) < 1:
+                    return None
+                parent_snapshot = self._build_parent_snapshot(state, action)
+                if parent_snapshot is None:
+                    return None
+                kind, parents, parent_generations = parent_snapshot
+                node_id = self._node_id_ceiling(events, state)
+                if idea is None:
+                    # Compatibility seam for callers that reserve only a node id. No production path
+                    # uses this branch once writer-side Card minting is enabled.
+                    try:
+                        self.store.append(EV_NODE_BUILDING, {
+                            "node_id": node_id, "operator": kind, "parent_ids": parents,
+                        }, expected_last_seq=tail)
+                    except EventStoreConcurrencyError:
+                        continue
+                    return _BuildReservation(
+                        state, node_id, kind, parents, parent_generations, None, None)
 
-            if not isinstance(idea, Idea):
-                idea = Idea.model_validate(idea)
-            plan = self._plan_native_card(
-                events, state, idea, parents=parents, parent_generations=parent_generations,
-                scored_against=scored_against, source=source, at_node=node_id,
-                implementation_ref=implementation_ref, steering_context=steering_context,
-                cross_run_receipt=cross_run_receipt,
-            )
-            if plan.disposition == "invalid":
-                self._append_proposal_event(EV_NOVELTY_REJECTED, {
-                    "node_id": node_id, "generation": 0, "kind": "card_contract",
-                    "reason": "proposal cannot form a bounded native Card action",
-                    "action": "dropped",
+                plan = self._plan_native_card(
+                    events, state, idea, parents=parents,
+                    parent_generations=parent_generations,
+                    scored_against=scored_against, source=source, at_node=node_id,
+                    implementation_ref=implementation_ref, steering_context=steering_context,
+                    cross_run_receipt=cross_run_receipt,
+                )
+                if plan.disposition == "invalid":
+                    self._append_proposal_event(EV_NOVELTY_REJECTED, {
+                        "node_id": node_id, "generation": 0, "kind": "card_contract",
+                        "reason": "proposal cannot form a bounded native Card action",
+                        "action": "dropped",
+                    })
+                    return None
+                if plan.disposition == "duplicate":
+                    return None
+                if plan.disposition not in {"mint", "reuse"} \
+                        or plan.card_id is None or plan.idea is None:
+                    return None
+                # A proposal-bound sidecar may already name this Card. Main-task-only minting means
+                # planner and commit must agree; never silently rebind its digest.
+                if idea.card_id is not None and idea.card_id != plan.card_id:
+                    return None
+                card_id = plan.card_id
+                reserved_idea = plan.idea
+                claim = (EV_NODE_BUILDING, {
+                    "node_id": node_id,
+                    "operator": kind,
+                    "parent_ids": parents,
+                    "card_id": card_id,
                 })
-                return None
-            if plan.disposition == "duplicate":
-                return None
-            # A proposal-bound sidecar may already name this Card. Main-task-only minting means the
-            # planner and commit should agree; fail closed rather than silently rebinding its digest.
-            if idea.card_id is not None and idea.card_id != plan.card_id:
-                return None
-            card_id = plan.card_id
-            reserved_idea = plan.idea
-            # CODEX AGENT: _id_lock is process-local and these unconditional appends are not one log
-            # transaction. A UI control can land between Card mint and build claim, after which paid
-            # work proceeds from stale authority. Commit mint+claim with append_many against the folded
-            # tail (and tail-CAS reuse-only claims) so interleaving forces a fresh plan.
-            if plan.disposition == "mint":
-                self.store.append(EV_CARD_ADDED, plan.payload)
-            self.store.append(EV_NODE_BUILDING, {
-                "node_id": node_id,
-                "operator": kind,
-                "parent_ids": parents,
-                "card_id": card_id,
-            })
-            return _BuildReservation(
-                state, node_id, kind, parents, parent_generations, card_id, reserved_idea)
+                try:
+                    if plan.disposition == "mint":
+                        self.store.append_many(
+                            [(EV_CARD_ADDED, plan.payload), claim],
+                            expected_last_seq=tail,
+                        )
+                    else:
+                        self.store.append(*claim, expected_last_seq=tail)
+                except EventStoreConcurrencyError:
+                    continue
+                return _BuildReservation(
+                    state, node_id, kind, parents, parent_generations,
+                    card_id, reserved_idea)
+            return None
 
     @staticmethod
     def _proposal_cue_fence(state: RunState) -> bytes:

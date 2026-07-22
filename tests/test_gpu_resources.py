@@ -190,6 +190,86 @@ class _DispatchHost(_Pool):
             await anyio.sleep(0)
 
 
+class _DropWaitHost(_Pool):
+    def __init__(self, parallel):
+        super().__init__(ids=(0,), mem={0: 16_000}, parallel=parallel)
+        self._concurrent_research_repeat = False
+        self.ran = []
+        self.terminals = []
+        self.store = types.SimpleNamespace(
+            read_all=lambda: [],
+            append=lambda event_type, data, **_kwargs: self.terminals.append(
+                (event_type, dict(data))),
+        )
+
+    def _spawn_research(self, _tg, _state):
+        return None
+
+    def _skip_if_aborted(self, action, state):
+        from looplab.engine.orchestrator import Engine
+        return Engine._skip_if_aborted(self, action, state)
+
+    async def _evaluate(self, node_id, _limiter, _max_es):
+        self.ran.append(node_id)
+
+
+@pytest.mark.parametrize("parallel", [1, 2])
+def test_dispatch_closes_operator_dropped_card_while_waiting_for_gpu(
+        monkeypatch, parallel):
+    host = _DropWaitHost(parallel)
+    assert host._acquire_gpus(1) == [0]  # external owner never releases during this admission
+    card = types.SimpleNamespace(
+        status="proposed", dropped_by=None, aliases=[], resource_pin=None)
+    node = types.SimpleNamespace(
+        id=0,
+        attempt=0,
+        status=NodeStatus.pending,
+        tombstoned=False,
+        idea=types.SimpleNamespace(card_id="card-0", footprint={"gpus": 1}),
+    )
+    state = types.SimpleNamespace(
+        total_eval_seconds=0.0,
+        aborted_nodes=set(),
+        nodes={0: node},
+        cards={"card-0": card},
+        paused=False,
+        finished=False,
+        stop_requested=False,
+    )
+    monkeypatch.setattr("looplab.engine.orchestrator.fold", lambda _events: state)
+    from looplab.engine.orchestrator import Engine
+
+    wait_entered = threading.Event()
+    original_wait = host._wait_for_gpu_change
+
+    def observed_wait(epoch):
+        wait_entered.set()
+        original_wait(epoch)
+
+    host._wait_for_gpu_change = observed_wait
+
+    async def scenario():
+        with anyio.fail_after(3):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    Engine._dispatch_evals, host, [{"node_id": 0}], state, None)
+                assert await anyio.to_thread.run_sync(wait_entered.wait, 1.0)
+                card.status = "dropped"
+                card.dropped_by = "operator"
+
+    anyio.run(scenario)
+
+    assert host.ran == []
+    assert host.terminals == [("node_failed", {
+        "node_id": 0,
+        "generation": 0,
+        "error": "Card dropped by operator",
+        "reason": "card_dropped",
+        "eval_seconds": 0.0,
+    })]
+    assert host._free_gpus == []  # no reservation was acquired or spuriously released
+
+
 def test_dispatch_cpu_candidate_passes_a_stalled_gpu_head(monkeypatch):
     host = _DispatchHost()
     assert host._acquire_gpus(1) == [0]              # external/in-flight owner stalls the head

@@ -21,7 +21,8 @@ from looplab.core.models import RunState, idea_proposal_ref, normalize_researche
 from looplab.events.replay import fold
 from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_COMPLETED,
-                                  BACKGROUND_APPENDABLE)
+                                  BACKGROUND_APPENDABLE,
+                                  NON_CARD_SELECTION_BACKGROUND_APPENDABLE)
 
 
 def research_memo_sig(memo) -> str:
@@ -411,14 +412,11 @@ class ResearchCadenceMixin:
         Phase 2: ALSO invoked from the concurrent eval-window background loop
         (`orchestrator._research_overlap_loop`, gated on `concurrent_consolidate`) so the board the
         repeated research keeps filling is deduped DURING a long eval, not only between nodes. That is
-        safe because the sole append here, `EV_HYPOTHESIS_MERGED`, is in `BACKGROUND_APPENDABLE`
-        (asserted below; proven selection-neutral by `tests/test_background_appendable.py`), and the
-        background loop is cancelled before the main task runs the serial pass — so the two never race
-        on `_last_hyp_merge_n`."""
-        # CODEX AGENT: hypothesis_merged is no longer selection-neutral in Card mode: _derive_cards
-        # combines native action owners and adds merged_work_items/action_owner_ambiguous blockers.
-        # A timing-dependent background append can therefore remove ready work from the next action;
-        # serialize it at the selection boundary or exclude selectable native Card identities.
+        safe only while Card-driven selection is disabled: `EV_HYPOTHESIS_MERGED` is in the explicit
+        non-Card conditional background registry. Card mode invokes this method only from the joined
+        main-task cadence, where ownership/readiness changes are serialized before selection. The
+        background loop is cancelled before that serial pass, so the two never race on
+        `_last_hyp_merge_n`."""
         if not self._track_hypotheses:
             return state
         client = self._reflect_client()
@@ -451,7 +449,7 @@ class ResearchCadenceMixin:
                     if len(g["members"]) < 2:
                         continue
                     ids = [open_hyps[i].id for i in g["members"]]
-                    assert EV_HYPOTHESIS_MERGED in BACKGROUND_APPENDABLE   # concurrent-consolidate safe
+                    assert EV_HYPOTHESIS_MERGED in NON_CARD_SELECTION_BACKGROUND_APPENDABLE
                     self.store.append(EV_HYPOTHESIS_MERGED, {
                         "canonical": ids[0], "aliases": ids[1:], "statement": g["merged"],
                         "at_node": len(state.nodes)})

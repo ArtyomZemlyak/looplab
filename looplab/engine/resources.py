@@ -129,8 +129,8 @@ class ResourceSchedulingMixin:
         return out
 
     @staticmethod
-    def _card_resource_pin_for_node(state, node):
-        """Resolve the independent operator pin through a bounded canonical Card chain."""
+    def _card_for_node(state, node):
+        """Resolve a Node's immutable Card spelling to one unambiguous canonical row."""
         card_id = getattr(getattr(node, "idea", None), "card_id", None)
         cards = getattr(state, "cards", None)
         if not isinstance(card_id, str) or not isinstance(cards, Mapping):
@@ -148,7 +148,23 @@ class ResourceSchedulingMixin:
                         return None
                     match = candidate
             card = match
+        return card
+
+    @classmethod
+    def _card_resource_pin_for_node(cls, state, node):
+        """Resolve the independent operator pin through a bounded canonical Card chain."""
+        card = cls._card_for_node(state, node)
         return getattr(card, "resource_pin", None) if card is not None else None
+
+    @classmethod
+    def _operator_card_dropped_for_node(cls, state, node) -> bool:
+        """Whether the explicit operator stop affordance owns this Node's canonical Card."""
+        card = cls._card_for_node(state, node)
+        return bool(
+            card is not None
+            and getattr(card, "status", None) == "dropped"
+            and getattr(card, "dropped_by", None) == "operator"
+        )
 
     def _resource_request_for_node(self, node, *, resource_pin=None) -> dict:
         """Translate a node footprint into the effective admission request.
