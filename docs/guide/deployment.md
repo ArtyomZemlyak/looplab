@@ -183,7 +183,11 @@ also allow the full origin in `LOOPLAB_UI_CORS`; otherwise unsafe-method request
 hub cull would otherwise orphan a detached engine that keeps billing GPU/CPU and holds the run's
 lock); eval subprocesses cap their BLAS/OpenMP threads to the pod's CPU quota; and an OOM-killed eval
 is recognised and repaired (reduce batch/model size) instead of dying silently. These are no-ops on a
-local box.
+local box. On a local box, GPU-owning Engine processes running as the same OS user and sharing the
+same temporary-filesystem namespace instead coordinate through one crash-released, pool-wide lease:
+packing remains concurrent inside a Run, while a sibling GPU-owning Run waits. The lease deliberately
+does not claim cross-user, cross-container, or cross-host isolation; deployments with those boundaries
+must use their external scheduler for GPU admission.
 
 ### Shared JupyterHub origin (important)
 

@@ -1559,7 +1559,7 @@ function _CardKanbanCard({
               onChange={event => setMemoryDraft(event.target.value)} /></label>
           </div>
           <div className="card-control-help">Validated against the current server GPU envelope;
-            blank memory inherits the declared value.</div>
+            blank memory inherits the declared value. Execution may still wait for local GPU admission.</div>
           <button type="submit" className="btn xs" disabled={busy || gpuDraft === ''}>Pin resources</button>
         </fieldset>
       </form>

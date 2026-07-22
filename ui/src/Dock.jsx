@@ -466,8 +466,8 @@ function agentStatus(live, log) {
     return `${action} experiment #${id}…`
   }
   const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending')
-  // Surface parallelism: with max_parallel>1 several nodes train at once (each pinned to its own GPU).
-  // The strip named only the highest id before, hiding the fan-out — show the count when >1.
+  // Surface eval_parallel fan-out. Each node owns its admitted reservation, which may be CPU-only or
+  // span one or more GPUs; the strip used to name only the highest id and hide concurrent work.
   if (pend.length > 1) return `Running ${pend.length} experiments in parallel…`
   if (pend.length) return `Running experiment #${pend[0].id}… (training)`
   // Between experiments: infer from the last MEANINGFUL event (skip the bookkeeping noise above), so the

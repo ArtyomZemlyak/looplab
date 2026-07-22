@@ -169,7 +169,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   so a late response from a replaced run cannot mutate the new board. Resource display keeps the
   receipt-owned declared `footprint` separate from the configured `resource_pin`; the browser sends
   only quantitative values and the server stamps operator provenance and validates the current GPU
-  envelope. The eventual scheduler allocation may still be smaller or re-clamped. Dropping a Card is
+  envelope. The eventual scheduler allocation may still be smaller or re-clamped, and a local
+  GPU-owning Run may wait behind the conservative pool-wide host lease. The UI shows the configured
+  request, not a live allocation or queue position. Dropping a Card is
   the explicit stop-now affordance for its matching in-flight eval; engine/freshness drops still burn
   to a valid terminal result. An exact empty Card
   projection keeps the legacy **Hypotheses** add/abandon board as a compatibility fallback for old or

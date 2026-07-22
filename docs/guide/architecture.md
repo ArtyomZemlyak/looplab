@@ -59,6 +59,11 @@ Score, …); the **Card lifecycle board** (with a legacy Hypotheses fallback), *
     LLM total among `build`, `deep_research`, `novelty_dedup`, `enrichment`, and the fail-safe `engine`
     lane. The Strategist can durably reallocate both totals and that lane map; operator pins win.
 
+    GPU packing is concurrent inside one Run. Separate local Engine processes that share an OS-user
+    filesystem namespace conservatively serialize GPU ownership through one crash-released pool lease;
+    this avoids treating ordinal, GPU-UUID, and MIG aliases as different hardware. Different OS users,
+    containers, or hosts do not share that lease and require an external scheduler.
+
 ## Where each piece lives in the code
 
 | Concept | Module |
