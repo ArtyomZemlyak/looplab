@@ -81,7 +81,7 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
   assert.doesNotMatch(markup, /spoofed-body-id|another-spoof/)
   assert.match(markup, /Action[\s\S]*improve[\s\S]*lr=0\.125/)
   assert.match(markup, /Declared[\s\S]*2 GPUs[\s\S]*8.?192 MiB\/GPU[\s\S]*90s timeout/)
-  assert.match(markup, /Effective pin[\s\S]*operator override[\s\S]*1 GPU[\s\S]*4.?096 MiB\/GPU/)
+  assert.match(markup, /Configured pin[\s\S]*operator override[\s\S]*1 GPU[\s\S]*4.?096 MiB\/GPU/)
   assert.match(markup, /requested 1 GPU[\s\S]*4.?096 MiB\/GPU/)
   assert.match(markup, /Provenance[\s\S]*identity native[\s\S]*action card_added[\s\S]*resource pin operator/)
   assert.match(markup, /freshness stale|freshness current/)

@@ -143,8 +143,10 @@ looplab run examples/repo_task.json --backend llm --developer-backend opencode
 
 ## `resume`
 
-Resume a crashed or incomplete run by re-entering the loop. State is rebuilt by replaying the event
-log, so resume continues from the exact frontier with no duplicated or lost work.
+Resume a crashed or incomplete run by re-entering the loop. State is rebuilt from the complete durable
+event prefix, and fulfillment receipts prevent already-recorded requests from being served again.
+External effects and cross-run sidecars have narrower per-operation recovery contracts; resume does not
+promise exactly-once behavior for work that has no durable receipt.
 
 ```bash
 looplab resume RUN_DIR [OPTIONS]
@@ -246,6 +248,21 @@ bytes through the CUDA Driver API before reporting its objective metric.
 The fixed v1 checks cover the exact 15-case scorer-fidelity suite, normalized regret, speculation
 hit/divergence rates and non-vacuous trusted concept coverage. A failing gate never writes a receipt.
 
+The repository includes the exact canonical task inputs. Produce one baseline/treatment pair per seed
+in fresh directories (shown with admitted depth `1` and budget `12`):
+
+```bash
+looplab run examples/speculation_gate_seed_0.json --no-genesis --out runs/seed0-depth0 --max-nodes 12 -s speculation_depth=0 --speculation-gate-calibration
+looplab run examples/speculation_gate_seed_0.json --no-genesis --out runs/seed0-depth1 --max-nodes 12 -s speculation_depth=1 --speculation-gate-calibration
+looplab run examples/speculation_gate_seed_1.json --no-genesis --out runs/seed1-depth0 --max-nodes 12 -s speculation_depth=0 --speculation-gate-calibration
+looplab run examples/speculation_gate_seed_1.json --no-genesis --out runs/seed1-depth1 --max-nodes 12 -s speculation_depth=1 --speculation-gate-calibration
+looplab run examples/speculation_gate_seed_2.json --no-genesis --out runs/seed2-depth0 --max-nodes 12 -s speculation_depth=0 --speculation-gate-calibration
+looplab run examples/speculation_gate_seed_2.json --no-genesis --out runs/seed2-depth1 --max-nodes 12 -s speculation_depth=1 --speculation-gate-calibration
+```
+
+The maintainer-only calibration flag forces the source-owned offline Toy/Greedy/Card profile and rejects
+a missing effective GPU, a non-canonical task, ambient receipt authority or a reused run directory.
+
 ```bash
 looplab speculation-gate \
   runs/seed0-depth0 runs/seed0-depth1 \
@@ -262,7 +279,8 @@ name, total memory, display-driver version and CUDA-driver version). It admits o
 policy, deterministic quadratic Toy-task profile and exact tested runtime envelope; it is not authority
 for other policies, workloads, task profiles, depths, budgets or settings. Validation re-reads the raw
 evidence and binds the current implementation, environment and effective GPU identity, so retain every
-referenced run directory and regenerate the receipt after any material code/environment change.
+referenced run directory. Regenerate after any byte change covered by the implementation digest (including
+Python comments, the packaged settings schema and `pyproject.toml`) or any bound environment change.
 
 ## `timings`
 

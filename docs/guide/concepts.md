@@ -127,8 +127,12 @@ The Web UI, boss tools, and TUI submit interactive controls through one server-o
 than treating an event append or process spawn as completion:
 
 ```text
-POST /api/runs/{run_id}/commands       {"type": "resume", "data": {}}
+GET  /api/runs/{run_id}/state
+# copy the returned 64-hex generation fence
+
+POST /api/runs/{run_id}/commands
 Idempotency-Key: <one key for this logical action>
+{"type": "resume", "data": {}, "expected_generation": "<state.generation>"}
 
 GET  /api/runs/{run_id}/commands/{command_id}
 POST /api/runs/{run_id}/commands/{command_id}/retry
@@ -741,10 +745,11 @@ The target CR0–CR3 design adds the full applicability/coverage frame, durable 
 incremental summaries and interactive Research Atlas; see
 [Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
 
-The per-run `cross_run_prior` timeline signal remains audit-only. Its v2 receipt separates a prior
-run's `run_best_metric` from `matched_concept_outcomes`: the UI names a concept outcome only when the
-matching row says it was retained, otherwise it explicitly labels the value as the **run best**. Capsule
-or bounded-run omissions are shown as partial/unknown evidence rather than inferred as complete history.
+The per-run `cross_run_prior` timeline signal remains an audit-only preview. Its v2 receipt separates a
+prior run's `run_best_metric` from `matched_concept_outcomes`, but the current timeline deliberately
+renders neither metric as evidence authority: it shows only bounded matched concepts, a retained-run
+count, and **evidence completeness unknown**. Inspect the event receipt or cross-run tools for the
+run-best/outcome distinction; capsule or bounded-run omissions are never inferred as complete history.
 
 ### Harmonic memory (`memora`, optional)
 

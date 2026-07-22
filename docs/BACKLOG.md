@@ -45,13 +45,13 @@ it builds on). B6 parked per user decision.
   metric + `metrics` + `constraints` + drift `cross_check`); protected-name normalization (`_normp`);
   Docker `--pids-limit 1024` on both untrusted paths. *(commit 9722226)*
 - ✅ **C2 (partial)** — child process no longer inherits host secrets: `sandbox.run_argv` filters
-  `SECRET_ENV`-matching vars out of the child env ([sandbox.py](../looplab/runtime/sandbox.py)).
+  `SECRET_ENV`-matching vars out of the child env ([sandbox.py](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/runtime/sandbox.py)).
 - ✅ **C3 (partial)** — CORS narrowed from `*` to a localhost allow-list (`LOOPLAB_UI_CORS` override);
-  SPA fallback `GET /{path:path}` now resolve-guards against traversal ([server.py:739](../looplab/serve/server.py)).
+  SPA fallback `GET /{path:path}` now resolve-guards against traversal ([server.py:739](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/serve/server.py)).
 - ✅ **C4 (partial)** — `replay.fold` is idempotent for terminal node events (duplicate
   `node_evaluated/node_failed` can't inflate `total_eval_seconds`).
 - ✅ **G4 (partial)** — `llm._post` now catches `URLError/HTTPError/TimeoutError/OSError` + JSON decode
-  errors instead of aborting the run ([llm.py:72](../looplab/core/llm.py)).
+  errors instead of aborting the run ([llm.py:72](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/core/llm.py)).
 - ✅ **F5 (partial)** — Dock `'Reasoning'`→`'Trace'` tab regression fixed (both call sites).
 
 **Roadmap expanded** (commits b0d7628 → 42d5fc5): ROADMAP.md + RESEARCH_NOTES.md added; **9 research
@@ -70,17 +70,17 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   separate writable `out/`; candidate writes `predictions.json`, host scores it. *Closes the rest of
   C1 — self-reported metric is still trusted on the default path.* → `command_eval.py`, `sandbox.py`.
 - ⬜ **P0 · mlebench out-of-process grader (M).** Grader/`_Y` answer key still runs *in the candidate's
-  interpreter/workdir* ([mlebench.py:102](../looplab/adapters/mlebench.py)) — `import grader; grader._Y` leaks
+  interpreter/workdir* ([mlebench.py:102](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/adapters/mlebench.py)) — `import grader; grader._Y` leaks
   labels. Grade in a separate process; labels never on the candidate FS. *(self-admitted caveat → close it).*
 - ⬜ **P0 · C2 output redaction (S–M).** Env is filtered, but `stdout_tail = res.stdout[-500:]` is still
-  persisted **verbatim** ([orchestrator.py:808](../looplab/engine/orchestrator.py)) — a `print(secret)` or
+  persisted **verbatim** ([orchestrator.py:808](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/engine/orchestrator.py)) — a `print(secret)` or
   traceback still leaks into the event log/UI. Add a redaction pass (regex + entropy) before write.
 - ⬜ **P0 · C3 auth token on mutating `/api/*` + `task_file` allow-list (S).** CORS+SPA are fixed, but
   endpoints are still **unauthenticated** and `task_file` from the request body is executed without an
-  allow-list ([server.py](../looplab/serve/server.py)). Add a shared-secret token + path validation.
+  allow-list ([server.py](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/serve/server.py)). Add a shared-secret token + path validation.
 - 🟡 **P1 · C4 finish (M).** Idempotent fold ✅; still TODO: **read/enforce `Event.v`** (a v2 log read
   by v1 silently mis-folds) + **fail-loud append lock** (still `except OSError: pass` →
-  [eventstore.py:38](../looplab/events/eventstore.py)) + a real multi-process append-race test.
+  [eventstore.py:38](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/events/eventstore.py)) + a real multi-process append-race test.
 - ⬜ **P1 · C5 read-model integrity (M).** SQLite rebuilt only at exit, non-atomically, no seq
   watermark, never refreshed for post-run control events → can diverge undetectably. Rebuild to temp +
   `os.replace`; stamp max `seq`; refresh on append. → `readmodel.py`.
@@ -92,7 +92,7 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
 - ⬜ **P2 · B4+ true-isolation tier (L).** gVisor/Kata/Firecracker microVM (`hostile` tier) — verified
   (3-0): shared-kernel hardening is *not* an isolation boundary for untrusted LLM code.
 - ⬜ **P2 · F5 remaining UX debt (S).** `delete_run` still `ignore_errors=True` (silent partial-delete →
-  [server.py:245](../looplab/serve/server.py)); `layoutWithGroups` cycle guard; SSE/Dock O(n²) full-log
+  [server.py:245](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/serve/server.py)); `layoutWithGroups` cycle guard; SSE/Dock O(n²) full-log
   refetch per tick; SSE `JSON.parse`/listener-leak guards; `RegistryPanel` min/max sort by direction.
 
 ---

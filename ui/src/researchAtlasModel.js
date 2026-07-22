@@ -402,7 +402,9 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   const totals = {
     runs: Math.max(count(atlas.n_runs), inferredRuns),
     concepts: Math.max(count(atlas.n_concepts), concepts.length),
-    claims: Math.max(count(claimsEnvelope.n), count(atlas.n_claims), claims.length),
+    // Atlas and Claims are independently refreshed projections. Do not combine their adjacent totals
+    // into one apparently atomic claim count; this panel renders the Claims endpoint's rows.
+    claims: Math.max(count(claimsEnvelope.n), claims.length),
     contested: Math.max(count(atlas.n_contested), contradictions.length),
     curation: Math.max(count(curationEnvelope.n), curation.length),
   }

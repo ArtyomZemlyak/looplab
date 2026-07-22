@@ -1,8 +1,11 @@
-"""Append-only event store (I1, ADR-1/17): orjson JSONL, single writer, fsync.
+"""Append-only event store (I1, ADR-1/17): orjson JSONL with serialized appenders.
 
 `read_all` tolerates a torn/partial final line (a crash mid-append) by stopping
 at the first line without a trailing newline or that fails to parse. This is the
-durability contract exercised by the replay-determinism keystone test.
+prefix-recovery contract exercised by the replay-determinism keystone test.
+The engine is the single live reducer, while the engine and control server may both append under the
+cross-process lock. Flush/fsync are best effort by default; paid-work/control claims opt into required
+locking and durability at their call sites.
 """
 from __future__ import annotations
 
@@ -671,7 +674,10 @@ class EventStore:
                trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE,
                expected_last_seq: "int | None" = None, require_lock: bool = False,
                require_durable: bool = False) -> Event:
-        """Durably append one event and return it (the envelope with its assigned seq).
+        """Append one event and return its assigned envelope.
+
+        Durability and lock enforcement are best effort unless ``require_durable`` and/or
+        ``require_lock`` are true.
 
         Under a best-effort cross-process lock (the UI server and the engine write the SAME
         events.jsonl): first heal a torn tail (truncate a final line without a trailing

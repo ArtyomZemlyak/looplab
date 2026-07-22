@@ -92,6 +92,7 @@ services:
       LOOPLAB_UI_HOSTS: "${LOOPLAB_UI_HOSTS:-}"
     volumes:
       - ./runs:/app/runs            # share run artifacts with the host + the run service
+      - looplab-state:/root/.looplab # shared default memory + knowledge; survives container removal
     ports:
       # Loopback-only by default: the control-plane is UNAUTHENTICATED unless LOOPLAB_UI_TOKEN
       # is set, so do not expose it on the LAN implicitly. To serve it beyond localhost, set a
@@ -120,6 +121,7 @@ services:
       <<: *llm-env
     volumes:
       - ./runs:/app/runs
+      - looplab-state:/root/.looplab
     depends_on:
       sglang:
         condition: service_healthy
@@ -128,3 +130,4 @@ services:
 
 volumes:
   hf-cache:
+  looplab-state:

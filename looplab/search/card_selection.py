@@ -1,8 +1,8 @@
-"""Pure, feature-gate-ready Card selection primitives (docs/23, Layer 3).
+"""Pure Card-selection primitives for the active ``card_driven_selection`` arm (docs/23).
 
-This module deliberately owns no configuration and writes no events.  The orchestrator can call
-``card_next_actions`` from the future ``card_driven_selection`` arm and later atomically claim the
-selected work item by the private ``_card_id`` carried on each returned action.
+This module deliberately owns no configuration and writes no events. The orchestrator calls
+``card_next_actions`` and its claim path re-folds and reserves the selected work item identified by
+the private ``_card_id`` before reconstructing the bounded Idea.
 
 The queue boundary is fail closed: only folded ``Card.selection_ready`` work items are considered,
 and their operator-specific anchors are checked again against the current state.  A policy extension
@@ -168,7 +168,7 @@ def card_fits_resource_envelope(
 
 @dataclass(frozen=True)
 class CardScoring:
-    """Bounded scorer inputs that ``Strategy.card_scoring`` can populate later.
+    """Bounded scorer inputs populated from the current ``Strategy.card_scoring`` treatment.
 
     The Strategist integration owns strict validation.  This pure boundary still normalizes values
     defensively so malformed resume/state data can only fall back to deterministic defaults.
@@ -388,7 +388,7 @@ def card_action(card: Card) -> Action | None:
     """Project one immutable Card to the macro action used by the engine.
 
     Proposal payload is intentionally not copied into the action.  ``_card_id`` is the authority: the
-    future writer must re-fold and atomically claim that exact Card before reconstructing its bounded
+    engine writer must re-fold and claim that exact Card before reconstructing its bounded
     Idea.  Returning ``None`` for a malformed shape keeps the queue fail closed.
     """
 

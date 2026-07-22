@@ -845,9 +845,8 @@ class Settings(BaseSettings):
     agent_patch_gate: bool = True
     agent_surface: list[str] = ["*.py"]   # edit-surface allow-list (globs)
     # Trust policy for an agent-authored eval/metric adapter (RepoTask onboarding, Phase 3):
-    # "ratify_freeze" (human confirms once, then frozen+protected) | "autonomous" |
-    # "ratify_freeze_drift". Selected per project. Not yet enforced (Phase 1 uses an
-    # explicit operator-written eval_spec).
+    # "ratify_freeze" waits for human approval, "autonomous" accepts the proposed spec without that
+    # gate, and "ratify_freeze_drift" also enforces the configured independent drift cross-check.
     eval_trust_mode: str = "ratify_freeze"
     # RepoTask node seeding policy (run-wide fallback; a task/editable `seed_mode` overrides):
     # "auto" (default) copies git-tracked files when the editable is a git repo (so a tree bloated

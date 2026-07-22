@@ -1161,7 +1161,7 @@ def _selection_key(cards: dict, card_id: str):
     card = cards[card_id]
     status = _field(card, "status")
     # CODEX AGENT: this is DTO admission/display relevance only. `actionable` is deliberately NOT the
-    # executable queue contract; future Layer-3 selection must require folded `selection_ready`.
+    # executable queue contract; active Card selection requires folded `selection_ready`.
     actionable = _field(card, "actionable") is True
     active = isinstance(status, str) and status in {"proposed", "building", "coded", "running"}
     priority = _selection_int(card, "priority")

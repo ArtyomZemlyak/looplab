@@ -1,9 +1,9 @@
 """Receipt-backed paired quality gate for speculative Card execution.
 
-This module is intentionally outside the engine/config/CLI wiring.  It consumes completed run
-directories as immutable evidence, reconstructs speculative ownership through replay, and emits a
-bounded receipt whose source and implementation digests can be revalidated later.  Counts supplied
-by a caller are never accepted as evidence.
+It consumes completed run directories as immutable evidence, reconstructs speculative ownership through
+replay, and emits a bounded receipt whose source and implementation digests can be revalidated later.
+The CLI produces paired gate evidence, and the Engine validates positive ``speculation_depth`` against
+the task, runtime, GPU and implementation receipts. Counts supplied by a caller are never accepted as evidence.
 """
 from __future__ import annotations
 

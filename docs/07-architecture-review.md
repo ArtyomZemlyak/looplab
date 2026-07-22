@@ -1,6 +1,6 @@
 # LoopLab — Architecture Review (2026-06-22)
 
-**Scope:** full audit of the `LoopLab/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](../README.md), status board [06](06-implementation-plan.md).
+**Scope:** full audit of the `LoopLab/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md), status board [06](06-implementation-plan.md).
 
 > **Historical point-in-time audit.** Module/test counts, shipped gaps, and the ADR-1 “engine sole writer” row
 > describe the 2026-06-22 revision. They are not the current implementation ledger. Today one live engine owns

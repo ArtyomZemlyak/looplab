@@ -1,7 +1,7 @@
 """Concept graph — the shared coordinate system for the hypothesis/coverage space (PART IV D5, §21.11).
 
-**Keystone A of the PART IV program.** Today a node's only structural label is a single flat
-`idea.theme` slug (`roles.py:31`), rolled up one-dimensionally by `theme_rollup`/`coverage.py`. The
+**Keystone A of the PART IV program.** The motivating baseline gave a node only a single flat
+`idea.theme` slug, rolled up one-dimensionally by `theme_rollup`/`coverage.py`. The
 `rubertlite` run proved that flat vocabulary is *blind to concentration*: dozens of hyper-narrow slugs
 (`dcl-rdrop-ema`, `dcl-rdrop-gc`, …) all belong to ONE branch `loss → contrastive → DCL + R-Drop`, yet
 the flat `dominant_theme_frac` the Strategist saw actually FELL 0.67→0.03 over the run — it reported an
@@ -28,6 +28,8 @@ latter stayed ~0.6 the whole run (each modifier mints a fresh exact set) and is 
 **Discipline (mirrors `search/coverage.py`).** The analytics (`concept_coverage`, `uncovered_regions`,
 `concept_report`) are PURE and deterministic over `(RunState, ConceptGraph, tags)` — no I/O, no LLM, no
 wall-clock — so a replay recomputes them byte-identically and a historical log is re-measurable offline.
+Their outputs are part of the live system: durable node memberships feed Strategist coverage cues,
+graded novelty and current Card scoring. The helpers remain pure even when their results steer those consumers.
 The only impure step is *assigning* the multi-label tags: `tag_nodes_heuristic` is a deterministic,
 alias-based (no-LLM) tagger that keys on primary-lever LINEAGE (all `dcl-*` → one family) so the signal
 fires early; `tag_nodes_llm` is the richer optional harness that also GROWS the vocabulary. Both return

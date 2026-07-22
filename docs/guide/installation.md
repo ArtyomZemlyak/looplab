@@ -35,6 +35,7 @@ Install only what you need:
 pip install -e ".[ui]"      # live React web UI       → adds fastapi, uvicorn
 pip install -e ".[otel]"    # OpenTelemetry export      → adds opentelemetry-*
 pip install -e ".[proc]"    # robust process tree-kill  → adds psutil
+pip install -e ".[jupyterhub]" # JupyterHub app tile      → adds UI + jupyter-server-proxy + psutil
 pip install -e ".[dev]"     # test dependencies         → adds pytest, httpx, fastapi, uvicorn
 ```
 
@@ -45,6 +46,7 @@ You can combine them: `pip install -e ".[ui,otel,dev]"`.
 | `ui` | `looplab ui` and local auto-start for `looplab tui` — the live control planes | Core CLI + static `tree.html` still work; TUI can target an existing server with `--server URL` |
 | `otel` | Sends spans to any OTLP collector (Jaeger/Tempo/Honeycomb) | Spans still written to `spans.jsonl` (files-as-truth) |
 | `proc` | Cross-platform process-tree termination on timeout | Falls back to best-effort kill |
+| `jupyterhub` | JupyterHub launcher tile and proxied UI server | Run the CLI/UI directly instead |
 | `dev` | Runs the test suite | — |
 
 ## Optional runtime components

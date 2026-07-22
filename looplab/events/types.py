@@ -16,8 +16,9 @@ Event-schema evolution rules (the contract ``replay.fold`` and every reader rely
   ``RunState``: no I/O, no LLM calls, no wall-clock — resume = re-fold the log. Decisions
   that involved an LLM (e.g. ``strategy_decision``) are *recorded* so replay rebuilds the
   state without re-invoking anything.
-* **Unknown event types are ignored** by the fold (forward compat): a newer writer never
-  breaks an older reader, and diagnostic/sidecar events are pure observability.
+* **Unknown logical event types are ignored** by the fold (forward compatibility once a reader has
+  decoded the physical record). This does not promise downgrade compatibility for the on-disk grammar:
+  ``append_many`` stores a versioned batch envelope that pre-batch readers discard as one unknown row.
 * **Duplicate terminal events are idempotent** (first-terminal pattern): only a node's
   FIRST terminal event (``node_evaluated``/``node_failed``) contributes its eval time, so a
   corrupt/double-folded log can't inflate budgets or make the fold order-dependent.
@@ -25,8 +26,8 @@ Event-schema evolution rules (the contract ``replay.fold`` and every reader rely
   pairs (``fork``/``fork_done``, ``inject_node``/``inject_done``, ``deep_research``/
   ``research_completed(served_manual)``): the engine serves ``len(requests) - done``
   outstanding items, so a resume never re-serves an already-fulfilled request.
-* **Envelope versioning:** ``Event.v`` is written (always 1) but never read today — v=1 is
-  the only envelope version; a future reader can key log migrations off it.
+* **Envelope versioning:** ordinary ``Event.v`` is written as 1 and is not yet migrated by fold.
+  Batch-envelope and nested member versions are decoded strictly as v1 by the event-store reader.
 
 How to add an event type:
 
@@ -218,9 +219,9 @@ EV_SPEC_APPROVED = "spec_approved"
 EV_HYPOTHESIS_ADDED = "hypothesis_added"       # also engine-written after deep research
 EV_HYPOTHESIS_UPDATED = "hypothesis_updated"
 EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypotheses into a canonical
-# Hypothesis-card Kanban re-architecture (docs/23, Layer 1a). The durable CARD ledger — a rich superset
-# of the thin hypothesis board that later layers turn into the work queue. FOLDED + ADVISORY in Layer 1
-# (never read by best-selection; `_derive_cards` mirrors `_derive_hypotheses`). Main-task-written; NONE
+# Durable Card ledger — a work-item projection beside the thin hypothesis-direction board. It never
+# directly selects the metric champion; the opt-in Card queue consumes folded `selection_ready` rows to
+# choose candidate actions. Main-task-written; NONE
 # are BACKGROUND_APPENDABLE (a monotonic card_id cannot be background-minted — docs/23 decision 29).
 EV_CARD_ADDED = "card_added"                    # id + immutable action/ownership receipt (+ later enrich)
 EV_CARD_MERGED = "card_merged"                  # fold alias cards into a canonical (mirrors hypothesis_merged)

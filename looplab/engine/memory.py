@@ -1084,12 +1084,14 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
 
 
 class ConceptCapsuleStore:
-    """Cross-run CONCEPT memory: one capsule per run (see `build_concept_capsule`), keyed by
-    task-fingerprint similarity rather than exact `task_id` so evidence reaches SIMILAR tasks. Mirrors
-    `JsonlCaseLibrary` exactly — atomic whole-file write, malformed-line-tolerant reload, best-effort
-    interprocess-locked upsert by `run_id` (a re-run REPLACES its own capsule, never duplicates it, and
-    a concurrent run sharing `memory_dir` can't clobber it). Pure store: it does no tagging and holds no
-    engine state, so it is trivially testable and stays off the live path unless a flag wires it in."""
+    """Cross-run concept memory with one current v2 row per local ``run_id``.
+
+    Upsert uses a required interprocess lock and quarantine-preserving atomic replacement. Exact task id
+    takes precedence on read; related-task transfer is allowed only when a complete fingerprint receipt
+    passes the bounded similarity rule. ``run_id`` is not yet a portfolio-wide incarnation id, so two
+    independent run roots sharing one global memory directory can collide on the same display id.
+    The store performs no tagging and holds no engine state.
+    """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)

@@ -3,7 +3,7 @@
   "goal": "demonstrate a declared train→score pipeline with %params% tuning and per-source data permissions",
   "direction": "max",
   "repo": "examples/repo_example",
-  "protect": ["ttrain.py"],
+  "protect": ["stage_train.py", "stage_score.py"],
   "params": {"x": [0, 6]},
   "dataset": {
     "raw": {
@@ -17,8 +17,8 @@
   },
   "cmd": {
     "stages": [
-      {"name": "train", "command": ["python", "ttrain.py", "%params%"], "timeout": 120, "check": true},
-      {"name": "score", "command": ["python", "ttrain.py"], "timeout": 60}
+      {"name": "train", "command": ["python", "stage_train.py", "%params%"], "timeout": 120, "check": true},
+      {"name": "score", "command": ["python", "stage_score.py"], "timeout": 60}
     ],
     "metric": {"reader": "stdout_json", "key": "metric"}
   }

@@ -263,11 +263,15 @@ def render_template(kind: str = "dataset") -> str:
     Active common values are runnable defaults for the generated file and therefore override matching
     environment variables. Every remaining setting appears commented out at its field default.
     """
+    from looplab.core.task_kinds import default_backend
+
     task_block = _task_block(kind)
+    backend_default = default_backend(kind, chosen=False) or "toy"
     # Curated common knobs shown live with a one-line comment each.
     common = [
         ("profile", "default", "preset: default/fast (lean) | thorough (confirm+trust-gate+cues on)"),
-        ("backend", "toy", "toy = offline optimizer (no LLM); llm = drive a real model"),
+        ("backend", backend_default,
+         "llm = code-writing/reasoning model; toy = fixed offline optimizer/baseline"),
         ("max_nodes", "8", "candidate budget — how many ideas the loop tries"),
         ("max_seconds", "null", "wall-clock ceiling in seconds (null = no limit)"),
         ("policy", "greedy", "search policy: greedy | evolutionary | mcts | asha | bohb"),

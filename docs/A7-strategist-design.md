@@ -1,7 +1,8 @@
 # A7 · Strategist role — implemented design record
 
 **Status:** implemented / historical design record · **Date:** 2026-06-24 · **Roadmap:** [ROADMAP.md](ROADMAP.md) A7,
-[BACKLOG.md](BACKLOG.md) Theme A · **Decision:** config-first, strategist-optional (default OFF).
+[BACKLOG.md](BACKLOG.md) Theme A · **Current decision:** config-first, Strategist defaults to the
+tool-using `agent` backend; `off`, deterministic `rule`, and single-shot `llm` remain explicit options.
 
 > The Strategist is an **optional meta-controller** that, at a bounded cadence, reads the folded run
 > state and decides *which search machinery to use next* — search policy/allocator, Developer backend
@@ -15,13 +16,13 @@
 
 ## 1. Why this shape (fit with LoopLab)
 
-- **Reuses the role-swap seam.** `Engine` already takes an injected `policy: SearchPolicy`
-  ([orchestrator.py:113](../looplab/engine/orchestrator.py)) and calls `self.policy.next_actions(state)` in
-  one place ([orchestrator.py:381](../looplab/engine/orchestrator.py)). Policies are **pure functions of
+- **Reuses the role-swap seam.** `Engine` applies validated decisions through
+  [`strategy.py`](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/engine/strategy.py), while search policies live in
+  [`policy.py`](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/search/policy.py). Policies are **pure functions of
   `RunState` sharing one action vocabulary** (`draft/improve/debug/merge/ablate/evaluate`), so they
   are hot-swappable between loop iterations with zero state migration.
 - **Reuses the event-sourced control plane.** It mirrors the existing `policy_decision` "why-this-node"
-  event ([orchestrator.py:415](../looplab/engine/orchestrator.py)) — the Strategist gets a `strategy_decision`
+  event — the Strategist gets a `strategy_decision`
   event and a "why this strategy" panel, exactly parallel.
 - **Replay-safe by construction.** Like an LLM `Idea` (recorded in `node_created`, never re-called on
   replay), the Strategist's decision is **recorded in the log** and reconstructed by `fold`; the LLM is
@@ -66,15 +67,17 @@ class Strategist(Protocol):
 ```
 
 `make_strategist(settings) -> Optional[Strategist]`:
-- `strategist_backend == "off"` → `None` (engine uses the static config policy — **default, == today**).
+- `strategist_backend == "off"` → `None` (engine uses the static configured policy).
 - `"rule"` → `RuleStrategist(settings)` — deterministic, zero-dep (also the LLM-path fallback).
 - `"llm"` → `LLMStrategist(client, settings)` — structured output via the existing `llm`/`parse` stack.
+- `"agent"` → `ToolUsingStrategist(...)` — the product default; reads bounded run/data/memory tools
+  before emitting the same validated Strategy contract.
 
 ---
 
 ## 3. Event + fold (replay-safe)
 
-**New event `strategy_decision`** (audit-only, like `policy_decision` — never changes node selection):
+**Event `strategy_decision`** (replayable live control/config — it can change later policy decisions):
 ```jsonc
 {"type":"strategy_decision","data":{
    "strategy": { /* the Strategy dict above */ },
@@ -83,7 +86,7 @@ class Strategist(Protocol):
 }}
 ```
 
-**`models.RunState`** — add two fields (audit-only; never read by best-selection):
+**`models.RunState`** — two folded fields consumed by live strategy application and UI history:
 ```python
 active_strategy: Optional[dict] = None          # the latest applied Strategy
 strategy_history: list[dict] = Field(default_factory=list)   # [{strategy, at_node}, ...] for the panel
@@ -118,13 +121,13 @@ def _apply_strategy(self, strat: dict) -> None:
 ```
 *Safety:* policies share the action vocabulary and are pure → swapping between iterations is safe.
 Developer is swapped only **between** sequential `_create_node` calls (creation is awaited
-sequentially, [orchestrator.py:417](../looplab/engine/orchestrator.py)), so no in-flight node sees two
+sequentially, [orchestrator.py:417](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/engine/orchestrator.py)), so no in-flight node sees two
 Developers.
 
 **Resume:** right after the initial fold in `run()`, `if state.active_strategy: self._apply_strategy(state.active_strategy)`.
 
 **Consult point** — at the top of the loop, *before* `self.policy.next_actions(state)`
-([orchestrator.py:381](../looplab/engine/orchestrator.py)), guarded so it can't thrash:
+([orchestrator.py:381](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/engine/orchestrator.py)), guarded so it can't thrash:
 ```python
 if self.strategist and self._should_consult(state):
     ctx = self._strategy_ctx(state)
@@ -216,13 +219,14 @@ Exposed in the Settings UI (`settingsSchema.js`) under "Search & policy" as a pr
 
 ## 9. Determinism, safety, invariants
 
-- **Audit-only.** `strategy_decision` never changes node selection or metrics; `fold` only updates
-  `active_strategy`/`strategy_history`. Removing the Strategist (replay an old log under `off`) yields
-  the same nodes — the decisions are recorded config, not hidden selection.
+- **Control/config, not a metric write.** `strategy_decision` does not rewrite recorded metrics, but its
+  folded policy/operator/backend/fidelity settings can change which later actions and nodes are selected.
+  Replay reconstructs the recorded decisions instead of silently recomputing them.
 - **Replay never re-calls the LLM.** The applied Strategy lives in the log; resume re-applies it.
 - **Whitelist + fallback.** `validate_strategy` constrains every field; invalid → keep current.
 - **No thrash.** Bounded cadence + act-only-on-change + operator-override-wins.
-- **`off` ⇒ no behavior change.** The default path is byte-identical to today (no consult, no event).
+- **`off` ⇒ static configured behavior.** No Strategist consult/event is produced; this is an explicit
+  conservative option, not the current product default.
 
 ---
 

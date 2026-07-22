@@ -6,7 +6,7 @@
 
 > 📖 **Looking for how to *use* LoopLab?** This index covers the *design* (the why). For practical,
 > task-oriented documentation — install, quickstart, CLI, configuration, tasks — see the
-> **[User Guide](guide/index.md)** and the [README](../README.md).
+> **[User Guide](guide/index.md)** and the [README](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md).
 
 > **Current implementation authority (2026-07-18):** current `master` source and tests decide runtime truth;
 > [doc 16](16-architecture-code-review-2026-07-11.md)
@@ -47,7 +47,7 @@
 | 4 | **[04-file-layout.md](04-file-layout.md)** | *Historical on-disk design.* Data-class → format decisions, canonical-vs-derived rule, proposed run/project layout, content-addressed artifact store, and atomic-write rules. Its opening banner points to the smaller shipped contract. |
 | 5 | **[05-build-decisions.md](05-build-decisions.md)** | *Historical build choices.* Per-component scorecard + **ADR-12** (orchestration/concurrency/durability/git), **ADR-13** (sandbox/isolation), **ADR-14** (structured outputs/patches), **ADR-15** (trust layer), **ADR-16** (knowledge/RAG/MCP), **ADR-17** (files/obs/plumbing), and **ADR-18** (core runtime shape). It is not a current dependency inventory. |
 | 7 | **[07-architecture-review.md](07-architecture-review.md)** | *Audit (2026-06-22).* Design↔code consistency (ADR alignment), intentional deviations, the 7 bugs found & fixed, the I10 gate-semantics correction, and residual risks/recommendations. Read after 06 to see what was verified and hardened. |
-| 6 | **[06-implementation-plan.md](06-implementation-plan.md)** | *Historical implementation ledger.* The 22 iterations (I0–I22) remain useful for shipped-module traceability, but its live-status and next-step claims are superseded by docs 16–18 where they conflict. Running code is in `looplab/` (see [README.md](../README.md)). |
+| 6 | **[06-implementation-plan.md](06-implementation-plan.md)** | *Historical implementation ledger.* The 22 iterations (I0–I22) remain useful for shipped-module traceability, but its live-status and next-step claims are superseded by docs 16–18 where they conflict. Running code is in `looplab/` (see [README.md](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md)). |
 | 10 | **[10-autoresearch-improvement-research.md](10-autoresearch-improvement-research.md)** | *Improvement research (2026-07-02).* Code-verified status + engine/planning/memory/UI gaps + the 2025–26 MLE-bench SOTA sweep, prioritized (T/P/M/U series; many items since shipped). |
 | 11 | **[11-agent-systems-research.md](11-agent-systems-research.md)** | *Historical deep research (2026-07-02).* A useful research input for D1–D14; doc 17 now governs feature prerequisites and promotion criteria. |
 | 12 | **[12-phased-plan-2026-07.md](12-phased-plan-2026-07.md)** | *Historical phased plan (2026-07-02).* Its six-phase ordering is superseded by doc 17's R0–R5 dependency graph where they conflict. |

@@ -203,8 +203,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   The packaged catalogue is v1 and its HTTP/editor contract is v2; the schema's weak ETag is a semantic cache
   revision, not a settings mutation token.
   The **API key**
-  field (LLM tab) stores the credential securely: it's written to an owner-only `secrets.json`, never
-  to `ui_settings.json` or a run snapshot, and the API only ever echoes a masked `***`. Set it here or
+  field (LLM tab) is written to a separate `secrets.json`, never to `ui_settings.json` or a run
+  snapshot, and the API only ever echoes a masked `***`. The store requests mode `0600` on POSIX;
+  Windows ACLs, network filesystems and bind-mount permissions remain the deployer's responsibility.
+  Set it here or
   via `LOOPLAB_LLM_API_KEY` (env / `.env`) — either way spawned runs inherit it. Global Save sends only
   schema-owned edits since this tab's last successful load/save; blank edited fields explicitly clear an
   override, and agent-governance roles are a nested sparse patch. The server validates and merges the whole
@@ -330,11 +332,11 @@ interpret the home Map, primary concept axis grouping, per-run Concepts table, o
 concept/evidence UI specified in
 [the UI/UX review](../18-ui-ux-review-2026-07-11.md).
 
-The preview validates the concept-source receipt independently. Its **D8 research source** diagnostic accepts
-the complete legacy producer-only shape, but treats the additive v1 read-health extension atomically: durable
-row totals, retained/quarantined counts, malformed/invalid counts and the lowercase snapshot digest must all
-agree. That D8 receipt describes only explicitly processed and persisted D8 rows; it does **not** prove that
-every run in the portfolio executed D8.
+The preview validates the concept-source receipt independently. Its D8 producer details are consumed through
+the current combined v1 `claim_source`; legacy or malformed source shapes fail closed. Durable row totals,
+retained/quarantined counts, malformed/invalid counts and the lowercase snapshot digest must agree. A D8
+producer receipt describes only explicitly processed and persisted D8 rows; it does **not** prove that every
+run in the portfolio executed D8.
 
 One-sided claim authority comes from the separate v1 `claim_source`, not from D8 alone. It joins durable
 lesson/research read health with D8 producer completeness. The endpoint envelope and every visible row must

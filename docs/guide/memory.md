@@ -224,16 +224,17 @@ after the durable claim.
 | **Task fingerprint + similarity** (M2) | A deterministic task descriptor (kind, direction, metric, goal keywords, param names); Jaccard overlap gates/ranks cross-run transfer to *similar* (not just identical) tasks. | lessons, skills |
 | **Passive prompt-injection** (run-start + per-proposal) | Fingerprint-matched lessons + exact-task meta-notes + the always-on digests + open hypotheses are written into the proposal prompt; contradicted verdicts are quarantined (newest wins). | lessons, meta-notes, hypotheses, digests |
 | **Role-split lesson routing** | Cross-run lessons are **tagged by role** at distillation and routed to only that role's context: the **Researcher** proposal prompt gets R&D / "what technique to try" lessons (the LLM reflection consolidation + improve-pair param credit); the **Developer** gets only its own "what code change fixed a crash" lessons (comparative *debug*-pair credit), folded into the idea it implements — most useful on repair. Untagged (legacy) lessons are shared. | lessons |
-| **Active agentic retrieval** | The Researcher *calls tools* to pull memory when it wants (see below). | all cross-run types + siblings + own run |
+| **Active agentic retrieval** | Supported tool-using roles pull memory on demand (see below): Researcher, Strategist, deep research, Genesis, the in-house repo Developer and owner Assistant. Exact availability remains role- and feature-gated. | cross-run claims/concepts, siblings, own run, knowledge |
 | **Harmonic indexing** (Memora) | Indexes by a short *abstraction* + cue *anchors*; consolidates near-duplicates at build time and expands retrieval through anchor links at query time. LLM-optional (degrades to lexical). | knowledge, cases, lessons |
 | **Consolidation / hygiene** (D2) | Merges duplicate lessons into an `evidence_count`, retires contradicted verdicts, and bounds the store size. Dedup identity is `(statement, task, role)` — a Researcher and a Developer lesson with the same statement never collapse (merging would drop one role's copy and break the routing). On top of exact-normalized dedup, a **hybrid-retrieval (grep+BM25+vector, RRF) → agentic paraphrase-merge** pass (per `(task, role)`) lets the Researcher fold re-worded duplicates. | lessons |
 | **Reconciliation on re-eval** (`lessons_reconciled`) | When a `node_reset` re-eval **flips a node's outcome** (a false-failure re-scored to evaluated, a demoted champion), this run's distilled lessons *grounded in that node* go stale. Each lesson stamps its evidence nodes' outcome **signature** at write time; a cheap `{node→sig}` hash gate detects the drift, then the stale lessons are **retired and re-derived** from the corrected state (same conclusion → identical lesson reappears = no-op; different → the stale row is replaced). Comparative lessons upsert per-pair (un-spend → re-derive → re-spend); reflect lessons re-derive the whole-run batch. Best-effort, LLM-only (never writes a template), replay-safe (idempotent — an empty re-derivation never nukes memory). | lessons |
 | **Verification** (D8) | The evidence ledger — each research claim carries its citing `node_ids`/URLs so a verifier can check it (audit-only). | research memo |
 
-## Agentic retrieval — the agent can pull *anything*
+## Agentic retrieval — role-gated pull surfaces
 
-The tool-using Researcher can actively reach **every** memory type, so it's never limited to what was
-auto-injected:
+The tool-using Researcher has the broad in-run surface below; other supported reasoning roles receive
+the providers appropriate to their task. Prompt-injected material is listed separately because it is not
+necessarily exposed as an on-demand tool.
 
 | Memory | Tool(s) |
 |---|---|
@@ -243,6 +244,7 @@ auto-injected:
 | Skills | `list_skills`, `use_skill` |
 | Own experiments | `list_experiments`, `read_experiment`, `read_code` |
 | Sibling runs (same task) | `list_sibling_runs`, `read_sibling_experiment`, `read_sibling_code`, `find_analogous_across_runs` |
+| Part IV/V portfolio claims + concepts | `cross_run_prior_attempts`, `cross_run_claims`, `cross_run_atlas`, `cross_run_search`, `cross_run_concept_map`, `similar_runs`, `find_concept_slugs`, `concept_card` |
 | Hypotheses | injected each proposal (open ones, with instruction to reuse exact wording for evidence linking) |
 
 ## Configuration

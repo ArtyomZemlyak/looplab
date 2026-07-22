@@ -1,7 +1,7 @@
 # LoopLab — Implementation ToDo & Status
 
 **Version:** 0.2 (status tracker) · **Updated:** 2026-06-22
-**Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · code: [README.md](../README.md)
+**Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · code: [README.md](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md)
 
 > This was the iteration plan; it is now the **living status board**. Each item shows what's built, where it lives, and what remains. The running code is in `looplab/`, split into the planned subpackage tree (`core/ events/ runtime/ tools/ agents/ search/ trust/ engine/ adapters/ serve/` — see `looplab/__init__.py` for the map; legacy flat imports keep working via the compat alias layer).
 
@@ -140,7 +140,7 @@
 
 - [x] **Real ML task** — polynomial+ridge model selection via CV (`regression` kind) — `regression.py`; tested `test_regression_task.py`
 - [x] **LLM writes the solution code** (`code_regression` kind) — dataset as a `data.json` asset materialized into the sandbox; LLM-Developer + error-feedback repair — `regression.py`, `roles.py`, `orchestrator.py`; tested `test_code_loop.py` + live
-- [x] **Live serving** — Ollama + Qwen3-8B on the RTX 5090; `smoke` self-test; live tests `test_live_llm.py` (see [README](../README.md))
+- [x] **Live serving** — Ollama + Qwen3-8B on the RTX 5090; `smoke` self-test; live tests `test_live_llm.py` (see [README](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md))
 
 ---
 

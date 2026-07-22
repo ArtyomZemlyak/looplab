@@ -81,17 +81,20 @@ Developer to an external coding agent.
 
 ## 5. Crash & resume
 
-The event log makes a run resilient to a hard kill — it continues from the exact frontier:
+The event log makes a run resilient to a hard kill — it continues from the durable replay frontier:
 
 ```bash
 looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3
 #   -> hard-exits mid-run (like kill -9)
 looplab resume runs/c --task-file examples/toy_task.json --max-nodes 12
-#   -> replays the log and finishes; no duplicated or lost work
+#   -> replays the complete event prefix; recorded fulfillment receipts are not served twice
 ```
 
 `resume` can read the task from the run's own `task.snapshot.json`, so `--task-file` is optional
 when resuming a run started by `looplab run`.
+
+This guarantee covers replayed state and explicitly receipted operations. External effects and cross-run
+sidecars use their own recovery gates; unreceipted work is not covered by a blanket exactly-once promise.
 
 ## Next steps
 

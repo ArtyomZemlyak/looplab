@@ -140,6 +140,10 @@ const NARR = {
   comment_edited: (d) => `comment edited on #${d.node_id ?? '?'}`,
   comment_resolution_changed: (d) => `comment ${d.resolved === true ? 'resolved' : d.resolved === false ? 'reopened' : 'resolution changed'} on #${d.node_id ?? '?'}`,
   concept_tag_edited: (d) => `operator re-tagged #${d.node_id}: ${(d.concepts || []).slice(0, 4).join(', ') || '(cleared)'}`,
+  card_reprioritized: (d) => `Card ${d.id.slice(0, 80)} priority pinned to ${d.priority}`,
+  card_edited: (d) => `Card ${d.id.slice(0, 80)} display statement edited${note(d.statement, 70)}`,
+  card_resource_pinned: (d) => `Card ${d.id.slice(0, 80)} resource override: ${d.gpus} GPU${d.gpus === 1 ? '' : 's'}${d.gpu_mem_mib != null ? ` · ${d.gpu_mem_mib} MiB/GPU` : ''}`,
+  card_dropped: (d) => `Card ${d.id.slice(0, 80)} dropped${note(d.reason, 70)}`,
   hypothesis_updated: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
   trust_gate_changed: (d) => `trust gate changed${d.gate ? ` — ${d.gate}` : ''}`,
   inject_failed: (d) => `experiment injection failed${note(d.reason)}`,
@@ -229,6 +233,12 @@ const NARR_VALID = {
   comment_edited: d => ownValue(d, 'node_id'),
   comment_resolution_changed: d => ownValue(d, 'node_id'),
   concept_tag_edited: d => ownValue(d, 'node_id') && Array.isArray(d?.concepts),
+  card_reprioritized: d => typeof d?.id === 'string' && d.id.length > 0 && ownValue(d, 'priority'),
+  card_edited: d => typeof d?.id === 'string' && d.id.length > 0
+    && typeof d?.statement === 'string',
+  card_resource_pinned: d => typeof d?.id === 'string' && d.id.length > 0
+    && ownValue(d, 'gpus'),
+  card_dropped: d => typeof d?.id === 'string' && d.id.length > 0,
   hypothesis_updated: d => ownValue(d, 'statement'),
   stage_finished: d => ownAny(d, ['name', 'stage']),
 }
@@ -249,7 +259,7 @@ const GROUPS = [
   ['research', 'research', 'research_completed deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank'],
-  ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
+  ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
   ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired'],
 ]
 const TYPE2GROUP = Object.fromEntries(GROUPS.flatMap(([group, , types]) =>
@@ -286,10 +296,6 @@ function kindOf(type) {
 // (Was an opt-OUT blacklist `FEED_HIDDEN`, which silently leaked every type nobody remembered to add —
 // e.g. `node_concepts` rendered as raw `{"node_id":67,"concepts":[…]}`. The allow-list can't regress
 // that way: a new event type is invisible-until-narrated instead of raw-JSON-until-hidden.)
-// CODEX AGENT: card_reprioritized/card_edited/card_resource_pinned/card_dropped have no NARR entry,
-// so this allow-list removes the actual operator transition from Events & timeline. Add bounded,
-// validated narrations under actions; command_ack cannot preserve the Card id, value or reason needed
-// to audit the board change.
 const isCuratedType = (type) => Object.hasOwn(NARR, type)
 
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).

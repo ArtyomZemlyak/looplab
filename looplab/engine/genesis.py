@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from looplab.agents.agent import agentic_struct
 from looplab.core.parse import parse_structured
+from looplab.core.task_kinds import GENERATIVE_KINDS, default_backend
 
 # Canonical, CLI-focused guide to choosing a task kind from a plain goal. Kept compact and in one
 # place (the richer, repo-scouting variant the Web UI uses lives in server.py's genesis endpoint).
@@ -87,25 +88,6 @@ REPO_AUTONOMY_GUIDE = (
     "available GPU memory and any README recipe — and use ALL available GPUs by default.\n"
     "- Put operational guidance the agent needs (use all GPUs, expected metric, which script to run) in "
     "the task `goal` in plain words — the coding agent reads it.\n")
-
-
-# Kinds whose work is inherently LLM-driven (the agent writes/edits code or reasons over data). When
-# Genesis infers one of these and the user didn't choose a backend, the run defaults to backend=llm —
-# the offline-optimizable kinds (quadratic/classification/regression/timeseries) stay on their default.
-GENERATIVE_KINDS = frozenset({"dataset", "code_regression", "mlebench", "mlebench_real", "repo"})
-
-
-def default_backend(kind: Optional[str], *, chosen: bool) -> Optional[str]:
-    """The ONE kind→backend defaulting rule, shared by every launch surface — cli.py's genesis path
-    and the web UI's /api/start + genesis card (`serve/routers/control.py::_defaults_backend_llm`) —
-    so the rule can't drift into per-surface copies. Returns "llm" when `kind` is generative and the
-    user chose no backend; None means "leave the configured default". Each caller keeps only its own
-    surface-specific `chosen` detection (CLI flag/file/env/.env vs merged launch settings + saved UI
-    defaults). Why it matters: Settings.backend defaults to "toy", which on a repo/dataset task gives
-    NoOpRepoDeveloper — every node silently re-evaluates the unchanged baseline (no error, just a
-    flat run) — so a generative kind with no explicit choice must default to the code-writing
-    backend."""
-    return "llm" if (not chosen and kind in GENERATIVE_KINDS) else None
 
 
 class _TaskPlan(BaseModel):

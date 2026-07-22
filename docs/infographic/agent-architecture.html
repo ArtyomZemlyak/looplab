@@ -36,10 +36,18 @@
     <span class="lg"><span class="sw" style="background:var(--trust)"></span>Trust/rigor</span>
     <span class="lg"><span class="sw" style="background:var(--mem)"></span>Memory</span>
     <span class="lg"><span class="sw" style="background:var(--sig)"></span>Event spine</span>
+    <span class="lg"><code>R/D/□/⌘</code> role or control owner</span>
+    <span class="lg"><code>off/opt-in/mixed</code> configured status; numbers are caps or thresholds</span>
   </div>
 </div>
 <div class="hint">◱ scroll — the canvas is large (pinch/scroll to pan)</div>
-<div class="scroll"><svg id="d" xmlns="http://www.w3.org/2000/svg"></svg></div>
+<div class="scroll"><svg id="d" xmlns="http://www.w3.org/2000/svg" role="img"
+  aria-labelledby="diagram-title diagram-description">
+  <title id="diagram-title">LoopLab full process capability map</title>
+  <desc id="diagram-description">Architecture diagram of proposal, novelty, implementation, evaluation,
+    trust, refinement, memory, Card lifecycle, and cross-run evidence paths. Every box exposes its full
+    text as an accessible group label and tooltip.</desc>
+</svg></div>
 
 <script>
 const NS="http://www.w3.org/2000/svg",svg=document.getElementById("d");
@@ -78,8 +86,8 @@ stack(40,330,DY,[
 ]);
 // NOVELTY
 stack(410,210,DY,[
- {id:"n_sem",h:78,t:"Semantic dedup",tag:"0.92",c:C.r,sub:["cosine ≥ 0.92 on rationale+hypothesis","re-propose ‘tried X, failed because Y’"]},
- {id:"n_num",h:78,t:"Numeric dedup",tag:"0.05",c:C.ev,sub:["L2 < 0.05 → deterministic nudge","seed=id×1009+7 · scale=max(|p|,1)×0.1"]},
+ {id:"n_sem",h:78,t:"Semantic dedup",tag:"algo opt-in",c:C.r,sub:["algorithmic mode + semantic_novelty only","cosine ≥ 0.92 on rationale+hypothesis"]},
+ {id:"n_num",h:78,t:"Numeric dedup",tag:"algo opt-in",c:C.ev,sub:["L2 < 0.05 → deterministic nudge","seed=id×1009+7 · scale=max(|p|,1)×0.1"]},
 ]);
 // DEVELOPER — three separately-traced phases on a fresh repo node (stages → plan → implement);
 // a repair skips them for one focused session. Env inspector / auto-validate / best-of-N below
@@ -94,7 +102,7 @@ stack(660,300,DY,[
 ]);
 // EVALUATE
 stack(1000,320,DY,[
- {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro (editable data must be a mount:false copy)"]},
+ {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","hostile = Docker + gVisor runsc; data mounts bound :ro"]},
  {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["stages phase / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
  {id:"e_mon",h:118,t:"Live-eval watchdogs",tag:"mixed",c:C.ev,sub:["sandbox (built-in): non-finite loss/grad divergence · stall (silent-while-alive) → tree-kill early","train monitor: LLM tails the live log · verdict healthy|watch|broken · cadence ≈10% of budget, self-paced","train_monitor_kill: broken ≥0.8 conf → early kill (reason=monitor_broken) · else advisory","ASHA live-curve: intermediate metric (eval's own reader) ranked vs finished siblings' finals","asha_live_kill: below the quantile bar past grace → early kill (reason=asha_underperforming) · else advisory"]},
  {id:"e_seed",h:60,t:"Drafts · confirm · holdout",tag:"mixed",c:C.ev,sub:["n_seeds=3 initial drafts; search eval seed=0","confirm: disjoint seeds; host holdout: 25%"]},
@@ -147,8 +155,8 @@ box("w_skill",1870,WY,290,72,"Auto-skill","R",C.mem,["supported hyp & Δ>0 → S
 
 /* ============ HYGIENE (row y≈1240) ============ */
 const GY=1240;
-box("g_ex",40,GY,320,66,"Dedup pass1 · exact","",C.mem,["group (normalize[:160], task_id)","newest wins · evidence summed (agreeing)"]);
-box("g_ag",380,GY,320,66,"Dedup pass2 · agentic","R",C.mem,["per task_id HybridRetriever RRF","Researcher merges paraphrases + synthesizes"]);
+box("g_ex",40,GY,320,66,"Dedup pass1 · exact","",C.mem,["group (statement, task_id, role)","newest wins · evidence summed (agreeing)"]);
+box("g_ag",380,GY,320,66,"Dedup pass2 · agentic","R",C.mem,["per (task_id, role) HybridRetriever RRF","Researcher merges paraphrases + synthesizes"]);
 box("g_ct",720,GY,300,66,"Contradiction quarantine","read",C.mem,["drop old supported vs newer negative","never drop the newest verdict"]);
 box("g_cp",1040,GY,320,66,"Compact + fingerprint","",C.mem,["lessons 4000→keep 2000","fp = kind·dir·metric·goal-kw·params"]);
 box("g_rec",1380,GY,340,66,"Reconcile on re-eval","R",C.mem,["node_reset flips outcome → retire + re-derive stale","{node→sig} gate · evidence_sig · lessons_reconciled"]);
@@ -256,14 +264,16 @@ function drawEdge([f,fs,t,ts,o]){
 }
 for(const e of E){if(!(e[4].dash||e[4].thin))drawEdge(e);}
 // blocks
-for(const id in B){const b=B[id],g=el("g",{});
+for(const id in B){const b=B[id],g=el("g",{role:"group",tabindex:"0"});
+ const full=[b.t,b.tag?`status ${b.tag}`:"",...(b.sub||[])].filter(Boolean).join(". ");
+ g.setAttribute("aria-label",full);const tooltip=el("title",{});tooltip.textContent=full;g.appendChild(tooltip);
  const big=b.t.length>0 && b.t===b.t.toUpperCase() && b.h>=76 && id.length<9;
  g.appendChild(el("rect",{x:b.x,y:b.y,width:b.w,height:b.h,rx:11,fill:id==="spine"?"#0e1a1c":"#141d28",stroke:b.c,"stroke-width":big?2:1.4,opacity:.99}));
  g.appendChild(el("rect",{x:b.x,y:b.y,width:5,height:b.h,rx:2,fill:b.c}));
  if(b.tag){const cw=b.tag.length*7+16;g.appendChild(el("rect",{x:b.x+b.w-cw-9,y:b.y+9,width:cw,height:18,rx:9,fill:"none",stroke:b.c,"stroke-width":1}));
   const tg=el("text",{x:b.x+b.w-cw/2-9,y:b.y+21.5,"text-anchor":"middle",fill:b.c,"font-size":"10.5","font-weight":"700","font-family":"var(--mono)"});tg.textContent=b.tag;g.appendChild(tg);}
  const t=el("text",{x:b.x+15,y:b.y+ (big?27:24),fill:"#eef4fa","font-size":big?"15":"13.5","font-weight":"700"});t.textContent=b.t;g.appendChild(t);
- (b.sub||[]).forEach((ln,i)=>{const e2=el("text",{x:b.x+15,y:b.y+(big?46:42)+i*14,fill:"#a8bccf","font-size":"11","font-family":"var(--mono)"});
+  (b.sub||[]).forEach((ln,i)=>{const e2=el("text",{x:b.x+15,y:b.y+(big?46:42)+i*14,fill:"#a8bccf","font-size":"11","font-family":"var(--mono)","aria-hidden":"true"});
   let s=ln;const max=Math.floor((b.w-26)/5.85);if(s.length>max)s=s.slice(0,max-1)+"…";e2.textContent=s;g.appendChild(e2);});
  svg.appendChild(g);}
 for(const e of E){if(e[4].dash||e[4].thin)drawEdge(e);}

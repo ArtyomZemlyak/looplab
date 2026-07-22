@@ -15,11 +15,10 @@ axis-region(s) of the concept DAG it touches (the "lever" / subsystem proxy — 
 a single axis (the "narrowing NOW" flavour) — both from the graph, so they are legible per D5 branch, not
 just "the metric plateaued".
 
-**Discipline.** Offline analytic (early lane, §6.6): pure and deterministic over `(RunState, ConceptGraph,
-tags)` — no I/O, no LLM, no wall-clock — so a replay recomputes it byte-identically. It reads the concept
-tags (deterministic heuristic by default, or the LLM tags 0a produced); it writes nothing and never
-touches selection. Wiring the alarm into the live Strategist pivot / a forced-jump operator is Phase 2
-(2a/2b) and inherits the R-gates.
+**Discipline.** The detector is pure and deterministic over `(RunState, ConceptGraph, tags)` — no I/O,
+LLM or wall-clock — so replay recomputes it byte-identically. Its result is consumed live by Strategist
+coverage, the capability-expansion proposal cue and, when enabled, the authoritative `expand` operator.
+The detector itself writes nothing and never ranks the metric champion.
 """
 from __future__ import annotations
 

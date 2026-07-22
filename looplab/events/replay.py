@@ -1,6 +1,7 @@
 """Pure fold: events -> RunState (I1/I6, ADR-12). Deterministic; the only producer
-of RunState. Resume = re-fold the log. `best` is recomputed deterministically from
-evaluated nodes (tie-break by id), so no separate `best_updated` event is needed.
+of RunState. Resume = re-fold the log. ``best_node_id`` is a deterministic post-pass over eligible
+evaluated nodes using trust/fitness treatment, confirmation, holdout and approval state; node id is
+only the final tie-break. No separate ``best_updated`` event is needed.
 """
 from __future__ import annotations
 
@@ -4463,15 +4464,17 @@ def _card_node_concept_projection(st: RunState, node: Node) -> tuple[list[str], 
 
 
 def _derive_cards(st: RunState) -> None:
-    """Build the CARD ledger (Kanban re-architecture, docs/23 Layer 1a). DERIVED, order-tolerant,
-    ADVISORY — never read by best-selection, exactly like `_derive_hypotheses`, which it MIRRORS. A card
-    is the rich superset of a hypothesis: seeded from `card_added` events and from every node whose
+    """Build the derived Card ledger from native receipts and compatibility shadows.
+
+    Cards do not directly choose the metric champion, but the active Card queue consumes receipt-backed
+    ``selection_ready`` rows to create candidates. A card is seeded from ``card_added`` events and nodes whose
     `idea.hypothesis` is set (linked by `idea.card_id` when present, else the statement hash — the same
     fallback join `_derive_hypotheses` uses), it accretes the substance on Idea/Node. The `verdict`
     (supported/tested/...) is computed by the SHARED `_evidence_verdict` helper so it is byte-identical
     to the hash-joined hypothesis; a separate lifecycle `status` lane (proposed/running/gated/evaluated/
-    dropped) is derived from node outcomes. Enrichment fields stay at their defaults in Layer 1a (Layer
-    1b populates them). Internal order MIRRORS `_derive_hypotheses` EXACTLY (docs/23 decision 20):
+    dropped) is derived from node outcomes. Bounded enrichment, ranking, operator overlays and lifecycle
+    outcomes are applied before selection readiness is derived. Internal order mirrors the hypothesis
+    projection where the contracts overlap:
     seed+link -> merge-union -> record-setters once -> shared verdict helper -> drop overrides ->
     operator-overlay (reserved, empty in L1) -> status."""
     cards: dict[str, Card] = {}
@@ -5081,9 +5084,8 @@ def _derive_cards(st: RunState) -> None:
                     and 0.0 <= float(ranking_confidence) <= 1.0):
                 c.confidence = float(ranking_confidence)
 
-    # 7) operator-override overlay — RESERVED FINAL PHASE (docs/23 decision 27: the operator wins
-    #    regardless of event arrival order). The maps are empty until Layer 6 fills them, so this is a
-    #    no-op in Layer 1; reserving it here means Layer 6 needs no `_derive_cards` rewrite. `card_edited`
+    # 7) operator-override overlay — FINAL PHASE (docs/23 decision 27: the operator wins regardless of
+    #    event arrival order). `card_edited`
     #    overlays the DISPLAY statement only — the join key stays `seed_statement` (docs/23 decision 24).
     # Resolve through `_canon` so a control that named a card before it was merged still lands on the
     # canonical survivor. Bound the stored id first as an additional replay hardening fence.
@@ -5115,7 +5117,7 @@ def _derive_cards(st: RunState) -> None:
     # 8) LAYER-1c exclusion seam — derive `actionable` from the FINAL status/verdict (after every
     #    override). This compatibility flag means only "not administratively dead" for the board:
     #    running/evaluated cards intentionally remain True. It MUST NOT be consumed as proof of
-    #    executability; receipt-backed `selection_ready` below is the future queue seam.
+    #    executability; receipt-backed `selection_ready` below is the active queue seam.
     for c in cards.values():
         c.actionable = c.status not in ("dropped", "gated") and c.verdict != "abandoned"
 

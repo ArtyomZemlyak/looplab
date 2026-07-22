@@ -1,4 +1,4 @@
-"""Graded novelty + failed-direction re-examination (PART IV D3, §21.4/§21.10/§21.12 — Phase 1c, advisory).
+"""Graded novelty + failed-direction re-examination (PART IV D3, §21.4/§21.10/§21.12).
 
 **Why this exists.** The live novelty gate (`engine/novelty.py::_llm_novelty_gate`) asks exactly ONE
 question — *is this a near-duplicate of an experiment tried in THIS run?* — and has no path to RE-OPEN a
@@ -10,7 +10,7 @@ it reproduced the loop's original mistake (§21.10). The fix that measured corre
 the concept graph** (so the gate can tell "this DCL tweak" from "the whole DCL branch"), and make
 re-examination **grounded** (D1 assets / prior art) and **repeated** (the 0c verifier), never a blind call.
 
-**What this is (advisory library, not the live gate).** Two pure/audit pieces plus one verifier-backed one:
+**What this is.** Pure Phase-1 primitives, now consumed by the opt-in Phase-2b live gate:
   * `grade_novelty(...)` — DETERMINISTIC multi-level classifier of a proposed idea vs the run's history,
     using the concept graph for the branch-vs-leaf distinction (the §21.4 levels 1–5). No LLM.
   * `failed_directions(...)` — DETERMINISTIC: concept-graph directions every experiment touching them
@@ -18,9 +18,10 @@ re-examination **grounded** (D1 assets / prior art) and **repeated** (the 0c ver
   * `reexamine_failed_direction(...)` — the 0c verifier (`reexamination_criteria`) grounded in the D1
     asset brief, deciding implementation-bound (re-open) vs direction-bound (leave closed). Best-effort.
 
-**Discipline.** Phase 1c is offline→ADVISORY (§21.13): this module computes the graded decision the engine
-COULD consult, and is validated offline; it does NOT change `_llm_novelty_gate`'s live behavior (that is
-Phase 2b). Deterministic parts are pure; the re-examination is best-effort and degrades without a client.
+**Discipline.** Deterministic parts are pure; the re-examination is best-effort and degrades without a
+client. In the live precheck, L4 admission requires a concrete parameter/search-space delta, and L5
+requires the grounded repeated verifier before it may reopen a failed direction. Cross-run priors remain
+a separate advisory signal. Metric ranking and champion selection are unchanged by this module.
 """
 from __future__ import annotations
 

@@ -1229,13 +1229,13 @@ class CardSelectionProvenance(BaseModel):
 class Card(BaseModel):
     """One immutable proposal/work item in the target Card queue (docs/23).
 
-    ``Hypothesis`` remains the many-experiment research-direction aggregate. The current Layer-1
-    migration projection also materializes legacy/hash/synthesized Card shadows so old logs retain a
-    useful board, but those rows are advisory and never selection-ready. Only a unique receipt-bound
-    ``card_added`` can establish native work-item identity; future Layer-3 code must consume
-    ``selection_ready``, never infer executability from the compatibility ``actionable`` flag.
+    ``Hypothesis`` remains the many-experiment research-direction aggregate. The projection also
+    materializes legacy/hash/synthesized Card shadows so old logs retain a useful board, but those rows
+    are advisory and never selection-ready. Only a unique receipt-bound ``card_added`` establishes
+    native work-item identity. Current Card selection consumes ``selection_ready`` and never infers
+    executability from the compatibility ``actionable`` flag.
     """
-    id: str                                             # engine-minted `card-{k}` (later) or statement hash
+    id: str                                             # native engine-minted `card-{k}` or legacy statement hash
     statement: str                                      # the DISPLAY statement (operator-editable in L6)
     # The IMMUTABLE seed statement captured at card_added — the stable statement-hash JOIN key, held
     # separate from `statement` so an operator paraphrase (L6 card_edited) overlays DISPLAY only and never
@@ -1255,9 +1255,9 @@ class Card(BaseModel):
     # Layer-1c compatibility flag for board filtering only: False for dropped/gated/abandoned, True for
     # proposed/running/evaluated. It deliberately does NOT imply that one fresh executable action exists.
     actionable: bool = True
-    # CODEX AGENT: `actionable` is a compatibility/advisory board flag, never proof that a card is one
-    # executable work item.  Only the receipt-backed, fail-closed seam below may be consumed by the
-    # future Layer-3 queue. `selection_ready` stays False for every legacy/hash/synthesized runtime card.
+    # `actionable` is a compatibility/advisory board flag, never proof that a card is one executable
+    # work item. Only the receipt-backed, fail-closed seam below is consumed by the active Card queue.
+    # `selection_ready` stays False for every legacy/hash/synthesized runtime card.
     identity: CardIdentityProvenance = Field(default_factory=CardIdentityProvenance)
     selection_provenance: CardSelectionProvenance = Field(default_factory=CardSelectionProvenance)
     selection_blockers: list[CardSelectionBlocker] = Field(
@@ -1845,8 +1845,9 @@ class RunState(BaseModel):
     # `_derive_hypotheses` stamps each open card's `priority` from `order`; the UI kanban sorts by it
     # and shows `reason` as the "why this order" analysis trace. None until the predictor first runs.
     hypothesis_ranking: Optional[dict] = None
-    # Hypothesis-card Kanban re-architecture (docs/23, Layer 1a). The CARD ledger — DERIVED each fold by
-    # `_derive_cards` (mirrors `hypotheses`), ADVISORY, never read by best-selection. Keyed by card id.
+    # Card ledger derived each fold by `_derive_cards`, keyed by card id. It never directly chooses the
+    # metric champion; when card_driven_selection is enabled, the engine consumes selection-ready rows
+    # to choose which candidate action to build next.
     cards: dict[str, Card] = Field(default_factory=dict)
     # Folded inputs for `_derive_cards` (mirror the `hypotheses_*` lists). These are canonical bounded
     # replay receipts, never raw Event.data: `cards_added` keeps the thin action seed, `cards_merged` the
@@ -1860,7 +1861,7 @@ class RunState(BaseModel):
     # open card's `priority` (falls back to `hypothesis_ranking` while the engine still ranks hypotheses).
     cards_enriched: list[dict] = Field(default_factory=list)
     card_ranking: Optional[dict] = None
-    # Operator-override maps — RESERVED in Layer 1a, filled by Layer 6 control events. `_derive_cards`
+    # Operator-override maps filled by Card control events. `_derive_cards`
     # overlays them in a FIXED LAST phase so the operator always wins regardless of event arrival order
     # (docs/23 decision 27). Empty {} in Layer 1 -> the overlay is a no-op; reserving them now means Layer
     # 6 needs no `_derive_cards` rewrite. Keyed by card id.

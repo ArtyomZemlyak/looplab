@@ -14,7 +14,7 @@ strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-
 | Area | Landed now | Remaining |
 |---|---|---|
 | Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | none |
-| Card read model | native monotonic Card mint/link under a process-local `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | Card mint and build claim are consecutive appends, not one cross-process atomic/CAS transaction; an exact retry repairs the crash prefix |
+| Card read model | native monotonic Card mint/link under a process-local `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-aware draft/rerun/inject/ablation writers; bounded per-event input and public projection; durable request/done queue | Card mint and build claim are consecutive appends, not one cross-process atomic/CAS transaction; an exact retry repairs the crash prefix. The folded `cards_enriched` replay journal is not yet capped |
 | Enrichment | structured steering snapshots; memo/claim/lesson refs; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays; schema seams for novelty/cross-run/concept projection | proposal-time selectable Cards do not yet carry trusted novelty/coverage memberships, so those ranking terms are zero until a linked Node supplies later evidence |
 | Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
 | Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, confirm admission, isolated Card producer/consumer | positive-GPU discovery failure can still launch an unspecified request without a pin; `required-but-unavailable` is not represented separately |
@@ -41,11 +41,12 @@ and hardware receipts below. Deferred broader rollout scopes are not unfinished 
 ### Validation and rollout receipt (evidence for commit `8d9952a1`)
 
 > The `implementation` digest below is `speculation_implementation_digest()` over the raw bytes of every
-> `looplab/**/*.py` AT commit `8d9952a1`. That hash is intentionally sensitive to any later Python edit —
-> including review-only comments and post-merge fixes — so this receipt is a point-in-time snapshot of
+> `looplab/**/*.py`, the required `looplab/serve/settings_ui_schema.json`, and `pyproject.toml` when the
+> checkout supplies it, AT commit `8d9952a1`. That hash is intentionally sensitive to any later byte edit —
+> including comments, schema help and packaging changes — so this receipt is a point-in-time snapshot of
 > that commit, **not** a claim about the current HEAD. A `speculation_depth>0` rollout must regenerate the
-> receipt against the exact deployed HEAD (`verify_speculation_receipt` recomputes and fails closed on a
-> mismatch); reading these digests as "current" would overstate what the runtime gate will admit.
+> receipt against the exact deployed HEAD (`validated_speculation_gate_receipt` returns the validated
+> receipt; `validate_speculation_gate_receipt` provides the boolean check and both fail closed on mismatch).
 
 - Implementation commit: `8d9952a1` (`feat(cards): harden speculative rollout gate`), pushed directly
   to `origin/master` on 2026-07-22.
@@ -57,8 +58,10 @@ and hardware receipts below. Deferred broader rollout scopes are not unfinished 
   module separately passed **80/80**.
 - UI: **602/602** tests passed. Production Vite build passed with **270 modules transformed**.
 - Documentation: strict MkDocs build and `git diff --check` are green for this ledger snapshot.
-- Hardware evidence root: `runs/speculation-gate-20260722/`; canonical receipt:
-  `runs/speculation-gate-20260722/speculation-quality.receipt.json` (**24,160 bytes**).
+- Historical local hardware evidence root: `runs/speculation-gate-20260722/`; receipt at validation time:
+  `runs/speculation-gate-20260722/speculation-quality.receipt.json` (**24,160 bytes**). `runs/` is ignored
+  and this evidence is not shipped in the repository, so these hashes are an audit record rather than a
+  reproducible source artifact. The guide now ships the exact seed task inputs and producer commands.
 - Effective device: NVIDIA GeForce RTX 5090, UUID
   `GPU-8db535f8-6a6c-d4db-e76b-04b3b9978a10`, PCI `0000:01:00.0`, 32,606 MiB,
   driver `595.79`, CUDA driver version `13020`. Every one of the **64 evaluated nodes** created a real
@@ -144,9 +147,11 @@ evaluated, and superseded work. It is therefore **not evidence of executability*
 consume only `selection_ready`, which requires all of the following:
 
 1. one unique `card_added` carrying an exact v1 `ownership_receipt` bound to the card id, immutable seed
-   statement, concrete action, parent anchors, resource declaration, and `scored_against` fence;
-2. one complete concrete action owner with a supported operator/parent shape;
-3. `scored_against == state.best_node_id` at fold time;
+   statement, concrete action, parent anchors, resource declaration and complete score fence;
+2. one complete concrete action owner with a supported operator/parent shape and matching
+   `parent_generations` for every anchored attempt;
+3. with an incumbent, `scored_against` and `scored_against_generation` match its current id/attempt;
+   without one, `scored_against_empty` explicitly records that complete empty authority;
 4. no linked pending, terminal, failed/superseded, missing, or merged work-item owner.
 
 ID spelling is never the discriminator: even an id that resembles a statement hash is native when its
@@ -669,35 +674,38 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     load-bearing. Timeout is ONE canonical field (`eval_timeout`) with a **Settings hard ceiling** the
     agent-declared value is clamped to (decision 3); footprint carries only `gpus`/`mem`.
 
-### 12.3 Card-schema additions Layer 1 MUST carry now (build 1a/1b right the first time)
+### 12.3 Landed Card schema and current transport contract
 
 The reason the review ran *before* coding 1a: several later-layer needs are Layer-1 schema items that,
 if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
 
-**1a (structural):**
+**Structural fields:**
 - `Idea.card_id: Optional[str]=None` (round-trips through `durable_idea_payload`→`node_created`→
   `Idea(**d['idea'])` for free — only concept fields are popped). Engine-minted monotonic `card-{k}`,
-  main-task-only, reserved+appended atomically under `_id_lock` (ceiling `1+max(card_added ids)`).
+  main-task-only, planned under process-local `_id_lock` and appended before the separate
+  `node_building` claim (ceiling `1+max(card_added ids)`); the two appends are not one transaction.
 - `node_building.card_id` as an additive data field (see decision 25); mint the card for speculative
   drafts too, decoupling card mint from idea proposal.
-- `Card.status` — derived enum, frozen lane vocabulary (decision 28), kept extensible.
-- `Card.node_ids`/`evidence`/`best_delta`/`verdict` — computed by the **extracted pure helper** (values,
+- `Card.status` — derived open string; current replay emits proposed/building/running/evaluated/gated/dropped
+  and leaves additional future vocabulary visible rather than rejecting it.
+- `Card.evidence`/`best_delta`/`verdict` — computed by the **extracted pure helper** (values,
   never stamped onto Node/Hypothesis).
 - **Immutable seed statement** captured on `card_added`, held separate from any editable display
   statement, used as the hash-fallback join key (decision 24).
-- `Card.idea` block: `operator (draft|improve|merge|debug)`, `params`, `space`, `eval_profile` — with the
+- Flat action fields `operator`, `params`, `space`, `eval_profile`, `eval_timeout` — with the
   operator KIND populated at `card_added` for pre-built/speculation candidates (so L3/quality can map a
   card to `legal_actions` semantics before any node exists).
 - **Prospective parent anchor** `Card.parent_id: Optional[int]` + `parent_ids: list[int]`, captured at
   `card_added`/`card_ranked` — the freshness gate re-derives improve/merge legality for a not-yet-built
   card against `state.best()`/`rank_by_metric[:2]`/`breedable_nodes()`.
-- `Card.source` enum `{researcher|operator|engine|foresight|novelty|freshness}` + `dropped_reason` +
-  `dropped_by{operator|engine|freshness|novelty}` + `merged_into`/`aliases` (cycle-safe via `_canon`).
+- Open, bounded `Card.source` and `dropped_by` strings + `dropped_reason` + `merged_into`/`aliases`
+  (cycle-safe via `_canon`); known writer values include researcher/operator/engine/freshness/novelty.
   Dropped and merged-away cards receive terminal/merge `selection_blockers`; L3 must never treat the
   broader compatibility `actionable` set as its queue.
-- `scored_against`/`built_against: Optional[int]` staleness scalar recorded IN `card_added`/`card_ranked`
-  (= `best_node_id` or event seq the card was scored against); the freshness gate compares it
-  deterministically. Reader-default `None` → a card with no fence never speculates.
+- The score fence is the triple `scored_against`, `scored_against_generation`,
+  `scored_against_empty`, plus exact `parent_generations`. With an incumbent, id and generation must
+  still match; without one, the writer must explicitly set the empty marker. Missing legacy fence data
+  stays unknown and never becomes selection-ready.
 - `RunState.cards: dict[str,Card]=default_factory(dict)`, assigned only inside `_derive_cards`.
 - **Reserve now** the operator-override maps + the final-overlay phase:
   `RunState.card_priority_pins`/`card_operator_edits`/`card_resource_pins` (`default_factory=dict`), even
@@ -725,9 +733,10 @@ internal folded model; transport metadata is deliberately not written back into 
   exact. Upstream receipts inside `cross_run_prior` and `concept_source` retain their own meaning; this
   outer receipt reports only additional loss at the public Card boundary.
 
-**1b (enrichment):**
-- `Card.footprint` sub-schema — concrete shape `{gpus:int, gpu_mem_mib:Optional[int],
-  proposed_by:str, finalized_by:Optional[str], pinned_by:Optional[str]}`; UNSPECIFIED (`None`/`gpus None`)
+**Enrichment:**
+- `Card.footprint` is the immutable receipt-owned declaration/developer provenance, while the operator
+  override is a separate `Card.resource_pin` shape `{gpus?, gpu_mem_mib?, pinned_by:"operator"}`.
+  UNSPECIFIED (`None`/`gpus None`)
   distinct from explicit `gpus=1` (decision 16). Also `Idea.footprint: Optional[dict]=None` (rides
   `durable_idea_payload` like `eval_profile`). **Timeout is NOT on the footprint** (owner decision 3): it
   stays the single canonical `eval_timeout`, and the agent-declared value is **clamped to a new Settings

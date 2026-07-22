@@ -2,7 +2,7 @@
 
 The local CLI needs **no Docker and no network**. This guide covers the two scenarios where extra
 infrastructure matters: the **untrusted sandbox tier** and the **one-command Compose stack** for a
-hosted setup.
+single-operator, self-hosted setup.
 
 ## The untrusted sandbox tier
 
@@ -20,16 +20,22 @@ export LOOPLAB_DOCKER_IMAGE=python:3.12-slim     # bake the framework's deps int
 ```
 
 Because the container runs `--network none`, a candidate can't fetch anything at eval time — the
-image must already contain the dependencies. Pair this tier with `redact_output=true` so a leaked
-secret in a print/traceback never lands in the durable log.
+image must already contain the dependencies. `redact_output=true` masks bounded stdout/stderr tails in
+events, traces and the UI; it does **not** scrub raw node-workdir `setup.log`, stage logs, `eval.log`,
+source or artifacts. Do not expose secrets to candidate code, and protect/retain the run root as
+sensitive data.
 
 > **Docker is only required for this tier (and the Compose stack below).** The local CLI never needs
 > it.
 
 ## Docker Compose stack (LLM + UI + engine)
 
-For the hosted scenario, `docker-compose.yml` brings up everything with one command. Requires Docker
-with the NVIDIA GPU runtime (Docker Desktop + WSL2 is fine).
+For a trusted single-operator machine, `docker-compose.yml` brings up the model, UI and runner with one
+command. It defaults to `trusted_local`, so candidate code executes inside the application container;
+this stack is **not** a multi-tenant or untrusted-code boundary. Run `untrusted`/`hostile` evaluation on
+a separately prepared host/worker with Docker (and gVisor for `hostile`) rather than assuming the app
+container can create nested sandboxes. Requires Docker with the NVIDIA GPU runtime (Docker Desktop +
+WSL2 is fine).
 
 ### Services
 
@@ -61,7 +67,10 @@ LOOPLAB_LLM_MODEL=...
 ```
 
 The model, ports, VRAM fraction, context length, and SGLang flags are all tunable in `.env`. Run
-artifacts land in `./runs`, shared with the host and the UI.
+artifacts land in `./runs`, shared with the host and the UI. The named `looplab-state` volume is mounted
+at `/root/.looplab` in both application services, so default cross-run memory and knowledge survive
+`docker compose run --rm` and are shared with the UI. Back up that volume separately; it can contain
+research notes and evidence.
 
 ### Notes
 
@@ -74,6 +83,12 @@ artifacts land in `./runs`, shared with the host and the UI.
   `LOOPLAB_UI_HOSTS` (comma-separated). Host validation prevents DNS rebinding a browser into the
   local control plane. The token is not embedded in HTML: the owner enters it in the unlock screen
   and it stays in that browser tab's `sessionStorage`.
+- SGLang's `:30000` endpoint has no API authentication in this Compose file. `LOOPLAB_UI_TOKEN`
+  protects only the LoopLab control plane, not the model server. Keep SGLang on loopback/a private
+  network or put an authenticated gateway/firewall in front of it.
+- The Compose UI healthcheck calls process-liveness `/api/health`; it does not prove that the run root
+  is writable or that SGLang can answer a model request. Production readiness monitoring must check
+  those dependencies separately.
 
 ## Owner access and read-only review links
 
@@ -83,8 +98,9 @@ first shows **Unlock LoopLab controls**; enter the same value there. The SPA sen
 HTML, and it is not written to a persistent browser store.
 
 The live owner run stream is protected by the same deny-by-default owner API boundary. The SPA uses an
-authenticated `fetch`-based SSE client because native `EventSource` cannot attach `X-LoopLab-Token`; reconnects
-send the last complete event ID in `Last-Event-ID`. Do not exempt `/api/runs/{id}/events` at a reverse proxy.
+authenticated `fetch`-based SSE client because native `EventSource` cannot attach `X-LoopLab-Token`.
+Reconnects currently receive a fresh complete snapshot; the browser may send `Last-Event-ID`, but the server
+does not offer resumptive delta delivery from that header. Do not exempt `/api/runs/{id}/events` at a reverse proxy.
 Read-only review links do not receive that owner stream: their dedicated `/api/review/*` projections stay
 capability-scoped and polling-based. SSE responses are never gzip-buffered.
 
@@ -147,8 +163,8 @@ target automatically when `LOOPLAB_UI_TOKEN` is present. Five env knobs matter o
 
 | Env | Why |
 |---|---|
-| `LOOPLAB_RUN_ROOT` | Where runs persist. Defaults to `~/looplab-runs` (the user's home volume) so runs survive a hub idle-cull + pod restart instead of landing in an ephemeral CWD. **Don't** point it at an S3/geesefs FUSE mount — the append-only event log needs atomic rename. |
-| `LOOPLAB_ALLOW_UNLOCKED_WRITER` | Safety override. The engine holds an exclusive `engine.lock` so only one writer touches a run's `events.jsonl`. On a FUSE/S3 mount where OS file locking is unavailable that lock can't be enforced, so startup **fails closed** with an actionable error (two writers could corrupt the log). Set this to `1` **only** if you guarantee a single engine per run dir; it degrades to a best-effort no-op and runs anyway. Prefer a lock-capable local disk (`LOOPLAB_RUN_ROOT`). |
+| `LOOPLAB_RUN_ROOT` | Where runs are written. Defaults to `~/looplab-runs`; it survives idle-cull/pod replacement **only when the Spawner/Z2JH deployment mounts a persistent home/PVC**. Without that volume, both runs and default `~/.looplab` memory disappear with the pod. **Don't** point the run root at an S3/geesefs FUSE mount: the event protocol depends on coherent append, tail repair, locking and fsync semantics that object-backed FUSE commonly cannot provide. |
+| `LOOPLAB_ALLOW_UNLOCKED_WRITER` | Safety override. The engine holds `engine.lock` as the one live reducer, while the engine and authenticated control server may append serialized records to the same log. On a FUSE/S3 mount where OS locking is unavailable the reducer lock cannot be enforced, so engine startup **fails closed**. Set this to `1` only if you externally guarantee one engine per run dir and accept best-effort append locking/durability; prefer a lock-capable local disk. |
 | `LOOPLAB_UI_DIST` | A prebuilt React bundle. Set it (the image bakes one) so `looplab ui --no-build` serves instantly and never attempts an `npm build` on the noexec/FUSE home. |
 | `LOOPLAB_UI_HOSTS` | Public hostname(s), comma-separated, that may reach the UI (for example `hub.example.org`). `localhost`, `127.0.0.1`, and `::1` are always allowed; every other Host is rejected to prevent DNS rebinding. |
 | `LOOPLAB_LLM_BASE_URL` | The cluster LLM endpoint (the default is localhost Ollama). A wrong/unreachable endpoint now surfaces as a terminal `run_finished{reason:error}` event rather than a silent stuck run. |
@@ -158,7 +174,10 @@ target automatically when `LOOPLAB_UI_TOKEN` is present. Five env knobs matter o
 
 **Single-user image.** `Dockerfile.jupyterhub` builds a `quay.io/jupyter/base-notebook` image with
 LoopLab installed, the bundle baked + pinned, and `LOOPLAB_RUN_ROOT` set. Point your Z2JH
-`singleuser.image` (or `c.Spawner.image`) at it and every user gets a working LoopLab tile.
+`singleuser.image` (or `c.Spawner.image`) at it, mount a persistent home/PVC, and set
+`LOOPLAB_UI_HOSTS=hub.example.org` for the public hub host. For an HTTP or non-default-port origin,
+also allow the full origin in `LOOPLAB_UI_CORS`; otherwise unsafe-method requests correctly fail with
+403 even though the tile can render.
 
 **Resource lifecycle.** Under JupyterHub the UI server reaps the engines it spawned on shutdown (a
 hub cull would otherwise orphan a detached engine that keeps billing GPU/CPU and holds the run's

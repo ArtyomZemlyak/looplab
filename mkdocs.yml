@@ -119,8 +119,10 @@ validation:
     not_found: warn
     absolute_links: info
   links:
-    not_found: info
-    anchors: info
+    # `mkdocs build --strict` is CI's link contract; missing pages/anchors must be warnings so strict
+    # mode fails instead of publishing dead navigation as informational noise.
+    not_found: warn
+    anchors: warn
     absolute_links: info
     unrecognized_links: info
 

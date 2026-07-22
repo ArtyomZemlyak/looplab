@@ -1,15 +1,16 @@
 """PART IV cross-run Step 4 (§21.20) — evidence-grounded CLAIM assessments.
 
-A pure read-model that projects the ALREADY-SHIPPED memory into verifiable claims: a distilled lesson
+The pure projection core maps existing memory into verifiable claims: a distilled lesson
 already carries `{statement, outcome, evidence:[node_ids], run_id, task_id}` (a verdict + its grounding
 nodes), and a D8 deep-research memo carries `claims:[{statement, node_ids, urls}]`. This module UNIFIES
 those two shapes (it does not fork a third): it groups by normalized statement and records support vs
 oppose evidence refs plus an epistemic state, so the loop/UI can ask "what does the accumulated evidence
 suggest, and what contradicts it?" — the §21.20.5 claim idea in lean form.
 
-Deliberately pure/deterministic and off any live path: no new store, no LLM, no I/O. The verdict→stance
-mapping reuses the shipped lesson vocabulary (`memory._NEGATIVE` / "supported"); a "noted"/unknown verdict
-is neutral (it takes no stance), exactly as on the lesson read/write paths.
+Around that core, this module owns the durable v3 ``research_claims.jsonl`` store, governance decisions,
+health-aware readers and live API/prompt consumers. It performs no LLM inference itself. The
+verdict→stance mapping reuses the shipped lesson vocabulary (`memory._NEGATIVE` / "supported"); a
+"noted"/unknown verdict is neutral (it takes no stance), exactly as on the lesson read/write paths.
 """
 from __future__ import annotations
 
@@ -1384,9 +1385,12 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
                            direction: str, claims_total: Optional[int] = None,
                            claims_receipt_known: Optional[bool] = None,
                            evidence_complete: Optional[bool] = None) -> int:
-    """Upsert (by run_id) a run's D8 research claims into `research_claims.jsonl`. Each row:
-    {run_id, task_id, statement, node_ids, urls, source_receipt}. Append-with-replace so a re-run doesn't
-    double-count. Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
+    """Replace one run's v3 D8 claims in ``research_claims.jsonl`` under the required store lock.
+
+    Rows carry version/record kind, run/task identity, direction/metric identity, statement,
+    verification/evidence fields, node/URL references and both aggregate and per-row source receipts.
+    Replacement preserves quarantined malformed input and returns the number of current rows written.
+    """
     from pathlib import Path
 
     from looplab.events.eventstore import (

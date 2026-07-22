@@ -1,6 +1,8 @@
-"""The general-purpose assistant: a persistent chat agent embedded in the Web UI that can read the
-machine, reference/steer runs, and (in later phases) write files, run commands and edit LoopLab
-itself. It is the evolution of the pre-run Genesis chat into a full assistant.
+"""The general-purpose assistant: a persistent Web UI agent that can inspect the machine and runs.
+
+Mutating permission modes additionally expose file, shell, git, knowledge, taxonomy and run-control
+providers behind the configured approval policy. Plan mode remains read-only. It is the evolution of
+the pre-run Genesis chat into a full assistant.
 
 This module is the DEPENDENCY-LIGHT core: a `SessionStore` (append-only per-session transcripts under
 `<run_root>/assistant/`) and a `run_turn` that assembles a toolset and drives the shared
@@ -8,9 +10,8 @@ This module is the DEPENDENCY-LIGHT core: a `SessionStore` (append-only per-sess
 keeping those injected makes the whole thing unit-testable with a scripted fake client (see
 `tests/test_assistant_endpoint.py`), exactly like `genesis`/`server` are tested today.
 
-Permission MODES (Claude-Code-style) are honored by the tool PROVIDERS, not here: `run_turn` just
-passes the mode down. In P0 the toolset is read-only (`plan` mode); write/shell/git providers and the
-pause-resume approval flow arrive in P1.
+Permission modes are honored by the tool providers rather than this module; ``run_turn`` passes the
+selected mode and approval hooks down to them.
 """
 from __future__ import annotations
 

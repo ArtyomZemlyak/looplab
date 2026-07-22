@@ -1,0 +1,10 @@
+{
+  "kind": "quadratic",
+  "id": "toy_quadratic",
+  "goal": "minimize (x-3)^2 + (y+1)^2",
+  "direction": "min",
+  "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]},
+  "seed": 0,
+  "step": 1.0,
+  "noise": 0.0
+}

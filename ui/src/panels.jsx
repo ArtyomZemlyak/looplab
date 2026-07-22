@@ -1343,17 +1343,15 @@ function _CardKanbanCard({
   const footprintKnown = Object.hasOwn(card, 'footprint')
   const baseFootprint = isRecord(card.footprint) ? card.footprint : null
   const resourcePin = isRecord(card.resource_pin) ? card.resource_pin : null
-  // CODEX AGENT: this is only a client-side merge of requested values, not the scheduler's effective
-  // footprint after host-capacity clamping. Rendering it as "Effective pin" can overstate GPU memory
-  // whenever the server accepted a partial pin and clamped the inherited footprint; project the
-  // server-computed effective allocation, or label this explicitly as a requested/configured merge.
-  const effectiveFootprint = baseFootprint || resourcePin
+  // This is the configured Card footprint after applying the operator override. Runtime scheduling may
+  // still allocate less, so never label the client-side projection as an effective allocation.
+  const configuredFootprint = baseFootprint || resourcePin
     ? { ...(_cardResourceValues(baseFootprint) || {}), ...(_cardResourceValues(resourcePin) || {}) }
     : null
-  if (effectiveFootprint?.gpus === 0) delete effectiveFootprint.gpu_mem_mib
-  const effectiveGpus = effectiveFootprint ? _cardInt(effectiveFootprint.gpus) : null
+  if (configuredFootprint?.gpus === 0) delete configuredFootprint.gpu_mem_mib
+  const configuredGpus = configuredFootprint ? _cardInt(configuredFootprint.gpus) : null
   const pinValues = _cardResourceValues(resourcePin)
-  const formGpus = pinValues?.gpus ?? effectiveGpus
+  const formGpus = pinValues?.gpus ?? configuredGpus
   const formGpuMem = pinValues && Object.hasOwn(pinValues, 'gpu_mem_mib')
     ? pinValues.gpu_mem_mib : null
   const evalTimeout = _cardNumber(card.eval_timeout)
@@ -1374,7 +1372,7 @@ function _CardKanbanCard({
   const omissionCount = isRecord(receipt?.omissions) ? Object.keys(receipt.omissions).length : 0
   const declaredResources = footprintKnown
     ? _cardResourceSummary(baseFootprint) : 'resource projection unavailable'
-  const effectiveResources = _cardResourceSummary(effectiveFootprint)
+  const configuredResources = _cardResourceSummary(configuredFootprint)
   const pinResources = _cardResourceSummary(resourcePin)
   const provenanceBits = [
     source && `source ${source}`,
@@ -1478,9 +1476,9 @@ function _CardKanbanCard({
       <span>{declaredResources}{evalTimeout == null ? '' : ` · ${fmt(evalTimeout)}s timeout`}</span>
     </div>
     {resourcePin && <div className="card-kanban-fact card-resource-pin">
-      <span className="card-kanban-k">Effective pin</span>
+      <span className="card-kanban-k">Configured pin</span>
       <span><span className="chip xs warn">{_cardText(resourcePin.pinned_by) === 'operator'
-        ? 'operator override' : 'pending operator override'}</span> {effectiveResources}
+        ? 'operator override' : 'pending operator override'}</span> {configuredResources}
         <span className="card-resource-request">requested {pinResources}</span></span>
     </div>}
     <div className="card-kanban-fact">
@@ -1539,7 +1537,7 @@ function _CardKanbanCard({
       </form>
       <form className="card-control-resource" onSubmit={event => { event.preventDefault(); saveResources() }}>
         <fieldset disabled={busy}>
-          <legend>Effective resource pin</legend>
+          <legend>Configured resource override</legend>
           <div className="card-control-resource-fields">
             <label><span>GPUs</span><input className="text" type="number" min="0" step="1"
               aria-label={`GPU count for ${card.id}`} value={gpuDraft}

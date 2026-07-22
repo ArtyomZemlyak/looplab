@@ -76,7 +76,7 @@ Score, …); the **Card lifecycle board** (with a legacy Hypotheses fallback), *
 | Part IV/V concept materialization · graph · bounded frame | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py`, `serve/concept_frame.py` |
 | Repo Developer: env-inspector + auto-validate | `tools/env_inspect.py`, `adapters/repo_write_tools.py` (re-exported via `repo_developer.py`) |
 | Sandbox seam (subprocess / Docker) · built-in eval watchdogs (loss/grad divergence · stall) | `runtime/sandbox.py` |
-| Training-log monitor (opt-in LLM watcher of the live training log; advisory verdict, gated early-kill) | `engine/train_monitor.py` |
+| Training-log monitor (product `Settings`: watcher on; bare `EngineOptions`: off; verdict advisory, early-kill separately opt-in) | `engine/train_monitor.py` |
 | Variance gate · multi-seed confirmation · CV · leakage · reward-hack | `trust/gate.py`, `trust/confirm.py`, `trust/cv.py`, `trust/leakage.py`, `trust/reward_hack.py` |
 | Cross-run memory · retrieval · harmonic index | `engine/memory.py`, `engine/lessons.py`, `tools/memora.py` |
 | Cross-run index · claims · taxonomy/claim governance | `engine/cross_run_index.py`, `engine/claims.py`, `engine/concept_registry.py`, `engine/governance_health.py` |

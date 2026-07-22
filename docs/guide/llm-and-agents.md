@@ -243,7 +243,7 @@ Give the agentic Researcher extra context and tools:
 | Setting | What it adds |
 |---|---|
 | `knowledge_dir` | A notes directory; the Researcher gets `grep` / `kb_search` / `list_notes` / `read_note` tools and chooses when to use them |
-| `skills_dir` | A directory of `SKILL.md` files the Researcher can list and load |
+| `skills_dir` | A directory whose recursive `*/SKILL.md` packages and root-level `*.md` skills the Researcher can list and load. The shipped flat example works with `-s skills_dir=examples/skills` |
 | `prompt_dir` | Editable, hot-reloaded role-prompt `.md` files (override the built-in prompts) |
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |
 | `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root) |

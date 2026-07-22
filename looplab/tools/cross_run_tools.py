@@ -3,9 +3,13 @@ reasoning role (Researcher, Strategist, Developer, deep-research) can ASK — mi
 
   - `cross_run_prior_attempts(idea)`  : has this concept been tried across runs, and how did it go?
   - `cross_run_claims(query, contested): what does the accumulated evidence support vs contradict?
-  - `cross_run_atlas()`               : the portfolio map — explored / thin / contradictory.
+  - `cross_run_atlas()`               : the portfolio map — explored / thin / contradictory;
+  - `cross_run_search(query)`         : bounded claims + concepts retrieval with a why-recalled receipt;
+  - `cross_run_concept_map()`         : governed portfolio concept graph;
+  - `similar_runs()`, `find_concept_slugs()`, `concept_card()` : scoped discovery/detail reads.
 
-Pure reads over `memory_dir` (`lessons.jsonl` + `concept_capsules.jsonl`) via the shipped read-models
+Pure reads over `memory_dir` (`lessons.jsonl`, `research_claims.jsonl`, `concept_capsules.jsonl` and
+governance overlays) via the shipped read-models
 (`claim_assessments`, `portfolio_concept_overview`, `portfolio_atlas`). ADVISORY ONLY: an agent may CITE
 what it finds, but this tool exposes NO mutation — cross-run truth is written only by the engine (facts) or
 ratified by the operator (§22.4). `role` scopes the claim stream so the Developer sees dev-routed lessons

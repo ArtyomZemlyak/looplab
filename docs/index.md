@@ -66,7 +66,8 @@ hand work around the wheel, and every arrow also appends one event to `events.js
 </svg>
 </div>
 
-Every domain/control arrow above appends one line to `events.jsonl`, the replay authority for `RunState`.
+Every domain/control arrow above appends one logical event to `events.jsonl`, the replay authority for
+`RunState`. A physical JSONL line may contain one event or a versioned atomic batch envelope.
 Diagnostic and cross-run boxes also use their documented sidecars.
 
 [See the full interactive infographic — every component and stage :material-open-in-new:](guide/architecture.md)
@@ -164,5 +165,7 @@ Diagnostic and cross-run boxes also use their documented sidecars.
 !!! tip "Two properties everything rests on"
 
     **Reproducible by replay** — `looplab replay RUN_DIR` folds the event log into state with a pure
-    function, identical every time. **Crash-resumable, exactly** — `looplab resume RUN_DIR` replays the
-    log, reconstructs the exact frontier, and continues with no duplicated or lost work.
+    function, identical every time. **Crash-resumable at the durable frontier** — `looplab resume RUN_DIR`
+    replays the complete event prefix and does not re-serve work whose durable fulfillment receipt is
+    present. External effects and cross-run sidecars have their own narrower recovery contracts; an
+    unreceipted side effect does not receive a blanket exactly-once guarantee.
