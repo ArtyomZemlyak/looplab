@@ -187,6 +187,10 @@ def build_router(srv) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
 
+    # CODEX AGENT: this is the sole public Card-control entry, but raw Request/manual Idempotency-Key and
+    # no response_model publish no usable request/header/response contract in OpenAPI. Add strict typed
+    # models (retaining the manual 400 parser if needed) so generated clients can submit and observe the
+    # command lifecycle.
     @router.post("/api/runs/{run_id}/commands")
     async def submit_command(run_id: str, request: Request, response: Response):
         _command_response_headers(response)

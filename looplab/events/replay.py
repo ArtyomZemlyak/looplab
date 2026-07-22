@@ -2629,6 +2629,10 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # legacy/default envelopes. Assign both after copying so payload fields can never spoof ordering.
         rec["_seq"] = e.seq if type(e.seq) is int else -1
         rec["_event_index"] = ctx.event_index if type(ctx.event_index) is int else -1
+        # CODEX AGENT: each delta is bounded, but this journal is not. Every FoldCursor snapshot deep
+        # copies the full history and _derive_cards sorts/replays it although only last-write-per-field
+        # affects the projection. Retain a bounded per-Card/per-field LWW receipt in RunState and leave
+        # full audit history in events.jsonl.
         st.cards_enriched.append(rec)
 
 def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -4894,6 +4898,10 @@ def _derive_cards(st: RunState) -> None:
             c.status = "building"
         elif not ev_nodes:
             c.status = "proposed"
+        # CODEX AGENT: every pending Node collapses directly to running and the log has no durable
+        # evaluation-start boundary, so the frozen coded lane advertised by the model/UI is unreachable.
+        # Add replayable eval ownership/start state, or remove the lane until coded-versus-running can
+        # be represented truthfully.
         elif any(n.status is NodeStatus.pending for n in ev_nodes):
             c.status = "running"
         elif all((n.id in st.breed_excluded) or (not n.feasible) for n in ev_nodes):

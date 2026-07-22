@@ -790,6 +790,10 @@ class EventStore:
                 )
                 for offset, (event_type, data) in enumerate(records, start=1)
             ]
+            # CODEX AGENT: this is an on-disk grammar change, not merely an additive event type.
+            # Pre-batch readers accept the envelope as one unknown event, discard every nested action,
+            # yet advance to last_seq; rollback/resume can repeat paid work from lost state. Keep the
+            # one-row grammar or add a migration boundary that old binaries fail closed on.
             envelope = Event(
                 seq=events[-1].seq,
                 ts=events[-1].ts,

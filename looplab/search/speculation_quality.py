@@ -976,6 +976,10 @@ def _validate_calibration_greedy_authority(
     baseline_stages = 0
 
     for event in events:
+        # CODEX AGENT: snapshot() deep-copies accumulated RunState and reruns all fold finalizers, yet
+        # this prefix is consumed only for card_added/card_build_requested. At the admitted 100k-event
+        # bound this approaches quadratic work. Extend on every row, but snapshot only immediately
+        # before the authority event types that actually consult the prefix.
         prefix = cursor.snapshot()
         if event.type == EV_CARD_ADDED:
             data = event.data if isinstance(event.data, Mapping) else {}

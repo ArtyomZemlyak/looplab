@@ -640,6 +640,10 @@ def resume(
     if snap.exists():
         data = json.loads(snap.read_text(encoding="utf-8"))
         data.pop("llm_api_key", None)   # masked in the snapshot; re-read from env/default
+        # CODEX AGENT: a pre-upgrade snapshot cannot preserve fields that did not exist yet. Pydantic
+        # fills them with today's product-on defaults, so resume can silently enable ASHA and repeated
+        # paid background research in an old run. Version snapshots and migrate absent fields to their
+        # historical off semantics before constructing Settings.
         settings = Settings(**data)
     if max_nodes is not None:
         settings.max_nodes = max_nodes

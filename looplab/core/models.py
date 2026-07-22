@@ -763,6 +763,10 @@ def idea_proposal_ref(idea: Idea) -> dict | None:
     return {"v": 1, "digest": digest} if digest is not None else None
 
 
+# CODEX AGENT: this expanded the preimage of already-persisted card-action:v1 receipts. Earlier writers
+# omitted lifecycle generations, eval_timeout and scored_against_empty; current replay recomputes the
+# new shape and demotes those native Cards on upgrade. Freeze the old v1 verifier and mint v2 for the
+# expanded action, accepting both versions during replay.
 CARD_ACTION_DIGEST_V1_FIELDS = (
     "operator", "params", "space", "eval_profile", "eval_timeout", "parent_id", "parent_ids",
     "parent_generations", "scored_against", "scored_against_generation",

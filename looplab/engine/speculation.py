@@ -1469,6 +1469,10 @@ class SpeculationMixin:
                                     yield_outer = True
                             else:
                                 yield_outer = True
+                        # CODEX AGENT: one idle polling turn performs this full replay plus several more
+                        # below, then repeats even when the log tail is unchanged. read_all caches bytes,
+                        # but fold still rebuilds all Cards/concepts. Cache one snapshot per observed tail
+                        # and invalidate it only after a write/wakeup, or extend a FoldCursor by suffix.
                         current = fold(self.store.read_all())
                         self._discard_orphaned_spec_results(current)
                         aborted = next(

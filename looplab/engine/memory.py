@@ -1131,6 +1131,10 @@ class ConceptCapsuleStore:
         from looplab.events.eventstore import _interprocess_lock
         if not self._valid_capsule(capsule):
             return False
+        # CODEX AGENT: run_id is only a run-root-local label (separate checkouts default to run_local),
+        # while memory_dir is global by default. Unrelated runs therefore replace each other's capsule,
+        # and current-run exclusion hides the older row first. Key upsert/exclusion by a persisted
+        # globally unique run-incarnation UID; retain run_id only for display.
         rid = str(capsule.get("run_id") or "")
         with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
             # CODEX AGENT: quarantine is a read policy, not permission to erase old/future durable data.
