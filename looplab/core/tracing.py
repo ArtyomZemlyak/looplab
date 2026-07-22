@@ -475,7 +475,7 @@ class JsonlSpanExporter:
         line = orjson.dumps(span, default=str) + b"\n"
         # Serialize writes: child spans export from to_thread worker threads while the parent
         # span exports from the event-loop thread; without the lock concurrent appends from
-        # distinct handles can interleave into a corrupt JSON line (max_parallel>1).
+        # distinct handles can interleave into a corrupt JSON line (eval_parallel fan-out).
         with self._lock, open(self.path, "ab") as f:
             f.write(line)
 

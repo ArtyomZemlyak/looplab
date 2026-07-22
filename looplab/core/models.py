@@ -1586,7 +1586,7 @@ class RunState(BaseModel):
     # folds. NOT in `nodes`, so it never affects id allocation (max(nodes)+1) or resume. None when no node
     # is mid-build.
     building: Optional[dict] = None
-    # ALL nodes currently being built, keyed by node_id — the `parallel_build>1` superset of the
+    # ALL nodes currently being built, keyed by node_id — the concurrent-build-width superset of the
     # singular `building` above (which stays the MOST-RECENT build, untouched, for back-compat). Each
     # value is the SAME transient marker shape
     # {node_id, operator, parent_ids, started, generation?, card_id?}.

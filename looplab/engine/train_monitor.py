@@ -400,7 +400,9 @@ class TrainingMonitorMixin:
 
         Advisory (always): every tick with a CHANGED digest emits a `train_monitor` trace span carrying
         the verdict; a NON-healthy verdict additionally appends an EV_TRAIN_MONITOR_ALERT diagnostic event
-        (fold-ignored — never touches node selection or replay — for the owner attention feed + audit).
+        (fold-ignored, so it cannot directly change lifecycle/champion/replay). CODEX AGENT: the raw
+        diagnostic can still steer a later Researcher prompt when watchdog_reflection is enabled, and it
+        also feeds the owner attention view + audit.
         Healthy verdicts stay trace-only except for a healthy transition after an alert; that explicit
         recovery row lets every lifecycle projection clear the earlier warning.
 

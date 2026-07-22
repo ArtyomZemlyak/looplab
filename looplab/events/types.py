@@ -275,9 +275,10 @@ EV_WORKSPACE_SEEDED = "workspace_seeded"
 EV_RUN_SETUP_STARTED = "run_setup_started"
 EV_RUN_SETUP_FINISHED = "run_setup_finished"
 # Training-log monitor (engine/train_monitor.py): a NON-healthy verdict (watch|broken) from the per-eval
-# LLM log observer. DIAGNOSTIC — the fold never reads it (advisory, splice-neutral even though it is
-# appended from the concurrent monitor task), so it never touches node selection or replay; it exists for
-# the owner attention feed + audit trail. Healthy verdicts stay trace-only (no event) to keep the log clean.
+# LLM log observer. DIAGNOSTIC — the fold never reads it (splice-neutral even though the concurrent
+# monitor appends it), so it cannot directly change lifecycle, ranking, or replay. CODEX AGENT: the raw
+# event may still enter a later Researcher prompt through watchdog_reflection; it also feeds owner
+# attention + audit. Healthy verdicts stay trace-only except for a recovery transition after an alert.
 EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 # ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric ranks below
 # completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;

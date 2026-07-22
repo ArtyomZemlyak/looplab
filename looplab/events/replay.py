@@ -687,7 +687,7 @@ def _building_matches_event(st: RunState, d: dict, nid: int) -> bool:
 def _clear_build_marker(st: RunState, d: dict, nid: int) -> None:
     """Clear the transient build marker for `nid` on ITS OWN created/terminal/reset/abort event —
     BOTH the singular `st.building` (last concurrent build; back-compat) and the per-node
-    `st.buildings` entry, each gated on its own generation. Under `parallel_build>1` the singular
+    `st.buildings` entry, each gated on its own generation. Under concurrent build fan-out the singular
     field holds only the last-appended build, so an EARLIER concurrent build's terminal matches its
     `st.buildings` entry but NOT the singular; keying each off its own marker is exactly what stops
     that entry from leaking a stale breathing 'building…' ghost."""

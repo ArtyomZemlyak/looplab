@@ -39,7 +39,8 @@ _EVENT_BATCH_SCHEMA = "looplab.event-batch/v1"
 # string marker already present in logs written during the initial rollout.
 _EVENT_BATCH_GUARD_TYPE = (_EVENT_BATCH_TYPE,)
 # Keep construction/validation CPU and memory bounded independently of serialized size, while staying
-# above every canonical fan-out knob (Settings.n_seeds/max_parallel allow 1024). Custom policy lanes may
+# above every canonical fan-out knob (Settings.n_seeds/eval_parallel allow 1024; max_parallel is its
+# legacy alias). Custom policy lanes may
 # be wider, so retain generous headroom; the byte ceiling below remains the tighter bound for rich rows.
 _MAX_EVENT_BATCH_MEMBERS = 4096
 _MAX_EVENT_BATCH_BYTES = 8 * 1024 * 1024
@@ -594,7 +595,7 @@ class EventStore:
         self._cache_bytes: int = 0
         self._cache_mtime_ns: Optional[int] = None
         self._cache_identity: Optional[tuple[int, int]] = None
-        # The abort watcher (and, under max_parallel>1, several concurrent watchers) call read_all()
+        # The abort watcher (and, under eval_parallel fan-out, several concurrent watchers) call read_all()
         # from worker THREADS while the main loop may also read — guard the cache top-up so a
         # concurrent extend/offset update can't race into a corrupt cache.
         self._read_lock = threading.Lock()

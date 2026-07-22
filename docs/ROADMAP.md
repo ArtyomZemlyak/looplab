@@ -3,6 +3,12 @@
 **Date:** 2026-06-23 · **Updated:** 2026-06-24 (hardened Pass 1 + new research-layer pass) ·
 **Author:** deep-research-backed synthesis · **Horizon:** next 3 phases.
 
+> **Historical planning snapshot.** This file preserves the capability inventory and priorities as
+> assessed on 2026-06-24; later implementation is intentionally not rewritten into every proposal
+> below. Use the [Guide](guide/index.md) for the live product contract and
+> [the Part IV/V Card ledger](23-hypothesis-card-kanban-2026-07-20.md) for current rollout status.
+> Names such as `max_parallel` / `parallel_build` below may therefore be legacy spellings.
+
 > **Method & honesty note.** This roadmap is grounded in three inputs: (1) a precise read of
 > LoopLab's *current* capabilities (code + build-status), (2) a full-repo code review
 > ([CODE_REVIEW.md](CODE_REVIEW.md)), and (3) **seven deep web-research passes** (AI-scientist

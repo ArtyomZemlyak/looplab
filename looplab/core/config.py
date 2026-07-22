@@ -263,22 +263,20 @@ class Settings(BaseSettings):
 
     # Bounds (review C/⚪): a non-positive node/seed budget or timeout is never valid. Upper bounds are
     # equally load-bearing — the UI /start path writes these straight into the engine's env, and an
-    # unbounded `max_parallel` (e.g. 100000 from a crafted preflight) would fan out that many sandboxes →
-    # resource exhaustion. Reject at config time, not mid-run. Ceilings are generous; tests top out near 50.
+    # unbounded `eval_parallel` (or legacy `max_parallel`; e.g. 100000 from a crafted preflight) would
+    # fan out that many sandboxes → resource exhaustion. Reject at config time, not mid-run. Ceilings
+    # are generous; tests top out near 50.
     n_seeds: int = Field(default=3, ge=1, le=1024)
     max_nodes: int = Field(default=8, ge=1, le=1_000_000)
-    # Concurrent evaluation is a backlog seam. The base/primary mode is a single experiment at a time
-    # (deterministic, one eval process running) — important for RepoTask where an eval is a real training
-    # run with its own resources/trackers. Set > 1 to opt into the parallel fan-out (the task-group path),
-    # where each concurrent eval is pinned to a distinct GPU. `max_parallel=0` means AUTO: the engine runs
-    # one experiment per DETECTED GPU (orchestrator resolves 0 -> GPU count, clamped to >=1) — the
-    # "let the box decide" startup knob. Live Strategist/operator zero settles to serial width 1.
+    # CODEX AGENT: legacy evaluation-width input. `eval_parallel` below is canonical and wins when set;
+    # keep this field for old env/config/snapshots and direct Engine call sites. A width > 1 admits
+    # concurrent evals, whose resource reservations may be CPU-only or span one/more GPUs — there is no
+    # one-node/one-GPU promise. `max_parallel=0` is launch-time AUTO (detected GPU count, at least 1).
     max_parallel: int = Field(default=1, ge=0, le=1024)
-    # Variant-1 parallel BUILD: research + code up to N independent (seed/explore) nodes CONCURRENTLY,
-    # each on its own pooled (researcher, developer) pair + GPU-pinned eval. 1 = serial (today).
-    # `parallel_build=0` means AUTO: the engine resolves it to the (resolved) `max_parallel` so you build
-    # exactly as many seeds as you can concurrently evaluate. Live Strategist/operator zero settles to 1.
-    # Needs a role_factory wired into the engine (the CLI/launcher passes one); without it, clamps to 1.
+    # CODEX AGENT: legacy build-width input. `llm_parallel` below is canonical and also controls the
+    # shared provider-call total when positive. A width > 1 uses fresh pooled researcher/developer pairs;
+    # it says nothing about the later eval's CPU/GPU reservation. Startup `0` derives build fan-out from
+    # resolved eval width; a live Strategist/operator zero settles to 1. Without role_factory it clamps to 1.
     parallel_build: int = Field(default=1, ge=0, le=64)
     # Hypothesis-card Kanban re-architecture (docs/23, Layer 2). Two INDEPENDENT concurrency axes,
     # decoupled from each other so cost (LLM work) can be tuned separately from throughput (GPU evals).
@@ -287,8 +285,9 @@ class Settings(BaseSettings):
     # so they cannot be renamed — CLAUDE.md). Resolution (orchestrator.__init__): a NEW name, when set,
     # WINS over its legacy alias; None => fall back to the legacy field => byte-identical to today.
     #   `eval_parallel`: concurrent EVALS (the GPU/experiment consumer). None -> max_parallel; 0 = AUTO
-    #     (one experiment per detected GPU). This is the eval-concurrency ceiling; the L4 scheduler
-    #     bin-packs declared footprints against the GPU inventory as a SEPARATE, orthogonal axis.
+    #     (one experiment per detected GPU). This is the in-Run eval-concurrency ceiling; the resource
+    #     scheduler bin-packs declared footprints separately. Sibling local GPU-owning Runs serialize
+    #     through the conservative host-pool lease; external execution needs its own admission boundary.
     #   `llm_parallel`: total concurrent LLM provider calls + BUILD fan-out. None -> legacy
     #     parallel_build semantics without a shared total; 0 = startup AUTO (= resolved eval_parallel
     #     for build fan-out, historical research overlap unbounded). A positive canonical value enables
@@ -297,9 +296,10 @@ class Settings(BaseSettings):
     llm_parallel: int | None = Field(default=None, ge=0, le=64)
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
-    # surface (Settings) — advisory-only, never touches node selection or replay, and only fires on the
-    # command-eval path with an LLM client — while the bare-library EngineOptions default stays OFF (so a
-    # direct Engine(...) in a test does no unasked LLM work; `off == today`). See test_options_divergence.
+    # surface (Settings). Its alert event is fold-ignored and cannot directly change lifecycle/champion;
+    # CODEX AGENT: with watchdog_reflection on, that alert is nevertheless advice in a later Researcher
+    # prompt and can change future proposals. It only fires on the command-eval path with an LLM client;
+    # bare-library EngineOptions stays OFF. See test_options_divergence.
     # `_interval_s` is the BASE tick cadence (the effective one adapts to the per-experiment budget).
     train_monitor: bool = True
     train_monitor_interval_s: float = Field(default=600.0, gt=0)

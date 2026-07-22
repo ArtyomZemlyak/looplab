@@ -388,9 +388,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         deep_researcher=deep_researcher,
         report_writer=report_writer,
         developer_factory=dev_factory,
-        # Variant-1 parallel BUILD: a factory of FRESH wired (researcher, developer) pairs so
-        # `parallel_build>1` can research+code several independent seeds concurrently without clobbering
-        # role state. None-safe: make_roles rebuilds the same wiring; unused when parallel_build == 1.
+        # CODEX AGENT: a fresh wired pair per concurrent build prevents mutable role state from being
+        # shared when the settled build width is >1 (canonical llm_parallel; legacy parallel_build).
+        # This is LLM/build isolation, not proof of the later evaluation's CPU/GPU allocation.
         role_factory=(lambda: role_builder(task, settings, run_dir)),
         proxy_scorer=proxy_scorer,
         embedder=_make_embedder(settings),
