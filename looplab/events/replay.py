@@ -51,7 +51,7 @@ from looplab.events.types import (
     EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
-    EV_CARD_ADDED, EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
+    EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
     EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
     EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_FORESIGHT_SELECTED, EV_FORK,
@@ -2493,8 +2493,9 @@ def _on_card_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.cards_merged.append(receipt)
 
 def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Engine/operator drop of a card: {id, reason, dropped_by}. Lifecycle override applied in
-    # `_derive_cards` (the card stays visible with status='dropped', like an abandoned hypothesis).
+    # Canonical engine effect (`card_auto_dropped`) or operator intent (`card_dropped`):
+    # {id, reason, dropped_by}. Historical engine-authored `card_dropped` rows intentionally share this
+    # handler so old logs retain byte-for-byte replay semantics after the event namespace split.
     receipt = _bounded_card_drop_receipt(d)
     if receipt is not None:
         # CODEX AGENT: keep a typed lifecycle receipt, not the raw control payload. This also prevents
@@ -3392,6 +3393,7 @@ _HANDLERS = {
     EV_CARD_BUILD_REQUESTED: _on_card_build_requested,
     EV_CARD_BUILD_DONE: _on_card_build_done,
     EV_CARD_MERGED: _on_card_merged,
+    EV_CARD_AUTO_DROPPED: _on_card_dropped,
     EV_CARD_DROPPED: _on_card_dropped,
     EV_CARD_REPRIORITIZED: _on_card_reprioritized,
     EV_CARD_EDITED: _on_card_edited,
@@ -4892,8 +4894,9 @@ def _derive_cards(st: RunState) -> None:
             any(control_id in st.hypotheses_abandoned
                 for control_id in control_ids.get(c.id, {c.id})))
 
-    # 5) apply `card_dropped` overrides (engine/operator). The card STAYS visible (like an abandoned
-    #    hypothesis) — the lifecycle `status` below reads this to show the 'dropped' lane. Last write wins.
+    # 5) apply `card_auto_dropped` engine effects and `card_dropped` operator overrides. The card STAYS
+    #    visible (like an abandoned hypothesis) — lifecycle `status` shows the 'dropped' lane. Historical
+    #    engine-authored `card_dropped` rows are already normalized into the same bounded receipt list.
     dropped: dict[str, dict] = {}
     for d in st.cards_dropped:
         raw_id = d.get("id")

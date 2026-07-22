@@ -140,7 +140,8 @@ Receipt identity is exact: self digest
   replay, command observation, scope/report capture, SSE, timeline paging, run caches and maintenance tools
   expand the bounded storage envelope consistently; generic non-event JSONL readers remain format-agnostic.
   New envelopes carry a guarded non-string type so pre-batch binaries stop at their corruption fence;
-  current readers also accept the initial string marker and reject non-dense logical sequences.
+  current readers also accept the initial string marker, reject duplicate/backward logical sequences,
+  preserve monotonic repaired-log gaps, and require dense members inside each atomic batch.
 - Coverage scoring consumes only complete authorized current memberships and canonicalizes Card aliases,
   case and spacing through the same concept-identity projection.
 
@@ -244,17 +245,17 @@ stays by `hypothesis_id` in Layer 1 — a paraphrase still mints a new card. `ca
 RE-reads (evidence relinks by id once assigned). Researcher emitting an existing id is a later layer.
 (Downgrades §4/§7.7 wording.)
 
-**Novelty verdict = ANNOTATION on the running node's card, NOT a `card_dropped` (fixes §7.1).** The
+**Novelty verdict = ANNOTATION on the running node's card, NOT a `card_auto_dropped` (fixes §7.1).** The
 premise "a rejected proposal becomes no node" is false: `_apply_novelty_gate` always yields a node
 (repropose / keep-dup / numeric-nudge), and the `novelty_rejected` prospective id is the SAME id that
-node receives — a `card_dropped` for it would collide. So the verdict lands as a card field
+node receives — an automatic drop for it would collide. So the verdict lands as a card field
 (`novelty_verdict`), sourced from the already-folded `novelty_events`/`novelty_grades`. The one truly
 node-less case (`_intra_batch_dup`, emits no event) is deferred to 1c.
 
 **`_derive_cards` determinism — pinned.** Iterate `sorted(st.nodes)`; extract `_derive_hypotheses`'
 evidence/verdict logic as a PURE helper returning values (never stamping onto Node/Hypothesis); reuse
 its exact tombstoned/aborted/feasible filters; canonicalize merges cycle-safe (reuse `_canon`) and
-apply `card_dropped`/deleted LAST; `card_enriched` last-write is by event **seq** (valid because all
+apply `card_auto_dropped`/operator `card_dropped`/deleted LAST; `card_enriched` last-write is by event **seq** (valid because all
 card events are main-task-written). Runs inside `_finalize_fold` AFTER `_select_best` (no selection
 leak) on the FoldCursor deep-copy (no suffix leak).
 
@@ -326,7 +327,7 @@ Layer 3 must remain disabled until the native mint/link lifecycle removes that a
 | `steering_context` (why proposed: cues + strategist stance + memo id) | proposal-cue hints + `active_strategy` — **homeless today** | new field |
 | `status` (derived maturity/lifecycle) | `_derive_cards` from fields + `st.nodes` | derived |
 | `merged_into` / `aliases` | `hypothesis_merged` → `card_merged` | reuse |
-| `dropped_reason` | `card_dropped` / novelty-reject / freshness (later) | new field |
+| `dropped_reason` | `card_auto_dropped` / operator `card_dropped` | new field |
 
 `footprint` is stored in Layer 1 but **not consumed** until Layer 4; storing it now keeps the schema
 stable and lets the Researcher/Developer start populating it immediately.
@@ -368,7 +369,12 @@ the license already granted at `types.py:274-283`) — none are selection-affect
 | `card_enriched` (novelty verdict / cross-run prior / concept tags / footprint-finalize) | folded, advisory | engine | `hypothesis_updated` |
 | `card_ranked` (priority order) | folded, advisory | engine (foresight) | `hypothesis_ranked` |
 | `card_merged` (alias → canonical) | folded, advisory | engine consolidation | `hypothesis_merged` |
-| `card_dropped` (reason) | folded, advisory | engine / operator | `hypothesis_updated`(deleted) |
+| `card_auto_dropped` (reason) | folded, advisory domain effect | engine main task | `hypothesis_updated`(deleted) |
+| `card_dropped` (reason) | folded, generation-fenced command intent | operator via server | `hypothesis_updated`(deleted) |
+
+`card_dropped` was dual-use in the first Card release. Replay still accepts historical engine-authored
+rows (distinguished by `dropped_by`), but current engine writers emit `card_auto_dropped`. New command,
+progress and authorization consumers can therefore classify current events from the type alone.
 
 Each new `EV_*` constant goes in `events/types.py`, added to `replay._HANDLERS` (folded), and — for the
 subset written by the concurrent enrichment task — to `BACKGROUND_APPENDABLE` **only after** its
@@ -394,7 +400,7 @@ A new post-pass in `_finalize_fold` (after `_derive_hypotheses`), pure and order
 3. Link nodes: for each node, `idea.card_id` (new) else statement-hash (legacy) → append to the card's
    `node_ids`; compute evidence-derived fields (`best_delta`, verdict) exactly as `_derive_hypotheses`
    does (`replay.py:2965-3012`) — **reuse that logic**, do not duplicate.
-4. Apply `card_merged` aliasing (cycle-safe, deterministic) and `card_dropped` overrides.
+4. Apply `card_merged` aliasing (cycle-safe, deterministic) and both drop-event overrides.
 5. Stamp `foresight_rank`/`priority` from the latest `card_ranked` (latest-wins).
 6. Derive `status` (maturity: has-statement / has-code / footprint-known / ready-gate; running from
    `st.building`/`st.buildings` + pending; done from terminal) — **no stored status**.
@@ -409,7 +415,7 @@ From map A, these currently evaporate or float in prospective-id lists; Layer 1 
 
 1. **Rejected-proposal novelty verdicts** — an idea the gate rejects becomes no node today; its
    "already tried #N" verdict lives only in a `novelty_rejected` event keyed by a *prospective* id →
-   Layer 1 mints a `card_dropped` card carrying the verdict, so the "already tried" signal survives.
+   Layer 1 mints a `card_auto_dropped` card carrying the verdict, so the "already tried" signal survives.
    **Highest-value gap.**
 2. **~12 proposal-cue hint strings** (`_set_complexity_hint`/`_stamp_novelty_hint`) → snapshot into the
    card's `steering_context` at `card_added` time.
@@ -418,7 +424,7 @@ From map A, these currently evaporate or float in prospective-id lists; Layer 1 
 4. **Deep-research memo evidence** (`findings/claims/sources` live only in the `research` timeline) →
    card's `research_origin` references the memo id.
 5. **Foresight discarded K-1 + calibration** → the pick is on the card; the K-1 rejected ideas may
-   become `card_dropped` cards (decided at review — may defer to keep Layer 1 lean).
+   become `card_auto_dropped` cards (decided at review — may defer to keep Layer 1 lean).
 6. **Lesson-guard / offline analytics** (`taxonomy_dedup`, `novelty_recall`, `research_targeting`,
    currently write nothing) → first-class card annotations (research_targeting is the natural scorer,
    wired in Layer 3).
@@ -533,7 +539,7 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
   exists, so an un-dropped stale speculation would be force-evaluated AND confirm/holdout (which fire
   only on empty actions, orchestrator.py:1008) would never trigger. Each loop turn: **re-fold → drop-
   stale → then consult the scorer.** Drop criterion = the card is **no longer ELIGIBLE** (`card_merged`/
-  `card_dropped`, footprint no longer fits, OR not a member of L3's **current selection SET**) — **never
+  either drop event, footprint no longer fits, OR not a member of L3's **current selection SET**) — **never
   "strictly rank-1"** (that collapses a population lane to one card and drops N-1 of every N speculative
   builds, re-idling the GPUs the layer exists to fill). A drop reuses the existing
   `node_failed(reason='superseded')` terminal (whitelisted, replay.py:749), honoring one-terminal-per-node.
@@ -619,7 +625,7 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
 20. `_derive_cards` internal order mirrors `_derive_hypotheses` **exactly**: (1) seed + node-link (id
     join else immutable-seed hash fallback), (2) `card_merged` alias/`_canon` evidence **UNION**, (3)
     run-global record-setter set once, (4) the **shared extracted verdict helper** on the merged set, (5)
-    `card_dropped`/deleted overrides, (6) `card_ranked` priority, (7) operator maps overlaid in a FIXED
+    `card_auto_dropped`/operator-drop/deleted overrides, (6) `card_ranked` priority, (7) operator maps overlaid in a FIXED
     LAST phase, (8) derive status. (§6's verdict-before-merge order is retracted — it breaks the 1a shadow
     invariant whenever a `card_merged` exists, silently, because the toy golden has no merges.)
 21. **The verdict-helper extraction is a SEPARATE first commit** (`test_golden_replay` green *without*
@@ -661,7 +667,7 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     (no node → EXPLORE band) from `gated` (only trust-gated/breed-excluded nodes → excluded, not
     re-proposable as fresh).
 29. **Every new `EV_*` lands in exactly one bucket** (`test_event_types.py` guard). **Folded `_HANDLERS`**
-    (main-task, additive): `card_added`, `card_merged`, `card_dropped`, `card_enriched`, `card_ranked`,
+    (main-task, additive): `card_added`, `card_merged`, `card_auto_dropped`, `card_enriched`, `card_ranked`,
     `card_build_requested`, `card_build_done`, and the L6 operator events (`card_reprioritized`,
     `card_edited`, `card_resource_pinned`, operator `card_dropped`). **DIAGNOSTIC** (fold-ignored, splice-
     neutral by construction): `EV_CARD_BUILT`, `EV_CARD_FRESHNESS`, optional
@@ -772,7 +778,8 @@ internal folded model; transport metadata is deliberately not written back into 
   site, or give it its own `entropy=True` redaction pass, since cards ride only the tokenless public dump).
 
 **Events (1a):** `card_added` (thin — id, immutable statement, source, steering snapshot, operator kind,
-parent anchor, `scored_against`; appended immediately at mint), `card_merged`, `card_dropped`. **(1b):**
+parent anchor, `scored_against`; appended immediately at mint), `card_merged`, `card_auto_dropped`.
+Operator `card_dropped` is the separate L6 command. **(1b):**
 `card_enriched` (last-write-by-seq), `card_ranked`. **Reserve awareness** that L5 adds folded
 `card_build_requested`/`card_build_done` + a durable `card_build_done`→`node_id` link + a per-node
 **speculative marker** on `node_created` — the L1 status enum and node schema must be OPEN to these so L5
@@ -837,7 +844,7 @@ then **6**.
 | # | Stage | Changes selection? | Risk | Depends on |
 |---|---|---|---|---|
 | 1 | **1a-extract** — pure verdict-helper extraction (byte-identity tripwire) | no | low | — |
-| 2 | **1a-model** — Card model + `_derive_cards` + `card_added/merged/dropped` + `node_building.card_id` + card-mint decouple | no | med | 1a-extract |
+| 2 | **1a-model** — Card model + `_derive_cards` + `card_added/merged/auto-dropped` + `node_building.card_id` + card-mint decouple | no | med | 1a-extract |
 | 3 | **1b** — card enrichment fields + `card_enriched`/`card_ranked` + reserve `last_footprint` | no | med | 1a-model |
 | 4 | **1c** — dropped/merged exclusion + `gated` distinction | no (advisory) | low | 1a-model, 1b |
 | 5 | **2** — two independent concurrency pools (knob split, no overlap yet) | no | med | — (orthogonal) |
@@ -857,7 +864,7 @@ then **6**.
   overtaken, testing-vs-open) asserting `fold(evs).hypotheses` byte-equal pre/post AND `st.nodes` unmutated.
 - **1a-model.** `RunState.cards` (assigned only in `_derive_cards`), `Idea.card_id`, the three override
   maps; the full `Card` (id, immutable seed, source, dropped/merged, idea block, parent anchor,
-  `scored_against`, evidence via the helper); `card_added/merged/dropped` in `_HANDLERS`+registry;
+  `scored_against`, evidence via the helper); `card_added/merged/auto-dropped` in `_HANDLERS`+registry;
   `node_building.card_id`; mint at/just-before reservation so drafts carry `card_id`; `_derive_cards` in
   `_finalize_fold` after `_derive_hypotheses`, in the pinned mirror order. *Gate:* old logs → `cards=={}`/
   `card_id null`/empty maps; cards advisory. *Tests:* golden **regen** (one documented additive diff),
@@ -872,12 +879,12 @@ then **6**.
   all additive/nullable; ref-shape hard gate (no body fields). *Tests:* `test_event_types`, golden regen
   for `footprint:null`, NEW: ref-size cap, `steering_context` passes redaction, `test_role_output_contract`
   green with `last_footprint` reserved.
-- **1c.** Wire engine-authored `card_dropped` (novelty/freshness; node-less `_intra_batch_dup`) +
+- **1c.** Wire engine-authored `card_auto_dropped` (novelty/freshness; node-less `_intra_batch_dup`) +
   `card_merged`/`_canon` into `_derive_cards` exclusion; derive `status='gated'` for all-breed-
   excluded/trust-gated evidence (distinct from true-open); tolerate a card whose only node terminated
   `node_failed(reason='superseded')`. *Gate:* advisory only. *Tests:* dropped/merged/gated are not
   `selection_ready` (while compatibility `actionable` retains its documented legacy meaning);
-  gated≠EXPLORE-band; `card_dropped` order-tolerance applied LAST.
+  gated≠EXPLORE-band; both drop formats are order-tolerant and applied LAST.
 - **2.** `Settings`+`EngineOptions` `eval_parallel`/`llm_parallel` `Optional[int]=None` as the **canonical**
   fields; resolve `_eval_parallel` (None→legacy `max_parallel`, AUTO(0)→`max(1,len(_gpu_ids))`) and
   `_llm_parallel` (None→legacy `parallel_build`, AUTO(0)→`_eval_parallel` for the build lane). `max_parallel`/

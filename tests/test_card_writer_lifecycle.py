@@ -17,6 +17,7 @@ from looplab.engine.orchestrator import Engine
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_CARD_ADDED,
+    EV_CARD_AUTO_DROPPED,
     EV_CARD_DROPPED,
     EV_CARD_MERGED,
     EV_NODE_BUILDING,
@@ -560,7 +561,7 @@ def test_injected_developer_exception_drops_card_before_clearing_build(tmp_path)
         })
 
     events = engine.store.read_all()
-    drop = next(event for event in events if event.type == EV_CARD_DROPPED)
+    drop = next(event for event in events if event.type == EV_CARD_AUTO_DROPPED)
     failed = next(event for event in events if event.type == EV_NODE_FAILED)
     assert drop.data["id"] == failed.data["card_id"] == "card-0"
     assert events.index(drop) < events.index(failed)
@@ -636,7 +637,7 @@ def test_propose_reset_replaces_card_on_same_node_and_drops_old_work_item(tmp_pa
     events = engine.store.read_all()
     registrations = [event for event in events if event.type == EV_CARD_ADDED]
     assert [event.data["id"] for event in registrations] == ["card-0", "card-1"]
-    drops = [event for event in events if event.type == EV_CARD_DROPPED]
+    drops = [event for event in events if event.type == EV_CARD_AUTO_DROPPED]
     assert len(drops) == 1
     assert drops[0].data["id"] == old_card_id
     assert drops[0].data["reason"] == "reproposed"
@@ -671,7 +672,7 @@ def test_drop_first_crash_prefix_is_fail_closed_and_recovery_is_idempotent(
 
     def _crash_before_node_terminal(event_type, data, **kwargs):
         if event_type == EV_NODE_FAILED:
-            raise RuntimeError("process died after card_dropped")
+            raise RuntimeError("process died after card_auto_dropped")
         return original_append(event_type, data, **kwargs)
 
     monkeypatch.setattr(engine.store, "append", _crash_before_node_terminal)
@@ -689,7 +690,7 @@ def test_drop_first_crash_prefix_is_fail_closed_and_recovery_is_idempotent(
     assert reservation.node_id in prefix_state.buildings
     assert prefix_state.cards[reservation.card_id].status == "dropped"
     assert prefix_state.cards[reservation.card_id].selection_ready is False
-    assert sum(event.type == EV_CARD_DROPPED for event in prefix) == 1
+    assert sum(event.type == EV_CARD_AUTO_DROPPED for event in prefix) == 1
     assert not any(event.type == EV_NODE_FAILED for event in prefix)
 
     monkeypatch.setattr(engine.store, "append", original_append)
@@ -697,7 +698,7 @@ def test_drop_first_crash_prefix_is_fail_closed_and_recovery_is_idempotent(
     recovered_events = engine.store.read_all()
     recovered = fold(recovered_events)
     assert recovered.buildings == {}
-    assert sum(event.type == EV_CARD_DROPPED for event in recovered_events) == 1
+    assert sum(event.type == EV_CARD_AUTO_DROPPED for event in recovered_events) == 1
     assert sum(event.type == EV_NODE_FAILED for event in recovered_events) == 1
     count = len(recovered_events)
     assert engine._recover_interrupted_builds(recovered) is False

@@ -84,10 +84,10 @@ def test_intra_batch_duplicate_is_journaled_after_accepted_reservations(tmp_path
 
     lifecycle = [
         event for event in engine.store.read_all()
-        if event.type in {"card_added", "node_building", "card_dropped"}
+        if event.type in {"card_added", "node_building", "card_auto_dropped"}
     ]
     assert [event.type for event in lifecycle] == [
-        "card_added", "node_building", "card_added", "card_dropped",
+        "card_added", "node_building", "card_added", "card_auto_dropped",
     ]
     accepted_id = lifecycle[0].data["id"]
     assert lifecycle[1].data["card_id"] == accepted_id == reservation.card_id
@@ -98,11 +98,11 @@ def test_intra_batch_duplicate_is_journaled_after_accepted_reservations(tmp_path
     # Crash-prefix safety: the rejected proposal must never become executable in the gap between its
     # registration and terminal receipt. A node-less rejection needs an intrinsically non-selectable
     # registration (or an equivalent atomic terminal-at-mint proof), because there is no build marker
-    # from which recovery could reconstruct the missing card_dropped event.
+    # from which recovery could reconstruct the missing card_auto_dropped event.
     all_events = engine.store.read_all()
     rejected_drop_index = next(
         index for index, event in enumerate(all_events)
-        if event.type == "card_dropped" and event.data.get("id") == rejected_id
+        if event.type == "card_auto_dropped" and event.data.get("id") == rejected_id
     )
     rejected_prefix = fold(all_events[:rejected_drop_index])
     assert rejected_prefix.cards[rejected_id].selection_ready is False

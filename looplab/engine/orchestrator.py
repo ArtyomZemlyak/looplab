@@ -30,7 +30,7 @@ from looplab.events.types import (
     EV_ABLATE,
     EV_APPROVAL_REQUESTED,
     EV_COMMAND_ACK,
-    EV_CARD_ADDED, EV_CARD_DROPPED, EV_CARD_MERGED,
+    EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED, EV_CARD_MERGED,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HOST_GRADING,
     EV_INJECT_DONE, EV_INJECT_FAILED,
@@ -4439,13 +4439,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         for _attempt in range(64):
             events = self.store.read_all()
             if any(
-                    event.type == EV_CARD_DROPPED
+                    event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}
                     and self._canonical_card_id(event.data.get("id")) == card_id
                     for event in events):
                 return
             tail_seq = events[-1].seq if events else -1
             try:
-                self.store.append(EV_CARD_DROPPED, {
+                self.store.append(EV_CARD_AUTO_DROPPED, {
                     "id": card_id,
                     "reason": reason,
                     "dropped_by": dropped_by,
@@ -4493,7 +4493,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # append the normal terminal override. The full two-event prefix remains visible/auditable.
             payload.pop("ownership_receipt", None)
             self.store.append(EV_CARD_ADDED, payload)
-            self.store.append(EV_CARD_DROPPED, {
+            self.store.append(EV_CARD_AUTO_DROPPED, {
                 "id": card_id, "reason": reason, "dropped_by": "engine",
             })
             return card_id
@@ -4547,7 +4547,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """Close a pre-node reservation and, when bare, its immutable Card work item.
 
         A terminal on a bare ``node_building`` clears the transient marker but creates no Node evidence.
-        Without the paired card_dropped receipt that Card would resurrect as a fresh proposed item after
+        Without the paired card_auto_dropped receipt that Card would resurrect as a fresh proposed item after
         replay.  Existing-node reruns pass ``drop_card=False`` because they reuse the original lifecycle.
         """
         # Fail closed first. If the process dies between these two appends, the still-live build marker

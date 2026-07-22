@@ -226,15 +226,17 @@ EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypo
 # are BACKGROUND_APPENDABLE (a monotonic card_id cannot be background-minted — docs/23 decision 29).
 EV_CARD_ADDED = "card_added"                    # id + immutable action/ownership receipt (+ later enrich)
 EV_CARD_MERGED = "card_merged"                  # fold alias cards into a canonical (mirrors hypothesis_merged)
-EV_CARD_DROPPED = "card_dropped"                # engine/operator drop: reason + dropped_by (lifecycle)
+EV_CARD_AUTO_DROPPED = "card_auto_dropped"      # engine lifecycle effect: reason + dropped_by=engine
 EV_CARD_ENRICHED = "card_enriched"              # Layer 1b: novelty/cross-run/footprint delta (last-write-by-seq)
 EV_CARD_RANKED = "card_ranked"                  # Layer 1b: board priority order (mirrors hypothesis_ranked)
 # Layer 6 operator controls. These are generation-fenced, server-stamped command intents; they fold
-# into dedicated override maps and are overlaid after every engine/Strategist projection. `card_dropped`
-# above is the fourth control as well as an engine lifecycle event.
+# into dedicated override maps and are overlaid after every engine/Strategist projection.  Old logs may
+# contain engine-authored ``card_dropped`` rows; replay keeps that format readable, but new domain writers
+# use ``card_auto_dropped`` so command and progress consumers can classify new rows by type alone.
 EV_CARD_REPRIORITIZED = "card_reprioritized"
 EV_CARD_EDITED = "card_edited"
 EV_CARD_RESOURCE_PINNED = "card_resource_pinned"
+EV_CARD_DROPPED = "card_dropped"                # explicit operator stop intent (server-stamped)
 # Layer 5's request/done execution ledger. Both are folded and main-task-only: the request is the
 # durable selection+compute gate; done advances it after commit or an explicit producer-failure give-up.
 EV_CARD_BUILD_REQUESTED = "card_build_requested"

@@ -81,10 +81,54 @@ def test_atomic_batch_counts_and_indexes_each_logical_event_with_physical_valid_
     assert index.metrics.last_records_parsed == 3
 
 
-def test_sequence_gap_ends_command_observation_at_the_eventstore_prefix(tmp_path):
+def test_card_drop_command_and_domain_types_have_distinct_progress_semantics(tmp_path):
+    """New rows classify by type; the payload check remains only for pre-split log compatibility."""
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b"".join([
+        _row(0, "run_started", {"run_id": "r"}),
+        _row(1, "card_dropped", {
+            "id": "card-operator", "reason": "stopped", "dropped_by": "operator",
+        }),
+    ]))
+    index = CommandObservationIndex()
+    operator = index.observe(path)
+    assert operator.has_domain_progress(0) is False
+
+    with path.open("ab") as handle:
+        handle.write(_row(2, "card_auto_dropped", {
+            "id": "card-engine", "reason": "stale", "dropped_by": "engine",
+        }))
+    canonical = index.observe(path)
+    assert canonical.has_domain_progress(1) is True
+
+    with path.open("ab") as handle:
+        handle.write(_row(3, "card_dropped", {
+            "id": "card-legacy", "reason": "duplicate", "dropped_by": "engine",
+        }))
+    legacy = index.observe(path)
+    assert legacy.has_domain_progress(2) is True
+
+
+def test_monotonic_sequence_gap_remains_part_of_the_eventstore_prefix(tmp_path):
     path = tmp_path / "events.jsonl"
     first = _row(0, "run_started", {"run_id": "r"})
     path.write_bytes(first + _row(2, "resume") + _row(3, "command_ack"))
+
+    observed = CommandObservationIndex().observe(path)
+
+    assert observed.event_count == 3
+    assert observed.latest_seq == 3
+    assert observed.valid_end == path.stat().st_size
+    assert observed.torn_tail is False
+    assert [event.type for event in observed.events()] == [
+        "run_started", "resume", "command_ack",
+    ]
+
+
+def test_duplicate_sequence_ends_command_observation_at_the_eventstore_prefix(tmp_path):
+    path = tmp_path / "events.jsonl"
+    first = _row(0, "run_started", {"run_id": "r"})
+    path.write_bytes(first + _row(0, "resume") + _row(1, "command_ack"))
 
     observed = CommandObservationIndex().observe(path)
 

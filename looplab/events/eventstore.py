@@ -126,12 +126,26 @@ def decode_event_record(obj: dict, *, strict: bool = False) -> list[Event]:
 
 
 def event_sequence_continues(events: Sequence[Event], expected_seq: int) -> bool:
-    """Whether logical events form the dense prefix beginning at ``expected_seq``."""
+    """Whether one physical record strictly advances the logical sequence.
 
-    return all(
-        type(event.seq) is int and event.seq == expected_seq + offset
-        for offset, event in enumerate(events)
-    )
+    Historical repair and compatibility workflows can retain monotonic gaps between physical rows.
+    Those gaps are part of the public timeline contract. A multi-event batch is different: its members
+    are one atomic writer transaction and must remain dense (also enforced by its strict decoder).
+    """
+
+    if not events:
+        return False
+    previous = expected_seq - 1
+    for offset, event in enumerate(events):
+        if type(event.seq) is not int:
+            return False
+        if offset == 0:
+            if event.seq < expected_seq:
+                return False
+        elif event.seq != previous + 1:
+            return False
+        previous = event.seq
+    return True
 
 
 # Private compatibility name for older internal call sites.  New event-specific readers should import the
@@ -263,9 +277,10 @@ def iter_event_jsonl(path: str | os.PathLike) -> Iterator[dict]:
     """Yield logical event envelopes while preserving ``iter_jsonl`` torn-tail semantics.
 
     A physical ``append_many`` envelope is an implementation detail and expands atomically: malformed
-    batches or non-dense logical sequences end the recoverable prefix and no rejected-row member is
-    exposed. Keeping this event-aware behavior out of ``iter_jsonl`` is required for non-event JSONL
-    stores that share the generic reader.
+    batches or duplicate/backward logical sequences end the recoverable prefix and no rejected-row
+    member is exposed. Monotonic gaps between rows are retained for repaired historical logs; members
+    inside one batch remain dense. Keeping this event-aware behavior out of ``iter_jsonl`` is required
+    for non-event JSONL stores that share the generic reader.
     """
 
     expected_seq = 0
@@ -276,7 +291,7 @@ def iter_event_jsonl(path: str | os.PathLike) -> Iterator[dict]:
             break
         if not event_sequence_continues(events, expected_seq):
             break
-        expected_seq += len(events)
+        expected_seq = events[-1].seq + 1
         if is_event_batch_record(obj):
             for event in events:
                 yield event.model_dump(mode="json")
@@ -495,7 +510,7 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
             dropped = sum(1 for later in complete[i + 1:] if later.strip())
             return {"good_records": sum(1 for e in complete[:i] if e.strip()),
                     "corrupt_line": i + 1, "dropped_lines": dropped}
-        expected_seq += len(events)
+        expected_seq = events[-1].seq + 1
     return None
 
 
@@ -869,9 +884,9 @@ class EventStore:
     def read_all(self) -> list[Event]:
         """Return every Event on disk (up to the first torn/corrupt line), served from an incremental
         cache. Only bytes appended since the previous call are read+parsed; the returned sequence is
-        identical to a full event-aware scan, including its dense-sequence boundary. Falls back to a
-        full rescan if the file shrank/was replaced (a heal-truncate or a fresh file) so the cache can
-        never go stale."""
+        identical to a full event-aware scan, including its monotonic-sequence boundary. Falls back to
+        a full rescan if the file shrank/was replaced (a heal-truncate or a fresh file) so the cache can
+        never go stale. Historical sequence gaps are preserved; duplicate/backward rows fail closed."""
         with self._read_lock:
             try:
                 st = self.path.stat() if self.path.exists() else None
@@ -916,7 +931,7 @@ class EventStore:
                     if not event_sequence_continues(record_events, expected_seq):
                         break
                     evs.extend(record_events)
-                    expected_seq += len(record_events)
+                    expected_seq = record_events[-1].seq + 1
                     ok_bytes = end
                 else:
                     ok_bytes = consumed   # all records valid — trailing blanks count too
@@ -938,7 +953,7 @@ class EventStore:
                 # Keeping the pre-replacement high-water mark would let a caller holding that OLD
                 # tail pass `expected_last_seq` after a reset (and would mint a large seq gap in the
                 # replacement log). Rebase it to the bytes we just reparsed so an old CAS conflicts
-                # and a current CAS continues densely. During __init__, `_scan_last_seq()` calls us
+                # and a current CAS advances from the current tail. During __init__, `_scan_last_seq()` calls us
                 # before `_seq` exists, hence the narrow hasattr guard.
                 self._seq = self._cache[-1].seq if self._cache else -1
             # Return a snapshot copy so a caller iterating the result can't be perturbed by a

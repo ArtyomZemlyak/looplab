@@ -7,7 +7,7 @@ event byte once, retains only eight active run indexes, and gives one stable log
 all helpers in a monitor iteration.
 
 The scanner deliberately mirrors :func:`looplab.events.eventstore.iter_event_jsonl`: the first partial,
-invalid, non-object, invalid-Event, malformed batch, or non-dense sequence row ends the recoverable
+invalid, non-object, invalid-Event, malformed batch, or duplicate/backward sequence row ends the recoverable
 prefix. A later append resumes from the last valid byte boundary, so completing a torn tail is observed
 without re-reading the prefix.
 Replacement, shrink, and a sampled same-size sentinel change rebuild the index before it is trusted.
@@ -169,10 +169,9 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
     for event in events:
         index.latest_seq = event.seq
         data = event.data or {}
-        # `card_dropped` is DUAL-USE: the engine writes its OWN domain drops with this type, and the L6
-        # operator control reuses it (dropped_by='operator'). Only the operator intent is a control
-        # event; an engine-authored drop is real domain progress and must still bump max_non_control_seq
-        # (else has_domain_progress misses it — the misclassification the type-only check introduced).
+        # Compatibility only: releases before `card_auto_dropped` wrote engine domain effects with the
+        # operator command type. Treat those historical rows as progress. New writers have disjoint
+        # types, so no new observation path depends on this payload-level provenance exception.
         engine_card_drop = (event.type == EV_CARD_DROPPED
                             and data.get("dropped_by") != "operator")
         if event.type not in CONTROL_EVENTS or engine_card_drop:
@@ -240,7 +239,7 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int,
                 break
             delta.extend(events)
             parsed += len(events)
-            expected_seq += len(events)
+            expected_seq = events[-1].seq + 1
         valid_end = end
 
     index.valid_end = valid_end

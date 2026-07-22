@@ -1303,7 +1303,7 @@ class Card(BaseModel):
     # Lifecycle lane (DERIVED; frozen UI-contract vocabulary, kept OPEN so Layer 5 can add
     # speculating/built-awaiting-commit without a model rework): proposed (no node yet) | building
     # (node_building in flight) | coded (pending node with code) | running (pending eval) | evaluated
-    # (>=1 terminal) | gated (only trust-gated / breed-excluded evidence) | dropped (card_dropped/merged).
+    # (>=1 terminal) | gated (only trust-gated / breed-excluded evidence) | dropped (drop/merge event).
     status: str = "proposed"
     # Research verdict (DERIVED via the shared `_evidence_verdict` helper — byte-identical to the
     # hash-joined hypothesis): open | testing | supported | tested | abandoned.

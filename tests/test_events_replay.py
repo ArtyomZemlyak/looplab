@@ -867,8 +867,7 @@ def test_log_divergence_detects_mid_file_corruption(tmp_path):
     assert log_divergence(p) == {"good_records": 2, "corrupt_line": 3, "dropped_lines": 1}
 
 
-@pytest.mark.parametrize("bad_seq", [0, 2, 10])
-def test_duplicate_or_gapped_logical_sequence_fails_closed(tmp_path, bad_seq):
+def test_duplicate_logical_sequence_fails_closed(tmp_path):
     from looplab.events.eventstore import (
         EventLogCorruptionError,
         iter_event_jsonl,
@@ -878,8 +877,8 @@ def test_duplicate_or_gapped_logical_sequence_fails_closed(tmp_path, bad_seq):
     p = tmp_path / "events.jsonl"
     p.write_bytes(
         b'{"seq":0,"type":"a"}\n'
-        + f'{{"seq":{bad_seq},"type":"bad"}}\n'.encode()
-        + f'{{"seq":{bad_seq + 1},"type":"hidden"}}\n'.encode()
+        + b'{"seq":0,"type":"bad"}\n'
+        + b'{"seq":1,"type":"hidden"}\n'
     )
 
     assert [row["type"] for row in iter_event_jsonl(p)] == ["a"]
@@ -890,6 +889,23 @@ def test_duplicate_or_gapped_logical_sequence_fails_closed(tmp_path, bad_seq):
     }
     with pytest.raises(EventLogCorruptionError):
         store.append("resume", {})
+
+
+def test_monotonic_logical_sequence_gaps_are_preserved_and_append_from_the_tail(tmp_path):
+    from looplab.events.eventstore import iter_event_jsonl, log_divergence
+
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(
+        b'{"seq":0,"type":"a"}\n'
+        b'{"seq":2,"type":"repaired-gap"}\n'
+        b'{"seq":10,"type":"tail"}\n'
+    )
+
+    assert [row["seq"] for row in iter_event_jsonl(p)] == [0, 2, 10]
+    store = EventStore(p)
+    assert [event.seq for event in store.read_all()] == [0, 2, 10]
+    assert log_divergence(p) is None
+    assert store.append("resume", {}).seq == 11
 
 
 def test_log_divergence_ignores_a_torn_tail(tmp_path):

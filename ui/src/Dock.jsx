@@ -144,6 +144,7 @@ const NARR = {
   card_edited: (d) => `Card ${d.id.slice(0, 80)} display statement edited${note(d.statement, 70)}`,
   card_resource_pinned: (d) => `Card ${d.id.slice(0, 80)} resource override: ${d.gpus} GPU${d.gpus === 1 ? '' : 's'}${d.gpu_mem_mib != null ? ` · ${d.gpu_mem_mib} MiB/GPU` : ''}`,
   card_dropped: (d) => `Card ${d.id.slice(0, 80)} dropped${note(d.reason, 70)}`,
+  card_auto_dropped: (d) => `Card ${d.id.slice(0, 80)} automatically dropped${note(d.reason, 70)}`,
   hypothesis_updated: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
   trust_gate_changed: (d) => `trust gate changed${d.gate ? ` — ${d.gate}` : ''}`,
   inject_failed: (d) => `experiment injection failed${note(d.reason)}`,
@@ -239,6 +240,7 @@ const NARR_VALID = {
   card_resource_pinned: d => typeof d?.id === 'string' && d.id.length > 0
     && ownValue(d, 'gpus'),
   card_dropped: d => typeof d?.id === 'string' && d.id.length > 0,
+  card_auto_dropped: d => typeof d?.id === 'string' && d.id.length > 0,
   hypothesis_updated: d => ownValue(d, 'statement'),
   stage_finished: d => ownAny(d, ['name', 'stage']),
 }
@@ -260,7 +262,7 @@ const GROUPS = [
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank'],
   ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
-  ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired'],
+  ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped'],
 ]
 const TYPE2GROUP = Object.fromEntries(GROUPS.flatMap(([group, , types]) =>
   types.split(' ').map(type => [type, group])))

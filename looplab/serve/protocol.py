@@ -71,11 +71,8 @@ CONTROL_EVENTS = {
     EV_RUN_CONCEPTS,  # PART V (D): operator/assistant sets the run's BASE concept set (last-write-wins)
     # Layer 6 Card board controls (docs/23 §12.6 stage 10) are command-only and server-stamped. They
     # never wake a dead engine; live selection/scheduling observes their fold, and an exact operator
-    # drop may cancel its running eval.
-    # CODEX AGENT: EV_CARD_DROPPED is also emitted directly by the engine as a domain effect. Putting
-    # both meanings behind one type makes every CONTROL_EVENTS consumer depend on a payload-level
-    # `dropped_by` exception (command_observation already needs one). Give operator intent a distinct
-    # event type before another auth/retry/progress reader silently classifies engine progress as input.
+    # drop may cancel its running eval. New engine lifecycle drops use `card_auto_dropped`; only legacy
+    # logs can still carry an engine-authored `card_dropped` compatibility row.
     EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
 }
 
