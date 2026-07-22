@@ -100,7 +100,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
     assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 156
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 185
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 186
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
@@ -111,8 +111,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert "pinned at run start" in by_key["card_driven_selection"]["help"]
     assert by_key["speculation_depth"]["type"] == "int"
     assert "only when Card queue selection is enabled" in by_key["speculation_depth"]["help"]
+    assert "speculation-gate" in by_key["speculation_depth"]["help"]
     assert Settings.model_fields["speculation_depth"].default == 0
     assert Settings.model_fields["speculation_depth"].metadata
+    assert "speculation_gate_receipt" not in by_key
     assert {"max_parallel", "parallel_build"}.isdisjoint(by_key)
     assert "0 = AUTO at launch" in by_key["eval_parallel"]["help"]
     assert "Live Strategist/operator updates settle 0" in by_key["llm_parallel"]["help"]

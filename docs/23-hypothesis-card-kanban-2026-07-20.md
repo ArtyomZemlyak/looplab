@@ -1,9 +1,9 @@
 # Hypothesis-Card Kanban re-architecture — design and implementation ledger (2026-07-20)
 
-Status: **Layers 1–6 and the post-review hardening pass are complete; the consolidated
-backend/UI/build/docs revalidation is green and recorded below.
-Card-driven selection remains a default-off, run-start-pinned opt-in; positive-depth speculation is a
-second pinned opt-in that takes effect only when Card-driven selection is enabled.**
+Status: **Layers 1–6 are implemented. The current fail-closed speculation hardening is still in
+progress and has not yet received its fresh consolidated validation receipt. Card-driven selection
+remains a default-off, run-start-pinned opt-in; positive-depth speculation remains unavailable until
+the exact scorer-fidelity and real-GPU A/B quality gates issue a current, scope-bound receipt.**
 Grounded in four exhaustive code maps (idea-pipeline ·
 strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-review consolidated in
 **§12 — the authoritative target contract**. The ledger below is the validated implementation truth.
@@ -12,37 +12,36 @@ strategist/policy · execution/GPU · replay/UI) and an 18-agent per-layer mega-
 
 | Area | Landed now | Remaining |
 |---|---|---|
-| Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | none |
-| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | none |
-| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays | none |
-| Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | none |
-| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, fail-closed Docker GPU pinning and explicit CPU isolation, confirm admission, isolated Card producer/consumer | none |
-| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, crash-atomic batch claim, durable exact ASHA receipts and Strategist-owned scoring over canonical trusted concept membership; bounded lifecycle lanes; optimistic generation-fenced edit/priority/resource/drop controls | none |
+| Direction board | `Card` is the bounded lifecycle Kanban; empty/pre-Card runs retain the `Hypothesis` research-direction workflow as a graceful fallback | final validation |
+| Card read model | native monotonic Card mint/link under `_id_lock`; ownership receipts; exact `node_building.card_id`; lifecycle-safe draft/rerun/inject/ablation writers; strict bounded replay/public projection; durable request/done queue | final validation |
+| Enrichment | structured steering snapshots; live ranking; memo/claim/lesson refs; novelty/cross-run/concept projections; Researcher proposal + Developer-finalized footprint; final operator edit/priority/resource overlays | final validation |
+| Identity / readiness | receipt-bound `Card.identity`, bounded provenance/blockers, fail-closed `selection_ready`; dropped/merged/gated/superseded work is excluded; exact existing-Card claim and counterfactual speculative freshness are tail/generation fenced | final validation |
+| Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, fail-closed Docker GPU pinning and explicit CPU isolation, confirm admission, isolated Card producer/consumer | final validation |
+| Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, crash-atomic batch claim, durable exact ASHA receipts and Strategist-owned scoring over canonical trusted concept membership; bounded lifecycle lanes; optimistic generation-fenced edit/priority/resource/drop controls | final validation plus scoped rollout receipt |
 
 ### Stage progress ledger (implementation working tree, 2026-07-21)
 
-`Complete` means every acceptance item in §12.6 is implemented and covered by the final validation
-receipt below. Every stage row is current for this implementation snapshot.
+`Implemented` means the acceptance behavior is present in the working tree. It does **not** mean that
+the current uncommitted snapshot has passed the final suite; that distinction is explicit below.
 
 | Stage | Honest status | Landed commits / evidence | Final validation | Remaining |
 |---|---|---|---|---|
-| **1a-extract** | **Complete** | `024358f` pure verdict helpers | covered by the consolidated receipt below | none |
-| **1a-model** | **Complete** | native planner/reservation, ownership receipt, drop-first recovery, parallel preplanning, rerun/inject/ablation linkage | covered by the consolidated receipt below | none |
-| **1b** | **Complete** | strict enrichment fence/schema; structured steering; live ranking; stable memo/claim/lesson refs; Developer footprint plumbing | covered by the consolidated receipt below | none |
-| **1c** | **Complete** | engine-authored drop/merge mirror, node-less duplicate Cards, immediate reconciliation, CAS-safe drop and superseded lifecycle handling | covered by the consolidated receipt below | none |
-| **2** | **Complete** | canonical axes, shared lane broker, Strategist `llm_lane_limits`, live/operator reconfiguration, UI/docs/diagram contract | covered by the consolidated receipt below | none |
-| **4** | **Complete** | Developer-finalized footprint; timeout ceiling; memory-aware atomic GPU pool; logical/physical remap; lifecycle/confirm admission; fail-closed Docker GPU pinning plus CPU isolation; footprint-conditioned prompts | covered by the consolidated receipt below | none |
-| **3** | **Complete** | default-off pinned selector; strict scorer and exact forced prefix; effective ranking view under a hard physical reservation ceiling; policy-faithful greedy/population/ASHA lanes with durable exact promotion receipts; due cadence protection; crash-atomic existing-Card batch claim; canonical trusted concept coverage; `Strategy.card_scoring` and launch/UI surface | covered by the consolidated receipt below | none |
-| **5a** | **Complete** | durable exact-head request/done queue; isolated pooled Researcher/Developer; worker-only slow proposal/build buffers; main-task Card/Node commits; producer-failure serial fallback; crash-prefix recovery; terminal-batch outer-cadence boundary | covered by the consolidated receipt below | none |
-| **5b** | **Complete** | static run-pinned depth; live-backlog accounting; counterfactual include-owned selection; pre-scorer and pre-GPU freshness; ASHA/merge/resource fences; stale drop without physical-slot refund; resume and terminal cleanup | covered by the consolidated receipt below | none |
-| **6** | **Complete** | bounded Card lifecycle Kanban + legacy fallback; four command-only server-stamped controls; append-time generation/subject CAS; final operator-wins overlays; immutable-base effective resource pins with resume clamp; exact operator-drop eval cancel; UI/docs/diagram integration | covered by the consolidated receipt below | none |
+| **1a-extract** | **Complete** | `024358f` pure verdict helpers | historical + unchanged | none |
+| **1a-model** | **Implemented** | `d4dc621f`, `e66b728c`, `9b1cdb8f`, `bb176cb9`; native planner/reservation and ownership linkage | current receipt pending | final one-shot validation |
+| **1b** | **Implemented** | `d10bbe11`, `9cff2fbd`, `b90babd4`, `bb176cb9`; enrichment fence/schema and footprint plumbing | current receipt pending | final one-shot validation |
+| **1c** | **Implemented** | `015b699f`, `54ab8d60`, `fb0b438b`, `bb176cb9`; lifecycle reconciliation | current receipt pending | final one-shot validation |
+| **2** | **Implemented** | `15df954b`, `5e871dc5`, `d9940342`; canonical axes and shared lane broker | current receipt pending | final one-shot validation |
+| **4** | **Implemented** | `547b8d0f`, `bb176cb9`; footprint-aware scheduling and lifecycle reservations | current receipt pending | final one-shot validation |
+| **3** | **Implemented** | `212b1a64`, `4a3bf96b`, `bb176cb9`; Card selector, policy fidelity and atomic claim | current receipt pending | scorer-fidelity receipt + final suite |
+| **5a** | **Implemented** | `cc3a666e`, `bb176cb9`; durable isolated producer/consumer | current receipt pending | final one-shot validation |
+| **5b** | **Implemented; rollout closed** | `bb176cb9` plus current fail-closed receipt/profile/GPU hardening | current receipt pending | real-GPU 3-pair A/B gate and receipt |
+| **6** | **Implemented** | `0ff29fed`, `bb176cb9`; Kanban and generation-fenced controls | current receipt pending | final one-shot validation |
 
-Final validation receipt (2026-07-21): backend **4,775 passed / 40 skipped / 0 failed**
-(all **4,815** cases in the complete four-file-shard partition; only affected shards/cases were rerun
-after test-contract alignment), UI **602/602**, production Vite build green
-(**270 modules transformed**), strict MkDocs build green, and `git diff --check` green. The one
-parallel-load `strict_fsync` timing failure reproduced green in isolation and its complete shard then
-passed **1,293 / 8 skipped** without a code change.
+Historical validation receipt for commit `bb176cb9` (2026-07-21): backend **4,775 passed / 40 skipped /
+0 failed**, UI **602/602**, production Vite build green (**270 modules transformed**), strict MkDocs
+build green, and `git diff --check` green. This receipt is retained as history and does **not** validate
+the current hardening working tree. A new receipt will replace this paragraph only after the TODO below
+is complete.
 
 ### Live implementation TODO
 
@@ -53,9 +52,18 @@ passed **1,293 / 8 skipped** without a code change.
 - [x] Layer 5a — concurrent request-driven producer/consumer execution.
 - [x] Layer 5b — durable speculation plus counterfactual freshness gate.
 - [x] Layer 6 — Card Kanban, four server-stamped controls and operator-wins overlays.
-- [x] Final documentation/acceptance audit against every §12.6 item.
-- [x] One consolidated backend/UI/build/MkDocs revalidation after post-review hardening.
-- [x] Final commit and direct push to `master`.
+- [x] Implement the exact 15-case scorer-fidelity gate from §12.7.
+- [x] Implement the scope-bound search-quality gate and tamper-evident receipt from §12.7.
+- [x] Reject raw/folded Card-queue mismatches, unknown events, cloned sources and cloned semantic trajectories.
+- [x] Pin the complete source-owned Settings calibration profile and fail closed before resume mutation.
+- [x] Require the exact one-finish, attempt-0, non-tombstoned calibration lifecycle and completed finalization.
+- [x] Replace the utility-only GPU check with an exact CUDA context/allocation receipt and stable UUID identity.
+- [x] Bind public admission/resume to the exact tested max-nodes/runtime envelope and fixed seed set.
+- [x] Finish the adversarial fail-closed audit after those three boundaries land.
+- [ ] Run one consolidated backend/UI/build/strict-MkDocs validation after implementation freezes.
+- [ ] Run three fresh depth-0/positive-depth pairs on the effective real GPU and issue the receipt.
+- [ ] Replace the historical receipt above with exact current counts, evidence paths and digests.
+- [ ] Commit the validated implementation/docs and push directly to `master`.
 
 ### Post-review hardening receipt
 
@@ -904,16 +912,32 @@ then **6**.
   reservation and launch release/retry in serial, speculative and confirm paths; only the exact post-start
   operator drop cancels a running eval, while engine/unrelated/pre-start drops do not.
 
-### 12.7 Deferred, and open questions for the owner
+### 12.7 Mandatory rollout gates and truly deferred follow-ups
 
-**Deferred (not blocking the build; scoped out with a reason):**
-- **Search-quality measurement harness** (the "quality" lane): an offline replay harness over existing
-  `events.jsonl` (staleness-divergence rate, staleness-regret, coverage trajectory, speculation hit-rate)
-  + the deterministic quadratic toy A/B. It **gates enabling** speculation on a real GPU run
-  (`speculation_depth>0`) but is a pure fold projection, not a build layer. Fund before flipping
-  speculation on in production.
-- **Scorer-fidelity test gate** (separate from staleness): prove the L3 scorer reproduces `next_actions`
-  exactly (merge/ablate cadence, `operator_bandit` UCB) before `speculation_depth>0`.
+**Mandatory before any `speculation_depth>0` rollout (implemented; fresh evidence still pending in the
+live TODO):**
+
+- **Search-quality measurement gate**: bounded strict replay of exactly three fresh depth-0/positive-
+  depth pairs for fixed seeds `0/1/2` from the source-owned offline calibration profile. It requires
+  the exact clean event allow-list, attempt-zero node lifecycle, complete finalization suffix and a
+  real CUDA context plus 4096-byte allocation/free proof on every evaluated node; re-derives
+  hit/divergence rate, normalized regret and non-vacuous trusted concept coverage from raw
+  event/config/task evidence; binds implementation, environment, seven-field effective GPU identity,
+  Greedy policy, exact tested depth, `max_nodes`, complete runtime scope and deterministic quadratic
+  Toy-task profile; and emits a tamper-evident receipt only when every fixed threshold passes.
+- **Scorer-fidelity gate**: 15 exact ordered cases cover the forced pending/seed/debug/budget prefix,
+  min/max direction, merge and ablation cadence boundaries, and untried/unequal-count bandit ownership.
+  Any semantic or action-ownership mismatch blocks the quality receipt.
+
+The clean event allow-list above is an **evidence protocol**, not a removal of Layer-6 operator control.
+A public run admitted by a current receipt may still accept the generation-fenced Card controls described
+in Stage 6. The first such intervention deliberately takes that run outside the calibrated A/B evidence
+envelope: its log cannot be used to issue, refresh, or substitute for a rollout receipt, and the quality
+reader rejects it. The receipt authorizes the pinned mechanism/configuration; it does not claim that an
+operator-modified trajectory is one of the six clean calibration trajectories.
+
+**Deferred (not authority granted by the narrow receipt):**
+
 - ~~**Unified `llm_parallel` CapacityLimiter**~~ — **PROMOTED to in-scope by owner decision 6.** The
   build fan-out, `_spawn_research`, `novelty_dedup`, and enrichment share one budgeted, Strategist-
   allocated limiter with named lanes. Folding research under a limiter can't be byte-identical, so it
@@ -924,6 +948,9 @@ then **6**.
   deprecation window; the cards+hypotheses dump duplication is accepted through L1–L6.
 - **Adaptive speculation depth** (keep the ready buffer ≈ `eval_parallel` dynamically) — ship the static
   `speculation_depth` const first.
+- **General-workload/policy rollout** — the first receipt is intentionally limited to the exact Greedy,
+  deterministic quadratic Toy-task and tested-depth scope. Production tasks and other policy/config
+  envelopes require their own representative protocol and evidence; no receipt scope is inferred.
 - **Operator "launch this card NOW" HITL** (the sole `ENSURE_RUNNING`/engine-ack card event needing a
   generation-fenced counter) and operator "merge these two cards" — deferred; `EV_INJECT_NODE` already
   covers manual node creation.

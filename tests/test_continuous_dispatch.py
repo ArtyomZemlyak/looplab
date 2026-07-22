@@ -20,7 +20,7 @@ class _DispatchStub:
     single-token limiter it receives is a no-op, so the outer semaphore is the only bound under test."""
 
     def __init__(self, *, max_parallel, durations):
-        self.max_parallel = max_parallel
+        self._eval_parallel = max_parallel
         self._durations = durations
         self._concurrent_research_repeat = False
         self.store = types.SimpleNamespace(read_all=lambda: [])
@@ -63,7 +63,7 @@ def test_freed_slot_refills_from_the_same_batch(monkeypatch):
     _drive(stub, [{"node_id": i} for i in range(5)], None, monkeypatch)
     assert sorted(stub.ran) == [0, 1, 2, 3, 4]        # every eval ran — the refill (not just the first 2)
     assert stub.peak == 2                             # the pool filled …
-    assert stub.peak <= stub.max_parallel            # … and was never exceeded
+    assert stub.peak <= stub._eval_parallel          # … and was never exceeded
 
 
 def test_batch_that_fits_the_pool_runs_all_without_blocking(monkeypatch):

@@ -155,8 +155,7 @@ class ResourceSchedulingMixin:
         declared = raw is not None and "gpus" in raw
         cpu_only = bool(declared and raw.get("gpus") == 0)
         pool_size = len(getattr(self, "_gpu_ids", []) or [])
-        parallel = max(1, int(getattr(self, "_eval_parallel",
-                                      getattr(self, "max_parallel", 1)) or 1))
+        parallel = max(1, int(self._eval_parallel or 1))
         if cpu_only:
             count = 0
         elif declared:
@@ -249,7 +248,7 @@ class ResourceSchedulingMixin:
     # Back-compat for integrations/tests that exercised the old single-GPU primitive directly.  The
     # dispatcher itself uses the multi-GPU API and never relies on this non-blocking wrapper.
     def _acquire_gpu(self) -> Optional[int]:
-        if max(1, int(getattr(self, "max_parallel", 1) or 1)) <= 1:
+        if max(1, int(self._eval_parallel or 1)) <= 1:
             return None
         got = self._acquire_gpus(1)
         return got[0] if got else None

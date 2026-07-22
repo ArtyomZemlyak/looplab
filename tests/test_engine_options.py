@@ -27,7 +27,8 @@ def _mk_engine(run_dir, **kw) -> Engine:
     researcher = ToyResearcher(task.bounds, seed=task.seed, step=task.step)
     developer = ToyObjectiveDeveloper()
     return Engine(run_dir, task=task, researcher=researcher, developer=developer,
-                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3), **kw)
+                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3),
+                  **kw)
 
 
 # EngineOptions field -> the Engine attribute it lands on (digest_char_cap is special-cased:
@@ -105,6 +106,7 @@ ATTR_BY_FIELD = {
     "agent_drives_actions": "agent_drives_actions",
     "card_driven_selection": "card_driven_selection",
     "speculation_depth": "speculation_depth",
+    "speculation_gate_receipt": "speculation_gate_receipt",
     "inline_repair": "_inline_repair",
     "inline_repair_attempts": "_inline_repair_attempts",
     "inline_repair_stuck_repeat": "_inline_repair_stuck_repeat",
@@ -177,7 +179,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         digest_char_cap=1234,
         inline_repair_attempts=6,
         seed_mode="tracked",
-        card_driven_selection=True,
+        # Keep a positive depth inert in this mapping-only test. Receipt-backed Card authority is
+        # exercised by the dedicated runtime-gate suite, not by the EngineOptions differential.
+        card_driven_selection=False,
         speculation_depth=4,
     )
 
@@ -294,7 +298,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
     assert new.trust_gate == "gate" and new._holdout_fraction == 0.4
     assert new._inline_repair_attempts == 6 and new._seed_mode == "tracked"
     assert new.lessons_every == 7 and new._novelty_epsilon == 0.2
-    assert new.card_driven_selection is True
+    assert new.card_driven_selection is False
     assert new.speculation_depth == 4
 
 
@@ -319,7 +323,9 @@ def test_speculation_depth_is_bounded_and_default_run_start_bytes_stay_legacy(tm
 
     enabled = _mk_engine(tmp_path / "spec-on", speculation_depth=5)
     assert enabled.speculation_depth == 5
-    assert enabled._run_start_pinned_values()["speculation_depth"] == 5
+    # Depth without Card authority is inert config, not a durable speculation prefix. Persisting it
+    # would force the fail-closed re-entry guard to treat an ordinary run as receipt-backed evidence.
+    assert "speculation_depth" not in enabled._run_start_pinned_values()
 
     clamped = _mk_engine(tmp_path / "spec-clamped", speculation_depth=999)
     assert clamped.speculation_depth == 64

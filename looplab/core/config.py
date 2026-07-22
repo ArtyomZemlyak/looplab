@@ -882,6 +882,11 @@ class Settings(BaseSettings):
     # historical alternating build/eval spine; positive values are pinned by run_started so a
     # resume cannot silently mix search treatments after a snapshot/default edit.
     speculation_depth: int = Field(default=0, ge=0, le=64)
+    # Local evidence receipt produced by ``looplab speculation-gate``.  This is deliberately absent
+    # from the curated Settings UI: positive-depth execution is a calibrated rollout decision, not a
+    # casual tuning knob.  The Engine validates the receipt against the current scorer,
+    # implementation, GPU inventory and raw paired-run evidence before it enables speculation.
+    speculation_gate_receipt: str | None = Field(default=None, max_length=4096)
     # Per-stage model/endpoint overrides for the unified agent. Recognized keys (see
     # tasks.build_unified_agent): `propose` (researcher), `implement`/`repair` (developer),
     # `strategy`, `pilot`. Unlisted keys are ignored. Empty = the per-role researcher_*/developer_*
@@ -1176,7 +1181,12 @@ class Settings(BaseSettings):
         return self
 
     def masked_snapshot(self) -> dict:
-        d = self.model_dump()
+        # Snapshots are a JSON contract (they are written verbatim to config.snapshot.json), not a
+        # Python-object dump.  In particular tuple-valued schema fields such as
+        # ``inline_repair_reasons`` must become JSON arrays before callers hash the runtime envelope;
+        # otherwise the strict speculation-scope canonicalizer sees a different/non-JSON preimage
+        # from the one that ``json.dumps`` eventually persists.
+        d = self.model_dump(mode="json")
         if self.llm_api_key is not None:
             d["llm_api_key"] = "***"
         else:

@@ -21,13 +21,19 @@ from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RESUME_SERVED,
                                   EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
-from looplab.engine.orchestrator import Engine
+from looplab.engine.orchestrator import (
+    Engine,
+    SPECULATION_CALIBRATION_PROFILE_DIGEST,
+    SpeculationAuthorizationError,
+)
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.events.replay import fold
 from looplab.adapters.tasks import validate_task
+from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
-                         _load_task, _print_result, _require_run_dir, app)
+                         _apply_speculation_calibration_profile, _load_task, _print_result,
+                         _require_run_dir, app)
 
 
 def _engine(*args, **kwargs):
@@ -53,6 +59,11 @@ def _run_engine_guarded(eng: Engine):
     started = time.time()
     try:
         return anyio.run(eng.run)
+    except SpeculationAuthorizationError:
+        # Authorization failures deliberately leave the untrusted/stale run prefix untouched.  The
+        # generic fatal-error path below writes run_finished + finalization receipts, which would turn
+        # a refused re-entry into a mutation by the very engine that refused to trust it.
+        raise
     except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
         # during implement/repair, a missing dep) must surface as a TERMINAL event, not a silent
         # stalled run the UI shows "thinking" forever. Mark finished-with-error, then re-raise so
@@ -131,6 +142,20 @@ def _run_engine_guarded(eng: Engine):
         except Exception:  # noqa: BLE001 - terminal recovery must never replace the root traceback
             pass
         raise
+
+
+def _preflight_speculation_authority(eng: Engine, events=None) -> None:
+    """Authorize an existing durable prefix before the CLI performs lifecycle/snapshot writes.
+
+    ``Engine.run`` repeats this check at every semantic decision boundary.  CLI ``run``/``resume``
+    also own writes before that coroutine starts, so they need the same read-only boundary first.
+    The callable guard keeps lightweight compatibility stubs used by command-level tests working.
+    """
+    guard = getattr(eng, "_require_pinned_speculation_receipt", None)
+    if not callable(guard):
+        return
+    source = eng.store.read_all() if events is None else events
+    guard(fold(source))
 
 
 def _pending_finalize(state) -> bool:
@@ -279,6 +304,11 @@ def run(
     confirm_seeds: Optional[int] = typer.Option(None, help="Seeds for the confirmation pass."),
     crash_after: Optional[int] = typer.Option(None, hidden=True,
                                               help="Test hook: hard-exit after N evals."),
+    speculation_gate_calibration: bool = typer.Option(
+        False,
+        "--speculation-gate-calibration",
+        hidden=True,
+        help="Maintainer hook: bootstrap bounded offline GPU speculation evidence."),
 ):
     """Start a new run (or continue if the run dir already has events).
 
@@ -339,6 +369,29 @@ def run(
         settings = appconfig.build_settings(file_settings, typed, sets)
     except ValidationError as e:
         raise typer.BadParameter(f"invalid settings: {e}")
+    if speculation_gate_calibration:
+        # This guard precedes Genesis client construction/authoring.  The bootstrap must be provably
+        # offline; merely resolving to a ToyTask after a model-authored Genesis call is insufficient.
+        if genesis:
+            raise typer.BadParameter(
+                "--speculation-gate-calibration requires --no-genesis")
+        if settings.speculation_gate_receipt is not None:
+            raise typer.BadParameter(
+                "--speculation-gate-calibration is restricted: "
+                "speculation_gate_receipt must be unset")
+        _apply_speculation_calibration_profile(settings)
+        typer.echo(
+            "Speculation calibration profile "
+            f"{SPECULATION_CALIBRATION_PROFILE_DIGEST} (offline toy/greedy/GPU)"
+        )
+    elif settings.speculation_gate_receipt is not None:
+        # A receipt is not a general product rollout. Force the exact offline profile before Genesis
+        # or any role/client construction, preserving only max_nodes/depth/receipt. An explicit
+        # model-authored task would cross that boundary before Engine admission, so reject it here.
+        if genesis and goal is not None:
+            raise typer.BadParameter(
+                "receipt-backed Card speculation requires --no-genesis")
+        _apply_speculation_calibration_profile(settings)
     # 3b. Genesis: you described the goal in words — let the LLM author the task (the headless
     # counterpart of the UI's "New run"). Fires on an explicit --goal (so no file-based / legacy flow
     # is affected). --kind does NOT skip it: it PINS the kind and Genesis fills the rest within it;
@@ -397,6 +450,47 @@ def run(
         task = validate_task(task_dict)
     except (ValueError, KeyError, TypeError) as e:
         raise typer.BadParameter(f"invalid task: {e}")
+    if speculation_gate_calibration:
+        # A receipt cannot bootstrap itself after an implementation digest changes.  Keep the only
+        # no-receipt path narrow and non-production: an explicit CLI-only flag, a deterministic toy
+        # adapter/backend, a real-GPU requirement, Card authority and a small budget. Both the serial
+        # depth=0 baseline and a positive-depth treatment use this same immutable envelope.
+        # It is deliberately absent from Settings/snapshots/env/UI and resume has no corresponding
+        # option, so it cannot silently authorize an application workload or survive re-entry.
+        from looplab.adapters.toytask import ToyTask
+        calibration_errors: list[str] = []
+        if type(task) is not ToyTask:
+            calibration_errors.append("task must be the exact offline quadratic ToyTask")
+        else:
+            try:
+                canonical_speculation_toy_task(task, require_seed_set=True)
+            except ValueError as exc:
+                calibration_errors.append(str(exc))
+        if settings.backend != "toy":
+            calibration_errors.append("backend must be toy")
+        if settings.policy != "greedy" or settings.strategist_backend != "off":
+            calibration_errors.append("policy must be greedy and strategist must be off")
+        if settings.card_driven_selection is not True:
+            calibration_errors.append("card_driven_selection must be true")
+        if not 1 <= settings.max_nodes <= 64:
+            calibration_errors.append("max_nodes must be in 1..64")
+        if settings.speculation_gate_receipt is not None:
+            calibration_errors.append("speculation_gate_receipt must be unset")
+        try:
+            from looplab.core.hardware import effective_gpu_inventory
+            if not effective_gpu_inventory():
+                calibration_errors.append("an effective visible GPU must be detected")
+        except Exception:
+            calibration_errors.append("GPU inventory could not be detected")
+        if calibration_errors:
+            raise typer.BadParameter(
+                "--speculation-gate-calibration is restricted: "
+                + "; ".join(calibration_errors)
+            )
+        # Unlike an ordinary authoring snapshot, calibration evidence must contain every defaulted
+        # task identity/provenance field (id/direction/noise/seed included), not just the flags the
+        # command happened to spell.
+        task_dict = task.model_dump(mode="json", exclude_none=False)
     # CODEX AGENT: the task adapters own comparison-contract validation and identity.  Persist their
     # canonical value (including contract_id), never the pre-validation authoring dict, so CLI and
     # Web/TUI/API launches produce the same scientific provenance in task.snapshot.json.
@@ -427,6 +521,20 @@ def run(
         # Continuing the SAME task is fine; an empty/fresh dir has no prior run_started.
         prior_events = store.read_all()
         prior = fold(prior_events)
+        if speculation_gate_calibration:
+            stale_material = sorted(
+                path.name for path in out.iterdir()
+                if path.name not in {"engine.lock", "events.jsonl"}
+            )
+            events_path = out / "events.jsonl"
+            if prior_events != [] or (events_path.exists() and events_path.stat().st_size) \
+                    or stale_material:
+                detail = (f"; stale material: {', '.join(stale_material)}"
+                          if stale_material else "")
+                raise typer.BadParameter(
+                    "--speculation-gate-calibration requires a fresh empty run directory "
+                    "with exactly zero prior events" + detail
+                )
         pending_finalize_scope = incomplete_finalize_scope(prior_events)
         finalization_pending = (
             pending_finalize_scope is not None or prior.finalization_pending())
@@ -446,10 +554,21 @@ def run(
             # paid report/cost wrap-up. Missing or corrupt snapshots fail closed without rewriting them.
             engine_task, engine_settings = _pending_finalization_inputs(out, prior.task_id)
             eng = _engine(out, engine_task, engine_settings, crash_after=None)
+            _preflight_speculation_authority(eng, prior_events)
         else:
             # Construction initializes roles/clients and can fail. Preserve the prior run's provenance
             # until the new Engine is viable; only then publish the new epoch's input snapshots.
-            eng = _engine(out, task, settings, crash_after)
+            eng = _engine(
+                out,
+                task,
+                settings,
+                crash_after,
+                **({"speculation_gate_calibration": True}
+                   if speculation_gate_calibration else {}),
+            )
+            # This existing prefix is still the authority until the new snapshots are published.
+            # Refuse a stale/missing/different receipt before replacing either snapshot.
+            _preflight_speculation_authority(eng, prior_events)
             atomic_write_text(out / "config.snapshot.json",
                               json.dumps(settings.masked_snapshot(), indent=2))
             # Self-describing run: write the RESOLVED task dict (after file + flags) as canonical JSON
@@ -525,6 +644,7 @@ def resume(
     if max_nodes is not None:
         settings.max_nodes = max_nodes
     eng = _engine(run_dir, task, settings, crash_after=None)
+    _preflight_speculation_authority(eng)
     # Continuing a STOPPED run: a `stop` (paused) or natural finish re-breaks on the first iteration
     # and does no work unless we LIFT it — so append the universal `resume` event (fold clears
     # paused + finished). BUT a pending FINALIZE (stop_requested set, not yet finished — e.g. the UI
@@ -548,6 +668,9 @@ def resume(
                 # engine's post-finish lock tail must not reopen the run without an owner.
                 prior_events = eng.store.read_all()
                 prior = fold(prior_events)
+                # A control may have landed while this command waited for singleton ownership.
+                # Re-authorize the exact prefix immediately before resume/resume_served can append.
+                _preflight_speculation_authority(eng, prior_events)
                 pending_finalize_scope = incomplete_finalize_scope(prior_events)
                 finalization_pending = (
                     pending_finalize_scope is not None or prior.finalization_pending())
@@ -652,12 +775,15 @@ def finalize(
         data.pop("llm_api_key", None)
         settings = Settings(**data)
     eng = _engine(run_dir, _load_task(snap), settings, crash_after=None)
+    _preflight_speculation_authority(eng)
     with _engine_singleton(run_dir) as ok:
         if not ok:
             typer.echo(f"engine already running on {run_dir} — it will finalize on its next iteration")
             return
         started = time.time()
-        current = fold(eng.store.read_all())
+        current_events = eng.store.read_all()
+        _preflight_speculation_authority(eng, current_events)
+        current = fold(current_events)
 
         # The server records a durable wake intent before spawning this process. Once singleton
         # ownership is ours, acknowledge it even when the run is already terminal; otherwise the

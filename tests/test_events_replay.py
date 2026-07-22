@@ -56,9 +56,59 @@ def test_speculation_depth_run_start_pin_is_strict_and_legacy_hidden(recorded, e
     assert state.speculation_depth == expected
     dumped = state.model_dump(mode="json")
     assert "speculation_depth" not in dumped
+    assert "speculation_gate_receipt_digest" not in dumped
     assert "card_build_requests" not in dumped
     assert "card_builds_done" not in dumped
     assert "speculative_nodes" not in dumped
+
+
+@pytest.mark.parametrize("recorded, expected", [
+    ("sha256:" + "a" * 64, "sha256:" + "a" * 64),
+    (None, ""),
+    ("a" * 64, ""),
+    ("sha256:" + "A" * 64, ""),
+    ("sha256:" + "a" * 63, ""),
+    (True, ""),
+])
+def test_speculation_gate_receipt_run_start_pin_is_strict_and_hidden(recorded, expected):
+    data = {"run_id": "r", "task_id": "t", "direction": "min"}
+    if recorded is not None:
+        data["speculation_gate_receipt_digest"] = recorded
+    state = fold([Event(type="run_started", data=data)])
+    assert state.speculation_gate_receipt_digest == expected
+    assert "speculation_gate_receipt_digest" not in state.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("recorded, expected", [
+    ("sha256:" + "d" * 64, "sha256:" + "d" * 64),
+    (None, ""),
+    ("sha256:" + "D" * 64, ""),
+    ("sha256:" + "d" * 63, ""),
+    (0, ""),
+])
+def test_speculation_runtime_scope_run_start_pin_is_strict_and_hidden(recorded, expected):
+    data = {"run_id": "r", "task_id": "t", "direction": "min"}
+    if recorded is not None:
+        data["speculation_runtime_scope_sha256"] = recorded
+    state = fold([Event(type="run_started", data=data)])
+    assert state.speculation_runtime_scope_sha256 == expected
+    assert "speculation_runtime_scope_sha256" not in state.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("recorded, expected", [
+    ("sha256:" + "b" * 64, "sha256:" + "b" * 64),
+    (None, ""),
+    ("sha256:" + "B" * 64, ""),
+    ("sha256:" + "b" * 65, ""),
+    (False, ""),
+])
+def test_speculation_implementation_run_start_pin_is_strict_and_hidden(recorded, expected):
+    data = {"run_id": "r", "task_id": "t", "direction": "min"}
+    if recorded is not None:
+        data["speculation_implementation_digest"] = recorded
+    state = fold([Event(type="run_started", data=data)])
+    assert state.speculation_implementation_digest == expected
+    assert "speculation_implementation_digest" not in state.model_dump(mode="json")
 
 
 def test_card_build_request_done_fold_is_generation_fenced_and_recoverable():
@@ -79,6 +129,7 @@ def test_card_build_request_done_fold_is_generation_fenced_and_recoverable():
     assert crashed.speculation_depth == 3
     assert crashed.card_build_requests == [{"card_id": "card-7", "generation": 0}]
     assert crashed.card_builds_done == 0
+    assert crashed.card_build_outcomes == []
     assert crashed.speculative_nodes == {}
     # Crash recovery can see both the outstanding durable request and its already-created node, so
     # the main task can append only done instead of creating the node twice.
@@ -89,6 +140,7 @@ def test_card_build_request_done_fold_is_generation_fenced_and_recoverable():
         "card_id": "card-7", "generation": 0, "node_id": 0, "speculative": True,
     })])
     assert completed.card_builds_done == 1
+    assert completed.card_build_outcomes == ["committed"]
     assert completed.speculative_nodes == {0: {"card_id": "card-7", "generation": 0}}
 
 
@@ -142,6 +194,7 @@ def test_card_build_done_orphan_and_mismatch_are_inert_but_exact_give_up_advance
     assert state.card_builds_done == 1
     assert len(state.card_build_requests) - state.card_builds_done == 1
     assert state.card_build_producer_failed == ["card-1"]
+    assert state.card_build_outcomes == ["producer_failed"]
     assert state.speculative_nodes == {}
 
 
@@ -1947,6 +2000,7 @@ def test_card_build_request_done_pair_preserves_positional_reservation_ledger(tm
     st = fold(s.read_all())
     assert st.card_build_requests == [{"card_id": "card-5", "generation": 0}]
     assert st.card_builds_done == 0
+    assert st.card_build_outcomes == []
 
     # A malformed request and an orphan done are inert. An exact give-up advances the head while
     # retaining its physical reservation history; the next valid request remains outstanding.
@@ -1966,6 +2020,7 @@ def test_card_build_request_done_pair_preserves_positional_reservation_ledger(tm
     assert st.card_builds_done == 1
     assert len(st.card_build_requests) - st.card_builds_done == 1
     assert st.card_build_producer_failed == ["card-5"]
+    assert st.card_build_outcomes == ["producer_failed"]
 
     # Old logs with no L5a events carry the hidden empty-list default.
     q = tmp_path / "legacy.jsonl"
@@ -1973,7 +2028,9 @@ def test_card_build_request_done_pair_preserves_positional_reservation_ledger(tm
     _seed(s2)
     legacy = fold(s2.read_all())
     assert legacy.card_build_requests == []
+    assert legacy.card_build_outcomes == []
     assert "card_build_requests" not in legacy.model_dump(mode="json")
+    assert "card_build_outcomes" not in legacy.model_dump(mode="json")
 
 
 def test_l6_operator_card_controls_fold_and_resolve_through_merge(tmp_path):

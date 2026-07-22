@@ -212,6 +212,229 @@ def test_run_no_file_from_flags(tmp_path):
     assert (tmp_path / "r" / "task.snapshot.json").exists()
 
 
+def test_speculation_gate_calibration_is_restricted_and_explicitly_threaded(
+        tmp_path, monkeypatch):
+    import looplab.cli as cli
+    import looplab.core.hardware as hardware
+
+    seen = {}
+
+    def _capture(out, task, settings, crash_after, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("captured-before-run")
+
+    monkeypatch.setattr(cli, "_engine", _capture)
+    monkeypatch.setattr(hardware, "effective_gpu_inventory", lambda: [{
+        "index": 0, "name": "test-gpu", "mem_total_mib": 24_576, "mem_free_mib": 20_000,
+    }])
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "minimize (x-3)^2 + (y+1)^2",
+        "--out", str(tmp_path / "fresh"),
+        "-s", "backend=toy", "-s", "max_nodes=12",
+        "-s", "card_driven_selection=true", "-s", "speculation_depth=1",
+        "--speculation-gate-calibration",
+    ])
+    assert result.exit_code == 1
+    assert seen == {"speculation_gate_calibration": True}
+
+
+def test_speculation_gate_calibration_rejects_non_gpu_or_ambient_receipt(tmp_path, monkeypatch):
+    import looplab.core.hardware as hardware
+
+    monkeypatch.setattr(hardware, "effective_gpu_inventory", lambda: [])
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "minimize (x-3)^2 + (y+1)^2",
+        "--out", str(tmp_path / "bad"),
+        "-s", "backend=toy", "-s", "max_nodes=12",
+        "-s", "card_driven_selection=true", "-s", "speculation_depth=1",
+        "-s", f"speculation_gate_receipt={tmp_path / 'old.json'}",
+        "--speculation-gate-calibration",
+    ])
+    assert result.exit_code == 2
+    assert "restricted" in result.output
+    assert "receipt must be unset" in result.output
+
+
+def test_speculation_gate_calibration_rejects_reusing_a_run_dir(tmp_path, monkeypatch):
+    import looplab.core.hardware as hardware
+    from looplab.events.eventstore import EventStore
+
+    out = tmp_path / "used"
+    out.mkdir()
+    EventStore(out / "events.jsonl").append(
+        "run_started",
+        {"run_id": "prior", "task_id": "toy_quadratic", "goal": "g", "direction": "min"},
+    )
+    monkeypatch.setattr(hardware, "effective_gpu_inventory", lambda: [{
+        "index": 0, "name": "test-gpu", "mem_total_mib": 24_576, "mem_free_mib": 20_000,
+    }])
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "minimize (x-3)^2 + (y+1)^2",
+        "--out", str(out),
+        "-s", "backend=toy", "-s", "max_nodes=12",
+        "-s", "card_driven_selection=true", "-s", "speculation_depth=1",
+        "--speculation-gate-calibration",
+    ])
+    assert result.exit_code == 2
+    # The EventStore lock is itself stale material, and proves the used directory was rejected before
+    # calibration could append. Rich may wrap the surrounding BadParameter prose unpredictably.
+    output = " ".join(result.output.split())
+    assert "stale material:" in output and "events.jsonl.lock" in output
+
+
+def test_speculation_gate_calibration_requires_no_genesis_before_model_call(
+        tmp_path, monkeypatch):
+    import looplab.cli as cli
+
+    monkeypatch.setattr(
+        cli, "make_llm_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("calibration crossed the no-Genesis guard")),
+    )
+    result = runner.invoke(app, [
+        "run", "--kind", "quadratic", "--goal", "gate calibration",
+        "--out", str(tmp_path / "genesis"),
+        "--speculation-gate-calibration",
+    ])
+    assert result.exit_code == 2
+    assert "requires --no-genesis" in result.output
+
+
+def test_speculation_gate_calibration_rejects_stale_snapshot_without_events(
+        tmp_path, monkeypatch):
+    import looplab.core.hardware as hardware
+
+    out = tmp_path / "stale"
+    out.mkdir()
+    (out / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(hardware, "effective_gpu_inventory", lambda: [{
+        "index": 0, "name": "test-gpu", "mem_total_mib": 24_576,
+    }])
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "minimize (x-3)^2 + (y+1)^2",
+        "--out", str(out), "-s", "max_nodes=12", "-s", "speculation_depth=0",
+        "--speculation-gate-calibration",
+    ])
+    assert result.exit_code == 2
+    # EventStore/locking may add another stale filename and Rich may wrap the rendered panel.
+    output = " ".join(result.output.split())
+    assert "stale material:" in output and "task.snapshot.json" in output
+
+
+def test_receipt_backed_run_forces_narrow_profile_before_engine_construction(
+        tmp_path, monkeypatch):
+    import looplab.cli as cli
+    from looplab.engine.orchestrator import SPECULATION_CALIBRATION_PROFILE_SETTINGS
+
+    seen = {}
+
+    def _capture(_out, _task, settings, _crash_after, **_kwargs):
+        seen.update(settings.masked_snapshot())
+        raise RuntimeError("captured-before-run")
+
+    monkeypatch.setattr(cli, "_engine", _capture)
+    receipt = tmp_path / "receipt.json"
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic",
+        "--goal", "minimize (x-3)^2 + (y+1)^2",
+        "--out", str(tmp_path / "receipt-run"),
+        "-s", "backend=llm", "-s", "policy=mcts", "-s", "max_nodes=5",
+        "-s", "speculation_depth=1",
+        "-s", f"speculation_gate_receipt={receipt}",
+    ])
+    assert result.exit_code == 1
+    assert seen["max_nodes"] == 5
+    assert seen["speculation_depth"] == 1
+    assert seen["speculation_gate_receipt"] == str(receipt)
+    for field, expected in SPECULATION_CALIBRATION_PROFILE_SETTINGS.items():
+        assert seen[field] == expected
+
+
+def test_ordinary_cli_engine_keeps_large_budget_outside_rollout_scope(
+    tmp_path, monkeypatch,
+):
+    import looplab.cli as cli
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.config import Settings
+
+    monkeypatch.setattr(
+        cli,
+        "speculation_runtime_scope_digest",
+        lambda _snapshot: (_ for _ in ()).throw(
+            AssertionError("ordinary run crossed the bounded speculation scope")),
+    )
+    engine = cli._engine(
+        tmp_path / "ordinary-large-budget",
+        ToyTask(),
+        Settings(max_nodes=65, backend="toy"),
+        None,
+    )
+
+    assert engine.policy.max_nodes == 65
+    assert engine._speculation_runtime_scope_sha256 == ""
+
+
+def _stale_speculation_prefix(run_dir):
+    """One deliberately incomplete positive-depth prefix plus valid resume snapshots."""
+    import json
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.config import Settings
+    from looplab.events.eventstore import EventStore
+
+    run_dir.mkdir()
+    task = ToyTask()
+    (run_dir / "task.snapshot.json").write_text(
+        json.dumps(task.model_dump(mode="json")), encoding="utf-8")
+    (run_dir / "config.snapshot.json").write_text(
+        json.dumps(Settings(backend="toy", max_nodes=3).masked_snapshot()), encoding="utf-8")
+    EventStore(run_dir / "events.jsonl").append("run_started", {
+        "run_id": run_dir.name,
+        "task_id": task.id,
+        "goal": task.goal,
+        "direction": task.direction,
+        "card_driven_selection": True,
+        "speculation_depth": 1,
+        # Missing receipt/runtime/implementation pins: re-entry must fail closed.
+    })
+    return (
+        (run_dir / "events.jsonl").read_bytes(),
+        (run_dir / "config.snapshot.json").read_bytes(),
+        (run_dir / "task.snapshot.json").read_bytes(),
+    )
+
+
+def test_resume_authorization_preflight_precedes_lifecycle_writes(tmp_path):
+    from looplab.engine.orchestrator import SpeculationAuthorizationError
+
+    run_dir = tmp_path / "stale-resume"
+    before = _stale_speculation_prefix(run_dir)
+    result = runner.invoke(app, ["resume", str(run_dir)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SpeculationAuthorizationError)
+    assert (run_dir / "events.jsonl").read_bytes() == before[0]
+    assert (run_dir / "config.snapshot.json").read_bytes() == before[1]
+    assert (run_dir / "task.snapshot.json").read_bytes() == before[2]
+
+
+def test_run_authorization_preflight_precedes_snapshot_and_reopen_writes(tmp_path):
+    from looplab.engine.orchestrator import SpeculationAuthorizationError
+
+    run_dir = tmp_path / "stale-run"
+    before = _stale_speculation_prefix(run_dir)
+    result = runner.invoke(app, [
+        "run", str(run_dir / "task.snapshot.json"), "--no-genesis", "--out", str(run_dir),
+        "-s", "backend=toy",
+    ])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SpeculationAuthorizationError)
+    assert (run_dir / "events.jsonl").read_bytes() == before[0]
+    assert (run_dir / "config.snapshot.json").read_bytes() == before[1]
+    assert (run_dir / "task.snapshot.json").read_bytes() == before[2]
+
+
 def test_run_set_unknown_key_errors(tmp_path):
     result = runner.invoke(app, [
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "g", "--out", str(tmp_path / "r"),

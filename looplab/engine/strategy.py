@@ -423,6 +423,13 @@ class StrategyCadenceMixin:
         (see Settings.agent_control), so default behaviour is unchanged. The gate is deterministic and
         applied both when the decision is recorded AND on resume (`_reentry_repin`), so a blocked knob
         stays blocked identically on replay — the recorded active_strategy and the live engine agree."""
+        # The hidden quality-evidence bootstrap calibrates the complete runtime envelope, not only
+        # the policy class, so it must remain immutable.  A public receipt admits that measured launch
+        # profile but does not revoke explicit Stage-6 operator controls; those interventions are
+        # durable/auditable and make the run ineligible as future calibration evidence.
+        if getattr(self, "_speculation_gate_calibration", False) is True:
+            return
+
         # PER-FIELD operator provenance: `_pinned` lists exactly the fields the operator pinned via a
         # `set_strategy` CONTROL_EVENT. Those are EXEMPT from the strategist's grant (the human "can
         # always change it via the UI/snapshot"); every OTHER field — including a strategist-decided
@@ -462,7 +469,7 @@ class StrategyCadenceMixin:
         if "prefer_sweep" in ops and may("prefer_sweep"):
             self._prefer_sweep = bool(ops["prefer_sweep"])
         # Resource budgets the Strategist may retune live (gated by the governance matrix). self.timeout
-        # is read fresh per eval and self.max_parallel rebuilds the CapacityLimiter each batch, so a
+        # is read fresh per eval and self._eval_parallel rebuilds the CapacityLimiter each batch, so a
         # mid-run change takes effect on the next node without any rewiring.
         if ("timeout" in strat and may("timeout")
                 and not isinstance(strat["timeout"], bool)):
@@ -473,9 +480,8 @@ class StrategyCadenceMixin:
             except (TypeError, ValueError, OverflowError):
                 pass
         # Layer-2 (docs/23): the Strategist steers the CANONICAL `eval_parallel`/`llm_parallel`; the
-        # legacy `max_parallel`/`parallel_build` stay accepted for back-compat. Each retune refreshes BOTH
-        # the runtime attr (read by evaluate.py/crash_repair/_dispatch_evals) AND the `_eval_parallel`/
-        # `_llm_parallel` read-through aliases. Live deltas do not retain an AUTO state: 0 settles to
+        # legacy `max_parallel`/`parallel_build` stay accepted for back-compat and feed the same canonical
+        # attributes through the loops below. Live deltas do not retain an AUTO state: 0 settles to
         # safe serial width 1. Startup config alone resolves 0 from hardware / the settled eval width.
         # Legacy alias FIRST, canonical name LAST, so when a strategy carries BOTH the canonical value
         # wins (last write) — matching __init__ ("a NEW name, when set, WINS over its legacy alias").
@@ -491,8 +497,7 @@ class StrategyCadenceMixin:
                     _value = int(_value)
                     if not 0 <= _value <= 1024:
                         continue
-                    self.max_parallel = max(1, _value)
-                    self._eval_parallel = self.max_parallel
+                    self._eval_parallel = max(1, _value)
                 except (TypeError, ValueError, OverflowError):
                     pass
         # llm_parallel / parallel_build: concurrent node BUILDS. Rebuilt role pool is lazy
@@ -511,8 +516,7 @@ class StrategyCadenceMixin:
                     _value = int(_value)
                     if not 0 <= _value <= 64:
                         continue
-                    self.parallel_build = max(1, _value)
-                    self._llm_parallel = self.parallel_build
+                    self._llm_parallel = max(1, _value)
                     if _k == "llm_parallel":
                         # CODEX AGENT: mutate the broker active tasks already reference. Replacing
                         # it here would split old/new borrowers across two independent totals.
@@ -1127,6 +1131,8 @@ class StrategyCadenceMixin:
         plus overlaying the pinned fields onto the Strategist's own decision below, is what stops the
         pin and the Strategist from thrashing (the old "reset to bare pin on any divergence"
         oscillated the policy every consult and dropped the Strategist's fidelity/operators)."""
+        if getattr(self, "_speculation_gate_calibration", False) is True:
+            return state
         pin = state.pending_strategy or {}
         raw_pin = {k: pin[k] for k in (
             "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",

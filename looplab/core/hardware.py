@@ -8,10 +8,12 @@ for tasks that actually support it (see `task_runtime_caps`).
 """
 from __future__ import annotations
 
+import ctypes
 import inspect
 import os
 import shutil
 import subprocess
+import sys
 
 _GPU_CACHE: "tuple[bool, str | None] | None" = None
 _GPUS_CACHE: "list[dict] | None" = None
@@ -40,6 +42,209 @@ def detect_gpus() -> list[dict]:
         gpus = []
     _GPUS_CACHE = gpus
     return gpus
+
+
+class _CudaDriverError(RuntimeError):
+    """The CUDA Driver API was absent, incomplete, or returned a non-success code."""
+
+
+class _CudaUuid(ctypes.Structure):
+    _fields_ = [("bytes", ctypes.c_ubyte * 16)]
+
+
+def _cuda_symbol(library, names: tuple[str, ...], argtypes: list[object]):
+    """Bind the first exported ABI-compatible CUDA symbol in ``names``."""
+    for name in names:
+        try:
+            function = getattr(library, name)
+        except AttributeError:
+            continue
+        function.restype = ctypes.c_int
+        function.argtypes = argtypes
+        return function
+    raise _CudaDriverError(f"CUDA driver is missing required symbol {names[0]}")
+
+
+class _CtypesCudaDriver:
+    """Small Python-valued facade over the CUDA Driver API used by inventory discovery.
+
+    The separate facade is intentional: tests can pass a tiny fake with these methods and exercise
+    validation/order/identity without loading a real NVIDIA library.
+    """
+
+    def __init__(self, library):
+        self._init = _cuda_symbol(library, ("cuInit",), [ctypes.c_uint])
+        self._driver_version = _cuda_symbol(
+            library, ("cuDriverGetVersion",), [ctypes.POINTER(ctypes.c_int)])
+        self._device_count = _cuda_symbol(
+            library, ("cuDeviceGetCount",), [ctypes.POINTER(ctypes.c_int)])
+        self._device_get = _cuda_symbol(
+            library, ("cuDeviceGet",), [ctypes.POINTER(ctypes.c_int), ctypes.c_int])
+        self._device_name = _cuda_symbol(
+            library, ("cuDeviceGetName",), [ctypes.c_char_p, ctypes.c_int, ctypes.c_int])
+        self._device_total_mem = _cuda_symbol(
+            library, ("cuDeviceTotalMem_v2", "cuDeviceTotalMem"),
+            [ctypes.POINTER(ctypes.c_size_t), ctypes.c_int])
+        self._device_uuid = _cuda_symbol(
+            library, ("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
+            [ctypes.POINTER(_CudaUuid), ctypes.c_int])
+        # A rollout receipt binds both CUDA UUID and PCI identity.  Treating PCI as optional would
+        # produce two hardware schemas (and make a later driver upgrade change receipt identity), so
+        # an incomplete driver surface fails closed before calibration begins.
+        self._device_pci_bus_id = _cuda_symbol(
+            library, ("cuDeviceGetPCIBusId",),
+            [ctypes.c_char_p, ctypes.c_int, ctypes.c_int])
+
+    @classmethod
+    def load(cls, *, platform_name: str | None = None):
+        platform_name = sys.platform if platform_name is None else platform_name
+        if platform_name == "win32":
+            library = ctypes.WinDLL("nvcuda.dll")
+        elif platform_name.startswith("linux"):
+            library = ctypes.CDLL("libcuda.so.1")
+        else:
+            raise _CudaDriverError(f"unsupported CUDA driver platform: {platform_name}")
+        return cls(library)
+
+    @staticmethod
+    def _check(result: int, operation: str) -> None:
+        if int(result) != 0:
+            raise _CudaDriverError(f"{operation} failed with CUDA result {int(result)}")
+
+    def initialize(self) -> None:
+        self._check(self._init(0), "cuInit")
+
+    def driver_version(self) -> int:
+        value = ctypes.c_int()
+        self._check(self._driver_version(ctypes.byref(value)), "cuDriverGetVersion")
+        return int(value.value)
+
+    def device_count(self) -> int:
+        value = ctypes.c_int()
+        self._check(self._device_count(ctypes.byref(value)), "cuDeviceGetCount")
+        return int(value.value)
+
+    def device(self, ordinal: int) -> int:
+        value = ctypes.c_int()
+        self._check(self._device_get(ctypes.byref(value), ordinal), "cuDeviceGet")
+        return int(value.value)
+
+    def device_name(self, device: int) -> str:
+        value = ctypes.create_string_buffer(256)
+        self._check(self._device_name(value, len(value), device), "cuDeviceGetName")
+        return value.value.decode("utf-8", errors="strict").strip()
+
+    def device_total_memory(self, device: int) -> int:
+        value = ctypes.c_size_t()
+        self._check(self._device_total_mem(ctypes.byref(value), device), "cuDeviceTotalMem")
+        return int(value.value)
+
+    def device_uuid(self, device: int) -> bytes:
+        value = _CudaUuid()
+        self._check(self._device_uuid(ctypes.byref(value), device), "cuDeviceGetUuid")
+        return bytes(value.bytes)
+
+    def device_pci_bus_id(self, device: int) -> str:
+        value = ctypes.create_string_buffer(64)
+        self._check(
+            self._device_pci_bus_id(value, len(value), device), "cuDeviceGetPCIBusId")
+        return value.value.decode("ascii", errors="strict").strip().lower()
+
+
+def _canonical_cuda_uuid(raw: object) -> str:
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) != 16 or not any(raw):
+        raise _CudaDriverError("CUDA device UUID is missing or malformed")
+    encoded = bytes(raw).hex()
+    return "GPU-" + "-".join((
+        encoded[:8], encoded[8:12], encoded[12:16], encoded[16:20], encoded[20:]))
+
+
+def _nvidia_driver_versions_by_uuid() -> dict[str, str]:
+    """Display-driver versions keyed by exact UUID; physical indices are never joined."""
+    rows = query_nvidia_smi("uuid,driver_version") or []
+    if not isinstance(rows, list):
+        return {}
+    versions: dict[str, str] = {}
+    for parts in rows:
+        if not isinstance(parts, list) or len(parts) != 2:
+            return {}
+        raw_uuid, raw_version = parts
+        uuid = raw_uuid.strip().lower() if isinstance(raw_uuid, str) else ""
+        version = raw_version.strip() if isinstance(raw_version, str) else ""
+        if (not uuid.startswith(("gpu-", "mig-")) or uuid in versions
+                or not version or len(version) > 64
+                or any(ord(char) < 32 or ord(char) > 126 for char in version)):
+            return {}
+        versions[uuid] = version
+    return versions
+
+
+def _cuda_driver_inventory(*, api=None, driver_version_query=None) -> list[dict]:
+    """Return a calibration-grade, logical-visible inventory or raise on ambiguity."""
+    api = _CtypesCudaDriver.load() if api is None else api
+    driver_version_query = (
+        _nvidia_driver_versions_by_uuid if driver_version_query is None else driver_version_query)
+    api.initialize()
+    cuda_driver_version = api.driver_version()
+    device_count = api.device_count()
+    if (type(cuda_driver_version) is not int or cuda_driver_version <= 0
+            or type(device_count) is not int or not 0 <= device_count <= 1024):
+        raise _CudaDriverError("CUDA driver returned an invalid version or device count")
+    if device_count == 0:
+        return []
+
+    display_versions = driver_version_query()
+    if not isinstance(display_versions, dict) or not display_versions:
+        raise _CudaDriverError("display driver version is unavailable by CUDA UUID")
+
+    inventory: list[dict] = []
+    seen_uuids: set[str] = set()
+    seen_pci: set[str] = set()
+    for logical_index in range(device_count):
+        device = api.device(logical_index)
+        name = api.device_name(device)
+        total_bytes = api.device_total_memory(device)
+        uuid = _canonical_cuda_uuid(api.device_uuid(device))
+        pci_bus_id = api.device_pci_bus_id(device)
+        driver_version = display_versions.get(uuid.lower())
+        if (type(device) is not int or not name or len(name) > 256
+                or type(total_bytes) is not int or total_bytes < 1024 * 1024
+                or uuid in seen_uuids or not isinstance(driver_version, str)
+                or not driver_version):
+            raise _CudaDriverError("CUDA device identity is incomplete or ambiguous")
+        if (not isinstance(pci_bus_id, str) or not pci_bus_id or len(pci_bus_id) > 64
+                or pci_bus_id in seen_pci):
+            raise _CudaDriverError("CUDA PCI identity is missing, malformed, or ambiguous")
+        seen_pci.add(pci_bus_id)
+        seen_uuids.add(uuid)
+        inventory.append({
+            "index": logical_index,
+            "uuid": uuid,
+            "pci_bus_id": pci_bus_id,
+            "name": name,
+            "mem_total_mib": total_bytes // (1024 * 1024),
+            "driver_version": driver_version,
+            "cuda_driver_version": cuda_driver_version,
+        })
+    return inventory
+
+
+def effective_gpu_inventory(*, _cuda_api=None, _driver_version_query=None) -> list[dict]:
+    """Calibration-grade GPUs visible to this process in CUDA logical order.
+
+    CUDA itself applies ``CUDA_VISIBLE_DEVICES`` before ``cuDeviceGetCount/cuDeviceGet``.  This
+    function therefore never guesses that a numeric visibility selector is an ``nvidia-smi``
+    physical index.  Every row has CUDA-owned UUID plus required PCI identity, and an exact UUID join
+    supplies the display-driver version.  Any missing/ambiguous identity
+    fails closed.  ``detect_gpus`` remains the cached, best-effort legacy physical inventory.
+
+    Private keyword seams accept a fake CUDA facade/version query for hardware-free unit tests.
+    """
+    try:
+        return _cuda_driver_inventory(
+            api=_cuda_api, driver_version_query=_driver_version_query)
+    except Exception:  # noqa: BLE001 -- this public capability boundary is deliberately fail-closed
+        return []
 
 
 def query_nvidia_smi(fields: str, *, timeout: float = 5.0, nounits: bool = True):

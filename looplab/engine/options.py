@@ -127,6 +127,8 @@ class EngineOptions:
     card_driven_selection: bool = False
     # Layer 5: maximum request+committed speculative Card backlog. Zero keeps speculation fully off.
     speculation_depth: int = 0
+    # Local scorer-fidelity + paired GPU A/B receipt required by the public positive-depth path.
+    speculation_gate_receipt: Optional[str] = None
     inline_repair: bool = True           # hybrid: triage + repair a crashed node IN PLACE (no new node)
     inline_repair_attempts: int = 0      # max in-place repair retries per node (0 = UNLIMITED)
     inline_repair_stuck_repeat: int = 4  # abandon when the SAME error repeats this many times in a row

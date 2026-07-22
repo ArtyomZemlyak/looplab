@@ -134,7 +134,7 @@ class ProposalCuesMixin:
         # documented legacy behavior when the declaration is omitted.
         if self._repo_spec and getattr(self, "_gpu_ids", None):
             pool = len(self._gpu_ids)
-            legacy = ("one device in parallel mode" if self.max_parallel > 1
+            legacy = ("one device in parallel mode" if self._eval_parallel > 1
                       else "the whole visible box in serial mode")
             hint += (
                 f"\nGPU RESOURCE CONTRACT — this pool exposes at most {pool} GPU(s). Set "

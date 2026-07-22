@@ -7,7 +7,9 @@ Positive canonical LLM totals activate one shared provider-call broker; the Stra
 its closed lanes without changing replay or metric selection."""
 from __future__ import annotations
 
+import ast
 import math
+from pathlib import Path
 
 import looplab.engine.orchestrator as _orch
 import pytest
@@ -48,6 +50,35 @@ def test_legacy_still_works_when_new_names_unset(tmp_path):
     e = _engine(tmp_path / "l", max_parallel=3, parallel_build=2)
     assert e.max_parallel == 3 and e._eval_parallel == 3          # None eval_parallel -> legacy
     assert e.parallel_build == 2 and e._llm_parallel == 2
+
+
+def test_legacy_attributes_are_bidirectional_descriptors_not_duplicate_state(tmp_path):
+    e = _engine(tmp_path / "aliases", eval_parallel=2, llm_parallel=3)
+    assert {"max_parallel", "parallel_build"}.isdisjoint(e.__dict__)
+
+    e.max_parallel = 7
+    e.parallel_build = 5
+    assert (e._eval_parallel, e._llm_parallel) == (7, 5)
+
+    e._eval_parallel = 4
+    e._llm_parallel = 2
+    assert (e.max_parallel, e.parallel_build) == (4, 2)
+    assert {"max_parallel", "parallel_build"}.isdisjoint(e.__dict__)
+
+
+def test_engine_runtime_never_reads_or_writes_legacy_parallel_attributes():
+    """Legacy spellings are input/output shims; scheduler logic owns only canonical state."""
+    engine_dir = Path(_orch.__file__).parent
+    legacy_uses: list[str] = []
+    for path in engine_dir.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                    and node.attr in {"max_parallel", "parallel_build"}):
+                legacy_uses.append(f"{path.name}:{node.lineno}:{node.attr}")
+    assert legacy_uses == []
 
 
 def test_eval_parallel_auto_resolves_to_gpu_count(tmp_path, monkeypatch):

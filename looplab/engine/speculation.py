@@ -96,6 +96,8 @@ class SpeculationMixin:
         return bool(
             getattr(self, "card_driven_selection", False)
             and int(getattr(self, "speculation_depth", 0) or 0) > 0
+            and getattr(self, "_speculation_gate_admitted", False) is True
+            and bool(getattr(self, "_speculation_gate_receipt_digest", ""))
         )
 
     @staticmethod
@@ -1499,10 +1501,17 @@ class SpeculationMixin:
                         head = self._head_request(current)
                         key = self._request_key(head)
                         if head is not None and key is not None:
+                            # Recovery still links an already-created exact Node before consulting this
+                            # flag. Once the admitted batch closes, every other head is acknowledged stale
+                            # without another scorer consult/claim crossing the outer cadence boundary.
                             if self._serve_card_builds(
                                 max_es,
                                 allow_commit=not (
-                                    terminal_gate or budget_exhausted or outer_rebuild
+                                    terminal_gate
+                                    or budget_exhausted
+                                    or outer_rebuild
+                                    or consumer_completed
+                                    or yield_outer
                                 ),
                             ):
                                 progressed = True
@@ -1519,6 +1528,8 @@ class SpeculationMixin:
                                     and not terminal_gate
                                     and not budget_exhausted
                                     and not outer_rebuild
+                                    and not consumer_completed
+                                    and not yield_outer
                                     and key not in self._spec_build_inflight
                                     and key not in self._spec_builds
                                 ):
@@ -1539,7 +1550,7 @@ class SpeculationMixin:
                             and not yield_outer
                         ):
                             selection_changed = False
-                            while len(eval_inflight) < max(1, int(self.max_parallel)):
+                            while len(eval_inflight) < max(1, int(self._eval_parallel)):
                                 current = fold(self.store.read_all())
                                 if self._terminal_intent(current) or _budget_exhausted(current):
                                     budget_exhausted = True

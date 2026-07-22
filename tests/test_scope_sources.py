@@ -260,6 +260,21 @@ def test_capture_detects_same_size_aba_rewrite_during_descriptor_read(
     original_mtime = event_path.stat().st_mtime_ns
     changed = False
 
+    if os.name == "nt":
+        # FILE_BASIC_INFO.ChangeTime is a timestamp, not a generation counter.  A fast A/B/A rewrite
+        # can complete inside one Windows clock tick and make two genuine observations numerically
+        # equal.  Drive the already-tested comparison branch with a deterministic generation delta;
+        # fixed sleeps merely turn this safety test into a timing lottery.
+        native_change_time = scope_sources._descriptor_change_time
+
+        def deterministic_change_time(descriptor):
+            observed = native_change_time(descriptor)
+            assert type(observed) is int
+            return observed + int(changed)
+
+        monkeypatch.setattr(
+            scope_sources, "_descriptor_change_time", deterministic_change_time)
+
     def rewrite_and_restore(descriptor, expected_size):
         nonlocal changed
         captured = original(descriptor, expected_size)

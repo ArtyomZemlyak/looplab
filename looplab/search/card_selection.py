@@ -125,6 +125,10 @@ def card_fits_resource_envelope(
         if isinstance(declared_gpus, int):
             if declared_gpus == 0:
                 return True
+            if envelope.gpu_count == 0:
+                # A positive explicit declaration remains an unsatisfied GPU request on a GPU-less
+                # host. Only a genuine ``gpus=0`` declaration may select the CPU path.
+                return False
             # Layer 4 persists/admits the effective clamped request; an over-declaration is not a
             # permanent miss and must not make Layer 5 drop work the scheduler will legally run.
             required = min(declared_gpus, envelope.gpu_count)

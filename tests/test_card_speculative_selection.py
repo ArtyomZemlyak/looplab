@@ -15,6 +15,7 @@ from looplab.core.models import (
     Node,
     NodeStatus,
     RunState,
+    effective_card_footprint,
 )
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
@@ -527,6 +528,44 @@ def test_effective_resource_clamp_keeps_overdeclarations_but_invalid_card_fails_
         card_id="compiled", node_id=2, ignored_pending_node_ids={2},
         resource_envelope=one_gpu,
     ) is True
+
+
+def test_zero_gpu_envelope_preserves_positive_requirement_and_fails_freshness_closed():
+    zero_gpu = CardResourceEnvelope(gpu_count=0)
+    positive = _ready_card(
+        "positive", footprint={"gpus": 2, "gpu_mem_mib": 32_000},
+    )
+    cpu_only = _ready_card(
+        "cpu-only", footprint={"gpus": 0, "gpu_mem_mib": 32_000},
+    )
+
+    assert effective_card_footprint(
+        positive.footprint, None, gpu_count=0,
+    ) == {"gpus": 2, "gpu_mem_mib": 32_000}
+    assert effective_card_footprint(
+        cpu_only.footprint, None, gpu_count=0,
+    ) == {"gpus": 0}
+    assert card_fits_resource_envelope(positive, zero_gpu) is False
+    assert card_fits_resource_envelope(cpu_only, zero_gpu) is True
+
+    owned = _owned(positive, 2)
+    state = RunState(
+        nodes={
+            0: _node(0, metric=0.9),
+            2: _node(
+                2, parents=(0,), operator="improve", status=NodeStatus.pending,
+                metric=None, card_id="positive",
+                footprint={"gpus": 2, "gpu_mem_mib": 32_000},
+            ),
+        },
+        best_node_id=0,
+        cards={"positive": owned},
+    )
+    assert speculative_card_is_fresh(
+        state, GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0), 8,
+        card_id="positive", node_id=2, ignored_pending_node_ids={2},
+        resource_envelope=zero_gpu,
+    ) is False
 
 
 def test_budget_refunds_only_proven_zero_cost_freshness_drop_not_ordinary_superseded():

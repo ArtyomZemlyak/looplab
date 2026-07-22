@@ -60,7 +60,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **156 of the 185 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **156 of the 186 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 17 high-frequency keys; search spans all 156 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
@@ -151,7 +151,8 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `unified_agent` | `LOOPLAB_UNIFIED_AGENT` | `true` | One LLM identity plays Researcher + Developer (+ Strategist) across stages |
 | `agent_drives_actions` | `LOOPLAB_AGENT_DRIVES_ACTIONS` | `true` | The agent picks the next macro action within a pure legal-action gate |
 | `card_driven_selection` | `LOOPLAB_CARD_DRIVEN_SELECTION` | `false` | Opt in to Card-queue macro-action selection. The value is pinned by `run_started`; when both action flags are enabled, Card selection takes precedence over `agent_drives_actions`. |
-| `speculation_depth` | `LOOPLAB_SPECULATION_DEPTH` | `0` | Static live-prefetch-backlog cap: outstanding requests plus committed pending speculative Card builds not already admitted to the current consumer session (`0` = fully off, `1`–`64` = bounded overlap). A positive value takes effect only with `card_driven_selection=true`. Pinned by `run_started`, so resume cannot silently mix execution treatments after a config edit. |
+| `speculation_depth` | `LOOPLAB_SPECULATION_DEPTH` | `0` | Static live-prefetch-backlog cap: outstanding requests plus committed pending speculative Card builds not already admitted to the current consumer session (`0` = fully off, `1`–`64` = bounded overlap). A positive value takes effect only with `card_driven_selection=true` and a currently valid `speculation_gate_receipt`. Pinned by `run_started`, so resume cannot silently mix execution treatments after a config edit. |
+| `speculation_gate_receipt` | `LOOPLAB_SPECULATION_GATE_RECEIPT` | — | Absolute path to a local receipt produced by `looplab speculation-gate` from exactly three fresh depth-0/positive-depth calibration pairs (fixed seeds `0/1/2`) on the effective real GPU. Before admitting positive depth, the engine rechecks the exact scorer-fidelity and quality thresholds, current implementation/environment/seven-field GPU identity, per-node CUDA context/allocation proof, raw event/config/task digests, Greedy policy, deterministic quadratic Toy-task profile, tested depth, `max_nodes` and complete runtime-scope digest. General policies/workloads/depths/budgets remain default-off and unadmitted. The receipt path is intentionally not exposed as a casual Settings-UI field. |
 
 Set `unified_agent` and `agent_drives_actions` both to `false` for the legacy split-role behavior.
 These are no-ops unless `backend=llm`.

@@ -244,6 +244,58 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # speculative execution. Absent on old logs -> 0 -> historical alternating build/eval behavior.
     _spec_depth = d.get("speculation_depth", 0)
     st.speculation_depth = (_spec_depth if type(_spec_depth) is int and 0 <= _spec_depth <= 64 else 0)
+    _spec_receipt = d.get("speculation_gate_receipt_digest", "")
+    st.speculation_gate_receipt_digest = (
+        _spec_receipt
+        if isinstance(_spec_receipt, str)
+        and len(_spec_receipt) == 71
+        and _spec_receipt.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in _spec_receipt[7:])
+        else ""
+    )
+    _runtime_scope = d.get("speculation_runtime_scope_sha256", "")
+    st.speculation_runtime_scope_sha256 = (
+        _runtime_scope
+        if isinstance(_runtime_scope, str)
+        and len(_runtime_scope) == 71
+        and _runtime_scope.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in _runtime_scope[7:])
+        else ""
+    )
+    _spec_implementation = d.get("speculation_implementation_digest", "")
+    st.speculation_implementation_digest = (
+        _spec_implementation
+        if isinstance(_spec_implementation, str)
+        and len(_spec_implementation) == 71
+        and _spec_implementation.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in _spec_implementation[7:])
+        else ""
+    )
+    _calibration_profile = d.get("speculation_calibration_profile_digest", "")
+    st.speculation_calibration_profile_digest = (
+        _calibration_profile
+        if isinstance(_calibration_profile, str)
+        and len(_calibration_profile) == 71
+        and _calibration_profile.startswith("sha256:")
+        and all(ch in "0123456789abcdef" for ch in _calibration_profile[7:])
+        else ""
+    )
+    _calibration_inventory = d.get("speculation_calibration_gpu_inventory", [])
+    st.speculation_calibration_gpu_inventory = (
+        [dict(row) for row in _calibration_inventory]
+        if isinstance(_calibration_inventory, list)
+        and len(_calibration_inventory) <= 256
+        and all(isinstance(row, dict) for row in _calibration_inventory)
+        else []
+    )
+    _calibration_seed = d.get("speculation_calibration_seed")
+    st.speculation_calibration_seed = (
+        _calibration_seed
+        if type(_calibration_seed) is int and 0 <= _calibration_seed <= (1 << 63) - 1
+        else None
+    )
+    _policy_scope = d.get("speculation_policy_scope", "")
+    st.speculation_policy_scope = _policy_scope if _policy_scope == "greedy" else ""
     # D1: recorded at start so replay applies the same selection rule. Absent in old
     # logs -> False -> byte-identical legacy selection.
     st.holdout_select = bool(d.get("holdout_select", False))
@@ -3145,6 +3197,7 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     skipped = d.get("skipped")
     if skipped in {"producer_failed", "stale"}:
         st.card_builds_done += 1
+        st.card_build_outcomes.append(skipped)
         if skipped == "producer_failed" and card_id not in st.card_build_producer_failed:
             st.card_build_producer_failed.append(card_id)
         return
@@ -3161,6 +3214,7 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     # Keep only the exact bounded receipt consumed by depth/freshness recovery. Last write for a node
     # is harmless and deterministic; first-terminal lifecycle rules still own its actual node state.
     st.card_builds_done += 1
+    st.card_build_outcomes.append("committed")
     st.speculative_nodes[node_id] = dict(request)
 
 def _on_inject_node(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

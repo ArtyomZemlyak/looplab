@@ -22,7 +22,7 @@ from looplab.search.card_selection import (
     forced_card_actions,
     normalize_card_scoring,
 )
-from looplab.search.policy import ASHAPolicy, EvolutionaryPolicy, GreedyTree
+from looplab.search.policy import ASHAPolicy, EvolutionaryPolicy, GreedyTree, MCTSPolicy
 
 
 _DIGEST = "card-action:v1:" + "0" * 64
@@ -607,6 +607,33 @@ def test_population_lane_is_top_k_and_diversifies_duplicate_action_concept_niche
 
     assert [card.id for card in card_selection_set(state, policy, 10)] == [
         "10-alpha", "20-beta", "30-gamma",
+    ]
+
+
+def test_mcts_card_lane_keeps_ucb_hot_parent_and_widens_to_seed_count():
+    state = RunState(
+        direction="max",
+        nodes={
+            0: _node(0, metric=0.9),
+            1: _node(1, metric=0.7),
+            2: _node(2, metric=0.5),
+        },
+        best_node_id=0,
+        cards={
+            "00-hot": _ready_card("00-hot", parents=(0,), concepts=("hot",)),
+            "10-open": _ready_card("10-open", parents=(1,), concepts=("open-a",)),
+            "20-open": _ready_card("20-open", parents=(2,), concepts=("open-b",)),
+            "30-overflow": _ready_card("30-overflow", parents=(1,), concepts=("open-c",)),
+        },
+    )
+    policy = MCTSPolicy(n_seeds=3, max_nodes=8, c=1.4, debug_depth=0)
+
+    assert policy.next_actions(state)[0]["parent_id"] == 0
+    assert [card.id for card in card_selection_set(state, policy, 8)] == [
+        "00-hot", "10-open", "20-open",
+    ]
+    assert [action["_card_id"] for action in card_next_actions(state, policy, 8)] == [
+        "00-hot", "10-open", "20-open",
     ]
 
 

@@ -3,8 +3,8 @@
 Split verbatim out of the flat `looplab/cli.py` (docs/15 §P5.2). Read-only over a run: pure folds of
 the event log, viewers over run-dir sidecars, and (the Part IV concept/novelty diagnostics) offline
 analyses that may invoke an LLM to tag/grade. Read-only EXCEPT for `concept-coverage --persist`, which
-retro-tags a run by appending generation-fenced `EV_NODE_CONCEPTS` (the one opt-in mutation; see
-`_persist_node_concepts`).
+retro-tags a run by appending generation-fenced `EV_NODE_CONCEPTS`, and `speculation-gate`, which
+atomically writes a local quality receipt without changing any source run.
 """
 from __future__ import annotations
 
@@ -232,6 +232,67 @@ def replay(run_dir: Path = typer.Argument(...)):
     state = fold(store.read_all())
     typer.echo(orjson.dumps(state.model_dump(mode="json"),
                             option=orjson.OPT_INDENT_2).decode())
+
+
+@app.command(name="speculation-gate")
+def speculation_gate(
+    run_dirs: list[Path] = typer.Argument(
+        ...,
+        help=("Exactly three alternating BASELINE TREATMENT pairs (six directories), one "
+              "pair for each fixed seed 0, 1 and 2. Each baseline uses depth 0 and each "
+              "treatment the same positive depth."),
+    ),
+    output: Path = typer.Option(
+        Path("speculation-quality.receipt.json"),
+        "--output", "-o",
+        help="Local receipt path to write atomically after every fixed gate passes.",
+    ),
+):
+    """Run scorer-fidelity plus paired real-GPU search-quality gates for Card speculation."""
+    if len(run_dirs) != 6:
+        typer.echo(
+            "speculation-gate requires exactly three alternating BASELINE TREATMENT pairs",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    from looplab.search.speculation_quality import (
+        speculation_quality_gate,
+        write_speculation_gate_receipt,
+    )
+
+    pairs = list(zip(run_dirs[0::2], run_dirs[1::2]))
+    report = speculation_quality_gate(pairs, require_gpu=True)
+    if report.get("passed") is not True:
+        typer.echo(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
+        typer.echo("speculation quality gate failed; no receipt was written", err=True)
+        raise typer.Exit(2)
+    try:
+        receipt = write_speculation_gate_receipt(
+            output,
+            pairs,
+            require_gpu=True,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(f"could not publish speculation gate receipt: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(orjson.dumps({
+        "passed": True,
+        "receipt": str(output.resolve()),
+        "self_digest": receipt["self_digest"],
+        "implementation_digest": receipt["implementation_digest"],
+        "environment_sha256": receipt["environment_sha256"],
+        "gpu_inventory": receipt["gpu_inventory"],
+        "policy_scope": receipt["policy_scope"],
+        "workload_scope": receipt["workload_scope"],
+        "calibration_seeds": receipt["calibration_seeds"],
+        "task_profile_sha256": receipt["task_profile_sha256"],
+        "admitted_depth": receipt["admitted_depth"],
+        "admitted_max_nodes": receipt["admitted_max_nodes"],
+        "runtime_scope_sha256": receipt["runtime_scope_sha256"],
+        "calibration_profile_digest": receipt["calibration_profile_digest"],
+        "aggregates": receipt["aggregates"],
+    }, option=orjson.OPT_INDENT_2).decode())
 
 
 @app.command()

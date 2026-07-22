@@ -101,7 +101,7 @@ class CrashRepairMixin:
                 error += (f"\n[hardware: this node reserved exactly {declared_gpus} GPU(s). Every "
                           f"training/eval command must target exactly {declared_gpus} device(s); keep "
                           "that count unchanged across repairs.]")
-        elif (getattr(self, "_repo_spec", None) and getattr(self, "max_parallel", 1) > 1
+        elif (getattr(self, "_repo_spec", None) and self._eval_parallel > 1
               and getattr(self, "_gpu_ids", None)):
             error += ("\n[hardware: this legacy unspecified-footprint node is pinned to exactly ONE "
                       "GPU for parallel eval. Keep every training/eval command at one device.]")

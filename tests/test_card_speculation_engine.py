@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import threading
 import textwrap
 from pathlib import Path
 
@@ -15,7 +16,10 @@ import anyio
 import pytest
 
 import looplab.engine.speculation as speculation_module
+import looplab.search.speculation_quality as speculation_quality
 from looplab.adapters.toytask import ToyTask
+from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.core.config import Settings
 from looplab.core.models import (
     Card,
     CardIdentityProvenance,
@@ -25,12 +29,18 @@ from looplab.core.models import (
     NodeStatus,
     RunState,
 )
-from looplab.engine.orchestrator import Engine
+from looplab.engine.options import EngineOptions
+from looplab.engine.orchestrator import (
+    Engine,
+    SPECULATION_CALIBRATION_PROFILE_DIGEST,
+    SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+)
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_BUDGET_EXTEND,
     EV_CARD_BUILD_DONE,
     EV_CARD_BUILD_REQUESTED,
+    EV_CARD_RESOURCE_PINNED,
     EV_LLM_COST,
     EV_LLM_USAGE,
     EV_NODE_BUILDING,
@@ -47,14 +57,57 @@ from looplab.events.types import (
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
+    card_budget_used,
     speculative_card_actions,
 )
 from looplab.search.policy import GreedyTree
+from looplab.search.speculation_calibration import (
+    SPECULATION_CALIBRATION_SEEDS,
+    speculation_runtime_scope_digest,
+)
 
 
-ROOT = Path(__file__).resolve().parents[1]
-TASK_FILE = ROOT / "examples" / "toy_task.json"
 _DIGEST = "card-action:v1:" + "5" * 64
+
+
+@pytest.fixture(autouse=True)
+def _admit_unit_speculation_receipt(monkeypatch):
+    """Keep mechanics tests on the public receipt boundary, without real gate evidence."""
+    task = ToyTask()
+
+    def _validated(path):
+        max_nodes, depth = map(int, Path(path).stem.rsplit("-", 2)[-2:])
+        runtime_scope = speculation_runtime_scope_digest({
+            **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+            "max_nodes": max_nodes,
+            "speculation_depth": depth,
+            "speculation_gate_receipt": str(path),
+        })
+        return {
+            "self_digest": "sha256:" + "a" * 64,
+            "implementation_digest": "sha256:" + "b" * 64,
+            "require_gpu": True,
+            "gpu_inventory": [{
+                "index": 0,
+                "uuid": "GPU-11111111-2222-3333-4444-555555555555",
+                "pci_bus_id": "00000000:01:00.0",
+                "name": "unit-gpu",
+                "mem_total_mib": 24_576,
+                "driver_version": "595.79",
+                "cuda_driver_version": 13000,
+            }],
+            "policy_scope": "greedy",
+            "admitted_depth": depth,
+            "admitted_max_nodes": max_nodes,
+            "runtime_scope_sha256": runtime_scope,
+            "calibration_profile_digest": SPECULATION_CALIBRATION_PROFILE_DIGEST,
+            "calibration_seeds": list(SPECULATION_CALIBRATION_SEEDS),
+            "workload_scope": "quadratic_toy",
+            "task_profile_sha256": speculation_quality.speculation_task_profile_digest(task),
+        }
+
+    monkeypatch.setattr(
+        speculation_quality, "validated_speculation_gate_receipt", _validated)
 
 
 class _Researcher:
@@ -101,6 +154,23 @@ class _Developer:
         return self.code
 
 
+class _DelayedSecondBuildDeveloper(_Developer):
+    """Let one bootstrap build finish, then hold the live prefetch until explicitly released."""
+
+    def __init__(self):
+        super().__init__()
+        self.second_started = threading.Event()
+        self.release_second = threading.Event()
+
+    def implement(self, _idea: Idea) -> str:
+        self.calls += 1
+        if self.calls == 2:
+            self.second_started.set()
+            if not self.release_second.wait(timeout=10):
+                raise RuntimeError("timed out waiting to release delayed speculative build")
+        return self.code
+
+
 def _engine(
     run_dir,
     *,
@@ -108,22 +178,62 @@ def _engine(
     producer: _Developer | None = None,
     isolated_roles: bool = True,
 ) -> tuple[Engine, _Developer]:
-    task = ToyTask.load(TASK_FILE)
+    task = ToyTask()
     producer = producer or _Developer()
     role_factory = (lambda: (_Researcher(), producer)) if isolated_roles else None
-    engine = Engine(
-        run_dir,
-        task=task,
-        researcher=_Researcher(),
-        developer=_Developer(),
-        sandbox=SubprocessSandbox(),
-        policy=GreedyTree(n_seeds=0, max_nodes=8, debug_depth=0),
-        n_seeds=0,
-        max_nodes=8,
-        card_driven_selection=True,
-        speculation_depth=depth,
-        role_factory=role_factory,
-    )
+    if depth > 0:
+        receipt_path = str(
+            Path(run_dir) / f"unit-speculation-receipt-8-{depth}")
+        settings = Settings(**{
+            **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+            "max_nodes": 8,
+            "speculation_depth": depth,
+            "speculation_gate_receipt": receipt_path,
+        })
+
+        def calibrated_roles():
+            return (
+                ToyResearcher(
+                    task.bounds,
+                    seed=task.seed,
+                    step=task.step,
+                    calibration_concepts=True,
+                ),
+                ToyObjectiveDeveloper(noise=0.0, calibration_gpu_probe=True),
+            )
+
+        engine = Engine(
+            run_dir,
+            task=task,
+            researcher=calibrated_roles()[0],
+            developer=calibrated_roles()[1],
+            sandbox=SubprocessSandbox(),
+            policy=GreedyTree(n_seeds=3, max_nodes=8, debug_depth=1),
+            options=EngineOptions.from_settings(settings),
+            role_factory=calibrated_roles,
+            _speculation_runtime_scope_sha256=speculation_runtime_scope_digest(
+                settings.masked_snapshot()),
+        )
+        # Admission is production-exact.  Only after that boundary do these mechanics tests replace
+        # the roles/policy with deterministic sentinels for the queue/concurrency behavior at issue.
+        engine.researcher = _Researcher()
+        engine.developer = _Developer()
+        engine.role_factory = role_factory
+        engine.policy = GreedyTree(n_seeds=0, max_nodes=8, debug_depth=0)
+    else:
+        engine = Engine(
+            run_dir,
+            task=task,
+            researcher=_Researcher(),
+            developer=_Developer(),
+            sandbox=SubprocessSandbox(),
+            policy=GreedyTree(n_seeds=0, max_nodes=8, debug_depth=0),
+            n_seeds=0,
+            max_nodes=8,
+            card_driven_selection=True,
+            speculation_depth=0,
+            role_factory=role_factory,
+        )
     engine._novelty_mode = "off"
     # Unit tests exercise admission deterministically on a CPU envelope, irrespective of the host.
     engine._gpu_ids = []
@@ -134,14 +244,14 @@ def _engine(
 
 
 def _start(engine: Engine) -> None:
-    engine.store.append("run_started", {
-        "run_id": "l5",
+    payload = {
+        "run_id": engine.run_dir.name,
         "task_id": "toy",
         "goal": "g",
         "direction": "min",
-        "card_driven_selection": True,
-        "speculation_depth": engine.speculation_depth,
-    })
+        **engine._run_start_pinned_values(),
+    }
+    engine.store.append("run_started", payload)
 
 
 def _cross_run_receipt() -> dict:
@@ -233,6 +343,7 @@ def _build_result(engine: Engine, request: dict):
 
 
 def _commit_speculative_node(engine: Engine) -> int:
+    before = set(fold(engine.store.read_all()).speculative_nodes)
     request = _request(engine)
     result = _build_result(engine, request)
     assert result.success is True
@@ -240,7 +351,9 @@ def _commit_speculative_node(engine: Engine) -> int:
     engine._spec_builds[result.key] = result
     assert engine._serve_card_builds() is True
     state = fold(engine.store.read_all())
-    link = next(iter(state.speculative_nodes))
+    created = set(state.speculative_nodes) - before
+    assert len(created) == 1
+    link = created.pop()
     assert state.nodes[link].status is NodeStatus.pending
     return link
 
@@ -267,6 +380,38 @@ def test_depth_zero_delegates_to_legacy_dispatcher_and_never_requests(tmp_path, 
         event for event in engine.store.read_all()
         if event.type == EV_CARD_BUILD_REQUESTED
     ]
+
+
+def test_depth_three_counts_exact_pending_backlog_and_never_crosses_cap(tmp_path):
+    engine, producer = _engine(tmp_path / "depth-three", depth=3)
+    _start(engine)
+    for index, x in enumerate((0.2, 0.4, 0.6, 0.8), start=1):
+        _add_ready_draft(engine, f"card-{index}", x=x)
+
+    node_ids = [_commit_speculative_node(engine) for _ in range(3)]
+    at_cap = fold(engine.store.read_all())
+    assert producer.calls == 3
+    assert len(set(node_ids)) == 3
+    assert engine._speculation_depth_used(at_cap) == 3
+
+    request_count = len(at_cap.card_build_requests)
+    assert engine._request_card_build() is False
+    assert len(fold(engine.store.read_all()).card_build_requests) == request_count
+
+    # Only an exact eval admission removes one pending attempt from prefetch inventory. A wrong
+    # generation cannot create capacity; the exact identity admits one replacement request and the
+    # resulting pending+request backlog remains exactly at the configured cap.
+    assert engine._request_card_build(consumed_inflight={(node_ids[0], 1)}) is False
+    assert engine._request_card_build(consumed_inflight={(node_ids[0], 0)}) is True
+    with_replacement = fold(engine.store.read_all())
+    assert engine._speculation_depth_used(
+        with_replacement,
+        consumed_inflight={(node_ids[0], 0)},
+    ) == 3
+    assert len(with_replacement.card_build_requests) == request_count + 1
+    assert engine._request_card_build(
+        consumed_inflight={(node_ids[0], 0)},
+    ) is False
 
 
 def test_exact_request_result_commit_writes_one_main_task_lifecycle(tmp_path):
@@ -756,6 +901,101 @@ def test_terminal_gate_explicitly_closes_request_only_crash_prefix(tmp_path):
     assert done[0].data["skipped"] == "stale"
     assert done[0].seq > next(event.seq for event in events if event.type == "run_abort")
     assert engine._head_request(fold(events)) is None
+
+
+def test_delayed_producer_after_eval_terminal_closes_stale_without_late_claim(
+    tmp_path, monkeypatch,
+):
+    producer = _DelayedSecondBuildDeveloper()
+    engine, _producer = _engine(
+        tmp_path / "terminal-before-producer",
+        depth=2,
+        producer=producer,
+    )
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.8)
+    admitted_node = _commit_speculative_node(engine)
+    delayed_request = _request(engine)
+    _without_research(monkeypatch, engine)
+
+    scorer_consults = []
+    claim_calls = []
+    original_scorer = speculation_module.speculative_card_actions
+    original_claim = engine._claim_requested_card_build
+
+    def _tracked_scorer(*args, **kwargs):
+        scorer_consults.append(True)
+        return original_scorer(*args, **kwargs)
+
+    def _tracked_claim(*args, **kwargs):
+        claim_calls.append(True)
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(speculation_module, "speculative_card_actions", _tracked_scorer)
+    monkeypatch.setattr(engine, "_claim_requested_card_build", _tracked_claim)
+    eval_recorded = anyio.Event()
+    boundary = {}
+
+    async def _terminal_eval(node_id, _limiter, _max_es):
+        assert node_id == admitted_node
+        assert engine._eval_resource_reservation(node_id, 0) is not None
+        while not producer.second_started.is_set():
+            await anyio.sleep(0)
+        node = fold(engine.store.read_all()).nodes[node_id]
+        terminal = engine.store.append(EV_NODE_EVALUATED, {
+            "node_id": node_id,
+            "generation": node.attempt,
+            "metric": 0.0,
+            "eval_seconds": 0.0,
+        })
+        boundary["seq"] = terminal.seq
+        eval_recorded.set()
+
+    monkeypatch.setattr(engine, "_evaluate", _terminal_eval)
+
+    async def _scenario():
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                engine._run_card_session,
+                [],
+                fold(engine.store.read_all()),
+                None,
+            )
+            try:
+                with anyio.fail_after(5):
+                    await eval_recorded.wait()
+                    while engine._eval_resource_reservation(admitted_node, 0) is not None:
+                        await anyio.sleep(0)
+                assert producer.second_started.is_set()
+                assert not [
+                    event for event in engine.store.read_all()
+                    if event.seq > boundary["seq"]
+                    and event.type in {EV_NODE_BUILDING, EV_NODE_CREATED}
+                ]
+            finally:
+                producer.release_second.set()
+
+    anyio.run(_scenario)
+
+    events = engine.store.read_all()
+    delayed_done = [
+        event for event in events
+        if event.type == EV_CARD_BUILD_DONE
+        and event.data.get("card_id") == delayed_request["card_id"]
+        and event.data.get("generation") == delayed_request["generation"]
+    ]
+    assert len(delayed_done) == 1
+    assert delayed_done[0].data["skipped"] == "stale"
+    assert delayed_done[0].seq > boundary["seq"]
+    assert scorer_consults == []
+    assert claim_calls == []
+    assert not [
+        event for event in events
+        if event.seq > boundary["seq"]
+        and event.type in {EV_NODE_BUILDING, EV_NODE_CREATED}
+    ]
+    assert producer.calls == 2
 
 
 def test_depth_one_prefetches_next_card_then_returns_at_outer_cadence_boundary(
@@ -1472,6 +1712,169 @@ def test_session_rechecks_freshness_after_reservation_and_before_gpu_child(
     assert state.nodes[node_id].error_reason == "superseded"
     assert state.nodes[node_id].error == CARD_FRESHNESS_SUPERSEDED_ERROR
     assert state.nodes[node_id].eval_seconds == 0.0
+
+
+def test_resumed_zero_gpu_engine_reruns_freshness_and_drops_now_stale_pin(tmp_path):
+    run_dir = tmp_path / "resume-freshness"
+    first, _producer = _engine(run_dir)
+    first._gpu_ids = [0]
+    first._gpu_physical_ids = {0: "0"}
+    first._gpu_mem = {0: 16_000}
+    first._free_gpus = [0]
+    _start(first)
+    _add_ready_draft(first)
+    first.store.append(EV_CARD_RESOURCE_PINNED, {
+        "id": "card-7",
+        "gpus": 1,
+        "gpu_mem_mib": 8_000,
+        "source": "operator",
+        "pinned": True,
+    })
+    node_id = _commit_speculative_node(first)
+
+    # The pin is fresh against the original one-GPU envelope.
+    assert anyio.run(first._drop_stale_speculation) is False
+    first.store.append(EV_PAUSE, {"reason": "operator pause"})
+    resumed_at = first.store.append(EV_RESUME, {})
+    assert fold(first.store.read_all()).paused is False
+
+    # A fresh process redetects a zero-GPU envelope. The durable positive pin stays positive and is
+    # now unavailable, so resume must run freshness again and close the unevaluated speculation.
+    resumed, _unused = _engine(run_dir)
+    assert resumed._gpu_ids == []
+    assert anyio.run(resumed._drop_stale_speculation) is True
+    assert anyio.run(resumed._drop_stale_speculation) is False
+
+    events = resumed.store.read_all()
+    failed = [
+        event for event in events
+        if event.type == EV_NODE_FAILED and event.data.get("node_id") == node_id
+    ]
+    assert len(failed) == 1 and failed[0].seq > resumed_at.seq
+    assert failed[0].data["reason"] == "superseded"
+    assert failed[0].data["eval_seconds"] == 0.0
+    node = fold(events).nodes[node_id]
+    assert node.status is NodeStatus.failed
+    assert node.error == CARD_FRESHNESS_SUPERSEDED_ERROR
+
+
+def test_freshness_drop_keeps_physical_slot_spent_until_add_nodes(
+    tmp_path, monkeypatch,
+):
+    engine, _producer = _engine(tmp_path / "freshness-physical-slot")
+    engine._base_max_nodes = 1
+    engine.policy.max_nodes = 1
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.8)
+    dropped_node = _commit_speculative_node(engine)
+
+    monkeypatch.setattr(
+        speculation_module,
+        "speculative_card_is_fresh",
+        lambda *_args, **_kwargs: False,
+    )
+    assert anyio.run(engine._drop_stale_speculation) is True
+    dropped = fold(engine.store.read_all())
+    assert dropped.nodes[dropped_node].status is NodeStatus.failed
+    assert dropped.nodes[dropped_node].error_reason == "superseded"
+
+    # The exact freshness failure is absent from the Card policy count, but its historical node id
+    # still spends the only physical reservation slot. Selection therefore cannot mint a replacement
+    # until the operator explicitly extends the hard ceiling.
+    engine._refresh_speculation_budget(dropped)
+    assert card_budget_used(dropped) == 0
+    assert engine._node_reservation_slots_remaining(dropped) == 0
+    request_count = len(dropped.card_build_requests)
+    assert engine._request_card_build() is False
+    assert len(fold(engine.store.read_all()).card_build_requests) == request_count
+
+    engine.store.append(EV_BUDGET_EXTEND, {"add_nodes": 1})
+    extended = fold(engine.store.read_all())
+    assert engine._node_reservation_slots_remaining(extended) == 1
+    assert engine._request_card_build() is True
+    requested = fold(engine.store.read_all())
+    assert len(requested.card_build_requests) == request_count + 1
+    assert engine._speculation_depth_used(requested) == 1
+
+
+def test_speculative_admission_releases_old_pin_and_rescans_current_pin(
+    tmp_path, monkeypatch,
+):
+    engine, _producer = _engine(tmp_path / "speculative-pin-race")
+    engine._gpu_ids = [0]
+    engine._gpu_physical_ids = {0: "0"}
+    engine._gpu_mem = {0: 16_000}
+    engine._free_gpus = [0]
+    _start(engine)
+    _add_ready_draft(engine)
+    engine.store.append(EV_CARD_RESOURCE_PINNED, {
+        "id": "card-7",
+        "gpus": 1,
+        "gpu_mem_mib": 8_000,
+        "source": "operator",
+        "pinned": True,
+    })
+    node_id = _commit_speculative_node(engine)
+    _without_research(monkeypatch, engine)
+
+    original_reserve = engine._try_reserve_node_resources
+    original_release = engine._release_gpus
+    reserve_pins = []
+    releases = []
+    admitted = []
+
+    def _racing_reserve(node, *, resource_pin=None):
+        reserve_pins.append(dict(resource_pin or {}))
+        reservation = original_reserve(node, resource_pin=resource_pin)
+        if len(reserve_pins) == 1:
+            assert reservation is not None and reservation["gpu_ids"] == [0]
+            engine.store.append(EV_CARD_RESOURCE_PINNED, {
+                "id": "card-7",
+                "gpus": 0,
+                "source": "operator",
+                "pinned": True,
+            })
+        return reservation
+
+    def _tracked_release(gpu_ids):
+        releases.append(list(gpu_ids or []))
+        original_release(gpu_ids)
+
+    async def _terminal_eval(admitted_id, _limiter, _max_es):
+        reservation = engine._eval_resource_reservation(admitted_id, 0)
+        admitted.append((admitted_id, reservation, list(engine._free_gpus)))
+        node = fold(engine.store.read_all()).nodes[admitted_id]
+        engine.store.append(EV_NODE_EVALUATED, {
+            "node_id": admitted_id,
+            "generation": node.attempt,
+            "metric": 0.0,
+            "eval_seconds": 0.0,
+        })
+
+    monkeypatch.setattr(engine, "_try_reserve_node_resources", _racing_reserve)
+    monkeypatch.setattr(engine, "_release_gpus", _tracked_release)
+    monkeypatch.setattr(engine, "_evaluate", _terminal_eval)
+    anyio.run(
+        engine._run_card_session,
+        [],
+        fold(engine.store.read_all()),
+        None,
+    )
+
+    assert [pin["gpus"] for pin in reserve_pins] == [1, 0]
+    assert releases[0] == [0]
+    assert admitted and admitted[0][0] == node_id
+    current_reservation = admitted[0][1]
+    assert current_reservation is not None
+    assert current_reservation["count"] == 0
+    assert current_reservation["cpu_only"] is True
+    assert current_reservation["gpu_ids"] == []
+    assert admitted[0][2] == [0]
+    assert fold(engine.store.read_all()).cards["card-7"].resource_pin == {
+        "gpus": 0,
+        "pinned_by": "operator",
+    }
 
 
 def _model_node(

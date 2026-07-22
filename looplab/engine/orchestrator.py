@@ -85,7 +85,7 @@ from looplab.core.models import (
     durable_idea_payload, idea_proposal_ref, normalize_researcher_footprint,
 )
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
-from looplab.core.config import RUN_START_PINNED_FIELDS
+from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limits,
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
@@ -93,6 +93,13 @@ from looplab.search.card_selection import (
     META_CARD_ID, card_action as projected_card_action, card_budget_used,
     card_next_actions, card_selection_set, eligible_cards, forced_card_actions,
     speculative_raw_actions,
+)
+from looplab.search.speculation_calibration import (
+    SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS,
+    SPECULATION_CALIBRATION_SEEDS,
+    SPECULATION_POLICY_SCOPE,
+    canonical_speculation_toy_task,
+    speculation_runtime_scope_digest,
 )
 from looplab.search.operators import merge_idea
 from looplab.search.policy import KIND_EXPAND, SearchPolicy
@@ -115,6 +122,251 @@ from looplab.engine.options import _UNSET  # noqa: F401
 # tracked data/generated file, where buffering the whole patch would spike run-start memory (a latent
 # OOM) and a truncated "did-it-change" signal is enough. Module-level so an operator/test can retune.
 _DIFF_DIGEST_CAP = 8 * 1024 * 1024
+
+# Back-compatible export: the source-owned definition lives beside the shared runtime-scope digest.
+SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS
+
+
+class SpeculationAuthorizationError(RuntimeError):
+    """A durable speculation prefix cannot be re-entered under the current evidence authority.
+
+    This is deliberately distinct from an ordinary fatal engine error.  CLI fatal-error recovery
+    writes terminal events, while an authorization failure must return without changing the log it
+    refused to trust.
+    """
+
+
+def _declared_settings_json_defaults() -> dict[str, object]:
+    """Read schema-declared defaults without consulting Settings env/.env sources.
+
+    ``BaseSettings()`` is intentionally forbidden here: its environment precedence would make the
+    supposedly source-owned profile depend on the launcher's machine. ``model_construct`` receives
+    every field's declared default/default_factory directly, then Pydantic's JSON serializer turns
+    tuples and other schema-native containers into the same representation written to snapshots.
+    """
+    declared: dict[str, object] = {}
+    for name, field in Settings.model_fields.items():
+        if field.is_required():
+            raise RuntimeError(
+                f"calibration profile cannot infer required Settings field {name!r}")
+        declared[name] = field.get_default(call_default_factory=True)
+    snapshot = Settings.model_construct(**declared).model_dump(mode="json")
+    try:
+        # Round-trip now so a future non-JSON default fails at import/source review, not after an
+        # expensive GPU calibration has begun.
+        canonical = orjson.loads(orjson.dumps(snapshot, option=orjson.OPT_SORT_KEYS))
+    except (TypeError, ValueError, orjson.JSONEncodeError) as exc:
+        raise RuntimeError("Settings declared defaults are not calibration-snapshot JSON") from exc
+    if not isinstance(canonical, dict) or set(canonical) != set(Settings.model_fields):
+        raise RuntimeError("Settings declared-default snapshot is incomplete")
+    return canonical
+
+
+# Start from *all* deterministic schema defaults, then turn every optional model/network/memory/
+# adaptive path off. This literal is only the source-owned overrides; the public profile below is the
+# complete Settings map minus the exact three variants above.
+_SPECULATION_CALIBRATION_PROFILE_OVERRIDES: dict[str, object] = {
+    "profile": "default",
+    "backend": "toy",
+    "developer_backend": "default",
+    "n_seeds": 3,
+    "max_parallel": 1,
+    "parallel_build": 1,
+    "eval_parallel": 1,
+    "llm_parallel": 1,
+    "train_monitor": False,
+    "train_monitor_kill": False,
+    "asha_live": False,
+    "asha_live_kill": False,
+    "trust_mode": "trusted_local",
+    "policy": "greedy",
+    "ablate_every": 0,
+    "ablate_code_blocks": False,
+    "merge_mode": "mean",
+    "complexity_cue": False,
+    "feature_engineering": False,
+    "budget_aware": False,
+    "failure_reflection": False,
+    "watchdog_reflection": False,
+    "deep_repair": False,
+    "inline_repair": False,
+    "auto_install_deps": False,
+    "agent_control": {},
+    "localize_faults": False,
+    "surrogate_proposer": False,
+    "researcher_panel": 1,
+    "proxy_scoring": False,
+    "proxy_kill_fraction": 0.0,
+    "novelty_mode": "off",
+    "novelty_gate": False,
+    "novelty_semantic": False,
+    "debug_depth": 1,
+    "operator_bandit": False,
+    "track_hypotheses": False,
+    "reflection_priors": False,
+    "comparative_lessons": False,
+    "lessons_every": 0,
+    "lessons_refresh_every": 0,
+    "reward_hack_detect": False,
+    "code_leakage_detect": False,
+    "workdir_audit": False,
+    "research_verify": False,
+    "critic_check": False,
+    "strategist_backend": "off",
+    "confirm_top_k": 0,
+    "confirm_seeds": 0,
+    "holdout_fraction": 0.0,
+    "holdout_select": False,
+    "holdout_top_k": 1,
+    "select_verifier": False,
+    "verifier_ci_tie": False,
+    "max_seconds": None,
+    "max_eval_seconds": None,
+    "memory_dir": None,
+    "require_approval": False,
+    "coverage_context": False,
+    "concept_pivot": False,
+    "graded_novelty": False,
+    "capability_expansion": False,
+    "fingerprint_universal": False,
+    "cross_run_concepts": False,
+    "concept_run_base": False,
+    "cross_run_advisory": False,
+    "cross_run_structured_claims": False,
+    "cross_run_curation": False,
+    "cross_run_curation_auto": False,
+    "best_of_n": 1,
+    "best_of_n_listwise": False,
+    "foresight": False,
+    "foresight_panel": 1,
+    "foresight_agentic": False,
+    "foresight_verify": False,
+    "unified_agent": False,
+    "agent_drives_actions": False,
+    "card_driven_selection": True,
+    "llm_cache": False,
+    "phase_handoff_summary": False,
+    "trace_llm_io": False,
+    "researcher_tools": False,
+    "cross_run_tools": False,
+    "all_runs_tools": False,
+    "cross_run_read_tools": False,
+    "knowledge_dir": None,
+    "embed_model": None,
+    "embed_base_url": None,
+    "memora": False,
+    "memora_llm": False,
+    "memora_cache": None,
+    "literature_search": False,
+    "web_search": False,
+    "deep_research_every": 0,
+    "concurrent_research": False,
+    "concurrent_research_repeat": False,
+    "concurrent_research_max_calls": 0,
+    "concurrent_consolidate": False,
+    "report_every": 0,
+    "skills_dir": None,
+    "prompt_dir": None,
+    # Never inherit/persist a credential even though the toy profile constructs no LLM client.
+    "llm_api_key": None,
+}
+SPECULATION_CALIBRATION_PROFILE_SETTINGS = _declared_settings_json_defaults()
+SPECULATION_CALIBRATION_PROFILE_SETTINGS.update(
+    _SPECULATION_CALIBRATION_PROFILE_OVERRIDES)
+for _variant_field in SPECULATION_CALIBRATION_VARIANT_FIELDS:
+    SPECULATION_CALIBRATION_PROFILE_SETTINGS.pop(_variant_field, None)
+_expected_calibration_profile_fields = (
+    set(Settings.model_fields) - set(SPECULATION_CALIBRATION_VARIANT_FIELDS))
+if set(SPECULATION_CALIBRATION_PROFILE_SETTINGS) != _expected_calibration_profile_fields:
+    missing = sorted(
+        _expected_calibration_profile_fields - set(SPECULATION_CALIBRATION_PROFILE_SETTINGS))
+    extra = sorted(
+        set(SPECULATION_CALIBRATION_PROFILE_SETTINGS) - _expected_calibration_profile_fields)
+    raise RuntimeError(
+        f"calibration Settings coverage drifted (missing={missing}, extra={extra})")
+try:
+    # Enforce the same plain-JSON shape the quality reader compares after json.loads().
+    _profile_json = orjson.loads(orjson.dumps(
+        SPECULATION_CALIBRATION_PROFILE_SETTINGS, option=orjson.OPT_SORT_KEYS))
+except (TypeError, ValueError, orjson.JSONEncodeError) as exc:
+    raise RuntimeError("calibration Settings profile must remain JSON-safe") from exc
+if _profile_json != SPECULATION_CALIBRATION_PROFILE_SETTINGS:
+    raise RuntimeError("calibration Settings profile is not canonical snapshot JSON")
+_SPECULATION_CALIBRATION_PROFILE_SCHEMA = "looplab.speculation-calibration-profile/v1"
+SPECULATION_CALIBRATION_PROFILE_DIGEST = "sha256:" + hashlib.sha256(orjson.dumps(
+    {
+        "schema": _SPECULATION_CALIBRATION_PROFILE_SCHEMA,
+        "settings": SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+    },
+    option=orjson.OPT_SORT_KEYS,
+)).hexdigest()
+def _stable_effective_gpu_inventory(raw) -> list[dict]:
+    """Canonical, resume-stable projection of ``effective_gpu_inventory``.
+
+    Free memory is deliberately excluded: it changes while unrelated jobs start and is not machine
+    identity.  The effective helper already applies CUDA_VISIBLE_DEVICES; this projection preserves its
+    logical indices and stable hardware identity only.
+    """
+    if not isinstance(raw, list):
+        return []
+    stable: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return []
+        index = item.get("index")
+        uuid = item.get("uuid")
+        pci_bus_id = item.get("pci_bus_id")
+        name = item.get("name")
+        total = item.get("mem_total_mib")
+        driver_version = item.get("driver_version")
+        cuda_driver_version = item.get("cuda_driver_version")
+        if (type(index) is not int or index < 0 or not isinstance(name, str)
+                or not name.strip() or type(total) is not int or total <= 0
+                or not isinstance(uuid, str) or not uuid.strip()
+                or not isinstance(pci_bus_id, str) or not pci_bus_id.strip()
+                or not isinstance(driver_version, str) or not driver_version.strip()
+                or type(cuda_driver_version) is not int or cuda_driver_version <= 0):
+            return []
+        stable.append({
+            "index": index,
+            "uuid": uuid.strip(),
+            "pci_bus_id": pci_bus_id.strip(),
+            "name": name.strip(),
+            "mem_total_mib": total,
+            "driver_version": driver_version.strip(),
+            "cuda_driver_version": cuda_driver_version,
+        })
+    stable.sort(key=lambda row: row["index"])
+    if (
+        len({row["index"] for row in stable}) != len(stable)
+        or len({row["uuid"] for row in stable}) != len(stable)
+        or len({row["pci_bus_id"] for row in stable}) != len(stable)
+    ):
+        return []
+    return stable
+
+
+def _calibration_role_pair_errors(task, researcher, developer) -> list[str]:
+    """Validate the two default-off purpose flags without accepting wrappers/subclasses."""
+    from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+
+    errors: list[str] = []
+    if type(researcher) is not ToyResearcher:  # exact: a wrapper could make live/model calls
+        errors.append("researcher must be the exact ToyResearcher")
+    else:
+        if getattr(researcher, "calibration_concepts", False) is not True:
+            errors.append("ToyResearcher.calibration_concepts must be true")
+        if (researcher.bounds != task.bounds or researcher.step != task.step
+                or researcher.seed != task.seed):
+            errors.append("ToyResearcher must match the calibrated task bounds/step/seed")
+    if type(developer) is not ToyObjectiveDeveloper:
+        errors.append("developer must be the exact ToyObjectiveDeveloper")
+    else:
+        if getattr(developer, "calibration_gpu_probe", False) is not True:
+            errors.append("ToyObjectiveDeveloper.calibration_gpu_probe must be true")
+        if developer.noise != 0.0:
+            errors.append("ToyObjectiveDeveloper noise must be zero")
+    return errors
 
 
 class _BuildReservation(NamedTuple):
@@ -192,6 +444,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
              ProposalCuesMixin,
              TrainingMonitorMixin, AshaMonitorMixin):
+    @property
+    def max_parallel(self) -> int:
+        """Deprecated read-through alias for the canonical evaluation width.
+
+        Keep the descriptor instead of a second instance attribute: integrations may continue to
+        read or assign ``max_parallel``, but there is only one live value and new runtime code cannot
+        observe a stale legacy copy.
+        """
+        return self._eval_parallel
+
+    @max_parallel.setter
+    def max_parallel(self, value: int) -> None:
+        self._eval_parallel = value
+
+    @property
+    def parallel_build(self) -> int:
+        """Deprecated read-through alias for the canonical LLM/build width."""
+        return self._llm_parallel
+
+    @parallel_build.setter
+    def parallel_build(self, value: int) -> None:
+        self._llm_parallel = value
+
     def __init__(
         self,
         run_dir: str | os.PathLike,
@@ -222,6 +497,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # rebuild policies with the same run-wide settings.
         embedder=None,                       # text→vector callable (default: zero-dep hash_embed)
         lesson_abstractor=None,              # Memora synergy: harmonic recall over cross-run lessons
+        _speculation_gate_calibration: bool = False,  # private mechanics-test/bootstrap seam
+        _speculation_runtime_scope_sha256: Optional[str] = None,
+        # Private CLI→Engine provenance seam. Narrow calibration/receipt paths independently
+        # reconstruct this digest from their source-owned full Settings profile before trusting it.
         # BACKLOG §4 (docs/15 F3): every PURE-CONFIG knob — one per EngineOptions field — is
         # accepted via **knobs and validated against EngineOptions, so adding a knob is TWO edits
         # (Settings field + EngineOptions field) instead of four. Each knob's type/default/why
@@ -248,8 +527,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Layer-2 decoupling (docs/23): the CANONICAL `eval_parallel`/`llm_parallel` win over the legacy
         # `max_parallel`/`parallel_build` when set; None => fall back to the legacy field => byte-identical.
         _eval_parallel_opt = _opt("eval_parallel")
-        max_parallel = _eval_parallel_opt if _eval_parallel_opt is not None else _opt("max_parallel")
+        _eval_parallel_value = (_eval_parallel_opt if _eval_parallel_opt is not None
+                                else _opt("max_parallel"))
         _llm_parallel_opt = _opt("llm_parallel")
+        _llm_parallel_value = (_llm_parallel_opt if _llm_parallel_opt is not None
+                               else _opt("parallel_build"))
         train_monitor = _opt("train_monitor")
         train_monitor_interval_s = _opt("train_monitor_interval_s")
         train_monitor_kill = _opt("train_monitor_kill")
@@ -328,6 +610,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         agent_drives_actions = _opt("agent_drives_actions")
         card_driven_selection = _opt("card_driven_selection")
         speculation_depth = _opt("speculation_depth")
+        speculation_gate_receipt = _opt("speculation_gate_receipt")
         inline_repair = _opt("inline_repair")
         inline_repair_attempts = _opt("inline_repair_attempts")
         inline_repair_stuck_repeat = _opt("inline_repair_stuck_repeat")
@@ -396,17 +679,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._developer_name = "default"
         # Variant-1 parallel BUILD: a pool of fresh (researcher, developer) pairs so N drafts research +
         # code CONCURRENTLY without clobbering each other's role state (developer.last_files, researcher
-        # hints). `_parallel_build` (EngineOptions, default 1) is the fan-out; the pool is built lazily on
+        # hints). The settled canonical LLM width is the fan-out; the pool is built lazily on
         # the first parallel batch and clamped to what `role_factory` can supply (None => stays serial).
         self.role_factory = role_factory
         # NB: draft builds fan out via anyio.to_thread, whose default capacity limiter is 40 threads;
         # a `parallel_build` above that (le=64) just queues the excess (no deadlock — workers never
         # re-enter the loop), so effective build concurrency silently caps near 40. The value is a raw
-        # opt here (0 = AUTO); it is resolved against the settled `self.max_parallel` further down.
+        # opt here (0 = AUTO); it is resolved against the settled `self._eval_parallel` further down.
         # Layer-2: the canonical `llm_parallel` wins over the legacy `parallel_build` when set.
-        self._parallel_build_opt = (_llm_parallel_opt if _llm_parallel_opt is not None
-                                    else _opt("parallel_build"))
-        self.parallel_build = max(1, self._parallel_build_opt)   # provisional; re-resolved below
+        self._llm_parallel_startup_opt = _llm_parallel_value
+        self._llm_parallel = max(1, self._llm_parallel_startup_opt)  # provisional; re-resolved below
         self._role_pool: Optional[list] = None
         # A successful live Developer swap owns every subsequent build worker too. None means the
         # CLI factory's configured backend is still authoritative; a string means pooled developers
@@ -535,6 +817,237 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Keep a settled, bounded scalar for the Layer-5 producer/consumer seam. Zero is a hard
         # off-switch; no task group/request event is allowed to infer a non-zero depth from hardware.
         self.speculation_depth = max(0, min(64, int(speculation_depth or 0)))
+        self.speculation_gate_receipt = (
+            str(Path(speculation_gate_receipt).expanduser().resolve())
+            if speculation_gate_receipt is not None else None
+        )
+        self._speculation_gate_calibration = bool(_speculation_gate_calibration)
+        self._speculation_gate_admitted = False
+        self._speculation_gate_receipt_digest = ""
+        self._speculation_implementation_digest = ""
+        self._speculation_policy_scope = ""
+        self._speculation_calibration_profile_digest = ""
+        self._speculation_calibration_gpu_inventory: list[dict] = []
+        self._speculation_calibration_seed: Optional[int] = None
+        self._speculation_runtime_scope_sha256 = ""
+        _gate_receipt = None
+
+        def _narrow_runtime_envelope_errors() -> tuple[list[str], str]:
+            """Validate the one runtime that calibration evidence actually measured."""
+            import sys
+            from looplab.adapters.toytask import ToyTask
+            from looplab.runtime.sandbox import SubprocessSandbox
+            from looplab.search.policy import GreedyTree
+            from looplab.tools.vectorstore import hash_embed
+
+            errors: list[str] = []
+            option_renames = {"policy": "policy_name"}
+            for setting, expected in SPECULATION_CALIBRATION_PROFILE_SETTINGS.items():
+                option_name = option_renames.get(setting, setting)
+                if option_name not in _fields:
+                    continue
+                actual = _opt(option_name)
+                try:
+                    # EngineOptions retains schema-native tuples while snapshots contain JSON arrays.
+                    matches_profile = orjson.dumps(
+                        actual, option=orjson.OPT_SORT_KEYS) == orjson.dumps(
+                            expected, option=orjson.OPT_SORT_KEYS)
+                except (TypeError, ValueError, orjson.JSONEncodeError):
+                    matches_profile = False
+                if not matches_profile:
+                    errors.append(f"{setting} must be {expected!r}, got {actual!r}")
+
+            if card_driven_selection is not True:
+                errors.append("card_driven_selection must be exactly true")
+            if type(max_nodes) is not int or not 1 <= max_nodes <= 64:
+                errors.append("max_nodes must be an integer in 1..64")
+            if type(speculation_depth) is not int or not 0 <= speculation_depth <= 64:
+                errors.append("speculation_depth must be an integer in 0..64")
+            if not self.run_dir.name.strip():
+                errors.append("run directory must have a non-empty run id")
+
+            expected_scope = ""
+            if type(max_nodes) is int and type(speculation_depth) is int:
+                try:
+                    expected_scope = speculation_runtime_scope_digest({
+                        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+                        "max_nodes": max_nodes,
+                        "speculation_depth": speculation_depth,
+                        "speculation_gate_receipt": self.speculation_gate_receipt,
+                    })
+                except ValueError as exc:
+                    errors.append(f"runtime scope could not be constructed: {exc}")
+            if (
+                not expected_scope
+                or _speculation_runtime_scope_sha256 != expected_scope
+            ):
+                errors.append(
+                    "runtime scope digest must match the source-owned full Settings profile "
+                    "and live max_nodes")
+
+            if type(task) is not ToyTask:
+                errors.append("task must be the exact offline ToyTask")
+            else:
+                try:
+                    canonical_speculation_toy_task(task, require_seed_set=True)
+                except ValueError as exc:
+                    errors.append(str(exc))
+                errors.extend(_calibration_role_pair_errors(task, researcher, developer))
+            if (
+                type(policy) is not GreedyTree
+                or policy.n_seeds != len(SPECULATION_CALIBRATION_SEEDS)
+                or policy.max_nodes != max_nodes
+                or policy.debug_depth != 1
+                or policy.enable_merge is not True
+                or policy.merge_every != 3
+                or policy.max_merges != 2
+                or policy.ablate_every != 0
+                or policy.operator_bandit is not False
+            ):
+                errors.append("policy must be the canonical bounded GreedyTree")
+            if (
+                type(sandbox) is not SubprocessSandbox
+                or sandbox.python != sys.executable
+                or sandbox.max_output_bytes != 64_000
+                or sandbox.mem_bytes is not None
+                or sandbox.fsize_bytes is not None
+            ):
+                errors.append("sandbox must be the exact default trusted-local SubprocessSandbox")
+            for name, value in (
+                ("strategist", strategist), ("deep_researcher", deep_researcher),
+                ("report_writer", report_writer), ("developer_factory", developer_factory),
+                ("onboarder", onboarder), ("proxy_scorer", proxy_scorer),
+                ("lesson_abstractor", lesson_abstractor), ("dep_installer", dep_installer),
+            ):
+                if value is not None:
+                    errors.append(f"{name} must be disabled")
+            if self._embedder is not hash_embed:
+                errors.append("embedder must be the offline hash embedder")
+            if not callable(self.role_factory):
+                errors.append("role_factory must provide isolated calibrated Toy roles")
+            if crash_after is not None:
+                errors.append("crash_after is forbidden in the calibrated runtime")
+            return errors, expected_scope
+
+        def _guard_calibrated_role_factory() -> None:
+            original_role_factory = self.role_factory
+
+            def _calibrated_role_factory():
+                pair = original_role_factory()
+                if not isinstance(pair, tuple) or len(pair) != 2:
+                    raise RuntimeError("calibrated role_factory must return one role pair")
+                pair_errors = _calibration_role_pair_errors(task, pair[0], pair[1])
+                if pair_errors:
+                    raise RuntimeError(
+                        "calibrated role_factory escaped the purpose envelope: "
+                        + "; ".join(pair_errors))
+                return pair
+
+            self.role_factory = _calibrated_role_factory
+
+        if self._speculation_gate_calibration:
+            # Validate the bootstrap at the library boundary.  A caller cannot obtain the waiver by
+            # constructing Engine directly with arbitrary roles/settings, and no run artifact exists
+            # yet when these checks execute.
+            calibration_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
+            if self.speculation_gate_receipt is not None:
+                calibration_errors.append("speculation_gate_receipt must be unset")
+
+            # The CLI has already created engine.lock.  An empty events file is also harmless; every
+            # material snapshot/artifact is forbidden because copied evidence must not bootstrap a run.
+            if self.run_dir.exists():
+                unexpected = sorted(
+                    path.name for path in self.run_dir.iterdir()
+                    if path.name not in {"engine.lock", "events.jsonl"}
+                )
+                event_path = self.run_dir / "events.jsonl"
+                if unexpected:
+                    calibration_errors.append(
+                        "run directory contains stale material: " + ", ".join(unexpected))
+                if event_path.exists() and event_path.stat().st_size:
+                    calibration_errors.append("events.jsonl must be exactly empty")
+
+            try:
+                from looplab.core.hardware import effective_gpu_inventory
+                gpu_inventory = _stable_effective_gpu_inventory(effective_gpu_inventory())
+            except Exception:
+                gpu_inventory = []
+            if not gpu_inventory:
+                calibration_errors.append(
+                    "effective CUDA_VISIBLE_DEVICES GPU inventory must be non-empty")
+            if calibration_errors:
+                raise ValueError(
+                    "speculation gate calibration profile mismatch: "
+                    + "; ".join(calibration_errors)
+                )
+
+            _guard_calibrated_role_factory()
+            self._speculation_gate_admitted = True  # depth=0 baseline and depth>0 treatment
+            # SpeculationMixin's live enablement also requires a non-empty internal admission token.
+            # This value is never serialized as a receipt digest for calibration evidence; the durable
+            # authority is the explicit profile/GPU/seed envelope below.
+            self._speculation_gate_receipt_digest = SPECULATION_CALIBRATION_PROFILE_DIGEST
+            self._speculation_policy_scope = SPECULATION_POLICY_SCOPE
+            self._speculation_calibration_profile_digest = (
+                SPECULATION_CALIBRATION_PROFILE_DIGEST
+            )
+            self._speculation_calibration_gpu_inventory = gpu_inventory
+            self._speculation_calibration_seed = task.seed
+            self._speculation_runtime_scope_sha256 = expected_runtime_scope
+            from looplab.search.speculation_quality import speculation_implementation_digest
+            self._speculation_implementation_digest = speculation_implementation_digest()
+        elif self.card_driven_selection and self.speculation_depth > 0:
+            from looplab.adapters.toytask import ToyTask
+            if not self.run_dir.name.strip():
+                raise ValueError("positive Card speculation requires a non-empty run id")
+            if not self.speculation_gate_receipt:
+                raise ValueError(
+                    "positive speculation_depth requires speculation_gate_receipt from "
+                    "`looplab speculation-gate`"
+                )
+            from looplab.search.speculation_quality import (
+                speculation_task_profile_digest,
+                validated_speculation_gate_receipt,
+            )
+            _gate_receipt = validated_speculation_gate_receipt(
+                self.speculation_gate_receipt,
+            )
+            runtime_errors, expected_runtime_scope = _narrow_runtime_envelope_errors()
+            if (
+                runtime_errors
+                or _gate_receipt is None
+                or _gate_receipt.get("require_gpu") is not True
+                or not _gate_receipt.get("gpu_inventory")
+                or _gate_receipt.get("policy_scope") != SPECULATION_POLICY_SCOPE
+                or type(_gate_receipt.get("admitted_depth")) is not int
+                or _gate_receipt.get("admitted_depth") != self.speculation_depth
+                or type(_gate_receipt.get("admitted_max_nodes")) is not int
+                or _gate_receipt.get("admitted_max_nodes") != max_nodes
+                or _gate_receipt.get("runtime_scope_sha256") != expected_runtime_scope
+                or _gate_receipt.get("calibration_profile_digest")
+                != SPECULATION_CALIBRATION_PROFILE_DIGEST
+                or _gate_receipt.get("workload_scope") != "quadratic_toy"
+                # The receipt is intentionally scoped to the shipped quadratic adapter, not merely
+                # to an arbitrary TaskAdapter/subclass that can spoof the same model_dump while
+                # executing a different workload.
+                or type(task) is not ToyTask
+                or _gate_receipt.get("task_profile_sha256")
+                != speculation_task_profile_digest(task)
+                or not isinstance(_gate_receipt.get("implementation_digest"), str)
+                or not _gate_receipt.get("implementation_digest")
+                or self._policy_name != SPECULATION_POLICY_SCOPE
+            ):
+                raise ValueError(
+                    "speculation_gate_receipt is stale, invalid, non-GPU, policy/depth-mismatched, "
+                    "runtime-scope/max-nodes-mismatched, or does not pass the current "
+                    "scorer/search-quality gates"
+                )
+            _guard_calibrated_role_factory()
+            self._speculation_gate_receipt_digest = _gate_receipt["self_digest"]
+            self._speculation_implementation_digest = _gate_receipt["implementation_digest"]
+            self._speculation_policy_scope = SPECULATION_POLICY_SCOPE
+            self._speculation_runtime_scope_sha256 = expected_runtime_scope
+            self._speculation_gate_admitted = True
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         # GPU pool + max_parallel=0 AUTO. Multi-GPU boxes were used at 1/N: a single-command eval pins
         # itself to one GPU (or DataParallel-deadlocks on cleanup), leaving the others idle. To actually
@@ -542,18 +1055,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # evaluate.py::_evaluate); `max_parallel=0` means AUTO — run one experiment per detected GPU.
         self._gpu_ids: list[int] = _detect_gpu_ids()
         self._gpu_physical_ids, self._gpu_mem = detect_gpu_inventory(self._gpu_ids)
-        if max_parallel == 0:                            # AUTO: the agent/operator lets the box decide
-            max_parallel = max(1, len(self._gpu_ids))
-        self.max_parallel = max(1, int(max_parallel))
-        # Now that max_parallel is settled, resolve parallel_build (0 = AUTO = max_parallel), so a build
+        if _eval_parallel_value == 0:                    # AUTO: the agent/operator lets the box decide
+            _eval_parallel_value = max(1, len(self._gpu_ids))
+        self._eval_parallel = max(1, int(_eval_parallel_value))
+        # Now that eval_parallel is settled, resolve llm_parallel (0 = AUTO = eval_parallel), so a build
         # fan-out never exceeds what we can concurrently evaluate.
-        self.parallel_build = self._resolve_parallel_build(self._parallel_build_opt)
-        # Layer-2 canonical read-through aliases: new code keys on `_eval_parallel`/`_llm_parallel`, which
-        # point at the settled runtime values (the legacy `max_parallel`/`parallel_build` attrs stay for
-        # the ~100 call sites / evaluate.py / crash_repair that already read them). A Strategist retune of
-        # either axis (strategy._apply_strategy) refreshes both the legacy attr and these aliases.
-        self._eval_parallel = self.max_parallel
-        self._llm_parallel = self.parallel_build
+        self._llm_parallel = self._resolve_llm_parallel(self._llm_parallel_startup_opt)
+        # Layer-2 compatibility lives solely in the two descriptors above. New runtime logic reads the
+        # canonical attributes; legacy Engine(...) callers and direct assignments transparently feed them.
         # The canonical field is also the opt-in switch for the SHARED provider-call budget. An
         # unset field (including legacy-only parallel_build) and startup AUTO preserve historical
         # unbounded research overlap; only a positive canonical value activates a finite total.
@@ -945,6 +1454,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     async def _run_with_llm_broker(self) -> RunState:
         events = self.store.read_all()
         state = fold(events)
+        # Re-entry authorization is the first semantic boundary.  Recovery, command ACK and setup all
+        # append events, so a stale/missing/different receipt must fail before any of them can mutate a
+        # positive-depth run.  `_reentry_repin` repeats this after setup to guard a concurrent tail edit.
+        self._require_pinned_speculation_receipt(state)
+        if self._speculation_gate_calibration and events:
+            # The hidden bootstrap is launch-only.  Even an exact prior calibration envelope cannot be
+            # resumed/reused as another sample; every evidence lane starts from an exactly empty log.
+            raise SpeculationAuthorizationError(
+                "speculation gate calibration requires exactly zero prior events at run start")
         if self._recover_interrupted_builds(state):
             # Recovery appends terminal evidence. Re-fold before setup or any policy work so this
             # invocation cannot resurrect the abandoned marker or reuse its reserved id.
@@ -971,6 +1489,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             decision_events = self.store.read_all()
             state = fold(decision_events)
             decision_seq = decision_events[-1].seq if decision_events else -1
+            # A control can arrive after initial re-entry. Re-check the calibrated authority on every
+            # stable decision prefix before ACKs, recovery or any budget/strategy application.
+            self._require_pinned_speculation_receipt(state)
             # A command ACK is a durable observation boundary. If it (or any concurrent writer)
             # extends the log after this fold, refold before doing domain work so neither a stale
             # reset nor a stale natural-finish decision can cross the newly-observed intent.
@@ -1311,8 +1832,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     reservation.card_id: reservation
                     for reservation in (_card_reservations or [])
                 }
-                _pb_pairs = (self._build_role_pairs(min(self.parallel_build, len(creates)))
-                             if (self.parallel_build > 1 and len(creates) > 1
+                _pb_pairs = (self._build_role_pairs(min(self._llm_parallel, len(creates)))
+                             if (self._llm_parallel > 1 and len(creates) > 1
                                  and all(a.get("kind") == "draft" for a in creates)
                                  and not any(META_CARD_ID in a for a in creates)) else None)
                 if _pb_pairs and len(_pb_pairs) > 1:
@@ -1385,7 +1906,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
                         # the configured fan-out — this span makes the actual per-batch cost observable.
                         with self.tracer.span("parallel_build_batch", fan=_fan, built=len(_chunk),
-                                              parallel_build=self.parallel_build):
+                                              parallel_build=self._llm_parallel):
                             async with anyio.create_task_group() as _tg:
                                 for _a, _res, _pair, _idea, _tel in zip(
                                         _chunk, _reserved, _pb_pairs, _ideas, _telem):
@@ -1661,10 +2182,50 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # only the opt-in path needs an additive durable marker.
         if self.card_driven_selection:
             values["card_driven_selection"] = True
+        if self._speculation_implementation_digest:
+            values["speculation_implementation_digest"] = (
+                self._speculation_implementation_digest
+            )
+        if self._speculation_runtime_scope_sha256:
+            values["speculation_runtime_scope_sha256"] = (
+                self._speculation_runtime_scope_sha256
+            )
         # Preserve the default run_started bytes just like the Card selector flag. Replay supplies
         # zero for an absent key, while an enabled overlap treatment must be durable across resume.
-        if self.speculation_depth:
+        if ((self.card_driven_selection and self.speculation_depth)
+                or self._speculation_gate_calibration):
             values["speculation_depth"] = self.speculation_depth
+        if self._speculation_gate_calibration:
+            if (
+                not self._speculation_gate_admitted
+                or not self._speculation_implementation_digest
+                or not self._speculation_runtime_scope_sha256
+                or self._speculation_calibration_profile_digest
+                != SPECULATION_CALIBRATION_PROFILE_DIGEST
+                or not self._speculation_calibration_gpu_inventory
+                or type(self._speculation_calibration_seed) is not int
+                or self._speculation_policy_scope != SPECULATION_POLICY_SCOPE
+            ):
+                raise RuntimeError("calibration reached run start outside its exact profile envelope")
+            values.update({
+                "speculation_calibration_profile_digest": (
+                    self._speculation_calibration_profile_digest),
+                "speculation_calibration_gpu_inventory": list(
+                    self._speculation_calibration_gpu_inventory),
+                "speculation_calibration_seed": self._speculation_calibration_seed,
+                "speculation_policy_scope": self._speculation_policy_scope,
+            })
+        elif self.card_driven_selection and self.speculation_depth:
+            if (
+                not self._speculation_gate_admitted
+                or not self._speculation_gate_receipt_digest
+                or not self._speculation_runtime_scope_sha256
+            ):
+                raise RuntimeError("positive Card speculation reached run start without gate evidence")
+            values["speculation_gate_receipt_digest"] = (
+                self._speculation_gate_receipt_digest
+            )
+            values["speculation_policy_scope"] = self._speculation_policy_scope
         return values
 
     def _setup_phase(self, state: RunState) -> None:
@@ -1820,9 +2381,98 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if _cur_env != state.env:
                 self.store.append(EV_ENV_CHANGED, {"was": state.env, "now": _cur_env})
 
+    def _require_pinned_speculation_receipt(self, entry: RunState) -> None:
+        """Fail closed on positive-depth or calibration re-entry before any log mutation."""
+        profile_digest = str(getattr(
+            entry, "speculation_calibration_profile_digest", "") or "")
+        calibration_gpu = getattr(entry, "speculation_calibration_gpu_inventory", None)
+        calibration_seed = getattr(entry, "speculation_calibration_seed", None)
+        recorded_depth = getattr(entry, "speculation_depth", 0)
+        recorded_impl = str(getattr(
+            entry, "speculation_implementation_digest", "") or "")
+        recorded_scope = str(getattr(entry, "speculation_policy_scope", "") or "")
+        recorded_receipt = str(getattr(
+            entry, "speculation_gate_receipt_digest", "") or "")
+        recorded_runtime_scope = str(getattr(
+            entry, "speculation_runtime_scope_sha256", "") or "")
+        recorded_calibration = bool(
+            profile_digest or calibration_gpu or calibration_seed is not None)
+        # Treat every durable speculation authority/prefix as gated, even when another field was
+        # corrupted or omitted.  In particular card=false must not turn a receipt/implementation/
+        # policy/depth prefix into an inert-looking log that recovery or command ACK may mutate.
+        recorded_marker = bool(
+            recorded_calibration
+            or recorded_impl
+            or recorded_scope
+            or recorded_receipt
+            or recorded_runtime_scope
+            or (type(recorded_depth) is int and recorded_depth > 0)
+        )
+        if not recorded_marker:
+            return
+
+        def reject() -> None:
+            raise SpeculationAuthorizationError(
+                "cannot resume Card speculation/calibration without the exact validated "
+                "run-start receipt/profile, implementation, policy, depth, seed and GPU pins"
+            )
+
+        if (
+            not isinstance(getattr(entry, "run_id", None), str)
+            or not entry.run_id.strip()
+            or entry.run_id != self.run_dir.name
+            or not recorded_impl
+            or not self._speculation_implementation_digest
+            or recorded_impl != self._speculation_implementation_digest
+            or not self._speculation_gate_admitted
+            or not recorded_runtime_scope
+            or recorded_runtime_scope != self._speculation_runtime_scope_sha256
+            or getattr(entry, "card_driven_selection", False) is not True
+            or type(recorded_depth) is not int
+            or recorded_depth != self.speculation_depth
+            or recorded_scope != SPECULATION_POLICY_SCOPE
+            or self._speculation_policy_scope != SPECULATION_POLICY_SCOPE
+        ):
+            reject()
+
+        # The hidden evidence bootstrap is immutable: any control would invalidate the paired
+        # measurement.  A public receipt, by contrast, admits the measured launch envelope and keeps
+        # explicit Stage-6 operator controls available.  Those interventions remain in the event log
+        # and the quality evidence reader rejects such a run as future calibration evidence.
+        if self._speculation_gate_calibration and (
+            self._policy_name != SPECULATION_POLICY_SCOPE
+            or bool(getattr(entry, "budget_overrides", None))
+            or getattr(entry, "pending_strategy", None) is not None
+            or bool(getattr(entry, "active_strategy", None))
+        ):
+            reject()
+
+        if recorded_calibration:
+            if (
+                self._speculation_gate_calibration is not True
+                or profile_digest != SPECULATION_CALIBRATION_PROFILE_DIGEST
+                or self._speculation_calibration_profile_digest != profile_digest
+                or not isinstance(calibration_gpu, list)
+                or calibration_gpu != self._speculation_calibration_gpu_inventory
+                or type(calibration_seed) is not int
+                or calibration_seed != self._speculation_calibration_seed
+                # Calibration never serializes its internal admission token as a public receipt.
+                or bool(getattr(entry, "speculation_gate_receipt_digest", ""))
+            ):
+                reject()
+            return
+
+        if (
+            self._speculation_gate_calibration
+            or not recorded_receipt
+            or recorded_receipt != self._speculation_gate_receipt_digest
+        ):
+            reject()
+
     def _reentry_repin(self) -> bool:
         _events = self.store.read_all()
         _entry = fold(_events)
+        self._require_pinned_speculation_receipt(_entry)
         self._pending_finalize_scope = incomplete_finalize_scope(_events)
         # A failed finalize attempt is recorded as finished(reason=error) by the CLI guard, but its
         # durable stop is still pending. Treat that as NOT already finalized so the retry below can
@@ -1920,6 +2570,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # max_seconds ("keep going 600s more") is a first-class operator budget extension via the
         # budget_extend control event, not an agent_control-governed knob — applied as-is.
         _bo = state.budget_overrides
+        if self._speculation_gate_calibration and _bo:
+            raise RuntimeError(
+                "Card speculation calibration forbids runtime budget/resource overrides; "
+                "max_nodes and the complete execution envelope are receipt-bound")
 
         def _finite_ceiling(key: str, fallback: Optional[float]) -> Optional[float]:
             raw = _bo.get(key)
@@ -1965,8 +2619,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     _value = int(_value)
                     if not 0 <= _value <= 1024:
                         continue
-                    self.max_parallel = max(1, _value)
-                    self._eval_parallel = self.max_parallel
+                    self._eval_parallel = max(1, _value)
                 except (TypeError, ValueError, OverflowError):
                     pass
         for _key in ("parallel_build", "llm_parallel"):
@@ -1981,8 +2634,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     _value = int(_value)
                     if not 0 <= _value <= 64:
                         continue
-                    self.parallel_build = max(1, _value)
-                    self._llm_parallel = self.parallel_build
+                    self._llm_parallel = max(1, _value)
                 except (TypeError, ValueError, OverflowError):
                     pass
         # A canonical live control opts into the shared provider-call ceiling. Replay may also retain
@@ -2453,7 +3105,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         async with anyio.create_task_group() as bg_tg:
             self._spawn_research(bg_tg, state)
             try:
-                if self.max_parallel <= 1:
+                if self._eval_parallel <= 1:
                     limiter = anyio.CapacityLimiter(1)
                     for a in evals:
                         cur = fold(self.store.read_all())
@@ -2562,7 +3214,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     #
                     # STILL A BARRIER: the inner task group joins the WHOLE batch before returning, so
                     # `bg_tg`'s lifecycle and every `pending_nodes()`-keyed guarantee are unchanged.
-                    slots = anyio.Semaphore(self.max_parallel, fast_acquire=True)
+                    slots = anyio.Semaphore(self._eval_parallel, fast_acquire=True)
 
                     async def _eval_in_slot(nid: int, generation: Optional[int],
                                             reservation: Optional[dict]) -> None:
@@ -3593,6 +4245,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return None
 
         try:
+            calibration_concepts = ({
+                "concept_mode": "full",
+                "concepts": [
+                    f"operator/{card.operator}",
+                    "objective/quadratic",
+                    "space/two-dimensional",
+                ],
+            } if self._speculation_gate_calibration else {})
             idea = Idea(
                 operator=card.operator,
                 params=dict(card.params or {}),
@@ -3603,6 +4263,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 hypothesis=card.seed_statement,
                 card_id=card.id,
                 footprint=normalize_researcher_footprint(card.footprint),
+                **calibration_concepts,
             )
         except Exception:  # hostile/future Card data cannot escape the closed Idea schema
             return None
@@ -3840,9 +4501,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             payload["card_id"] = card_id
         self.store.append(EV_NODE_FAILED, payload)
 
-    def _resolve_parallel_build(self, value: int) -> int:
-        """Resolve a startup `parallel_build` setting to a concrete build fan-out. `0` = AUTO = the (already
-        resolved) `self.max_parallel`, so we build exactly as many seeds as we can concurrently evaluate;
+    def _resolve_llm_parallel(self, value: int) -> int:
+        """Resolve startup ``llm_parallel`` to a concrete build fan-out. ``0`` = AUTO = the (already
+        resolved) ``self._eval_parallel``, so we build exactly as many seeds as we can concurrently evaluate;
         any other value is used as-is (clamped to >=1). The build pool still clamps to 1 downstream
         (`_build_role_pairs`) when no `role_factory` is wired. Live strategy/control updates use 0=1
         because they settle immediately rather than retaining an AUTO mode."""
@@ -3854,7 +4515,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `le=1024`), which must not silently exceed the parallel_build cap the config author set (nor
         # eagerly instantiate >64 wired role pairs); the operator budget-override path is otherwise
         # unvalidated. The explicit Settings/Strategist paths are already bounded 0..64.
-        resolved = self.max_parallel if value == 0 else value
+        resolved = self._eval_parallel if value == 0 else value
         return min(64, max(1, resolved))
 
     def _reconfigure_llm_broker(self, value) -> None:
@@ -3944,6 +4605,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             linked = (candidate if isinstance(candidate, Idea)
                       else Idea.model_validate(candidate)).model_copy(deep=True)
             linked.card_id = None  # a Researcher/plugin can never claim writer namespace authority
+            if self._speculation_gate_calibration:
+                # Mechanical merge/debug Ideas do not pass through ToyResearcher, but they are still
+                # members of the calibrated workload. Keep every physical node inside the same
+                # one-GPU resource/provenance envelope without changing ordinary Idea bytes.
+                linked.footprint = {"gpus": 1}
+                linked.concept_mode = "full"
+                linked.concepts = [
+                    f"operator/{_kind}", "objective/quadratic", "space/two-dimensional"]
+                linked.concepts_added = []
+                linked.concepts_removed = []
             # Bind the Card and the durable Node to the action that execution will actually honor.
             # Keeping the model-requested value here would make a 3600s request with a 90s ceiling
             # appear as 3600s in both receipts even though eval_dispatch runs only 90s.
@@ -4750,29 +5421,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             option=orjson.OPT_SORT_KEYS)).hexdigest()[:16]
 
     def _env_fingerprint(self) -> dict:
-        """P0-5 environment identity: a small, stable record of the interpreter + the key libraries a
-        result depends on, pinned at run start so a resume after an upgrade can flag that the run is no
-        longer bit-reproducible. Best-effort: a missing/broken package is simply omitted, and
-        importlib.metadata never touches the network. Deterministic on a fixed environment."""
-        import platform
-        import sys
-        env: dict = {"python": sys.version.split()[0], "platform": platform.platform()}
-        libs: dict = {}
-        try:
-            from importlib.metadata import PackageNotFoundError, version
-            for pkg in ("numpy", "pandas", "scikit-learn", "scipy", "torch", "xgboost",
-                        "lightgbm", "tensorflow", "transformers"):
-                try:
-                    libs[pkg] = version(pkg)
-                except PackageNotFoundError:
-                    pass
-                except Exception:  # noqa: BLE001 — a broken metadata entry must not fail setup
-                    pass
-        except Exception:  # noqa: BLE001 — importlib.metadata unavailable: skip the lib pins
-            pass
-        if libs:
-            env["libs"] = libs
-        return env
+        """Use the same source-owned environment identity as the quality receipt validator.
+
+        A calibration run is pinned here and re-read later by ``speculation_quality``; two nearly
+        identical package lists would make valid local evidence impossible to revalidate (or, worse,
+        omit a broken direct dependency from one side).  The shared helper is metadata-only and never
+        touches the network.
+        """
+        from looplab.search.speculation_quality import speculation_environment_fingerprint
+        return speculation_environment_fingerprint()
 
     def _dirty_inputs(self, wf: "dict | None") -> list:
         """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST

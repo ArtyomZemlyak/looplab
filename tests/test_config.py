@@ -4,6 +4,8 @@ masked snapshot on resume.
 Regressions from the code-review rounds (round 5 config lower bounds; audit C1 resume settings)."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from looplab.core.config import Settings
@@ -68,6 +70,11 @@ def test_settings_roundtrip_through_snapshot():
     s = Settings()
     s.require_approval, s.trust_mode, s.confirm_seeds = True, "untrusted", 4
     snap = s.masked_snapshot()
+    # The persisted/runtime-scope snapshot is strict JSON-domain, not a Python-mode dump.  Tuple
+    # schema fields must already be arrays before json.dumps or digest canonicalization sees them.
+    assert snap["inline_repair_reasons"] == ["crash", "timeout", "oom"]
+    assert isinstance(snap["inline_repair_reasons"], list)
+    json.dumps(snap, allow_nan=False)
     snap.pop("llm_api_key", None)
     s2 = Settings(**snap)
     assert s2.require_approval is True and s2.trust_mode == "untrusted" and s2.confirm_seeds == 4

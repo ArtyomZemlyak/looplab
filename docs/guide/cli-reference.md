@@ -158,7 +158,9 @@ dropped. Seven comparison/selection fields (`card_driven_selection`, `speculatio
 `holdout_select`, `select_verifier`, `select_verifier_samples`, `verifier_ci_tie`) are then restored
 from the folded `run_started` record;
 `trust_gate_changed` owns later trust-gate edits. Those event-pinned semantics win over a stale or hand-edited
-snapshot.
+snapshot. A positive-depth run additionally pins the exact quality-receipt digest; resume fails closed if
+the configured receipt is absent, stale, bound to different raw evidence/hardware/code, or has a different
+digest.
 
 ---
 
@@ -226,6 +228,38 @@ reproducibility check — it has no side effects.
 ```bash
 looplab replay RUN_DIR
 ```
+
+## `speculation-gate`
+
+Build the mandatory local rollout receipt for positive-depth Card speculation. Supply alternating
+depth-0 baseline and positive-depth treatment directories: exactly three pairs, in fixed seed order
+`0`, `1`, `2` (six directories total). All six runs use the same `max_nodes`; every treatment uses the
+same positive depth. Evidence runs must be created in fresh directories by the source-owned offline
+calibration protocol (`looplab run ... --no-genesis --speculation-gate-calibration`). Within each pair
+the task bytes and non-placement configuration are exact; between pairs only the integer Toy-task seed
+changes. Every run must finish its complete node budget through the effective `CUDA_VISIBLE_DEVICES`
+GPU inventory, and every evaluated artifact must create a real CUDA context and allocate/free 4096
+bytes through the CUDA Driver API before reporting its objective metric.
+The fixed v1 checks cover the exact 15-case scorer-fidelity suite, normalized regret, speculation
+hit/divergence rates and non-vacuous trusted concept coverage. A failing gate never writes a receipt.
+
+```bash
+looplab speculation-gate \
+  runs/seed0-depth0 runs/seed0-depth1 \
+  runs/seed1-depth0 runs/seed1-depth1 \
+  runs/seed2-depth0 runs/seed2-depth1 \
+  --output "$PWD/.looplab/speculation-quality.receipt.json"
+```
+
+Use the exact absolute path printed by the command as `speculation_gate_receipt`, together with
+`card_driven_selection=true`, the receipt's exact admitted `speculation_depth`, and its exact
+`admitted_max_nodes`. The printed receipt also exposes `calibration_seeds`, `runtime_scope_sha256`,
+the implementation/environment/profile digests, and seven stable GPU fields (`index`, UUID, PCI bus,
+name, total memory, display-driver version and CUDA-driver version). It admits only the measured Greedy
+policy, deterministic quadratic Toy-task profile and exact tested runtime envelope; it is not authority
+for other policies, workloads, task profiles, depths, budgets or settings. Validation re-reads the raw
+evidence and binds the current implementation, environment and effective GPU identity, so retain every
+referenced run directory and regenerate the receipt after any material code/environment change.
 
 ## `timings`
 

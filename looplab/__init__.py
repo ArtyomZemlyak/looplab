@@ -189,6 +189,7 @@ _LAYOUT = {
     "run_tools": "tools",
     "machine_runs_tools": "tools",
     "sandbox": "runtime",
+    "scorer_fidelity": "search",
     "schemas": "serve",
     "scope_report": "serve",
     "scope_sources": "serve",
@@ -200,6 +201,8 @@ _LAYOUT = {
     "signal_delivery": "engine",   # §1 signal-delivery registry (docs/14-agent-framework-mega-review)
     "skills": "tools",
     "speculation": "engine",  # durable speculative Card build queue and worker contracts
+    "speculation_calibration": "search",
+    "speculation_quality": "search",
     "source_identity": "trust",   # provenance/source-identity checks among the trust monitors
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)

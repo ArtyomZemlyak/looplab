@@ -499,14 +499,18 @@ def effective_card_footprint(
         return out
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 0:
         raise ValueError("gpu_count must be a non-negative integer or None")
-    if "gpus" in out:
+    if "gpus" in out and (gpu_count > 0 or out["gpus"] == 0):
+        # Match scheduler admission on a GPU-less host: an explicit positive declaration remains
+        # unavailable instead of being silently rewritten into a CPU-only action. A genuine zero pin
+        # is still authoritative and may clear inherited GPU-memory demand above.
         out["gpus"] = min(out["gpus"], gpu_count)
     required = out.get("gpus", 1 if gpu_count else 0)
     if required == 0:
         out.pop("gpu_mem_mib", None)
         return out
     memory = tuple(gpu_memory_mib or ())
-    if (isinstance(out.get("gpu_mem_mib"), int)
+    if (gpu_count > 0
+            and isinstance(out.get("gpu_mem_mib"), int)
             and len(memory) == gpu_count
             and all(type(value) is int and value >= 0 for value in memory)):
         envelope = sorted(memory, reverse=True)[min(required, gpu_count) - 1]
@@ -1468,6 +1472,26 @@ class RunState(BaseModel):
     # Layer 5 producer/evaluator overlap treatment pinned by run_started. Hidden from the public
     # RunState dump so legacy/default-zero logs remain byte-identical at the API/golden boundary.
     speculation_depth: int = Field(default=0, ge=0, le=64, exclude=True)
+    # Exact local quality-gate receipt used to admit a positive depth.  Replay keeps the evidence
+    # identity separate from the mutable config path; an old positive-depth row without this marker
+    # remains readable but is not resumable through the guarded runtime path.
+    speculation_gate_receipt_digest: str = Field(default="", exclude=True)
+    # Complete source-owned Settings/runtime envelope (including max_nodes, excluding only the
+    # treatment depth, receipt placement and output path).  This prevents a valid quality receipt
+    # from being replayed under a cheaper/different runtime profile.
+    speculation_runtime_scope_sha256: str = Field(default="", exclude=True)
+    # Exact shipped runtime that produced a calibration/positive-depth trajectory.  The quality gate
+    # rejects evidence without this run-start pin, preventing old run directories from being relabelled
+    # with the digest of later code.
+    speculation_implementation_digest: str = Field(default="", exclude=True)
+    # Restricted bootstrap evidence is a separate authority envelope, never a fake quality receipt.
+    # All fields are run-start pins and hidden from the legacy/public projection.
+    speculation_calibration_profile_digest: str = Field(default="", exclude=True)
+    speculation_calibration_gpu_inventory: list[dict] = Field(default_factory=list, exclude=True)
+    speculation_calibration_seed: Optional[int] = Field(default=None, exclude=True)
+    # The v1 scorer/evidence envelope is intentionally Greedy-only.  A later broader policy rollout
+    # needs its own source-owned scorer matrix and a new receipt scope.
+    speculation_policy_scope: str = Field(default="", exclude=True)
     # D1 holdout-gated promotion (folded from run_started; False for old logs -> byte-identical
     # legacy selection). When True, best-selection prefers the holdout metric among the nodes
     # that carry one (the val-top-k re-scored on the unseen partition at finish).
@@ -1721,6 +1745,11 @@ class RunState(BaseModel):
     # not a public board payload; old logs therefore keep the exact serialized RunState shape.
     card_build_requests: list[dict] = Field(default_factory=list, exclude=True)
     card_builds_done: int = Field(default=0, exclude=True)
+    # One normalized outcome for every replay-accepted positional Card-build completion.  The
+    # quality gate needs the complete denominator: looking only at ``speculative_nodes`` would hide
+    # pre-commit stale/producer failures and could turn 99 misses + 1 hit into a reported 100% hit
+    # rate.  Hidden like the request queue so the public/legacy RunState projection is unchanged.
+    card_build_outcomes: list[str] = Field(default_factory=list, exclude=True)
     # Only replay-accepted exact-head give-ups enter this hidden set-like list. Runtime scheduling must
     # never infer serial fallback from raw/orphan ``card_build_done`` rows that fold deliberately rejects.
     card_build_producer_failed: list[str] = Field(default_factory=list, exclude=True)

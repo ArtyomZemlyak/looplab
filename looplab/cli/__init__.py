@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import copy
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -26,8 +27,12 @@ from looplab import __version__
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
 from looplab.engine.options import EngineOptions
-from looplab.engine.orchestrator import Engine
+from looplab.engine.orchestrator import (
+    Engine,
+    SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+)
 from looplab.search.policy import make_policy
+from looplab.search.speculation_calibration import speculation_runtime_scope_digest
 from looplab.runtime.sandbox import make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
 from looplab.tools.vectorstore import make_embedder as _make_embedder
@@ -209,13 +214,49 @@ def _engine_singleton(run_dir: Path):
         f.close()
 
 
+def _apply_speculation_calibration_profile(settings: Settings) -> None:
+    """Force the source-owned offline measurement profile before any role/client is built."""
+    for field, value in SPECULATION_CALIBRATION_PROFILE_SETTINGS.items():
+        if field not in settings.__class__.model_fields:
+            raise RuntimeError(f"calibration profile references unknown Settings field {field!r}")
+        setattr(settings, field, copy.deepcopy(value))
+
+
+def _make_calibration_roles(task: TaskAdapter, settings: Settings, run_dir: Path):
+    researcher, developer = make_roles(task, settings, run_dir)
+    # These flags are deliberately not Settings/env/UI knobs.  Engine validates their exact concrete
+    # role types and values, including every pair returned by role_factory.
+    setattr(researcher, "calibration_concepts", True)
+    setattr(developer, "calibration_gpu_probe", True)
+    return researcher, developer
+
+
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
-            crash_after: Optional[int]) -> Engine:
+            crash_after: Optional[int], *, speculation_gate_calibration: bool = False) -> Engine:
     from looplab.core.tracing import set_llm_capture
+    narrow_speculation_runtime = bool(
+        speculation_gate_calibration or settings.speculation_gate_receipt)
+    if narrow_speculation_runtime:
+        # A public receipt authorizes only the offline source-owned profile that produced it. The
+        # helper intentionally preserves max_nodes, treatment depth and receipt placement.
+        _apply_speculation_calibration_profile(settings)
+    if settings.speculation_gate_receipt:
+        # Snapshots must retain the receipt's launch identity even when a later resume starts from a
+        # different cwd. Engine repeats the normalization for direct library callers.
+        settings.speculation_gate_receipt = str(
+            Path(settings.speculation_gate_receipt).expanduser().resolve())
     # Capture LLM prompts/completions into spans (UI per-node trace) unless disabled. Diagnostics
     # only; never read by replay.fold. Honors LOOPLAB_TRACE_LLM_IO via Settings.
     set_llm_capture(settings.trace_llm_io)
-    researcher, developer = make_roles(task, settings, run_dir)
+    # The runtime-scope primitive is intentionally bounded to the calibration/public-receipt lane
+    # (`max_nodes <= 64`).  Ordinary CLI runs may use the product's much larger node budgets and must
+    # never cross this rollout-only validator.
+    runtime_scope_sha256 = (
+        speculation_runtime_scope_digest(settings.masked_snapshot())
+        if narrow_speculation_runtime else None
+    )
+    role_builder = (_make_calibration_roles if narrow_speculation_runtime else make_roles)
+    researcher, developer = role_builder(task, settings, run_dir)
     # Agentic-foresight tools: run-introspection (own experiments) + data facts, so the ranker can
     # PULL actual results before deciding. None when foresight_agentic is off -> the one-shot ranker.
     _ftools = None
@@ -336,6 +377,12 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            operator_bandit=settings.operator_bandit),
         options=EngineOptions.from_settings(settings),
         crash_after=crash_after,
+        # Maintainer-only bootstrap path for producing the paired evidence that the public positive
+        # speculation path requires.  The CLI admits this flag only for a fresh, bounded offline
+        # quadratic run with a real GPU requirement; Engine keeps the seam private so Settings,
+        # snapshots, environment variables and the Web UI cannot turn it on accidentally.
+        _speculation_gate_calibration=speculation_gate_calibration,
+        _speculation_runtime_scope_sha256=runtime_scope_sha256,
         onboarder=onboarder,
         strategist=strategist,
         deep_researcher=deep_researcher,
@@ -344,7 +391,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # Variant-1 parallel BUILD: a factory of FRESH wired (researcher, developer) pairs so
         # `parallel_build>1` can research+code several independent seeds concurrently without clobbering
         # role state. None-safe: make_roles rebuilds the same wiring; unused when parallel_build == 1.
-        role_factory=(lambda: make_roles(task, settings, run_dir)),
+        role_factory=(lambda: role_builder(task, settings, run_dir)),
         proxy_scorer=proxy_scorer,
         embedder=_make_embedder(settings),
         # Memora synergy: harmonic recall over the cross-run lessons tier (same abstractor Memora

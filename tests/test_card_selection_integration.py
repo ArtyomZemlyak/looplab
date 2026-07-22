@@ -4,20 +4,69 @@ from __future__ import annotations
 from pathlib import Path
 
 import anyio
+import pytest
 
 import looplab.engine.orchestrator as orchestrator_module
+import looplab.search.speculation_quality as speculation_quality
 from looplab.adapters.toytask import ToyTask
+from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.core.config import Settings
 from looplab.core.models import Idea, RunState
-from looplab.engine.orchestrator import Engine
+from looplab.engine.options import EngineOptions
+from looplab.engine.orchestrator import (
+    Engine,
+    SPECULATION_CALIBRATION_PROFILE_DIGEST,
+    SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+)
 from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_ADDED, EV_CARD_DROPPED, EV_NODE_BUILDING, EV_NODE_CREATED
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.card_selection import META_CARD_ID
 from looplab.search.policy import EvolutionaryPolicy, GreedyTree
+from looplab.search.speculation_calibration import (
+    SPECULATION_CALIBRATION_SEEDS,
+    speculation_runtime_scope_digest,
+)
 
 
-ROOT = Path(__file__).resolve().parents[1]
-TASK_FILE = ROOT / "examples" / "toy_task.json"
+@pytest.fixture(autouse=True)
+def _admit_unit_speculation_receipt(monkeypatch):
+    """Exercise positive-depth mechanics through the public receipt seam."""
+    task = ToyTask()
+
+    def _validated(path):
+        max_nodes, depth = map(int, Path(path).stem.rsplit("-", 2)[-2:])
+        runtime_scope = speculation_runtime_scope_digest({
+            **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+            "max_nodes": max_nodes,
+            "speculation_depth": depth,
+            "speculation_gate_receipt": str(path),
+        })
+        return {
+            "self_digest": "sha256:" + "a" * 64,
+            "implementation_digest": "sha256:" + "b" * 64,
+            "require_gpu": True,
+            "gpu_inventory": [{
+                "index": 0,
+                "uuid": "GPU-11111111-2222-3333-4444-555555555555",
+                "pci_bus_id": "00000000:01:00.0",
+                "name": "unit-gpu",
+                "mem_total_mib": 24_576,
+                "driver_version": "595.79",
+                "cuda_driver_version": 13000,
+            }],
+            "policy_scope": "greedy",
+            "admitted_depth": depth,
+            "admitted_max_nodes": max_nodes,
+            "runtime_scope_sha256": runtime_scope,
+            "calibration_profile_digest": SPECULATION_CALIBRATION_PROFILE_DIGEST,
+            "calibration_seeds": list(SPECULATION_CALIBRATION_SEEDS),
+            "workload_scope": "quadratic_toy",
+            "task_profile_sha256": speculation_quality.speculation_task_profile_digest(task),
+        }
+
+    monkeypatch.setattr(
+        speculation_quality, "validated_speculation_gate_receipt", _validated)
 
 
 class _NoResearcher:
@@ -40,34 +89,82 @@ class _CaptureDeveloper:
 
 def _engine(run_dir, *, unified=False, agent_drives=False, policy=None, max_nodes=4,
             card_driven=True, speculation_depth=0) -> Engine:
-    task = ToyTask.load(TASK_FILE)
+    task = ToyTask()
     researcher = _NoResearcher()
     developer = _CaptureDeveloper()
-    engine = Engine(
-        run_dir,
-        task=task,
-        researcher=researcher,
-        developer=developer,
-        sandbox=SubprocessSandbox(),
-        policy=policy or GreedyTree(n_seeds=0, max_nodes=max_nodes, debug_depth=0),
-        n_seeds=0,
-        max_nodes=max_nodes,
-        unified_agent=unified,
-        agent_drives_actions=agent_drives,
-        card_driven_selection=card_driven,
-        speculation_depth=speculation_depth,
-    )
+    if card_driven and speculation_depth > 0:
+        receipt_path = str(
+            Path(run_dir)
+            / f"unit-speculation-receipt-{max_nodes}-{speculation_depth}"
+        )
+        settings = Settings(**{
+            **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+            "max_nodes": max_nodes,
+            "speculation_depth": speculation_depth,
+            "speculation_gate_receipt": receipt_path,
+        })
+
+        def calibrated_roles():
+            return (
+                ToyResearcher(
+                    task.bounds,
+                    seed=task.seed,
+                    step=task.step,
+                    calibration_concepts=True,
+                ),
+                ToyObjectiveDeveloper(noise=0.0, calibration_gpu_probe=True),
+            )
+
+        engine = Engine(
+            run_dir,
+            task=task,
+            researcher=calibrated_roles()[0],
+            developer=calibrated_roles()[1],
+            sandbox=SubprocessSandbox(),
+            policy=GreedyTree(n_seeds=3, max_nodes=max_nodes, debug_depth=1),
+            options=EngineOptions.from_settings(settings),
+            role_factory=calibrated_roles,
+            _speculation_runtime_scope_sha256=speculation_runtime_scope_digest(
+                settings.masked_snapshot()),
+        )
+        engine.researcher = researcher
+        engine.developer = developer
+        engine.role_factory = None
+        engine.policy = policy or GreedyTree(
+            n_seeds=0, max_nodes=max_nodes, debug_depth=0)
+    else:
+        engine = Engine(
+            run_dir,
+            task=task,
+            researcher=researcher,
+            developer=developer,
+            sandbox=SubprocessSandbox(),
+            policy=policy or GreedyTree(n_seeds=0, max_nodes=max_nodes, debug_depth=0),
+            n_seeds=0,
+            max_nodes=max_nodes,
+            unified_agent=unified,
+            agent_drives_actions=agent_drives,
+            card_driven_selection=card_driven,
+            speculation_depth=speculation_depth,
+        )
     engine._novelty_mode = "off"
     return engine
 
 
-def _start(engine: Engine) -> None:
+def _start(
+    engine: Engine,
+    *,
+    card_driven_selection: bool | None = None,
+) -> None:
     payload = {
-        "run_id": "l3", "task_id": "toy", "goal": "g", "direction": "min",
-        "card_driven_selection": True,
+        "run_id": engine.run_dir.name,
+        "task_id": "toy",
+        "goal": "g",
+        "direction": "min",
+        **engine._run_start_pinned_values(),
     }
-    if engine.speculation_depth:
-        payload["speculation_depth"] = engine.speculation_depth
+    if card_driven_selection is not None:
+        payload["card_driven_selection"] = card_driven_selection
     engine.store.append("run_started", payload)
 
 
@@ -113,6 +210,31 @@ def test_both_selector_flags_give_card_authority_precedence(tmp_path, monkeypatc
         "state": state, "policy": engine.policy,
         "max_nodes": engine.policy.max_nodes, "scoring": treatment,
     }
+
+
+def test_positive_speculation_depth_is_inert_when_card_selector_is_off(
+    tmp_path, monkeypatch,
+):
+    engine = _engine(
+        tmp_path / "depth-without-card-mode",
+        card_driven=False,
+        speculation_depth=3,
+    )
+    state = RunState()
+    observed = {}
+
+    async def _serial(evals, selected_state, max_es):
+        observed.update(evals=evals, state=selected_state, max_es=max_es)
+
+    monkeypatch.setattr(engine, "_dispatch_evals", _serial)
+
+    assert engine._speculation_enabled() is False
+    anyio.run(engine._run_card_session, ["sentinel"], state, 12.5)
+    assert observed == {"evals": ["sentinel"], "state": state, "max_es": 12.5}
+    assert not [
+        event for event in engine.store.read_all()
+        if event.type in {"card_build_requested", "card_build_done"}
+    ]
 
 
 def test_atomic_claim_reuses_card_without_reregister_or_researcher_call(tmp_path):
@@ -307,7 +429,7 @@ def test_population_lane_claims_complete_card_batch_before_first_build(tmp_path)
 
 def test_resume_restores_card_mode_before_reapplying_recorded_scoring(tmp_path):
     engine = _engine(tmp_path / "resume-scoring", card_driven=False)
-    _start(engine)
+    _start(engine, card_driven_selection=True)
     treatment = {"stance": "explore", "novelty_weight": 0.8, "coverage_weight": 0.2}
     engine.store.append("strategy_decision", {
         "strategy": {"card_scoring": treatment, "source": "rule"},
