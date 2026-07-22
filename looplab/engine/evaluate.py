@@ -318,11 +318,11 @@ class EvaluateMixin:
                                 self.store.append(EV_NODE_FAILED, {
                                     "node_id": node_id, "generation": generation,
                                     "error": str(exc)[:400], "reason": "gpu_unpinnable",
-                                    # CODEX AGENT: the normal path adds this attempt's elapsed time only
-                                    # after the task group exits below; this early return records the old
-                                    # accumulator and loses the current Docker/runtime probe + setup cost.
-                                    # Add `(time.time() - _t0)` here so immutable budget accounting is complete.
-                                    "eval_seconds": total_eval})
+                                    # Add THIS attempt's elapsed (`time.time() - _t0`) — the normal path
+                                    # accumulates it only after the task group exits (line 330), which this
+                                    # early return skips, so recording the bare accumulator would drop the
+                                    # Docker/runtime probe + setup cost from the immutable eval budget.
+                                    "eval_seconds": round(total_eval + (time.time() - _t0), 3)})
                                 self._maybe_crash()
                         return
                     cancel.set()                  # eval finished on its own …

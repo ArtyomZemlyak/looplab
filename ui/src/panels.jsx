@@ -1591,6 +1591,13 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
   const cardsByIdRef = useRef(cardsById)
   cardsByIdRef.current = cardsById
   useEffect(() => {
+    // Prune sentEditRef for cards no longer on the board: the ref outlives the optimistic override
+    // (needed so a chained extend edit can baseline against the prior in-flight submission), so without
+    // this it accumulates one entry per distinct id ever edited AND a recreated same id would inherit a
+    // vanished card's last submission as a stale edit baseline. Bound it to live cards.
+    for (const id of Object.keys(sentEditRef.current)) {
+      if (!cardsByIdRef.current.has(id)) delete sentEditRef.current[id]
+    }
     setOptim(current => {
       let changed = false
       const next = { ...current }
@@ -1618,11 +1625,13 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
     })
   }, [state.cards])
   const visibleCards = cards.map(card => _cardWithOptimisticControls(card, optim[card.id]))
-  // A 'confirmation-unknown' pending (a lost/uncertain submission) can NEVER self-clear — the fold never
-  // reflects an intent that may not have landed — so it must not count toward the board-wide lock, or one
-  // uncertain command would freeze the controls on EVERY Card until reload. The real concurrency guard is
-  // `inFlight` (released in the finally), and the stuck Card still shows its own 'waiting for the live
-  // fold' notice via its own pending. Only genuinely-progressing pendings gate the rest of the board.
+  // A 'confirmation-unknown' pending (a lost/uncertain submission) MAY never self-clear: if the intent
+  // never actually landed, the fold never reflects it and the reconcile effect above never drops it (if
+  // it DID land, that effect clears it normally). Because it can hang indefinitely, it must not count
+  // toward the board-wide lock, or one uncertain command would freeze the controls on EVERY Card until
+  // reload. The real concurrency guard is `inFlight` (released in the finally), and the stuck Card still
+  // shows its own 'waiting for the live fold' notice via its own pending. Only genuinely-progressing
+  // pendings gate the rest of the board.
   const globalPending = Object.values(optim).some(
     entry => isRecord(entry?.pending) && entry.pending.phase !== 'confirmation-unknown')
   const cardControl = async (card, kind, data, patch) => {

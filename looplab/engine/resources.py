@@ -344,14 +344,15 @@ class ResourceSchedulingMixin:
         # refuse launch; a test-locked divergent helper is evidence to repair the contract, not to inherit it.
         if not reservation or (not reservation.get("cpu_only") and not reservation.get("gpu_ids")):
             return dict(base) if base is not None else None
-        # SECURITY: `inherit_host` shovels the host environment into the eval env so a pinned/CPU
-        # reservation can override CUDA_VISIBLE_DEVICES. But the host env holds LLM_API_KEY / cloud
-        # creds, and this dict is treated as the TRUSTED explicit-env channel by BOTH sandbox tiers:
-        # `run_argv` overlays it on top of its own secret-filtered base (re-adding the secrets it just
-        # stripped), and the untrusted Docker tier forwards every key verbatim via `-e`. So filter the
-        # inherited host names by SECRET_ENV here — the same guard `run_argv` applies to os.environ —
-        # before they reach candidate code. `base` (LOOPLAB_EVAL_SEED, etc.) is the engine's own
-        # explicit env and is kept as-is; CUDA_VISIBLE_DEVICES is set below regardless.
+        # SECURITY (source-side strip): `inherit_host` shovels the host environment into the eval env so
+        # a pinned/CPU reservation can override CUDA_VISIBLE_DEVICES. But the host env holds LLM_API_KEY /
+        # cloud creds, and `run_argv` (subprocess tier) overlays this dict on top of its own
+        # secret-filtered base — re-adding the secrets it just stripped — so we MUST filter here or the
+        # subprocess tier leaks. Filter the inherited host names by SECRET_ENV, the same guard `run_argv`
+        # applies to os.environ. The untrusted Docker tier ALSO strips secrets independently at its `-e`
+        # choke point (`docker_gpu_env`), so this is defense-in-depth for that tier, not its sole guard.
+        # `base` (LOOPLAB_EVAL_SEED, etc.) is the engine's own explicit env, kept as-is;
+        # CUDA_VISIBLE_DEVICES is set below regardless.
         host = ({k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
                 if inherit_host else {})
         env = {**host, **(base or {})}

@@ -1195,6 +1195,14 @@ def _counterfactual_owned_selection_state(
         return None
     requested = (card_id, node_id)
     pairs = [requested]
+    # Ids folded INTO a canonical Card (the merge receipt). A sibling whose Card row is absent is proven
+    # to have been merged away only if its id is here; an absent id NOT in this set is a corrupt/partial
+    # ownership chain and must fail closed rather than be silently skipped (see the sibling loop below).
+    merged_alias_ids = {
+        alias for card in state.cards.values()
+        for alias in (getattr(card, "aliases", None) or [])
+        if isinstance(alias, str) and alias
+    }
     for sibling_id, sibling in sorted(state.nodes.items()):
         if (
             sibling_id == node_id
@@ -1226,19 +1234,22 @@ def _counterfactual_owned_selection_state(
         # will itself be terminalized by the freshness gate on its own turn. Including it here would make
         # `_counterfactual_owned_card_state` return None and fail the WHOLE counterfactual closed —
         # spuriously superseding a HEALTHY sibling in the same speculative population (the L6-drop /
-        # card_merged x L5a-speculation interaction). Skip it so only genuinely-owned pairs are reopened.
-        # Test `status == "dropped"` (the canonical folded closed state, matching orchestrator's
-        # projection check), NOT `dropped_reason`: a card_dropped event carrying an empty/missing reason
-        # folds to status="dropped" with dropped_reason=None (replay: `dropped_reason = reason or None`),
-        # so a reason-keyed check would let a reason-less drop slip through and reintroduce the bug.
+        # card_merged x L5a-speculation interaction). Skip only PROVEN-dead siblings so the fail-closed
+        # contract still bites on a corrupt chain:
+        #  - present + status=="dropped": the canonical folded closed state (match orchestrator's
+        #    projection check), NOT `dropped_reason` — a reason-less card_dropped folds to
+        #    status="dropped" with dropped_reason=None (`dropped_reason = reason or None`), so a
+        #    reason-keyed check would let it slip through and reintroduce the bug;
+        #  - present + merged_into set, OR absent but its id is in `merged_alias_ids` (folded INTO a
+        #    canonical): a proven merge receipt.
+        # An ABSENT id that is NOT a known merge alias is a corrupt/partial ownership chain — do NOT skip
+        # it; let it enter `pairs` so the counterfactual fails closed rather than proceeding on an
+        # unproven common population.
         sibling_card = state.cards.get(sibling_card_id)
-        # CODEX AGENT: `None` is not proof that this sibling was administratively merged away; it is
-        # also the observable state for a corrupt/partial ownership chain whose speculative marker names
-        # a Card that never existed. Silently skipping both cases contradicts the fail-closed contract
-        # above and lets the healthy subject proceed with an unproven common population. Verify an exact
-        # merge/alias receipt before skipping a missing Card; otherwise reject the counterfactual.
-        if (sibling_card is None or sibling_card.status == "dropped"
-                or sibling_card.merged_into is not None):
+        if sibling_card is not None:
+            if sibling_card.status == "dropped" or sibling_card.merged_into is not None:
+                continue
+        elif sibling_card_id in merged_alias_ids:
             continue
         pairs.append((sibling_card_id, sibling_id))
 

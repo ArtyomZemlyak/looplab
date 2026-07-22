@@ -1607,7 +1607,8 @@ class RunState(BaseModel):
     # emission gate is idempotent on resume. See search/coverage.py.
     coverage_snapshots: list[dict] = Field(default_factory=list)
     # PART IV Phase 2a: concept-graph coverage + uncovered-region snapshots (the "0 coverage in {X}"
-    # pivot signal) recorded at the strategist cadence when `concept_pivot` is on. The folded field
+    # pivot signal) recorded at the `concept_retag_every` cadence (via `_should_consult_concepts`, not
+    # `strategist_every`) when `concept_pivot` is on. The folded field
     # does not directly select a winner, but the live Researcher cue can change future candidates.
     # Each entry carries `at_node` so the emission gate is idempotent on resume.
     # Additive/reader-defaulted: empty on old logs -> byte-identical fold. See search/concept_graph.py.

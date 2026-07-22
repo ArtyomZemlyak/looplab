@@ -393,24 +393,34 @@ def test_consumed_speculative_sibling_stays_masked_from_next_prefetch_population
 
 @pytest.mark.parametrize(
     "terminal_exclusion",
-    ["aborted", "tombstoned", "dropped", "dropped_no_reason", "merged"])
+    ["aborted", "tombstoned", "dropped", "dropped_no_reason", "merged", "merged_absent"])
 def test_terminally_excluded_speculative_sibling_does_not_poison_common_population(
     terminal_exclusion,
 ):
     subject = _owned(_ready_card("subject", concepts=("subject",)), 2)
     excluded = _owned(_ready_card("excluded", concepts=("excluded",)), 3)
+    rank_one = _ready_card("rank-one", concepts=("new",))
     # A sibling whose CARD is administratively dead (operator-dropped or merged) must NOT poison the
     # subject's freshness counterfactual — it is terminalized by the gate on its own turn. The node
     # itself stays pending in these cases (only the Card carries the closure). `dropped_no_reason` is the
     # regression guard for the reachable folded state a card_dropped event with an empty/missing reason
     # produces (status="dropped" but dropped_reason=None): a reason-keyed skip would miss it, so the gate
-    # must key on status. `merged` exercises the defensive merged_into disjunct on a hand-built state.
+    # must key on status. `merged` exercises the present-with-merged_into disjunct; `merged_absent` is the
+    # PRODUCTION merged shape (the alias row is collapsed OUT of state.cards but its id is in a canonical
+    # Card's `aliases`) — the skip must fire on that proven merge receipt.
+    cards = {"subject": subject, "excluded": excluded, "rank-one": rank_one}
     if terminal_exclusion == "dropped":
-        excluded = excluded.model_copy(update={"status": "dropped", "dropped_reason": "operator dropped"})
+        cards["excluded"] = excluded.model_copy(
+            update={"status": "dropped", "dropped_reason": "operator dropped"})
     elif terminal_exclusion == "dropped_no_reason":
-        excluded = excluded.model_copy(update={"status": "dropped", "dropped_reason": None})
+        cards["excluded"] = excluded.model_copy(update={"status": "dropped", "dropped_reason": None})
     elif terminal_exclusion == "merged":
-        excluded = excluded.model_copy(update={"merged_into": "subject"})
+        cards["excluded"] = excluded.model_copy(update={"merged_into": "subject"})
+    elif terminal_exclusion == "merged_absent":
+        del cards["excluded"]                                   # collapsed out of state.cards
+        # merge receipt: "excluded" folded INTO a canonical Card (which is therefore not selection_ready)
+        cards["canonical"] = _ready_card("canonical", concepts=("new",)).model_copy(
+            update={"selection_ready": False, "aliases": ["excluded"]})
     subject_node = _node(
         2, parents=(0,), operator="improve", status=NodeStatus.pending,
         metric=None, card_id="subject",
@@ -426,11 +436,7 @@ def test_terminally_excluded_speculative_sibling_does_not_poison_common_populati
     state = RunState(
         nodes={0: _node(0, metric=0.9), 2: subject_node, 3: excluded_node},
         best_node_id=0,
-        cards={
-            "subject": subject,
-            "excluded": excluded,
-            "rank-one": _ready_card("rank-one", concepts=("new",)),
-        },
+        cards=cards,
         aborted_nodes={3} if terminal_exclusion == "aborted" else set(),
         speculative_nodes={
             2: {"card_id": "subject", "generation": 7},
@@ -444,6 +450,37 @@ def test_terminally_excluded_speculative_sibling_does_not_poison_common_populati
         excluded_card_ids={"subject", "excluded"},
         ignored_pending_node_ids={2, 3},
     ) is True
+
+
+def test_corrupt_absent_speculative_sibling_fails_the_counterfactual_closed():
+    """A sibling whose speculative marker names a Card that is ABSENT and is NOT a known merge alias is a
+    corrupt/partial ownership chain — the freshness counterfactual must fail CLOSED (subject not fresh)
+    rather than silently skip it and proceed on an unproven common population."""
+    subject = _owned(_ready_card("subject", concepts=("subject",)), 2)
+    subject_node = _node(
+        2, parents=(0,), operator="improve", status=NodeStatus.pending,
+        metric=None, card_id="subject",
+    ).model_copy(update={"speculative": True, "card_build_generation": 7})
+    corrupt_node = _node(
+        3, parents=(0,), operator="improve", status=NodeStatus.pending,
+        metric=None, card_id="ghost",
+    ).model_copy(update={"speculative": True, "card_build_generation": 8})
+    state = RunState(
+        nodes={0: _node(0, metric=0.9), 2: subject_node, 3: corrupt_node},
+        best_node_id=0,
+        cards={"subject": subject, "rank-one": _ready_card("rank-one", concepts=("new",))},
+        speculative_nodes={
+            2: {"card_id": "subject", "generation": 7},
+            3: {"card_id": "ghost", "generation": 8},        # names a Card that never existed
+        },
+    )
+
+    assert speculative_card_is_fresh(
+        state, _PopulationPolicy(), 5,
+        card_id="subject", node_id=2,
+        excluded_card_ids={"subject", "ghost"},
+        ignored_pending_node_ids={2, 3},
+    ) is False
 
 
 def test_include_owned_keeps_exact_parent_generation_fence():

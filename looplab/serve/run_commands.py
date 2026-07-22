@@ -437,9 +437,10 @@ def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
         # detect_gpus() is process-cached — fine for the static identity/count, but its mem_free_mib is
         # frozen at server start, so as the current admission envelope it would accept a pin after memory
         # was consumed (or reject one after it was freed). Take the count/identity from the cache but
-        # source the FREE-memory envelope from a fresh, UNCACHED nvidia-smi query at admission time. This
-        # is a serve control path (not a fold path) and resource pins are rare operator actions, so the
-        # extra subprocess query is acceptable; it fails soft to an empty map (count-safe) when absent.
+        # source the FREE-memory envelope ONLY from a fresh, UNCACHED nvidia-smi query at admission time.
+        # This is a serve control path (not a fold path) and resource pins are rare operator actions, so
+        # the extra subprocess query is acceptable; when the live query is absent/partial we degrade that
+        # device (or the whole join) to COUNT-ONLY rather than fall back to stale server-start telemetry.
         rows = detect_gpus()
     except Exception:  # noqa: BLE001 - validation remains count-safe when inventory is unavailable
         rows = []
@@ -456,12 +457,11 @@ def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
         if not isinstance(row, dict) or type(row.get("index")) is not int:
             continue
         idx = row["index"]
-        # Prefer the live free value; fall back to the cached one only when the live query lacks this id.
-        # CODEX AGENT: that fallback restores the original stale-admission bug exactly when the live
-        # authority is unavailable or partial. A cached startup `memory.free` is not a conservative
-        # ceiling: it can exceed today's free memory and accept an unsafe pin. Degrade this device (or
-        # the whole join) to count-only instead of presenting old telemetry as a current envelope.
-        free = live_free.get(idx, row.get("mem_free_mib"))
+        # Live free VRAM only — no fallback to the cached startup `memory.free`. That cached value is not
+        # a conservative ceiling (it can exceed today's free memory and accept an unsafe pin), so a device
+        # the live probe cannot see is left out of memory_by_id and degrades to count-only below, rather
+        # than being admitted against stale server-start telemetry.
+        free = live_free.get(idx)
         if type(free) is int and free >= 0:
             memory_by_id[idx] = free
     if tokens is not None:
@@ -2535,15 +2535,14 @@ class RunCommandService:
                     f"the Card target {card_id!r} no longer exists in this run generation",
                     "refresh the Card board before submitting another operator control",
                 )
-            # Terminal Cards are closed to further operator MUTATION. The React client hides these
-            # controls, but a stale client / direct API caller must not append edit/reprioritize/pin
-            # history onto an already dropped or merged Card (a self-contradictory board row plus a
-            # mutate-after-drop sequence in the append-only log). EV_CARD_DROPPED is deliberately
-            # EXCLUDED: idempotent re-drop and an operator overriding an engine drop reason stay valid.
-            # CODEX AGENT: a re-drop is not idempotent when `reason` differs: replay explicitly applies
-            # the last card_dropped row and overwrites dropped_reason/dropped_by. Thus a direct client can
-            # still mutate terminal history through the excluded event. Reject a second operator drop,
-            # or model reason/author override as its own revision-fenced command instead of calling it idempotent.
+            # Terminal Cards are closed to further operator MUTATION OF THEIR WORK (edit / reprioritize /
+            # resource-pin). The React client hides these controls, but a stale client / direct API caller
+            # must not append edit/reprioritize/pin history onto an already dropped or merged Card (a
+            # self-contradictory board row plus a mutate-after-drop sequence in the append-only log).
+            # EV_CARD_DROPPED is deliberately EXCLUDED so an operator keeps authority over the DROP itself
+            # on a terminal Card: a re-drop with the SAME reason is a no-op, and overriding an engine-set
+            # drop reason/author is an intentional operator-wins affordance — replay applies the LAST
+            # card_dropped row, so this is a bounded reason/author revision, NOT byte-idempotence.
             if event_type in {EV_CARD_EDITED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED} and (
                     getattr(card, "status", None) == "dropped"
                     or getattr(card, "merged_into", None) is not None):
@@ -2665,13 +2664,12 @@ class RunCommandService:
         """
         store = EventStore(self._events_path(rd))
         baseline = -1
-        # The GPU free-memory envelope is hardware state, invariant across the CAS loop's log-race
-        # refolds — compute it ONCE (only for a resource pin, its sole consumer) rather than re-spawning
-        # the uncached nvidia-smi query on every retry.
-        # CODEX AGENT: free VRAM is precisely the part of hardware state that is NOT invariant while
-        # this loop retries; another process can allocate/free memory between the probe and the eventual
-        # successful tail CAS. Hoist only static count/identity, then refresh the dynamic memory envelope
-        # for the attempt that actually appends (or stop describing this as append-time/live admission).
+        # Capture the GPU free-memory envelope ONCE at admission (only for a resource pin, its sole
+        # consumer) rather than re-spawning the uncached nvidia-smi query on every CAS retry: the bounded
+        # loop below retries only for LOG races (concurrent event appends, which do not change GPU memory)
+        # and its retry window is milliseconds. This is a point-in-time snapshot, NOT a live per-attempt
+        # reading — another process can still allocate/free VRAM between this probe and the tail append;
+        # the pin is advisory and the reservation path re-clamps against real capacity when it runs.
         envelope = (_card_resource_envelope()
                     if record.get("event_type") == EV_CARD_RESOURCE_PINNED else None)
         for _ in range(8):

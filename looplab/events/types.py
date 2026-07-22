@@ -85,7 +85,8 @@ EV_DIVERSITY_ARCHIVE = "diversity_archive"
 # See looplab/search/coverage.py.
 EV_COVERAGE_SNAPSHOT = "coverage_snapshot"
 # PART IV D5/D7 (§21.11/§21.8, Phase 2a): concept-graph coverage + uncovered-region snapshot recorded
-# at the strategist cadence when `concept_pivot` is on. The fold handler is selection-neutral, while
+# at the `concept_retag_every` cadence (via `_should_consult_concepts`, not `strategist_every`) when
+# `concept_pivot` is on. The fold handler is selection-neutral, while
 # the live "0 coverage in {X} — go there" directive can steer future candidate generation; folded
 # (at_node gate) exactly like coverage_snapshot.
 # Produced ONCE per cadence (agentic build when a reflect client is wired -> universal, any task, derived
