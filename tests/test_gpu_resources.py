@@ -527,6 +527,32 @@ def test_docker_unspecified_and_cpu_legacy_requests_need_no_gpu_runtime(monkeypa
     assert result.metric == 1.0
 
 
+def test_resource_eval_env_inherit_host_strips_secret_named_vars(monkeypatch):
+    """SECURITY: _resource_eval_env(inherit_host=True) is the TRUSTED explicit-env channel that both
+    sandbox tiers forward verbatim — run_argv overlays it on top of its own secret-filtered base
+    (re-adding secrets), and the Docker tier forwards each key via -e. So the inherited host names must
+    be SECRET_ENV-filtered here, or a pinned/CPU reservation would hand LLM_API_KEY/creds to candidate
+    code. The engine's own `base` (LOOPLAB_EVAL_SEED) and CUDA_VISIBLE_DEVICES still pass."""
+    monkeypatch.setenv("LLM_API_KEY", "sk-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "creds")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
+    monkeypatch.setenv("HARMLESS_HOST_VAR", "keepme")
+    pool = _Pool(ids=(0,), physical={0: "5"})
+    reservation = pool._try_reserve_node_resources(_node(0, {"gpus": 1}))
+    env = pool._resource_eval_env(
+        reservation, base={"LOOPLAB_EVAL_SEED": "7"}, inherit_host=True)
+    assert "LLM_API_KEY" not in env and "AWS_SECRET_ACCESS_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert env.get("HARMLESS_HOST_VAR") == "keepme"        # non-secret host vars are inherited
+    assert env.get("LOOPLAB_EVAL_SEED") == "7"             # engine's explicit base is kept
+    assert env.get("CUDA_VISIBLE_DEVICES") == "5"          # physical pin still applied
+    # A CPU-only reservation with inherit_host also strips secrets and fences the device to "".
+    cpu_pool = _Pool(ids=(0,))
+    cpu = cpu_pool._resource_eval_env(
+        cpu_pool._try_reserve_node_resources(_node(0, {"gpus": 0})), inherit_host=True)
+    assert "LLM_API_KEY" not in cpu and cpu.get("CUDA_VISIBLE_DEVICES") == ""
+
+
 def test_solution_docker_sandbox_uses_same_device_remap(monkeypatch, tmp_path):
     from looplab.runtime import sandbox
 

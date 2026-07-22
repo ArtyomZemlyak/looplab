@@ -299,19 +299,23 @@ class EvaluateMixin:
                         # the batch and re-crash deterministically on every resume; the reservation is
                         # still released by the dispatcher's finally.
                         cancel.set()
-                        # CODEX AGENT: cancelling the task-group scope also cancels this host task at
-                        # its next checkpoint. The awaited write-lock acquisition below is such a
-                        # checkpoint, so the promised node_failed append can be skipped; after the
-                        # scope suppresses its own cancellation, execution may then continue with
-                        # `res` unbound. Persist the terminal under a shield before cancelling the
-                        # watcher, or give the watcher its own child scope to cancel independently.
                         _tg.cancel_scope.cancel()
-                        async with self._write_lock:
-                            self.store.append(EV_NODE_FAILED, {
-                                "node_id": node_id, "generation": generation,
-                                "error": str(exc)[:400], "reason": "gpu_unpinnable",
-                                "eval_seconds": total_eval})
-                            self._maybe_crash()
+                        # Cancelling the task-group scope cancels THIS host task at its next checkpoint,
+                        # and the write-lock acquisition below IS such a checkpoint. Without a shield the
+                        # pending CancelledError preempts the append: the promised node_failed is skipped,
+                        # the task group swallows its own scope's cancellation, and execution falls through
+                        # to `ok = (res.metric ...)` with `res` still unbound (UnboundLocalError — NO
+                        # terminal written, and a deterministic re-crash on every resume, exactly what this
+                        # handler exists to prevent). Shield the terminal so scope cancellation cannot
+                        # preempt it; the acquire is bounded (the watcher/monitor siblings only briefly
+                        # read or append under the same lock and are already being cancelled).
+                        with anyio.CancelScope(shield=True):
+                            async with self._write_lock:
+                                self.store.append(EV_NODE_FAILED, {
+                                    "node_id": node_id, "generation": generation,
+                                    "error": str(exc)[:400], "reason": "gpu_unpinnable",
+                                    "eval_seconds": total_eval})
+                                self._maybe_crash()
                         return
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)

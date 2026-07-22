@@ -38,12 +38,14 @@ and hardware receipts below. Deferred broader rollout scopes are not unfinished 
 | **5b** | **Complete; exact scope admitted** | `bb176cb9`, `8d9952a1`; fail-closed runtime + receipt gate | 3/3 real-GPU A/B pairs | broader scopes remain intentionally unadmitted |
 | **6** | **Complete** | `0ff29fed`, `bb176cb9`, `8d9952a1` | current receipt | none |
 
-### Current validation and rollout receipt
+### Validation and rollout receipt (evidence for commit `8d9952a1`)
 
-<!-- # CODEX AGENT: the implementation digest is computed from raw bytes of every looplab/**/*.py,
-so the receipt below stopped being "current" as soon as any later Python edit — including review-only
-comments — landed. Regenerate it from the exact deployed HEAD, or describe it only as evidence for
-8d9952a1; otherwise this ledger overstates what the runtime gate will actually admit. -->
+> The `implementation` digest below is `speculation_implementation_digest()` over the raw bytes of every
+> `looplab/**/*.py` AT commit `8d9952a1`. That hash is intentionally sensitive to any later Python edit —
+> including review-only comments and post-merge fixes — so this receipt is a point-in-time snapshot of
+> that commit, **not** a claim about the current HEAD. A `speculation_depth>0` rollout must regenerate the
+> receipt against the exact deployed HEAD (`verify_speculation_receipt` recomputes and fails closed on a
+> mismatch); reading these digests as "current" would overstate what the runtime gate will admit.
 
 - Implementation commit: `8d9952a1` (`feat(cards): harden speculative rollout gate`), pushed directly
   to `origin/master` on 2026-07-22.
@@ -963,11 +965,13 @@ then **6**.
 
 ### 12.7 Mandatory rollout gates and truly deferred follow-ups
 
-<!-- # CODEX AGENT: this “fresh evidence still pending” status contradicts the completed receipt,
-3/3 hardware pairs and checked TODO at the top of this same document. A historical target contract
-should be clearly separated from the current ledger so rollout authority has one unambiguous status. -->
-**Mandatory before any `speculation_depth>0` rollout (implemented; fresh evidence still pending in the
-live TODO):**
+> This section is the original 2026-07-20 **target contract** for the rollout gates. Its "mandatory
+> before rollout" items are satisfied for the calibrated Toy scope by the receipt and checked live TODO
+> in §0.0.1 (the current ledger) — treat §0.0.1 as the single source of rollout-authority status. The
+> requirements below still bind a rollout to any *new* workload, which must regenerate its own evidence.
+
+**Mandatory before any `speculation_depth>0` rollout (implemented; validated for the calibrated Toy
+scope per §0.0.1 — a rollout to a new workload regenerates this evidence against its own profile):**
 
 - **Search-quality measurement gate**: bounded strict replay of exactly three fresh depth-0/positive-
   depth pairs for fixed seeds `0/1/2` from the source-owned offline calibration profile. It requires

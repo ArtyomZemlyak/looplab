@@ -16,6 +16,7 @@ import anyio
 
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
+from looplab.runtime.sandbox import SECRET_ENV
 
 
 def detect_gpu_inventory(logical_ids: list[int]) -> tuple[dict[int, str], dict[int, int]]:
@@ -323,14 +324,25 @@ class ResourceSchedulingMixin:
     def _resource_eval_env(self, reservation: Optional[dict], *, base: Optional[dict] = None,
                            inherit_host: bool = False) -> Optional[dict]:
         """Build the child env for a reservation without changing the unpinned legacy branch."""
-        # CODEX AGENT: an explicit positive GPU request clamped to zero has cpu_only=False and
-        # gpu_ids=[], so it falls into this legacy unpinned branch. If discovery failed on a machine
-        # that actually has GPUs, the child inherits the host environment and can see every device,
-        # bypassing both the reservation pool and Docker's fail-closed pinning. Preserve an explicit
-        # "GPU required but unavailable" state instead of conflating it with unspecified legacy work.
+        # KNOWN (separate, low): a node that DECLARED gpus>0 but was clamped to zero on a host where
+        # discovery returned no ids (cpu_only=False, gpu_ids=[]) falls into this unpinned branch and, if
+        # such a host actually has GPUs (torch absent AND nvidia-smi unavailable), the child sees every
+        # device. Fencing it here would have to reconcile with the deliberately-divergent
+        # `effective_card_footprint` zero-host branch (models.py) that the freshness projection relies on
+        # and that is test-locked, so it is intentionally left to a maintainer rather than fixed inline.
         if not reservation or (not reservation.get("cpu_only") and not reservation.get("gpu_ids")):
             return dict(base) if base is not None else None
-        env = ({**os.environ, **(base or {})} if inherit_host else dict(base or {}))
+        # SECURITY: `inherit_host` shovels the host environment into the eval env so a pinned/CPU
+        # reservation can override CUDA_VISIBLE_DEVICES. But the host env holds LLM_API_KEY / cloud
+        # creds, and this dict is treated as the TRUSTED explicit-env channel by BOTH sandbox tiers:
+        # `run_argv` overlays it on top of its own secret-filtered base (re-adding the secrets it just
+        # stripped), and the untrusted Docker tier forwards every key verbatim via `-e`. So filter the
+        # inherited host names by SECRET_ENV here — the same guard `run_argv` applies to os.environ —
+        # before they reach candidate code. `base` (LOOPLAB_EVAL_SEED, etc.) is the engine's own
+        # explicit env and is kept as-is; CUDA_VISIBLE_DEVICES is set below regardless.
+        host = ({k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+                if inherit_host else {})
+        env = {**host, **(base or {})}
         env["CUDA_VISIBLE_DEVICES"] = (
             "" if reservation.get("cpu_only")
             else ",".join(self._physical_gpu_ids(reservation.get("gpu_ids"))))

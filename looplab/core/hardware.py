@@ -44,6 +44,25 @@ def detect_gpus() -> list[dict]:
     return gpus
 
 
+def gpu_free_mib_uncached() -> "dict[int, int]":
+    """Live per-GPU FREE VRAM as ``{index: mib}``, queried fresh on every call (deliberately NOT
+    process-cached like ``detect_gpus``). ``detect_gpus`` caches ``mem_free_mib`` for the process
+    lifetime — correct for the static identity/count, but WRONG for an admission envelope that must
+    reflect memory consumed or freed since the server started. Best-effort: empty dict when nvidia-smi
+    is unavailable, so a caller stays count-safe (falls back to the cached value / rejects nothing)."""
+    from looplab.core.parse import to_int
+    out: "dict[int, int]" = {}
+    try:
+        for parts in (query_nvidia_smi("index,memory.free") or []):
+            if len(parts) >= 2:
+                idx, free = to_int(parts[0]), to_int(parts[-1])
+                if type(idx) is int and type(free) is int and free >= 0:
+                    out[idx] = free
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    return out
+
+
 class _CudaDriverError(RuntimeError):
     """The CUDA Driver API was absent, incomplete, or returned a non-success code."""
 

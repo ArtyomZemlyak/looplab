@@ -64,6 +64,11 @@ _PRIOR_RUN_KEYS = {
     "run", "run_id", "metric", "best_metric", "run_best_metric", "similarity", "concepts",
     "matched_concepts", "outcomes", "matched_concept_outcomes", "source_receipt",
 }
+# The exact closed vocabulary of a matched_concept_outcome row (see `_matched_outcomes`). This is
+# NOT the steering vocabulary: guarding these rows against `_STEERING_KEYS` (which lacks every one of
+# these keys) makes every real row look lossy and falsely reports the whole card projection incomplete.
+# frozenset (not a plain set) keeps this closed wire vocabulary immutable — a future schema edit must
+# change THIS single canonical definition, not silently mutate a set the runtime happens to read.
 _MATCHED_OUTCOME_KEYS = frozenset({"concept", "outcome_retained", "outcome"})
 _CROSS_RUN_KEYS = frozenset({
     "v", "matched_concepts", "prior_runs", "prior_runs_total", "prior_runs_omitted",
@@ -78,13 +83,6 @@ _STEERING_KEYS = {
     "siblings", "level", "remaining_seconds", "total_seconds", "seconds", "mode", "node_ids",
     "file_count", "status", "novelty_stance", "fidelity",
 }
-# The exact closed vocabulary of a matched_concept_outcome row (see `_matched_outcomes`). This is
-# NOT the steering vocabulary: guarding these rows against `_STEERING_KEYS` (which lacks every one of
-# these keys) makes every real row look lossy and falsely reports the whole card projection incomplete.
-# CODEX AGENT: this second assignment shadows the frozenset declared above, so the first declaration
-# is dead and the closed wire vocabulary becomes mutable by accident. Keep one canonical definition;
-# otherwise a future schema edit can easily update the declaration that runtime never reads.
-_MATCHED_OUTCOME_KEYS = {"concept", "outcome_retained", "outcome"}
 _RECEIPT_KEYS = {
     "concept_evidence_nodes_total", "concept_evidence_nodes_incomplete", "concept_evidence_complete",
     "concepts_total", "concepts_omitted", "concepts_complete", "concept_outcomes_total",

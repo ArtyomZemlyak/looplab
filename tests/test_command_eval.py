@@ -285,6 +285,25 @@ def test_docker_wrap_forwards_env(monkeypatch):
     assert argv[i + 1] == "LOOPLAB_EVAL_SEED=7"
 
 
+def test_docker_wrap_never_forwards_secret_named_env(monkeypatch):
+    """SECURITY: the untrusted tier's -e forwarding must strip secret-named host vars (mirrors
+    sandbox.run_argv's SECRET_ENV filter). A pinned/CPU reservation's eval env carries the whole host
+    environment; without this filter `docker run -e LLM_API_KEY=...` would hand credentials to
+    adversarial candidate code (docker, unlike the subprocess tier, does not inherit — only -e reaches
+    the container)."""
+    argv = _wrap_argv(monkeypatch, env={
+        "LOOPLAB_EVAL_SEED": "7", "LLM_API_KEY": "sk-secret", "AWS_SECRET_ACCESS_KEY": "creds",
+        "GITHUB_TOKEN": "ghp_x", "DB_PASSWORD": "pw", "MY_CREDENTIAL": "c", "PATH": "/usr/bin",
+    })
+    forwarded = {argv[i + 1].split("=", 1)[0] for i, tok in enumerate(argv) if tok == "-e"}
+    assert "LOOPLAB_EVAL_SEED" in forwarded and "PATH" in forwarded   # non-secret vars still pass
+    for secret in ("LLM_API_KEY", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DB_PASSWORD",
+                   "MY_CREDENTIAL"):
+        assert secret not in forwarded, secret
+    joined = " ".join(argv)
+    assert "sk-secret" not in joined and "creds" not in joined and "ghp_x" not in joined
+
+
 def test_docker_wrap_preserves_posix_absolute_bind_path(monkeypatch, tmp_path):
     """A Windows Docker client must not prefix a Linux symlink target with its current drive."""
     import shutil

@@ -38,7 +38,7 @@ from looplab.core.concepts import (
     resolve_concept_set,
 )
 from looplab.core.atomicio import atomic_write_text
-from looplab.core.hardware import detect_gpus
+from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
     Event, Idea, IdeaEmission, durable_idea_payload, effective_card_footprint,
 )
@@ -434,20 +434,28 @@ def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
         if len(tokens) == 1 and tokens[0].lower() in {"-1", "none", "nodevfiles", "void"}:
             return 0, ()
     try:
-        # CODEX AGENT: detect_gpus() caches memory.free for the lifetime of this server process, yet
-        # this value is used as the "current" append-time admission envelope below. A long-running UI
-        # can therefore accept a pin after memory was consumed, or reject it after memory was freed;
-        # cache only static identity/capacity or perform an uncached free-memory query at admission.
+        # detect_gpus() is process-cached — fine for the static identity/count, but its mem_free_mib is
+        # frozen at server start, so as the current admission envelope it would accept a pin after memory
+        # was consumed (or reject one after it was freed). Take the count/identity from the cache but
+        # source the FREE-memory envelope from a fresh, UNCACHED nvidia-smi query at admission time. This
+        # is a serve control path (not a fold path) and resource pins are rare operator actions, so the
+        # extra subprocess query is acceptable; it fails soft to an empty map (count-safe) when absent.
         rows = detect_gpus()
     except Exception:  # noqa: BLE001 - validation remains count-safe when inventory is unavailable
         rows = []
-    memory_by_id = {
-        row.get("index"): row.get("mem_free_mib")
-        for row in rows if isinstance(row, dict)
-        and type(row.get("index")) is int
-        and type(row.get("mem_free_mib")) is int
-        and row["mem_free_mib"] >= 0
-    }
+    try:
+        live_free = gpu_free_mib_uncached()
+    except Exception:  # noqa: BLE001 - stay count-safe if the live query is unavailable
+        live_free = {}
+    memory_by_id = {}
+    for row in rows:
+        if not isinstance(row, dict) or type(row.get("index")) is not int:
+            continue
+        idx = row["index"]
+        # Prefer the live free value; fall back to the cached one only when the live query lacks this id.
+        free = live_free.get(idx, row.get("mem_free_mib"))
+        if type(free) is int and free >= 0:
+            memory_by_id[idx] = free
     if tokens is not None:
         count = len(tokens)
         if all(token.isdecimal() and int(token) in memory_by_id for token in tokens):
@@ -2514,10 +2522,20 @@ class RunCommandService:
                     f"the Card target {card_id!r} no longer exists in this run generation",
                     "refresh the Card board before submitting another operator control",
                 )
-            # CODEX AGENT: the React client hides controls for dropped/merged Cards, but this durable
-            # append-time guard checks only existence. A stale client or direct API caller can still
-            # edit, reprioritize, re-pin, or drop an already-terminal Card and append contradictory
-            # history; enforce the terminal lifecycle here, where all clients share the same contract.
+            # Terminal Cards are closed to further operator MUTATION. The React client hides these
+            # controls, but a stale client / direct API caller must not append edit/reprioritize/pin
+            # history onto an already dropped or merged Card (a self-contradictory board row plus a
+            # mutate-after-drop sequence in the append-only log). EV_CARD_DROPPED is deliberately
+            # EXCLUDED: idempotent re-drop and an operator overriding an engine drop reason stay valid.
+            if event_type in {EV_CARD_EDITED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED} and (
+                    getattr(card, "status", None) == "dropped"
+                    or getattr(card, "merged_into", None) is not None):
+                return _error(
+                    "card_lifecycle_closed",
+                    f"the Card target {card_id!r} is already dropped or merged and cannot be modified",
+                    "refresh the Card board; a terminal Card no longer accepts edits, priority or "
+                    "resource pins",
+                )
             if event_type == EV_CARD_RESOURCE_PINNED:
                 gpus = data.get("gpus")
                 memory = data.get("gpu_mem_mib")

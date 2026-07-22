@@ -25,6 +25,7 @@ from looplab.core.models import NodeStatus, RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL,
                                   EV_NODE_CONFIRMED, EV_SPEC_DRIFT)
+from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.trust.confirm import robust_selection
 from looplab.trust.cv import cv_summary
 
@@ -149,6 +150,21 @@ class ConfirmPhaseMixin:
                     res = await anyio.to_thread.run_sync(_run)
                     cancel.set()
                     tg.cancel_scope.cancel()
+            except GpuPinUnenforceable as exc:
+                # A durable resource pin the Docker daemon/runtime cannot enforce must NOT crash the
+                # run() spine (unlike the main eval, confirm has no surrounding try — it would abort the
+                # engine and re-crash on every resume, since the operator pin is durable). Terminalize
+                # THIS seed instead: record a null confirm_eval so the seed is durably accounted (resume
+                # skips it via confirm_seed_results) and the node simply fails to gain a confirmed metric.
+                # `_release_gpus` still runs in the finally below (do not double-release here).
+                still_current = self._confirmation_node_current(nd.id, generation)
+                async with self._write_lock:
+                    self.store.append(EV_CONFIRM_EVAL, {
+                        "node_id": nd.id, "generation": generation, "seed": s,
+                        "eval_seconds": round(time.time() - _t0, 3), "metric": None,
+                        "reason": "gpu_unpinnable", "error": str(exc)[:400],
+                        **({"superseded": True} if not still_current else {})})
+                return None
             finally:
                 self._release_gpus(reservation.get("gpu_ids"))
 

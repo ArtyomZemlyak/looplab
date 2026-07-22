@@ -196,6 +196,34 @@ def test_append_time_recheck_rejects_resource_pin_after_envelope_shrinks(
     assert all(event.type != EV_CARD_RESOURCE_PINNED for event in store.read_all())
 
 
+def test_terminal_card_rejects_mutation_but_allows_redrop(tmp_path):
+    """A dropped Card is closed to operator MUTATION (edit/reprioritize/pin) at the durable append-time
+    guard, so a stale client / direct API caller cannot append contradictory history onto an
+    already-terminal Card. EV_CARD_DROPPED stays allowed (idempotent re-drop / override of an engine
+    drop reason). The React client hides these controls, but the guard is the all-clients contract.
+    (A merged alias is collapsed out of state.cards, so it fails the earlier card_not_found guard; the
+    `merged_into` arm of the lifecycle check is a defensive/forward-compat backstop.)"""
+    rd, store = _seed(tmp_path)
+    store.append(EV_CARD_DROPPED,
+                 {"id": "card-1", "reason": "owner decision", "dropped_by": "operator"})
+    state = fold(store.read_all())
+    assert state.cards["card-1"].status == "dropped"
+
+    for event_type, data in (
+        (EV_CARD_EDITED, {"id": "card-1", "statement": "x", "source": "operator"}),
+        (EV_CARD_REPRIORITIZED,
+         {"id": "card-1", "priority": 3, "source": "operator", "pinned": True}),
+        (EV_CARD_RESOURCE_PINNED,
+         {"id": "card-1", "gpus": 1, "source": "operator", "pinned_by": "operator"}),
+    ):
+        error = RunCommandService._collaboration_precondition(state, event_type, data)
+        assert error is not None and error["code"] == "card_lifecycle_closed", event_type
+    # A re-drop of the already-terminal Card is deliberately NOT blocked by the lifecycle guard.
+    assert RunCommandService._collaboration_precondition(
+        state, EV_CARD_DROPPED,
+        {"id": "card-1", "reason": "again", "dropped_by": "operator"}) is None
+
+
 def test_operator_overlays_win_without_mutating_seed_or_action_footprint(tmp_path):
     _rd, store = _seed(tmp_path)
     # Controls deliberately arrive before later engine/Strategist projections. The final phase must

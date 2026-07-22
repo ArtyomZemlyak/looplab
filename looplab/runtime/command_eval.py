@@ -26,7 +26,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.sandbox import (RunResult, STALL_SENTINEL, _to_float, docker_gpu_argv,
+from looplab.runtime.sandbox import (RunResult, SECRET_ENV, STALL_SENTINEL, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_timed_out, finite_timeout, json_line_extras,
                                      json_line_metric, json_line_trials, run_argv)
 
@@ -614,8 +614,14 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         # client's environment, so without `-e` the LOOPLAB_EVAL_SEED (and any eval env) never
         # reaches the eval — every confirm seed would read the default seed and the variance gate
         # would collapse. Mirrors DockerSandbox.run's `-e` forwarding.
+        # SECURITY: this is the untrusted tier's env boundary. `docker run` does not inherit the host
+        # env, so ONLY what we forward here reaches the candidate — mirror `sandbox.run_argv`'s SECRET_ENV
+        # filter so a secret-named host var (LLM_API_KEY / cloud creds) that rode in via `env` is never
+        # handed to adversarial code through `-e`. Non-secret eval vars (LOOPLAB_EVAL_SEED, …) still pass.
         envs: list[str] = []
         for k, v in docker_gpu_env(env, gpu_args=gpu_args).items():
+            if SECRET_ENV.search(k):
+                continue
             envs += ["-e", f"{k}={v}"]
         base = ["docker", "run", "--rm", "--network", network, *rt, *gpu_args,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)

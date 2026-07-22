@@ -146,3 +146,34 @@ test('Card optimistic controls retain uncertain commands and roll back only the 
   assert.match(board, /if \(!uncertain\) delete updates\[kind\]/)
   assert.doesNotMatch(board, /feedback\.kind !== 'success'[\s\S]{0,120}(revert|delete next\[card\.id\])/)
 })
+
+test('An uncertain (confirmation-unknown) command does not freeze controls on the whole board', async () => {
+  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
+  // globalPending — which drives controlsLocked on every OTHER card — must exclude the never-clearing
+  // 'confirmation-unknown' pending, or one lost submission disables the entire board until reload.
+  assert.match(board, /const globalPending = [\s\S]*?pending\.phase !== 'confirmation-unknown'/)
+})
+
+test('Edit reflection needs the card to move off the submit-time baseline (no extend-edit false clear)', async () => {
+  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const reflected = source.slice(
+    source.indexOf('function _cardControlReflected'), source.indexOf('function _cardWithOptimisticControls'))
+  // The clipped-prefix branch must require card.statement !== baseline so a common extend edit
+  // ("foo" -> "foobar"), whose pre-value still prefix-matches, cannot read as already-landed.
+  assert.match(reflected, /card\.statement !== baseline[\s\S]*patch\.statement\.startsWith\(card\.statement\)/)
+  // The submit path captures the baseline so the reflection check has it.
+  const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
+  assert.match(board, /const editBaseline = kind === 'edit'/)
+  assert.match(board, /baselines: \{ \.\.\.\(entry\.baselines \|\| \{\}\)/)
+})
+
+test('Each Card control draft re-seeds only from its own folded source (no cross-field clobber)', async () => {
+  const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
+  const card = source.slice(source.indexOf('function _CardKanbanCard'), source.indexOf('function _CardKanban('))
+  // Four independent effects, one per field — NOT one effect that resets all drafts on any dep change.
+  assert.match(card, /useEffect\(\(\) => \{ setStatementDraft\(statement\) \}, \[card\.id, statement\]\)/)
+  assert.match(card, /setGpuDraft\([\s\S]*?\}, \[card\.id, formGpus\]\)/)
+  assert.match(card, /setMemoryDraft\([\s\S]*?\}, \[card\.id, formGpuMem\]\)/)
+  assert.doesNotMatch(card, /\[card\.id, statement, card\.priority, formGpus, formGpuMem\]/)
+})

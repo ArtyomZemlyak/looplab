@@ -1257,7 +1257,7 @@ function _sameCardResourceValues(left, right) {
   ))
 }
 
-function _cardControlReflected(card, kind, patch) {
+function _cardControlReflected(card, kind, patch, baseline) {
   if (!card || !isRecord(patch)) return false
   if (kind === 'edit') {
     // The server clips the display statement (fold cap) and may redact secrets, so the folded value is
@@ -1265,13 +1265,14 @@ function _cardControlReflected(card, kind, patch) {
     // PREFIX of the submitted text as reflected — otherwise the optimistic override (and its aria-busy
     // pending state) would never clear when the statement was clipped.
     if (typeof card.statement !== 'string' || typeof patch.statement !== 'string') return false
-    // CODEX AGENT: prefix equality is already true before the command for a common edit such as
-    // "foo" -> "foobar". Any unrelated SSE frame can therefore clear the optimistic value and
-    // waiting-for-fold fence while the edit is still unobserved, permitting a second control against
-    // stale UI truth. Bind reflection to the command/event sequence (or returned normalized value);
-    // the pre-existing statement cannot be evidence that this particular write landed.
-    return card.statement === patch.statement
-      || (card.statement.length > 0 && patch.statement.startsWith(card.statement))
+    if (card.statement === patch.statement) return true
+    // A clipped/redacted fold is a PROPER prefix of the submitted text — but so is the PRE-EDIT value for
+    // a common extend edit ("foo" -> "foobar"): matching the prefix alone would clear the override before
+    // the write is even folded, letting an unrelated SSE frame drop the waiting-for-fold fence against
+    // stale UI truth. Require the card to have actually MOVED off the submit-time baseline before a prefix
+    // counts as this write landing; without a baseline (legacy entry) only an exact match reflects.
+    return typeof baseline === 'string' && card.statement !== baseline
+      && card.statement.length > 0 && patch.statement.startsWith(card.statement)
   }
   if (kind === 'priority') return card.priority === patch.priority && card.pinned === true
   if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
@@ -1383,12 +1384,18 @@ function _CardKanbanCard({
   const ownPending = isRecord(controlState?.pending) ? controlState.pending : null
   const busy = !!ownPending || controlsLocked === true
   const terminal = _cardStatus(card) === 'dropped' || !!_cardText(card.merged_into)
+  // Re-seed each draft ONLY when its own folded source (or the card identity) changes. A single effect
+  // over every dep re-ran on ANY change, so an unrelated live fold (e.g. a card_ranked priority bump
+  // arriving while the operator is typing a new statement) reset ALL four drafts and silently discarded
+  // the in-progress edits in the other fields. Per-field effects keep each edit until its own source moves.
+  useEffect(() => { setStatementDraft(statement) }, [card.id, statement])
   useEffect(() => {
-    setStatementDraft(statement)
     setPriorityDraft(_cardInt(card.priority) == null ? '' : String(card.priority + 1))
-    setGpuDraft(formGpus == null ? '' : String(formGpus))
+  }, [card.id, card.priority])
+  useEffect(() => { setGpuDraft(formGpus == null ? '' : String(formGpus)) }, [card.id, formGpus])
+  useEffect(() => {
     setMemoryDraft(formGpuMem == null ? '' : String(formGpuMem))
-  }, [card.id, statement, card.priority, formGpus, formGpuMem])
+  }, [card.id, formGpuMem])
 
   const control = async (kind, data, patch) => {
     if (!onControl || busy) return
@@ -1573,7 +1580,8 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         if (!card) { delete next[id]; changed = true; continue }
         const updates = { ...(entry.updates || {}) }
         for (const kind of _CARD_CONTROL_KINDS) {
-          if (updates[kind] && _cardControlReflected(card, kind, updates[kind])) {
+          if (updates[kind]
+              && _cardControlReflected(card, kind, updates[kind], entry.baselines?.[kind])) {
             delete updates[kind]
             changed = true
           }
@@ -1591,7 +1599,13 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
     })
   }, [state.cards])
   const visibleCards = cards.map(card => _cardWithOptimisticControls(card, optim[card.id]))
-  const globalPending = Object.values(optim).some(entry => isRecord(entry?.pending))
+  // A 'confirmation-unknown' pending (a lost/uncertain submission) can NEVER self-clear — the fold never
+  // reflects an intent that may not have landed — so it must not count toward the board-wide lock, or one
+  // uncertain command would freeze the controls on EVERY Card until reload. The real concurrency guard is
+  // `inFlight` (released in the finally), and the stuck Card still shows its own 'waiting for the live
+  // fold' notice via its own pending. Only genuinely-progressing pendings gate the rest of the board.
+  const globalPending = Object.values(optim).some(
+    entry => isRecord(entry?.pending) && entry.pending.phase !== 'confirmation-unknown')
   const cardControl = async (card, kind, data, patch) => {
     const labels = {
       edit: { saving: 'Saving Card display text…', success: 'Card display text updated', failure: 'Could not edit Card' },
@@ -1605,11 +1619,18 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
       return { kind: 'pending', message }
     }
     inFlight.current.add(card.id)
+    // Snapshot the card's CURRENT statement so a later clipped/redacted fold of THIS edit is
+    // distinguishable from the not-yet-folded state (see `_cardControlReflected`): a landed edit moves
+    // the card off this baseline, whereas an extend edit's pre-value still prefix-matches the submission.
+    const editBaseline = kind === 'edit' && typeof card.statement === 'string'
+      ? card.statement : undefined
     setOptim(current => {
       const entry = current[card.id] || {}
       return { ...current, [card.id]: {
         ...entry,
         updates: { ...(entry.updates || {}), [kind]: patch },
+        baselines: { ...(entry.baselines || {}),
+          ...(editBaseline !== undefined ? { edit: editBaseline } : {}) },
         pending: { kind, phase: 'submitting' },
         notice: { tone: 'pending', text: labels.saving },
       } }
@@ -1637,7 +1658,9 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         // byte-equal fold would leave the card stuck showing operator text with its controls disabled.
         // Only a 'pending' (accepted, engine will apply later) settle keeps the override until the fold.
         const settled = ['error', 'success', 'noop'].includes(feedback.kind)
-        if (settled || _cardControlReflected(rawCard, kind, patch)) delete updates[kind]
+        if (settled || _cardControlReflected(rawCard, kind, patch, entry.baselines?.[kind])) {
+          delete updates[kind]
+        }
         const pending = feedback.kind === 'pending' && updates[kind]
           ? { kind, phase: 'waiting-for-fold' } : null
         const notice = feedback.kind === 'error'
