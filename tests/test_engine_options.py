@@ -52,6 +52,7 @@ ATTR_BY_FIELD = {
     "timeout": "timeout",
     "max_eval_timeout": "max_eval_timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
+    "eval_stall_timeout_s": "eval_stall_timeout_s",
     "confirm_top_k": "confirm_top_k",
     "confirm_seeds": "confirm_seeds",
     "confirm_seed_base": "confirm_seed_base",

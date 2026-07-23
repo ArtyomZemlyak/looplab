@@ -48,22 +48,25 @@ MAX_STAGE_COUNT = 16
 # released) and tree-killed early — instead of sitting until the full, often multi-hour, stage
 # deadline. Bounded generously so a legitimately slow-but-quiet phase (hard-negative mining, a large
 # FAISS build, a checkpoint save) is not falsely killed; a real deadlock still dies in ~minutes.
-# CODEX AGENT: this always-on kill has no reachable override — no engine caller passes
-# run_command_eval(stall_timeout=...) and validate_stages accepts no per-stage stall key, so a
-# healthy stage that is legitimately quiet on the pipes for >30 min (non-Python train wrapper with
-# block-buffered stdout, a repo script logging only to its own file — PYTHONUNBUFFERED helps Python
-# children only) is tree-killed and the node fails with no way to opt out. Wire the existing
-# stall_timeout seam through a Settings field or an optional per-stage manifest key (validated in
-# validate_stages) and document it in configuration.md.
+# The DEFAULT stall cap (30 min). It is now OPERATOR-OVERRIDABLE: the engine threads
+# `Settings.eval_stall_timeout_s` in as `run_command_eval(stall_cap=...)`, so a legitimately quiet
+# stage (non-Python train wrapper with block-buffered stdout, a repo script logging only to its own
+# file — PYTHONUNBUFFERED helps Python children only) can raise the cap or set it to 0 to disable the
+# watchdog. Surfaced to the Developer (agents/roles.py) so its code emits periodic progress to stay alive.
 _MAX_STALL_S = 1800.0
 
 
-def _stall_window(timeout: float) -> Optional[float]:
-    """Silence-before-kill for a stage, capped at `_MAX_STALL_S` and never longer than the stage's own
-    deadline (for a short scorer the deadline fires first, so the stall check is a harmless no-op)."""
+def _stall_window(timeout: float, cap: Optional[float] = None) -> Optional[float]:
+    """Silence-before-kill for a stage, capped at `cap` (default `_MAX_STALL_S`) and never longer than
+    the stage's own deadline (for a short scorer the deadline fires first, so the stall check is a
+    harmless no-op). A `cap` of 0/None DISABLES the watchdog (only the hard deadline bounds the stage)."""
     if not timeout or timeout <= 0:
         return None
-    return min(_MAX_STALL_S, float(timeout))
+    if cap is None:
+        cap = _MAX_STALL_S
+    if cap <= 0:                    # operator opt-out: no silence-based kill, only the hard deadline
+        return None
+    return min(float(cap), float(timeout))
 
 
 def safe_stage_name(name: str) -> bool:
@@ -667,6 +670,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      stages: Optional[list] = None,
                      start_stage: Optional[str] = None,
                      stall_timeout: Optional[float] = None,
+                     stall_cap: Optional[float] = None,
                      check_fn=None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
@@ -790,7 +794,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 rc, out, err, to = run_argv(
                     _w(_bound(_scmd, _sto), str(wd)), wd, _sto + grace, env, max_output_bytes, cancel,
                     log_path=_log(f"{_sname}.log"), health_check=True,
-                    stall_timeout=(stall_timeout if stall_timeout is not None else _stall_window(_sto)))
+                    stall_timeout=(stall_timeout if stall_timeout is not None
+                                   else _stall_window(_sto, stall_cap)))
                 to = to or (is_docker and docker_timed_out(rc))
                 if _sh is not None:
                     _sh.set_many(exit_code=rc, timed_out=to, stage=_sname)
@@ -837,7 +842,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             rc, out, err, to = run_argv(
                 _w(_bound(command, timeout), str(wd)), wd, timeout + grace, env, max_output_bytes, cancel,
                 log_path=_log("eval.log"),
-                stall_timeout=(stall_timeout if stall_timeout is not None else _stall_window(timeout)))
+                stall_timeout=(stall_timeout if stall_timeout is not None
+                               else _stall_window(timeout, stall_cap)))
             to = to or (is_docker and docker_timed_out(rc))   # 124 (SIGTERM) or 137 (SIGKILL escalation)
             if _h is not None:
                 _h.set_many(exit_code=rc, timed_out=to)

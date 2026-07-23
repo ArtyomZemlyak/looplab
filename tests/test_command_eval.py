@@ -10,10 +10,38 @@ import sys
 
 import pytest
 
-from looplab.runtime.command_eval import (_drift, _fmt, cap_gpu_flags, read_metric,
-                                           run_command_eval)
+from looplab.runtime.command_eval import (_MAX_STALL_S, _drift, _fmt, _stall_window,
+                                           cap_gpu_flags, read_metric, run_command_eval)
 
 _M = {"kind": "stdout_json", "key": "metric"}
+
+
+def test_stall_window_respects_the_configurable_cap():
+    # #6: the silence-before-kill window is min(cap, the stage's own deadline); cap defaults to
+    # _MAX_STALL_S, and 0/None-cap DISABLES the watchdog. Never longer than the stage deadline.
+    assert _stall_window(3600.0) == _MAX_STALL_S              # default cap (1800) clamps a long stage
+    assert _stall_window(3600.0, 600.0) == 600.0             # a smaller operator cap wins
+    assert _stall_window(120.0, 3600.0) == 120.0             # the stage's own deadline still bounds it
+    assert _stall_window(3600.0, 0) is None                  # cap 0 => watchdog OFF (opt-out)
+    assert _stall_window(0, 1800.0) is None                  # no/❭0 stage deadline => no stall window
+
+
+def test_stall_cap_zero_disables_the_watchdog_while_a_small_cap_still_kills(tmp_path):
+    # A permanently-silent script under a short deadline: a small stall_cap tree-kills it early (stalled),
+    # while stall_cap=0 lets it run to the hard DEADLINE instead (timed_out, not stalled) — proving the
+    # operator opt-out threads all the way to the subprocess watchdog.
+    (tmp_path / "p.py").write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    import time as _t
+
+    t0 = _t.time()
+    killed = run_command_eval([sys.executable, "p.py"], str(tmp_path), 8, _M, stall_cap=2)
+    assert _t.time() - t0 < 7                                 # stall-killed at ~2s, not the 8s deadline
+    assert killed.stalled is True and killed.timed_out is False
+
+    t1 = _t.time()
+    deadlined = run_command_eval([sys.executable, "p.py"], str(tmp_path), 4, _M, stall_cap=0)
+    assert _t.time() - t1 >= 3                                # NOT stall-killed early: ran to the 4s deadline
+    assert deadlined.timed_out is True and deadlined.stalled is False
 
 
 # --- GPU-pin reconciliation: cap a hardcoded multi-GPU request to one device when pinned ----------

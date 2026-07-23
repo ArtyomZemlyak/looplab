@@ -190,6 +190,7 @@ class EvalDispatchMixin:
                 stages=stages,                                # multi-stage pipeline (Phase 1); None = single command
                 start_stage=((node.rerun_stage if node is not None else None)
                              if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
+                stall_cap=self.eval_stall_timeout_s,          # #6: operator-set silence-before-kill cap (0 = off)
                 check_fn=check_fn)                            # Phase 3: optional inter-stage agentic verify
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the

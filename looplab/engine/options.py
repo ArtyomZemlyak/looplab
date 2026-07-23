@@ -69,6 +69,7 @@ class EngineOptions:
     # a bare Engine and EngineOptions.from_settings(Settings()) must enforce the same finite ceiling.
     max_eval_timeout: float = 3600.0
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
+    eval_stall_timeout_s: float = 1800.0  # #6: silence-before-kill CAP for an eval stage; 0 disables
     confirm_top_k: int = 0
     confirm_seeds: int = 0
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint

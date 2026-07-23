@@ -345,6 +345,14 @@ class Settings(BaseSettings):
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).
     sweep_timeout_mult: float = Field(default=8.0, ge=1)
+    # Eval STALL watchdog CAP (seconds): a stage that is completely SILENT on stdout/stderr for this
+    # long — while still alive and BELOW its wall-clock deadline — is tree-killed early with a STALLED
+    # marker (a hung dataloader/deadlock dies in minutes instead of burning a multi-hour timeout). The
+    # per-stage window is `min(this, the stage's own timeout)`, so a short scorer's deadline fires first.
+    # `0` DISABLES the watchdog entirely (only the hard deadline applies) — for a legitimately quiet
+    # non-Python stage (block-buffered stdout, a script that logs only to its own file). Threaded into
+    # the eval and surfaced to the Developer so its code can emit periodic progress to stay alive.
+    eval_stall_timeout_s: float = Field(default=1800.0, ge=0)
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
     # "hostile" (untrusted + a true-isolation OCI runtime, gVisor `runsc` by default / Kata) for

@@ -541,6 +541,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         asha_live_min_siblings = _opt("asha_live_min_siblings")
         timeout = _opt("timeout")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
+        eval_stall_timeout_s = _opt("eval_stall_timeout_s")
         confirm_top_k = _opt("confirm_top_k")
         confirm_seeds = _opt("confirm_seeds")
         confirm_seed_base = _opt("confirm_seed_base")
@@ -1095,6 +1096,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._eval_gpu_reservations: dict[tuple[int, int], dict] = {}
         self.timeout = timeout
         self.max_eval_timeout = _opt("max_eval_timeout")
+        # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
+        # Developer so its code can emit periodic progress to avoid a false silence-kill.
+        self.eval_stall_timeout_s = float(eval_stall_timeout_s)
         self._train_monitor = bool(train_monitor)
         self._train_monitor_interval_s = train_monitor_interval_s
         self._train_monitor_kill = bool(train_monitor_kill)

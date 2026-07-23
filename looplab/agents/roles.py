@@ -154,7 +154,13 @@ _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced
                      # the env var only in the confirm/holdout phases.
                      "Seed ALL randomness (train/validation splits, CV folds, model init, "
                      "subsampling) from int(os.environ.get('LOOPLAB_EVAL_SEED', '0')) so every "
-                     "evaluation is reproducible and comparable across candidates. ")
+                     "evaluation is reproducible and comparable across candidates. "
+                     # #6: the eval has a STALL watchdog — a stage silent on the pipes for too long
+                     # (block-buffered output, a slow-but-quiet loop) is tree-killed before its deadline.
+                     "A stage that prints NOTHING to stdout/stderr for a long stretch may be killed early "
+                     "as a STALL, so PRINT PERIODIC PROGRESS for any long loop — one flushed line per "
+                     "epoch/step (e.g. `print(f'epoch {i} loss={loss}', flush=True)`) — to stay visibly "
+                     "alive; a fully silent multi-minute phase risks a false kill. ")
 
 
 def _developer_footprint_guidance(idea: Idea) -> str:

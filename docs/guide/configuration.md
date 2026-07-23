@@ -62,7 +62,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **156 of the 186 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **156 of the 187 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 18 high-frequency keys; search spans all 156 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
@@ -140,6 +140,7 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) |
 | `max_eval_timeout` | `LOOPLAB_MAX_EVAL_TIMEOUT` | `3600.0` | Hard ceiling for a Researcher-authored per-node `eval_timeout`, applied after the `agent_control.timeout` permission gate. The run-wide `timeout` remains the fallback when no permitted override is supplied. The one-hour default admits existing heavy-model requests while remaining below the sandbox's defensive 24-hour subprocess ceiling. |
 | `sweep_timeout_mult` | `LOOPLAB_SWEEP_TIMEOUT_MULT` | `8.0` | A sweep node (a grid in one process) gets this × `timeout` |
+| `eval_stall_timeout_s` | `LOOPLAB_EVAL_STALL_TIMEOUT_S` | `1800.0` | STALL watchdog cap (seconds): a stage that is completely SILENT on stdout/stderr for this long — while still alive and below its wall-clock deadline — is tree-killed early with a STALLED marker (a hung dataloader/deadlock dies in minutes instead of burning a multi-hour timeout). The per-stage window is `min(this, the stage's own timeout)`. Set to `0` to DISABLE the watchdog (only the hard deadline applies) — for a legitimately quiet non-Python stage (block-buffered stdout, a script logging only to its own file). Threaded into the eval and surfaced to the Developer so its code emits periodic progress to stay alive |
 | `n_seeds` | `LOOPLAB_N_SEEDS` | `3` | Seeds per evaluation / rung-0 width |
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
 | `max_eval_seconds` | `LOOPLAB_MAX_EVAL_SECONDS` | — | Hard ceiling on cumulative time *inside* evals (survives resume) |
