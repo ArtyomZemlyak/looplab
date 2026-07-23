@@ -253,11 +253,17 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
         _live_rung = _resource_rung(sample.resource)
         value = _curve_metric_at(getattr(node, "resource_curve", None), sample.resource)
         if value is None:
-            for obj in _json_objects_newest_first(getattr(node, "stdout_tail", "") or ""):
+            # EARLIEST-in-band on the fallback TOO (consistent with the curve's start-of-band checkpoint):
+            # scan chronologically (oldest-first) and take the FIRST in-band match. Newest-first + break
+            # would take the END-of-band value, re-introducing on this path the exact ~2× more-trained
+            # comparison the curve's earliest-per-band choice removes, and mixing start/end-of-band values
+            # in one comparable population (peer review).
+            for obj in reversed(list(_json_objects_newest_first(getattr(node, "stdout_tail", "") or ""))):
                 if _resource_rung(obj.get(sample.resource_key)) != _live_rung:
                     continue
-                value = _finite_number(obj.get(metric_key))
-                if value is not None:
+                _v = _finite_number(obj.get(metric_key))
+                if _v is not None:
+                    value = _v
                     break
         if value is not None:
             out.append(value)

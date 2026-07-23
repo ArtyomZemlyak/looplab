@@ -209,6 +209,22 @@ def test_earliest_per_band_does_not_false_flag_a_node_just_into_a_band():
     assert asha_underperforming(1 / 65, pop, "min", quantile=0.5) is False
 
 
+def test_sibling_tail_fallback_uses_earliest_in_band_not_latest():
+    # Peer review: the stdout_tail fallback (no persisted curve) must ALSO take the EARLIEST in-band
+    # coordinate, consistent with the curve's start-of-band checkpoint — not the LATEST (end-of-band),
+    # which would re-introduce the ~2× more-trained comparison on the fallback path and mix start/end-of-
+    # band values in one comparable population.
+    state = _fake_state(
+        [0.5, 0.5, 0.5],
+        tails=['{"loss": 0.20, "step": 64}\n{"loss": 0.12, "step": 90}\n{"loss": 0.10, "step": 100}\n'] * 3,
+    )
+    # no resource_curve on the siblings (default None) -> the fallback tail scan is used
+    spec = {"kind": "stdout_json", "key": "loss", "resource_key": "step"}
+    sample = IntermediateSample(value=0.19, resource_key="step", resource=65.0)     # step 65 -> rung 64
+    pop = sibling_metrics_at_resource(state, 0, spec, sample)
+    assert pop == [0.20, 0.20, 0.20]           # start-of-band step 64, NOT end-of-band step 100 (0.10)
+
+
 def test_extract_resource_curve_survives_a_huge_integer_coordinate():
     # Peer review: a solution printing a 400-digit-int step overflowed float() inside
     # extract_resource_curve (called in _evaluate's write lock), aborting the node terminal. A pathological
