@@ -63,12 +63,16 @@ def test_d7_expand_operator_is_yield_tracked_and_counts_as_improve_family():
 def test_d7_capability_expansion_due_helper():
     """D7 gate: due only when the latest concept snapshot's lock-in streak >= threshold; self-resets."""
     from looplab.search.lock_in import capability_expansion_due
+    # A live snapshot must carry the node-count boundary the producer stamps (`at_node`), else the shared
+    # `latest_live_snapshot` reader fails it closed (a snapshot whose boundary can't be verified must not
+    # steer — it could be an ancient row revived by the reverse scan). st has 0 nodes, so at_node == 0.
     st = RunState()
-    st.concept_coverage_snapshots = [{"current_streak": 6, "recent_axis": "loss/decoupled-contrastive"}]
+    st.concept_coverage_snapshots = [
+        {"at_node": 0, "current_streak": 6, "recent_axis": "loss/decoupled-contrastive"}]
     assert capability_expansion_due(st, streak_threshold=5) == (True, "loss/decoupled-contrastive", 6)
-    st.concept_coverage_snapshots = [{"current_streak": 2, "recent_axis": "loss/x"}]
+    st.concept_coverage_snapshots = [{"at_node": 0, "current_streak": 2, "recent_axis": "loss/x"}]
     assert capability_expansion_due(st, streak_threshold=5)[0] is False        # streak too short
-    st.concept_coverage_snapshots = [{"current_streak": 9}]                    # no axis
+    st.concept_coverage_snapshots = [{"at_node": 0, "current_streak": 9}]      # no axis
     assert capability_expansion_due(st, streak_threshold=5)[0] is False
     assert capability_expansion_due(RunState(), streak_threshold=5) == (False, None, 0)   # no snapshot
 
