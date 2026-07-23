@@ -702,14 +702,15 @@ def board_dedup(
     #   recorded cache covers the board -> use it (tags=None -> dedup_analysis reads hypothesis_concepts);
     #   otherwise + a client -> tag the board LIVE agentically against the agent-built graph;
     #   else                 -> tag_text heuristic.
-    # 1 card = 1 hypothesis: tag the single Card board. `seed_statement` is the immutable belief text;
-    # card.id == the old hypothesis id for a research card, so the `hypothesis_concepts` cache still joins.
+    # 1 card = 1 hypothesis: tag the single Card board. Read the DISPLAY `statement` (== the old
+    # Hypothesis.statement, including a merged card's consolidated wording); card.id == the old hypothesis
+    # id for a research card, so the `hypothesis_concepts` cache still joins.
     hyps = list(state.research_cards())
     cache = getattr(state, "hypothesis_concepts", None) or {}
     board_cached = any(h.id in cache for h in hyps)     # cache covers at least one CURRENT-board card
     tags, label = None, "heuristic"
     if offline:
-        tags = {h.id: tag_text(h.seed_statement, m["graph"], allow_plural=True) for h in hyps}
+        tags = {h.id: tag_text(h.statement, m["graph"], allow_plural=True) for h in hyps}
         label = "heuristic (--offline)"
     elif board_cached:
         label = "recorded/agentic"                      # dedup_analysis reads the cache (per-item fallback)
@@ -721,7 +722,7 @@ def board_dedup(
         except Exception as e:  # noqa: BLE001 — no endpoint => heuristic tags, noted
             typer.echo(f"(no LLM endpoint: {e}; using the heuristic hypothesis tagger)")
         if client is not None:
-            tags = {h.id: tag_text_llm(h.seed_statement, m["graph"], client, allow_plural=True) for h in hyps}
+            tags = {h.id: tag_text_llm(h.statement, m["graph"], client, allow_plural=True) for h in hyps}
             label = "live-agentic"
     typer.echo(dedup_report(state, m["graph"], tags=tags))
     typer.echo(f"\n  (concept graph built by: {m['mode']}; hypothesis tags: {label})")

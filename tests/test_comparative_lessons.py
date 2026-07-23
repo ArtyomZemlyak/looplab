@@ -601,3 +601,30 @@ def test_lessons_are_llm_only_no_templates_and_consolidate(tmp_path, monkeypatch
     # the reflect prompt was FED the hypotheses+outcomes so it could consolidate them
     prompt = "\n".join(fake.prompts)
     assert "Hypotheses tested" in prompt and "VERBATIM_TEMP_A" in prompt
+
+
+def test_lessons_summary_feeds_the_merged_display_statement_not_the_raw_seed(tmp_path, monkeypatch):
+    # 1 card = 1 hypothesis regression guard: when the board consolidated paraphrases, the fold rewrites
+    # a merged card's DISPLAY `statement` to the clean agent-merged text while `seed_statement` stays the
+    # raw first-member seed. The run-end lessons summary (like the old hypothesis board's h.statement)
+    # must feed the merged `statement`, NOT the raw seed — else consolidation is undone in the prompt.
+    from looplab.core.models import Card
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(tmp_path / "mem"),
+                  comparative_lessons=False)
+    st = _state([
+        _node(0, metric=9.0, op="draft", params={"x": 1.0}),
+        _node(1, metric=4.0, parent_ids=[0], params={"x": 3.0}),
+    ])
+    st.best_node_id = 1
+    st.cards = {
+        "m1": Card(id="m1", verdict="supported", status="proposed", best_delta=0.02, evidence=[1],
+                   seed_statement="RAWSEED first messy run-on member wording",       # the immutable join key
+                   statement="MERGEDBELIEF a sharper temperature ~0.01 improves recall"),  # merged display
+    }
+    fake = FakeClient("[GOOD] lower the contrastive temperature")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: fake)
+    eng._write_reflection_note(st)
+
+    prompt = "\n".join(fake.prompts)
+    assert "MERGEDBELIEF" in prompt                            # the consolidated display statement is fed
+    assert "RAWSEED" not in prompt                             # never the raw first-member seed

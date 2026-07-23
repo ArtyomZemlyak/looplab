@@ -47,9 +47,10 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
       false_merge_risks- [{a, b, similarity}] lexically/vector-similar but concept-DISJOINT pairs (keep-distinct)
       false_merge_count- len(false_merge_risks)
     """
-    # 1 card = 1 hypothesis: analyse the single Card board. `seed_statement` is the immutable belief
-    # text, and card.id == the old hypothesis id for a research card, so the `hypothesis_concepts` cache
-    # keyed by that id still joins. Native work-item cards (no hypothesis twin) now analyse too.
+    # 1 card = 1 hypothesis: analyse the single Card board. Read the DISPLAY `statement` (== the old
+    # Hypothesis.statement, including a merged card's consolidated wording); card.id == the old hypothesis
+    # id for a research card, so the `hypothesis_concepts` cache keyed by that id still joins. Native
+    # work-item cards (no hypothesis twin) now analyse too.
     hyps = list(state.research_cards())
     n = len(hyps)
     if n == 0:
@@ -63,7 +64,7 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
         # at the cadence). No cache -> the deterministic alias tagger, exactly as before.
         cache = getattr(state, "hypothesis_concepts", None) or {}
         tags = {h.id: (frozenset(cache[h.id]) if h.id in cache
-                       else tag_text(h.seed_statement, graph, allow_plural=True)) for h in hyps}
+                       else tag_text(h.statement, graph, allow_plural=True)) for h in hyps}
 
     # within-concept clusters (a hypothesis with several concepts appears in each) — the merge groups
     by_concept: dict[str, list[str]] = defaultdict(list)
@@ -92,21 +93,21 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
     risks: list[dict] = []
     try:
         from looplab.search.hybrid_merge import HybridRetriever
-        statements = [h.seed_statement for h in hyps]
+        statements = [h.statement for h in hyps]
         retr = HybridRetriever(statements, embed=embed)
         seen: set[tuple[int, int]] = set()
         # Collect EVERY disjoint-concept candidate pair (bounded: k=5 candidates × n hypotheses), then
         # sort by similarity and cap — truncating during collection would keep the first-DISCOVERED pairs
         # (ascending hypothesis index), not the highest-similarity ones the report is meant to surface.
         for i, h in enumerate(hyps):
-            for j, score in retr.candidates(h.seed_statement, k=5, exclude=i, min_signals=min_signals):
+            for j, score in retr.candidates(h.statement, k=5, exclude=i, min_signals=min_signals):
                 pair = (min(i, j), max(i, j))
                 if pair in seen:
                     continue
                 seen.add(pair)
                 ci, cj = tags.get(hyps[i].id, frozenset()), tags.get(hyps[j].id, frozenset())
                 if ci and cj and not (ci & cj):     # similar text, disjoint concepts -> keep distinct
-                    risks.append({"a": hyps[i].seed_statement, "b": hyps[j].seed_statement,
+                    risks.append({"a": hyps[i].statement, "b": hyps[j].statement,
                                   "similarity": round(score, 4)})
     except Exception:  # noqa: BLE001 — the retriever is optional; the concept analysis stands alone
         pass

@@ -146,14 +146,17 @@ class LessonDistillMixin:
         sk_dir = base / "skills"
         skills: list[str] = []
         # 1 card = 1 hypothesis: distil skills from the single Card board. `verdict` is the research
-        # status (byte-identical to the old Hypothesis.status via `_evidence_verdict`); `seed_statement`
-        # is the immutable belief text (the stable skill identity, unaffected by an operator display edit).
+        # status (byte-identical to the old Hypothesis.status via `_evidence_verdict`). Use the DISPLAY
+        # `statement`, not `seed_statement`: for a MERGED card the fold rewrites `statement` to the
+        # agent-consolidated text (replay.py `merged_stmt`) exactly as the old Hypothesis.statement did,
+        # while `seed_statement` stays the raw first-member seed — so `statement` is the behaviour-equal
+        # belief text here. The `h.statement` guard mirrors the fold's old empty-statement skip.
         for h in final.research_cards():
-            if h.verdict == "supported" and (h.best_delta or 0) > 0:
+            if h.verdict == "supported" and (h.best_delta or 0) > 0 and h.statement:
                 ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
-                write_auto_skill(sk_dir, h.seed_statement,
+                write_auto_skill(sk_dir, h.statement,
                                  self._e._distill_skill_body(final, h, ev), fp, final.task_id)
-                skills.append(h.seed_statement)
+                skills.append(h.statement)
 
         # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
         # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
@@ -237,11 +240,12 @@ class LessonDistillMixin:
         # CONSOLIDATE many trials of the SAME theme (e.g. every temperature experiment) into ONE lesson,
         # instead of the old one-verbatim-hypothesis-per-lesson dump that filled the store with near-dupes.
         # 1 card = 1 hypothesis: consolidate over the single Card board. `verdict` == the old
-        # Hypothesis.status (RESOLVED lanes only); `seed_statement` is the immutable belief text.
+        # Hypothesis.status (RESOLVED lanes only); the DISPLAY `statement` is the behaviour-equal belief
+        # text (it carries a merged card's consolidated wording, matching the old Hypothesis.statement).
         hyps = [f"[{h.verdict}{f' Δ{h.best_delta:+.4g}' if isinstance(h.best_delta, (int, float)) else ''}] "
-                f"{' '.join((h.seed_statement or '').split())[:160]}"
+                f"{' '.join((h.statement or '').split())[:160]}"
                 for h in final.research_cards()
-                if h.verdict in ("supported", "tested", "abandoned") and h.seed_statement]
+                if h.verdict in ("supported", "tested", "abandoned") and h.statement]
         prompt = ("Distil reusable LESSONS from a finished ML experiment run, to guide FUTURE runs on "
                   f"SIMILAR tasks.\nTask: {final.goal}\nWhat worked (best first):\n" + "\n".join(rows) +
                   ("\nWhat failed:\n" + "\n".join(fails) if fails else "") +
@@ -291,10 +295,10 @@ class LessonDistillMixin:
                         key=lambda n: (n.metric if n.metric is not None else -1e18), default=None)
         if client is None or code_node is None or not code_node.code:
             return base
-        # 1 card = 1 hypothesis: prefer the immutable `seed_statement` (matches the skill title the
-        # caller writes) so an operator display edit can't drift the technique belief; fall back to
-        # `statement` for any legacy caller that still passes a bare hypothesis-shaped object.
-        belief = getattr(h, "seed_statement", "") or getattr(h, "statement", "")
+        # 1 card = 1 hypothesis: the technique belief is the DISPLAY `statement` (== the skill title the
+        # caller writes, and == the old Hypothesis.statement including the merged-card consolidated text);
+        # fall back to `seed_statement` for any legacy caller that passes a bare hypothesis-shaped object.
+        belief = getattr(h, "statement", "") or getattr(h, "seed_statement", "")
         prompt = (f"A technique that worked: {belief}\n\nThe winning solution's code:\n"
                   f"```\n{code_node.code[:4000]}\n```\n\n"
                   "Write a SHORT, REUSABLE skill card for THIS technique — not the whole script. Include:\n"
