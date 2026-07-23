@@ -179,6 +179,27 @@ class AppState:
         # change publish counts that do not describe the actual mapping in this SSE/state frame.
         card_fragment = public_cards_projection(st.cards).model_dump(mode="json")
         d.update(card_fragment)
+        # DEPRECATED read-only `hypotheses` compat projection (peer review): the derived hypothesis board
+        # was removed from RunState (1 card = 1 hypothesis), but docs/23 deferred the /state CONTRACT
+        # retirement to a post-L6 window — without the key an external client can't tell "known empty"
+        # from "schema removed". Re-derive it from the belief board (`research_cards`), reusing the
+        # ALREADY bounded+redacted Card DTO values so no raw card text leaks past the public boundary, in
+        # the old Hypothesis shape (each Card shadows it 1:1; old `status` == the research `verdict`). It
+        # is read-only telemetry — never folded, never read by the engine — and clients should migrate to
+        # `cards`.
+        _card_dtos = card_fragment.get("cards")
+        if isinstance(_card_dtos, dict):
+            d["hypotheses"] = {
+                c.id: {
+                    "id": c.id, "statement": dto.get("statement", ""),
+                    "source": dto.get("source", "researcher"), "status": dto.get("verdict", "open"),
+                    "rationale": dto.get("rationale", ""), "evidence": list(dto.get("evidence") or []),
+                    "created_at_node": dto.get("created_at_node", 0),
+                    "best_delta": dto.get("best_delta"), "priority": dto.get("priority"),
+                }
+                for c in st.research_cards()
+                if isinstance((dto := _card_dtos.get(c.id)), dict)
+            }
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.trust.redact import redact_secrets
         for n in d.get("nodes", {}).values():

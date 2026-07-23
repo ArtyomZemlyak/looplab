@@ -42,6 +42,26 @@ def _make_resumable(rd: Path) -> Path:
     return snap
 
 
+def test_state_exposes_deprecated_hypotheses_compat_projection(tmp_path):
+    # Peer review: the derived hypothesis board was removed from RunState, but the /state CONTRACT
+    # retirement was deferred to a deprecation window. /state must still expose a read-only `hypotheses`
+    # projection (from the Card belief board, in the old shape) so a client can tell "known empty" from
+    # "schema removed" and keep working until it migrates to `cards`.
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    EventStore(rd / "events.jsonl").append(
+        "card_added", {"id": "card-belief", "statement": "log-transform the target",
+                       "source": "researcher"})
+    client = TestClient(make_app(tmp_path))
+    state = client.get("/api/runs/demo/state").json()["state"]
+    assert "hypotheses" in state                                 # the compat key is present...
+    hyp = state["hypotheses"]["card-belief"]
+    assert hyp["statement"] == "log-transform the target"        # ...in the old Hypothesis shape
+    assert hyp["source"] == "researcher" and hyp["status"] == "open"   # no evidence yet -> open
+    assert set(hyp) == {"id", "statement", "source", "status", "evidence",
+                        "rationale", "created_at_node", "best_delta", "priority"}
+
+
 def test_artifacts_list_and_view(tmp_path):
     """Artifacts: list the run dir AND a declared separate repo path, view text content, flag binary,
     and block path traversal / unknown roots."""
