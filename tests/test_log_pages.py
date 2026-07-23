@@ -415,3 +415,36 @@ def test_eventstore_fixture_generation_matches_state_contract(tmp_path):
     client = TestClient(make_app(tmp_path))
     assert (client.get("/api/runs/demo/log-page").json()["generation"]
             == client.get("/api/runs/demo/state").json()["generation"])
+
+
+def test_legacy_log_route_is_row_bounded(tmp_path, monkeypatch):
+    """The legacy /log route returns the oldest-first envelopes past `since`, but bounded to
+    _LEGACY_LOG_MAX_ROWS so a pathological multi-GB events.jsonl can't be materialized whole into
+    one response (OOM). An incremental caller pages forward by advancing `since`."""
+    import looplab.serve.routers.runs as runs_mod
+    monkeypatch.setattr(runs_mod, "_LEGACY_LOG_MAX_ROWS", 4)   # tiny cap so the bound is observable
+    _seed_run(tmp_path, 10)                                    # seq 0..9
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+
+    first = client.get("/api/runs/demo/log", headers=OWNER)
+    assert first.status_code == 200
+    assert [event["seq"] for event in first.json()] == [0, 1, 2, 3]   # capped, oldest-first
+    # advancing `since` pages forward — no event is permanently lost across the cap
+    second = client.get("/api/runs/demo/log", headers=OWNER, params={"since": 3})
+    assert [event["seq"] for event in second.json()] == [4, 5, 6, 7]
+
+
+def test_legacy_log_route_rejects_symlinked_events_log(tmp_path, monkeypatch):
+    """Defence-in-depth parity with /log-page: a symlinked events.jsonl (e.g. inside an imported run
+    bundle) that could escape the run dir is rejected with 404, not followed."""
+    _seed_run(tmp_path, 5)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+    original = Path.is_symlink
+
+    def looks_like_symlink(path):
+        return path.name == "events.jsonl" or original(path)
+
+    monkeypatch.setattr(Path, "is_symlink", looks_like_symlink)
+    assert client.get("/api/runs/demo/log", headers=OWNER).status_code == 404
