@@ -353,20 +353,32 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
     # actually renders BEFORE taking [:max_shown] keeps two recently-recovered nodes from evicting an
     # older still-FLAGGED node (and the function from returning "" while a live alert exists) — recovery
     # silences its OWN node's slot, never a sibling's. The predicate mirrors the render conditions below.
-    def _renders(key: tuple[int, int]) -> bool:
+    def _mon_renders(key: tuple[int, int]) -> bool:
         m = mon.get(key, (None, -1))[0]
-        if m and str(m.get("status") or "").strip().lower() in ("watch", "broken"):
-            return True
+        return bool(m and str(m.get("status") or "").strip().lower() in ("watch", "broken"))
+
+    def _asha_renders(key: tuple[int, int]) -> bool:
         a = asha.get(key, (None, -1))[0]
         return bool(a and a.get("underperforming", True) is True)
 
+    def _renders(key: tuple[int, int]) -> bool:
+        return _mon_renders(key) or _asha_renders(key)
+
+    def _render_position(key: tuple[int, int]) -> int:
+        # Rank a lifecycle by the newest row whose signal ACTUALLY renders below, NOT max over both rows:
+        # `_renders` can be true because an old ASHA warning survives while the latest monitor row is
+        # healthy (or vice versa), and taking the max would rank that lifecycle by the NON-rendering
+        # recovery's newer position — letting a stale warning evict a genuinely newer one under the cap.
+        positions = []
+        if _mon_renders(key):
+            positions.append(mon[key][1])
+        if _asha_renders(key):
+            positions.append(asha[key][1])
+        return max(positions) if positions else -1
+
     lifecycle_keys = sorted(
         (key for key in active if _renders(key)),
-        # CODEX AGENT: _renders may be true because an old ASHA warning survives while the latest
-        # monitor row is healthy (or vice versa). Taking max over both rows ranks that lifecycle by
-        # the non-rendering recovery, so a stale warning can evict a newer live warning under the cap.
-        # Rank by the newest row whose signal actually renders.
-        key=lambda key: max(mon.get(key, ({}, -1))[1], asha.get(key, ({}, -1))[1]),
+        key=_render_position,
         reverse=True,
     )[:max_shown]
     lines = []

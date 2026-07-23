@@ -261,6 +261,25 @@ def test_watchdog_reflection_recovered_nodes_do_not_evict_a_still_flagged_node()
     assert "node 4:" not in out and "node 5:" not in out             # ...recovered siblings take no slot
 
 
+def test_watchdog_reflection_ranks_by_newest_rendering_row_not_a_healthy_recovery():
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
+    # Node 1 has an OLD asha warning (seq 10) then a NEWER HEALTHY monitor row (seq 30) that renders
+    # nothing; node 2 has a genuinely newer asha warning (seq 20). Ranking a lifecycle by max(mon,asha)
+    # scored node 1 by its healthy row's seq 30 and, under the cap, evicted node 2's newer live warning.
+    events = _watchdog_lifecycle_events(1, 2) + [
+        _wd_event(10, EV_ASHA_RANK, node_id=1, generation=0, intermediate=0.3,
+                  quantile=0.5, population=3, direction="max", underperforming=True),
+        _wd_event(20, EV_ASHA_RANK, node_id=2, generation=0, intermediate=0.3,
+                  quantile=0.5, population=3, direction="max", underperforming=True),
+        _wd_event(30, EV_TRAIN_MONITOR_ALERT, node_id=1, generation=0, status="healthy",
+                  reason="recovered", confidence=0.9),
+    ]
+    out = watchdog_reflection(events, max_shown=1)
+    assert "node 2:" in out               # the genuinely newer RENDERING warning is kept...
+    assert "node 1:" not in out           # ...not out-ranked by node 1's newer non-rendering recovery
+
+
 def test_watchdog_reflection_distinguishes_endpoint_warning_from_same_resource_rank():
     from looplab.events.digest import watchdog_reflection
     from looplab.events.types import EV_ASHA_RANK
