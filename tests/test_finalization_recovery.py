@@ -263,6 +263,88 @@ def test_llm_cost_append_failure_keeps_marker_pending_then_recovers_once(
     ) == 1
 
 
+def test_scoped_recovery_bails_on_a_control_that_landed_after_the_caller_snapshot(tmp_path):
+    """`_recover_scoped_terminal` re-checks quiescence against the SAME fresh snapshot its finish CAS
+    derives its tail from — not the caller's staler `events`. A concurrent reopen landing in that window
+    is invisible to the top-of-function quiescence gate but becomes the tail here, so the run_finished CAS
+    (`expected_last_seq=tail_seq`) would SUCCEED on mere adjacency and silently bury the operator's reopen.
+    The re-check must bail instead so the reopened scope is handled fresh on re-entry."""
+    from looplab.engine.finalize import _recover_scoped_terminal
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    scope = "finish:1"
+    # Crash prefix: a scoped finish was staged (begun, carrying its finish payload) but crashed before
+    # run_finished. A begun marker with no `after_seq` passes the adjacency claim.
+    store.append("finalize_step", {"scope": scope, "step": "begun", "finish_data": {"reason": "done"}})
+    events_stale = store.read_all()             # the caller's snapshot, taken BEFORE the control
+    state_stale = fold(events_stale)
+    # A UI/CLI writer appends a reopen AFTER the caller read its snapshot but before recovery's fresh read.
+    store.append("run_reopened", {})
+    eng = _EngineStub(run_dir)
+
+    before = sum(event.type == "run_finished" for event in store.read_all())
+    _recover_scoped_terminal(eng, events_stale, state_stale, scope)
+    after = sum(event.type == "run_finished" for event in store.read_all())
+    assert after == before                      # bailed: no adjacency-CAS run_finished buries the reopen
+
+
+def test_stale_cost_refresh_failure_blocks_completion_until_durable(tmp_path, monkeypatch):
+    """A stale cost roll-up refresh whose append fails must NOT complete the run: the prior pass's
+    llm_cost step marker still reads 'done', so without re-gating on the refresh's own success the run
+    would publish completion with an un-folded usage delta stranded in the outbox (a silent cost
+    under-count). It must stay pending (block until durable), then complete on a later working pass —
+    the same guarantee the initial cost step already gives."""
+    from looplab.engine.finalize import finalize_run
+
+    run_dir = tmp_path / "run"
+    store, finish_seq = _terminal_store(run_dir)
+    scope = f"finish:{finish_seq}"
+    # A prior pass already emitted the roll-up + set the llm_cost step marker (cost_step_done == True).
+    store.append("llm_cost", {
+        "cost": 0.0, "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+        "total_tokens": 0, "finalize_scope": scope, "finish_seq": finish_seq,
+    })
+    store.append("finalize_step", {"scope": scope, "step": "llm_cost"})
+
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+    # A steward appends NEW usage after the roll-up boundary -> the roll-up is now stale and must refresh.
+    def append_new_usage(_state):
+        eng.store.append("llm_usage", {
+            "usage_id": "late-steward-usage", "cost": 0.2, "calls": 1,
+            "prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12,
+        })
+    eng._store_concept_curation = append_new_usage
+
+    real_append = eng.store.append
+    failed = []
+
+    def _fail_cost_once(event_type, data, **kwargs):
+        if event_type == "llm_cost" and not failed:
+            failed.append(True)
+            raise OSError("injected stale-refresh cost append failure")
+        return real_append(event_type, data, **kwargs)
+
+    monkeypatch.setattr(eng.store, "append", _fail_cost_once)
+    first = finalize_run(eng, entry_finished=True, start_time=0.0)
+    assert failed == [True]
+    assert first.finalization_pending()                    # blocked: the stranded delta must not complete
+    assert not any(e.type == "finalization_finished" for e in eng.store.read_all())
+
+    # A later pass with a working append reconciles the delta and completes exactly once.
+    monkeypatch.setattr(eng.store, "append", real_append)
+    second = finalize_run(eng, entry_finished=True, start_time=0.0)
+    assert not second.finalization_pending()
+    assert second.llm_cost["cost"] == pytest.approx(0.2)   # the late delta is folded into the durable total
+    assert sum(
+        e.type == "finalization_finished" and e.data.get("finish_seq") == finish_seq
+        for e in eng.store.read_all()
+    ) == 1
+
+
 def test_derived_projection_failures_are_atomic_and_non_terminal(tmp_path, monkeypatch):
     import looplab.engine.finalize as mod
 

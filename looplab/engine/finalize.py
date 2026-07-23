@@ -547,6 +547,15 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
         refreshed = engine.store.read_all()
         return refreshed, fold(refreshed)
     latest = engine.store.read_all()
+    # Re-check quiescence against the SAME snapshot the finish CAS tail is derived from (not the caller's
+    # staler `events`). A concurrent control — reopen/reset/inject from the UI/CLI writer — can land in the
+    # window between `events` and this read; it is invisible to the quiescence gate at the top yet becomes
+    # the tail here, so the run_finished CAS below (`expected_last_seq=tail_seq`) would SUCCEED on mere
+    # adjacency and silently bury it (the fold clears `finished` on reopen, then this re-materialized
+    # run_finished sets it back). Bail so the reopened/reset scope is handled fresh on re-entry — matching
+    # the orchestrator's own finish path, which re-checks quiescence and derives the tail from one snapshot.
+    if not finalize_scope_quiescent(latest, scope):
+        return latest, fold(latest)
     report = scoped_finish_report(latest, scope)
     tail_seq = latest[-1].seq if latest else -1
     if report is not None and report.seq != tail_seq:
@@ -716,14 +725,17 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # CODEX AGENT: a legacy roll-up marker is not proof that newly-added steward usage was
         # presented.  Refresh only when a later exact usage delta exists; the new roll-up then becomes
         # the boundary, so repeated recovery remains idempotent.
-        if not cost_step_done or _llm_cost_rollup_stale(events, scope, finish_seq):
-            if emit_llm_cost(
+        cost_refresh_needed = not cost_step_done or _llm_cost_rollup_stale(
+            events, scope, finish_seq)
+        cost_refresh_ok = True
+        if cost_refresh_needed:
+            cost_refresh_ok = emit_llm_cost(
                 engine,
                 finalize_scope=scope,
                 finish_seq=finish_seq,
-            ):
-                if not cost_step_done:
-                    _mark_finalize_step(engine, scope, "llm_cost")
+            )
+            if cost_refresh_ok and not cost_step_done:
+                _mark_finalize_step(engine, scope, "llm_cost")
 
         latest_events = engine.store.read_all()
         requirements = (
@@ -736,7 +748,14 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 latest_events, scope, finish_seq, "diversity", EV_DIVERSITY_ARCHIVE),
             _finalize_step_done(latest_events, scope, finish_seq, "case"),
             _finalize_step_done(latest_events, scope, finish_seq, "reflection"),
-            _finalize_step_done(latest_events, scope, finish_seq, "llm_cost", EV_LLM_COST),
+            # A NEEDED cost refresh that failed to reconcile must block completion, preserving the initial
+            # cost step's "block until durable" guarantee. The step marker persists from a prior pass
+            # (cost_step_done), so without this a stale-refresh whose emit_llm_cost returns False would
+            # still read "done" and the run would publish completion with an un-folded usage delta stranded
+            # in the outbox — a silent cost under-count on a run that reports itself finalized. The next
+            # finalize pass re-emits; a transient outbox/append conflict clears without a wedge.
+            _finalize_step_done(latest_events, scope, finish_seq, "llm_cost", EV_LLM_COST)
+            and (not cost_refresh_needed or cost_refresh_ok),
         )
         requirements_complete = all(requirements)
         if modern_protocol and requirements_complete:
