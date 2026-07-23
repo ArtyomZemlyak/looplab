@@ -248,6 +248,43 @@ def test_docker_timed_out_covers_124_and_137():
     assert not docker_timed_out(0) and not docker_timed_out(1) and not docker_timed_out(2)
 
 
+def test_staged_final_stage_stall_after_metric_is_salvaged(tmp_path):
+    # MED: the single-command path salvages a stall-after-metric (reads the printed metric + sets
+    # stalled=True so evaluate.py's gate accepts it), but the STAGED branch hard-returned metric=None,
+    # stalled=False on any non-ok stage — discarding a completed multi-hour train+eval whose FINAL
+    # stage printed its metric then wedged on teardown. Parity restored: the final stage's metric is
+    # salvaged and the result is flagged stalled.
+    (tmp_path / "prep.py").write_text("print('prepped')\n", encoding="utf-8")
+    (tmp_path / "train.py").write_text(
+        'import json,sys,time\nprint(json.dumps({"metric": 0.7}), flush=True)\ntime.sleep(60)\n',
+        encoding="utf-8")
+    stages = [{"name": "prep", "command": [sys.executable, "prep.py"]},
+              {"name": "train", "command": [sys.executable, "train.py"]}]
+    import time as _t
+    t0 = _t.time()
+    res = run_command_eval([sys.executable, "train.py"], str(tmp_path), 30, _M,
+                           stages=stages, stall_timeout=2)
+    assert _t.time() - t0 < 20            # killed at the stall window, not the 30s deadline / 60s sleep
+    assert res.metric == 0.7             # the final stage's printed metric is SALVAGED
+    assert res.stalled is True           # flagged as a stall so evaluate.py's gate accepts it
+    assert res.timed_out is False        # a stall is not a deadline timeout
+    assert res.failed_stage == "train"
+
+
+def test_staged_non_final_stage_failure_salvages_no_metric(tmp_path):
+    # Only the metric-producing FINAL stage salvages: an earlier stage failing has no metric, and its
+    # stall must not invent one (mirrors the single-command self-gating on `metric is not None`).
+    (tmp_path / "prep.py").write_text(
+        'import json,sys,time\nprint(json.dumps({"metric": 0.9}), flush=True)\ntime.sleep(60)\n',
+        encoding="utf-8")
+    (tmp_path / "train.py").write_text("print('unreached')\n", encoding="utf-8")
+    stages = [{"name": "prep", "command": [sys.executable, "prep.py"]},
+              {"name": "train", "command": [sys.executable, "train.py"]}]
+    res = run_command_eval([sys.executable, "train.py"], str(tmp_path), 30, _M,
+                           stages=stages, stall_timeout=2)
+    assert res.metric is None and res.failed_stage == "prep"
+
+
 def test_stage_start_emits_a_live_band_anchor(tmp_path):
     # A long training stage emits no child spans and its own operation span flushes only on CLOSE, so
     # a live trace would stay blank the whole run. run_command_eval flushes a `stage_started` child the

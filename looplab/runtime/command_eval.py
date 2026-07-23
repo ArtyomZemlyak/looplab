@@ -835,16 +835,20 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             stage_results.append({"name": _sname, "status": _status, "exit_code": rc,
                                   "seconds": round(time.monotonic() - _t0, 3)})
             if _status != "ok":
-                # CODEX AGENT: this return hard-codes metric=None and leaves stalled=False, so the
-                # STALL-SALVAGE contract is unreachable in pipeline mode: evaluate.py's gate
-                # (`res.metric is not None and (exit==0 or res.stalled)`) can never salvage a staged
-                # train+eval whose final stage printed its metric before hanging — the multi-hour
-                # result is discarded as a plain failure, though the single-command path (which sets
-                # stalled=(STALL_SENTINEL in err)) salvages exactly this case. Propagate
-                # stalled=(STALL_SENTINEL in err) here, and when the FAILED stage is the final/metric
-                # stage and stalled, attempt read_metric before returning.
+                # STALL-SALVAGE parity with the single-command path: that path reads the metric whenever
+                # the run was not a hard timeout and reports stalled=(STALL_SENTINEL in err), so
+                # evaluate.py's gate (`metric is not None and not timed_out and (exit==0 or stalled)`)
+                # can rescue a train+eval that printed its metric then hung on teardown (a wedged CUDA
+                # finalize, a distributed barrier) and was tree-killed by the stall watchdog. Mirror it
+                # for the FINAL (metric-producing) stage — an earlier stage's failure has no metric to
+                # salvage, and the read is only attempted when it wasn't a hard timeout, matching
+                # read_metric's `if not to` guard. A plain crash reads a value too but stays unsalvaged
+                # (stalled False, exit!=0), exactly as in single-command mode.
+                _salvaged = (read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started)
+                             if (_i == len(stages) - 1 and not to) else None)
                 return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
-                                 metric=None, timed_out=to, stages=stage_results, failed_stage=_sname)
+                                 metric=_salvaged, timed_out=to, stages=stage_results,
+                                 failed_stage=_sname, stalled=(STALL_SENTINEL in err))
             # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
             # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
             # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)
