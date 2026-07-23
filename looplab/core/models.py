@@ -1156,6 +1156,26 @@ def hypothesis_id(statement: str) -> str:
     return f"{slug}-{hashlib.md5(norm.encode('utf-8')).hexdigest()[:6]}"
 
 
+def hypothesis_concept_cache_keys(card) -> tuple[str, ...]:
+    """The keys a research card's agentic concept tags may live under in the `hypothesis_concepts`
+    cache: its live `id` AND its immutable seed-statement hash. Pre-migration rows were keyed by
+    hypothesis_id(statement); a research card WITHOUT an explicit card_id already has that same hash as
+    its id, but a migrated NATIVE card (a `card-N` id) does not — so an id-only join silently discards
+    the recorded tags and re-tags the same belief on resume. Consumers look up the cache by BOTH keys
+    (read-only tolerance; nothing about what is written or folded changes). Deterministic and ordered:
+    the live id first (a fresh same-run tag wins), the seed hash second (recovers legacy rows)."""
+    keys: list[str] = []
+    cid = str(getattr(card, "id", "") or "")
+    if cid:
+        keys.append(cid)
+    seed = (getattr(card, "seed_statement", "") or "").strip()
+    if seed:
+        seed_key = hypothesis_id(seed)
+        if seed_key and seed_key != cid:
+            keys.append(seed_key)
+    return tuple(keys)
+
+
 def run_setup_key(command) -> str:
     """Stable identity for a run-level `run_setup` command, so a resume can tell "this exact setup
     already completed" from "not yet run" (arch-review §5 P2). A short hash of the canonical argv —

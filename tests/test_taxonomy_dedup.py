@@ -57,6 +57,32 @@ def test_dedup_prefers_recorded_agentic_hypothesis_tags(tmp_path):
     assert a["top_cluster"]["concept"] == "optimization/grad-reweighting" and a["top_cluster"]["count"] == 2
 
 
+def test_dedup_bridges_native_card_id_to_seed_hash_for_cached_tags():
+    """Peer review: a migrated NATIVE card has a `card-N` id but its legacy agentic tags were recorded
+    under the seed-statement hash (the pre-migration hypothesis_id). dedup_analysis must still read those
+    tags via the seed-hash bridge, not silently fall back to the heuristic tagger (which shares no alias
+    for these statements, so a broken bridge would leave both untagged and unclustered)."""
+    from looplab.core.models import Card, hypothesis_concept_cache_keys, hypothesis_id
+    seed_a = "reweight the anchors by inverse frequency"
+    seed_b = "scale gradients per query bucket"
+    st = RunState(direction="max", goal="g")
+    st.cards = {
+        "card-1": Card(id="card-1", seed_statement=seed_a, statement=seed_a,
+                       verdict="open", status="proposed", source="researcher"),
+        "card-2": Card(id="card-2", seed_statement=seed_b, statement=seed_b,
+                       verdict="open", status="proposed", source="researcher"),
+    }
+    # tags stored under the STATEMENT HASH (pre-migration keying), NOT the native card-N ids
+    st.hypothesis_concepts = {hypothesis_id(seed_a): ["optimization/grad-reweighting"],
+                              hypothesis_id(seed_b): ["optimization/grad-reweighting"]}
+    assert hypothesis_id(seed_a) in hypothesis_concept_cache_keys(st.cards["card-1"])   # bridge key hits
+    assert "card-1" not in st.hypothesis_concepts                                       # id-only would miss
+
+    a = dedup_analysis(st, skeleton_for("dense-retrieval"))
+    assert a["tagged"] == 2                          # both recovered via the seed-hash bridge
+    assert a["top_cluster"]["concept"] == "optimization/grad-reweighting" and a["top_cluster"]["count"] == 2
+
+
 def test_dedup_falls_back_to_heuristic_for_uncached_hypotheses(tmp_path):
     """A hypothesis with NO recorded agentic tag still gets the deterministic tag_text tagging (per-item
     fallback), so a partially-tagged board mixes cache + heuristic without dropping anyone."""

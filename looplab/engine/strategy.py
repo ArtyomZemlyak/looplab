@@ -925,17 +925,19 @@ class StrategyCadenceMixin:
                                                      growth=_RETAG_GROWTH, cap=_RETAG_CAP))
                     tagged_this_cadence = 0
                     # 1 card = 1 hypothesis: tag the single Card board. Tag the DISPLAY `statement` (== the
-                    # old Hypothesis.statement, including a merged card's consolidated wording); `id` is the
-                    # same hash/native key the `hypothesis_concepts` cache is keyed by (card.id == the old
-                    # hypothesis id for a research card), so the cache join holds.
+                    # old Hypothesis.statement, including a merged card's consolidated wording). The cache
+                    # is joined by the card id AND its seed-statement hash (below): a research card without
+                    # an explicit card_id already has that hash as its id, but a migrated native card-N does
+                    # not, so an id-only join would orphan its legacy tags.
+                    from looplab.core.models import hypothesis_concept_cache_keys
                     for h in state.research_cards():
                         if not getattr(h, "statement", ""):
                             continue
-                        # CODEX AGENT: historical hypothesis_concepts rows are keyed by
-                        # hypothesis_id(statement), while migrated native Cards are normally card-N.
-                        # Looking up only h.id orphans recorded agentic tags on resume and pays to retag
-                        # the same belief. Bridge the native id to its unambiguous seed hash.
-                        if h.id in known_h and h.id not in stale_h:   # already tagged & fresh -> skip
+                        # Match the recorded tags by the card id OR its seed-statement hash (peer review),
+                        # and judge staleness on the MATCHED key — an id-only skip re-tagged a migrated
+                        # card-N belief every resume and mis-read its freshness.
+                        matched = next((k for k in hypothesis_concept_cache_keys(h) if k in known_h), None)
+                        if matched is not None and matched not in stale_h:   # already tagged & fresh -> skip
                             continue
                         if tagged_this_cadence >= _HYP_TAG_CAP:
                             break

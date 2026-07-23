@@ -707,10 +707,11 @@ def board_dedup(
     # id for a research card, so the `hypothesis_concepts` cache still joins.
     hyps = list(state.research_cards())
     cache = getattr(state, "hypothesis_concepts", None) or {}
-    # CODEX AGENT: that join is false for migrated native Cards: historical tag receipts use the
-    # statement hash while the Card id is card-N. This test then declares the board uncached and may
-    # purchase a new live tagging pass instead of reusing recorded evidence; share the seed-hash bridge.
-    board_cached = any(h.id in cache for h in hyps)     # cache covers at least one CURRENT-board card
+    # Cache-covered if ANY current-board card's tags are recorded under its id OR its seed-statement hash
+    # (peer review): a migrated native `card-N` card kept legacy tags under the statement hash, so the
+    # id-only test wrongly declared the board uncached and bought a redundant live tagging pass.
+    from looplab.core.models import hypothesis_concept_cache_keys
+    board_cached = any(any(key in cache for key in hypothesis_concept_cache_keys(h)) for h in hyps)
     tags, label = None, "heuristic"
     if offline:
         tags = {h.id: tag_text(h.statement, m["graph"], allow_plural=True) for h in hyps}
