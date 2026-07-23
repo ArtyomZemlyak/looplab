@@ -1507,7 +1507,9 @@ def test_settings_cas_rejects_an_old_delayed_put(tmp_path):
     assert current["secret_revision"] == loaded["secret_revision"]
 
 
-@pytest.mark.parametrize("bad_revision", [None, "", 1, True, [], "x" * 257])
+# `None` is NOT invalid: `_expected_revision` treats an explicit null the same as an absent field
+# (no CAS check), matching the nullable request schema — its accept path is covered just below.
+@pytest.mark.parametrize("bad_revision", ["", 1, True, [], "x" * 257])
 def test_settings_put_rejects_invalid_expected_revision(tmp_path, bad_revision):
     client = TestClient(make_app(tmp_path))
     response = client.put("/api/settings", json={
@@ -1515,6 +1517,17 @@ def test_settings_put_rejects_invalid_expected_revision(tmp_path, bad_revision):
     })
     assert response.status_code == 400
     assert client.get("/api/settings").json()["overrides"] == {}
+
+
+def test_settings_put_null_expected_revision_is_no_cas(tmp_path):
+    # An explicit `expected_revision: null` means "no optimistic-concurrency check" (== omitting it),
+    # so the write proceeds — the nullable-schema contract documented in routers/misc._expected_revision.
+    client = TestClient(make_app(tmp_path))
+    response = client.put("/api/settings", json={
+        "settings": {"max_nodes": 22}, "expected_revision": None,
+    })
+    assert response.status_code == 200
+    assert client.get("/api/settings").json()["overrides"]["max_nodes"] == 22
 
 
 def test_settings_partial_put_preserves_hidden_overrides_and_null_clears(tmp_path):
@@ -1667,17 +1680,26 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
 
     # CODEX AGENT: canonical envelopes are strict, while the second documented variant preserves
     # pre-editor-v2 flat dictionaries; both paths still reach the same manual 400/CAS parser.
+    def rev_string_variant(prop):
+        # `expected_revision` is a NULLABLE optional CAS token: an explicit null == absent (no CAS),
+        # matching routers/misc._expected_revision. Pydantic renders that as anyOf[<string...>, null], so
+        # the string constraints live on the non-null branch. Assert nullability, then return that branch.
+        variants = prop.get("anyOf")
+        assert variants is not None, "expected_revision must be a nullable optional (anyOf)"
+        assert {"type": "null"} in variants, "expected_revision must accept an explicit null (no CAS)"
+        return next(v for v in variants if v.get("type") == "string")
+
     settings_body = paths["/api/settings"]["put"]["requestBody"]["content"][
         "application/json"]["schema"]
     settings_variants = {variant["title"]: variant for variant in settings_body["anyOf"]}
     canonical_settings = settings_variants["SettingsUpdateRequest"]
     assert canonical_settings["required"] == ["settings"]
     assert canonical_settings["additionalProperties"] is False
-    assert canonical_settings["properties"]["expected_revision"]["type"] == "string"
+    assert rev_string_variant(canonical_settings["properties"]["expected_revision"])["type"] == "string"
     legacy_settings = settings_variants["LegacySettingsUpdateRequest"]
     assert legacy_settings["additionalProperties"] is True
     assert legacy_settings["not"] == {"required": ["settings"]}
-    assert legacy_settings["properties"]["expected_revision"]["type"] == "string"
+    assert rev_string_variant(legacy_settings["properties"]["expected_revision"])["type"] == "string"
     # An invalid reserved envelope matches neither branch: canonical requires an object, while the
     # legacy branch explicitly excludes every body carrying the reserved `settings` member.
     invalid_envelope = {"settings": []}
@@ -1689,7 +1711,7 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
     assert secret_body["required"] == ["key"]
     assert secret_body["additionalProperties"] is False
     assert secret_body["properties"]["key"]["pattern"] == r"^(?:llm_api_key)$"
-    assert secret_body["properties"]["expected_revision"]["type"] == "string"
+    assert rev_string_variant(secret_body["properties"]["expected_revision"])["type"] == "string"
 
     run_body = paths["/api/runs/{run_id}/config"]["put"]["requestBody"]["content"][
         "application/json"]["schema"]
@@ -1697,11 +1719,11 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
     canonical_run = run_variants["RunConfigUpdateRequest"]
     assert canonical_run["required"] == ["settings"]
     assert canonical_run["additionalProperties"] is False
-    assert canonical_run["properties"]["expected_revision"]["pattern"] == r"^[0-9a-f]{64}$"
+    assert rev_string_variant(canonical_run["properties"]["expected_revision"])["pattern"] == r"^[0-9a-f]{64}$"
     legacy_run = run_variants["LegacyRunConfigUpdateRequest"]
     assert legacy_run["additionalProperties"] is True
     assert legacy_run["not"] == {"required": ["settings"]}
-    assert legacy_run["properties"]["expected_revision"]["pattern"] == r"^[0-9a-f]{64}$"
+    assert rev_string_variant(legacy_run["properties"]["expected_revision"])["pattern"] == r"^[0-9a-f]{64}$"
     assert components["RunConfigResponse"]["additionalProperties"] is True
     assert "_looplab_config_meta" in components["RunConfigResponse"]["required"]
     assert components["RunConfigMetadata"]["properties"]["config_revision"][
@@ -1832,7 +1854,8 @@ def test_run_config_cas_rejects_an_old_delayed_put(tmp_path):
     assert current["_looplab_config_meta"]["config_revision"] == new_revision
 
 
-@pytest.mark.parametrize("bad_revision", [None, "", 1, True, [], "g" * 64, "a" * 65])
+# `None` is NOT invalid: an explicit null == absent (no CAS), matching the nullable request schema.
+@pytest.mark.parametrize("bad_revision", ["", 1, True, [], "g" * 64, "a" * 65])
 def test_put_run_config_rejects_invalid_expected_revision(tmp_path, bad_revision):
     _build_run(tmp_path)
     rd = tmp_path / "demo"
@@ -1844,6 +1867,21 @@ def test_put_run_config_rejects_invalid_expected_revision(tmp_path, bad_revision
     })
     assert response.status_code == 400
     assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 30.0
+
+
+def test_put_run_config_null_expected_revision_is_no_cas(tmp_path):
+    # An explicit `expected_revision: null` means "no optimistic-concurrency check" (== omitting it),
+    # so the write proceeds and the snapshot is updated (nullable-schema contract).
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0)
+    client = TestClient(make_app(tmp_path))
+
+    response = client.put("/api/runs/demo/config", json={
+        "settings": {"timeout": 44.0}, "expected_revision": None,
+    })
+    assert response.status_code == 200
+    assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 44.0
 
 
 def test_concurrent_run_config_puts_serialize_the_complete_cas_transaction(

@@ -12,7 +12,7 @@ from looplab.core.models import card_ownership_receipt
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_CARD_ADDED,
-    EV_CARD_DROPPED,
+    EV_CARD_AUTO_DROPPED,
     EV_NODE_BUILDING,
     EV_NODE_CREATED,
     EV_NODE_FAILED,
@@ -103,12 +103,11 @@ def test_reentry_terminalizes_all_interrupted_builds_before_setup(tmp_path, monk
     assert final.buildings == {}
     assert 5 not in final.nodes                 # a bare reservation does not fabricate a candidate
     dropped = [event for event in eng.store.read_all()
-               if event.type == EV_CARD_DROPPED and event.data.get("id") == "card-5"]
-    # CODEX AGENT: FAILING ON MASTER since 16f941f split the card drop contract: engine lifecycle
-    # drops now emit EV_CARD_AUTO_DROPPED (orchestrator._drop_card_once); card_dropped is reserved for
-    # explicit operator intent. That commit migrated 5 other test files but missed this one — recovery
-    # DOES drop card-5, just under the auto event. Filter EV_CARD_AUTO_DROPPED here (and assert
-    # dropped_by == "engine") to match the new contract.
+               if event.type == EV_CARD_AUTO_DROPPED and event.data.get("id") == "card-5"]
+    # 16f941f split the card drop contract: engine lifecycle drops emit EV_CARD_AUTO_DROPPED
+    # (orchestrator._drop_card_once, dropped_by="engine"); card_dropped is reserved for explicit operator
+    # intent. Recovery DOES drop card-5 — under the auto event — so match the new contract here.
     assert len(dropped) == 1 and dropped[0].data["reason"] == "build_interrupted"
+    assert dropped[0].data["dropped_by"] == "engine"
     assert final.cards["card-5"].status == "dropped"
     assert eng._recover_interrupted_builds(fold(eng.store.read_all())) is False  # idempotent re-entry
