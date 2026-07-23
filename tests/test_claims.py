@@ -541,6 +541,42 @@ def test_research_claim_upsert_preserves_malformed_future_and_invalid_same_run_r
     assert any(row.get("run_id") == "sibling" for row in decoded)
 
 
+def test_research_claim_upsert_retires_superseded_same_run_legacy_rows(tmp_path):
+    # #4: a pre-upgrade run wrote understood LEGACY (v2) claims. On re-finalize at v3 those SUPERSEDED
+    # same-run legacy rows are RETIRED — not left live beside the v3 replacements (a refresh can now
+    # retire a withdrawn claim, stale spellings leave the union, and the producer count reconciles). A
+    # DIFFERENT run's legacy rows — the latest for THAT run, never re-finalized — stay untouched.
+    import orjson
+    from looplab.engine.claims import load_research_claims, record_research_claims
+
+    path = tmp_path / "research_claims.jsonl"
+    legacy_same = {"v": 2, "statement": "stale spelling of the belief", "run_id": "r1",
+                   "task_id": "t", "node_ids": [5]}
+    legacy_other = {"v": 2, "statement": "an old run's belief", "run_id": "old",
+                    "task_id": "t", "node_ids": [3]}
+    path.write_bytes(orjson.dumps(legacy_same) + b"\n" + orjson.dumps(legacy_other) + b"\n")
+
+    record_research_claims(tmp_path, run_id="r1", task_id="t", direction="max",
+                           claims=[{"statement": "the refreshed belief", "node_ids": [7],
+                                    "verification": {"verdict": "supported"}}])
+
+    decoded = []
+    for line in path.read_bytes().split(b"\n"):
+        try:
+            decoded.append(orjson.loads(line))
+        except orjson.JSONDecodeError:
+            pass
+    # the superseded legacy row for r1 is GONE; the other run's legacy row survives (cross-run untouched)
+    assert not any(r.get("run_id") == "r1" and r.get("v") == 2 for r in decoded)
+    assert "stale spelling of the belief" not in [r.get("statement") for r in decoded]
+    assert any(r.get("run_id") == "old" and r.get("statement") == "an old run's belief"
+               for r in decoded)
+    # r1 now carries ONLY its v3 claim, which is the single row the reader surfaces for that run
+    r1_loaded = [r for r in load_research_claims(tmp_path) if r.get("run_id") == "r1"]
+    assert len(r1_loaded) == 1 and r1_loaded[0]["statement"] == "the refreshed belief"
+    assert r1_loaded[0]["v"] == 3
+
+
 def test_nonempty_all_invalid_d8_source_persists_receipt_sentinel_without_indexing_claim(tmp_path):
     from looplab.engine.claims import (
         claim_assessments, load_research_claims, portfolio_atlas,

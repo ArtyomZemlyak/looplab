@@ -1497,21 +1497,19 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
         replace_jsonl_rows_atomic_preserving_quarantine(
             path,
             rows,
-            # CODEX AGENT: only a fully understood current-schema sibling is an upsert target. A future,
-            # legacy, or malformed row with the same apparent run_id is quarantine evidence, not permission
-            # to erase bytes and falsely restore source_complete=true.
-            # CODEX AGENT: but the reader does NOT quarantine what this keeps: _valid_claim_source_row
-            # accepts v in (None,0,1,2) rows and _indexable_research_claim indexes them, so when a
-            # pre-upgrade run re-finalizes, its superseded v2 claims stay LIVE evidence beside the v3
-            # replacements — a refresh can never retire a withdrawn claim, stale spellings join every
-            # union, and claims_retained != len(claim_members) counts the run producer-unknown forever.
-            # Either exclude same-run legacy rows the reader fully understands from indexing (they are
-            # superseded, not quarantine), or widen replace_if to rows _valid_claim_source_row accepts.
+            # #4 (resolved): retire every SAME-RUN row the reader FULLY UNDERSTANDS — the current-schema
+            # v3 claim/source_receipt siblings AND the understood legacy (v0-v2, empty-kind) claims a
+            # pre-upgrade run of this same run_id wrote. `_valid_claim_source_row` IS that "understood"
+            # fence: it accepts v3 (with a valid receipt + verification) and valid legacy claims, and
+            # REJECTS future/malformed/unknown-kind rows — those are NOT retired here, so they stay as raw
+            # quarantine evidence (never erased on a plausible run_id). Retiring the superseded legacy rows
+            # at the SOURCE (rather than only skipping them at index time) fixes all three symptoms: a
+            # refresh now retires a withdrawn claim, stale spellings leave the union, and
+            # claims_retained == len(claim_members) again (no more perpetual producer-unknown for the run).
+            # Cross-run legacy rows are untouched (the `== rid` guard): a genuinely old run that never
+            # re-finalized keeps its claims — they are the latest for THAT run, not superseded.
             replace_if=lambda row: (
-                row.get("v") == _RESEARCH_CLAIM_VERSION
-                and row.get("record_kind") in ("claim", "source_receipt")
-                and _valid_claim_source_row(row, research=True)
-                and _research_source_receipt(row) is not None
+                _valid_claim_source_row(row, research=True)
                 and _identity_text(row.get("run_id"), _MAX_SOURCE_ID) == rid
             ),
             loads=json.loads,
