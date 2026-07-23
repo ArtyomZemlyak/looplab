@@ -166,9 +166,14 @@ class UnifiedAgent(WrapsDeveloper):
         default_idx = 0
         if recommended is not None:
             for i, a in enumerate(legal):
-                # Match merges by their parent SET too — kind + parent_id alone matched the FIRST
-                # merge in the list regardless of which pair the policy actually recommended.
-                if a.get("kind") == recommended.get("kind") and _parents(a) == _parents(recommended):
+                # Match merges by their parent SET (a merge is symmetric in its parents) — kind +
+                # parent_id alone matched the FIRST merge in the list regardless of which pair the policy
+                # recommended, and an ordered-tuple compare missed a non-greedy policy's recommended pair
+                # whenever its order differed from the menu's top-2 order (the fallback then silently
+                # defaulted to legal[0]/draft instead of the recommendation). `frozenset` is order-neutral
+                # for merges and a no-op for the single-parent / draft kinds.
+                if (a.get("kind") == recommended.get("kind")
+                        and frozenset(_parents(a)) == frozenset(_parents(recommended))):
                     default_idx = i
                     break
         if self._pilot_client is None:        # pilot model not wired -> take the policy recommendation

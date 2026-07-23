@@ -126,6 +126,19 @@ def test_choose_action_no_pilot_client_uses_recommendation():
     assert legal[choice["index"]] == recommended
 
 
+def test_choose_action_matches_a_merge_recommendation_regardless_of_parent_order():
+    # Regression: a merge recommendation was matched to the legal menu by ORDERED parent tuple, but a
+    # merge is symmetric in its parents. A non-greedy policy whose recommended pair differs in order
+    # from the menu's top-2 order then failed to match, and the no-pilot fallback silently defaulted to
+    # legal[0] (draft) instead of the recommended merge.
+    st = _st()
+    legal = [{"kind": "draft"}, {"kind": "merge", "parent_ids": [1, 2]}]
+    recommended = {"kind": "merge", "parent_ids": [2, 1]}          # reverse of the menu's parent order
+    choice = _agent(pilot_client=None).choose_action(st, legal, recommended=recommended)
+    assert legal[choice["index"]]["kind"] == "merge"              # matched the merge, not defaulted to draft
+    assert legal[choice["index"]]["parent_ids"] == [1, 2]
+
+
 # --------------------------------------------------------------------------- wiring
 def test_make_roles_unified_returns_one_object():
     r, d = make_roles(ToyTask(), Settings(backend="llm", unified_agent=True))
