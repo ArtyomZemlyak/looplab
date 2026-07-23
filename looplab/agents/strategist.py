@@ -583,7 +583,10 @@ def _fmt_operator_yields(yields: dict) -> str:
     if not yields:
         return "unavailable"
     return "; ".join(
-        f"{op}: gain={d.get('gain', 0.0):.4g}/s over {d.get('n', 0)}"
+        # `(d.get('gain') or 0.0)` — the `0.0` default only fires on an ABSENT key, so a present
+        # `gain=None` reached `f"{None:.4g}"` -> TypeError, crashing the whole run (this brief is built
+        # OUTSIDE the strategist's try). Guard it the same way the sort key below already does.
+        f"{op}: gain={(d.get('gain') or 0.0):.4g}/s over {d.get('n', 0)}"
         for op, d in sorted(yields.items(), key=lambda kv: -(kv[1].get('gain') or 0.0)))
 
 

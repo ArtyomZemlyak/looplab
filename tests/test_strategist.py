@@ -1913,3 +1913,12 @@ def test_build_strategist_tools_includes_run_and_data():
     # run-introspection + task-data tools are always present (read its own run + the data)
     assert any(("experiment" in n) or ("node" in n) or ("code" in n) or ("read" in n)
                for n in names), names
+
+
+def test_fmt_operator_yields_tolerates_a_none_gain():
+    # Regression: `d.get('gain', 0.0)` defaults only on an ABSENT key, so a present gain=None reached
+    # `f"{None:.4g}"` -> TypeError, crashing the run (this brief is built OUTSIDE the strategist's try).
+    from looplab.agents.strategist import _fmt_operator_yields
+    out = _fmt_operator_yields({"draft": {"gain": None, "n": 5}, "merge": {"gain": 0.3, "n": 2}})
+    assert "draft: gain=0/s over 5" in out and "merge: gain=0.3/s over 2" in out
+    assert _fmt_operator_yields({}) == "unavailable"
