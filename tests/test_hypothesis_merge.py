@@ -144,3 +144,49 @@ def test_engine_pass_writes_merge_events_gated(tmp_path, monkeypatch):
     small.cards = {"a": _card("a", "x"), "b": _card("b", "y")}      # only 2 open (< 4)
     eng2._maybe_merge_hypotheses(small)
     assert not (tmp_path / "e2.jsonl").exists() or not list(EventStore(tmp_path / "e2.jsonl").read_all())
+
+
+def test_belief_merge_excludes_native_work_item_cards(tmp_path, monkeypatch):
+    """Peer review: belief consolidation must exclude native WORK-ITEM cards by IDENTITY — a card that
+    owns an action (`selection_provenance.action_source != "none"`), not by transient readiness. Merging
+    a receipt-backed work item would collapse its distinct action identity into another card."""
+    import looplab.search.hybrid_merge as hm
+    from looplab.core.models import Card, CardSelectionProvenance
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+
+    eng = Engine.__new__(Engine)
+    eng._track_hypotheses = True
+    eng._embedder = None
+    eng._reflect_client = lambda: object()
+    eng.store = EventStore(tmp_path / "events.jsonl")
+
+    def _belief(cid, stmt):                       # owns no action -> a pure belief (action_source none)
+        return Card(id=cid, seed_statement=stmt, statement=stmt, verdict="open", status="proposed")
+
+    # A receipt-bound native work item: owns exactly one action, and NOT selection-ready (default) so the
+    # OLD `not selection_ready` filter would have admitted it — the identity filter must exclude it anyway.
+    native = Card(id="card-9", seed_statement="native work item", statement="native work item",
+                  verdict="open", status="proposed",
+                  selection_provenance=CardSelectionProvenance(action_source="node", action_owner_count=1))
+    assert native.selection_ready is False
+
+    st = RunState(goal="g", direction="max")
+    st.cards = {**{f"h{i}": _belief(f"h{i}", f"belief statement {i}") for i in range(4)},
+                "card-9": native}
+    st.nodes = {}
+
+    seen = {}
+    def fake_consolidate(texts, client, **kw):
+        seen["texts"] = list(texts)
+        return [{"members": [i], "merged": texts[i]} for i in range(len(texts))]
+    monkeypatch.setattr(hm, "consolidate", fake_consolidate)
+    import looplab.engine.orchestrator as orch
+    import looplab.engine.research_cadence as rc
+    monkeypatch.setattr(orch, "fold", lambda evs: st)
+    monkeypatch.setattr(rc, "fold", lambda evs: st)
+
+    eng._maybe_merge_hypotheses(st)
+    # only the 4 pure beliefs are merge candidates; the native work item is excluded by identity
+    assert "native work item" not in seen.get("texts", [])
+    assert len(seen.get("texts", [])) == 4

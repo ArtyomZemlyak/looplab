@@ -426,15 +426,20 @@ class ResearchCadenceMixin:
         if client is None:
             return state
         # 1 card = 1 hypothesis: consolidate the open BELIEF board — the Card equivalent of the old open
-        # hypotheses (verdict 'open' == the old status 'open'). Exclude selection-ready native work-item
-        # cards: this cadence merges near-duplicate research BELIEFS, and collapsing a receipt-backed
-        # work item's action identity is not its job. Merges emit `hypothesis_merged` with card ids
-        # (== the old hypothesis ids for a belief card), which `_derive_cards` applies unchanged.
-        # CODEX AGENT: readiness is transient, not identity. A native Card becomes selection_ready=False
-        # when it is stale, incomplete, in flight, or terminal, so this admits receipt-backed work items
-        # to belief consolidation and can merge distinct action identities. Exclude native Cards by
-        # identity regardless of their current blockers.
-        open_hyps = [c for c in state.open_research_cards() if not c.selection_ready]
+        # hypotheses (verdict 'open' == the old status 'open'). This cadence merges near-duplicate
+        # research BELIEFS; collapsing a receipt-backed WORK ITEM's action identity is not its job.
+        # Exclude native work-item cards by IDENTITY, not readiness (peer review): `selection_ready` is
+        # transient (a native card is not-ready while stale/incomplete/in-flight/terminal), so the old
+        # `not selection_ready` filter admitted a native card whenever it was blocked and could merge
+        # distinct action identities. A native card OWNS an action (`selection_provenance.action_source`
+        # != "none", i.e. action_owner_count > 0 — the model enforces the equivalence); a pure belief
+        # owns none. Keep only the pure beliefs. Merges emit `hypothesis_merged` with card ids, which
+        # `_derive_cards` applies unchanged.
+        def _pure_belief(card) -> bool:
+            provenance = getattr(card, "selection_provenance", None)
+            return getattr(provenance, "action_source", "none") == "none"
+        open_hyps = [c for c in state.open_research_cards()
+                     if not c.selection_ready and _pure_belief(c)]
         n = len(open_hyps)
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
             return state
