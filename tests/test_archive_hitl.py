@@ -46,6 +46,35 @@ def test_archive_excludes_aborted_evaluated_history():
     assert {node.id for node in arch.values()} == {1}
 
 
+def test_niche_buckets_non_finite_and_non_numeric_params_without_crashing():
+    # Regression: `_niche` did `round(v / r)` with no numeric guard, so inf/NaN, an overflowing huge int,
+    # or a non-numeric value raised (OverflowError/ValueError) instead of bucketing.
+    arch = DiversityArchive(resolution=1.0)
+    for params in ({"a": float("inf")}, {"a": float("nan")}, {"a": 10 ** 400}, {"a": "oops"},
+                   {"a": None}):
+        key = arch._niche(params)                         # must not raise
+        assert isinstance(key, tuple) and len(key) == 1
+    assert arch._niche({"a": 2.4}) == (("a", 2),)         # a finite param still discretizes normally
+    # the same inf param buckets to the SAME niche (stable), distinct pathological values differ
+    assert arch._niche({"a": float("inf")}) == arch._niche({"a": float("inf")})
+
+
+def test_archive_build_tolerates_a_non_finite_param_node():
+    # A feasible, finitely-evaluated node whose idea.params holds a non-finite value (a `1e309` param
+    # folds to inf) must not crash `build`/`summary` on the main run loop's coverage cadence.
+    st = RunState(direction="min")
+    st.nodes = {
+        0: _n(0, 0.1, 0.1, 1.0),                                          # a normal niche
+        1: Node(id=1, operator="improve", metric=2.0, status=NodeStatus.evaluated,
+                idea=Idea(operator="improve", params={"lr": float("inf"), "depth": 5.0})),
+        2: Node(id=2, operator="improve", metric=3.0, status=NodeStatus.evaluated,
+                idea=Idea(operator="improve", params={"lr": float("nan")})),
+    }
+    arch = DiversityArchive(resolution=1.0).build(st)         # pre-fix: OverflowError / ValueError
+    assert {n.id for n in arch.values()} == {0, 1, 2}         # every feasible node bucketed, none lost
+    assert DiversityArchive(resolution=1.0).summary(st)["niches"] == 3    # summary() must not raise either
+
+
 def test_archive_summary_emitted_on_run(tmp_path):
     task = ToyTask.load(TASK)
     r, d = task.build_roles()

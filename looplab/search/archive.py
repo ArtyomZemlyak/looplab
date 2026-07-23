@@ -5,6 +5,8 @@ end as provenance and queryable for seeding exploration.
 """
 from __future__ import annotations
 
+import math
+
 from looplab.core.models import Node, RunState
 from looplab.search.policy import rank_by_metric
 
@@ -15,7 +17,26 @@ class DiversityArchive:
 
     def _niche(self, params: dict) -> tuple:
         r = self.resolution or 1.0
-        return tuple(sorted((k, round(v / r)) for k, v in params.items()))
+
+        def _bucket(v):
+            # Discretize only a FINITE numeric coordinate. `round(v / r)` on a non-finite value —
+            # inf/NaN (a `1e309` param JSON-folds straight to inf; NaN is agent-supplied) or a huge int
+            # whose float conversion overflows — raises (OverflowError/ValueError) and, because `build`
+            # only skips aborted/null-metric/infeasible nodes (never guards the param VALUES), that crash
+            # reaches the main run loop at the default-on coverage cadence and aborts the whole run. Every
+            # other param consumer already guards this (digest.numeric_params, operators.merge_idea, the
+            # surrogate). Bucket a non-bucketable coordinate under a stable token so the degenerate node
+            # gets its own niche in the diversity/audit view instead of crashing.
+            try:
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    q = v / r
+                    if math.isfinite(q):
+                        return round(q)
+            except (OverflowError, ValueError, TypeError, ZeroDivisionError):
+                pass
+            return f"\x00nonbucketable:{v!r}"
+
+        return tuple(sorted((k, _bucket(v)) for k, v in params.items()))
 
     def build(self, state: RunState) -> dict[tuple, Node]:
         """niche-key -> best Node in that niche."""
