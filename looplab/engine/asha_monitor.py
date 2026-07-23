@@ -26,6 +26,7 @@ Fragility is contained by construction:
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -82,21 +83,30 @@ def _declared_resource_key(metric_spec: dict) -> Optional[str]:
     return key if (isinstance(key, str) and 0 < len(key) <= 128 and key != metric_key) else None
 
 
+def _resource_rung(resource) -> Optional[float]:
+    """Snap a resource coordinate to a canonical geometric RUNG — the largest power of two <= it — so a
+    live sample and completed-sibling curves compare at the SAME checkpoint across the WHOLE run, not
+    only the dense early coordinates (#7 review). Steps 32..63 all map to rung 32, so a live node deep in
+    the run still finds sibling values at its rung instead of the exact-coordinate gap the first-31+
+    endpoint retention left. None for a non-finite / non-positive resource (no rung -> no comparison)."""
+    r = _finite_number(resource)
+    if r is None or r <= 0:
+        return None
+    return 2.0 ** math.floor(math.log2(r))
+
+
 def _curve_metric_at(curve, resource) -> Optional[float]:
-    """The metric persisted at exactly `resource` in a bounded `[[resource, metric], ...]` curve, or
-    None. Tolerant of old logs (curve is None) and malformed rows — a missing coordinate degrades the
-    sibling to "no same-resource observation", never a crash."""
-    # CODEX AGENT: exact matching is still incompatible with the bounded first-31-plus-endpoint curve
-    # after the early window. For a 100-step run, completed peers have no coordinates 32..99, so each
-    # live sample there yields no comparable population and resets `under_streak`; a run that survives
-    # the first 31 steps cannot accumulate another kill streak until its endpoint. Persist one explicit
-    # shared rung schedule (or a provenance-safe completed rung) rather than combining ad-hoc retention
-    # with equality against every emitted resource coordinate.
-    if not isinstance(curve, list):
+    """The metric persisted at the canonical RUNG of `resource` in a bounded `[[rung, metric], ...]`
+    curve, or None. Both the live sample and the persisted curve snap to the SAME rung (`_resource_rung`),
+    so a sample anywhere in a rung band finds its sibling checkpoint — not only at an exactly-matching
+    coordinate. Tolerant of old logs (curve is None) and malformed rows — a missing rung degrades the
+    sibling to "no comparable observation", never a crash."""
+    rung = _resource_rung(resource)
+    if rung is None or not isinstance(curve, list):
         return None
     for entry in curve:
         if (isinstance(entry, (list, tuple)) and len(entry) == 2
-                and _finite_number(entry[0]) == resource):
+                and _finite_number(entry[0]) == rung):
             return _finite_number(entry[1])
     return None
 
@@ -140,49 +150,44 @@ def latest_intermediate_sample(log_tail: str, workdir, metric_spec: dict) -> Opt
 
 
 def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) -> Optional[list]:
-    """A bounded, downsampled per-resource curve ``[[resource, metric], ...]`` mined from the eval's
-    CAPTURED stdout at node_evaluated time (#7). That capture is run_argv's bounded ~64 KB tail (and, for
-    a staged eval, the final stage's output) — 128× the 500-char ``stdout_tail`` and enough early rungs
-    for typical logs, though a very verbose or multi-stage job can still lose its earliest coordinates.
-    The completed node's persisted ``stdout_tail`` keeps only the last ~500 chars, so a sibling curve read
-    from it has only the FINAL epochs — a live node stopped at an EARLY resource coordinate then never
-    finds same-resource peers. Persisting this durable curve lets ``sibling_metrics_at_resource`` compare
-    a fresh early sample against PAST EXPERIMENTS at the SAME coordinate. Reuses the eval's own metric
-    contract (the operator/Developer-declared ``resource_key`` + metric key); returns None when the task
-    declares no ``resource_key`` or the kind isn't ``stdout_json``.
+    """A bounded per-RUNG curve ``[[rung, metric], ...]`` mined from the eval's CAPTURED stdout at
+    node_evaluated time (#7). That capture is run_argv's bounded ~64 KB tail (and, for a staged eval, the
+    final stage's output) — 128× the 500-char ``stdout_tail``, which retains only the FINAL epochs so a
+    live node stopped earlier never found same-resource peers. Persisting this durable curve lets
+    ``sibling_metrics_at_resource`` compare a fresh live sample against PAST EXPERIMENTS at the same rung.
+    Reuses the eval's own metric contract (the operator/Developer-declared ``resource_key`` + metric key);
+    returns None when the task declares no ``resource_key`` or the kind isn't ``stdout_json``.
 
-    Sorted by resource; when ``max_points >= 2`` (the default 32) and there are more distinct coordinates,
-    it keeps the EARLIEST ``max_points - 1`` coordinates verbatim plus the final endpoint. Early rungs are
-    both where an ASHA kill saves real compute AND where the live poller's early samples must land on a
-    coordinate the siblings actually persisted to accumulate the consecutive comparable ticks a kill needs
-    (#7 review) — uniform sampling dropped step 2/3/… so a progressing early run rarely found a peer; the
-    sparse late-middle rungs (lower kill value) are the ones dropped instead. ``max_points < 2`` disables
-    downsampling (every distinct coordinate is returned) — no caller passes that, it only guards the math."""
+    Coordinates are collapsed to a canonical geometric RUNG schedule (`_resource_rung`: the largest power
+    of two <= the coordinate), keeping the LATEST value within each rung band, sorted by rung (#7 review).
+    A shared rung schedule is what makes the comparison work across the WHOLE run: the live poller snaps
+    its sample to the same rungs, so a node deep in the run finds a sibling checkpoint instead of the
+    exact-coordinate gap the old first-31+endpoint retention left after the early window. Geometric rungs
+    are O(log resource) — a 100-step run yields 7 rungs, ~1e6 steps ~20 — so ``max_points`` (default 32)
+    is a corruption bound that realistic runs never hit; when exceeded it keeps the earliest
+    ``max_points - 1`` rungs plus the last. ``max_points < 2`` disables that bound."""
     if not stdout or not isinstance(metric_spec, dict):
         return None
     resource_key = _declared_resource_key(metric_spec)
     if resource_key is None or metric_spec.get("kind", "stdout_json") != "stdout_json":
         return None
     metric_key = metric_spec.get("key", "metric")
-    by_resource: dict[float, float] = {}
-    # Chronological order (reverse the newest-first generator) so the LATEST value logged at a resource
-    # wins when a coordinate is re-emitted.
+    by_rung: dict[float, float] = {}
+    # Chronological order (reverse the newest-first generator) so the LATEST value in a rung band wins.
     for obj in reversed(list(_json_objects_newest_first(stdout))):
-        resource = _finite_number(obj.get(resource_key))
+        rung = _resource_rung(obj.get(resource_key))
         value = _finite_number(obj.get(metric_key))
-        if resource is not None and value is not None:
-            by_resource[resource] = value
-    if not by_resource:
+        if rung is not None and value is not None:
+            by_rung[rung] = value
+    if not by_rung:
         return None
-    coords = sorted(by_resource)
+    coords = sorted(by_rung)
     if max_points >= 2 and len(coords) > max_points:
-        # Early-dense retention (#7 review): keep the first `max_points-1` coordinates verbatim + the last
-        # endpoint, NOT a uniform sample. The live poller's early steps are exactly where a same-resource
-        # peer must exist for the kill to accumulate consecutive comparable ticks (and where a kill saves
-        # the most compute); uniform sampling dropped those early rungs and made the kill near-unreachable.
+        # Corruption/pathology bound only (geometric rungs are O(log resource) — realistic runs stay far
+        # below the cap). Keep the earliest `max_points-1` rungs + the last.
         keep = sorted(set(range(max_points - 1)) | {len(coords) - 1})
         coords = [coords[i] for i in keep]
-    return [[r, by_resource[r]] for r in coords]
+    return [[r, by_rung[r]] for r in coords]
 
 
 def sibling_final_metrics(state, node_id: int) -> list[float]:
@@ -209,13 +214,16 @@ def sibling_final_metrics(state, node_id: int) -> list[float]:
 
 def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
                                 sample: IntermediateSample) -> list[float]:
-    """Sibling curve values observed at exactly the live sample's declared resource coordinate.
+    """Sibling curve values observed at the live sample's declared resource RUNG (`_resource_rung`).
 
-    Completed nodes retain a bounded stdout tail. Missing/truncated/malformed curve evidence simply
-    removes that sibling from the comparable population; its final endpoint is never substituted.
+    Completed nodes retain a durable per-rung curve (+ a bounded stdout tail fallback). Missing/
+    truncated/malformed curve evidence simply removes that sibling from the comparable population; its
+    final endpoint is never substituted.
     """
     if sample.resource_key is None or sample.resource is None:
         return []
+    if _resource_rung(sample.resource) is None:
+        return []                      # a non-positive/degenerate resource maps to no rung -> no compare
     if _declared_resource_key(metric_spec) != sample.resource_key:
         return []
     if metric_spec.get("kind", "stdout_json") != "stdout_json":
@@ -228,17 +236,16 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
     for node in promotion_eligible_nodes(state):
         if node.id == node_id:
             continue
-        # #7 (resolved): read the durable downsampled per-resource curve mined from the eval's captured
-        # stdout (~64 KB tail) at node_evaluated (extract_resource_curve). The 500-char stdout_tail retains only each sibling's
-        # FINAL epochs, so a live node at an EARLY resource coordinate — the only time a kill saves
-        # compute — used to find no same-resource peers, and asha_live_kill only bit once the node
-        # already neared its siblings' endpoints. Fall back to the tail whenever the curve holds no value
-        # at THIS exact resource: a pre-#7 log (no curve at all), or a #7 curve that downsampled this
-        # coordinate away. The tail then covers the few final coordinates the curve may have dropped.
+        # #7: read the durable per-RUNG curve mined from the eval's captured stdout (~64 KB tail) at
+        # node_evaluated (extract_resource_curve). Both sides snap to a shared geometric rung schedule
+        # (`_resource_rung`), so a live node anywhere in the run — not only at an exact early coordinate —
+        # finds a sibling checkpoint at its rung. Fall back to the sibling's raw stdout_tail (matched at
+        # the SAME rung) only for a pre-#7 log with no persisted curve.
+        _live_rung = _resource_rung(sample.resource)
         value = _curve_metric_at(getattr(node, "resource_curve", None), sample.resource)
         if value is None:
             for obj in _json_objects_newest_first(getattr(node, "stdout_tail", "") or ""):
-                if _finite_number(obj.get(sample.resource_key)) != sample.resource:
+                if _resource_rung(obj.get(sample.resource_key)) != _live_rung:
                     continue
                 value = _finite_number(obj.get(metric_key))
                 if value is not None:

@@ -619,15 +619,16 @@ class EvaluateMixin:
                         # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
                         "trials": res.trials or [],
                     }
-                    # ASHA past-experiment curve (#7): a bounded downsampled [[resource, metric], ...]
-                    # mined from the eval's CAPTURED stdout when the task declares a stdout_json
-                    # `resource_key`, so a future live node stopped at an EARLY resource can find same-
-                    # resource peers. Additive/only-when-present → old logs fold byte-identically.
+                    # ASHA past-experiment curve (#7): a bounded per-RUNG [[rung, metric], ...] (canonical
+                    # geometric rungs) mined from the eval's CAPTURED stdout when the task declares a
+                    # stdout_json `resource_key`, so a future live node — snapping its sample to the same
+                    # rung — finds a sibling checkpoint across the whole run. Additive/only-when-present →
+                    # old logs fold byte-identically.
                     # SCOPE (#7 review): `res.stdout` is run_argv's bounded ~64 KB tail (and, for a staged
                     # eval, the FINAL stage's output), NOT the literal full stream — 128× the 500-char
-                    # stdout_tail and enough early coordinates for typical logs, but a very verbose or
-                    # multi-stage job can still lose its earliest rungs. Widening this to a teed full-curve
-                    # accumulator is a follow-up; the fold + reader already degrade safely to the tail.
+                    # stdout_tail and enough rungs for typical logs, but a very verbose or multi-stage job
+                    # can still lose its earliest rungs. Widening this to a teed full-curve accumulator is a
+                    # follow-up; the fold + reader already degrade safely to the tail.
                     _spec = getattr(self, "_eval_spec", None)
                     _curve = extract_resource_curve(
                         res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)

@@ -1032,13 +1032,14 @@ class Node(BaseModel):
     # digest can feed it to the NEXT proposal instead of dropping it (signal-delivery, §1).
     triage_rationale: str = ""
     stdout_tail: str = ""
-    # ASHA past-experiment curve (#7): a bounded, downsampled `[[resource, metric], ...]` mined from the
-    # eval's CAPTURED stdout (the ~64 KB run tail — far larger than the 500-char `stdout_tail`, though for
-    # a very verbose or multi-stage job not the literal full stream) at node_evaluated, set only when the
-    # task declares a stdout_json `resource_key`. The 500-char `stdout_tail` retains only the FINAL
-    # epochs, so a live node stopped at an EARLY resource coordinate finds no same-resource peers there;
-    # this durable curve lets the ASHA watchdog compare a fresh early sample against past experiments at
-    # the SAME coordinate. Additive/reader-defaulted (None on old logs).
+    # ASHA past-experiment curve (#7): a bounded per-RUNG `[[rung, metric], ...]` (canonical geometric
+    # rungs — powers of two — via asha_monitor._resource_rung) mined from the eval's CAPTURED stdout (the
+    # ~64 KB run tail — far larger than the 500-char `stdout_tail`, though for a very verbose or
+    # multi-stage job not the literal full stream) at node_evaluated, set only when the task declares a
+    # stdout_json `resource_key`. The 500-char `stdout_tail` retains only the FINAL epochs, so a live node
+    # stopped earlier finds no comparable peers there; this durable curve lets the ASHA watchdog compare a
+    # fresh sample against past experiments at the SAME rung across the WHOLE run (the shared rung
+    # schedule is what makes a mid-run comparison land). Additive/reader-defaulted (None on old logs).
     # EXCLUDED from the model dump (#7 review): engine-internal ASHA evidence the watchdog reads off the
     # in-process fold — no UI/API consumer reads it, so serializing up to 32 points per node into every
     # lightweight /state and SSE frame was pure O(nodes × curve) transfer. `exclude=True` keeps it off

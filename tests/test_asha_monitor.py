@@ -103,13 +103,13 @@ def test_sibling_resource_metrics_never_substitute_finished_endpoints():
 
 # --------------------------------------------------------------------- extract_resource_curve / durable curve (#7)
 
-def test_extract_resource_curve_sorts_and_keeps_latest_per_resource():
-    stdout = ('{"recall": 0.10, "step": 1}\n'
-              '{"recall": 0.50, "step": 5}\n'
-              '{"recall": 0.55, "step": 5}\n'          # re-emitted step 5 -> the LATEST value wins
-              '{"recall": 0.90, "step": 10}\n')
+def test_extract_resource_curve_collapses_to_rungs_latest_per_band():
+    stdout = ('{"recall": 0.10, "step": 1}\n'          # rung 1
+              '{"recall": 0.50, "step": 5}\n'          # rung 4 ...
+              '{"recall": 0.55, "step": 5}\n'          # rung 4 -> the LATEST value in the band wins
+              '{"recall": 0.90, "step": 10}\n')        # rung 8
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
-    assert extract_resource_curve(stdout, spec) == [[1.0, 0.10], [5.0, 0.55], [10.0, 0.90]]
+    assert extract_resource_curve(stdout, spec) == [[1.0, 0.10], [4.0, 0.55], [8.0, 0.90]]
 
 
 def test_extract_resource_curve_requires_a_declared_stdout_json_resource_key():
@@ -130,33 +130,34 @@ def test_extract_resource_curve_requires_a_declared_stdout_json_resource_key():
     assert extract_resource_curve(stdout, None) is None
 
 
-def test_extract_resource_curve_downsamples_early_dense_plus_endpoint():
-    # 100 distinct coordinates, cap 32 -> keep the EARLIEST 31 coordinates verbatim + the final endpoint
-    # (#7 review): early rungs are where an ASHA kill saves compute and where the live poller's early
-    # samples must find same-resource peers, so they are retained densely, not uniformly sampled.
+def test_extract_resource_curve_collapses_a_full_run_to_geometric_rungs():
+    # 100 steps collapse to the geometric rung schedule (powers of two) across the WHOLE run — latest
+    # value per band — so a live node DEEP in the run finds a sibling checkpoint at its rung, not the
+    # exact-coordinate gap the old first-31+endpoint retention left after the early window (#7 review).
     lines = "".join('{"recall": %f, "step": %d}\n' % (i / 100.0, i) for i in range(1, 101))
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
-    curve = extract_resource_curve(lines, spec, max_points=32)
-    assert [p[0] for p in curve] == [float(i) for i in range(1, 32)] + [100.0]  # steps 1..31 + endpoint
-    assert curve == sorted(curve)                              # ascending by resource
-    assert extract_resource_curve(lines, spec, max_points=1000) == [
-        [float(i), i / 100.0] for i in range(1, 101)]          # no downsample when under the cap
+    curve = extract_resource_curve(lines, spec)
+    # rung r keeps the latest step in [r, 2r) -> min(2r-1, 100)/100
+    assert curve == [[float(r), min(2 * r - 1, 100) / 100.0] for r in (1, 2, 4, 8, 16, 32, 64)]
+    assert _curve_metric_at(curve, 50) == 0.63       # step 50 -> rung 32 -> latest step 63 (mid-run peer!)
 
 
-def test_curve_metric_at_reads_the_exact_coordinate_only():
-    curve = [[1.0, 0.05], [10.0, 0.80]]
-    assert _curve_metric_at(curve, 1.0) == 0.05
-    assert _curve_metric_at(curve, 10.0) == 0.80
-    assert _curve_metric_at(curve, 5.0) is None      # no such coordinate -> no observation
-    assert _curve_metric_at(None, 1.0) is None       # pre-#7 log (curve absent)
-    assert _curve_metric_at([["bad"], [1.0, "x"], [2.0, 0.5]], 2.0) == 0.5   # malformed rows skipped
+def test_curve_metric_at_snaps_the_query_to_its_rung():
+    curve = [[1.0, 0.05], [8.0, 0.80]]               # rungs 1 and 8
+    assert _curve_metric_at(curve, 1) == 0.05        # rung 1
+    assert _curve_metric_at(curve, 1.5) == 0.05      # 1.5 -> rung 1
+    assert _curve_metric_at(curve, 8) == 0.80        # rung 8
+    assert _curve_metric_at(curve, 12) == 0.80       # 12 -> rung 8 (band [8, 16))
+    assert _curve_metric_at(curve, 4) is None        # rung 4 not persisted -> no observation
+    assert _curve_metric_at(curve, 0) is None        # non-positive -> no rung
+    assert _curve_metric_at(None, 1) is None          # pre-#7 log (curve absent)
+    assert _curve_metric_at([["bad"], [1.0, "x"], [2.0, 0.5]], 2) == 0.5   # malformed rows skipped; rung 2
 
 
 def test_sibling_metrics_prefer_the_durable_curve_over_the_truncated_tail():
-    # #7 core: the 500-char stdout_tail retains only each sibling's FINAL epoch (step 10). A live node at
-    # an EARLY step (1) — the only time an ASHA kill actually saves compute — finds NO same-resource peer
-    # in those tails. The durable resource_curve, mined from the eval's captured stdout (~64 KB tail) at
-    # node_evaluated, keeps the early coordinate, so the same-resource population is now discoverable.
+    # #7 core: the 500-char stdout_tail retains only each sibling's FINAL epoch (rung 8). A live node at
+    # an EARLY step (1 -> rung 1) — the only time an ASHA kill actually saves compute — finds NO peer in
+    # those tails. The durable per-rung curve keeps the early rung, so the population is discoverable.
     state = _fake_state(
         [0.90, 0.85, 0.80],
         tails=['{"recall": 0.90, "step": 10}\n',
@@ -164,15 +165,28 @@ def test_sibling_metrics_prefer_the_durable_curve_over_the_truncated_tail():
                '{"recall": 0.80, "step": 10}\n'],
     )
     for i, early in zip((1, 2, 3), (0.10, 0.08, 0.09)):
-        state.nodes[i].resource_curve = [[1.0, early], [10.0, state.nodes[i].metric]]
+        state.nodes[i].resource_curve = [[1.0, early], [8.0, state.nodes[i].metric]]   # rungs 1 and 8
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
-    early_sample = IntermediateSample(value=0.11, resource_key="step", resource=1.0)
+    early_sample = IntermediateSample(value=0.11, resource_key="step", resource=1.0)   # rung 1
 
-    # The tails alone hold nothing at step 1; the curves supply all three early peers.
+    # The tails alone hold nothing at rung 1; the curves supply all three early peers.
     assert sorted(sibling_metrics_at_resource(state, 0, spec, early_sample)) == [0.08, 0.09, 0.10]
-    # And the endpoint step is still readable from the same curves.
-    final_sample = IntermediateSample(value=0.5, resource_key="step", resource=10.0)
+    # And the endpoint rung is read from the same curves (step 10 -> rung 8).
+    final_sample = IntermediateSample(value=0.5, resource_key="step", resource=10.0)   # rung 8
     assert sorted(sibling_metrics_at_resource(state, 0, spec, final_sample)) == [0.80, 0.85, 0.90]
+
+
+def test_sibling_metrics_at_resource_finds_mid_run_peers_via_rungs():
+    # The owner's scenario: a live node at step 50 (deep in a 100-step run). Under exact-coordinate
+    # matching, completed peers had no coordinate 50, so no comparable population and the kill streak
+    # reset until the endpoint. With the shared rung schedule step 50 -> rung 32, and each sibling
+    # persisted a rung-32 checkpoint, so the mid-run population is discoverable.
+    state = _fake_state([0.90, 0.85, 0.80])
+    for i, mid in zip((1, 2, 3), (0.60, 0.58, 0.62)):
+        state.nodes[i].resource_curve = [[1.0, 0.05], [32.0, mid], [64.0, state.nodes[i].metric]]
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    sample = IntermediateSample(value=0.30, resource_key="step", resource=50.0)        # step 50 -> rung 32
+    assert sorted(sibling_metrics_at_resource(state, 0, spec, sample)) == [0.58, 0.60, 0.62]
 
 
 def test_node_evaluated_folds_resource_curve_and_old_logs_default_none(tmp_path):
