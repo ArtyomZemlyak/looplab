@@ -216,15 +216,15 @@ class OpenAICompatibleClient:
         self.temperature = temperature
         self.timeout = timeout
         # `header_timeout` bounds the TCP/TLS CONNECT (httpx `connect=`, see `_new_sdk`), so a connection
-        # that never ESTABLISHES fails over fast instead of waiting the full idle `timeout`. After headers
-        # arrive, `_accumulate_stream` reuses it as the first-SSE-EVENT budget (and the idle `timeout` for
-        # the inter-token body). KNOWN LIMITATION (do not over-claim): on the STREAM path it does NOT yet
-        # bound the wait for HTTP response HEADERS once the socket is connected — that read is a `read`
-        # timeout, so `_sdk.chat.completions.create()` blocks up to the idle `timeout` before failover.
-        # An endpoint that completes TLS then sends no headers is therefore failed over after `timeout`,
-        # not `header_timeout`; bounding the header-read too needs the same wall-clock worker-thread guard
-        # `_nonstream_bounded` already uses (its stream body would then be read cross-thread — deferred to
-        # a change that can be validated against a real streaming endpoint, not a fake SDK).
+        # that never ESTABLISHES fails over fast instead of waiting the full idle `timeout`. It ALSO bounds
+        # the wait for HTTP response HEADERS on the STREAM path: `create(stream=True)` runs under a wall-
+        # clock worker-thread guard (`_bounded_create`, join = header_timeout + up to header_timeout of
+        # slack), so an endpoint that completes TLS then sends no headers is failed over near `header_timeout`
+        # — not after the full idle `timeout` (the black-holed-request hang this used to have, when the
+        # header-read was left to httpx's `read` timeout). Once headers arrive, `_accumulate_stream` reuses
+        # `header_timeout` as the first-SSE-EVENT budget (and the idle `timeout` for the inter-token body).
+        # The bounded streaming Response is created in the worker and iterated on the caller thread: a sync-
+        # httpx sequential handoff, no concurrent access.
         _ht = DEFAULT_HEADER_TIMEOUT_S if header_timeout is None else float(header_timeout)
         self.header_timeout = min(_ht, timeout) if timeout else _ht   # never exceeds the idle timeout
         # Stream EVERY request (SSE) and reassemble it, so `timeout` acts as an INTER-TOKEN idle
@@ -271,8 +271,9 @@ class OpenAICompatibleClient:
         # resetting it, so it's never cut off). httpx's `read` timeout can't catch an SSE
         # keepalive-trickle (bytes reset it while no data EVENT arrives) — that is enforced by
         # `_accumulate_stream`'s idle/first-event guard on the STREAM path (idle_limit=timeout;
-        # first_byte_limit=header_timeout bounds the first EVENT AFTER headers, NOT the header-read
-        # itself — see the `header_timeout` note above). The per-request timeout lives on the OpenAI client
+        # first_byte_limit=header_timeout bounds the first EVENT AFTER headers; the header-READ itself is
+        # bounded separately by `_bounded_create`'s worker-thread guard — see the `header_timeout` note
+        # above). The per-request timeout lives on the OpenAI client
         # (`timeout=`), which wins over the http_client's; the http_client exists only to set
         # `trust_env=False` (the internal endpoint needs a DIRECT connection — no proxy env). See
         # `llm_trust_env` if a proxy/custom-CA is required. max_retries=0: we own the retry loop.

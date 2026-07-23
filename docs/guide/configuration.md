@@ -183,7 +183,7 @@ These are no-ops unless `backend=llm`.
 | `llm_reasoning_extra` | `LOOPLAB_LLM_REASONING_EXTRA` | `{}` | Raw fields merged into the request body (escape hatch) |
 | `llm_stream` | `LOOPLAB_LLM_STREAM` | `True` | Stream the response (SSE) and reassemble it — bounds a stalled generation via an idle-guard watchdog; off = one blocking request |
 | `llm_timeout` | `LOOPLAB_LLM_TIMEOUT` | `180.0` | Per-request inter-token idle limit (s): a stream with no new token for this long is aborted + retried |
-| `llm_header_timeout` | `LOOPLAB_LLM_HEADER_TIMEOUT` | `45.0` | First-byte (response-headers) window (s) for **streaming attempts only** before a request is treated as stalled; clamped to `llm_timeout`. Non-stream attempts are not bounded by it |
+| `llm_header_timeout` | `LOOPLAB_LLM_HEADER_TIMEOUT` | `45.0` | First-byte / response-headers window (s) for **streaming attempts**: bounds both the wait for response headers (a wall-clock guard on `create()`) and the first stream event, before the request is treated as stalled and failed over; clamped to `llm_timeout`. Non-stream attempts use the whole-call deadline (`llm_timeout` + this) instead |
 | `llm_trust_env` | `LOOPLAB_LLM_TRUST_ENV` | `False` | Honor HTTP(S)_PROXY / NO_PROXY env for the LLM client. Default false = a direct connection (the internal endpoint needs no proxy) |
 | `llm_cache` | `LOOPLAB_LLM_CACHE` | `False` | Serve identical **deterministic** (temperature-0) LLM requests from an in-process content-addressed cache (cuts cost on retry/panel/verify); sampling calls (temp>0) are never cached. Off by default |
 | `compressor_model` | `LOOPLAB_COMPRESSOR_MODEL` | — | Model id for the history auto-summary compressor (blank = the shared chat model) |
