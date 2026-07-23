@@ -2857,6 +2857,22 @@ def test_chat_log_persist_and_restore(tmp_path):
     assert client.get("/api/runs/ghost/chat-log").status_code == 404
 
 
+def test_chat_log_append_is_size_bounded(tmp_path, monkeypatch):
+    # Regression: chat.jsonl had no size cap, so unbounded turn appends could exhaust disk and slow
+    # every GET (which re-reads the whole file). An over-cap append is refused with 413; the refused
+    # turn is not written, and a normal append under the (generous) default cap still works.
+    import looplab.serve.routers.boss as boss_router
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    assert client.post("/api/runs/demo/chat-log",
+                       json={"role": "user", "content": "hi", "ts": 1.0, "seq": 1}).json()["ok"] is True
+    # shrink the cap so the (now non-empty) file is already over it: the next append is refused
+    monkeypatch.setattr(boss_router, "_CHAT_LOG_MAX_BYTES", 5)
+    assert client.post("/api/runs/demo/chat-log",
+                       json={"role": "user", "content": "more", "ts": 2.0, "seq": 2}).status_code == 413
+    assert [m["content"] for m in client.get("/api/runs/demo/chat-log").json()] == ["hi"]  # refused turn not written
+
+
 def test_start_seeds_genesis_chat(tmp_path, monkeypatch):
     """The chat-first creation flow carries its planning conversation into the new run: /api/start with
     a `chat` array writes those turns to the run's chat.jsonl, so the run opens with its creation story

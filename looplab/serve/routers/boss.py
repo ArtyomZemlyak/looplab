@@ -60,6 +60,15 @@ def _safe_boss_failure(exc: Exception) -> dict:
 from pydantic import BaseModel  # noqa: E402
 
 
+# Per-run bound on the durable UI chat sidecar (`chat.jsonl`). It is a single-writer UI-only file that
+# never folds into events.jsonl, but it had no cap: an owner (or, on an unauthenticated same-origin
+# deployment, any same-origin page) POSTing turns unbounded grows it without limit — disk exhaustion,
+# and every GET /chat-log re-reads the whole file. Generous so a real conversation never hits it (the
+# event-sourced comment path is bounded the same way); an over-cap append is refused with 413 and the
+# operator compacts (chat-compact) or resets (which archives chat.jsonl independently).
+_CHAT_LOG_MAX_BYTES = 32 * 1024 * 1024   # 32 MiB
+
+
 _DOMAIN_HTTP_FAILURES = {
     "run_generation_changed": {
         "message": "The run was reset or replaced before this work started.",
@@ -495,6 +504,13 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "chat turn must be a JSON object")
         turn = _sanitize_chat_turn(turn)
         path = rd / "chat.jsonl"
+        # Bound the durable sidecar so unbounded turn appends can't exhaust disk / slow every re-read.
+        try:
+            if path.stat().st_size >= _CHAT_LOG_MAX_BYTES:
+                raise HTTPException(413, "chat log is full for this run — compact it (chat-compact) "
+                                         "or reset the run to start a fresh transcript")
+        except OSError:
+            pass                                   # no file yet (or unstat-able) -> nothing to bound
         with srv.commands.run_activity(rd, "chat_append", generation=generation):
             with open(path, "ab") as f:
                 f.write(orjson.dumps(turn) + b"\n")
