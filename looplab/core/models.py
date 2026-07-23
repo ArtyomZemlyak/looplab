@@ -2057,10 +2057,10 @@ class RunState(BaseModel):
         Pure, deterministic, and strictly additive: it NEVER mutates a card, a per-card verdict, or any
         folded field — the card identities and their own verdicts are untouched. Each group is
         ``{seed_hash, seed_digest, seed_statement, card_ids, evidence, statements, verdict}`` in
-        first-seen order, with ``evidence`` the ordered union of the members' evidence and ``verdict`` a
-        strength roll-up of the members' own verdicts (supported > testing > tested > open, matching
-        ``_evidence_verdict``'s precedence on the unioned evidence; ``abandoned`` only when EVERY member
-        is abandoned)."""
+        first-seen order, with ``evidence`` the ordered union of the NON-ABANDONED members' evidence and
+        ``verdict`` a strength roll-up of the members' own verdicts (supported > testing > tested > open,
+        matching ``_evidence_verdict``'s precedence on that same non-abandoned evidence; ``abandoned``
+        only when EVERY member is abandoned). `card_ids` still lists every member (abandoned included)."""
         # Precedence == `_evidence_verdict`'s status order: supported > testing > tested > open (peer
         # review — `testing` OUTRANKS `tested`, so a still-running experiment is NOT hidden by a
         # finished-no-improve sibling). A per-card-label max is EXACTLY the union recompute here: each
@@ -2086,13 +2086,19 @@ class RunState(BaseModel):
                 groups[key] = group
                 order.append(key)
             group["card_ids"].append(card.id)
-            for node_id in (card.evidence or []):
-                if node_id not in group["evidence"]:
-                    group["evidence"].append(node_id)
+            verdict = card.verdict or "open"
+            # Union evidence from NON-abandoned members only, so `evidence` and `verdict` describe the
+            # SAME (live) set (peer review): the verdict roll-up drops an abandoned member's stance, so
+            # folding its evidence would make the two disagree — and the label-max == _evidence_verdict
+            # equivalence holds only over the non-abandoned members whose labels the roll-up keeps.
+            if verdict != "abandoned":
+                for node_id in (card.evidence or []):
+                    if node_id not in group["evidence"]:
+                        group["evidence"].append(node_id)
             statement = (card.statement or "").strip()
             if statement and statement not in group["statements"]:
                 group["statements"].append(statement)
-            group["_verdicts"].append(card.verdict or "open")
+            group["_verdicts"].append(verdict)
         out: list[dict] = []
         for key in order:
             group = groups[key]

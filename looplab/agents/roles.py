@@ -589,11 +589,13 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # shadow the old Hypothesis (verdict == status, id/evidence identical); `seed_statement == statement`
     # only until an operator edit or a merge diverges them.
     # This feed DELIBERATELY shows the immutable `seed_statement` (not the display `statement`) and asks
-    # the model to copy it EXACTLY: evidence links only when the built node's `idea.hypothesis` hashes to
-    # the card id (== hypothesis_id(seed_statement)), so copying an edited/merged `statement` would hash
-    # elsewhere and the card would never gain evidence. Consequence (by design): an operator statement
-    # edit changes render/analysis/selection (which read `statement`) but NOT the seed the proposal feed
-    # asks the model to test — a display/analysis edit, not a re-seed of the linkable research direction.
+    # the model to copy it EXACTLY: evidence links only when the built node's `idea.hypothesis` matches the
+    # card's SEED — `_derive_cards` bridges `hypothesis_id(seed)` to the owning card id via
+    # owner_by_statement (that hash EQUALS the card id only for a legacy hypothesis-shadow card, NOT for a
+    # native `card-N`). Copying an edited/merged `statement` would hash elsewhere, so no card owns it and it
+    # gains no evidence. Consequence (by design): an operator statement edit changes render/analysis/
+    # selection (which read `statement`) but NOT the seed the proposal feed asks the model to test — a
+    # display/analysis edit, not a re-seed of the linkable research direction.
     # Distinct untested BELIEFS, not raw work-item cards (peer review): two cards that reuse the exact
     # hypothesis wording are ONE belief, surfaced once so the model does not re-read a duplicate.
     open_hyps = state.open_research_beliefs()

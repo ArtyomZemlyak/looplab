@@ -84,21 +84,17 @@ def test_sibling_final_metrics_excludes_discarded_selection_evidence():
     assert sibling_final_metrics(state, node_id=0) == []
 
 
-def test_sibling_resource_metrics_never_substitute_finished_endpoints():
-    state = _fake_state(
-        [0.90, 0.85, 0.80],
-        tails=[
-            '{"recall": 0.10, "step": 1}\n{"recall": 0.90, "step": 10}\n',
-            '{"recall": 0.08, "step": 1}\n{"recall": 0.85, "step": 10}\n',
-            '{"recall": 0.09, "step": 1}\n{"recall": 0.80, "step": 10}\n',
-        ],
-    )
+def test_sibling_resource_metrics_use_the_rung_curve_not_the_finished_endpoint():
+    state = _fake_state([0.90, 0.85, 0.80])
+    for i, early in zip((1, 2, 3), (0.10, 0.08, 0.09)):
+        state.nodes[i].resource_curve = [[1.0, early], [8.0, state.nodes[i].metric]]   # rung 1 + endpoint 8
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
-    same_step = IntermediateSample(value=0.11, resource_key="step", resource=1.0)
-    absent_step = IntermediateSample(value=0.11, resource_key="step", resource=2.0)
+    rung1 = IntermediateSample(value=0.11, resource_key="step", resource=1.0)           # rung 1
+    absent_rung = IntermediateSample(value=0.11, resource_key="step", resource=2.0)     # rung 2 (not persisted)
 
-    assert sorted(sibling_metrics_at_resource(state, 0, spec, same_step)) == [0.08, 0.09, 0.10]
-    assert sibling_metrics_at_resource(state, 0, spec, absent_step) == []
+    # a rung-1 sample reads each sibling's rung-1 checkpoint, NEVER their finished endpoint (rung 8)
+    assert sorted(sibling_metrics_at_resource(state, 0, spec, rung1)) == [0.08, 0.09, 0.10]
+    assert sibling_metrics_at_resource(state, 0, spec, absent_rung) == []              # no rung-2 checkpoint
 
 
 # --------------------------------------------------------------------- extract_resource_curve / durable curve (#7)
@@ -209,20 +205,21 @@ def test_earliest_per_band_does_not_false_flag_a_node_just_into_a_band():
     assert asha_underperforming(1 / 65, pop, "min", quantile=0.5) is False
 
 
-def test_sibling_tail_fallback_uses_earliest_in_band_not_latest():
-    # Peer review: the stdout_tail fallback (no persisted curve) must ALSO take the EARLIEST in-band
-    # coordinate, consistent with the curve's start-of-band checkpoint — not the LATEST (end-of-band),
-    # which would re-introduce the ~2× more-trained comparison on the fallback path and mix start/end-of-
-    # band values in one comparable population.
+def test_sibling_with_no_curve_is_excluded_not_substituted_from_the_tail():
+    # Peer review: a sibling contributes ONLY its per-rung curve (a START-of-band checkpoint). The
+    # 500-char stdout_tail holds only FINAL epochs, so any in-band value there is END-of-band (~2× more
+    # trained); substituting it would false-flag a live node just into the band and mix start/end-of-band
+    # values in one population. A sibling with no curve at this rung is EXCLUDED, never tail-substituted.
     state = _fake_state(
         [0.5, 0.5, 0.5],
-        tails=['{"loss": 0.20, "step": 64}\n{"loss": 0.12, "step": 90}\n{"loss": 0.10, "step": 100}\n'] * 3,
+        tails=['{"loss": 0.20, "step": 64}\n{"loss": 0.10, "step": 100}\n'] * 3,   # tail: end-of-band only
     )
-    # no resource_curve on the siblings (default None) -> the fallback tail scan is used
+    # nodes 1,2 have NO resource_curve (default None) -> excluded; node 3 has a real curve -> contributes.
+    state.nodes[3].resource_curve = [[64.0, 0.18]]                                   # rung 64 start-of-band
     spec = {"kind": "stdout_json", "key": "loss", "resource_key": "step"}
-    sample = IntermediateSample(value=0.19, resource_key="step", resource=65.0)     # step 65 -> rung 64
+    sample = IntermediateSample(value=0.19, resource_key="step", resource=65.0)      # step 65 -> rung 64
     pop = sibling_metrics_at_resource(state, 0, spec, sample)
-    assert pop == [0.20, 0.20, 0.20]           # start-of-band step 64, NOT end-of-band step 100 (0.10)
+    assert pop == [0.18]        # only the curve sibling; the tail-only siblings' end-of-band 0.10 is NOT used
 
 
 def test_extract_resource_curve_survives_a_huge_integer_coordinate():
@@ -355,7 +352,7 @@ class _AshaStub(AshaMonitorMixin):
         return self._cadence
 
 
-def _fake_state(finals, self_id=0, tails=None):
+def _fake_state(finals, self_id=0, tails=None, curves=None):
     idea = Idea(operator="draft", params={}, rationale="asha test")
     nodes = {
         self_id: Node(id=self_id, operator="draft", idea=idea, status=NodeStatus.pending),
@@ -368,14 +365,15 @@ def _fake_state(finals, self_id=0, tails=None):
             metric=m,
             status=NodeStatus.evaluated,
             stdout_tail=(tails[i - 1] if tails else ""),
+            resource_curve=(curves[i - 1] if curves else None),   # the same-rung comparable source
         )
     return RunState(nodes=nodes)
 
 
 def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, *,
-              tails=None, log_snapshot=None, window=0.12):
+              tails=None, curves=None, log_snapshot=None, window=0.12):
     monkeypatch.setattr(
-        "looplab.events.replay.fold", lambda events: _fake_state(finals, tails=tails))
+        "looplab.events.replay.fold", lambda events: _fake_state(finals, tails=tails, curves=curves))
 
     async def drive():
         cancel = threading.Event()
@@ -476,17 +474,19 @@ def test_loop_opt_in_kill_requires_comparable_resource_evidence(tmp_path, monkey
     endpoint_alerts = [d for event, d in endpoint_stub.store.events if event == EV_ASHA_RANK]
     assert endpoint_alerts and endpoint_alerts[0]["kill_comparable"] is False
 
-    # The live curve is already better than peers were at the SAME step, even though it is naturally
+    # The live curve is already better than peers were at the SAME rung, even though it is naturally
     # below their finished endpoints. The old endpoint-only comparison killed this healthy improving run.
+    # Peers contribute their rung-1 START-of-band checkpoint via the durable resource_curve (step 1 ->
+    # rung 1, step 10 -> rung 8); a tail is never substituted.
     improving = {}
-    peer_curves = [
-        '{"recall": 0.05, "step": 1}\n{"recall": 0.80, "step": 10}\n',
-        '{"recall": 0.07, "step": 1}\n{"recall": 0.70, "step": 10}\n',
-        '{"recall": 0.09, "step": 1}\n{"recall": 0.60, "step": 10}\n',
+    peer_resource_curves = [
+        [[1.0, 0.05], [8.0, 0.80]],
+        [[1.0, 0.07], [8.0, 0.70]],
+        [[1.0, 0.09], [8.0, 0.60]],
     ]
     stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01)
     _run_loop(stub, wd, spec, "max", improving, monkeypatch,
-              finals=[0.8, 0.7, 0.6], tails=peer_curves, window=0.2)
+              finals=[0.8, 0.7, 0.6], curves=peer_resource_curves, window=0.2)
     assert improving.get("kill") is not True
     alerts = [d for event, d in stub.store.events if event == EV_ASHA_RANK]
     assert alerts and alerts[0]["kill_comparable"] is True  # endpoint warning remains diagnostic
@@ -497,7 +497,7 @@ def test_loop_opt_in_kill_requires_comparable_resource_evidence(tmp_path, monkey
     (wd / "train.log").write_text('{"recall": 0.01, "step": 1}\n', encoding="utf-8")
     on = {}
     _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01), wd, spec, "max", on,
-              monkeypatch, finals=[0.8, 0.7, 0.6], tails=peer_curves, window=0.2)
+              monkeypatch, finals=[0.8, 0.7, 0.6], curves=peer_resource_curves, window=0.2)
     assert on.get("kill") is True
     assert on.get("terminal_reason") == "asha_underperforming"
 

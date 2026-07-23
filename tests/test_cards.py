@@ -1164,6 +1164,24 @@ def test_grouped_beliefs_keys_by_full_digest_not_the_short_hash():
                                                   hypothesis_statement_digest(second)}
 
 
+def test_grouped_beliefs_excludes_an_abandoned_members_evidence_from_the_union():
+    # Peer review: the verdict roll-up drops an abandoned member; its evidence must drop from the union
+    # too, so `evidence` and `verdict` describe the SAME (live, non-abandoned) set.
+    from looplab.core.models import Card, RunState
+    seed = "shared belief across two work items"
+    st = RunState(direction="max", goal="g")
+    st.cards = {
+        "card-1": Card(id="card-1", seed_statement=seed, statement=seed, verdict="abandoned",
+                       evidence=[1, 2], status="proposed"),
+        "card-2": Card(id="card-2", seed_statement=seed, statement=seed, verdict="open",
+                       evidence=[3], status="proposed"),
+    }
+    [group] = st.grouped_beliefs()
+    assert group["card_ids"] == ["card-1", "card-2"]     # both are still listed as members
+    assert group["evidence"] == [3]                       # the abandoned member's [1, 2] is excluded
+    assert group["verdict"] == "open"                     # verdict + evidence describe the live member
+
+
 def test_grouped_beliefs_verdict_matches_evidence_verdict_on_the_union():
     # Peer review: `testing` (a still-running experiment) must OUTRANK `tested` (finished, no improvement)
     # so the group is not reported "done" while an experiment is live — matching `_evidence_verdict`'s

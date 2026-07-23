@@ -224,9 +224,10 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
                                 sample: IntermediateSample) -> list[float]:
     """Sibling curve values observed at the live sample's declared resource RUNG (`_resource_rung`).
 
-    Completed nodes retain a durable per-rung curve (+ a bounded stdout tail fallback). Missing/
-    truncated/malformed curve evidence simply removes that sibling from the comparable population; its
-    final endpoint is never substituted.
+    A completed node contributes ONLY its durable per-rung `resource_curve` START-of-band checkpoint.
+    Missing/truncated/malformed curve evidence simply removes that sibling from the comparable
+    population; a value is NEVER substituted from its stdout tail (which holds only final epochs, i.e.
+    an end-of-band point that would false-flag a live node just into the band).
     """
     if sample.resource_key is None or sample.resource is None:
         return []
@@ -236,7 +237,6 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
         return []
     if metric_spec.get("kind", "stdout_json") != "stdout_json":
         return []
-    metric_key = metric_spec.get("key", "metric")
 
     from looplab.events.replay import promotion_eligible_nodes
 
@@ -247,24 +247,14 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
         # #7: read the durable per-RUNG curve mined from the eval's captured stdout (~64 KB tail) at
         # node_evaluated (extract_resource_curve). Both sides snap to a shared geometric rung schedule
         # (`_resource_rung`), so a live node anywhere in the run — not only at an exact early coordinate —
-        # finds a sibling checkpoint at its rung. Fall back to the sibling's raw stdout_tail (matched at
-        # the SAME rung) when the persisted curve holds no value at this rung — a pre-#7 log with no
-        # curve, or a #7 curve whose early rung scrolled past the ~64 KB tail extract_resource_curve mined.
-        _live_rung = _resource_rung(sample.resource)
+        # finds a sibling checkpoint at its rung. A sibling contributes ONLY via its persisted curve (the
+        # START-of-band checkpoint): its 500-char stdout_tail retains only the FINAL epochs, so any in-band
+        # value there is an END-of-band (~2× more-trained) point — substituting it would false-flag a live
+        # node just into the band and mix start/end-of-band values in one population (peer review). A
+        # sibling whose curve lacks this rung (a pre-#7 log, or a #7 curve whose early rung scrolled past
+        # the ~64 KB extract window) is simply EXCLUDED, never substituted from the tail — exactly the
+        # docstring's contract. The min_siblings floor then degrades to no-kill on thin same-rung evidence.
         value = _curve_metric_at(getattr(node, "resource_curve", None), sample.resource)
-        if value is None:
-            # EARLIEST-in-band on the fallback TOO (consistent with the curve's start-of-band checkpoint):
-            # scan chronologically (oldest-first) and take the FIRST in-band match. Newest-first + break
-            # would take the END-of-band value, re-introducing on this path the exact ~2× more-trained
-            # comparison the curve's earliest-per-band choice removes, and mixing start/end-of-band values
-            # in one comparable population (peer review).
-            for obj in reversed(list(_json_objects_newest_first(getattr(node, "stdout_tail", "") or ""))):
-                if _resource_rung(obj.get(sample.resource_key)) != _live_rung:
-                    continue
-                _v = _finite_number(obj.get(metric_key))
-                if _v is not None:
-                    value = _v
-                    break
         if value is not None:
             out.append(value)
     return out
