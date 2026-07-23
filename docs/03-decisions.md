@@ -329,3 +329,16 @@ knowledge/
 | 9 | Capability layer: MCP bus (`archive`/`ml-tools`/`sandbox`/`web`) + Agent Skills (seed-knowledge migrates) | [02 §3.14](02-architecture.md) |
 | 10 | Unified knowledge/memory (CoALA tiers, router, cross-run case library + lessons, files-as-truth) — replaces the disconnected §3.8/§3.10/§3.12 stores | [02 §3.10](02-architecture.md), [04](04-file-layout.md) |
 | 11 | Cross-cutting hardening (secrets/config/observability/HITL/resume/determinism/testing/security/cost/isolation) | [02 §18](02-architecture.md) |
+
+---
+
+## Open (needs investigation, not yet decided)
+
+- **Advisory-vs-behavior classification of RunState sidecars.** Commit `f019358` relabeled several
+  sidecars (`hypotheses`, `research`, `foresight_selected`, `reward_hacks`, …) from "audit-only" to
+  "advisory — feeds prompts/priorities". That pass was NOT exhaustive: some field comments and
+  docstrings still assert "audit-only; never read by best-selection" while the code now consumes them
+  (e.g. the Card-priority fallback, proposal cues, trust gating). **TODO:** audit the real data flow of
+  every sidecar against the business requirement (what SHOULD steer selection vs. stay pure telemetry),
+  then reconcile every inline comment + doc to match. Marker in `looplab/core/models.py` at the
+  "advisory/control receipts" section. Do this before trusting any single field's stated role.

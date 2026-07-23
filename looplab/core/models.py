@@ -1856,6 +1856,12 @@ class RunState(BaseModel):
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
     # --- advisory/control receipts (no direct objective ranking; downstream effects noted per field) ---
+    # TODO(advisory-vs-behavior audit): f019358 relabeled several of these sidecars from "audit-only" to
+    # "advisory — feeds prompts/priorities". That relabel was not exhaustive: individual field comments
+    # below (and some docstrings) may still say "audit-only; never read by best-selection" while the code
+    # now consumes them. Before relying on any single field's comment, audit the REAL data flow against
+    # the business requirement (what SHOULD steer selection vs. stay pure telemetry) and reconcile every
+    # comment + doc to match. Tracked in docs/03-decisions.md.
     # Unified self-driving agent (audit-only; never read by best-selection): timeline of the agent's
     # macro-action choices {at_node, chosen, legal, recommended, rationale} for the "why this action"
     # view. Additive — old event logs without `agent_decision` events fold to an empty list.
