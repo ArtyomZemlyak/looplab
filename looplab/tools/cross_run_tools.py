@@ -17,7 +17,6 @@ ratified by the operator (§22.4). `role` scopes the claim stream so the Develop
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 import unicodedata
@@ -307,16 +306,6 @@ class CrossRunTools:
                           "both work."}},
                 ["slug"]),
         ]
-
-    # CLAUDE REVIEW: dead code — no caller remains (all tool branches read through the governed strict
-    # snapshots: project_governed_sources + quarantine receipts), and this is the one LENIENT reader
-    # left on the class; a future branch reaching for it would silently bypass row quarantine, the
-    # source-health receipts, and the governance snapshot locks. Remove it (and the
-    # read_jsonl_lenient import).
-    def _load(self, fname: str) -> list[dict]:
-        from looplab.events.eventstore import read_jsonl_lenient
-        p = self.dir / fname
-        return read_jsonl_lenient(p, loads=json.loads, dicts_only=True) if p.exists() else []
 
     def _role_lessons(self) -> list[dict]:
         """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the

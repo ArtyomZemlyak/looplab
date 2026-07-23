@@ -241,6 +241,26 @@ def test_watchdog_reflection_bounds_to_most_recent_nodes():
     assert "node 3:" not in out and "node 1:" not in out              # ...older ones are bounded out
 
 
+def test_watchdog_reflection_recovered_nodes_do_not_evict_a_still_flagged_node():
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
+    # Node 3 stays FLAGGED (broken); nodes 4 and 5 are the two MOST-RECENT rows but each RECOVERED
+    # (asha underperforming=False renders nothing). With max_shown=2 a slot-first cut let the two
+    # recovered nodes take both slots and evict node 3 — the function returned "" while a live alert
+    # existed. The render-filter must keep node 3 and skip the empty-rendering siblings.
+    events = _watchdog_lifecycle_events(3, 4, 5) + [
+        _wd_event(10, EV_TRAIN_MONITOR_ALERT, node_id=3, generation=0, status="broken",
+                  reason="loss diverged", confidence=0.9),
+        _wd_event(11, EV_ASHA_RANK, node_id=4, generation=0, intermediate=0.4,
+                  quantile=0.5, population=3, direction="max", underperforming=False),
+        _wd_event(12, EV_ASHA_RANK, node_id=5, generation=0, intermediate=0.4,
+                  quantile=0.5, population=3, direction="max", underperforming=False),
+    ]
+    out = watchdog_reflection(events, max_shown=2)
+    assert "node 3:" in out and "broken" in out                      # the live alert survives...
+    assert "node 4:" not in out and "node 5:" not in out             # ...recovered siblings take no slot
+
+
 def test_watchdog_reflection_distinguishes_endpoint_warning_from_same_resource_rank():
     from looplab.events.digest import watchdog_reflection
     from looplab.events.types import EV_ASHA_RANK

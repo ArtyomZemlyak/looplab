@@ -348,14 +348,20 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
         if (node is not None and node.attempt == generation and not node.tombstoned
                 and nid not in current_state.aborted_nodes):
             active.add(key)
-    # CLAUDE REVIEW: the max_shown slots are taken BEFORE checking whether a lifecycle's latest row
-    # still renders anything. A recovered lifecycle (latest train verdict healthy / ASHA
-    # underperforming=False) yields no segment yet occupies a slot, so two recently-recovered nodes
-    # evict an older still-FLAGGED node — and the function can return "" while a live alert exists,
-    # contradicting its purpose (recovery is meant to silence its OWN node, not its siblings). Filter
-    # `active` down to keys whose latest mon/asha row would render before applying [:max_shown].
+    # A recovered lifecycle (latest train verdict healthy / ASHA underperforming=False) renders NO
+    # segment below, yet would still occupy a slot. Filtering `active` down to keys whose latest row
+    # actually renders BEFORE taking [:max_shown] keeps two recently-recovered nodes from evicting an
+    # older still-FLAGGED node (and the function from returning "" while a live alert exists) — recovery
+    # silences its OWN node's slot, never a sibling's. The predicate mirrors the render conditions below.
+    def _renders(key: tuple[int, int]) -> bool:
+        m = mon.get(key, (None, -1))[0]
+        if m and str(m.get("status") or "").strip().lower() in ("watch", "broken"):
+            return True
+        a = asha.get(key, (None, -1))[0]
+        return bool(a and a.get("underperforming", True) is True)
+
     lifecycle_keys = sorted(
-        active,
+        (key for key in active if _renders(key)),
         key=lambda key: max(mon.get(key, ({}, -1))[1], asha.get(key, ({}, -1))[1]),
         reverse=True,
     )[:max_shown]

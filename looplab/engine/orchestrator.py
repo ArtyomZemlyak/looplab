@@ -4863,10 +4863,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         state = reserved.state
         node_id = reserved.node_id
         kind = reserved.kind
-        # CLAUDE REVIEW: dead assignment — nothing reads _bparents since the node_building append moved
-        # into _reserve_node_build; every branch below recomputes parents from `action`. Delete it (or
-        # make it the authoritative parent list so the card-claimed path is visibly single-sourced).
-        _bparents = reserved.parent_ids
         parent_generations = reserved.parent_generations
         idea = reserved.idea.model_copy(deep=True) if reserved.idea is not None else None
         if idea is None:

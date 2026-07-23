@@ -121,7 +121,7 @@ class RunConfigUpdateRequest(BaseModel):
     # the published schema advertises {"type": "string", "pattern": ..., "default": null} while
     # put_run_config 400s an explicit null ("must be the 64-character config revision"). Make it
     # Optional[str] (accepting explicit null as "no CAS") or publish without the null default.
-    expected_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = None
+    expected_revision: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")] = None
 
 
 class LegacyRunConfigUpdateRequest(BaseModel):
@@ -132,7 +132,7 @@ class LegacyRunConfigUpdateRequest(BaseModel):
         json_schema_extra={"not": {"required": ["settings"]}},
     )
 
-    expected_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = None
+    expected_revision: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")] = None
 
 
 class RunConfigUpdateResponse(BaseModel):
@@ -2447,7 +2447,9 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "request body must be a JSON object")
         has_expected_revision = "expected_revision" in body
         expected_revision = body.get("expected_revision")
-        if has_expected_revision and (
+        # An explicit null is treated as absent (no CAS), matching the now-nullable request schema; only
+        # a present, non-null value must be the 64-char revision.
+        if has_expected_revision and expected_revision is not None and (
                 not isinstance(expected_revision, str)
                 or _SHA256_RE.fullmatch(expected_revision) is None):
             raise HTTPException(400, "expected_revision must be the 64-character config revision")

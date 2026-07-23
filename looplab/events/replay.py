@@ -3695,7 +3695,9 @@ def _derive_hypotheses(st: RunState) -> None:
     evidence, merged with any explicitly-added ones (`hypothesis_added`). The verdict is computed from
     evidence outcomes — supported if an experiment IMPROVED over its parent (or became the run best),
     tested if evaluated without improvement, testing while still running, open with no evidence.
-    Audit-only: nothing here is read by best-selection."""
+    Advisory: never directly re-ranks evaluated nodes or picks the champion, but the OPEN board is fed
+    to later proposal prompts and is the compatibility fallback for Card priority in card-driven
+    selection (see f019358 / the RunState.hypotheses + Hypothesis docs)."""
     hyps: dict[str, Hypothesis] = {}
 
     # 1) explicitly-added hypotheses (human / deep-research) — may start with no evidence.
