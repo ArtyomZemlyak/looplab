@@ -86,11 +86,7 @@ stack(40,330,DY,[
 ]);
 // NOVELTY
 stack(410,210,DY,[
- // CLAUDE REVIEW: the setting is `novelty_semantic`, not `semantic_novelty` (core/config.py), and
- // "algorithmic mode … only" is incomplete — the deterministic gate (incl. this semantic leg) also
- // engages on a Strategist `explore` novelty stance (engine/novelty.py; configuration.md's
- // novelty_semantic row lists all triggers). Suggest: "novelty_semantic on + algo mode or explore stance".
- {id:"n_sem",h:78,t:"Semantic dedup",tag:"algo opt-in",c:C.r,sub:["algorithmic mode + semantic_novelty only","cosine ≥ 0.92 on rationale+hypothesis"]},
+ {id:"n_sem",h:78,t:"Semantic dedup",tag:"algo opt-in",c:C.r,sub:["novelty_semantic on + algo mode or explore stance","cosine ≥ 0.92 on rationale+hypothesis"]},
  {id:"n_num",h:78,t:"Numeric dedup",tag:"algo opt-in",c:C.ev,sub:["L2 < 0.05 → deterministic nudge","seed=id×1009+7 · scale=max(|p|,1)×0.1"]},
 ]);
 // DEVELOPER — three separately-traced phases on a fresh repo node (stages → plan → implement);
