@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import urllib.request
 from pathlib import Path
@@ -53,6 +54,64 @@ def test_cli_agent_missing_binary_leaves_seed(tmp_path):
                             cmd_override=[str(tmp_path / "nope.exe")])
     code = dev.implement(Idea(operator="draft", params={}))
     assert "TODO" in code and "metric" in code
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while `pid` is a live (non-zombie) process. A reaped-pending zombie counts as dead — the
+    tree-kill's job is to STOP the work, and a zombie no longer runs."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:                                              # Linux: a 'Z' state is a reaped-pending corpse
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return fh.read().rsplit(") ", 1)[1].split(" ", 1)[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError, IndexError, OSError):
+        return False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group liveness probe")
+def test_cli_agent_timeout_kills_the_whole_process_tree(tmp_path):
+    # G4a: a CLI agent that spawns a grandchild (a nested train/LSP/git subprocess) then hangs. The
+    # plain subprocess.run timeout SIGKILLs only the DIRECT child, orphaning the grandchild to keep
+    # burning compute past the deadline; the own-process-group tree-kill must reap the grandchild too.
+    import time
+    pidfile = tmp_path / "grandchild.pid"
+    child = tmp_path / "hang_agent.py"
+    child.write_text(
+        "import subprocess, sys, pathlib, time\n"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(g.pid))\n"
+        "time.sleep(120)\n",
+        encoding="utf-8")
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=[sys.executable, str(child), str(pidfile)], timeout=1.5)
+    dev.implement(Idea(operator="draft", params={}))
+
+    assert dev.last_run is not None and dev.last_run.timed_out is True
+    for _ in range(60):                               # the stub records the grandchild pid promptly
+        if pidfile.exists():
+            break
+        time.sleep(0.05)
+    assert pidfile.exists(), "stub never recorded the grandchild pid"
+    gpid = int(pidfile.read_text().strip())
+    try:
+        dead = False
+        for _ in range(100):                          # give the tree-kill a moment to propagate
+            if not _pid_alive(gpid):
+                dead = True
+                break
+            time.sleep(0.05)
+        assert dead, f"grandchild {gpid} survived the timeout — the tree-kill orphaned it"
+    finally:
+        # Self-cleaning: if the fix ever regresses the grandchild is a live `sleep(120)`; never leak
+        # it out of the test (a CI re-run must not accumulate one detached sleeper per failing run).
+        try:
+            os.kill(gpid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
 
 
 def test_make_roles_selects_cli_agent():

@@ -199,19 +199,43 @@ class CliAgentDeveloper:
                         else None)
             env = {**os.environ, **self.spec.env(self.host)}
             argv = self._argv((self.brief + "\n\n" + message).strip(), "solution.py")
+            # OWN process group (not the plain subprocess.run timeout): a CLI coding agent spawns its
+            # OWN children — a language server, git, a nested training/eval subprocess. subprocess's
+            # built-in timeout kill signals only the DIRECT child, orphaning those grandchildren to keep
+            # burning CPU/GPU/memory past the deadline. Launch a group and whole-tree-kill on timeout,
+            # reusing the sandbox tier's `_kill_tree` (psutil → killpg/taskkill fallback).
+            group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                     else {"start_new_session": True})
             try:
                 # encoding/errors explicit: agents print UTF-8 glyphs (·, →) that the
                 # Windows locale codec (cp1252) can't decode — the default text=True
                 # crashes the stdout reader thread mid-run and loses the captured output.
-                p = subprocess.run(argv, cwd=str(wd), env=env, timeout=self.timeout,
-                                   capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace")
-                self.last_run = AgentRun(launched=True, exit_code=p.returncode,
-                                         stdout_tail=(p.stdout or "")[-2000:],
-                                         stderr_tail=(p.stderr or "")[-2000:])
-            except subprocess.TimeoutExpired as e:
-                self.last_run = AgentRun(launched=True, timed_out=True,
-                                         stderr_tail=str(e)[-2000:])
+                with subprocess.Popen(argv, cwd=str(wd), env=env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                      errors="replace", **group) as p:
+                    from looplab.runtime.sandbox import _kill_tree
+                    try:
+                        out, err = p.communicate(timeout=self.timeout)
+                        self.last_run = AgentRun(launched=True, exit_code=p.returncode,
+                                                 stdout_tail=(out or "")[-2000:],
+                                                 stderr_tail=(err or "")[-2000:])
+                    except subprocess.TimeoutExpired as e:
+                        _kill_tree(p)                  # the WHOLE tree, not just the direct child
+                        try:
+                            p.communicate(timeout=10)  # reap the signalled group; drain/free the pipes
+                        except Exception:  # noqa: BLE001 — SIGKILL'd tree; __exit__ still closes the fds
+                            pass
+                        self.last_run = AgentRun(launched=True, timed_out=True,
+                                                 stderr_tail=str(e)[-2000:])
+                    except BaseException:
+                        # ANY other error (KeyboardInterrupt / MemoryError / an OSError raised mid-
+                        # communicate) must NOT leave a detached tree: with start_new_session the child is
+                        # its OWN session leader, so a terminal SIGINT never reaches it — only the engine
+                        # parent raises. Tree-kill before propagating (restores subprocess.run's kill-on-
+                        # any-exception) so Popen.__exit__ can't hang on a live child and no grandchild
+                        # survives. An OSError here re-raises to the outer handler (launched=False), as before.
+                        _kill_tree(p)
+                        raise
             except OSError as e:
                 # binary missing / not executable -> leave the seed; the validator flags
                 # `agent_launched=False` and the loop's eval/debug copes.
