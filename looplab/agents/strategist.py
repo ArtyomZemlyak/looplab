@@ -492,8 +492,13 @@ def canonicalize_strategy_parallelism(strat: Optional[dict]) -> dict:
     A partial legacy delta must first promote to canonical and then discard both legacy spellings.
     Otherwise merging it onto an active Strategy that already contains a canonical value leaves the
     stale canonical value to win at apply time, silently dropping the newer delta.
+
+    Unlike config/startup loads, the live Strategist deliberately treats ``parallel_build`` as a FULL
+    alias of ``llm_parallel`` (its docstring vocabulary + strategy.py ``_apply_strategy``), so it opts
+    into ``promote_build_to_llm_parallel``. Startup keeps that promotion off to avoid a legacy build
+    width silently enabling the shared broker.
     """
-    out = canonicalize_parallelism_source(strat or {})
+    out = canonicalize_parallelism_source(strat or {}, promote_build_to_llm_parallel=True)
     for legacy, canonical in PARALLELISM_ALIASES.items():
         if canonical in out:
             out.pop(legacy, None)

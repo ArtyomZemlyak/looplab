@@ -48,33 +48,41 @@ def parallelism_aliases(setting: str) -> tuple[str, ...]:
     return (setting,)
 
 
-def canonicalize_parallelism_source(values: dict) -> dict:
+def canonicalize_parallelism_source(
+    values: dict, *, promote_build_to_llm_parallel: bool = False,
+) -> dict:
     """Promote legacy parallel keys *within one config-precedence source*.
 
     Applying this only after file/CLI/env were flattened would let a lower-priority canonical env
     value shadow a higher-priority legacy file value (or a file canonical value shadow a CLI legacy
     override), so callers with sub-layers normalize each layer independently.
+
+    ``max_parallel``/``eval_parallel`` are true aliases (pure eval width, no extra semantics) and are
+    always promoted. ``parallel_build``/``llm_parallel`` are NOT: a positive ``llm_parallel`` also flips
+    on the finite shared LLM broker (``orchestrator._startup_llm_total``), while legacy ``parallel_build``
+    means "legacy build width, unbounded overlap, no shared total". So promoting a legacy-only
+    ``parallel_build`` layer (e.g. just ``LOOPLAB_PARALLEL_BUILD=1`` in env) would silently serialize
+    every provider call — contradicting llm_broker.py's docstring, orchestrator's "legacy-only preserves
+    unbounded overlap" note, the broker-neutral live-control path, and the configuration.md ``llm_parallel``
+    row ("falls back ... without enabling a shared total"). Config/startup loads therefore keep broker
+    opt-in tied to an EXPLICITLY-spelled canonical ``llm_parallel``; the orchestrator's own width fallback
+    (``llm_parallel if not None else parallel_build``) still carries the legacy build width. Only the
+    Strategist live-control path (``canonicalize_strategy_parallelism``) opts into
+    ``promote_build_to_llm_parallel``, where ``parallel_build`` is a deliberate full alias of the
+    canonical knob (see strategy.py ``_apply_strategy``).
     """
     if not isinstance(values, dict):
         return values
     out = dict(values)
     for legacy, canonical in PARALLELISM_ALIASES.items():
-        # CODEX AGENT: None is the durable legacy mode for llm_parallel, not a missing value. A normal
-        # snapshot contains llm_parallel:null plus parallel_build:1; reloading it here promotes null to
-        # 1 and unexpectedly enables the global one-call broker. Promote aliases only when the
-        # canonical key is absent, and pin snapshot round-trip parity.
+        if canonical == "llm_parallel" and not promote_build_to_llm_parallel:
+            continue
+        # None is the durable legacy mode for llm_parallel, not a missing value. A normal snapshot
+        # contains llm_parallel:null plus parallel_build:1; promoting null to 1 would unexpectedly enable
+        # the global one-call broker. Promote aliases only when the canonical key is absent, and pin
+        # snapshot round-trip parity. Canonicalize inside each precedence layer, never across the
+        # flattened result, so the alias migration cannot invert CLI > file > env precedence.
         if canonical not in out and out.get(legacy) is not None:
-            # CODEX AGENT: canonicalize inside each precedence layer, never across the flattened
-            # result. The alias migration must not invert CLI > file > env precedence.
-            # CODEX AGENT: promoting a legacy-ONLY parallel_build layer (e.g. just
-            # LOOPLAB_PARALLEL_BUILD=1 in env) into canonical llm_parallel ALSO flips on the finite
-            # shared LLM broker: llm_parallel=1 -> orchestrator._startup_llm_total=1, serializing
-            # every provider call in the run (research overlap, novelty, tag_nodes_llm, monitors) —
-            # contradicting llm_broker.py's docstring, orchestrator's "legacy-only preserves unbounded
-            # overlap" note, the broker-neutral live-control path, and the configuration.md
-            # llm_parallel row ("falls back ... without enabling a shared total"). Promote only the
-            # build width (keep broker opt-in tied to an explicitly-spelled canonical value), or fix
-            # all four contracts and pin the env/file semantics with a test.
             out[canonical] = out[legacy]
     return out
 

@@ -11,6 +11,7 @@ import pytest
 from looplab.core.config import (
     LEGACY_CONFIG_SNAPSHOT_DEFAULTS,
     Settings,
+    canonicalize_parallelism_source,
     migrate_config_snapshot,
     settings_from_snapshot,
 )
@@ -104,6 +105,41 @@ def test_legacy_snapshot_migration_is_copy_only_and_preserves_historical_effects
         assert getattr(settings, key) == value
     assert settings.max_parallel == 4
     assert settings.eval_parallel is None and settings.llm_parallel is None
+
+
+def test_canonicalize_parallelism_source_keeps_broker_optin_off_by_default():
+    """`max_parallel`/`eval_parallel` are true aliases and always promote. `parallel_build`/`llm_parallel`
+    are NOT — a positive `llm_parallel` also flips on the shared broker — so a config/startup load must
+    NOT promote a legacy-only `parallel_build`; only the Strategist opt-in does."""
+    # True alias: always promoted (no broker semantics).
+    assert canonicalize_parallelism_source({"max_parallel": 5}) == {
+        "max_parallel": 5, "eval_parallel": 5}
+    # Legacy build width: NOT promoted at config/startup load (broker stays opt-in).
+    assert canonicalize_parallelism_source({"parallel_build": 3}) == {"parallel_build": 3}
+    # Strategist opt-in DOES promote parallel_build -> llm_parallel (deliberate full alias).
+    assert canonicalize_parallelism_source(
+        {"parallel_build": 3}, promote_build_to_llm_parallel=True) == {
+            "parallel_build": 3, "llm_parallel": 3}
+    # An explicit canonical llm_parallel is always preserved verbatim.
+    assert canonicalize_parallelism_source({"llm_parallel": 4}) == {"llm_parallel": 4}
+
+
+def test_env_legacy_parallel_build_does_not_enable_the_shared_llm_broker(monkeypatch):
+    """The exact bug surface: `LOOPLAB_PARALLEL_BUILD` alone must set the legacy build width WITHOUT
+    promoting to canonical `llm_parallel` (which the orchestrator reads as the broker opt-in switch)."""
+    monkeypatch.setenv("LOOPLAB_PARALLEL_BUILD", "3")
+    settings = Settings()
+    assert settings.parallel_build == 3
+    assert settings.llm_parallel is None          # NOT promoted -> orchestrator leaves the broker off
+
+    # An explicit canonical llm_parallel still loads (and is the broker opt-in).
+    monkeypatch.setenv("LOOPLAB_LLM_PARALLEL", "5")
+    assert Settings().llm_parallel == 5
+
+    # The true-alias max_parallel -> eval_parallel promotion is unaffected (no broker semantics).
+    monkeypatch.delenv("LOOPLAB_LLM_PARALLEL", raising=False)
+    monkeypatch.setenv("LOOPLAB_MAX_PARALLEL", "6")
+    assert Settings().eval_parallel == 6
 
 
 def test_snapshot_migration_never_overrides_explicit_modern_values():

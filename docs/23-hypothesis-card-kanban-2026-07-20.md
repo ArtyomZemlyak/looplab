@@ -50,6 +50,22 @@ parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim b
 adversarial tests close. -->
 
 <!-- BLOCKER RESOLUTION LOG (append-only; the snapshot above is pinned to 60e9a5f3 and left verbatim).
+(6) RESOLVED 2026-07-23 — a legacy-only parallel_build source no longer enables the finite shared LLM
+broker. `canonicalize_parallelism_source` now defaults `promote_build_to_llm_parallel=False`, so config/
+startup loads (config.py source customization + appconfig sub-layers) no longer promote a legacy-only
+`parallel_build` (e.g. LOOPLAB_PARALLEL_BUILD=1) into canonical `llm_parallel` — which the orchestrator
+reads as the broker opt-in switch. Broker opt-in stays tied to an explicitly-spelled canonical
+`llm_parallel`; the orchestrator's own width fallback (`llm_parallel if not None else parallel_build`)
+still carries the legacy build width, and the true-alias `max_parallel → eval_parallel` promotion is
+unaffected. The live Strategist path (`canonicalize_strategy_parallelism`) opts back into the promotion,
+where `parallel_build` is a deliberate full alias (strategy.py `_apply_strategy` already reconfigures the
+broker only for the `llm_parallel` spelling). The stale configuration.md CODEX annotation documenting the
+violation is removed. Teeth-tested in
+`tests/test_config.py::test_canonicalize_parallelism_source_keeps_broker_optin_off_by_default`,
+`::test_env_legacy_parallel_build_does_not_enable_the_shared_llm_broker`, and
+`tests/test_llm_broker.py::test_env_legacy_parallel_build_does_not_enable_shared_broker_end_to_end`.
+This closes the six concurrency/GPU/config release blockers (1)-(6) from the pinned snapshot; the later
+cards-compatibility/ASHA/belief blockers (7)-(16) were addressed in the preceding commit series.
 (3) RESOLVED 2026-07-23 — a node_reset landing between the dispatcher's admission and an eval worker's
 fold can no longer launch the eval unpinned. The dispatcher registers the reservation under the OLD
 admission generation; `_evaluate` reads the NEW `node.attempt` (eval-reset: attempt+1, still pending,

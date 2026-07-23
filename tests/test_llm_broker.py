@@ -360,6 +360,22 @@ def test_engine_enables_shared_total_only_for_positive_canonical_value(tmp_path)
     assert finite._llm_broker.snapshot()["total"] == 3
 
 
+def test_env_legacy_parallel_build_does_not_enable_shared_broker_end_to_end(tmp_path, monkeypatch):
+    """End-to-end: a config/startup load with only LOOPLAB_PARALLEL_BUILD sets the build width but must
+    NOT enable the finite shared broker — the legacy value cannot silently serialize every provider call
+    through the env→Settings→Engine path."""
+    from looplab.core.config import Settings
+    from looplab.engine.options import EngineOptions
+
+    monkeypatch.setenv("LOOPLAB_PARALLEL_BUILD", "3")
+    settings = Settings()
+    assert settings.llm_parallel is None and settings.parallel_build == 3
+
+    engine = _engine(tmp_path / "env-legacy", options=EngineOptions.from_settings(settings))
+    assert engine._llm_parallel == 3                        # legacy build width is honored
+    assert engine._llm_broker.snapshot()["total"] is None   # ...but the shared broker stays off
+
+
 def test_canonical_operator_override_reconfigures_broker_but_legacy_does_not(tmp_path):
     from looplab.core.models import RunState
 

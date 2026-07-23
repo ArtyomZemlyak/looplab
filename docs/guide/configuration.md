@@ -145,11 +145,13 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
 | `max_eval_seconds` | `LOOPLAB_MAX_EVAL_SECONDS` | — | Hard ceiling on cumulative time *inside* evals (survives resume) |
 
-<!-- CODEX AGENT: runtime currently violates the llm_parallel row for a legacy-only source. Per-source
-canonicalize_parallelism_source promotes LOOPLAB_PARALLEL_BUILD into llm_parallel before Engine startup, so
-the value is indistinguishable from an explicitly canonical positive setting and activates the shared broker.
-The compatibility contract needs either provenance-preserving normalization or revised product semantics plus
-tests; until then operators should spell llm_parallel explicitly. -->
+<!-- The runtime now honors the `llm_parallel` row for a legacy-only source: config/startup loads no
+longer promote `LOOPLAB_PARALLEL_BUILD` into canonical `llm_parallel` (broker opt-in stays tied to an
+explicitly-spelled canonical value; the orchestrator's own width fallback carries the legacy build
+width). Only the live Strategist path treats `parallel_build` as a full `llm_parallel` alias. See
+`core/config.py::canonicalize_parallelism_source` (`promote_build_to_llm_parallel`) and the tests
+`test_config.py::test_env_legacy_parallel_build_does_not_enable_the_shared_llm_broker` +
+`test_llm_broker.py::test_env_legacy_parallel_build_does_not_enable_shared_broker_end_to_end`. -->
 
 ## Backend & roles
 
