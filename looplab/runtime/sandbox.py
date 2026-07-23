@@ -743,13 +743,22 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
 
 
 def _kill_tree(proc: "subprocess.Popen") -> None:
+    # POSIX: kill the whole SESSION/process group in ONE atomic syscall. The child was spawned with
+    # start_new_session=True (see run_argv), so it is its own session/group leader — os.getpgid(pid) ==
+    # pid, so killpg targets ONLY the eval's group, never the engine — and SIGKILL to the group reaps
+    # every descendant, INCLUDING one forked DURING the kill, with no race. The psutil path snapshots
+    # parent.children() then kills each, which races a late fork: a DataLoader/worker spawned after the
+    # snapshot escapes and keeps using a GPU the scheduler then releases. So on POSIX do the group kill
+    # first and reserve psutil for Windows / a fallback if the group kill itself fails.
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(proc.pid), 9)
+            return
+        except (OSError, ValueError):
+            pass
     try:
-        import psutil  # optional (extras: proc)
+        import psutil  # optional (extras: proc) — Windows tree kill, or a POSIX fallback if killpg failed
 
-        # CODEX AGENT: production installs psutil, but this branch snapshots descendants while the
-        # parent can still fork. A late DataLoader worker can escape after children() returns, then keep
-        # using a GPU the scheduler releases. Kill through the process-group/Job boundary (or suspend
-        # and reap to a stable tree), and cover the proc-extra path with a fork-during-kill regression.
         parent = psutil.Process(proc.pid)
         for child in parent.children(recursive=True):
             child.kill()
@@ -757,9 +766,9 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
         return
     except Exception:
         pass
-    # Fallback (no psutil): OS-branched WHOLE-TREE kill. Plain proc.kill() on Windows ends only
-    # the direct child, orphaning grandchildren (DataLoader/worker/nested-train subprocesses) —
-    # so use `taskkill /T` to terminate the tree; on POSIX kill the process group.
+    # Last-resort fallback (no psutil, or the group kill above failed): OS-branched WHOLE-TREE kill.
+    # Plain proc.kill() on Windows ends only the direct child, orphaning grandchildren
+    # (DataLoader/worker/nested-train subprocesses) — so use `taskkill /T`; on POSIX kill the group.
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],

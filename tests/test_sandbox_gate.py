@@ -289,6 +289,83 @@ def test_run_argv_force_removes_daemon_container_after_stall_or_diverge(tmp_path
     assert not list(tmp_path.glob(".looplab-container-*.cid"))
 
 
+def test_kill_tree_prefers_atomic_group_kill_over_racy_psutil_snapshot_on_posix(monkeypatch):
+    # MED (fork-during-kill race): on POSIX _kill_tree must kill the whole process group in one atomic
+    # syscall (killpg), NOT snapshot psutil `children()` then kill each — the snapshot races a late fork
+    # (a DataLoader worker spawned after the snapshot escapes and keeps a GPU the scheduler then
+    # releases). Verify the atomic path is primary and the racy per-child snapshot is never consulted.
+    import os
+    import sys
+    import types
+    if os.name == "nt":
+        pytest.skip("POSIX process-group kill")
+    import looplab.runtime.sandbox as sb
+
+    seen = {"killpg": [], "children": 0}
+    monkeypatch.setattr(sb.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(sb.os, "killpg", lambda pgid, sig: seen["killpg"].append((pgid, sig)))
+
+    class _FakeProc:                          # stand in for psutil.Process so nothing real is killed
+        def __init__(self, _pid):
+            pass
+
+        def children(self, recursive=False):
+            seen["children"] += 1             # the RACY snapshot — must NOT be reached on the happy path
+            return []
+
+        def kill(self):
+            pass
+
+    # Inject a fake `psutil` so the racy branch is exercised even where the `[proc]` extra isn't
+    # installed (as in this env): pre-fix `_kill_tree` imports it and snapshots children() without ever
+    # calling killpg; post-fix killpg runs first and returns before psutil is imported.
+    fake_psutil = types.ModuleType("psutil")
+    fake_psutil.Process = _FakeProc
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    class _P:
+        pid = 4321
+
+    sb._kill_tree(_P())
+    assert seen["killpg"] == [(4321, 9)]      # one atomic SIGKILL to the whole group…
+    assert seen["children"] == 0             # …and the racy per-child snapshot was never taken
+
+
+def test_kill_tree_reaps_a_grandchild_process(tmp_path):
+    # Behavioral guard: the group kill must reap the WHOLE tree, including a grandchild the eval forked
+    # (the exact escapee the race would have leaked). Spawned as run_argv does — a new session so the
+    # child leads its own group.
+    import os
+    import subprocess
+    import sys
+    import time
+    if os.name == "nt":
+        pytest.skip("POSIX liveness probe (os.kill(pid, 0))")
+    from looplab.runtime.sandbox import _kill_tree
+
+    code = ("import subprocess, sys, time\n"
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(g.pid, flush=True)\n"
+            "time.sleep(60)\n")
+    proc = subprocess.Popen([sys.executable, "-c", code], cwd=str(tmp_path),
+                            stdout=subprocess.PIPE, start_new_session=True)
+    grandchild_pid = int(proc.stdout.readline().strip())
+    _kill_tree(proc)
+    gone = False
+    for _ in range(50):
+        try:
+            os.kill(grandchild_pid, 0)        # raises OSError once the grandchild is reaped
+            time.sleep(0.1)
+        except OSError:
+            gone = True
+            break
+    try:
+        proc.wait(timeout=5)                  # reap the killed parent so it doesn't linger as a zombie
+    except Exception:
+        pass
+    assert gone, f"grandchild {grandchild_pid} survived _kill_tree (process group not reaped)"
+
+
 def test_run_argv_cidfile_lives_outside_the_bind_mounted_workdir(tmp_path, monkeypatch):
     """SECURITY (#5): the docker cidfile must NOT be created under the workdir, which DockerSandbox
     bind-mounts into the container as writable /work. If it lived there, untrusted root code could
