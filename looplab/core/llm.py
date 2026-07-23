@@ -311,21 +311,37 @@ class OpenAICompatibleClient:
         if use_stream:
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
-            return self._accumulate_stream(self._sdk.chat.completions.create(**kwargs),
+            # Bound the header-WAIT. The static httpx.Timeout treats `header_timeout` as connect-only, so
+            # an endpoint that completes TLS then never sends response HEADERS would block create() up to
+            # the idle `timeout` (~180s) before failover — the "black-holed request" this design claims to
+            # fail over fast. Run create() under the SAME wall-clock guard `_nonstream_bounded` uses, keyed
+            # on the header budget (header_timeout + up to header_timeout of slack, so a small header_timeout
+            # still fails over fast); it returns as soon as headers arrive, and `_accumulate_stream`'s idle
+            # watchdog then governs the body. Iterating that streaming Response on THIS thread after a
+            # worker thread created it is safe: sync-httpx sequential handoff, no concurrent access.
+            header_join = self.header_timeout + min(10.0, self.header_timeout)
+            return self._accumulate_stream(self._bounded_create(kwargs, header_join),
                                            self.timeout, self.header_timeout)
         return self._nonstream_bounded(kwargs)
 
     def _nonstream_bounded(self, kwargs: dict) -> dict:
-        """A NON-STREAM chat call bounded by a wall-clock deadline. httpx's per-read timeout can't catch
-        a proxy that TRICKLES the response body (a byte resets the read timer while the payload never
-        completes — the keepalive pathology the stream idle-guard exists for, but there's no SSE loop
-        to guard here). Run the blocking call in a worker thread; if it overruns the read+connect
-        budget, ABORT: `socket.shutdown()` the in-flight connection (forces a recv() wedged in the
-        kernel to return — close() alone can't), close + rebuild the httpx client, and raise
-        APITimeoutError so `_post` retries/degrades instead of hanging. The wall-clock join guarantees
-        the CALLER unblocks, and the socket-shutdown guarantees the WORKER thread exits too (no lingering
-        daemons accumulating across a long run on a flaky endpoint — the pre-shutdown behaviour that
-        leaked ~one thread per wedged call)."""
+        """A NON-STREAM chat call: no SSE loop guards a TRICKLED body (a byte resets httpx's read timer
+        while the payload never completes), so bound the WHOLE call (headers + body) via `_bounded_create`
+        at timeout+header_timeout, then serialize the completed response."""
+        return self._bounded_create(kwargs, self.timeout + self.header_timeout + 10).model_dump()
+
+    def _bounded_create(self, kwargs: dict, join_s: float):
+        """Run one `chat.completions.create(**kwargs)` in a worker thread bounded by a `join_s` wall-clock
+        deadline; if it overruns, ABORT: `socket.shutdown()` the in-flight connection (forces a recv()
+        wedged in the kernel to return — close() alone can't), close + rebuild the httpx client, and raise
+        APITimeoutError so `_post` retries/degrades instead of hanging. The wall-clock join guarantees the
+        CALLER unblocks, and the socket-shutdown guarantees the WORKER thread exits too (no lingering
+        daemons accumulating across a long run on a flaky endpoint — the pre-shutdown behaviour that leaked
+        ~one thread per wedged call). Returns the raw SDK result: a STREAM object when stream=True (its
+        body is iterated on the caller thread — a sync-httpx streaming Response created in the worker and
+        consumed sequentially elsewhere is safe), else the completed response. Shared by the streaming
+        header-WAIT (join_s = the header budget; `_accumulate_stream` then governs the body) and the
+        non-stream whole-call bound (join_s covers the trickled body too)."""
         box: dict = {}
 
         def _call():
@@ -336,7 +352,7 @@ class OpenAICompatibleClient:
 
         th = threading.Thread(target=_call, daemon=True)
         th.start()
-        th.join(self.timeout + self.header_timeout + 10)
+        th.join(join_s)
         if th.is_alive():
             # Force the wedged recv() to return so the worker thread EXITS (doesn't linger): shutdown the
             # in-flight connection's socket BEFORE close() — close() can't interrupt a kernel read, only
@@ -354,7 +370,7 @@ class OpenAICompatibleClient:
             raise openai.APITimeoutError(request=httpx.Request("POST", self.base_url))
         if "exc" in box:
             raise box["exc"]
-        return box["resp"].model_dump()
+        return box["resp"]                      # RAW SDK result; callers serialize/iterate as needed
 
     @staticmethod
     def _accumulate_stream(stream, idle_limit: float = 0.0, first_byte_limit: float = 0.0) -> dict:

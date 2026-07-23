@@ -951,3 +951,47 @@ def test_nonstream_bounded_passes_a_fast_response():
         def create(self, **k): return _Resp()
     c._sdk = type("S", (), {"chat": type("Ch", (), {"completions": _Comp()})()})()
     assert c._nonstream_bounded({"model": "m", "messages": []})["choices"][0]["message"]["content"] == "ok"
+
+
+def test_stream_path_bounds_create_by_header_budget(monkeypatch):
+    """The STREAM path must run create() under the SAME wall-clock guard as the non-stream path, keyed
+    on the HEADER budget (header_timeout + min(10, header_timeout)) — not left UNBOUNDED, where a
+    black-holed request that TLS-handshakes then never sends headers blocks up to the idle `timeout`
+    (~180s) before failover. Pin the routing: the stream branch delegates to `_bounded_create` with
+    stream=True and the header-budget join (independent of the much larger idle `timeout`)."""
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=True,
+                                   timeout=99.0, header_timeout=4.0)
+    seen = {}
+
+    def fake_bounded(kwargs, join_s):
+        seen["join"] = join_s
+        seen["stream"] = kwargs.get("stream")
+        return iter([])                                  # empty stream -> _accumulate_stream returns empty body
+    monkeypatch.setattr(c._sdk.chat.completions, "create", lambda **k: iter([]))   # pre-fix would hit this
+    monkeypatch.setattr(c, "_bounded_create", fake_bounded)
+    c._sdk_chat({"model": "m", "messages": []}, use_stream=True)
+    assert seen["stream"] is True                        # header-bound the CREATE, not the body only
+    assert seen["join"] == pytest.approx(4.0 + min(10.0, 4.0))   # header budget, NOT idle timeout (99)
+
+
+def test_stream_bounded_aborts_a_blackholed_create(monkeypatch):
+    """End-to-end: a STREAM create() that accepts the socket then never returns headers (black-holed
+    request) must be aborted by the header-budget wall-clock deadline — client closes+rebuilds and
+    raises APITimeoutError so `_post` degrades/retries — instead of hanging until the idle timeout."""
+    import time as _t
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", api_key="k", stream=True,
+                                   timeout=0.3, header_timeout=0.3)
+    closed = {"n": 0}; rebuilt = {"n": 0}
+
+    class _Comp:
+        def create(self, **k): _t.sleep(10)              # headers never arrive
+    c._sdk = type("S", (), {"chat": type("Ch", (), {"completions": _Comp()})(),
+                            "_client": type("Cl", (), {"close": lambda s: closed.__setitem__("n", 1)})()})()
+    monkeypatch.setattr(c, "_new_sdk", lambda: (rebuilt.__setitem__("n", rebuilt["n"] + 1) or c._sdk))
+    t0 = _t.monotonic()
+    with pytest.raises(_openai.APITimeoutError):
+        c._sdk_chat({"model": "m", "messages": []}, use_stream=True)
+    assert _t.monotonic() - t0 < 20                      # fired near the header budget + cleanup, did not hang
+    assert closed["n"] == 1 and rebuilt["n"] == 1
