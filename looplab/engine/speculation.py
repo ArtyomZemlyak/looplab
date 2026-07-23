@@ -996,6 +996,24 @@ class SpeculationMixin:
             return self._append_card_build_done(request, skipped="stale")
         result = self._spec_builds.get(key)
         if result is None:
+            # CODEX AGENT (crash-recovery wedge): a kill between node_building and node_created leaves the
+            # interrupted build's Node id permanently spent (it still counts against the physical ceiling
+            # via `_node_id_ceiling`) AND recovery drops its Card, yet the durable request survives at head
+            # with no in-memory result. Capacity is then zero, so `_start_head_producer`'s slot gate never
+            # starts a producer and this method returns False forever — the session polls indefinitely with
+            # `outstanding` still true and no exit boundary reachable. Recognize a head whose Card was
+            # dropped or merged (by recovery or an operator) as permanently unbuildable and close it
+            # `stale`, so the outstanding request clears and the loop can reach its exit boundary. Never
+            # strand a live producer: skip while one is in-flight (its eventual result is released by
+            # `_discard_orphaned_spec_results` once the request closes), and leave an ALIVE card's request
+            # open so a producer can still be started for it.
+            card = state.cards.get(key[0])
+            if (
+                key not in self._spec_build_inflight
+                and card is not None
+                and (card.dropped_reason is not None or card.merged_into is not None)
+            ):
+                return self._append_card_build_done(request, skipped="stale")
             return False
         if not result.success:
             self._discard_spec_result(self._spec_builds.pop(key, None))

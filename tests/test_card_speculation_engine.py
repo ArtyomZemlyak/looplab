@@ -713,6 +713,41 @@ def test_speculative_last_slot_request_waits_for_budget_extend_without_rebuild(t
     assert fold(events).card_builds_done == 1
 
 
+def test_recovery_dropped_head_with_no_result_closes_stale_instead_of_wedging(tmp_path):
+    # CODEX AGENT (crash-recovery wedge): a kill between node_building and node_created spends the
+    # interrupted build's Node id (it keeps counting against the physical ceiling via _node_id_ceiling)
+    # AND recovery drops its Card, but the durable request survives at head with no in-memory result.
+    # Capacity is then zero, so no producer can be started to close it — `_serve_card_builds` must not
+    # return False forever. It recognizes the dropped, producer-less head as permanently unbuildable and
+    # closes it `stale`, so the outstanding request clears and the session can exit instead of polling.
+    engine, _producer = _engine(tmp_path / "recovery-wedge")
+    _start(engine)
+    _add_ready_draft(engine)
+    request = _request(engine)                 # durable card_build_requested for card-7 at head
+    key = engine._request_key(request)
+    engine._ensure_speculation_state()
+    assert not engine._spec_builds and not engine._spec_build_inflight  # a crash lost every in-memory result
+
+    # An ALIVE head with no result and no in-flight producer must stay open: a producer can still start.
+    assert engine._serve_card_builds() is False
+    assert fold(engine.store.read_all()).card_builds_done == 0
+
+    # Recovery drops the Card of the interrupted build (its Node id stays spent as a ceiling gap).
+    engine._drop_card_once("card-7", reason="build_interrupted")
+    dropped = fold(engine.store.read_all())
+    assert dropped.cards["card-7"].status == "dropped"
+    assert engine._request_key(engine._head_request(dropped)) == key  # request still outstanding at head
+
+    # Now the head is permanently unbuildable: close it stale rather than wedging on an infinite poll.
+    assert engine._serve_card_builds() is True
+    events = engine.store.read_all()
+    done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
+    assert len(done) == 1 and done[0].data.get("skipped") == "stale"
+    assert not [event for event in events if event.type == EV_NODE_BUILDING]  # no phantom reservation
+    final = fold(events)
+    assert final.card_builds_done == 1 and engine._head_request(final) is None  # outstanding cleared
+
+
 def test_producer_exception_closes_head_as_skipped_without_live_wedge(
     tmp_path, monkeypatch,
 ):
