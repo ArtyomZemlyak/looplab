@@ -729,7 +729,7 @@ def card_score(
     band = 3.0 if card.pinned else 2.0 if exact_match else 1.0 if same_operator else 0.0
 
     novelty = _novelty_signal(card)
-    # CODEX AGENT: card_score runs once per candidate, but this rebuilds the complete concept projection
+    # CODEX AGENT REVIEW(2026-07-23, MEDIUM): card_score runs once per candidate, but this rebuilds the complete concept projection
     # over every Node each time. Large Card lanes make one election O(cards * nodes/concepts). Compute
     # explored+rename once per selection snapshot and pass that immutable scoring context through every
     # candidate score.

@@ -130,7 +130,7 @@ class CrossRunTools:
         self._concepts: set[str] = set()      # E2: the current run's concept set (for similar_runs overlap)
         self._concept_projection_status = "complete"
         self._concept_projection_reasons: tuple[str, ...] = ()
-        # CODEX AGENT: Scope construction is fail-open: a forgotten/failed ``bind_state`` leaves the
+        # CODEX AGENT REVIEW(2026-07-23, HIGH): Scope construction is fail-open: a forgotten/failed ``bind_state`` leaves the
         # provider portfolio-wide, and ``bind_state(None)`` silently preserves that exposure. Because the
         # same class is model-facing and human-facing, require an explicit audience/scope mode at creation;
         # an unbound agent provider should return no rows rather than inherit CLI-level visibility.

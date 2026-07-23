@@ -1045,7 +1045,7 @@ class SpeculationMixin:
             return
         try:
             try:
-                # CODEX AGENT: abandon_on_cancel=False makes pause/abort wait for the entire blocking
+                # CODEX AGENT REVIEW(2026-07-23, HIGH): abandon_on_cancel=False makes pause/abort wait for the entire blocking
                 # Developer/provider call even after the main task has durably closed this request as
                 # stale. The session's exit gate still counts _spec_build_inflight, so an unavailable
                 # provider can make an operator stop take the full transport timeout. Use a genuinely
@@ -1308,7 +1308,7 @@ class SpeculationMixin:
         if self._terminal_intent(state):
             return False
         self._refresh_speculation_budget(state)
-        # CODEX AGENT: _request_card_build elects with _speculative_card_ids UNION
+        # CODEX AGENT REVIEW(2026-07-23, HIGH): _request_card_build elects with _speculative_card_ids UNION
         # _producer_failed_card_ids, but this freshness revalidation — and _claim_requested_card_build
         # and the pre-GPU recheck in _run_card_session — pass only _speculative_card_ids. A durable
         # producer-failed card (serial-fallback-only, never speculatively buildable) therefore competes
@@ -1442,7 +1442,7 @@ class SpeculationMixin:
                             or key in self._spec_builds
                         ):
                             return False
-                        # CODEX AGENT: recovery may have terminalized this head's interrupted
+                        # CODEX AGENT REVIEW(2026-07-23, HIGH): recovery may have terminalized this head's interrupted
                         # node_building after it consumed the final physical Node id. The request then
                         # has no result but capacity remains zero, so no worker can close it and this
                         # session polls forever. Close recovered unbuildable heads before this gate.
@@ -1489,7 +1489,7 @@ class SpeculationMixin:
                                     yield_outer = True
                             else:
                                 yield_outer = True
-                        # CODEX AGENT: one idle polling turn performs this full replay plus several more
+                        # CODEX AGENT REVIEW(2026-07-23, MEDIUM): one idle polling turn performs this full replay plus several more
                         # below, then repeats even when the log tail is unchanged. read_all caches bytes,
                         # but fold still rebuilds all Cards/concepts. Cache one snapshot per observed tail
                         # and invalidate it only after a write/wakeup, or extend a FoldCursor by suffix.

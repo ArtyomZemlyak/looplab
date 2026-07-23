@@ -388,7 +388,7 @@ class ResourceSchedulingMixin:
                 return None
             lease_path = self._gpu_host_lease_path
             if lease_path is not None and self._gpu_host_lease_handle is None:
-                # CODEX AGENT: _try_acquire_gpu_host_lease raises GpuPinUnenforceable when the lease
+                # CODEX AGENT REVIEW(2026-07-23, HIGH): _try_acquire_gpu_host_lease raises GpuPinUnenforceable when the lease
                 # cannot even be OPENED (EACCES on a squatted/stale /tmp/looplab-gpu-pool-<uid>.lock,
                 # ELOOP, read-only fs) — and NO caller on this admission path handles it: it propagates
                 # through _try_reserve_node_resources into _dispatch_evals/speculation/confirm-wait
