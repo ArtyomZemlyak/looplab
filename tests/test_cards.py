@@ -1088,3 +1088,34 @@ def test_operator_pin_wins_over_engine_enrichment():
     _derive_cards(st)
     assert st.cards[cid].footprint == {"gpus": 8, "proposed_by": "researcher"}
     assert st.cards[cid].resource_pin == {"gpus": 1, "pinned_by": "operator"}
+
+
+def test_grouped_beliefs_aggregates_same_seed_cards_keeping_ids_distinct():
+    # Peer review: the board keeps 1 card = 1 work item, but two cards reusing the exact hypothesis
+    # wording are ONE belief. grouped_beliefs() groups them by seed hash (additively, without merging the
+    # cards) so a consumer reads their evidence + verdict together instead of fragmented across cards.
+    from looplab.core.models import Card, RunState, hypothesis_id
+    seed = "log-transform the skewed target"
+    other = "add class weights"
+    st = RunState(direction="max", goal="g")
+    st.cards = {
+        "card-1": Card(id="card-1", seed_statement=seed, statement=seed, verdict="tested",
+                       evidence=[1, 2], status="evaluated"),
+        "card-2": Card(id="card-2", seed_statement=seed, statement=seed + " (v2)", verdict="supported",
+                       evidence=[2, 3], status="evaluated"),
+        "card-9": Card(id="card-9", seed_statement=other, statement=other, verdict="open",
+                       evidence=[], status="proposed"),
+    }
+    groups = st.grouped_beliefs()
+    assert len(groups) == 2                                   # two distinct beliefs
+    belief = next(g for g in groups if g["seed_hash"] == hypothesis_id(seed))
+    assert belief["card_ids"] == ["card-1", "card-2"]         # work items stay DISTINCT, grouped together
+    assert belief["evidence"] == [1, 2, 3]                    # ordered union of member evidence
+    assert belief["verdict"] == "supported"                  # strength roll-up (supported > tested)
+    assert belief["statements"] == [seed, seed + " (v2)"]
+
+    # a merged-away alias never appears; a belief whose EVERY member is abandoned rolls up to abandoned
+    st.cards["card-2"].merged_into = "card-1"
+    st.cards["card-1"].verdict = "abandoned"
+    solo = next(g for g in st.grouped_beliefs() if g["seed_hash"] == hypothesis_id(seed))
+    assert solo["card_ids"] == ["card-1"] and solo["verdict"] == "abandoned"

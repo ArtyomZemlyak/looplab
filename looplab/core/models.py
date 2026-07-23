@@ -2006,6 +2006,51 @@ class RunState(BaseModel):
         return [c for c in self.research_cards()
                 if c.verdict == "open" and c.status != "dropped" and c.seed_statement.strip()]
 
+    def grouped_beliefs(self) -> list[dict]:
+        """Additive BELIEF projection (peer review): the board keeps ``1 card = 1 work item`` — two
+        native actions that reuse the exact hypothesis wording stay DISTINCT cards — but they are ONE
+        belief, and the removed statement-keyed ledger read their evidence together. Group the research
+        cards by their immutable seed-statement hash so a consumer (verdicts / lessons / a belief view)
+        can read a belief's evidence and verdict as a whole instead of fragmented across work items.
+
+        Pure, deterministic, and strictly additive: it NEVER mutates a card, a per-card verdict, or any
+        folded field — the card identities and their own verdicts are untouched. Each group is
+        ``{seed_hash, seed_statement, card_ids, evidence, statements, verdict}`` in first-seen order,
+        with ``evidence`` the ordered union of the members' evidence and ``verdict`` a strength roll-up of
+        the members' own verdicts (supported > tested > testing > open; ``abandoned`` only when EVERY
+        member is abandoned)."""
+        _RANK = {"supported": 4, "tested": 3, "testing": 2, "open": 1, "abandoned": 0}
+        groups: "dict[str, dict]" = {}
+        order: list[str] = []
+        for card in self.research_cards():
+            seed = (card.seed_statement or "").strip()
+            if not seed:
+                continue
+            key = hypothesis_id(seed)
+            group = groups.get(key)
+            if group is None:
+                group = {"seed_hash": key, "seed_statement": seed, "card_ids": [], "evidence": [],
+                         "statements": [], "_verdicts": []}
+                groups[key] = group
+                order.append(key)
+            group["card_ids"].append(card.id)
+            for node_id in (card.evidence or []):
+                if node_id not in group["evidence"]:
+                    group["evidence"].append(node_id)
+            statement = (card.statement or "").strip()
+            if statement and statement not in group["statements"]:
+                group["statements"].append(statement)
+            group["_verdicts"].append(card.verdict or "open")
+        out: list[dict] = []
+        for key in order:
+            group = groups[key]
+            verdicts = group.pop("_verdicts")
+            non_abandoned = [v for v in verdicts if v != "abandoned"]
+            group["verdict"] = (max(non_abandoned, key=lambda v: _RANK.get(v, 1))
+                                if non_abandoned else "abandoned")
+            out.append(group)
+        return out
+
     def evaluated_nodes(self) -> list[Node]:
         # `not n.tombstoned` gates ALL downstream selection at the source: feasible_nodes/
         # breedable_nodes and the best-pick post-pass all read through here, so a logically-deleted
