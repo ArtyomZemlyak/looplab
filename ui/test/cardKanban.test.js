@@ -105,6 +105,35 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
   assert.doesNotMatch(markup, /PRIVATE-CODE-BODY|PRIVATE-FILE-BODY|PRIVATE-OUTPUT|secret\.py/)
 })
 
+test('Card board renders the research verdict and treats an abandoned belief as terminal', () => {
+  // Peer review: the research verdict (open/supported/refuted/abandoned) is distinct from the work
+  // status. The board must render it as its own chip (a supported/refuted outcome was invisible) and
+  // treat an abandoned belief as terminal so it stops offering edit/priority/drop controls.
+  const cards = {
+    'card-sup': {
+      id: 'card-sup', status: 'evaluated', statement: 'Supported belief',
+      verdict: 'supported', priority: 0, selection_ready: true,
+    },
+    'card-ab': {
+      id: 'card-ab', status: 'proposed', statement: 'Abandoned belief',
+      verdict: 'abandoned', selection_ready: false,
+    },
+  }
+  const markup = renderToStaticMarkup(React.createElement(HypothesisBoard, {
+    state: {
+      cards, cards_projection: {
+        source_valid: true, total: 2, returned: 2, omitted: 0, complete: true, items: {},
+      },
+    },
+    runId: 'run', onClose() {}, onSelect() {},
+  }))
+
+  assert.match(markup, />supported</)          // the verdict renders as its own chip...
+  assert.match(markup, />abandoned</)          // ...for both the positive and the terminal outcome
+  assert.match(markup, /aria-label="Display statement for card-sup"/)   // supported keeps controls
+  assert.doesNotMatch(markup, /aria-label="Display statement for card-ab"/)  // abandoned is terminal
+})
+
 test('HypothesisBoard keeps the hypothesis workflow as a graceful empty-Card fallback', () => {
   const markup = renderToStaticMarkup(React.createElement(HypothesisBoard, {
     state: {

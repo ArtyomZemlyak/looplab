@@ -1401,11 +1401,13 @@ function _CardKanbanCard({
   const [controlError, setControlError] = useState('')
   const ownPending = isRecord(controlState?.pending) ? controlState.pending : null
   const busy = !!ownPending || controlsLocked === true
-  // # CODEX AGENT: status is the work lifecycle, not the research verdict. Replay can publish
-  // status=proposed/evaluated with verdict=abandoned and actionable=false, but this board never reads
-  // verdict and still exposes controls; supported/tested outcomes are invisible too. Render the verdict
-  // separately and treat abandoned Cards as terminal.
+  // The research VERDICT (open/supported/refuted/abandoned) is distinct from the work-lifecycle STATUS
+  // (peer review): replay can publish status=proposed/evaluated with verdict=abandoned, so read the
+  // verdict separately — render it as its own chip (a supported/refuted outcome was otherwise invisible)
+  // and treat an abandoned belief as terminal so the board stops offering edit/priority/drop controls.
+  const verdict = _cardText(card.verdict)
   const terminal = _cardStatus(card) === 'dropped' || !!_cardText(card.merged_into)
+    || verdict === 'abandoned'
   // Re-seed each draft ONLY when its own folded source (or the card identity) changes. A single effect
   // over every dep re-ran on ANY change, so an unrelated live fold (e.g. a card_ranked priority bump
   // arriving while the operator is typing a new statement) reset ALL four drafts and silently discarded
@@ -1469,6 +1471,9 @@ function _CardKanbanCard({
     </div>
     <div className="card-kanban-meta">
       <span className="chip xs" title="durable Card identity">{card.id}</span>
+      {verdict && verdict !== 'open' && <span
+        className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'refuted' ? 'alarm' : 'warn')}
+        title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
       {priority != null && <span className="chip xs" title="derived priority; 1 is highest">#{priority + 1}</span>}
       {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} /> pinned</span>}
       {card.selection_ready === true
