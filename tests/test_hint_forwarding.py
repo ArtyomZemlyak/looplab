@@ -24,7 +24,7 @@ import inspect
 
 from looplab.agents.roles import RESEARCHER_HINT_ATTRS
 from looplab.agents.unified_agent import UnifiedAgent
-from looplab.core.models import Card, Hypothesis, Idea, RunState, hypothesis_id
+from looplab.core.models import Card, Idea, RunState, hypothesis_id
 from looplab.search.foresight import ForesightPanelResearcher
 
 # The handles engine/foresight code uses for "the ACTIVE researcher" when stamping hints.
@@ -118,14 +118,15 @@ def test_hints_reach_the_inner_researcher_through_both_wrappers():
     unified = UnifiedAgent(researcher=inner, developer=_RecordingDeveloper())
     outer = ForesightPanelResearcher(unified, k=1, client=_RankClient())
 
-    # Two OPEN board hypotheses so _prioritize_board actually ranks (it needs >= 2).
+    # Two OPEN board cards so _prioritize_board actually ranks (it needs >= 2). 1 card = 1
+    # hypothesis: foresight ranks the open Card board ONLY (cid == hypothesis_id(statement)). No
+    # hypotheses board is populated here — if a consumer wrongly read the removed board, `_hyp_order`
+    # would come back empty and the final assertion would fail (test-fidelity guard).
     st = RunState(goal="g", direction="min")
     ids = []
     for s in ("belief zero", "belief one"):
         hid = hypothesis_id(s)
         ids.append(hid)
-        st.hypotheses[hid] = Hypothesis(id=hid, statement=s, status="open", evidence=[])
-        # 1 card = 1 hypothesis: foresight now ranks the open Card board (cid == hid).
         st.cards[hid] = Card(id=hid, seed_statement=s, statement=s, verdict="open",
                              status="proposed", evidence=[])
 

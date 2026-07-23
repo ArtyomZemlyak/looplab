@@ -80,11 +80,13 @@ class AuditMixin:
         hypothesis_data = {"node_id": node_id, **pick}
         if generation is not None:
             hypothesis_data["generation"] = generation
-        # Layer 1b producer: the foresight role still ranks the compatibility Hypothesis board, whose
-        # keys are statement hashes. Resolve that one snapshot to the live canonical Card ids after
-        # node_created. A single direction may own several immutable work items, so preserve all matches
-        # in stable id order. Only refs/scalars cross onto card_ranked; free-form analysis remains on the
-        # hypothesis event and cannot leak through the tokenless Card projection.
+        # Layer 1b producer: the foresight role ranks the open Card board (card ids best-first). For a
+        # research card minted from a hypothesis, card.id == hypothesis_id(statement) — a statement hash —
+        # so the direct `state.cards.get(raw)` match below handles it; the hash-resolution branch stays as
+        # a fallback for any legacy hash-keyed order. A single direction may own several immutable work
+        # items, so preserve all matches in stable id order. Only refs/scalars cross onto card_ranked;
+        # free-form analysis remains on the hypothesis event and cannot leak through the tokenless Card
+        # projection.
         try:
             from looplab.core.models import hypothesis_id
             from looplab.events.replay import fold

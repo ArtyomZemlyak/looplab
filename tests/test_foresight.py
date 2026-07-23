@@ -219,11 +219,10 @@ def test_panel_forwards_engine_hints_to_base():
 def _state_with_open_hyps(statements):
     st = RunState(direction="min", goal="minimize loss")
     for s in statements:
-        hid = hypothesis_id(s)
-        # 1 card = 1 hypothesis: cid == hid == hypothesis_id(s). Both boards populated during the 1a
-        # transition (consumers read cards; assertions still read the coexisting hypotheses board).
-        st.hypotheses[hid] = Hypothesis(id=hid, statement=s, status="open", evidence=[])
-        st.cards[hid] = Card(id=hid, seed_statement=s, statement=s, verdict="open",
+        cid = hypothesis_id(s)   # 1 card = 1 hypothesis: cid == hypothesis_id(seed_statement)
+        # Populate ONLY the Card board so these tests genuinely PIN the card board as the source — a
+        # regression that read state.hypotheses again would leave the board empty and fail.
+        st.cards[cid] = Card(id=cid, seed_statement=s, statement=s, verdict="open",
                              status="proposed", evidence=[])
     return st
 
@@ -233,7 +232,7 @@ def test_prioritize_board_orders_open_hypotheses():
     base = _SeqResearcher([Idea(operator="draft")], _RankClient([2, 0, 1]))
     panel = ForesightPanelResearcher(base, k=2)
     panel._prioritize_board(st, None)
-    ids = list(st.hypotheses)                       # insertion order
+    ids = list(st.cards)                            # insertion order (card board is the source)
     assert base._hyp_order == [ids[2], ids[0], ids[1]]
     lp = panel.last_hyp_priority
     assert lp["n"] == 3 and lp["reason"] == "test" and lp["order"] == base._hyp_order

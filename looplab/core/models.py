@@ -1984,9 +1984,11 @@ class RunState(BaseModel):
 
     def open_research_cards(self) -> list["Card"]:
         """Research cards still OPEN for evidence (verdict 'open', not dropped) — the card equivalent of
-        the old `open` hypotheses fed to proposal prompts and foresight ranking."""
+        the old `open` hypotheses fed to proposal prompts and foresight ranking. The blank-statement
+        guard mirrors the fold's `_derive_hypotheses` empty-skip: the old board never rendered a
+        statement-less bullet, so a malformed card_added with an empty seed must not surface one here."""
         return [c for c in self.research_cards()
-                if c.verdict == "open" and c.status != "dropped"]
+                if c.verdict == "open" and c.status != "dropped" and c.seed_statement.strip()]
 
     def evaluated_nodes(self) -> list[Node]:
         # `not n.tombstoned` gates ALL downstream selection at the source: feasible_nodes/
