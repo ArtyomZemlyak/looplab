@@ -103,13 +103,13 @@ def test_sibling_resource_metrics_never_substitute_finished_endpoints():
 
 # --------------------------------------------------------------------- extract_resource_curve / durable curve (#7)
 
-def test_extract_resource_curve_collapses_to_rungs_latest_per_band():
+def test_extract_resource_curve_collapses_to_rungs_earliest_per_band():
     stdout = ('{"recall": 0.10, "step": 1}\n'          # rung 1
-              '{"recall": 0.50, "step": 5}\n'          # rung 4 ...
-              '{"recall": 0.55, "step": 5}\n'          # rung 4 -> the LATEST value in the band wins
+              '{"recall": 0.50, "step": 4}\n'          # rung 4 (band 4-7) -> EARLIEST step in the band wins
+              '{"recall": 0.55, "step": 6}\n'          # rung 4, later step -> dropped
               '{"recall": 0.90, "step": 10}\n')        # rung 8
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
-    assert extract_resource_curve(stdout, spec) == [[1.0, 0.10], [4.0, 0.55], [8.0, 0.90]]
+    assert extract_resource_curve(stdout, spec) == [[1.0, 0.10], [4.0, 0.50], [8.0, 0.90]]
 
 
 def test_extract_resource_curve_requires_a_declared_stdout_json_resource_key():
@@ -131,15 +131,15 @@ def test_extract_resource_curve_requires_a_declared_stdout_json_resource_key():
 
 
 def test_extract_resource_curve_collapses_a_full_run_to_geometric_rungs():
-    # 100 steps collapse to the geometric rung schedule (powers of two) across the WHOLE run — latest
-    # value per band — so a live node DEEP in the run finds a sibling checkpoint at its rung, not the
-    # exact-coordinate gap the old first-31+endpoint retention left after the early window (#7 review).
+    # 100 steps collapse to the geometric rung schedule (powers of two) across the WHOLE run — the
+    # EARLIEST (start-of-band) value per band — so a live node DEEP in the run finds a sibling checkpoint
+    # at its rung, not the exact-coordinate gap the old first-31+endpoint retention left (#7 review).
     lines = "".join('{"recall": %f, "step": %d}\n' % (i / 100.0, i) for i in range(1, 101))
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
     curve = extract_resource_curve(lines, spec)
-    # rung r keeps the latest step in [r, 2r) -> min(2r-1, 100)/100
-    assert curve == [[float(r), min(2 * r - 1, 100) / 100.0] for r in (1, 2, 4, 8, 16, 32, 64)]
-    assert _curve_metric_at(curve, 50) == 0.63       # step 50 -> rung 32 -> latest step 63 (mid-run peer!)
+    # rung r keeps the EARLIEST step in [r, 2r) -> step r -> r/100
+    assert curve == [[float(r), r / 100.0] for r in (1, 2, 4, 8, 16, 32, 64)]
+    assert _curve_metric_at(curve, 50) == 0.32       # step 50 -> rung 32 -> start-of-band step 32
 
 
 def test_curve_metric_at_snaps_the_query_to_its_rung():
@@ -187,6 +187,36 @@ def test_sibling_metrics_at_resource_finds_mid_run_peers_via_rungs():
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
     sample = IntermediateSample(value=0.30, resource_key="step", resource=50.0)        # step 50 -> rung 32
     assert sorted(sibling_metrics_at_resource(state, 0, spec, sample)) == [0.58, 0.60, 0.62]
+
+
+def test_earliest_per_band_does_not_false_flag_a_node_just_into_a_band():
+    # Peer review: a live node just INTO a rung band sits at the band's LOW end. Storing the LATEST
+    # (end-of-band) sibling value compared a healthy improving node against ~2× more training and
+    # false-flagged it (and could spuriously kill). EARLIEST-per-band is the start-of-band checkpoint.
+    # Min-objective, loss = 1/step: three siblings each trained steps 1..100.
+    lines = "".join('{"loss": %f, "step": %d}\n' % (1.0 / i, i) for i in range(1, 101))
+    spec = {"kind": "stdout_json", "key": "loss", "resource_key": "step"}
+    curve = extract_resource_curve(lines, spec)
+    assert dict(curve)[64.0] == 1 / 64          # rung 64 = start-of-band step 64, NOT end-of-band step 100
+    state = _fake_state([0.5, 0.5, 0.5])
+    for i in (1, 2, 3):
+        state.nodes[i].resource_curve = curve
+    sample = IntermediateSample(value=1 / 65, resource_key="step", resource=65.0)   # step 65 -> rung 64
+    pop = sibling_metrics_at_resource(state, 0, spec, sample)
+    assert pop == [1 / 64, 1 / 64, 1 / 64]
+    # 1/65 < 1/64 -> the node is slightly AHEAD of the siblings' start-of-band checkpoint, NOT flagged
+    # (the old end-of-band 1/100 checkpoint made asha_underperforming(1/65, [1/100…], min) spuriously True)
+    assert asha_underperforming(1 / 65, pop, "min", quantile=0.5) is False
+
+
+def test_extract_resource_curve_survives_a_huge_integer_coordinate():
+    # Peer review: a solution printing a 400-digit-int step overflowed float() inside
+    # extract_resource_curve (called in _evaluate's write lock), aborting the node terminal. A pathological
+    # coordinate must degrade to "no rung", never crash — the finite line still yields its rung.
+    huge = 10 ** 400
+    stdout = ('{"recall": 0.5, "step": %d}\n' % huge) + '{"recall": 0.9, "step": 8}\n'
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    assert extract_resource_curve(stdout, spec) == [[8.0, 0.90]]     # huge coord dropped, step 8 kept
 
 
 def test_node_evaluated_folds_resource_curve_and_old_logs_default_none(tmp_path):

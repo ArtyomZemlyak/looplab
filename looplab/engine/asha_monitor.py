@@ -73,7 +73,10 @@ class IntermediateSample:
 def _finite_number(value) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value = float(value)
+    try:
+        value = float(value)                # a 400-digit JSON int overflows float() — degrade to "no
+    except (OverflowError, ValueError):     # rung/observation", never crash the write-path caller
+        return None                         # (extract_resource_curve runs inside _evaluate's write lock)
     return value if value == value and abs(value) != float("inf") else None
 
 
@@ -159,13 +162,17 @@ def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) ->
     returns None when the task declares no ``resource_key`` or the kind isn't ``stdout_json``.
 
     Coordinates are collapsed to a canonical geometric RUNG schedule (`_resource_rung`: the largest power
-    of two <= the coordinate), keeping the LATEST value within each rung band, sorted by rung (#7 review).
-    A shared rung schedule is what makes the comparison work across the WHOLE run: the live poller snaps
-    its sample to the same rungs, so a node deep in the run finds a sibling checkpoint instead of the
-    exact-coordinate gap the old first-31+endpoint retention left after the early window. Geometric rungs
-    are O(log resource) — a 100-step run yields 7 rungs, ~1e6 steps ~20 — so ``max_points`` (default 32)
-    is a corruption bound that realistic runs never hit; when exceeded it keeps the earliest
-    ``max_points - 1`` rungs plus the last. ``max_points < 2`` disables that bound."""
+    of two <= the coordinate), keeping the EARLIEST value within each rung band — the band's START-of-band
+    checkpoint — sorted by rung (#7 review). A shared rung schedule is what makes the comparison work
+    across the WHOLE run: the live poller snaps its sample to the same rungs, so a node deep in the run
+    finds a sibling checkpoint instead of the exact-coordinate gap the old first-31+endpoint retention
+    left. EARLIEST (not latest) per band matters: a LIVE node just INTO a band sits at the band's LOW end,
+    so comparing it against a sibling's END-of-band value (up to ~2× the training) would systematically
+    false-flag a healthy improving node; the start-of-band checkpoint keeps the comparison conservative
+    (a live sample later in the band only ever looks BETTER than the sibling's earlier checkpoint, never
+    spuriously worse). Geometric rungs are O(log resource) — a 100-step run yields 7 rungs, ~1e6 steps ~20
+    — so ``max_points`` (default 32) is a corruption bound that realistic runs never hit; when exceeded it
+    keeps the earliest ``max_points - 1`` rungs plus the last. ``max_points < 2`` disables that bound."""
     if not stdout or not isinstance(metric_spec, dict):
         return None
     resource_key = _declared_resource_key(metric_spec)
@@ -173,12 +180,13 @@ def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) ->
         return None
     metric_key = metric_spec.get("key", "metric")
     by_rung: dict[float, float] = {}
-    # Chronological order (reverse the newest-first generator) so the LATEST value in a rung band wins.
+    # Chronological order (reverse the newest-first generator) + `setdefault` so the EARLIEST value in a
+    # rung band wins (the start-of-band checkpoint — see the docstring on why not the latest).
     for obj in reversed(list(_json_objects_newest_first(stdout))):
         rung = _resource_rung(obj.get(resource_key))
         value = _finite_number(obj.get(metric_key))
         if rung is not None and value is not None:
-            by_rung[rung] = value
+            by_rung.setdefault(rung, value)
     if not by_rung:
         return None
     coords = sorted(by_rung)
