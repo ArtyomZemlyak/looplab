@@ -1240,7 +1240,7 @@ function _cardOrder(a, b) {
   return an - bn || a.id.localeCompare(b.id)
 }
 
-const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop']
+const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop', 'abandon']
 
 function _cardResourceValues(value) {
   if (!isRecord(value)) return null
@@ -1290,6 +1290,7 @@ function _cardControlReflected(card, kind, patch, baseline, expectedEventSeq) {
   if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
   if (kind === 'drop') return card.status === 'dropped'
     && (!patch.dropped_reason || card.dropped_reason === patch.dropped_reason)
+  if (kind === 'abandon') return card.verdict === 'abandoned'
   return false
 }
 
@@ -1459,6 +1460,10 @@ function _CardKanbanCard({
     const reason = dropReason.trim() || 'operator dropped'
     control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
   }
+  // Abandon the research BELIEF (verdict → abandoned via hypothesis_updated) — distinct from dropping
+  // the work item: the Card stays visible in its lane, its research direction is marked concluded. For a
+  // research card `card.id == hypothesis_id(seed)`, the exact id the fold's abandoned override keys on.
+  const abandonBelief = () => control('abandon', {}, { verdict: 'abandoned' })
   // # CODEX AGENT: each lane is named, but an individual Card is an unnamed article: the statement is
   // a plain span and the article has no aria-label/aria-labelledby. Screen-reader article navigation
   // therefore announces several indistinguishable "article" landmarks. Give the statement a stable
@@ -1577,6 +1582,12 @@ function _CardKanbanCard({
           <button type="submit" className="btn xs" disabled={busy || gpuDraft === ''}>Pin resources</button>
         </fieldset>
       </form>
+      <div className="card-control-form">
+        <button type="button" className="btn xs" disabled={busy} onClick={abandonBelief}
+          title="Mark this research belief abandoned (verdict) — the Card stays visible in its lane; distinct from dropping the work item">
+          Abandon belief
+        </button>
+      </div>
       <details className="card-control-danger">
         <summary>Drop Card…</summary>
         <form className="card-control-form" onSubmit={event => { event.preventDefault(); drop() }}>
@@ -1664,6 +1675,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
       priority: { saving: 'Pinning Card priority…', success: 'Card priority pinned', failure: 'Could not pin Card priority' },
       resources: { saving: 'Pinning Card resources…', success: 'Card resources pinned', failure: 'Could not pin Card resources' },
       drop: { saving: 'Dropping Card…', success: 'Card dropped', failure: 'Could not drop Card' },
+      abandon: { saving: 'Abandoning belief…', success: 'Belief abandoned', failure: 'Could not abandon belief' },
     }[kind]
     if (!labels || inFlight.current.size > 0) {
       const message = 'Another Card command is still being submitted for this run.'
@@ -1708,7 +1720,9 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
           ? await CONTROL.reprioritizeCard(runId, card.id, data.priority)
           : kind === 'resources'
             ? await CONTROL.pinCardResources(runId, card.id, data.gpus, data.gpu_mem_mib)
-            : await CONTROL.dropCard(runId, card.id, data.reason)
+            : kind === 'abandon'
+              ? await CONTROL.abandonHypothesis(runId, card.id)
+              : await CONTROL.dropCard(runId, card.id, data.reason)
       if (!activeRef.current) return { kind: 'stale', message: 'Card board scope changed' }
       const feedback = commandFeedback(record, {
         success: labels.success, noop: `${labels.success} (already current)`,
@@ -1941,10 +1955,10 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
   // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.
-  // # CODEX AGENT: `+ Add` is now restored on the authoritative Card board, but `abandonHypothesis`
-  // still exists only in this fallback. RunState no longer publishes `state.hypotheses`, and the first
-  // Card unmounts the fallback, so an ordinary cards-only run cannot emit the documented
-  // `hypothesis_updated(status=abandoned)` control. Move that affordance onto `_CardKanbanCard`.
+  // Both operator affordances now live on the authoritative Card board too: `+ Add` (below) and
+  // `Abandon belief` (the per-card `abandon` control emitting hypothesis_updated(status=abandoned)),
+  // so an ordinary cards-only run — where this fallback is unmounted after the first Card — still
+  // exposes them; this fallback remains only for the pre-first-Card / legacy-hypotheses shape.
   const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0
     || projection?.source_valid === false
   // Card ids can repeat across runs and after an in-place reset. Remount every optimistic/ref tracker

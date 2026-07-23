@@ -95,7 +95,7 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
   assert.match(markup, /scored vs #3 · attempt 4/)
   assert.match(markup, /aria-label="Open evidence node #7"/)
   assert.match(markup, /Operator controls/)
-  for (const label of ['Save text', 'Pin priority', 'Pin resources', 'Confirm drop']) {
+  for (const label of ['Save text', 'Pin priority', 'Pin resources', 'Confirm drop', 'Abandon belief']) {
     assert.match(markup, new RegExp(`>${label}<`))
   }
   for (const label of [
@@ -106,9 +106,9 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
 })
 
 test('Card board renders the research verdict and treats an abandoned belief as terminal', () => {
-  // Peer review: the research verdict (open/supported/refuted/abandoned) is distinct from the work
-  // status. The board must render it as its own chip (a supported/refuted outcome was invisible) and
-  // treat an abandoned belief as terminal so it stops offering edit/priority/drop controls.
+  // Peer review: the research verdict (open/supported/testing/tested/abandoned) is distinct from the
+  // work status. The board must render it as its own chip (a supported/tested outcome was invisible)
+  // and treat an abandoned belief as terminal so it stops offering edit/priority/drop/abandon controls.
   const cards = {
     'card-sup': {
       id: 'card-sup', status: 'evaluated', statement: 'Supported belief',
