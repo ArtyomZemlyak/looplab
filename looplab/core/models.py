@@ -1876,12 +1876,15 @@ class RunState(BaseModel):
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
     # --- advisory/control receipts (no direct objective ranking; downstream effects noted per field) ---
-    # TODO(advisory-vs-behavior audit): f019358 relabeled several of these sidecars from "audit-only" to
-    # "advisory — feeds prompts/priorities". That relabel was not exhaustive: individual field comments
-    # below (and some docstrings) may still say "audit-only; never read by best-selection" while the code
-    # now consumes them. Before relying on any single field's comment, audit the REAL data flow against
-    # the business requirement (what SHOULD steer selection vs. stay pure telemetry) and reconcile every
-    # comment + doc to match. Tracked in docs/03-decisions.md.
+    # advisory-vs-behavior audit (f019358 follow-up): the sidecar FIELD comments in THIS section were
+    # audited against real data flow and reconciled — `novelty_grades` was relabeled from "audit-only"
+    # (it folds to `card.novelty_verdict` and feeds card-driven selection via `_novelty_signal`), while
+    # `agent_decisions` (append + UI only), `cross_run_priors` (UI projection only) and `report`
+    # (narrative + its own regeneration cadence gate) were confirmed accurate — none re-rank the metric
+    # champion. Still open: the same sweep across DOCSTRINGS elsewhere in the tree. Distinguish "never
+    # read by best-selection" (the metric champion — the load-bearing safety claim) from "audit-only"
+    # (pure telemetry): a field can honour the first while feeding card-driven build selection or prompts.
+    # Tracked in docs/03-decisions.md.
     # Unified self-driving agent (audit-only; never read by best-selection): timeline of the agent's
     # macro-action choices {at_node, chosen, legal, recommended, rationale} for the "why this action"
     # view. Additive — old event logs without `agent_decision` events fold to an empty list.
@@ -1902,7 +1905,10 @@ class RunState(BaseModel):
     novelty_events: list[dict] = Field(default_factory=list)
     # PART IV D3 (Phase 2b): the live gate's GRADED-ALLOW decisions — proposals allowed despite a
     # concept overlap the flat gate would reject (level-4 same-direction-new-impl, level-5 re-open of a
-    # wrongly-abandoned direction). Audit-only sidecar; never read by best-selection. Additive.
+    # wrongly-abandoned direction). Never re-ranks evaluated nodes / the metric champion, but NOT pure
+    # telemetry: `_derive_cards` folds it (with `novelty_events`) onto `card.novelty_verdict`, and when
+    # card_driven_selection is enabled that feeds the card novelty signal
+    # (search/card_selection.py::_novelty_signal) steering WHICH candidate is built next. Additive.
     novelty_grades: list[dict] = Field(default_factory=list)
     # PART IV cross-run Step 2 (§21.20): concepts the proposed idea shares with a SIMILAR earlier run,
     # surfaced (never rejected) so the trace/researcher sees "tried in run X -> metric Y". Populated only
