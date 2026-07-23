@@ -594,7 +594,9 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # elsewhere and the card would never gain evidence. Consequence (by design): an operator statement
     # edit changes render/analysis/selection (which read `statement`) but NOT the seed the proposal feed
     # asks the model to test — a display/analysis edit, not a re-seed of the linkable research direction.
-    open_hyps = [c for c in state.open_research_cards() if not c.evidence]
+    # Distinct untested BELIEFS, not raw work-item cards (peer review): two cards that reuse the exact
+    # hypothesis wording are ONE belief, surfaced once so the model does not re-read a duplicate.
+    open_hyps = state.open_research_beliefs()
     if open_hyps:
         # FOREAGENT predict-before-execute (search/foresight.py): when the world model has ranked the
         # board by expected payoff (`hyp_order` = hypothesis ids best-first), surface the batch of

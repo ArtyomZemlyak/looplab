@@ -1121,6 +1121,27 @@ def test_grouped_beliefs_aggregates_same_seed_cards_keeping_ids_distinct():
     assert solo["card_ids"] == ["card-1"] and solo["verdict"] == "abandoned"
 
 
+def test_open_research_beliefs_dedups_same_seed_untested_cards():
+    # Peer review: two work-item cards reusing the exact hypothesis wording are ONE belief; the proposal
+    # feed + foresight must see it ONCE (first-seen no-evidence card as the representative), not as
+    # indistinguishable duplicates the model re-reads and re-ranks.
+    from looplab.core.models import Card, RunState
+    seed, other = "log-transform the skewed target", "add class weights"
+    st = RunState(direction="max", goal="g")
+    st.cards = {
+        "card-1": Card(id="card-1", seed_statement=seed, statement=seed, verdict="open",
+                       status="proposed", evidence=[]),
+        "card-2": Card(id="card-2", seed_statement=seed, statement=seed + " v2", verdict="open",
+                       status="proposed", evidence=[]),               # same seed -> same belief
+        "card-9": Card(id="card-9", seed_statement=other, statement=other, verdict="open",
+                       status="proposed", evidence=[]),
+    }
+    assert [c.id for c in st.open_research_beliefs()] == ["card-1", "card-9"]   # one per belief, 1st rep
+    # a same-seed card WITH evidence is skipped so the untested sibling represents the belief
+    st.cards["card-1"].evidence = [1]
+    assert [c.id for c in st.open_research_beliefs()] == ["card-2", "card-9"]
+
+
 def test_grouped_beliefs_keys_by_full_digest_not_the_short_hash():
     # Peer review: two DISTINCT statements can collide on the short `hypothesis_id`; grouping on it would
     # silently merge unrelated beliefs. Group by the full statement digest instead.

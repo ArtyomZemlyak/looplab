@@ -1295,10 +1295,12 @@ class CardSelectionProvenance(BaseModel):
         return self
 
 
-# CODEX AGENT: grouped_beliefs() now acknowledges that Card is work-item identity, but no production
-# decision consumer calls it: Researcher and foresight still iterate open_research_cards() and rank two
-# same-seed actions as duplicate, semantically indistinguishable beliefs. Make the grouped projection
-# the actual belief-consumer contract (with opaque work ids for evidence joins), not a test-only view.
+# Belief-vs-work-item identity (peer review): a Card is a WORK ITEM, but two cards that reuse the exact
+# hypothesis wording are ONE belief. The Researcher proposal feed (roles._state_brief) and foresight
+# ranking now consume `open_research_beliefs()` — `open_research_cards()` collapsed by seed-statement
+# digest, the representative work-item id preserved for evidence joins — so the model no longer re-reads
+# or re-ranks same-seed duplicates. `grouped_beliefs()` remains the FULL-board belief view (evidence +
+# verdict aggregated across a belief's cards) for the UI / lessons / verdict consumers.
 class Card(BaseModel):
     """One stable-identity proposal/work item in the target Card queue (docs/23).
 
@@ -2022,6 +2024,27 @@ class RunState(BaseModel):
         statement-less bullet, so a malformed card_added with an empty seed must not surface one here."""
         return [c for c in self.research_cards()
                 if c.verdict == "open" and c.status != "dropped" and c.seed_statement.strip()]
+
+    def open_research_beliefs(self) -> list["Card"]:
+        """The open, UNTESTED research board as distinct BELIEFS (peer review): the
+        `[open_research_cards() with no evidence yet]` list the Researcher proposal feed and foresight
+        ranking consume, collapsed by seed-statement DIGEST (the `grouped_beliefs` key) so two work-item
+        cards that reuse the exact hypothesis wording surface as ONE belief — not indistinguishable
+        duplicates the model re-reads and re-ranks. The FIRST-seen no-evidence card per belief is the
+        representative (deterministic over `self.cards` insertion order); its distinct work-item id is
+        preserved for the caller's evidence joins. `grouped_beliefs` remains the FULL-board view that
+        aggregates evidence + verdict across a belief's cards."""
+        seen: set[str] = set()
+        out: list["Card"] = []
+        for c in self.open_research_cards():
+            if c.evidence:                  # untested only (mirrors the consumers' `if not c.evidence`)
+                continue
+            key = hypothesis_statement_digest(c.seed_statement)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(c)
+        return out
 
     def grouped_beliefs(self) -> list[dict]:
         """Additive BELIEF projection (peer review): the board keeps ``1 card = 1 work item`` — two
