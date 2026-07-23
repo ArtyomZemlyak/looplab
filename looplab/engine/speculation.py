@@ -523,19 +523,19 @@ class SpeculationMixin:
                 events = self.store.read_all()
                 latest = fold(events)
                 latest_card = latest.cards.get(result.card_id)
-                if (
-                    latest.paused
-                    or latest.finished
-                    or latest.stop_requested
-                    or latest.search_epoch != result.generation
+                # Separate a GENUINE supersession (epoch bump, abort, the Card itself dropped/merged, or
+                # a parent invalidated) from a TRANSIENT freeze (run paused/finished/stopped, or the
+                # eval-budget crossed between the node_building CAS and this revalidation). The pre-claim
+                # path (_serve_card_builds) preserves the Card for the transient set — a later resume or
+                # add_nodes extension rebuilds it — so a mid-build pause/budget crossing must NOT reach
+                # _fail_reserved_build's drop_card=True default and permanently card_auto_drop the Card
+                # (losing its hypothesis). Only real supersession drops the Card.
+                superseded = (
+                    latest.search_epoch != result.generation
                     or node_id in latest.aborted_nodes
                     or latest_card is None
                     or latest_card.dropped_reason is not None
                     or latest_card.merged_into is not None
-                    or (
-                        max_eval_seconds is not None
-                        and latest.total_eval_seconds >= max_eval_seconds
-                    )
                     or any(
                         parent_id not in latest.nodes
                         or latest.nodes[parent_id].attempt != parent_generation
@@ -546,22 +546,25 @@ class SpeculationMixin:
                             for parent_id, generation in reserved.parent_generations.items()
                         )
                     )
-                ):
-                    # CLAUDE REVIEW: this arm conflates transient freezes with real supersession.
-                    # Pre-claim, the same conditions preserve the Card (_serve_card_builds closes the
-                    # head skipped="stale" without dropping; the "budget" outcome deliberately keeps
-                    # head+result for a later add_nodes extension) — but a pause or an eval-budget
-                    # crossing that lands BETWEEN the node_building CAS and this revalidation reaches
-                    # _fail_reserved_build with its drop_card=True default and permanently
-                    # card_auto_dropped's the hypothesis. Pass drop_card=False for the
-                    # pause/stop/budget conditions (split them from genuine supersession) so a
-                    # transient freeze doesn't kill the Card.
+                )
+                transient = (
+                    latest.paused
+                    or latest.finished
+                    or latest.stop_requested
+                    or (
+                        max_eval_seconds is not None
+                        and latest.total_eval_seconds >= max_eval_seconds
+                    )
+                )
+                if superseded or transient:
                     self._fail_reserved_build(
                         node_id=node_id,
                         card_id=reserved.card_id,
                         generation=0,
-                        error="speculative build became stale before commit",
-                        reason="superseded",
+                        error=("speculative build became stale before commit" if superseded
+                               else "speculative build frozen before commit (pause/stop/budget)"),
+                        reason="superseded" if superseded else "frozen",
+                        drop_card=superseded,
                     )
                     self._discard_node_build_telemetry(
                         researcher=researcher, developer=developer,

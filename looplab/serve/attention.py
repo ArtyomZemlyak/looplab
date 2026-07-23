@@ -33,6 +33,9 @@ from looplab.serve.run_commands import run_generation_token
 
 _IGNORED_FAILURE_REASONS = {
     "aborted", "cancelled", "card_dropped", "proxy_skipped", "superseded",
+    # A speculative build frozen by a transient pause/stop/budget crossing (the Card survives for a
+    # later resume/extension) is benign — do not raise an owner attention alert for it.
+    "frozen",
 }
 _BUDGET_REASONS = {
     "time_budget": "The run reached its wall-clock budget.",

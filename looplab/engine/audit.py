@@ -106,18 +106,6 @@ class AuditMixin:
                             and card_id not in seen):
                         seen.add(card_id)
                         card_order.append(card_id)
-            # CLAUDE REVIEW: when NONE of the ranked board ids resolve (cards not yet minted for the
-            # ranked directions, or every match merged away — this loop DROPS merged ids instead of
-            # canonicalizing to the survivor like _derive_cards._canon), card_order is [] yet the batch
-            # still publishes card_ranked {"order": []}. The fold is latest-wins, and _derive_cards
-            # treats ANY non-None card_ranking as native: it clears every open card's
-            # foresight_rank/confidence, stamps no priority, and suppresses the hypothesis_ranking
-            # fallback — and card.priority feeds _priority_signal in card-driven selection. Skip the
-            # EV_CARD_RANKED member (keep the hypothesis event) when card_order is empty but raw_order
-            # was not: a resolution miss is not a "rank nothing" decision.
-            card_data = {"order": card_order, "at_node": node_id}
-            if "confidence" in pick:
-                card_data["confidence"] = pick["confidence"]
             # CODEX AGENT: these are two projections of ONE ranking decision. One physical batch keeps
             # a crash/torn tail from exposing a new Hypothesis order beside stale Card selection priority.
             # CLAUDE REVIEW: both events fold as GLOBAL last-write-wins registers, but this method is
@@ -125,14 +113,26 @@ class AuditMixin:
             # so the folded card_ranking/hypothesis_ranking depend on nondeterministic worker
             # byte-order, outside the invariant-1 carve-out (which only permits INDEPENDENT per-node
             # events to interleave). Emit board-wide rankings from the main task (e.g. at batch join),
-            # or drop them on pooled builds.
-            self.store.append_many([
-                (EV_HYPOTHESIS_RANKED, hypothesis_data),
-                (EV_CARD_RANKED, card_data),
-            ], trace_id=tid, span_id=sid)
-        except (AttributeError, KeyError, TypeError, ValueError):
-            # Projection construction is additive and must not fail an already-completed node build.
-            # Publish neither side: a lone hypothesis order would fall back into Card priority on replay.
+            # or drop them on pooled builds. [FLAGGED for a design decision; not auto-fixed.]
+            members = [(EV_HYPOTHESIS_RANKED, hypothesis_data)]
+            # A resolution MISS (ranked directions whose Cards are not yet minted, or every match merged
+            # away — the loop above drops merged ids instead of canonicalizing to the survivor) leaves
+            # card_order empty while raw_order was not. That is NOT a "rank nothing" decision: publishing
+            # card_ranked{"order": []} folds as a native empty board, so _derive_cards clears every open
+            # card's foresight_rank/confidence, stamps no priority, and suppresses the hypothesis_ranking
+            # fallback that feeds _priority_signal in card selection. Only emit the Card projection when
+            # at least one id resolved, or the board was genuinely empty to begin with.
+            if card_order or not raw_order:
+                card_data = {"order": card_order, "at_node": node_id}
+                if "confidence" in pick:
+                    card_data["confidence"] = pick["confidence"]
+                members.append((EV_CARD_RANKED, card_data))
+            self.store.append_many(members, trace_id=tid, span_id=sid)
+        except Exception:  # noqa: BLE001 — projection construction is additive and must NOT fail an
+            # already-completed node build. The try wraps fold()+append_many(), which can raise store/IO
+            # errors (EventLogCorruptionError, OSError, concurrency) besides the shape errors above;
+            # swallow them all. Publish neither side: a lone hypothesis order would fall back into Card
+            # priority on replay.
             return
         finally:
             setattr(role, "last_hyp_priority", None)
