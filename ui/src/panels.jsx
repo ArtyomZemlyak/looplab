@@ -1452,6 +1452,10 @@ function _CardKanbanCard({
     const reason = dropReason.trim() || 'operator dropped'
     control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
   }
+  // # CODEX AGENT: each lane is named, but an individual Card is an unnamed article: the statement is
+  // a plain span and the article has no aria-label/aria-labelledby. Screen-reader article navigation
+  // therefore announces several indistinguishable "article" landmarks. Give the statement a stable
+  // id/heading and bind the article to it without exposing the long internal Card id as its name.
   return <article className="card-kanban-card" data-card-id={card.id} aria-busy={ownPending ? 'true' : undefined}>
     <div className="card-kanban-stmt">
       <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
@@ -1671,7 +1675,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
     }
     setOptim(current => {
       const entry = current[card.id] || {}
-      // CLAUDE REVIEW: `...entry` carries the PREVIOUS edit's editEventSeq into a chained edit's
+      // # CODEX AGENT: `...entry` carries the PREVIOUS edit's editEventSeq into a chained edit's
       // entry, so _cardControlReflected's seq shortcut (folded >= expected) marks the NEW edit
       // reflected as soon as the OLD edit folds — the reconcile effect then clears this edit's
       // override/pending early and the visible text reverts to the old edit until the second fold

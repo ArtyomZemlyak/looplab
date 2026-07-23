@@ -3147,7 +3147,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
                                 # exact lifecycle plus run-level operator gates before retrying.
-                                # CLAUDE REVIEW: with the cross-run host lease this wait is no longer
+                                # CODEX AGENT: with the cross-run host lease this wait is no longer
                                 # bounded by a sibling eval in this process — it lasts as long as
                                 # ANOTHER run holds the pool (hours of training), and every 0.5s tick
                                 # re-folds the WHOLE log (the parallel branch folds twice per tick):

@@ -97,7 +97,7 @@ def _make_run(tmp_path: Path) -> Path:
         {"type": "node_evaluated", "data": {"node_id": 0, "metric": 0.3, "eval_seconds": 12.0,
                                             "stdout_tail": "epoch1 loss=0.5\n{\"metric\": 0.3}"}},
     ]
-    # CLAUDE REVIEW: FAILING ON MASTER (test_read_run_logs_reads_stdout_from_disk) — these
+    # CODEX AGENT: FAILING ON MASTER (test_read_run_logs_reads_stdout_from_disk) — these
     # hand-written envelopes carry no "seq", so since 5f011a2's fail-closed reader every record after
     # the first is a non-advancing row (all default seq 0): only run_started survives the boundary,
     # the fold sees zero nodes, and read_run_logs answers "(no experiment #0)". Stamp increasing seqs

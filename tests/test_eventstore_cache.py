@@ -109,13 +109,6 @@ def test_shrink_rebases_seq_and_rejects_pre_reset_cas(tmp_path):
     assert s.append("current", {}, expected_last_seq=0).seq == 1
 
 
-# CLAUDE REVIEW: FAILING ON MASTER — 16f941f's monotonic-gap tolerance in event_sequence_continues
-# invalidated this fence's premise: the seq-1→7 rewrite now reads as a legal "repaired" gap (cache
-# [0,7], divergence None) and the CAS append raises EventStoreConcurrencyError, then a retry at the
-# mutated tail SUCCEEDS — the tamper this test pinned as fail-closed is undetectable. Adjudicate
-# deliberately: either restore detection (explicit repair receipts; unexplained gaps fail closed) and
-# keep this test, or migrate it to the new contract in the same change. See the paired note on
-# event_sequence_continues.
 def test_same_size_rewrite_with_seq_gap_fails_closed(tmp_path):
     from looplab.events.eventstore import EventLogCorruptionError
     import os

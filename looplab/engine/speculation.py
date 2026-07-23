@@ -1308,7 +1308,7 @@ class SpeculationMixin:
         if self._terminal_intent(state):
             return False
         self._refresh_speculation_budget(state)
-        # CLAUDE REVIEW: _request_card_build elects with _speculative_card_ids UNION
+        # CODEX AGENT: _request_card_build elects with _speculative_card_ids UNION
         # _producer_failed_card_ids, but this freshness revalidation — and _claim_requested_card_build
         # and the pre-GPU recheck in _run_card_session — pass only _speculative_card_ids. A durable
         # producer-failed card (serial-fallback-only, never speculatively buildable) therefore competes

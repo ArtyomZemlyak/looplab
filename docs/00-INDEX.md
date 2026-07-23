@@ -32,7 +32,7 @@
 
 ## Read in this order
 
-<!-- CLAUDE REVIEW: this authority map is missing the two design docs added this window —
+<!-- CODEX AGENT: this authority map is missing the two design docs added this window —
 22-agent-parallelism-2026-07-19.md and 23-hypothesis-card-kanban-2026-07-20.md (the self-declared
 current implementation truth for the Card re-architecture, referenced by CLAUDE.md and
 core/config.py). Doc 22 has ZERO inbound links anywhere (index-absent + mkdocs not_in_nav = fully

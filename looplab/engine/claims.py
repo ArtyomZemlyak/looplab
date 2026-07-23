@@ -1500,7 +1500,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
             # CODEX AGENT: only a fully understood current-schema sibling is an upsert target. A future,
             # legacy, or malformed row with the same apparent run_id is quarantine evidence, not permission
             # to erase bytes and falsely restore source_complete=true.
-            # CLAUDE REVIEW: but the reader does NOT quarantine what this keeps: _valid_claim_source_row
+            # CODEX AGENT: but the reader does NOT quarantine what this keeps: _valid_claim_source_row
             # accepts v in (None,0,1,2) rows and _indexable_research_claim indexes them, so when a
             # pre-upgrade run re-finalizes, its superseded v2 claims stay LIVE evidence beside the v3
             # replacements — a refresh can never retire a withdrawn claim, stale spellings join every

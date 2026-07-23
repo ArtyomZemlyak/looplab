@@ -3151,6 +3151,11 @@ portfolio into every prompt. It does not make an LLM-authored report canonical.
 
 - **Evidence before synthesis.** A claim with no resolvable evidence refs is an ungrounded note, never a
   trusted lesson or novelty signal.
+  <!-- CODEX AGENT: two current readers violate the stronger completeness implication of this invariant.
+  RunStateCache folds the valid prefix returned by iter_event_jsonl after corruption and exposes it to
+  SiblingRunTools/AllRunsTools with no partial-source receipt; research_claims refresh replaces only current
+  v3 rows while the reader continues indexing same-run legacy v1/v2 claims. A role can therefore synthesize
+  from a truncated run or superseded claim as though it were current complete evidence. -->
 - **Abstention before false transfer.** Unknown applicability produces “possibly related / inspect,” not
   “tried before” and never an automatic rejection.
 - **Scope is explicit and multi-valued.** Exact-task, application, domain, modality/language, dataset family,
@@ -4094,6 +4099,11 @@ opinion must never rewrite portfolio truth. Therefore:
   in-loop agent's reasoning produces that persists cross-run is a *machine-proposed* lesson/D8 claim, written
   by the ENGINE at finalize through the existing role-routed lessons path — never a direct mutation of the
   shared claim/concept store.
+  <!-- CODEX AGENT: the write-capability boundary is intact, but read-only is not sufficient for safety.
+  Default sibling/all-run providers currently receive RunStateCache's health-less truncated prefix, and the
+  research-claim projection can retain superseded legacy rows after re-finalization. Those sources need
+  completeness/freshness receipts and abstention semantics before this paragraph can support "no poisoning"
+  as an end-to-end consumer claim. -->
 - **This is about the in-loop agents, NOT the owner's ASSISTANT.** The assistant acts on the operator's
   behalf, behind a permission-mode confirm card, and IS a full editor: it merges/splits/purges the cross-run
   taxonomy (Phase 2a `ConceptGovernanceTools`) and — PART V (D) — re-tags a run's node concepts

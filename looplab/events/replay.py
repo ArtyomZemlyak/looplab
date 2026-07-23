@@ -5117,7 +5117,7 @@ def _derive_cards(st: RunState) -> None:
         canonical_id = _canon(bounded_id)
         if canonical_id in ranked_cards:
             continue
-        # CLAUDE REVIEW: this compressed counter diverges from _derive_hypotheses, which stamps raw
+        # CODEX AGENT: this compressed counter diverges from _derive_hypotheses, which stamps raw
         # enumerate(order) positions (duplicates/invalid ids still consume ranks). On the SHARED
         # hypothesis_ranking fallback, order ["h1","h1","h2"] gives h2 priority 2 on the hypothesis
         # board but 1 on its card shadow — the two "mirrored" boards disagree on the same event. Use

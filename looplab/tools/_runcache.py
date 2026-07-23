@@ -38,6 +38,11 @@ class RunStateCache:
     def sig(rd: Path):
         try:
             s = (rd / "events.jsonl").stat()
+            # CODEX AGENT: truncating mtime to whole seconds makes this cache blind to a same-size
+            # replacement/rewrite inside one second. That is not only a freshness issue: these folded
+            # states feed default-on SiblingRunTools/AllRunsTools, so an agent can keep reasoning from
+            # an obsolete cross-run evidence prefix. Use mtime_ns plus stable file identity (and keep
+            # the read snapshot fenced) before treating a hit as the current run state.
             return (s.st_size, int(s.st_mtime))
         except OSError:
             return (0, 0)
@@ -54,6 +59,12 @@ class RunStateCache:
         from looplab.core.models import Event
         from looplab.events.replay import fold
         try:
+            # CODEX AGENT: iter_event_jsonl deliberately STOPS at the first corrupt/non-dense record,
+            # but this cache exposes the surviving prefix as an ordinary complete RunState and records
+            # no divergence/health receipt. SiblingRunTools and MachineRunsTools can therefore tell an
+            # in-loop role that missing later experiments/evidence do not exist. Read through an
+            # EventStore health boundary (or return state + completeness) and make every consumer
+            # abstain from absence/best claims when the source is partial.
             st = fold(Event(**o) for o in iter_event_jsonl(rd / "events.jsonl"))
         except (OSError, ValueError, TypeError):
             return None

@@ -48,7 +48,7 @@ MAX_STAGE_COUNT = 16
 # released) and tree-killed early — instead of sitting until the full, often multi-hour, stage
 # deadline. Bounded generously so a legitimately slow-but-quiet phase (hard-negative mining, a large
 # FAISS build, a checkpoint save) is not falsely killed; a real deadlock still dies in ~minutes.
-# CLAUDE REVIEW: this always-on kill has no reachable override — no engine caller passes
+# CODEX AGENT: this always-on kill has no reachable override — no engine caller passes
 # run_command_eval(stall_timeout=...) and validate_stages accepts no per-stage stall key, so a
 # healthy stage that is legitimately quiet on the pipes for >30 min (non-Python train wrapper with
 # block-buffered stdout, a repo script logging only to its own file — PYTHONUNBUFFERED helps Python
@@ -798,7 +798,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             stage_results.append({"name": _sname, "status": _status, "exit_code": rc,
                                   "seconds": round(time.monotonic() - _t0, 3)})
             if _status != "ok":
-                # CLAUDE REVIEW: this return hard-codes metric=None and leaves stalled=False, so the
+                # CODEX AGENT: this return hard-codes metric=None and leaves stalled=False, so the
                 # STALL-SALVAGE contract is unreachable in pipeline mode: evaluate.py's gate
                 # (`res.metric is not None and (exit==0 or res.stalled)`) can never salvage a staged
                 # train+eval whose final stage printed its metric before hanging — the multi-hour

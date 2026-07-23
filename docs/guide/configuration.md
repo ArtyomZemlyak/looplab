@@ -144,6 +144,12 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
 | `max_eval_seconds` | `LOOPLAB_MAX_EVAL_SECONDS` | — | Hard ceiling on cumulative time *inside* evals (survives resume) |
 
+<!-- CODEX AGENT: runtime currently violates the llm_parallel row for a legacy-only source. Per-source
+canonicalize_parallelism_source promotes LOOPLAB_PARALLEL_BUILD into llm_parallel before Engine startup, so
+the value is indistinguishable from an explicitly canonical positive setting and activates the shared broker.
+The compatibility contract needs either provenance-preserving normalization or revised product semantics plus
+tests; until then operators should spell llm_parallel explicitly. -->
+
 ## Backend & roles
 
 | Setting | Env | Default | Description |

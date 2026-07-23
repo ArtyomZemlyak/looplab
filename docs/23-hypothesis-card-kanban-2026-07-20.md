@@ -21,6 +21,17 @@ truth and wins wherever the original target text differs from shipped behavior.
 | Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, fail-closed zero-device admission, confirm admission, isolated Card producer/consumer; local Engine processes sharing one OS-user filesystem namespace hold a crash-released pool-wide lease, so separate Runs cannot double-allocate the same GPU | The deliberately conservative lease serializes GPU-owning Runs; cross-user/container/host scheduling remains the external execution backend's responsibility |
 | Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events |
 
+<!-- CODEX AGENT: the "Complete" layer labels above describe the validated happy path, not the current
+adversarial concurrency boundary. Review at origin/master 827e8a0f still finds seven release blockers:
+(1) confirm GPU refusal hot-spins without backoff/cap; (2) opening the host GPU lease can escape admission
+and abort every resume; (3) reset between admission and _evaluate can miss the generation-keyed reservation
+and launch unpinned; (4) parallel workers append global LWW Card/Hypothesis rankings, making replayed
+priority completion-order dependent; (5) producer-failed Card exclusions differ between election and three
+freshness rechecks; (6) one alive-but-stale speculative sibling can collapse the healthy population lane;
+and (7) a legacy-only parallel_build source promotes llm_parallel and enables the finite shared broker despite
+the documented compatibility contract. Keep positive-depth speculation and trusted parallel-GPU promotion
+blocked until those exact sites and their adversarial tests close. -->
+
 ### Stage progress ledger (validated implementation, 2026-07-22)
 
 `Complete` means the acceptance behavior is present in `8d9952a1` and covered by the current validation
@@ -40,6 +51,12 @@ and hardware receipts below. Deferred broader rollout scopes are not unfinished 
 | **6** | **Complete** | `0ff29fed`, `bb176cb9`, `8d9952a1` | current receipt | none |
 
 ### Validation and rollout receipt (evidence for commit `8d9952a1`)
+
+<!-- CODEX AGENT: this receipt is correctly point-in-time and is NOT valid for current master. The current
+implementation digest already differs, and the review annotations added under looplab/**/*.py change it
+again by design. A positive speculation_depth deployment must regenerate the real-GPU evidence/receipt after
+the review blockers are fixed; copying the historical digest or treating comments as digest-neutral would
+defeat the fail-closed admission contract. -->
 
 > The `implementation` digest below is `speculation_implementation_digest()` over the raw bytes of every
 > `looplab/**/*.py`, the required `looplab/serve/settings_ui_schema.json`, and `pyproject.toml` when the
@@ -142,6 +159,9 @@ Receipt identity is exact: self digest
   New envelopes carry a guarded non-string type so pre-batch binaries stop at their corruption fence;
   current readers also accept the initial string marker, reject duplicate/backward logical sequences,
   preserve monotonic repaired-log gaps, and require dense members inside each atomic batch.
+  <!-- CODEX AGENT: stale after 827e8a0f. event_sequence_continues now requires a dense prefix for every
+  logical record; no legitimate repair path preserves forward seq gaps. Leaving "preserve monotonic
+  repaired-log gaps" here contradicts the runtime and the restored fail-closed regression contract. -->
 - Coverage scoring consumes only complete authorized current memberships and canonicalizes Card aliases,
   case and spacing through the same concept-identity projection.
 

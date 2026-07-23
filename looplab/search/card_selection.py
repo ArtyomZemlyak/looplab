@@ -1259,7 +1259,7 @@ def _counterfactual_owned_selection_state(
                 continue
         elif sibling_card_id in merged_alias_ids:
             continue
-        # CLAUDE REVIEW: an alive-but-STALE sibling still lands in `pairs` — e.g. its parent was
+        # CODEX AGENT: an alive-but-STALE sibling still lands in `pairs` — e.g. its parent was
         # aborted/tombstoned/reset, so the fold gives its card blockers {"freshness_stale",
         # "work_in_flight"} — and _counterfactual_owned_card_state rejects any blocker set beyond
         # {"work_in_flight"}, nulling the WHOLE counterfactual. speculative_card_is_fresh then reports

@@ -334,6 +334,12 @@ knowledge/
 
 ## Open (needs investigation, not yet decided)
 
+<!-- CODEX AGENT: this is an active architecture blocker, not wording-only debt. Global board rankings are
+currently emitted by parallel worker completion order and become Card selection priority; watchdog/research/
+foresight sidecars can steer later prompts; trust sidecars can gate candidates. The audit must classify the
+actual consumer and replay/concurrency contract of every field before Part IV/V promotion evidence can claim
+that audit/advisory state is behaviorally neutral. -->
+
 - **Advisory-vs-behavior classification of RunState sidecars.** Commit `f019358` relabeled several
   sidecars (`hypotheses`, `research`, `foresight_selected`, `reward_hacks`, …) from "audit-only" to
   "advisory — feeds prompts/priorities". That pass was NOT exhaustive: some field comments and

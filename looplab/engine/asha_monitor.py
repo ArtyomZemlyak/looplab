@@ -163,7 +163,7 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
     for node in promotion_eligible_nodes(state):
         if node.id == node_id:
             continue
-        # CLAUDE REVIEW: the comparable population comes from sibling stdout_tail, which the terminal
+        # CODEX AGENT: the comparable population comes from sibling stdout_tail, which the terminal
         # event caps at stdout[-500:] (evaluate.py) — only each sibling's FINAL few epoch/step records
         # survive. A live node at an early resource coordinate (the only time a kill saves compute)
         # therefore ~never finds min_siblings same-resource peers: comparable_under stays None, the

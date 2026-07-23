@@ -106,7 +106,7 @@ class EvaluateMixin:
             # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
             # devices across every inline repair/retry prevents a repaired process from jumping onto a
             # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
-            # CLAUDE REVIEW: the dispatcher registered this reservation under the ADMISSION-time
+            # CODEX AGENT: the dispatcher registered this reservation under the ADMISSION-time
             # generation, but `generation` here is node.attempt from this worker's fresher fold. An
             # eval-stage node_reset landing in that window (attempt+1, still pending, rerun_from None)
             # passes the prestart guard above, the lookup returns None, and _resource_eval_env(None)

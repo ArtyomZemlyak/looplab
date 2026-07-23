@@ -183,7 +183,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
   // `withBuilding` splices EVERY in-flight build into `live.nodes` (building:true), so keying off the
   // spliced node — not the singular `live.building` — lights up whichever concurrent build this is.
-  // CLAUDE REVIEW: the claim above is false for EXISTING nodes — withBuilding skips ids already in
+  // # CODEX AGENT: the claim above is false for EXISTING nodes — withBuilding skips ids already in
   // state.nodes (buildingModel.js "never overwrite either with a ghost"), yet node_reset re-builds
   // emit node_building for an existing pending node (orchestrator re-propose/re-implement paths). So
   // after an operator resets a node, building is never true here: the /nodes/{id} poll stops and the

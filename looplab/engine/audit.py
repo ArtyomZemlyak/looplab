@@ -108,7 +108,7 @@ class AuditMixin:
                         card_order.append(card_id)
             # CODEX AGENT: these are two projections of ONE ranking decision. One physical batch keeps
             # a crash/torn tail from exposing a new Hypothesis order beside stale Card selection priority.
-            # CLAUDE REVIEW: both events fold as GLOBAL last-write-wins registers, but this method is
+            # CODEX AGENT: both events fold as GLOBAL last-write-wins registers, but this method is
             # called from parallel-build worker threads (_create_node_guarded, speculation session) —
             # so the folded card_ranking/hypothesis_ranking depend on nondeterministic worker
             # byte-order, outside the invariant-1 carve-out (which only permits INDEPENDENT per-node

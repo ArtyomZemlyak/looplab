@@ -140,7 +140,7 @@ const NARR = {
   comment_edited: (d) => `comment edited on #${d.node_id ?? '?'}`,
   comment_resolution_changed: (d) => `comment ${d.resolved === true ? 'resolved' : d.resolved === false ? 'reopened' : 'resolution changed'} on #${d.node_id ?? '?'}`,
   concept_tag_edited: (d) => `operator re-tagged #${d.node_id}: ${(d.concepts || []).slice(0, 4).join(', ') || '(cleared)'}`,
-  // CLAUDE REVIEW: d.priority is the 0-based wire value (server accepts 0..255) but every operator
+  // # CODEX AGENT: d.priority is the 0-based wire value (server accepts 0..255) but every operator
   // surface is 1-based (board chip renders priority+1, the form says "1 is highest" and savePriority
   // submits visible-1) — so pinning "1 (highest)" narrates as "pinned to 0". Narrate d.priority + 1
   // (guarding non-int) so the feed matches what the operator typed and the board shows.
@@ -160,7 +160,7 @@ const NARR = {
   stage_finished: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
   lessons_reconciled: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}`,
   train_monitor_alert: (d) => `training monitor: #${d.node_id} looks ${d.status}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
-  // CLAUDE REVIEW: asha_rank events include RECOVERY edges (underperforming:false — asha_monitor
+  // # CODEX AGENT: asha_rank events include RECOVERY edges (underperforming:false — asha_monitor
   // publishes both edges precisely so projections can clear the flag), but this narration ignores
   // d.underperforming and always says "rank warning", so the recovery is displayed as ANOTHER
   // warning. Branch on d.underperforming === false to say "rank recovered" (and only then pick the
