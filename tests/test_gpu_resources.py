@@ -335,18 +335,39 @@ def test_parallel_eval_launches_normally_when_the_reservation_matches_the_genera
     assert host.eval_env_calls == [{"gpu_ids": [0], "pin": True}]
 
 
-def test_serial_eval_is_exempt_from_the_stale_generation_fail_closed(monkeypatch):
-    """Serial mode intentionally runs unpinned whole-box, so a stale-generation miss there is harmless and
-    must NOT be failed closed — `_evaluate` proceeds to launch with the unpinned (None) reservation."""
+def test_stale_reservation_fails_closed_even_when_eval_parallel_is_lowered_to_one(monkeypatch):
+    """The fail-closed keys on the stale RESERVATION, not the live mutable `_eval_parallel`. A
+    Strategist/operator that lowers eval_parallel to 1 mid-batch (while pinned siblings are still
+    draining) must not flip a reset lifecycle into an unpinned launch — the stale pinned reservation
+    still means the dispatcher must re-admit and re-pin it."""
     from looplab.engine.orchestrator import Engine
 
-    host = _EvalResetHost(parallel=1)
-    host._register_eval_resource_reservation(0, 0, {"gpu_ids": [0], "pin": True})  # stale gen, but serial
+    host = _EvalResetHost(parallel=1)                  # live-lowered to serial mid-batch
+    host._register_eval_resource_reservation(0, 0, {"gpu_ids": [0], "pin": True})  # admitted while parallel
+    monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
+
+    launched = None
+    try:
+        anyio.run(Engine._evaluate, host, 0, anyio.CapacityLimiter(1), None)
+    except _ReachedLaunch:
+        launched = host.eval_env_calls
+
+    assert launched is None, f"reset lifecycle launched an eval with reservation {launched}"
+    assert host.appended == []
+    assert (0, 0) in host._eval_gpu_reservations
+
+
+def test_never_admitted_node_is_exempt_from_the_stale_generation_fail_closed(monkeypatch):
+    """The only exemption is a never-admitted node: a recovery/test call that holds NO reservation under
+    any generation is not a reset-superseded admission, so `_evaluate` proceeds to launch (unpinned)."""
+    from looplab.engine.orchestrator import Engine
+
+    host = _EvalResetHost(parallel=2)                  # no reservation registered at all
     monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
 
     with pytest.raises(_ReachedLaunch):
         anyio.run(Engine._evaluate, host, 0, anyio.CapacityLimiter(1), None)
-    assert host.eval_env_calls == [None]             # unpinned whole-box, the serial contract
+    assert host.eval_env_calls == [None]              # unpinned: the defensive recovery/test seam
 
 
 def test_clamp_helper_persists_effective_nth_device_memory_envelope():

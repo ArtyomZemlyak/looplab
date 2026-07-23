@@ -112,14 +112,17 @@ class EvaluateMixin:
             # `generation` here is node.attempt from a fresher fold. An eval-stage node_reset landing in
             # that window (attempt+1, still pending, rerun_from None) passes the prestart guard above and
             # misses the current-generation lookup — and `_resource_eval_env(None)` would yield an
-            # UNPINNED env that sees every sibling's GPU. Under parallel dispatch, if the dispatcher still
-            # holds this node's devices under the superseded key, fail closed (return without a terminal)
-            # so the dispatcher re-admits the reset lifecycle under its current generation and re-pins it,
-            # instead of degrading to whole-box visibility. Serial mode intentionally runs unpinned
-            # whole-box, and a never-admitted recovery/test call holds no stale key, so both are exempt.
+            # UNPINNED env that sees every sibling's GPU. If the dispatcher still holds this node's
+            # reservation under the superseded key, fail closed (return without a terminal) so the
+            # dispatcher re-admits the reset lifecycle under its current generation and re-pins it,
+            # instead of degrading to whole-box visibility. The presence of a stale-generation reservation
+            # is the authoritative signal that this node was dispatcher-admitted — a never-admitted
+            # recovery/test call holds no stale key and is exempt. Gate on that reservation, NOT on the
+            # live mutable `_eval_parallel`: a Strategist/operator that lowers eval_parallel to 1 mid-batch
+            # (while pinned siblings are still draining) must not flip this into an unpinned launch. A
+            # serial re-admit of a whole-pool-unpinned node is harmless (it just re-runs unpinned).
             if (
                 _resource_reservation is None
-                and max(1, int(getattr(self, "_eval_parallel", 1) or 1)) > 1
                 and self._eval_reservation_under_other_generation(node_id, generation)
             ):
                 return
