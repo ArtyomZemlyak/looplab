@@ -839,6 +839,10 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.terminal_event_seq = e.seq
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             n.stdout_tail = d.get("stdout_tail", "")
+            # ASHA past-experiment curve (#7): a bounded [[resource, metric], ...] the ASHA watchdog
+            # reads to find same-resource peers for an EARLY live sample (the 500-char stdout_tail keeps
+            # only the final epochs). Reader-defaulted to None so pre-#7 logs fold byte-identically.
+            n.resource_curve = d.get("resource_curve")
             n.eval_seconds = d.get("eval_seconds")
             n.extra_metrics = normalize_extra_metrics(d.get("extra_metrics"))
             n.violations = d.get("violations", []) or []
@@ -965,6 +969,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.error_reason = ""
         n.triage_rationale = ""
         n.stdout_tail = ""
+        n.resource_curve = None            # #7: the prior attempt's curve no longer describes this node
         n.eval_seconds = None
         n.extra_metrics = {}
         n.violations = []
@@ -1127,6 +1132,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.triage_rationale = ""   # the crash-triage verdict describes the NOW-abandoned lifecycle
         n.eval_seconds = None
         n.stdout_tail = ""
+        n.resource_curve = None            # #7: the abandoned attempt's curve no longer describes this node
         n.extra_metrics = {}
         n.violations = []
         n.feasible = True

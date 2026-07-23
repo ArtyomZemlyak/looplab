@@ -1032,6 +1032,13 @@ class Node(BaseModel):
     # digest can feed it to the NEXT proposal instead of dropping it (signal-delivery, §1).
     triage_rationale: str = ""
     stdout_tail: str = ""
+    # ASHA past-experiment curve (#7): a bounded, downsampled `[[resource, metric], ...]` mined from
+    # the FULL eval stdout at node_evaluated (set only when the task declares a stdout_json
+    # `resource_key`). The 500-char `stdout_tail` retains only the FINAL epochs, so a live node stopped
+    # at an EARLY resource coordinate finds no same-resource peers there; this durable curve lets the
+    # ASHA watchdog compare a fresh early sample against past experiments at the SAME coordinate.
+    # Additive/reader-defaulted (None on old logs) so replay folds byte-identically.
+    resource_curve: Optional[list] = None
     # Multi-seed confirmation (I12): set by a node_confirmed event. When present,
     # best-selection ranks by confirmed_mean (the robust metric) instead of `metric`.
     confirmed_mean: Optional[float] = None

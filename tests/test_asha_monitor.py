@@ -8,8 +8,9 @@ import anyio
 from looplab.adapters.tasks import normalize_task
 from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
 from looplab.engine.asha_monitor import (
-    AshaMonitorMixin, IntermediateSample, asha_underperforming, latest_intermediate,
-    latest_intermediate_sample, sibling_final_metrics, sibling_metrics_at_resource,
+    AshaMonitorMixin, IntermediateSample, _curve_metric_at, asha_underperforming,
+    extract_resource_curve, latest_intermediate, latest_intermediate_sample,
+    sibling_final_metrics, sibling_metrics_at_resource,
 )
 from looplab.engine.train_monitor import snapshot_training_logs
 from looplab.events.types import DIAGNOSTIC_EVENTS, EV_ASHA_RANK
@@ -98,6 +99,100 @@ def test_sibling_resource_metrics_never_substitute_finished_endpoints():
 
     assert sorted(sibling_metrics_at_resource(state, 0, spec, same_step)) == [0.08, 0.09, 0.10]
     assert sibling_metrics_at_resource(state, 0, spec, absent_step) == []
+
+
+# --------------------------------------------------------------------- extract_resource_curve / durable curve (#7)
+
+def test_extract_resource_curve_sorts_and_keeps_latest_per_resource():
+    stdout = ('{"recall": 0.10, "step": 1}\n'
+              '{"recall": 0.50, "step": 5}\n'
+              '{"recall": 0.55, "step": 5}\n'          # re-emitted step 5 -> the LATEST value wins
+              '{"recall": 0.90, "step": 10}\n')
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    assert extract_resource_curve(stdout, spec) == [[1.0, 0.10], [5.0, 0.55], [10.0, 0.90]]
+
+
+def test_extract_resource_curve_requires_a_declared_stdout_json_resource_key():
+    stdout = '{"recall": 0.9, "step": 10}\n'
+    # no declared resource_key -> not eligible (we never guess step/epoch is fidelity)
+    assert extract_resource_curve(stdout, {"kind": "stdout_json", "key": "recall"}) is None
+    # resource_key == metric key -> not a distinct resource -> None
+    assert extract_resource_curve(
+        stdout, {"kind": "stdout_json", "key": "step", "resource_key": "step"}) is None
+    # non stdout_json kind -> None (never mine a workdir file / a regex line for a curve)
+    assert extract_resource_curve(
+        stdout, {"kind": "stdout_regex", "key": "recall", "resource_key": "step"}) is None
+    # nothing parses -> None (no signal, never a spurious empty curve)
+    assert extract_resource_curve(
+        "", {"kind": "stdout_json", "key": "recall", "resource_key": "step"}) is None
+    assert extract_resource_curve(
+        "no json here", {"kind": "stdout_json", "key": "recall", "resource_key": "step"}) is None
+    assert extract_resource_curve(stdout, None) is None
+
+
+def test_extract_resource_curve_downsamples_but_keeps_endpoints():
+    # 100 distinct coordinates, cap 32 -> at most 32 points; the FIRST (earliest) and last survive so an
+    # early live sample still has a same-resource peer after the downsample.
+    lines = "".join('{"recall": %f, "step": %d}\n' % (i / 100.0, i) for i in range(1, 101))
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    curve = extract_resource_curve(lines, spec, max_points=32)
+    assert 2 <= len(curve) <= 32
+    assert curve[0][0] == 1.0 and curve[-1][0] == 100.0        # endpoints retained
+    assert curve == sorted(curve)                              # ascending by resource
+    assert extract_resource_curve(lines, spec, max_points=1000) == [
+        [float(i), i / 100.0] for i in range(1, 101)]          # no downsample when under the cap
+
+
+def test_curve_metric_at_reads_the_exact_coordinate_only():
+    curve = [[1.0, 0.05], [10.0, 0.80]]
+    assert _curve_metric_at(curve, 1.0) == 0.05
+    assert _curve_metric_at(curve, 10.0) == 0.80
+    assert _curve_metric_at(curve, 5.0) is None      # no such coordinate -> no observation
+    assert _curve_metric_at(None, 1.0) is None       # pre-#7 log (curve absent)
+    assert _curve_metric_at([["bad"], [1.0, "x"], [2.0, 0.5]], 2.0) == 0.5   # malformed rows skipped
+
+
+def test_sibling_metrics_prefer_the_durable_curve_over_the_truncated_tail():
+    # #7 core: the 500-char stdout_tail retains only each sibling's FINAL epoch (step 10). A live node at
+    # an EARLY step (1) — the only time an ASHA kill actually saves compute — finds NO same-resource peer
+    # in those tails. The durable resource_curve, mined from the FULL stdout at node_evaluated, keeps the
+    # early coordinate, so the same-resource population is now discoverable. The curve is read first.
+    state = _fake_state(
+        [0.90, 0.85, 0.80],
+        tails=['{"recall": 0.90, "step": 10}\n',
+               '{"recall": 0.85, "step": 10}\n',
+               '{"recall": 0.80, "step": 10}\n'],
+    )
+    for i, early in zip((1, 2, 3), (0.10, 0.08, 0.09)):
+        state.nodes[i].resource_curve = [[1.0, early], [10.0, state.nodes[i].metric]]
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    early_sample = IntermediateSample(value=0.11, resource_key="step", resource=1.0)
+
+    # The tails alone hold nothing at step 1; the curves supply all three early peers.
+    assert sorted(sibling_metrics_at_resource(state, 0, spec, early_sample)) == [0.08, 0.09, 0.10]
+    # And the endpoint step is still readable from the same curves.
+    final_sample = IntermediateSample(value=0.5, resource_key="step", resource=10.0)
+    assert sorted(sibling_metrics_at_resource(state, 0, spec, final_sample)) == [0.80, 0.85, 0.90]
+
+
+def test_node_evaluated_folds_resource_curve_and_old_logs_default_none(tmp_path):
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    def _log(name, evaluated):
+        s = EventStore(tmp_path / name)
+        s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+        s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}}})
+        s.append("node_evaluated", evaluated)
+        return fold(s.read_all())
+
+    curve = [[1.0, 0.1], [10.0, 0.9]]
+    st = _log("with_curve.jsonl", {"node_id": 0, "metric": 0.9, "resource_curve": curve})
+    assert st.nodes[0].resource_curve == curve
+    # A pre-#7 node_evaluated carries no resource_curve -> reader default None (byte-identical replay).
+    st_old = _log("no_curve.jsonl", {"node_id": 0, "metric": 0.9})
+    assert st_old.nodes[0].resource_curve is None
 
 
 # --------------------------------------------------------------------- asha_underperforming (pure)

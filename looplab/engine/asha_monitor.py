@@ -82,6 +82,19 @@ def _declared_resource_key(metric_spec: dict) -> Optional[str]:
     return key if (isinstance(key, str) and 0 < len(key) <= 128 and key != metric_key) else None
 
 
+def _curve_metric_at(curve, resource) -> Optional[float]:
+    """The metric persisted at exactly `resource` in a bounded `[[resource, metric], ...]` curve, or
+    None. Tolerant of old logs (curve is None) and malformed rows — a missing coordinate degrades the
+    sibling to "no same-resource observation", never a crash."""
+    if not isinstance(curve, list):
+        return None
+    for entry in curve:
+        if (isinstance(entry, (list, tuple)) and len(entry) == 2
+                and _finite_number(entry[0]) == resource):
+            return _finite_number(entry[1])
+    return None
+
+
 def _json_objects_newest_first(log_tail: str):
     for line in reversed(log_tail.splitlines()):
         line = line.strip()
@@ -118,6 +131,42 @@ def latest_intermediate_sample(log_tail: str, workdir, metric_spec: dict) -> Opt
             return IntermediateSample(value=value, resource_key=resource_key, resource=resource)
         return IntermediateSample(value=value)
     return IntermediateSample(value=value)
+
+
+def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) -> Optional[list]:
+    """A bounded, downsampled per-resource curve ``[[resource, metric], ...]`` mined from a FULL eval
+    stdout at node_evaluated time (#7). The completed node's persisted ``stdout_tail`` keeps only the
+    last ~500 chars, so a sibling curve read from it has only the FINAL epochs — a live node stopped at
+    an EARLY resource coordinate then never finds same-resource peers. Persisting this durable curve lets
+    ``sibling_metrics_at_resource`` compare a fresh early sample against PAST EXPERIMENTS at the SAME
+    coordinate. Reuses the eval's own metric contract (the operator/Developer-declared ``resource_key``
+    + metric key); returns None when the task declares no ``resource_key`` or the kind isn't
+    ``stdout_json``. Sorted by resource; when ``max_points >= 2`` (the default 32) it downsamples to at
+    most ``max_points`` evenly-sampled distinct coordinates with both endpoints kept, so the event stays
+    small AND an early coordinate survives the downsample. ``max_points < 2`` disables downsampling
+    (every distinct coordinate is returned) — no caller passes that, it only guards the index math."""
+    if not stdout or not isinstance(metric_spec, dict):
+        return None
+    resource_key = _declared_resource_key(metric_spec)
+    if resource_key is None or metric_spec.get("kind", "stdout_json") != "stdout_json":
+        return None
+    metric_key = metric_spec.get("key", "metric")
+    by_resource: dict[float, float] = {}
+    # Chronological order (reverse the newest-first generator) so the LATEST value logged at a resource
+    # wins when a coordinate is re-emitted.
+    for obj in reversed(list(_json_objects_newest_first(stdout))):
+        resource = _finite_number(obj.get(resource_key))
+        value = _finite_number(obj.get(metric_key))
+        if resource is not None and value is not None:
+            by_resource[resource] = value
+    if not by_resource:
+        return None
+    coords = sorted(by_resource)
+    if max_points >= 2 and len(coords) > max_points:
+        step = (len(coords) - 1) / (max_points - 1)
+        keep = sorted({int(round(i * step)) for i in range(max_points)})
+        coords = [coords[i] for i in keep]
+    return [[r, by_resource[r]] for r in coords]
 
 
 def sibling_final_metrics(state, node_id: int) -> list[float]:
@@ -163,21 +212,23 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
     for node in promotion_eligible_nodes(state):
         if node.id == node_id:
             continue
-        # CODEX AGENT: the comparable population comes from sibling stdout_tail, which the terminal
-        # event caps at stdout[-500:] (evaluate.py) — only each sibling's FINAL few epoch/step records
-        # survive. A live node at an early resource coordinate (the only time a kill saves compute)
-        # therefore ~never finds min_siblings same-resource peers: comparable_under stays None, the
-        # streak resets, and opt-in asha_live_kill effectively fires only once the node is already
-        # near its siblings' endpoints — defeating the early-stop purpose for per-epoch loggers.
-        # Persist a bounded per-resource curve sample (e.g. downsampled {resource: metric} on
-        # node_evaluated) or read siblings' own stage-log tails instead of the 500-char excerpt.
-        for obj in _json_objects_newest_first(getattr(node, "stdout_tail", "") or ""):
-            if _finite_number(obj.get(sample.resource_key)) != sample.resource:
-                continue
-            value = _finite_number(obj.get(metric_key))
-            if value is not None:
-                out.append(value)
-                break
+        # #7 (resolved): read the durable downsampled per-resource curve mined from the FULL stdout at
+        # node_evaluated (extract_resource_curve). The 500-char stdout_tail retains only each sibling's
+        # FINAL epochs, so a live node at an EARLY resource coordinate — the only time a kill saves
+        # compute — used to find no same-resource peers, and asha_live_kill only bit once the node
+        # already neared its siblings' endpoints. Fall back to the tail whenever the curve holds no value
+        # at THIS exact resource: a pre-#7 log (no curve at all), or a #7 curve that downsampled this
+        # coordinate away. The tail then covers the few final coordinates the curve may have dropped.
+        value = _curve_metric_at(getattr(node, "resource_curve", None), sample.resource)
+        if value is None:
+            for obj in _json_objects_newest_first(getattr(node, "stdout_tail", "") or ""):
+                if _finite_number(obj.get(sample.resource_key)) != sample.resource:
+                    continue
+                value = _finite_number(obj.get(metric_key))
+                if value is not None:
+                    break
+        if value is not None:
+            out.append(value)
     return out
 
 

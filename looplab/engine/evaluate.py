@@ -21,6 +21,7 @@ import anyio
 
 from looplab.core.models import (NodeStatus, developer_artifact_footprint,
                                  normalize_extra_metrics)
+from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import snapshot_training_logs
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
@@ -607,18 +608,27 @@ class EvaluateMixin:
                     self.store.append(EV_SPEC_DRIFT,
                                       {"node_id": node_id, **res.drift, "generation": generation})
                 if ok:
-                    self.store.append(
-                        EV_NODE_EVALUATED,
-                        {"node_id": node_id, "generation": generation,
-                         "metric": res.metric,
-                         "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
-                         "extra_metrics": normalize_extra_metrics(res.extra_metrics),   # #5 multi-objective
-                         "violations": res.violations or [],
-                         # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
-                         # node_evaluated event (the sweep is a single atomic eval — eval_seconds is
-                         # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
-                         "trials": res.trials or []},
-                    )
+                    _eval_payload = {
+                        "node_id": node_id, "generation": generation,
+                        "metric": res.metric,
+                        "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
+                        "extra_metrics": normalize_extra_metrics(res.extra_metrics),   # #5 multi-objective
+                        "violations": res.violations or [],
+                        # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
+                        # node_evaluated event (the sweep is a single atomic eval — eval_seconds is
+                        # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
+                        "trials": res.trials or [],
+                    }
+                    # ASHA past-experiment curve (#7): a bounded downsampled [[resource, metric], ...]
+                    # mined from the FULL stdout (not the 500-char tail) when the task declares a
+                    # stdout_json `resource_key`, so a future live node stopped at an EARLY resource can
+                    # find same-resource peers. Additive/only-when-present → old logs fold byte-identically.
+                    _spec = getattr(self, "_eval_spec", None)
+                    _curve = extract_resource_curve(
+                        res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
+                    if _curve:
+                        _eval_payload["resource_curve"] = _curve
+                    self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # CODEX AGENT: emission does not rewrite the metric, but the folded trust_gate policy
                     # can exclude high-precision signals from champion/breeding under gate/block.
