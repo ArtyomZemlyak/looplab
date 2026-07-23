@@ -1598,6 +1598,7 @@ function _CardKanbanCard({
 
 function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
   const [optim, setOptim] = useState({})
+  const [addDraft, setAddDraft] = useState('')
   const inFlight = useRef(new Set())
   const activeRef = useRef(true)
   useEffect(() => {
@@ -1772,8 +1773,31 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
   const total = _cardInt(projection?.total)
   const sub = total != null && total !== cards.length
     ? `${visibleCards.length} of ${total} public work items` : `${visibleCards.length} work item${visibleCards.length === 1 ? '' : 's'}`
+  // A card is born as a hypothesis (peer review): keep the "+ Add" belief affordance on the
+  // authoritative Card board, not only the empty-Card fallback — otherwise the operator loses the
+  // documented control the moment the first card exists. Wired to the same addHypothesis control.
+  const canAdd = typeof runId === 'string' && !!runId
+  const addCard = async () => {
+    const s = addDraft.trim()
+    if (!s) return
+    try {
+      const feedback = commandFeedback(await CONTROL.addHypothesis(runId, s), {
+        success: 'Card added', noop: 'That hypothesis was already tracked',
+        executing: 'Card requested — waiting for the run', failure: 'Could not add Card',
+      })
+      if (feedback.kind === 'success') setAddDraft('')
+      onToast?.(feedback.message)
+    } catch (error) { onToast?.(`Could not add Card: ${error.message || error}`) }
+  }
   return <Panel title="Cards" sub={sub} onClose={onClose} wide>
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
+    {canAdd && <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
+      <input className="text" style={{ flex: 1 }} aria-label="New hypothesis"
+        placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
+        value={addDraft} onChange={e => setAddDraft(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') addCard() }} />
+      <button className="btn sm primary" onClick={addCard} disabled={!addDraft.trim()}>+ Add</button>
+    </div>}
     <div className="card-board" role="region" aria-label="Card lifecycle kanban">
       {lanes.map(([key, label, hint]) => {
         const rows = visibleCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)

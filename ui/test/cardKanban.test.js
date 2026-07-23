@@ -134,6 +134,23 @@ test('Card board renders the research verdict and treats an abandoned belief as 
   assert.doesNotMatch(markup, /aria-label="Display statement for card-ab"/)  // abandoned is terminal
 })
 
+test('Card board keeps the +Add belief affordance once cards exist (peer review)', () => {
+  // A card is born as a hypothesis: the "+ Add" control must live on the authoritative Card board, not
+  // only the empty-Card fallback — otherwise it vanished the moment the first card was minted.
+  const cards = { 'card-1': { id: 'card-1', status: 'proposed', statement: 'A belief', selection_ready: true } }
+  const markup = renderToStaticMarkup(React.createElement(HypothesisBoard, {
+    state: {
+      cards, cards_projection: {
+        source_valid: true, total: 1, returned: 1, omitted: 0, complete: true, items: {},
+      },
+    },
+    runId: 'run', onClose() {}, onSelect() {}, onToast() {},
+  }))
+  assert.match(markup, /aria-label="Card lifecycle kanban"/)   // the authoritative Card board (not fallback)...
+  assert.match(markup, /aria-label="New hypothesis"/)          // ...still exposes the +Add belief input
+  assert.match(markup, />\+ Add</)
+})
+
 test('HypothesisBoard keeps the hypothesis workflow as a graceful empty-Card fallback', () => {
   const markup = renderToStaticMarkup(React.createElement(HypothesisBoard, {
     state: {
