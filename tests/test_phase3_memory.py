@@ -132,6 +132,19 @@ def test_ablation_attribution_aggregates_across_probes():
     assert "Component attribution" in out
 
 
+def test_ablation_attribution_skips_non_finite_impacts():
+    # Regression: `abs(float(imp))` catches only TypeError/ValueError; abs(inf)/abs(nan) don't raise,
+    # so a crafted/hand-edited inf/NaN impact poisoned the summed impact AND the -impact sort key
+    # (surfacing `nan`/`inf` in the agent-facing digest). Non-finite impacts must be skipped.
+    st = _state([_node(0, metric=1.0)])
+    st.ablations = [{"parent_id": 0, "impacts": {"features": 0.3, "model": float("inf")}},
+                    {"parent_id": 0, "impacts": {"aug": float("nan"), "features": 0.2}}]
+    attr = ablation_attribution(st)
+    assert list(attr) == ["features"]                        # only the finite component survives
+    assert attr["features"]["impact"] == pytest.approx(0.5) and attr["features"]["n"] == 2
+    assert "model" not in attr and "aug" not in attr        # inf/NaN dropped, not summed
+
+
 def test_experiments_digest_excludes_tombstoned_nodes():
     # §6.3: tombstoned (logically-deleted) nodes are invisible to selection; the always-on Researcher
     # context (fail count, failures list, theme rollup) must hide them too — else a deleted dead-end

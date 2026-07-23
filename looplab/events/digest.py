@@ -559,6 +559,12 @@ def ablation_attribution(state: RunState) -> dict:
                 v = abs(float(imp))
             except (TypeError, ValueError):
                 continue
+            if not math.isfinite(v):
+                # abs(inf)/abs(nan) don't raise, so the try above doesn't catch them — a crafted/
+                # hand-edited `impact` of inf/NaN would poison the summed impact AND the sort key
+                # (nan compares False against everything), surfacing `nan`/`inf` in the agent-facing
+                # digest. Skip it, like every other non-finite guard in this module.
+                continue
             d = out.setdefault(str(comp), {"impact": 0.0, "n": 0})
             d["impact"] += v
             d["n"] += 1
