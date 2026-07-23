@@ -37,6 +37,7 @@ from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_
                                   EV_NODE_CONCEPTS, EV_RUN_CONCEPTS, EV_STRATEGY_DECISION,
                                   EV_VERIFIER_GROUP_SCORED)
 from looplab.search.coverage import (analytics_projection_token, coverage_signal,
+                                     latest_live_snapshot,
                                      snapshot_matches_analytics_projection)
 from looplab.search.policy import available_policies, make_policy, operator_yields
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
@@ -341,9 +342,11 @@ class StrategyCadenceMixin:
         coverage_context is off."""
         if not self._coverage_context:
             return {}
-        snaps = state.coverage_snapshots
-        if snaps and snapshot_matches_analytics_projection(state, snaps[-1]):
-            return {k: v for k, v in snaps[-1].items() if k not in {"at_node", "projection_token"}}
+        # #5: reuse the newest STILL-LIVE snapshot (shared reverse-scan reader), not only the last row;
+        # an off-cadence consult (or a stale receipt after a retag) computes fresh.
+        snap = latest_live_snapshot(state, state.coverage_snapshots)
+        if snap:
+            return {k: v for k, v in snap.items() if k not in {"at_node", "projection_token"}}
         return coverage_signal(state, resolution=self.archive_resolution)
 
     def _should_consult(self, state: RunState) -> bool:

@@ -103,6 +103,24 @@ def snapshot_matches_analytics_projection(state: RunState, snapshot: object) -> 
     return token == analytics_projection_token(state)
 
 
+def latest_live_snapshot(state: RunState, snapshots) -> dict:
+    """The newest recorded coverage snapshot whose projection receipt STILL matches the live analytics
+    projection — the one the current node-count/tagging/lifecycle would reproduce — or ``{}`` when none
+    does (stale/absent => no coverage signal). The single "is this snapshot current?" reader shared by
+    every consumer (proposal cues, lock-in, the Strategist context), for both `coverage_snapshots` and
+    `concept_coverage_snapshots`.
+
+    It REVERSE-SCANS rather than reading only `snapshots[-1]`: the producer de-duplicates against ANY
+    prior exact receipt, so after an A→B→A retag at one node count the cadence reuses the earlier A
+    snapshot while B stays last — a `[-1]`-only check would then see B fail the projection match and
+    wrongly discard a still-current A (suppressing the explore/pivot cue and capability-expansion). The
+    reverse scan finds the still-live A, so production and consumption pick the SAME snapshot."""
+    for snapshot in reversed(snapshots or []):
+        if snapshot_matches_analytics_projection(state, snapshot):
+            return snapshot
+    return {}
+
+
 def _node_theme(node):
     """A node's theme exactly as the canonical `theme_rollup` reads it — delegated to the ONE shared
     derivation (`events.digest.node_theme`: legacy `idea.theme`, else the first concept's axis) so the

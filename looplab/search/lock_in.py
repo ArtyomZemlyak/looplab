@@ -26,7 +26,7 @@ from typing import Optional
 
 from looplab.core.models import RunState
 from looplab.search.concept_graph import ConceptGraph, _experiment_nodes, tag_nodes_heuristic
-from looplab.search.coverage import snapshot_matches_analytics_projection
+from looplab.search.coverage import latest_live_snapshot
 
 
 def _node_axes(graph: ConceptGraph, cids) -> frozenset[str]:
@@ -44,13 +44,12 @@ def capability_expansion_due(state, *, streak_threshold: int) -> tuple:
     0)` with no snapshot. The CURRENT streak clears after a successful pivot, so this self-resets. The
     helper itself only reads state; callers gate on `capability_expansion` and use the result both for the
     proposal cue and for the authoritative scored `expand` operator."""
-    snaps = getattr(state, "concept_coverage_snapshots", None) or []
-    # CODEX AGENT: The producer de-duplicates against ANY exact projection receipt, but this consumer
-    # checks only the last row. After A→B→A retagging at one node count, cadence reuses A while B stays
-    # last and incorrectly suppresses capability expansion. Reverse-scan for the newest receipt that
-    # satisfies ``snapshot_matches_analytics_projection`` so production and consumption pick one snapshot.
-    cs = snaps[-1] if snaps else {}
-    if not snapshot_matches_analytics_projection(state, cs):
+    # #5: the newest STILL-LIVE concept-coverage snapshot (reverse-scan, shared reader), NOT only the
+    # last row — the producer de-duplicates against any prior receipt, so an A→B→A retag at one node
+    # count leaves B last while the live projection is A; a `[-1]`-only check would wrongly suppress
+    # capability expansion. `latest_live_snapshot` makes production and consumption pick one snapshot.
+    cs = latest_live_snapshot(state, getattr(state, "concept_coverage_snapshots", None))
+    if not cs:
         return False, None, 0
     try:
         streak = int(cs.get("current_streak", 0) or 0)

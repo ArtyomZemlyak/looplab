@@ -108,6 +108,29 @@ def test_report_renders_alarm(tmp_path):
     assert "LOCK-IN ALARM" in rep and "loss" in rep
 
 
+def test_capability_expansion_reverse_scans_past_a_stale_last_snapshot():
+    # #5: the producer de-duplicates against ANY prior receipt, so after an A->B->A retag at one node
+    # count the still-LIVE A snapshot is NOT the last row. capability_expansion_due (via the shared
+    # latest_live_snapshot reverse-scan) must find A rather than read only the stale last row B and
+    # wrongly report "not due".
+    from looplab.core.models import Idea, Node, NodeStatus
+    from looplab.search.coverage import analytics_projection_token
+    from looplab.search.lock_in import capability_expansion_due
+
+    st = RunState(direction="max", goal="g")
+    st.nodes = {i: Node(id=i, operator="draft", status=NodeStatus.evaluated,
+                        idea=Idea(operator="draft", params={})) for i in range(1, 4)}
+    n = len(st.nodes)
+    live = {"at_node": n, "projection_token": analytics_projection_token(st),
+            "current_streak": 7, "recent_axis": "loss/contrastive"}
+    stale = {"at_node": n, "projection_token": "0" * 64, "current_streak": 1, "recent_axis": "other"}
+    st.concept_coverage_snapshots = [live, stale]        # live recorded first; a re-retag left stale last
+    assert capability_expansion_due(st, streak_threshold=5) == (True, "loss/contrastive", 7)
+    # only the stale last row -> nothing is current -> not due (no false expansion off a mismatched receipt)
+    st.concept_coverage_snapshots = [stale]
+    assert capability_expansion_due(st, streak_threshold=5) == (False, None, 0)
+
+
 def test_pure_analytics_are_hash_seed_stable():
     """The order-stability invariant (no set/frozenset/dict iteration order leaking into a returned
     value) can only be caught ACROSS hash seeds — a same-process f(x)==f(x) iterates every set the SAME
