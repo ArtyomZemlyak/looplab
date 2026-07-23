@@ -727,6 +727,19 @@ def test_card_action_is_bounded_and_preserves_internal_claim_identity(operator, 
     assert card_action(_ready_card("card", operator=operator, parents=parents)) == expected
 
 
+def test_action_key_merge_is_order_independent():
+    # Regression: `_action_key` keyed merge on the RAW parent order, so a merge Card whose parent_ids
+    # were stored reversed from the policy fallback's rank order missed `exact_match` and, on a due-merge
+    # tick, the `due_key ==` filter dropped it — orphaning the ready Card. A merge is symmetric in its
+    # parents (and `_live_card_action` already accepts it order-independently), so the key must too.
+    from looplab.search.card_selection import _action_key
+    forward = _action_key({"kind": "merge", "parent_ids": [1, 2]})
+    reverse = _action_key({"kind": "merge", "parent_ids": [2, 1]})
+    assert forward == reverse == ("merge", (1, 2))
+    # single-parent kinds are unaffected
+    assert _action_key({"kind": "improve", "parent_id": 3}) == ("improve", (3,))
+
+
 def test_scoring_normalization_is_bounded_and_fail_closed():
     assert normalize_card_scoring({
         "stance": "unknown",

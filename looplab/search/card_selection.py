@@ -701,7 +701,13 @@ def _action_key(action: Mapping[str, object]) -> tuple[str, tuple[int, ...]] | N
             isinstance(parent, bool) or not isinstance(parent, int) for parent in parents
         ):
             return None
-        return kind, tuple(parents)
+        # A merge is symmetric in its parents (merging {a,b} == merging {b,a}), and `_live_card_action`
+        # already accepts a merge Card order-INDEPENDENTLY (`set(parents) == top_two`). Key on the SORTED
+        # parents so this key agrees: without it, a merge Card whose parent_ids are stored in the reverse
+        # of the policy fallback's rank order missed `exact_match` (band 2.0 -> 1.0) and, on a due-merge
+        # tick, the `due_key ==` filter dropped it entirely — orphaning the ready Card while the engine
+        # ran a redundant legacy merge. Both sides of every `_action_key` comparison canonicalize here.
+        return kind, tuple(sorted(parents))
     return None
 
 
