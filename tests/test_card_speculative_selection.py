@@ -452,6 +452,71 @@ def test_terminally_excluded_speculative_sibling_does_not_poison_common_populati
     ) is True
 
 
+def _stale_owned(card_id: str) -> Card:
+    """An in-flight speculative sibling that is stale on its OWN account: its parent was
+    aborted/tombstoned/reset, so the fold gives it blockers {"freshness_stale", "work_in_flight"}."""
+    base = _owned(_ready_card(card_id, concepts=(card_id,)), 3)
+    return base.model_copy(update={
+        "selection_provenance": base.selection_provenance.model_copy(update={"freshness": "stale"}),
+        "selection_blockers": ["freshness_stale", "work_in_flight"],
+    })
+
+
+def _stale_sibling_state(sibling: Card) -> RunState:
+    subject = _owned(_ready_card("subject", concepts=("subject",)), 2)
+    subject_node = _node(
+        2, parents=(0,), operator="improve", status=NodeStatus.pending,
+        metric=None, card_id="subject",
+    ).model_copy(update={"speculative": True, "card_build_generation": 7})
+    sibling_node = _node(
+        3, parents=(0,), operator="improve", status=NodeStatus.pending,
+        metric=None, card_id="excluded",
+    ).model_copy(update={"speculative": True, "card_build_generation": 8})
+    return RunState(
+        nodes={0: _node(0, metric=0.9), 2: subject_node, 3: sibling_node},
+        best_node_id=0,
+        cards={"subject": subject, "excluded": sibling, "rank-one": _ready_card("rank-one")},
+        speculative_nodes={
+            2: {"card_id": "subject", "generation": 7},
+            3: {"card_id": "excluded", "generation": 8},
+        },
+    )
+
+
+def test_alive_but_stale_speculative_sibling_does_not_collapse_the_healthy_lane():
+    """An alive-but-STALE sibling (blockers {"freshness_stale", "work_in_flight"}) restores cleanly
+    EXCEPT for its own staleness. It is terminalized by the freshness gate on its OWN turn, so it must
+    be skipped like an administratively-dead sibling — NOT poison the counterfactual and spuriously
+    supersede the healthy subject (the docs/23 §12.5 lane collapse)."""
+    state = _stale_sibling_state(_stale_owned("excluded"))
+
+    assert speculative_card_is_fresh(
+        state, _PopulationPolicy(), 5,
+        card_id="subject", node_id=2,
+        excluded_card_ids={"subject", "excluded"},
+        ignored_pending_node_ids={2, 3},
+    ) is True
+
+
+def test_stale_sibling_with_an_extra_blocker_still_fails_the_counterfactual_closed():
+    """The stale-skip is NARROW: it fires only when staleness is the SOLE extra blocker. A sibling that
+    also carries an unproven shape (here an incomplete action receipt) is not a clean drop-on-its-own-
+    turn case, so the counterfactual still fails CLOSED rather than proceed on an unproven population."""
+    base = _stale_owned("excluded")
+    corrupt_stale = base.model_copy(update={
+        "selection_provenance": base.selection_provenance.model_copy(update={"action_complete": False}),
+        "selection_blockers": ["action_receipt_incomplete", "freshness_stale", "work_in_flight"],
+    })
+    state = _stale_sibling_state(corrupt_stale)
+
+    assert speculative_card_is_fresh(
+        state, _PopulationPolicy(), 5,
+        card_id="subject", node_id=2,
+        excluded_card_ids={"subject", "excluded"},
+        ignored_pending_node_ids={2, 3},
+    ) is False
+
+
 def test_corrupt_absent_speculative_sibling_fails_the_counterfactual_closed():
     """A sibling whose speculative marker names a Card that is ABSENT and is NOT a known merge alias is a
     corrupt/partial ownership chain — the freshness counterfactual must fail CLOSED (subject not fresh)

@@ -50,6 +50,17 @@ parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim b
 adversarial tests close. -->
 
 <!-- BLOCKER RESOLUTION LOG (append-only; the snapshot above is pinned to 60e9a5f3 and left verbatim).
+(5) RESOLVED 2026-07-23 — an alive-but-STALE speculative sibling no longer collapses a healthy lane.
+`_counterfactual_owned_selection_state` now skips a sibling whose card would restore cleanly EXCEPT for
+its own staleness (blockers exactly {freshness_stale, work_in_flight}, owner in_flight, evidence==[node],
+status coded/running, not dropped/merged) — exactly like the administratively-dead case, since the
+freshness gate terminalizes it on its OWN turn. Previously it entered `pairs`, `_counterfactual_owned_card_state`
+rejected any blocker set beyond {work_in_flight}, nulled the whole counterfactual, and
+`speculative_card_is_fresh` reported the healthy subject not-fresh (at depth>=2 one stale member superseded
+every fresh member). The skip is narrow: any OTHER unproven shape (e.g. a stale sibling that also has an
+incomplete action receipt) still enters `pairs` and fails the counterfactual closed. Teeth-tested in
+`tests/test_card_speculative_selection.py::test_alive_but_stale_speculative_sibling_does_not_collapse_the_healthy_lane`
+and `::test_stale_sibling_with_an_extra_blocker_still_fails_the_counterfactual_closed`.
 (1) RESOLVED 2026-07-23 — a confirm GPU-pin refusal no longer hot-spins. `_run_confirm_seed` dedupes the
 gpu_unavailable/gpu_unpinnable `confirm_eval` audit row per (node, generation, seed, reason) so re-entry
 cannot grow events.jsonl, and both re-entering callers (`_confirm_phase` empty-actions re-entry and the

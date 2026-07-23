@@ -1257,17 +1257,27 @@ def _counterfactual_owned_selection_state(
         if sibling_card is not None:
             if _card_administratively_dead(sibling_card):
                 continue
+            # An alive-but-STALE sibling (its own parent aborted/tombstoned/reset, so the fold gives
+            # its card blockers {"freshness_stale", "work_in_flight"}) would restore cleanly EXCEPT for
+            # its own staleness. Including it makes `_counterfactual_owned_card_state` reject any blocker
+            # set beyond {"work_in_flight"} and null the WHOLE counterfactual, so `speculative_card_is_fresh`
+            # reports a HEALTHY subject as not-fresh and `_drop_stale_speculation` terminalizes it — at
+            # depth>=2 one stale member spuriously supersedes every fresh member (the lane collapse
+            # docs/23 §12.5 says this gate must avoid). It is terminalized by the freshness gate on its
+            # OWN turn, exactly like the administratively-dead case, so skip it here. The guard mirrors
+            # that helper's node-branch acceptance so ONLY a stale-sole failure is skipped; any other
+            # unproven shape still enters `pairs` and fails the counterfactual closed.
+            if (
+                sibling_card.dropped_reason is None
+                and sibling_card.merged_into is None
+                and sibling_card.selection_provenance.owner_state == "in_flight"
+                and sibling_card.evidence == [sibling_id]
+                and sibling_card.status in {"coded", "running"}
+                and set(sibling_card.selection_blockers) == {"freshness_stale", "work_in_flight"}
+            ):
+                continue
         elif sibling_card_id in merged_alias_ids:
             continue
-        # CODEX AGENT: an alive-but-STALE sibling still lands in `pairs` — e.g. its parent was
-        # aborted/tombstoned/reset, so the fold gives its card blockers {"freshness_stale",
-        # "work_in_flight"} — and _counterfactual_owned_card_state rejects any blocker set beyond
-        # {"work_in_flight"}, nulling the WHOLE counterfactual. speculative_card_is_fresh then reports
-        # a healthy subject as not fresh and _drop_stale_speculation terminalizes it; at depth>=2 one
-        # stale member spuriously supersedes every fresh member (the lane collapse docs/23 §12.5 says
-        # this gate must avoid). Treat a restore failing only on the SIBLING's own staleness like the
-        # administratively-dead case (skip it — it is dropped on its own turn) instead of failing the
-        # subject closed.
         pairs.append((sibling_card_id, sibling_id))
 
     selection_state = state
