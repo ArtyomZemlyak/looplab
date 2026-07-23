@@ -109,20 +109,21 @@ def test_card_drop_command_and_domain_types_have_distinct_progress_semantics(tmp
     assert legacy.has_domain_progress(2) is True
 
 
-def test_monotonic_sequence_gap_remains_part_of_the_eventstore_prefix(tmp_path):
+def test_monotonic_sequence_gap_ends_command_observation_at_the_eventstore_prefix(tmp_path):
+    # A forward seq jump (0 -> 2) is corruption, not a repair artifact — the engine appends densely and
+    # repair-log truncates a corrupt TAIL, so a mid-file gap can only be tampering. It ends the
+    # recoverable prefix exactly like a duplicate; only the dense run_started prefix survives.
     path = tmp_path / "events.jsonl"
     first = _row(0, "run_started", {"run_id": "r"})
     path.write_bytes(first + _row(2, "resume") + _row(3, "command_ack"))
 
     observed = CommandObservationIndex().observe(path)
 
-    assert observed.event_count == 3
-    assert observed.latest_seq == 3
-    assert observed.valid_end == path.stat().st_size
-    assert observed.torn_tail is False
-    assert [event.type for event in observed.events()] == [
-        "run_started", "resume", "command_ack",
-    ]
+    assert observed.event_count == 1
+    assert observed.latest_seq == 0
+    assert observed.valid_end == len(first)
+    assert observed.torn_tail is True
+    assert [event.type for event in observed.events()] == ["run_started"]
 
 
 def test_duplicate_sequence_ends_command_observation_at_the_eventstore_prefix(tmp_path):

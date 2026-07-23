@@ -891,21 +891,30 @@ def test_duplicate_logical_sequence_fails_closed(tmp_path):
         store.append("resume", {})
 
 
-def test_monotonic_logical_sequence_gaps_are_preserved_and_append_from_the_tail(tmp_path):
-    from looplab.events.eventstore import iter_event_jsonl, log_divergence
+def test_monotonic_logical_sequence_gap_fails_closed(tmp_path):
+    from looplab.events.eventstore import (
+        EventLogCorruptionError,
+        iter_event_jsonl,
+        log_divergence,
+    )
 
+    # A forward seq jump (0 -> 2) cannot come from any legitimate workflow: the engine appends densely
+    # and repair-log truncates a corrupt TAIL (never a mid-file gap). It is therefore corruption/
+    # tampering and must END the recoverable prefix — not be admitted as a "repaired gap" a CAS append
+    # then writes on top of.
     p = tmp_path / "events.jsonl"
     p.write_bytes(
         b'{"seq":0,"type":"a"}\n'
-        b'{"seq":2,"type":"repaired-gap"}\n'
+        b'{"seq":2,"type":"gap"}\n'
         b'{"seq":10,"type":"tail"}\n'
     )
 
-    assert [row["seq"] for row in iter_event_jsonl(p)] == [0, 2, 10]
+    assert [row["seq"] for row in iter_event_jsonl(p)] == [0]
     store = EventStore(p)
-    assert [event.seq for event in store.read_all()] == [0, 2, 10]
-    assert log_divergence(p) is None
-    assert store.append("resume", {}).seq == 11
+    assert [event.seq for event in store.read_all()] == [0]
+    assert log_divergence(p) == {"good_records": 1, "corrupt_line": 2, "dropped_lines": 1}
+    with pytest.raises(EventLogCorruptionError):
+        store.append("resume", {})
 
 
 def test_log_divergence_ignores_a_torn_tail(tmp_path):

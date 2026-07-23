@@ -127,34 +127,19 @@ def decode_event_record(obj: dict, *, strict: bool = False) -> list[Event]:
 
 
 def event_sequence_continues(events: Sequence[Event], expected_seq: int) -> bool:
-    """Whether one physical record strictly advances the logical sequence.
+    """Whether logical events form the DENSE prefix beginning at ``expected_seq``.
 
-    Historical repair and compatibility workflows can retain monotonic gaps between physical rows.
-    Those gaps are part of the public timeline contract. A multi-event batch is different: its members
-    are one atomic writer transaction and must remain dense (also enforced by its strict decoder).
-
-    CLAUDE REVIEW: this gap tolerance (16f941f) silently voided the same-size-rewrite fail-closed
-    fence 5f011a2 added: an in-place rewrite that bumps a mid-file seq FORWARD now reads as a legal
-    repaired gap — divergence stays None, the tail jumps to the tampered seq, and a CAS caller (e.g.
-    _drop_card_once's 64-try loop) sees EventStoreConcurrencyError, re-reads, and appends on top of
-    mutated history. Its pinned guard test test_same_size_rewrite_with_seq_gap_fails_closed now FAILS
-    on master. Reconcile deliberately: make legal repairs explicit (a repair receipt/marker) so
-    unexplained gaps still fail closed — or migrate/delete the stale test in the same change.
+    The engine only ever appends densely (``seq = last + 1``), and ``repair-log`` truncates a corrupt
+    TAIL, leaving a dense prefix — so NO legitimate workflow produces a monotonic gap. A forward seq
+    jump can therefore only come from corruption/tampering (e.g. a same-size in-place rewrite that bumps
+    a mid-file seq), and MUST fail closed rather than be admitted as a "repaired gap" that a CAS append
+    then writes on top of. (Restores the 5f011a2 fail-closed fence that 16f941f's gap tolerance voided;
+    that tolerance covered a repair workflow that does not exist in this codebase.)
     """
-
-    if not events:
-        return False
-    previous = expected_seq - 1
-    for offset, event in enumerate(events):
-        if type(event.seq) is not int:
-            return False
-        if offset == 0:
-            if event.seq < expected_seq:
-                return False
-        elif event.seq != previous + 1:
-            return False
-        previous = event.seq
-    return True
+    return all(
+        type(event.seq) is int and event.seq == expected_seq + offset
+        for offset, event in enumerate(events)
+    )
 
 
 # Private compatibility name for older internal call sites.  New event-specific readers should import the
@@ -286,10 +271,9 @@ def iter_event_jsonl(path: str | os.PathLike) -> Iterator[dict]:
     """Yield logical event envelopes while preserving ``iter_jsonl`` torn-tail semantics.
 
     A physical ``append_many`` envelope is an implementation detail and expands atomically: malformed
-    batches or duplicate/backward logical sequences end the recoverable prefix and no rejected-row
-    member is exposed. Monotonic gaps between rows are retained for repaired historical logs; members
-    inside one batch remain dense. Keeping this event-aware behavior out of ``iter_jsonl`` is required
-    for non-event JSONL stores that share the generic reader.
+    batches or non-dense logical sequences end the recoverable prefix and no rejected-row member is
+    exposed. Keeping this event-aware behavior out of ``iter_jsonl`` is required for non-event JSONL
+    stores that share the generic reader.
     """
 
     expected_seq = 0
