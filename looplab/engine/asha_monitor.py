@@ -240,7 +240,8 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
         # node_evaluated (extract_resource_curve). Both sides snap to a shared geometric rung schedule
         # (`_resource_rung`), so a live node anywhere in the run — not only at an exact early coordinate —
         # finds a sibling checkpoint at its rung. Fall back to the sibling's raw stdout_tail (matched at
-        # the SAME rung) only for a pre-#7 log with no persisted curve.
+        # the SAME rung) when the persisted curve holds no value at this rung — a pre-#7 log with no
+        # curve, or a #7 curve whose early rung scrolled past the ~64 KB tail extract_resource_curve mined.
         _live_rung = _resource_rung(sample.resource)
         value = _curve_metric_at(getattr(node, "resource_curve", None), sample.resource)
         if value is None:

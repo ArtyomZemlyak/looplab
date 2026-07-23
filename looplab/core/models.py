@@ -1299,8 +1299,9 @@ class CardSelectionProvenance(BaseModel):
 # hypothesis wording are ONE belief. The Researcher proposal feed (roles._state_brief) and foresight
 # ranking now consume `open_research_beliefs()` — `open_research_cards()` collapsed by seed-statement
 # digest, the representative work-item id preserved for evidence joins — so the model no longer re-reads
-# or re-ranks same-seed duplicates. `grouped_beliefs()` remains the FULL-board belief view (evidence +
-# verdict aggregated across a belief's cards) for the UI / lessons / verdict consumers.
+# or re-ranks same-seed duplicates. `grouped_beliefs()` is the additive FULL-board belief view (evidence
+# + verdict aggregated across a belief's cards) AVAILABLE for a future UI / lessons / verdict view — it
+# currently has no production consumer.
 class Card(BaseModel):
     """One stable-identity proposal/work item in the target Card queue (docs/23).
 

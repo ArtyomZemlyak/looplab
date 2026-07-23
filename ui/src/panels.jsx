@@ -1461,8 +1461,10 @@ function _CardKanbanCard({
     control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
   }
   // Abandon the research BELIEF (verdict → abandoned via hypothesis_updated) — distinct from dropping
-  // the work item: the Card stays visible in its lane, its research direction is marked concluded. For a
-  // research card `card.id == hypothesis_id(seed)`, the exact id the fold's abandoned override keys on.
+  // the work item: the Card stays visible in its lane, its research direction is marked concluded. The
+  // control submits `card.id`; the fold's abandoned override keys on the card's control-id SET
+  // (`control_ids.get(c.id, {c.id})` — c.id itself, plus hypothesis_id(seed)), so passing card.id
+  // matches whether or not it equals the seed hash (a native card_added id like `card-5` does not).
   const abandonBelief = () => control('abandon', {}, { verdict: 'abandoned' })
   // # CODEX AGENT: each lane is named, but an individual Card is an unnamed article: the statement is
   // a plain span and the article has no aria-label/aria-labelledby. Screen-reader article navigation
