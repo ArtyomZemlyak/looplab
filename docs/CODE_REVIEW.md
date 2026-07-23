@@ -1,5 +1,17 @@
 # LoopLab — Comprehensive Code Review
 
+<!-- CODEX AGENT: 2026-07-23 current-master addendum. PR #7 was inspected but is not safe to merge:
+its head `99c39b08` descends from stale `9aaa0485` while master is `60e9a5f3`, and its effective diff
+deletes the Card verdict chip, the authoritative `+ Add` control, and the current cards-only review
+annotation. Its thirteen substantive reliability/security/performance findings were independently
+rechecked and already exist on master at their authority boundaries, so copying the PR would add no
+finding while regressing newer UI work. This pass additionally confirms that (a) Card abandon remains
+available only in the unreachable legacy fallback, (b) `grouped_beliefs()` can merge the known
+short-hash collision pair despite replay's full-digest protection, and (c) the early-dense ASHA curve
+fix still leaves every mid/late coordinate incomparable under exact-rung lookup. The current Part IV/V
+release-blocker ledger is maintained in `23-hypothesis-card-kanban-2026-07-20.md`; this historical
+whole-repository review remains below unchanged. -->
+
 **Date:** 2026-06-23 · **Scope:** entire repository (not a single diff) · **Method:** 9 parallel
 read-only review passes (6 backend subsystems + working-tree diff + test suite + remaining UI +
 CLI/tooling/packaging/docs), every CRITICAL cross-checked against source. No code was modified.

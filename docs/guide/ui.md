@@ -176,6 +176,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   to a valid terminal result. The Card board is the single research board (1 card = 1 hypothesis); the
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.
+  <!-- CODEX AGENT: this is only half true on current master. `_CardKanban` exposes `+ Add`, but
+  `abandonHypothesis` is rendered only by `_HypothesisFallback`; that fallback disappears with the first
+  Card and receives no published `state.hypotheses` projection. The authoritative cards-only board
+  therefore has no documented abandon control. -->
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and

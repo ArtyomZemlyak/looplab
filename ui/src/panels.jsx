@@ -1941,10 +1941,10 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
   // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.
-  // # CODEX AGENT: RunState no longer publishes state.hypotheses, so this fallback is reachable only
-  // before the first Card. Once that add folds—or on any ordinary run—_CardKanban removes the documented
-  // +Add / abandon surface. Keep those controls on the authoritative Card board and test the real
-  // cards-only state shape.
+  // # CODEX AGENT: `+ Add` is now restored on the authoritative Card board, but `abandonHypothesis`
+  // still exists only in this fallback. RunState no longer publishes `state.hypotheses`, and the first
+  // Card unmounts the fallback, so an ordinary cards-only run cannot emit the documented
+  // `hypothesis_updated(status=abandoned)` control. Move that affordance onto `_CardKanbanCard`.
   const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0
     || projection?.source_valid === false
   // Card ids can repeat across runs and after an in-place reset. Remount every optimistic/ref tracker

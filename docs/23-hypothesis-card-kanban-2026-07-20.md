@@ -27,7 +27,7 @@ a Hypothesis projection, so the empty/pre-Card surface is an add form over an ab
 deletion still bypassed the post-L6 deprecation/version window promised in §12. -->
 
 <!-- CODEX AGENT: the "Complete" layer labels above describe the validated happy path, not the current
-adversarial concurrency boundary. Review at origin/master e2ff5f07 still finds fourteen release blockers:
+adversarial concurrency boundary. Review at origin/master 60e9a5f3 still finds sixteen release blockers:
 (1) confirm GPU refusal hot-spins without backoff/cap; (2) opening the host GPU lease can escape admission
 and abort every resume; (3) reset between admission and _evaluate can miss the generation-keyed reservation
 and launch unpinned; (4) producer-failed Card exclusions differ between election and three freshness rechecks;
@@ -37,13 +37,17 @@ compatibility contract; (7) cards-only removed the public hypotheses key without
 deprecation/version boundary; (8) prompt/foresight consume immutable seed text while audit/UI claim current
 edited text; (9) ranking id resolution can cross-wire a direct native id onto an unrelated legacy-hash Card;
 (10) every public Node/SSE frame carries the internal 32-point ASHA curve; (11) that curve is mined only from
-the capped final-stage stdout rather than the full training stream; (12) uniform curve downsampling conflicts
-with exact-rung matching and usually resets the live kill streak; (13) the new grouped-belief projection has
-no production consumer and its tested>testing roll-up hides an active experiment unlike `_evidence_verdict`;
-and (14) the worker-ranking fix uses Python main-thread identity as a proxy for pooled concurrency, so a
-serial Engine embedded in any worker loses deterministic ranking telemetry. Keep positive-depth speculation,
-trusted parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim blocked until those
-sites and adversarial tests close. -->
+the capped final-stage stdout rather than the full training stream; (12) uniform curve downsampling has
+been replaced with first-31-plus-endpoint retention, but exact matching still makes every mid/late
+coordinate incomparable and resets the live kill streak; (13) the new grouped-belief projection has no
+production consumer and its tested>testing roll-up hides an active experiment unlike `_evidence_verdict`;
+(14) that grouping uses the collision-prone short `hypothesis_id`, despite replay's full-digest collision
+fixture, and can merge unrelated beliefs/evidence; (15) the worker-ranking fix uses Python main-thread
+identity as a proxy for pooled concurrency, so a serial Engine embedded in any worker loses deterministic
+ranking telemetry; and (16) the authoritative Card board exposes `+ Add` but not the documented abandon
+control, which remains trapped in an unreachable legacy fallback. Keep positive-depth speculation, trusted
+parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim blocked until those sites and
+adversarial tests close. -->
 
 ### Stage progress ledger (validated implementation, 2026-07-22)
 

@@ -86,6 +86,12 @@ def _curve_metric_at(curve, resource) -> Optional[float]:
     """The metric persisted at exactly `resource` in a bounded `[[resource, metric], ...]` curve, or
     None. Tolerant of old logs (curve is None) and malformed rows — a missing coordinate degrades the
     sibling to "no same-resource observation", never a crash."""
+    # CODEX AGENT: exact matching is still incompatible with the bounded first-31-plus-endpoint curve
+    # after the early window. For a 100-step run, completed peers have no coordinates 32..99, so each
+    # live sample there yields no comparable population and resets `under_streak`; a run that survives
+    # the first 31 steps cannot accumulate another kill streak until its endpoint. Persist one explicit
+    # shared rung schedule (or a provenance-safe completed rung) rather than combining ad-hoc retention
+    # with equality against every emitted resource coordinate.
     if not isinstance(curve, list):
         return None
     for entry in curve:

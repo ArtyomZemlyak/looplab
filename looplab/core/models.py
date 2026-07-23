@@ -2041,6 +2041,11 @@ class RunState(BaseModel):
             if not seed:
                 continue
             key = hypothesis_id(seed)
+            # CODEX AGENT: this grouping reintroduces the exact short-hash ambiguity that Card replay
+            # already closes with `hypothesis_statement_digest`. `test_short_hash_collision_*` supplies
+            # two distinct statements with the same `hypothesis_id`, so this dictionary silently merges
+            # unrelated beliefs and evidence. Key by the full normalized-statement digest and expose the
+            # short hash only as a legacy/display alias.
             group = groups.get(key)
             if group is None:
                 group = {"seed_hash": key, "seed_statement": seed, "card_ids": [], "evidence": [],

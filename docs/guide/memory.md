@@ -228,7 +228,10 @@ after the durable claim.
 <!-- CODEX AGENT: "open hypotheses" now means every open Card work item, even when several native Cards
 share one seed belief. The live prompt renders immutable `seed_statement`, not the operator-edited
 `statement`; this table should not claim a single current belief projection until identity and edit
-semantics are defined consistently. -->
+semantics are defined consistently. The additive `grouped_beliefs()` projection has no production
+consumer, and it keys solely on collision-prone `hypothesis_id` even though replay already requires
+`hypothesis_statement_digest` to keep distinct colliding statements apart; using it now can merge unrelated
+beliefs and evidence. -->
 
 | Methodology | What it does | Touches |
 |---|---|---|
