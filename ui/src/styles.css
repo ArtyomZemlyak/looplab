@@ -884,6 +884,17 @@ table.tbl tr.best-row td { color: var(--best); }
 .reset-option-title, .reset-option-description { display: block; }
 .reset-option-title b { font-size: 12px; }
 .reset-option-title .muted, .reset-option-description { font-size: 10px; }
+/* PART V Phase 2c: per-node concept tag list + inline re-tag editor (Inspector Overview). */
+.node-concepts-list { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 4px; }
+.node-concepts-list .nc-tag { font-size: 11px; line-height: 1.5; padding: 0 7px; border-radius: 999px;
+  background: var(--bg-2); border: 1px solid var(--border); color: var(--fg); }
+.concept-tag-editor { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 6px; }
+.concept-tag-editor label { font-size: 11px; }
+.concept-tag-input { width: 100%; box-sizing: border-box; resize: vertical; font-family: var(--mono, monospace);
+  font-size: 12px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-1); color: var(--fg); }
+.concept-tag-input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.concept-tag-actions { display: flex; gap: 8px; }
 .eval-pipeline { margin: 8px 0; }
 .eval-pipeline-label { margin-bottom: 3px; font-size: 10px; }
 .eval-pipeline-stages { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }

@@ -3,7 +3,11 @@
 // multi-selectable (OR). Selecting a concept highlights every node that touches it OR any descendant
 // of it. All ids are canonicalized through the consolidation rename map (prototype-safe helpers in
 // conceptId.js — concept ids are LLM-authored, so an id like "__proto__" must never reach the chain).
-import { canonicalId } from './conceptId.js'
+import { canonicalId, normalizeConceptId } from './conceptId.js'
+
+// Mirror the server field cap (core.models: EV_CONCEPT_TAG_EDITED concepts list max_length=64). The
+// editor drops the overflow rather than sending a payload the durable command would reject.
+export const MAX_NODE_CONCEPTS = 64
 
 // The chips to show at a breadcrumb `path` ('' = top-level roots): the distinct next-level concepts
 // under `path`, each with the count of nodes touching that subtree. Sorted by canonical id so live
@@ -142,4 +146,41 @@ export function matchingNodeIds(nodeConcepts = {}, selected, rename = {}) {
     if (conceptMatches(ids, selected, rename)) out.add(Number(nid))
   }
   return out
+}
+
+// Phase 2c (concept re-tag affordance): a node's CURRENT canonical concept ids, read exactly like the
+// Dag on-node tags — `node_concepts` keys are strings in the wire state while `node.id` is numeric (read
+// both), canonicalized through the consolidation rename and de-duped, and prototype-safe (conceptId.js
+// keeps LLM-authored ids off the chain). This is the editor's prefill, so the operator edits the same
+// set they see on the graph.
+export function nodeCanonicalConcepts(nodeConcepts = {}, nodeId, rename = {}) {
+  const raw = (nodeConcepts && (nodeConcepts[nodeId] || nodeConcepts[String(nodeId)])) || []
+  if (!Array.isArray(raw)) return []
+  const seen = new Set(); const out = []
+  for (const r of raw) {
+    const c = canonicalId(r, rename)
+    if (c && !seen.has(c)) { seen.add(c); out.push(c) }
+  }
+  return out
+}
+
+// Parse the operator's free-text tag input (comma- or newline-separated) into the exact concept id list
+// the `concept_tag_edited` command carries: each token normalized through the SAME validity gate the
+// server applies (`normalizeConceptId` mirrors core.models.valid_concept_id), invalid/empty tokens
+// dropped, de-duped in first-seen order, and capped at MAX_NODE_CONCEPTS. Returns `{ concepts, dropped }`
+// so the UI can tell the operator when a token was rejected or the overflow trimmed, instead of silently
+// sending a different set than they typed.
+export function parseConceptTagsInput(text = '') {
+  const tokens = String(text == null ? '' : text).split(/[,\n]/)
+  const seen = new Set(); const concepts = []; let dropped = 0
+  for (const token of tokens) {
+    const trimmed = token.trim()
+    if (!trimmed) continue                       // pure separators/whitespace are not a rejected token
+    const id = normalizeConceptId(trimmed)
+    if (!id) { dropped += 1; continue }          // fails the server's valid_concept_id gate
+    if (seen.has(id)) continue                   // de-dupe, keep first-seen order
+    if (concepts.length >= MAX_NODE_CONCEPTS) { dropped += 1; continue }
+    seen.add(id); concepts.push(id)
+  }
+  return { concepts, dropped }
 }

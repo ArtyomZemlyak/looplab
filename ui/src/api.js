@@ -1244,6 +1244,14 @@ export const CONTROL = {
     comment_id: commentId, node_id: nodeId, node_generation: nodeGeneration,
     expected_version: expectedVersion, resolved,
   }, options),
+  // PART V Phase 2c: an operator replaces ONE node's concept tags (full set). Generation-fenced like a
+  // comment (the node's attempt separate from the displayed run generation), so a late click cannot
+  // re-tag a replacement run or a reset incarnation of the same numeric node id. Folds with
+  // `operator-edited` provenance the classifier re-tag cadence must not clobber.
+  retagConcepts: (rid, { nodeId, nodeGeneration, concepts }, options = {}) => runCommand(
+    rid, 'concept_tag_edited', {
+      node_id: nodeId, node_generation: nodeGeneration, concepts,
+    }, options),
   promote: (rid, id, generation) => runCommand(
     rid, 'promote', { node_id: id, generation, alias: 'champion' }),
   // Operator-authored experiment: hand-add a node to the search tree. `idea` = {operator, params,

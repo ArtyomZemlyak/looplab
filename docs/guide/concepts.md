@@ -587,7 +587,10 @@ Full or materialized memberships fold into `RunState.node_concepts` at/after `no
 (deterministic, offline — no tagging cadence required), and the strategist cadence may later
 consolidate/enrich them. An **operator** can also re-tag one node's concepts directly via the durable
 command `concept_tag_edited` (generation-fenced like a comment): it folds with `operator-edited` provenance,
-which the classifier re-tag cadence **must not clobber** (order-tolerantly, invariant 5). Generic node resets
+which the classifier re-tag cadence **must not clobber** (order-tolerantly, invariant 5). In the UI this
+is the **Edit tags** control in the Inspector → Overview (offered only on a live run with an authoritative
+concept projection; a partial/unavailable projection stays display-only so a fabricated set is never
+overwritten). Generic node resets
 do not clear the override. Only a `propose` reset clears it together with the Idea;
 implement/eval resets preserve it while the Idea is unchanged. Operator edits are authoritative for the
 run's read models but are deliberately **not**

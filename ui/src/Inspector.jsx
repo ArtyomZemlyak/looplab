@@ -14,6 +14,8 @@ import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import { traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail } from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
+import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
+import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 
 // # CODEX AGENT: Comments are an explicit Inspector interaction. Keep their independently secured
@@ -368,6 +370,73 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
   </div>
 }
 
+// PART V Phase 2c: the node's concept tags with a direct operator re-tag affordance. The tags are
+// displayed exactly as on the Dag (canonical, de-duped); on a LIVE run with an AUTHORITATIVE concept
+// projection an operator can replace the whole set, which folds with `operator-edited` provenance the
+// classifier re-tag cadence must not clobber (docs/guide/concepts.md). Read-only history (runId null),
+// a partial/unavailable projection, and a still-building node stay display-only — a fabricated "current"
+// set must never be presented as something to overwrite.
+function ConceptTags({ n, state, runId, onToast }) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const areaRef = useRef(null)
+  const triggerRef = useRef(null)
+  const current = useMemo(
+    () => nodeCanonicalConcepts(state?.node_concepts || {}, n.id, state?.concept_consolidation || {}),
+    [state?.node_concepts, state?.concept_consolidation, n.id])
+  const status = conceptMaterializationStatus(state, n.id)
+  const canEdit = !!runId && status === 'complete'
+  useEffect(() => { if (editing) requestAnimationFrame(() => areaRef.current?.focus()) }, [editing])
+  const open = () => { setText(current.join('\n')); setEditing(true) }
+  const cancel = () => {
+    setEditing(false)
+    requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
+  }
+  const save = async () => {
+    if (busy) return
+    const { concepts, dropped } = parseConceptTagsInput(text)
+    setBusy(true)
+    try {
+      const feedback = commandFeedback(
+        await CONTROL.retagConcepts(runId, { nodeId: n.id, nodeGeneration: n.attempt, concepts }), {
+          success: `Re-tagged #${n.id} → ${concepts.length} concept${concepts.length === 1 ? '' : 's'}`
+            + `${dropped ? ` (${dropped} invalid dropped)` : ''} — the engine is processing it`,
+          noop: `#${n.id} already carries exactly those concepts`,
+          executing: `Re-tag of #${n.id} requested — waiting for the engine`,
+          failure: `Re-tag of #${n.id} failed`,
+        })
+      onToast?.(feedback.message)
+      if (feedback.kind !== 'error') cancel()   // keep the editor + typed set on failure so it can retry
+    } catch { onToast?.(`Re-tag of #${n.id} could not be submitted. Try again.`) }
+    finally { setBusy(false) }
+  }
+  return <>
+    <div className="section-h">Concepts{status === 'partial' ? ' · partial (display-only)' : ''}
+      {canEdit && !editing && <button ref={triggerRef} type="button" className="ctx-chip ctx-chip-action"
+        title="replace this experiment's concept tags (operator authoring; the classifier re-tag will not overwrite it)"
+        onClick={open}>✎ Edit tags</button>}
+    </div>
+    {!editing && (current.length
+      ? <div className="node-concepts-list">{current.map(c =>
+          <span key={c} className="nc-tag" title={c}>{c}</span>)}</div>
+      : <div className="muted">{status === 'unavailable' ? 'concepts unavailable'
+          : status === 'partial' ? 'none retained (partial projection)' : 'none'}</div>)}
+    {editing && <div className="concept-tag-editor">
+      <label className="muted" htmlFor={`ct-${n.id}`}>One concept id per line (or comma-separated),
+        e.g. <code>loss/contrastive</code>. Invalid ids are dropped.</label>
+      <textarea id={`ct-${n.id}`} ref={areaRef} className="concept-tag-input" rows={4} value={text}
+        disabled={busy} onChange={event => setText(event.target.value)}
+        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); cancel() } }} />
+      <div className="concept-tag-actions">
+        <button type="button" className="btn sm" disabled={busy} onClick={save}>
+          {busy ? 'Saving…' : 'Save tags'}</button>
+        <button type="button" className="btn sm ghost" disabled={busy} onClick={cancel}>Cancel</button>
+      </div>
+    </div>}
+  </>
+}
+
 function Overview({ n, state, runId, onToast }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
@@ -383,6 +452,7 @@ function Overview({ n, state, runId, onToast }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
+    <ConceptTags n={n} state={state} runId={runId} onToast={onToast} />
     <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
