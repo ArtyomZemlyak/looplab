@@ -97,6 +97,24 @@ def test_cached_abstractor_persists_across_instances(tmp_path):
     assert out.primary == "essence" and out.anchors == ["anchor"] and calls["n"] == 1
 
 
+def test_cached_abstractor_tolerates_a_corrupt_cache_entry(tmp_path):
+    # Regression: a structurally-valid but wrong-typed cache value (anchors=null or a number) made
+    # `list(...)` raise, contradicting the class's "never raises / a corrupt cache starts empty"
+    # contract (the load path only rejects a non-dict top level, not per-entry type drift).
+    import json
+    p = tmp_path / "cache.json"
+
+    def inner(_text):
+        return Abstraction("fresh", ["a"])
+
+    key = CachedAbstractor(inner, path=str(p))._key("mem")
+    for bad in (None, 5):
+        p.write_text(json.dumps({key: {"primary": "cached", "anchors": bad}}), encoding="utf-8")
+        out = CachedAbstractor(inner, path=str(p))("mem")     # loads the corrupt entry, must not raise
+        assert isinstance(out, Abstraction)
+        assert out.primary == "cached" and out.anchors == []  # non-list anchors coerced to []
+
+
 def test_cached_abstractor_namespaced_by_model(tmp_path):
     p = tmp_path / "cache.json"
     CachedAbstractor(lambda t: Abstraction("m1", []), path=str(p), namespace="model-1")("x")

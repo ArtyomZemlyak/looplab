@@ -195,7 +195,13 @@ class CachedAbstractor:
         key = self._key(text)
         hit = self._cache.get(key)
         if isinstance(hit, dict) and ("primary" in hit or "anchors" in hit):
-            return Abstraction(str(hit.get("primary", "")), list(hit.get("anchors", [])))
+            # `list(hit.get("anchors", []))` raised on a structurally-valid but wrong-typed cache value
+            # (`anchors: null` -> list(None); `anchors: 5` -> list(5)), contradicting this class's
+            # "never raises / a corrupt cache starts empty" contract — the load path only rejects a
+            # non-dict top level and JSON errors, not per-entry type drift. Coerce a non-list to [].
+            _anchors = hit.get("anchors")
+            return Abstraction(str(hit.get("primary", "")),
+                               list(_anchors) if isinstance(_anchors, list) else [])
         ab = self.inner(text)
         self._cache[key] = {"primary": ab.primary, "anchors": list(ab.anchors)}
         self._persist()
