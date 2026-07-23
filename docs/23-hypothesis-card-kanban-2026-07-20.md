@@ -50,6 +50,18 @@ parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim b
 adversarial tests close. -->
 
 <!-- BLOCKER RESOLUTION LOG (append-only; the snapshot above is pinned to 60e9a5f3 and left verbatim).
+(2) RESOLVED 2026-07-23 — opening the host GPU-pool lease can no longer escape admission and abort the
+run. `_try_acquire_gpu_host_lease` RAISES GpuPinUnenforceable when the lease cannot even be OPENED
+(EACCES on a squatted/stale lock, ELOOP, read-only fs); no admission caller handled that raw exception,
+so it aborted the run mid task-group with no terminal and re-crashed on every resume. `_try_reserve_node_resources`
+now catches it at the admission boundary and returns a durable `admission_unpinnable` reservation marker
+(not None, so no forever-wait). `_resource_eval_env` re-raises the exact cause at the launch boundary
+BEFORE its unpinned-fallback branch — so a populated-pool marker (required_unavailable stays False) can
+never leak an unpinned full-host launch — routing into each caller's existing GpuPinUnenforceable →
+node-terminal / retry contract. The marker key is excluded from `_node_resource_reservation_is_current`
+so it does not trip a release/retry loop. Teeth-tested in
+`tests/test_gpu_resources.py::test_host_lease_open_failure_fails_closed_at_admission_not_engine_abort`
+and `::test_host_lease_open_failure_fails_closed_for_unspecified_serial_whole_pool`.
 (5) RESOLVED 2026-07-23 — an alive-but-STALE speculative sibling no longer collapses a healthy lane.
 `_counterfactual_owned_selection_state` now skips a sibling whose card would restore cleanly EXCEPT for
 its own staleness (blockers exactly {freshness_stale, work_in_flight}, owner in_flight, evidence==[node],

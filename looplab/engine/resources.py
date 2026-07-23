@@ -350,9 +350,11 @@ class ResourceSchedulingMixin:
         )
         # ``pin`` and ``gpu_ids`` are admission outcomes, not source-request identity.  Exact device
         # assignment may differ after a release/retry even when the Card source footprint is unchanged.
+        # ``admission_unpinnable`` is a fail-closed host-lease marker (also an admission outcome, not a
+        # source field), so it must not make a still-valid pin look stale and trigger a release/retry loop.
         admitted_source = {
             key: value for key, value in reservation.items()
-            if key not in {"gpu_ids", "pin", "whole_pool_unpinned"}
+            if key not in {"gpu_ids", "pin", "whole_pool_unpinned", "admission_unpinnable"}
         }
         expected_source = {key: value for key, value in expected.items() if key != "pin"}
         return admitted_source == expected_source
@@ -388,15 +390,14 @@ class ResourceSchedulingMixin:
                 return None
             lease_path = self._gpu_host_lease_path
             if lease_path is not None and self._gpu_host_lease_handle is None:
-                # CODEX AGENT: _try_acquire_gpu_host_lease raises GpuPinUnenforceable when the lease
-                # cannot even be OPENED (EACCES on a squatted/stale /tmp/looplab-gpu-pool-<uid>.lock,
-                # ELOOP, read-only fs) — and NO caller on this admission path handles it: it propagates
-                # through _try_reserve_node_resources into _dispatch_evals/speculation/confirm-wait
-                # (orchestrator has zero GpuPinUnenforceable handlers), aborting the whole run mid
-                # task-group with no terminal event and re-crashing deterministically on every resume.
-                # evaluate.py's handler for this type documents preventing exactly that outcome. Catch
-                # it at the admission boundary and convert to a durable node terminal
-                # (reason=gpu_unpinnable) or a paused-run contract instead of an engine abort.
+                # `_try_acquire_gpu_host_lease` returns None when the lease is HELD by another live
+                # holder (retryable contention → wait/re-scan) but RAISES GpuPinUnenforceable when the
+                # lease cannot even be OPENED (EACCES on a squatted/stale /tmp/looplab-gpu-pool-<uid>.lock,
+                # ELOOP, read-only fs). That raise is a non-retryable host-infra failure; the admission
+                # boundary `_try_reserve_node_resources` catches it and converts it into a durable
+                # `admission_unpinnable` reservation marker, so `_resource_eval_env` re-raises it into
+                # each caller's existing node-terminal / retry contract instead of aborting the run mid
+                # task-group with no terminal and re-crashing on every resume.
                 handle = _try_acquire_gpu_host_lease(Path(lease_path))
                 if handle is None:
                     return None
@@ -464,7 +465,19 @@ class ResourceSchedulingMixin:
             # may use the whole box. Reserve every logical device internally for the same lifecycle;
             # otherwise an unpinned serial Run could bypass both the local pool and the host lease.
             reserve_count = len(self._gpu_ids)
-        gpu_ids = self._acquire_gpus(reserve_count, request["gpu_mem_mib"])
+        try:
+            gpu_ids = self._acquire_gpus(reserve_count, request["gpu_mem_mib"])
+        except GpuPinUnenforceable as exc:
+            # The host GPU-pool lease could not be OPENED (EACCES on a squatted/stale lock, ELOOP,
+            # read-only fs). This is NOT retryable via the pool epoch, and no admission caller handles
+            # the raw exception — it would abort the run mid task-group with no terminal and re-crash on
+            # every resume. Fail closed at the admission boundary with a durable marker (reservation, not
+            # None, so no forever-wait) that `_resource_eval_env` re-raises at the launch boundary into
+            # each caller's existing GpuPinUnenforceable → node-terminal / retry contract. Keep the
+            # request's own `required_unavailable` (the pool may hold devices) so
+            # `_node_resource_reservation_is_current` still matches the source; the extra marker key is
+            # excluded from that comparison.
+            return {**request, "gpu_ids": [], "admission_unpinnable": str(exc)[:400]}
         if gpu_ids is None:
             return None
         return {
@@ -527,6 +540,13 @@ class ResourceSchedulingMixin:
     def _resource_eval_env(self, reservation: Optional[dict], *, base: Optional[dict] = None,
                            inherit_host: bool = False) -> Optional[dict]:
         """Build the child env for a reservation without changing the unpinned legacy branch."""
+        if reservation and reservation.get("admission_unpinnable"):
+            # The host GPU-pool lease could not be opened at admission (see _try_reserve_node_resources).
+            # Re-raise the exact cause HERE, at the launch boundary and BEFORE the unpinned-fallback
+            # branch below, so a fail-closed host-lease marker (which keeps required_unavailable=False on
+            # a populated pool) can never leak an unpinned full-host launch. Each caller's existing
+            # GpuPinUnenforceable handler converts it into a durable node terminal / retry.
+            raise GpuPinUnenforceable(reservation["admission_unpinnable"])
         if reservation and reservation.get("required_unavailable"):
             # CODEX AGENT: discovery failure must not turn an explicit positive declaration into an
             # unpinned full-host launch. Evaluate/confirm convert this defensive refusal into their

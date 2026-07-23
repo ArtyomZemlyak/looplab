@@ -192,6 +192,43 @@ def test_positive_explicit_gpu_requirement_fails_closed_on_gpu_less_host():
             and cpu["required_unavailable"] is False)
 
 
+def test_host_lease_open_failure_fails_closed_at_admission_not_engine_abort(tmp_path):
+    """A host GPU-pool lease that cannot even be OPENED (here the path is a directory, so os.open raises
+    EISDIR) must fail closed AT THE ADMISSION BOUNDARY — a durable reservation marker that the launch
+    boundary re-raises into the caller's node-terminal/retry contract — NOT propagate a raw
+    GpuPinUnenforceable out of admission that aborts the run mid task-group with no terminal event."""
+    pool = _Pool(ids=(0, 1), parallel=2, lease_path=tmp_path)   # a directory: os.open fails EISDIR
+    node = _node(0, {"gpus": 1, "gpu_mem_mib": 8_000})
+
+    # Admission returns a marker instead of raising (pre-fix, this call itself raised).
+    reservation = pool._try_reserve_node_resources(node)
+    assert reservation is not None
+    assert reservation["gpu_ids"] == []
+    assert "admission_unpinnable" in reservation
+    assert reservation["required_unavailable"] is False        # the pool DOES hold devices
+
+    # The marker still matches the source pin, so the current-check does not release/retry-loop it.
+    assert pool._node_resource_reservation_is_current(
+        types.SimpleNamespace(cards={}), node, reservation) is True
+
+    # The launch boundary re-raises the exact host-lease cause — never an unpinned full-host env.
+    with pytest.raises(GpuPinUnenforceable, match="lease cannot be opened"):
+        pool._resource_eval_env(reservation)
+
+
+def test_host_lease_open_failure_fails_closed_for_unspecified_serial_whole_pool(tmp_path):
+    """An unspecified SERIAL run reserves the whole pool + the host lease so it can never bypass the
+    lease. If the lease cannot be opened, admission must fail closed — the unpinned whole-pool reservation
+    must NOT fall through to `_resource_eval_env`'s unpinned-env branch and launch on the whole box."""
+    serial = _Pool(ids=(0, 1), parallel=1, lease_path=tmp_path)  # a directory: os.open fails EISDIR
+    reservation = serial._try_reserve_node_resources(_node(0, None))
+
+    assert reservation is not None and reservation["gpu_ids"] == []
+    assert "admission_unpinnable" in reservation
+    with pytest.raises(GpuPinUnenforceable, match="lease cannot be opened"):
+        serial._resource_eval_env(reservation)
+
+
 def test_clamp_helper_persists_effective_nth_device_memory_envelope():
     pool = _Pool(ids=(0, 1, 2), mem={0: 8_000, 1: 24_000, 2: 16_000})
     assert pool._clamp_resource_footprint(
