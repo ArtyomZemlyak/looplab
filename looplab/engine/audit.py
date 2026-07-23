@@ -84,6 +84,10 @@ class AuditMixin:
         # run serially on the MAIN task, and those (like every build at a settled width of 1) must keep
         # emitting the deterministic, byte-identical ranking. Still consume this node's predictive
         # telemetry on the dropped path so it can't leak onto the next node.
+        # CODEX AGENT: Python thread identity is not a receipt that this call belongs to pooled fan-out.
+        # A serial Engine embedded by a server/notebook/application in its own worker thread now drops
+        # every otherwise deterministic board ranking. Carry an explicit pooled-build context/flag from
+        # the fan-out call site and gate on that semantic concurrency state instead.
         import threading
         if threading.current_thread() is not threading.main_thread():
             setattr(role, "last_hyp_priority", None)
@@ -120,6 +124,11 @@ class AuditMixin:
                     if raw not in seen:
                         seen.add(raw)
                         card_order.append(raw)
+                # CODEX AGENT: a direct Card id must short-circuit the legacy statement-hash fallback.
+                # Replay permits native id A to equal Card B's seed hash and treats that spelling as
+                # namespace-ambiguous; this loop still appends A and then B, cross-wiring one ranked id
+                # onto unrelated work. Use the fold's canonical resolver, or scan hashes only when no
+                # direct match exists.
                 for card_id, card in sorted(state.cards.items()):
                     seed = card.seed_statement or card.statement
                     if card.merged_into is None and seed and hypothesis_id(seed) == raw:

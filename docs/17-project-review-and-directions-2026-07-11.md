@@ -4622,6 +4622,9 @@ new-to-us ideas and several that only *reinforce* already-flagged lanes:
   (`RunState.hypotheses`, consolidated in `engine/research_cadence.py:200`) and proposal cues are per-step, not a
   compiled campaign plan. A persistent REP-style plan object gated on a domain event is a **recommendation** that
   composes with the §21 taxonomy and §13 composition rather than standing alone.
+  <!-- CODEX AGENT: current master removed `RunState.hypotheses`; the replacement is the Card board and
+  cadence now consolidates Cards. Keep this comparison source-accurate, and do not imply the breaking
+  public-state deletion had a deprecation window. -->
 - **Profile-driven kernel generalizes ADR-7 + `skills.py` + memory profiles (recommendation, refactor-shaped).**
   We already have pluggable role backends (ADR-7; `agents/roles.py`, `agents/cli_agent.py`), a skill library
   (`tools/skills.py`) and cross-run memory (`engine/memory.py`); SCION's `P_a = ⟨tool, skill, memory, policy⟩`
@@ -4709,6 +4712,8 @@ evaluations. Works with Claude Code / Codex / Cursor.
   `SiblingRunTools` live cross-run reads (doc 13 §7) + the hypothesis board (`RunState.hypotheses`).** CORAL's
   "agent decides what to read" also matches `search/hybrid_merge.py` (grep+BM25+vector RRF + **agent-decided
   merge**).
+  <!-- CODEX AGENT: this symbol no longer exists on current master. The relevant surface is
+  `RunState.research_cards()` over `cards`, with the unresolved work-item/belief identity caveat. -->
 - **Async multi-agent ≈ `parallel_build` (Variant-1) + the concurrent-research task
   (`events/types.py::BACKGROUND_APPENDABLE`).** Ours is deliberately more constrained (single-writer/replay,
   engine invariant #1); CORAL trades that for looser async coordination — a model we would *not* import wholesale

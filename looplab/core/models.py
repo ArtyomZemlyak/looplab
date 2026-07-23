@@ -1294,6 +1294,10 @@ class CardSelectionProvenance(BaseModel):
         return self
 
 
+# CODEX AGENT: grouped_beliefs() now acknowledges that Card is work-item identity, but no production
+# decision consumer calls it: Researcher and foresight still iterate open_research_cards() and rank two
+# same-seed actions as duplicate, semantically indistinguishable beliefs. Make the grouped projection
+# the actual belief-consumer contract (with opaque work ids for evidence joins), not a test-only view.
 class Card(BaseModel):
     """One stable-identity proposal/work item in the target Card queue (docs/23).
 
@@ -1911,6 +1915,12 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
+    # CODEX AGENT: removing this field is a breaking public-state migration, not a derived-view cleanup:
+    # `/api/runs/{id}/state` no longer contains ``hypotheses`` and external clients cannot distinguish
+    # "known empty" from "schema removed". docs/23 explicitly deferred retirement to a post-L6
+    # deprecation window, but this change shipped without a compatibility projection, API version bump,
+    # or migration notice; the updated golden fixture merely accepts the break. Restore a deprecated
+    # read-only projection for that window or version the state contract before deleting the key.
     # The former derived hypothesis board (`hypotheses: dict[str, Hypothesis]`) was removed once
     # `1 card = 1 hypothesis`: every consumer now reads `research_cards()`/`open_research_cards()`, and
     # `_derive_cards` folds the raw accumulators below directly. The accumulators stay (frozen event
@@ -2021,6 +2031,10 @@ class RunState(BaseModel):
         member is abandoned)."""
         _RANK = {"supported": 4, "tested": 3, "testing": 2, "open": 1, "abandoned": 0}
         groups: "dict[str, dict]" = {}
+        # CODEX AGENT: this roll-up also disagrees with the removed aggregate's `_evidence_verdict`.
+        # There, one tested failure plus one pending experiment is `testing` (still inconclusive);
+        # `tested > testing` here hides the active experiment. Recompute from the unioned evidence with
+        # the shared helper/precedence instead of ranking already-lossy per-card labels.
         order: list[str] = []
         for card in self.research_cards():
             seed = (card.seed_statement or "").strip()

@@ -21,16 +21,29 @@ truth and wins wherever the original target text differs from shipped behavior.
 | Concurrency / resources | canonical `eval_parallel`/`llm_parallel`, closed per-lane Strategist allocation (explicit `{}` clears caps), shared broker, memory-aware GPU pool, lifecycle reservations, Docker enforcement for known positive pins and explicit CPU isolation, fail-closed zero-device admission, confirm admission, isolated Card producer/consumer; local Engine processes sharing one OS-user filesystem namespace hold a crash-released pool-wide lease, so separate Runs cannot double-allocate the same GPU | The deliberately conservative lease serializes GPU-owning Runs; cross-user/container/host scheduling remains the external execution backend's responsibility |
 | Selection / UX | default-off Card selector with exact forced prefix, policy-faithful lanes, durable exact ASHA receipts, bounded public lifecycle projection, optimistic edit/priority/resource/drop controls, and run+generation-scoped optimistic UI state | broader rollout scopes remain deferred/default-off; `coded` and optional speculative display lanes are reserved rather than derivable from current replay events |
 
+<!-- CODEX AGENT: the Direction-board row remains stale on current master: RunState no longer exposes
+a Hypothesis projection, so the empty/pre-Card surface is an add form over an absent
+`state.hypotheses` map, not the retained compatibility workflow claimed here. The public-state
+deletion still bypassed the post-L6 deprecation/version window promised in §12. -->
+
 <!-- CODEX AGENT: the "Complete" layer labels above describe the validated happy path, not the current
-adversarial concurrency boundary. Review at origin/master 827e8a0f still finds seven release blockers:
+adversarial concurrency boundary. Review at origin/master e2ff5f07 still finds fourteen release blockers:
 (1) confirm GPU refusal hot-spins without backoff/cap; (2) opening the host GPU lease can escape admission
 and abort every resume; (3) reset between admission and _evaluate can miss the generation-keyed reservation
-and launch unpinned; (4) parallel workers append global LWW Card/Hypothesis rankings, making replayed
-priority completion-order dependent; (5) producer-failed Card exclusions differ between election and three
-freshness rechecks; (6) one alive-but-stale speculative sibling can collapse the healthy population lane;
-and (7) a legacy-only parallel_build source promotes llm_parallel and enables the finite shared broker despite
-the documented compatibility contract. Keep positive-depth speculation and trusted parallel-GPU promotion
-blocked until those exact sites and their adversarial tests close. -->
+and launch unpinned; (4) producer-failed Card exclusions differ between election and three freshness rechecks;
+(5) one alive-but-stale speculative sibling can collapse the healthy population lane; (6) a legacy-only
+parallel_build source promotes llm_parallel and enables the finite shared broker despite the documented
+compatibility contract; (7) cards-only removed the public hypotheses key without the promised
+deprecation/version boundary; (8) prompt/foresight consume immutable seed text while audit/UI claim current
+edited text; (9) ranking id resolution can cross-wire a direct native id onto an unrelated legacy-hash Card;
+(10) every public Node/SSE frame carries the internal 32-point ASHA curve; (11) that curve is mined only from
+the capped final-stage stdout rather than the full training stream; (12) uniform curve downsampling conflicts
+with exact-rung matching and usually resets the live kill streak; (13) the new grouped-belief projection has
+no production consumer and its tested>testing roll-up hides an active experiment unlike `_evidence_verdict`;
+and (14) the worker-ranking fix uses Python main-thread identity as a proxy for pooled concurrency, so a
+serial Engine embedded in any worker loses deterministic ranking telemetry. Keep positive-depth speculation,
+trusted parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim blocked until those
+sites and adversarial tests close. -->
 
 ### Stage progress ledger (validated implementation, 2026-07-22)
 
@@ -302,6 +315,9 @@ foresight's). Land or explicitly defer each.
 3. Sole-writer of folded events; a card event that a background task writes must pass the
    `BACKGROUND_APPENDABLE` splice test (`tests/test_background_appendable.py`).
 4. Additive-only schema; old logs fold **byte-identically** (golden-replay gate `tests/test_golden_replay.py`).
+   <!-- CODEX AGENT: old event logs may still fold, but their public model dump is no longer byte-identical:
+   `hypotheses` was deleted from RunState and from the golden fixture. That is an API/schema break and must not
+   be presented as satisfying this invariant without an explicit versioned migration. -->
 5. `FoldCursor.snapshot()` deep-copies before finalize — the `_derive_cards` post-pass must be
    destructive-safe on the copy and never leak into the next suffix.
 
@@ -1066,6 +1082,9 @@ operator-modified trajectory is one of the six clean calibration trajectories.
   extension of L2 (the lane structure) + the Strategist mixin (the periodic re-allocation).
 - **Retiring `HypothesisBoard`/`state.hypotheses`** from the public dump — deferred to a post-L6
   deprecation window; the cards+hypotheses dump duplication is accepted through L1–L6.
+  <!-- CODEX AGENT: current master already removed `state.hypotheses`, its model, and its serialized key
+  without this deprecation window. Either restore the compatibility view or mark this contract superseded by
+  a versioned breaking-change ADR; silently updating tests does not migrate API consumers. -->
 - **Adaptive speculation depth** (keep the ready buffer ≈ `eval_parallel` dynamically) — ship the static
   `speculation_depth` const first.
 - **General-workload/policy rollout** — the first receipt is intentionally limited to the exact Greedy,

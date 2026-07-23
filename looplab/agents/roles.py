@@ -587,6 +587,11 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
     # 1 card = 1 hypothesis: read the single Card board directly (open, no evidence yet). Card fields
     # shadow the old Hypothesis (seed_statement == statement, verdict == status, id/evidence identical).
+    # CODEX AGENT: ``seed_statement == statement`` stops being true after an operator edit or a merge.
+    # This prompt still shows the immutable seed and asks the model to copy it verbatim, so the visible
+    # Card edit does not change the live research direction even though other analysis/render consumers
+    # were moved to ``Card.statement``. Preserve an explicit hidden join id while prompting with the
+    # current statement, or document that edits are cosmetic and stop presenting them as direction edits.
     open_hyps = [c for c in state.open_research_cards() if not c.evidence]
     if open_hyps:
         # FOREAGENT predict-before-execute (search/foresight.py): when the world model has ranked the

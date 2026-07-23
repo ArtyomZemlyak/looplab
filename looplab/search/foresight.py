@@ -405,6 +405,10 @@ class ForesightPanelResearcher:
         if len(hyps) < 2:
             setattr(self.base, "_hyp_order", None)
             return
+        # CODEX AGENT: the model ranks immutable ``seed_statement`` below, but the emitted audit row
+        # records ``Card.statement``. After card_edited/merge these can express different hypotheses,
+        # so telemetry claims the model saw/ranked text it never received. Rank and receipt must share
+        # one exact bounded input (prefer the current display statement plus an opaque id).
         r = self._rank(
                  verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
                  ["Hypothesis: " + h.seed_statement for h in hyps],

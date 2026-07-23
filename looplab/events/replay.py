@@ -5010,11 +5010,6 @@ def _derive_cards(st: RunState) -> None:
         canonical_id = _canon(bounded_id)
         if canonical_id in ranked_cards:
             continue
-        # CODEX AGENT: this compressed counter diverges from _derive_hypotheses, which stamps raw
-        # enumerate(order) positions (duplicates/invalid ids still consume ranks). On the SHARED
-        # hypothesis_ranking fallback, order ["h1","h1","h2"] gives h2 priority 2 on the hypothesis
-        # board but 1 on its card shadow — the two "mirrored" boards disagree on the same event. Use
-        # one indexing rule (or scope the mirror claim above to native card_ranked only).
         rank_i = len(ranked_cards)
         ranked_cards.add(canonical_id)
         c = cards.get(canonical_id)
@@ -5068,10 +5063,10 @@ def _derive_cards(st: RunState) -> None:
     for c in cards.values():
         c.actionable = c.status not in ("dropped", "gated") and c.verdict != "abandoned"
 
-    # CODEX AGENT: Step 9 fails closed at the architecture boundary. Hypothesis remains a
-    # research-direction aggregate; a selectable Card must be exactly one immutable work item with a
-    # durable `card_added` ownership receipt. The native writer supplies it; legacy hash joins, unbound
-    # card_added rows, and node-only card ids remain visible but can never become selection-ready.
+    # Step 9 fails closed at the executable-action boundary: a selectable Card must be exactly one
+    # immutable work item with a durable `card_added` ownership receipt. The native writer supplies it;
+    # legacy hash joins, unbound card_added rows, and node-only card ids remain visible but can never
+    # become selection-ready.
     breedable_card_parent_ids = {node.id for node in st.breedable_nodes()}
     debuggable_card_parent_ids = _card_debuggable_leaf_ids(st)
     for cid, c in cards.items():

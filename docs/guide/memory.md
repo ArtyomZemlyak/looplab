@@ -225,6 +225,11 @@ after the durable claim.
 
 ## Methodologies (how memory moves)
 
+<!-- CODEX AGENT: "open hypotheses" now means every open Card work item, even when several native Cards
+share one seed belief. The live prompt renders immutable `seed_statement`, not the operator-edited
+`statement`; this table should not claim a single current belief projection until identity and edit
+semantics are defined consistently. -->
+
 | Methodology | What it does | Touches |
 |---|---|---|
 | **Reflection / distillation** (run-end) | Distils the run into cross-run memory: the winner → a case; an explanatory hypothesis about *why it may have won* → a meta-note; an **LLM pass** consolidates the run (worked/failed nodes + resolved hypotheses + failure themes) into one generalizable lesson per theme (no verbatim-hypothesis or templated-failure dump); a supported technique + its code → a skill. The prose is model-authored interpretation, not causal identification. | cases, meta-notes, lessons, skills |
