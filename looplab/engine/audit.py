@@ -95,19 +95,27 @@ class AuditMixin:
             card_order: list[str] = []
             seen: set[str] = set()
             raw_order = pick.get("order") if isinstance(pick.get("order"), list) else []
+            all_resolved = True
             for raw in raw_order[:256]:
                 if not isinstance(raw, str):
+                    all_resolved = False          # a non-string rank slot resolves to no live card
                     continue
+                matched = False                   # does THIS ranked direction own >= 1 live card?
                 direct = state.cards.get(raw)
-                if direct is not None and direct.merged_into is None and raw not in seen:
-                    seen.add(raw)
-                    card_order.append(raw)
+                if direct is not None and direct.merged_into is None:
+                    matched = True
+                    if raw not in seen:
+                        seen.add(raw)
+                        card_order.append(raw)
                 for card_id, card in sorted(state.cards.items()):
                     seed = card.seed_statement or card.statement
-                    if (card.merged_into is None and seed and hypothesis_id(seed) == raw
-                            and card_id not in seen):
-                        seen.add(card_id)
-                        card_order.append(card_id)
+                    if card.merged_into is None and seed and hypothesis_id(seed) == raw:
+                        matched = True
+                        if card_id not in seen:
+                            seen.add(card_id)
+                            card_order.append(card_id)
+                if not matched:
+                    all_resolved = False          # unminted / all-merged direction -> a rank GAP
             # CODEX AGENT: these are two projections of ONE ranking decision. One physical batch keeps
             # a crash/torn tail from exposing a new Hypothesis order beside stale Card selection priority.
             # CODEX AGENT: both events fold as GLOBAL last-write-wins registers, but this method is
@@ -117,18 +125,17 @@ class AuditMixin:
             # events to interleave). Emit board-wide rankings from the main task (e.g. at batch join),
             # or drop them on pooled builds. [FLAGGED for a design decision; not auto-fixed.]
             members = [(EV_HYPOTHESIS_RANKED, hypothesis_data)]
-            # A resolution MISS (ranked directions whose Cards are not yet minted, or every match merged
-            # away — the loop above drops merged ids instead of canonicalizing to the survivor) leaves
-            # card_order empty while raw_order was not. That is NOT a "rank nothing" decision: publishing
-            # card_ranked{"order": []} folds as a native empty board, so _derive_cards clears every open
-            # card's foresight_rank/confidence, stamps no priority, and suppresses the hypothesis_ranking
-            # fallback that feeds _priority_signal in card selection. Only emit the Card projection when
-            # at least one id resolved, or the board was genuinely empty to begin with.
-            # CODEX AGENT: guarding only the all-miss case still publishes a partial projection.
-            # ["missing", "card-b"] becomes ["card-b"], promotes B from rank 1 to 0, and suppresses the
-            # hypothesis fallback for every Card. Emit card_ranked only after complete exact resolution
-            # (or preserve unresolved positions); otherwise publish only hypothesis_ranked.
-            if card_order or not raw_order:
+            # A resolution MISS (a ranked direction whose Card is not yet minted, or every match merged
+            # away — the loop drops merged ids instead of canonicalizing to the survivor) is NOT a "rank
+            # nothing" decision. Publishing a native card_ranked at all folds as the WHOLE board, so
+            # _derive_cards clears every open card's foresight_rank/confidence and suppresses the
+            # hypothesis_ranking fallback that feeds _priority_signal in card selection — and a PARTIAL
+            # order corrupts priority besides: dropping the missing slot shifts survivors up (["missing",
+            # "card-b"] -> ["card-b"] promotes B from rank 1 to 0). So emit the Card projection ONLY on
+            # COMPLETE exact resolution (every ranked direction owns a live card), or when the board was
+            # genuinely empty; otherwise the hypothesis_ranked order alone drives card priority via the
+            # fold's fallback (peer review: partial projection).
+            if (card_order and all_resolved) or not raw_order:
                 card_data = {"order": card_order, "at_node": node_id}
                 if "confidence" in pick:
                     card_data["confidence"] = pick["confidence"]

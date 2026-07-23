@@ -163,6 +163,32 @@ def test_live_card_ranked_maps_hypothesis_hashes_atomically_and_clears_confidenc
     assert all(card.pinned is False for card in reranked.cards.values())
 
 
+def test_live_card_ranked_suppressed_on_partial_resolution(tmp_path):
+    # Peer review: a ranked direction not yet minted (or all-merged) must NOT publish a PARTIAL Card
+    # order. Dropping the missing slot promotes the survivors (["gamma","beta"] -> ["card-beta"] would
+    # make beta rank 0 instead of 1), and folding a native card_ranked at all suppresses the
+    # hypothesis_ranking fallback. On an incomplete resolution only hypothesis_ranked is published; card
+    # priority then comes from that full order via the fold's fallback.
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    beta = "beta direction"
+    store.append("card_added", {"id": "card-beta", "statement": beta, "source": "researcher"})
+
+    class _Researcher:
+        last_hyp_priority = {"order": [hypothesis_id("gamma not yet minted"), hypothesis_id(beta)],
+                             "confidence": 0.6}
+
+    engine = Engine.__new__(Engine)
+    engine.store = store
+    engine.researcher = _Researcher()
+    engine._emit_hypothesis_ranked(5, generation=0)
+
+    emitted = store.read_all()
+    assert [e for e in emitted if e.type == "hypothesis_ranked"]       # the full order is published...
+    assert not [e for e in emitted if e.type == "card_ranked"]         # ...but NO partial Card order
+    assert fold(emitted).cards["card-beta"].priority != 0              # beta not spuriously promoted
+
+
 def test_research_writer_mints_stable_bounded_memo_and_claim_refs():
     class _Store:
         def __init__(self):
