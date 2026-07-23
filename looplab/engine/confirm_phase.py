@@ -24,13 +24,24 @@ import anyio
 from looplab.core.models import NodeStatus, RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL,
-                                  EV_NODE_CONFIRMED, EV_SPEC_DRIFT)
+                                  EV_NODE_CONFIRMED, EV_PAUSE, EV_SPEC_DRIFT)
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.trust.confirm import robust_selection
 from looplab.trust.cv import cv_summary
 
 
 _CONFIRM_RETRYABLE = object()
+
+# Guardrails for an unsatisfiable durable GPU pin during confirmation (a CPU-only resume, driver loss,
+# or an unenforceable Docker `--gpus` pin). `run()`'s empty-actions branch re-enters `_confirm_phase`
+# immediately and `GpuPinUnenforceable` is raised without waiting, so an unguarded retry hot-spins at
+# 100% CPU. We back off between consecutive refusals and, after the cap, auto-pause the run durably so
+# the loop breaks (like the developer-crash circuit breaker) and an operator can repair/re-pin. The
+# streak is INTENTIONALLY in-memory: a fresh process (or an operator resume after a repair) starts at
+# zero and genuinely retries the seeds, instead of re-pausing off a stale durable counter.
+_CONFIRM_REFUSAL_PAUSE_AFTER = 5      # consecutive whole-pass refusals before a durable auto-pause
+_CONFIRM_REFUSAL_BACKOFF_BASE = 0.5   # seconds; doubled per consecutive refusal
+_CONFIRM_REFUSAL_BACKOFF_CAP = 5.0    # seconds; keep operator-control latency bounded during backoff
 
 
 class ConfirmPhaseMixin:
@@ -54,6 +65,51 @@ class ConfirmPhaseMixin:
         current = {str(node.id): node.attempt for node in state.nodes.values()
                    if node.id not in state.aborted_nodes and not node.tombstoned}
         return current == generations
+
+    def _confirm_refusal_recorded(self, node_id: int, generation: int, seed: int,
+                                  reason: str) -> bool:
+        """True when a prior ``confirm_eval`` already audited this exact (node, generation, seed,
+        reason) infrastructure refusal. Replay excludes these rows from ``confirm_seed_results`` so
+        the seed can retry after a repair, which means an un-deduped re-entry would append an
+        identical row on every pass and grow ``events.jsonl`` without bound. Keyed on ``reason`` so
+        each distinct diagnostic (gpu_unavailable vs gpu_unpinnable) is still recorded exactly once."""
+        for event in self.store.read_all():
+            if event.type != EV_CONFIRM_EVAL:
+                continue
+            d = event.data
+            if (d.get("node_id") == node_id and d.get("generation") == generation
+                    and d.get("seed") == seed and d.get("reason") == reason):
+                return True
+        return False
+
+    async def _pace_confirm_refusal(self) -> None:
+        """Back off after one retryable confirm refusal and, past the consecutive-refusal cap, pause
+        the run durably. Called only on the ``_CONFIRM_RETRYABLE`` path, so the streak counts whole
+        confirm passes that refused back-to-back; any pass that actually runs a seed resets it."""
+        streak = getattr(self, "_confirm_refusal_streak", 0) + 1
+        self._confirm_refusal_streak = streak
+        if streak >= _CONFIRM_REFUSAL_PAUSE_AFTER:
+            # A durable pin the runtime cannot enforce is not retryable in-process. Pause (durable) so
+            # run()'s paused branch breaks the loop instead of spinning; a resume after the operator
+            # repairs/re-pins resets the streak to zero in the fresh attempt and genuinely retries.
+            self._confirm_refusal_streak = 0
+            if self._run_halt_intent():
+                return
+            async with self._write_lock:
+                if self._run_halt_intent():
+                    return
+                self.store.append(EV_PAUSE, {
+                    "reason": "auto-paused: confirmation could not secure the pinned GPU resource "
+                              "after repeated attempts (zero-device inventory or an unenforceable "
+                              "durable pin). Repair the runtime or re-pin the Card, then resume."})
+            return
+        await anyio.sleep(min(_CONFIRM_REFUSAL_BACKOFF_CAP,
+                              _CONFIRM_REFUSAL_BACKOFF_BASE * (2 ** (streak - 1))))
+
+    def _run_halt_intent(self) -> bool:
+        """The run is already paused, finished, or stopping — do not append a redundant auto-pause."""
+        state = fold(self.store.read_all())
+        return bool(state.paused or state.finished or state.stop_requested)
 
     async def _run_confirm_seed(self, nd, s: int):
         """One confirm-seed evaluation of node `nd` under seed `s`: materialize a fresh confirm
@@ -149,12 +205,16 @@ class ConfirmPhaseMixin:
                 # A zero-device inventory is retryable infrastructure state, not a completed seed memo.
                 # Record an audit row, but replay deliberately excludes this reason from
                 # ``confirm_seed_results`` so a later re-pin/runtime repair can retry the same seed.
+                # Dedupe: on a host that can never satisfy the pin the run re-enters confirm every loop,
+                # so append this row only the first time this (node, seed, reason) refuses.
                 try:
-                    async with self._write_lock:
-                        self.store.append(EV_CONFIRM_EVAL, {
-                            "node_id": nd.id, "generation": generation, "seed": s,
-                            "eval_seconds": 0.0, "metric": None,
-                            "reason": "gpu_unavailable", "error": str(exc)[:400]})
+                    if not self._confirm_refusal_recorded(
+                            nd.id, generation, s, "gpu_unavailable"):
+                        async with self._write_lock:
+                            self.store.append(EV_CONFIRM_EVAL, {
+                                "node_id": nd.id, "generation": generation, "seed": s,
+                                "eval_seconds": 0.0, "metric": None,
+                                "reason": "gpu_unavailable", "error": str(exc)[:400]})
                 finally:
                     self._release_gpus(reservation.get("gpu_ids"))
                 return _CONFIRM_RETRYABLE
@@ -180,19 +240,26 @@ class ConfirmPhaseMixin:
                         cancel.set()
                         tg.cancel_scope.cancel()
                         still_current = self._confirmation_node_current(nd.id, generation)
-                        with anyio.CancelScope(shield=True):
-                            async with self._write_lock:
-                                self.store.append(EV_CONFIRM_EVAL, {
-                                    "node_id": nd.id, "generation": generation, "seed": s,
-                                    "eval_seconds": round(time.time() - _t0, 3), "metric": None,
-                                    "reason": "gpu_unpinnable", "error": str(exc)[:400],
-                                    **({"superseded": True} if not still_current else {})})
+                        # Dedupe as above: an unenforceable durable pin refuses on every re-entry, so
+                        # write the audit row only the first time this (node, seed, reason) refuses.
+                        if not self._confirm_refusal_recorded(
+                                nd.id, generation, s, "gpu_unpinnable"):
+                            with anyio.CancelScope(shield=True):
+                                async with self._write_lock:
+                                    self.store.append(EV_CONFIRM_EVAL, {
+                                        "node_id": nd.id, "generation": generation, "seed": s,
+                                        "eval_seconds": round(time.time() - _t0, 3), "metric": None,
+                                        "reason": "gpu_unpinnable", "error": str(exc)[:400],
+                                        **({"superseded": True} if not still_current else {})})
                         return _CONFIRM_RETRYABLE
                     cancel.set()
                     tg.cancel_scope.cancel()
             finally:
                 self._release_gpus(reservation.get("gpu_ids"))
 
+            # The eval actually executed (neither GpuPinUnenforceable fired): the pinned resource is
+            # satisfiable again, so clear any accumulated consecutive-refusal streak.
+            self._confirm_refusal_streak = 0
             current = self._confirmation_node_current(nd.id, generation)
             valid = (current and res.metric is not None
                      and res.exit_code == 0 and not res.timed_out)
@@ -293,15 +360,13 @@ class ConfirmPhaseMixin:
                     return
                 if m is _CONFIRM_RETRYABLE:
                     # Infrastructure refusal is neither a completed seed nor confirmation completion.
-                    # Leave the phase open so the same seed can run after a re-pin/runtime repair.
-                    # CODEX AGENT: this retry has no bound. run()'s empty-actions branch re-enters
-                    # _confirm_phase on the very next iteration (orchestrator._run, "if not actions"),
-                    # every attempt re-raises GpuPinUnenforceable instantly (required_unavailable
-                    # returns without waiting) and appends another confirm_eval row, and replay
-                    # excludes gpu_unavailable/gpu_unpinnable from the seed memo — so a host that can
-                    # never satisfy the pin (CPU box resume, driver loss) hot-spins at 100% CPU with
-                    # unbounded events.jsonl growth. Add backoff or a consecutive-refusal cap that
-                    # pauses/terminalizes the pass, and dedupe the audit row per (node, seed, reason).
+                    # Leave the phase open so the same seed can run after a re-pin/runtime repair. The
+                    # audit row is deduped inside `_run_confirm_seed` so re-entry cannot grow the log
+                    # without bound; here we back off and, after a consecutive-refusal cap, auto-pause
+                    # the run durably. Otherwise run()'s empty-actions branch re-enters _confirm_phase
+                    # immediately and (required_unavailable returns without waiting) a host that can
+                    # never satisfy the pin — a CPU-box resume, driver loss — would hot-spin at 100% CPU.
+                    await self._pace_confirm_refusal()
                     return
                 if m is not None:
                     scores.append(m)
@@ -353,6 +418,9 @@ class ConfirmPhaseMixin:
             if not self._confirmation_node_current(nd.id, generation):
                 return
             if result is _CONFIRM_RETRYABLE:
+                # `_serve_forced_requests` re-enters this unfulfilled forced confirm every loop, so an
+                # unsatisfiable pin hot-spins here exactly as in `_confirm_phase`. Back off / auto-pause.
+                await self._pace_confirm_refusal()
                 return
         async with self._write_lock:
             if not self._confirmation_node_current(nd.id, generation):

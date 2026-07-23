@@ -269,6 +269,94 @@ def test_confirm_gpu_pin_refusal_is_audited_retryable_and_releases(tmp_path):
     assert eng._free_gpus == [0]
 
 
+def _unpinnable_confirm_engine(run_dir):
+    """An evaluated node whose confirm eval always refuses the durable GPU pin."""
+    eng = _noisy_engine(run_dir, confirm_top_k=1, confirm_seeds=1, max_nodes=1)
+    eng._gpu_ids = [0]
+    eng._gpu_physical_ids = {0: "0"}
+    eng._gpu_mem = {0: 16_000}
+    eng._free_gpus = [0]
+    eng._gpu_epoch = 0
+    eng._eval_gpu_reservations = {}
+    eng.store.append("run_started", {
+        "run_id": run_dir.name, "task_id": "toy", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(operator="draft", footprint={"gpus": 1}).model_dump(mode="json"),
+        "code": ""})
+    eng.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0})
+
+    def refuse_pin(_node, _workdir, env=None, profile=None, cancel=None):
+        raise GpuPinUnenforceable("container runtime cannot enforce GPU 0")
+
+    eng._run_eval = refuse_pin
+    return eng
+
+
+def test_confirm_refusal_audit_row_is_deduped_across_reentries(tmp_path, monkeypatch):
+    """run() re-enters _confirm_phase every empty-actions loop; on an unsatisfiable pin each pass
+    would append an identical confirm_eval and grow events.jsonl without bound. The audit row must
+    be written exactly once per (node, seed, reason) no matter how many times the pass re-enters."""
+    import looplab.engine.confirm_phase as confirm_module
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_BACKOFF_BASE", 0.0)
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_BACKOFF_CAP", 0.0)
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_PAUSE_AFTER", 1000)  # isolate dedupe here
+    eng = _unpinnable_confirm_engine(tmp_path / "confirm-dedupe")
+
+    for _ in range(5):
+        anyio.run(eng._confirm_phase, fold(eng.store.read_all()))
+
+    events = eng.store.read_all()
+    refusals = [e for e in events if e.type == "confirm_eval"
+                and e.data.get("reason") == "gpu_unpinnable"]
+    assert len(refusals) == 1                       # five re-entries, one durable audit row
+    assert not any(e.type in {"node_confirmed", "best_confirmed", "confirm_done"}
+                   for e in events)                 # never falsely completes confirmation
+    assert eng._free_gpus == [0]                    # every attempt still releases its lease
+
+
+def test_confirm_persistent_refusal_auto_pauses_after_cap(tmp_path, monkeypatch):
+    """Bounding the log alone still spins the loop at 100% CPU. After the consecutive-refusal cap the
+    run must durably auto-pause so run()'s paused branch breaks the loop for operator repair."""
+    import looplab.engine.confirm_phase as confirm_module
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_BACKOFF_BASE", 0.0)
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_BACKOFF_CAP", 0.0)
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_PAUSE_AFTER", 3)
+    eng = _unpinnable_confirm_engine(tmp_path / "confirm-autopause")
+
+    for pass_index in range(3):
+        assert not fold(eng.store.read_all()).paused   # not paused before the cap is reached
+        anyio.run(eng._confirm_phase, fold(eng.store.read_all()))
+
+    paused = fold(eng.store.read_all())
+    assert paused.paused                               # durable terminal, not an infinite hot-spin
+    pause_events = [e for e in eng.store.read_all() if e.type == "pause"]
+    assert len(pause_events) == 1 and "GPU" in pause_events[0].data["reason"]
+
+
+def test_confirm_refusal_streak_resets_when_a_seed_actually_runs(tmp_path, monkeypatch):
+    """A satisfiable pin between refusals must reset the streak so a transient outage never trips the
+    auto-pause: the streak counts CONSECUTIVE refusing passes, not lifetime refusals."""
+    import looplab.engine.confirm_phase as confirm_module
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_BACKOFF_BASE", 0.0)
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_BACKOFF_CAP", 0.0)
+    monkeypatch.setattr(confirm_module, "_CONFIRM_REFUSAL_PAUSE_AFTER", 2)
+    eng = _unpinnable_confirm_engine(tmp_path / "confirm-streak-reset")
+
+    # One refusal (streak -> 1, one below the cap), then a repaired eval that must reset the streak.
+    anyio.run(eng._confirm_phase, fold(eng.store.read_all()))
+    assert not fold(eng.store.read_all()).paused
+
+    def repaired_eval(_node, _workdir, env=None, profile=None, cancel=None):
+        return RunResult(exit_code=0, stdout="", stderr="", metric=0.5, timed_out=False)
+
+    eng._run_eval = repaired_eval
+    anyio.run(eng._confirm_phase, fold(eng.store.read_all()))
+    completed = fold(eng.store.read_all())
+    assert completed.confirmed_done and not completed.paused
+    assert getattr(eng, "_confirm_refusal_streak", 0) == 0   # reset by the seed that ran
+
+
 def test_confirm_seed_releases_stale_pin_reservation_before_eval(tmp_path):
     """Confirmation must refold and retry when a Card pin changes during a blocking wait."""
     eng = _noisy_engine(tmp_path / "confirm-pin-race", confirm_top_k=1, confirm_seeds=1,

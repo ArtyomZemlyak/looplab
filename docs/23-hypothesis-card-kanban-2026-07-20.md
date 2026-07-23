@@ -50,6 +50,16 @@ parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim b
 adversarial tests close. -->
 
 <!-- BLOCKER RESOLUTION LOG (append-only; the snapshot above is pinned to 60e9a5f3 and left verbatim).
+(1) RESOLVED 2026-07-23 — a confirm GPU-pin refusal no longer hot-spins. `_run_confirm_seed` dedupes the
+gpu_unavailable/gpu_unpinnable `confirm_eval` audit row per (node, generation, seed, reason) so re-entry
+cannot grow events.jsonl, and both re-entering callers (`_confirm_phase` empty-actions re-entry and the
+`_confirm_node`/`_serve_forced_requests` forced-confirm re-entry) now `_pace_confirm_refusal`: exponential
+backoff between consecutive refusals and, past a consecutive-refusal cap, a durable auto-pause so run()'s
+paused branch breaks the loop for operator repair. The streak is in-memory on purpose (a fresh process /
+resume after a repair retries the seeds) and resets whenever a seed actually runs. Teeth-tested in
+`tests/test_confirm_integration.py::test_confirm_refusal_audit_row_is_deduped_across_reentries`,
+`::test_confirm_persistent_refusal_auto_pauses_after_cap`, and
+`::test_confirm_refusal_streak_resets_when_a_seed_actually_runs`.
 (4) RESOLVED 2026-07-23 — producer-failed Card ids are now unioned into every counterfactual-election
 exclusion set that previously omitted them: `_claim_requested_card_build` (union then discard the exact
 claimed id), `_drop_stale_speculation`, and the pre-GPU freshness recheck in `_run_card_session`, matching
