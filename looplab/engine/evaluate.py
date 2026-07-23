@@ -107,15 +107,22 @@ class EvaluateMixin:
             # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
             # devices across every inline repair/retry prevents a repaired process from jumping onto a
             # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
-            # CODEX AGENT: the dispatcher registered this reservation under the ADMISSION-time
-            # generation, but `generation` here is node.attempt from this worker's fresher fold. An
-            # eval-stage node_reset landing in that window (attempt+1, still pending, rerun_from None)
-            # passes the prestart guard above, the lookup returns None, and _resource_eval_env(None)
-            # yields an UNPINNED env — this eval then sees every GPU while pinned siblings run and the
-            # dispatcher still holds this node's devices under the stale key. When dispatcher-admitted
-            # with _eval_parallel > 1, a miss here should fail closed / re-admit, not degrade to
-            # whole-box visibility.
             _resource_reservation = self._eval_resource_reservation(node_id, generation)
+            # The dispatcher registered this reservation under its ADMISSION-time generation, but
+            # `generation` here is node.attempt from a fresher fold. An eval-stage node_reset landing in
+            # that window (attempt+1, still pending, rerun_from None) passes the prestart guard above and
+            # misses the current-generation lookup — and `_resource_eval_env(None)` would yield an
+            # UNPINNED env that sees every sibling's GPU. Under parallel dispatch, if the dispatcher still
+            # holds this node's devices under the superseded key, fail closed (return without a terminal)
+            # so the dispatcher re-admits the reset lifecycle under its current generation and re-pins it,
+            # instead of degrading to whole-box visibility. Serial mode intentionally runs unpinned
+            # whole-box, and a never-admitted recovery/test call holds no stale key, so both are exempt.
+            if (
+                _resource_reservation is None
+                and max(1, int(getattr(self, "_eval_parallel", 1) or 1)) > 1
+                and self._eval_reservation_under_other_generation(node_id, generation)
+            ):
+                return
             try:
                 eval_env = self._resource_eval_env(
                     _resource_reservation, inherit_host=True)

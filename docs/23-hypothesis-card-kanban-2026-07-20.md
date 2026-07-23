@@ -50,6 +50,20 @@ parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim b
 adversarial tests close. -->
 
 <!-- BLOCKER RESOLUTION LOG (append-only; the snapshot above is pinned to 60e9a5f3 and left verbatim).
+(3) RESOLVED 2026-07-23 — a node_reset landing between the dispatcher's admission and an eval worker's
+fold can no longer launch the eval unpinned. The dispatcher registers the reservation under the OLD
+admission generation; `_evaluate` reads the NEW `node.attempt` (eval-reset: attempt+1, still pending,
+rerun_from None) so the current-generation lookup misses and `_resource_eval_env(None)` would yield an
+unpinned full-host env that sees every sibling's GPU. New `_eval_reservation_under_other_generation`
+detects the stale-key signature (a reservation for this node under a different generation), and under
+parallel dispatch `_evaluate` now fails closed (returns without a terminal) so the dispatcher re-admits
+and re-pins the reset lifecycle. Serial mode (intentionally unpinned whole-box) and a never-admitted
+recovery/test call (no stale key) are both exempt. This is complementary to the existing `superseded`
+mechanism, which only catches a reset landing DURING the eval. Teeth-tested in
+`tests/test_gpu_resources.py::test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generation`,
+`::test_parallel_eval_launches_normally_when_the_reservation_matches_the_generation`,
+`::test_serial_eval_is_exempt_from_the_stale_generation_fail_closed`, and
+`::test_eval_reservation_under_other_generation_detects_only_a_stale_generation_key`.
 (2) RESOLVED 2026-07-23 — opening the host GPU-pool lease can no longer escape admission and abort the
 run. `_try_acquire_gpu_host_lease` RAISES GpuPinUnenforceable when the lease cannot even be OPENED
 (EACCES on a squatted/stale lock, ELOOP, read-only fs); no admission caller handled that raw exception,

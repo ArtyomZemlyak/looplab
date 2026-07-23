@@ -229,6 +229,126 @@ def test_host_lease_open_failure_fails_closed_for_unspecified_serial_whole_pool(
         serial._resource_eval_env(reservation)
 
 
+def test_eval_reservation_under_other_generation_detects_only_a_stale_generation_key():
+    pool = _Pool(ids=(0,), parallel=2)
+    pool._register_eval_resource_reservation(5, 0, {"gpu_ids": [0], "pin": True})
+    # A reset bumped node 5 to attempt 1: the current-generation lookup misses, but the dispatcher still
+    # owns the devices under the OLD key — that is the exact stale-generation signature.
+    assert pool._eval_reservation_under_other_generation(5, 1) is True
+    assert pool._eval_reservation_under_other_generation(5, 0) is False   # its own generation is a match
+    assert pool._eval_reservation_under_other_generation(6, 1) is False   # a never-admitted node
+
+
+class _Span:
+    def set(self, *args, **kwargs):
+        return None
+
+    def set_many(self, **kwargs):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Tracer:
+    def span(self, *args, **kwargs):
+        return _Span()
+
+
+class _ReachedLaunch(Exception):
+    """Raised by the stub `_resource_eval_env` to prove `_evaluate` reached the launch-env build."""
+
+
+class _EvalResetHost(_Pool):
+    """Minimal host for the real `Engine._evaluate` up to the resource-pin guard."""
+
+    def __init__(self, *, parallel):
+        super().__init__(ids=(0,), mem={0: 16_000}, parallel=parallel)
+        self.tracer = _Tracer()
+        self.eval_env_calls = []
+        self.appended = []
+        self.store = types.SimpleNamespace(
+            read_all=lambda: [],
+            append=lambda event_type, data, **_kwargs: self.appended.append(
+                (event_type, dict(data))),
+        )
+
+    def _skip_if_aborted(self, _action, _state):
+        return False
+
+    def _resource_eval_env(self, reservation, **_kwargs):
+        # Record the exact reservation the launch would use, then stop before any candidate process.
+        self.eval_env_calls.append(reservation)
+        raise _ReachedLaunch()
+
+
+def _reset_node(attempt):
+    return types.SimpleNamespace(
+        id=0, attempt=attempt, operator="improve", status=NodeStatus.pending,
+        tombstoned=False, rerun_from=None, rerun_stage=None,
+        idea=types.SimpleNamespace(card_id=None, footprint={"gpus": 1}))
+
+
+def _reset_state(node):
+    return types.SimpleNamespace(
+        nodes={0: node}, aborted_nodes=set(), paused=False, finished=False,
+        stop_requested=False, total_eval_seconds=0.0)
+
+
+def test_parallel_eval_fails_closed_when_reset_superseded_the_reserved_generation(monkeypatch):
+    """A node_reset that lands between the dispatcher's admission (which registered the reservation under
+    the OLD generation) and this worker's fresher fold makes the current-generation lookup miss. Under
+    parallel dispatch, `_evaluate` must fail closed (return without a terminal) so the dispatcher re-admits
+    and re-pins the reset lifecycle — NOT fall through to `_resource_eval_env(None)`'s unpinned full-host
+    env that sees every sibling's GPU."""
+    from looplab.engine.orchestrator import Engine
+
+    host = _EvalResetHost(parallel=2)
+    host._register_eval_resource_reservation(0, 0, {"gpu_ids": [0], "pin": True})  # admission gen 0
+    monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
+
+    launched = None
+    try:
+        anyio.run(Engine._evaluate, host, 0, anyio.CapacityLimiter(1), None)
+    except _ReachedLaunch:
+        launched = host.eval_env_calls
+
+    assert launched is None, f"reset lifecycle launched an eval with reservation {launched}"
+    assert host.appended == []                       # no terminal: the reset lifecycle is re-admitted
+    assert (0, 0) in host._eval_gpu_reservations     # stale-gen reservation left for the dispatcher finally
+
+
+def test_parallel_eval_launches_normally_when_the_reservation_matches_the_generation(monkeypatch):
+    """The guard is narrow: a reservation registered under the CURRENT generation is not a stale-key miss,
+    so `_evaluate` proceeds to launch with that exact PINNED reservation."""
+    from looplab.engine.orchestrator import Engine
+
+    host = _EvalResetHost(parallel=2)
+    host._register_eval_resource_reservation(0, 1, {"gpu_ids": [0], "pin": True})  # matches current gen 1
+    monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
+
+    with pytest.raises(_ReachedLaunch):
+        anyio.run(Engine._evaluate, host, 0, anyio.CapacityLimiter(1), None)
+    assert host.eval_env_calls == [{"gpu_ids": [0], "pin": True}]
+
+
+def test_serial_eval_is_exempt_from_the_stale_generation_fail_closed(monkeypatch):
+    """Serial mode intentionally runs unpinned whole-box, so a stale-generation miss there is harmless and
+    must NOT be failed closed — `_evaluate` proceeds to launch with the unpinned (None) reservation."""
+    from looplab.engine.orchestrator import Engine
+
+    host = _EvalResetHost(parallel=1)
+    host._register_eval_resource_reservation(0, 0, {"gpu_ids": [0], "pin": True})  # stale gen, but serial
+    monkeypatch.setattr("looplab.engine.evaluate.fold", lambda _events: _reset_state(_reset_node(1)))
+
+    with pytest.raises(_ReachedLaunch):
+        anyio.run(Engine._evaluate, host, 0, anyio.CapacityLimiter(1), None)
+    assert host.eval_env_calls == [None]             # unpinned whole-box, the serial contract
+
+
 def test_clamp_helper_persists_effective_nth_device_memory_envelope():
     pool = _Pool(ids=(0, 1, 2), mem={0: 8_000, 1: 24_000, 2: 16_000})
     assert pool._clamp_resource_footprint(

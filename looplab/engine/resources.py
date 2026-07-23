@@ -522,6 +522,22 @@ class ResourceSchedulingMixin:
         with self._gpu_condition:
             self._eval_gpu_reservations.pop((int(node_id), int(generation)), None)
 
+    def _eval_reservation_under_other_generation(self, node_id: int, generation: int) -> bool:
+        """True when this node holds a live eval reservation under a DIFFERENT generation.
+
+        That is the exact signature of a reset that landed between the dispatcher's admission (which
+        registered the reservation under the OLD generation) and an eval worker's fresher fold (which
+        reads the NEW ``node.attempt``): the current-generation lookup misses, but the dispatcher still
+        owns this node's devices under the superseded key. It distinguishes that stale-key miss from a
+        never-admitted node (recovery/test seam), which holds no reservation under any generation.
+        """
+        self._ensure_resource_state()
+        with self._gpu_condition:
+            return any(
+                nid == int(node_id) and gen != int(generation)
+                for (nid, gen) in self._eval_gpu_reservations
+            )
+
     def _physical_gpu_ids(self, logical_ids) -> list[str]:
         mapping = getattr(self, "_gpu_physical_ids", {})
         logical = list(logical_ids or [])
