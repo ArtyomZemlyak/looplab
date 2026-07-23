@@ -209,9 +209,12 @@ class RunResult:
     stalled: bool = False
 
 
-# Distinctive sentinel in the killed stage's stderr, so command_eval/the orchestrator can tell a STALL
-# apart from any other non-zero exit without threading a new value through run_argv's 4-tuple return.
+# Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's
+# own docker cleanup) can tell a parent-initiated STALL/DIVERGE kill apart from any other non-zero exit
+# without threading a new value through run_argv's 4-tuple return. Both markers are appended to the
+# returned stderr by _tee_drain, so a substring test on `err` recovers which watchdog fired.
 STALL_SENTINEL = "LOOPLAB health-check: stage STALLED"
+DIVERGED_SENTINEL = "LOOPLAB health-check: training DIVERGED"
 
 
 class Sandbox(Protocol):
@@ -456,11 +459,14 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
         # the path with a directory so unlink raises IsADirectoryError) turn a normal timeout into an
         # engine-visible crash on the untrusted eval path.
         try:
-            # CODEX AGENT: divergence/stall watchdogs also force-kill the local docker client, but
-            # deliberately return timed_out=False. That skips daemon-container removal, deletes the
-            # only cidfile, and can release the GPU while the container keeps running. Track forced
-            # termination separately and rm -f Docker containers for every parent-side kill reason.
-            if timed_out:
+            # Force-remove the daemon-owned container for EVERY parent-initiated kill, not just a hard
+            # timeout. The divergence and stall watchdogs also tree-kill the local `docker run` client but
+            # deliberately return timed_out=False; gating removal on `timed_out` alone left their container
+            # running while the cidfile (the only cleanup handle) was unlinked below — so the GPU it holds
+            # is released by the scheduler and re-pinned to a sibling, double-assigning the device. The
+            # STALL/DIVERGE watchdogs append their sentinel to `err` (the intended out-of-band signal, see
+            # STALL_SENTINEL), so a substring test recovers a watchdog kill without a 4-tuple change.
+            if timed_out or STALL_SENTINEL in err or DIVERGED_SENTINEL in err:
                 _remove_docker_container(str(argv[0]), docker_cidfile)
             docker_cidfile.unlink(missing_ok=True)
         except OSError:
@@ -705,7 +711,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     # Let the final lines flush before we read the buffers.
     t_out.join(timeout=5)
     t_err.join(timeout=5)
-    marker = ("\n‼ LOOPLAB health-check: training DIVERGED — non-finite loss/grad_norm "
+    marker = (f"\n‼ {DIVERGED_SENTINEL} — non-finite loss/grad_norm "
               "reported repeatedly; aborting the stage early.\n")
     stall_marker = (f"\n‼ LOOPLAB health-check: stage STALLED — no output for "
                     f"{int(stall_timeout or 0)}s while the process stayed alive (likely a hung "

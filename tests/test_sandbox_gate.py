@@ -253,6 +253,42 @@ def test_run_argv_force_removes_daemon_container_after_cancel(tmp_path, monkeypa
     assert not list(tmp_path.glob(".looplab-container-*.cid"))
 
 
+def test_run_argv_force_removes_daemon_container_after_stall_or_diverge(tmp_path, monkeypatch):
+    """A STALL/DIVERGE watchdog force-kills `docker run` but returns timed_out=False, so gating daemon-
+    container removal on `timed_out` alone leaked the container (still running, holding its GPU) while
+    the cidfile — the only cleanup handle — was unlinked. Removal must fire for EVERY parent-side kill,
+    recovered from the watchdog sentinel appended to stderr."""
+    import io
+    import looplab.runtime.sandbox as sb
+
+    cid = "b" * 64
+
+    class Proc:
+        def __init__(self, argv, **_kwargs):
+            self.stdout, self.stderr, self.returncode = io.BytesIO(b""), io.BytesIO(b""), -9
+            Path(argv[argv.index("--cidfile") + 1]).write_text(cid, encoding="ascii")
+
+        def wait(self, timeout=None):
+            return -9
+
+    monkeypatch.setattr(sb.subprocess, "Popen", Proc)
+
+    for marker in (sb.STALL_SENTINEL, sb.DIVERGED_SENTINEL):
+        cleanup = {}
+        # Simulate the watchdog kill: non-zero rc, the sentinel appended to stderr, timed_out=False.
+        monkeypatch.setattr(sb, "_tee_drain",
+                            lambda *a, _m=marker, **k: (-9, "", f"boom {_m} tail", False))
+        monkeypatch.setattr(
+            sb.subprocess, "run",
+            lambda argv, **k: cleanup.setdefault("argv", list(argv))
+            or type("Done", (), {"returncode": 0})())
+        rc, _out, _err, timed_out = sb.run_argv(
+            ["docker", "run", "--rm", "image", "python", "solution.py"], str(tmp_path), timeout=30)
+        assert timed_out is False                                   # a stall/diverge is not a hard timeout…
+        assert cleanup.get("argv") == ["docker", "rm", "-f", cid], marker   # …but the container is still rm -f'd
+    assert not list(tmp_path.glob(".looplab-container-*.cid"))
+
+
 def test_run_argv_cidfile_lives_outside_the_bind_mounted_workdir(tmp_path, monkeypatch):
     """SECURITY (#5): the docker cidfile must NOT be created under the workdir, which DockerSandbox
     bind-mounts into the container as writable /work. If it lived there, untrusted root code could
