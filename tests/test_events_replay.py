@@ -341,6 +341,47 @@ def test_direction_normalized_in_fold(tmp_path):
     assert fold(s2.read_all()).direction == "max"     # case-insensitive valid value accepted
 
 
+def test_run_setup_finished_folds_splice_neutrally(tmp_path):
+    # Invariant #1 guard: `run_setup_finished` is a FOLDED event appended off the main task — from
+    # whichever eval WORKER thread wins `_run_setup_lock` first under eval_parallel>1 — so its
+    # byte-position relative to sibling `node_evaluated` events is thread-schedule-dependent. Its fold is
+    # a commutative, idempotent, success-only set-add (`run_setup_done.add(run_setup_key(command))`), so
+    # two logs that differ ONLY in that splice position MUST fold to an identical RunState. This guards
+    # the property the off-thread append relies on (its `run_setup_started` sibling is already
+    # fold-ignored via DIAGNOSTIC_EVENTS); if the fold ever became order-sensitive, resume determinism
+    # would silently break and this test would catch it.
+    from looplab.core.models import run_setup_key
+    cmd = ["pip", "install", "-e", "."]
+    fin = {"command": cmd, "exit_code": 0, "timed_out": False}
+
+    def _folded(p, setup_early: bool):
+        s = EventStore(p)
+        s.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+        if setup_early:
+            s.append("run_setup_finished", dict(fin))
+        s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {"x": 1.0}}, "code": ""})
+        s.append("node_evaluated", {"node_id": 0, "metric": 0.5, "violations": []})
+        if not setup_early:
+            s.append("run_setup_finished", dict(fin))       # spliced AFTER the eval instead of before
+        return fold(s.read_all())
+
+    early, late = _folded(tmp_path / "early", True), _folded(tmp_path / "late", False)
+    assert early.run_setup_done == late.run_setup_done == {run_setup_key(cmd)}
+    assert set(early.nodes) == set(late.nodes) == {0} and early.best_node_id == late.best_node_id
+    # idempotent under a duplicate terminal (a resume that re-appends the same success)
+    dup = EventStore(tmp_path / "dup")
+    dup.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+    dup.append("run_setup_finished", dict(fin))
+    dup.append("run_setup_finished", dict(fin))
+    assert fold(dup.read_all()).run_setup_done == {run_setup_key(cmd)}
+    # a FAILED / timed-out setup is NOT recorded (it must actually re-run on resume)
+    failed = EventStore(tmp_path / "failed")
+    failed.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+    failed.append("run_setup_finished", {"command": cmd, "exit_code": 1, "timed_out": False})
+    assert fold(failed.read_all()).run_setup_done == set()
+
+
 def test_fold_idempotent_to_duplicate_terminal_events(tmp_path):
     # A duplicate node_evaluated (corrupt/hand-edited log) must not double-count eval time.
     s = EventStore(tmp_path / "e.jsonl")
