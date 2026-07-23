@@ -52,7 +52,15 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None) -> li
         # metric from a name/expression. Otherwise a legitimate `print(json.dumps({"metric": score}))`
         # — or a placeholder `{"metric": 0.0}` later overwritten with a computed value — false-positives.
         hardcoded = re.search(r'["\']metric["\']\s*:\s*[0-9.+\-eE]+\s*[}\)]', code)
-        computed = re.search(r'["\']?metric["\']?\s*[:=]\s*[A-Za-z_]', code) or \
+        # Anchor the `metric` token with a left word boundary. Unanchored, the bare-name alternative
+        # matched `metric` as a SUFFIX of any identifier — `is_symmetric = True` (also `asymmetric`,
+        # `parametric`, `barometric`, `isometric`) makes `metric = T` match `computed`, so
+        # `hardcoded and not computed` is False and the hard-coded-metric cheat slips the HARD
+        # `critic:hardcoded_metric` gate (one throwaway `symmetric = x` line defeats it). The quoted
+        # `hardcoded`/second-alt regexes already require quotes around `metric`, so only this bare form
+        # needs the boundary. `(?<![A-Za-z0-9_])` still admits every legit computed form — `{"metric":
+        # score}`, a bare `metric = score`, `result["metric"] = value`.
+        computed = re.search(r'(?<![A-Za-z0-9_])["\']?metric["\']?\s*[:=]\s*[A-Za-z_]', code) or \
             re.search(r'\[\s*["\']metric["\']\s*\]\s*=\s*[A-Za-z_]', code)
         if hardcoded and not computed:
             issues.append({"issue": "hardcoded_metric",

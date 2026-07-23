@@ -74,10 +74,12 @@ from looplab.events.types import (
 
 def flagged_node_ids(st: RunState) -> set:
     """T2: node ids excluded from best/holdout selection under trust_gate gate/block — those with a
-    HIGH-PRECISION cheating/leakage signal. The heuristic `critic:` and `perfect_metric` signals
-    stay advisory in every mode (perfect_metric flags metric<=0 (min) / >=1 (max), which
-    legitimately-perfect scores hit, so gating on it could exclude honest winners). Empty under
-    `audit`. Shared by the fold and the engine's holdout-topk so both apply the SAME exclusion."""
+    HIGH-PRECISION cheating/leakage signal (see `is_hard_signal`). One `critic:` signal —
+    `critic:hardcoded_metric` — is HARD and gates; every OTHER `critic:` issue and `perfect_metric`
+    stay advisory in every mode (perfect_metric flags the EXACT theoretical optimum — metric==0.0 on
+    min / ==1.0 on max — which a legitimately-perfect score hits, so gating on it could exclude honest
+    winners). Empty under `audit`. Shared by the fold and the engine's holdout-topk so both apply the
+    SAME exclusion."""
     if st.trust_gate not in ("gate", "block"):
         return set()
     return hard_flagged_ids(st)

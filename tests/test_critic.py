@@ -112,3 +112,18 @@ def test_critic_no_false_positive_on_computed_metric():
     # A genuinely hard-coded literal with no computation is still flagged.
     hard = "import json\nprint(json.dumps({'metric': 0.99}))\nk = 3\n"
     assert any(i["issue"] == "hardcoded_metric" for i in critique(idea, hard))
+
+
+def test_hardcoded_metric_not_masked_by_a_symmetric_substring():
+    # Regression: the `computed` guard matched `metric` as a SUFFIX of any identifier, so a throwaway
+    # line whose name ends in "metric" (`is_symmetric = True`, `asymmetric`, `parametric`, ...) made
+    # `metric = T` read as a computed assignment — `hardcoded and not computed` went False and the
+    # hard-coded-metric cheat slipped the HARD `critic:hardcoded_metric` gate under trust_gate=gate/block.
+    idea = Idea(operator="draft", rationale="x")
+    for filler in ("is_symmetric = True", "asymmetric = 1", "parametric = fn()", "barometric = p"):
+        cheat = f"import json\n{filler}\nprint(json.dumps({{'metric': 0.999}}))\n"
+        assert any(i["issue"] == "hardcoded_metric" for i in critique(idea, cheat)), filler
+    # A genuinely computed metric alongside such a name is still NOT flagged (no false positive).
+    ok = ("import json\nis_symmetric = True\nscore = compute()\n"
+          "print(json.dumps({'metric': score}))\n")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(idea, ok))
