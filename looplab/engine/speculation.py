@@ -547,6 +547,15 @@ class SpeculationMixin:
                         )
                     )
                 ):
+                    # CLAUDE REVIEW: this arm conflates transient freezes with real supersession.
+                    # Pre-claim, the same conditions preserve the Card (_serve_card_builds closes the
+                    # head skipped="stale" without dropping; the "budget" outcome deliberately keeps
+                    # head+result for a later add_nodes extension) — but a pause or an eval-budget
+                    # crossing that lands BETWEEN the node_building CAS and this revalidation reaches
+                    # _fail_reserved_build with its drop_card=True default and permanently
+                    # card_auto_dropped's the hypothesis. Pass drop_card=False for the
+                    # pause/stop/budget conditions (split them from genuine supersession) so a
+                    # transient freeze doesn't kill the Card.
                     self._fail_reserved_build(
                         node_id=node_id,
                         card_id=reserved.card_id,
@@ -1296,6 +1305,14 @@ class SpeculationMixin:
         if self._terminal_intent(state):
             return False
         self._refresh_speculation_budget(state)
+        # CLAUDE REVIEW: _request_card_build elects with _speculative_card_ids UNION
+        # _producer_failed_card_ids, but this freshness revalidation — and _claim_requested_card_build
+        # and the pre-GPU recheck in _run_card_session — pass only _speculative_card_ids. A durable
+        # producer-failed card (serial-fallback-only, never speculatively buildable) therefore competes
+        # inside the counterfactual set here; when it outranks the subject (it was elected first, so it
+        # usually does) a committed speculative node is dropped as superseded and a fresh head claim is
+        # rejected "stale". Union producer-failed ids at all three sites —
+        # _reserved_speculative_slots documents exactly that contract for excluded_card_ids.
         excluded = self._speculative_card_ids(state)
         ignored_pending = self._acknowledged_pending_ids(state)
         envelope = self._resource_envelope()

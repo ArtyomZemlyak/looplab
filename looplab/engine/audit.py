@@ -106,11 +106,26 @@ class AuditMixin:
                             and card_id not in seen):
                         seen.add(card_id)
                         card_order.append(card_id)
+            # CLAUDE REVIEW: when NONE of the ranked board ids resolve (cards not yet minted for the
+            # ranked directions, or every match merged away — this loop DROPS merged ids instead of
+            # canonicalizing to the survivor like _derive_cards._canon), card_order is [] yet the batch
+            # still publishes card_ranked {"order": []}. The fold is latest-wins, and _derive_cards
+            # treats ANY non-None card_ranking as native: it clears every open card's
+            # foresight_rank/confidence, stamps no priority, and suppresses the hypothesis_ranking
+            # fallback — and card.priority feeds _priority_signal in card-driven selection. Skip the
+            # EV_CARD_RANKED member (keep the hypothesis event) when card_order is empty but raw_order
+            # was not: a resolution miss is not a "rank nothing" decision.
             card_data = {"order": card_order, "at_node": node_id}
             if "confidence" in pick:
                 card_data["confidence"] = pick["confidence"]
             # CODEX AGENT: these are two projections of ONE ranking decision. One physical batch keeps
             # a crash/torn tail from exposing a new Hypothesis order beside stale Card selection priority.
+            # CLAUDE REVIEW: both events fold as GLOBAL last-write-wins registers, but this method is
+            # called from parallel-build worker threads (_create_node_guarded, speculation session) —
+            # so the folded card_ranking/hypothesis_ranking depend on nondeterministic worker
+            # byte-order, outside the invariant-1 carve-out (which only permits INDEPENDENT per-node
+            # events to interleave). Emit board-wide rankings from the main task (e.g. at batch join),
+            # or drop them on pooled builds.
             self.store.append_many([
                 (EV_HYPOTHESIS_RANKED, hypothesis_data),
                 (EV_CARD_RANKED, card_data),

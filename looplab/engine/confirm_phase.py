@@ -294,6 +294,14 @@ class ConfirmPhaseMixin:
                 if m is _CONFIRM_RETRYABLE:
                     # Infrastructure refusal is neither a completed seed nor confirmation completion.
                     # Leave the phase open so the same seed can run after a re-pin/runtime repair.
+                    # CLAUDE REVIEW: this retry has no bound. run()'s empty-actions branch re-enters
+                    # _confirm_phase on the very next iteration (orchestrator._run, "if not actions"),
+                    # every attempt re-raises GpuPinUnenforceable instantly (required_unavailable
+                    # returns without waiting) and appends another confirm_eval row, and replay
+                    # excludes gpu_unavailable/gpu_unpinnable from the seed memo — so a host that can
+                    # never satisfy the pin (CPU box resume, driver loss) hot-spins at 100% CPU with
+                    # unbounded events.jsonl growth. Add backoff or a consecutive-refusal cap that
+                    # pauses/terminalizes the pass, and dedupe the audit row per (node, seed, reason).
                     return
                 if m is not None:
                     scores.append(m)

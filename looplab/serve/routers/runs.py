@@ -117,6 +117,10 @@ class RunConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     settings: dict[str, Any]
+    # CLAUDE REVIEW: declared non-nullable str yet defaulted None (also in the legacy model below), so
+    # the published schema advertises {"type": "string", "pattern": ..., "default": null} while
+    # put_run_config 400s an explicit null ("must be the 64-character config revision"). Make it
+    # Optional[str] (accepting explicit null as "no CAS") or publish without the null default.
     expected_revision: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] = None
 
 

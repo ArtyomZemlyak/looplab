@@ -1,5 +1,10 @@
 # Agent parallelism: parallel node building (design + Variant-1 plan)
 
+<!-- CLAUDE REVIEW: stale status — this plan SHIPPED (docs/23 §0.0.1 marks Layer 2 canonical
+llm_parallel build fan-out complete; CLAUDE.md documents the concurrent-build seam; Settings has
+parallel_build/llm_parallel with these semantics). Mirror the A7 doc's treatment: "implemented /
+historical design record — superseded by docs/23 Layer 2", so §1's "builds nodes one at a time"
+reads as the 2026-07-19 snapshot it is. -->
 **Status:** design / proposal — 2026-07-19
 **Motivation:** on a multi-GPU box LoopLab runs at ~1/N utilisation. Per-GPU pinning + `max_parallel>1`
 (shipped) let concurrent *evals* land on distinct GPUs, but the engine still **builds nodes one at a

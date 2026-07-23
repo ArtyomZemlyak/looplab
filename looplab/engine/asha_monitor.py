@@ -163,6 +163,14 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
     for node in promotion_eligible_nodes(state):
         if node.id == node_id:
             continue
+        # CLAUDE REVIEW: the comparable population comes from sibling stdout_tail, which the terminal
+        # event caps at stdout[-500:] (evaluate.py) — only each sibling's FINAL few epoch/step records
+        # survive. A live node at an early resource coordinate (the only time a kill saves compute)
+        # therefore ~never finds min_siblings same-resource peers: comparable_under stays None, the
+        # streak resets, and opt-in asha_live_kill effectively fires only once the node is already
+        # near its siblings' endpoints — defeating the early-stop purpose for per-epoch loggers.
+        # Persist a bounded per-resource curve sample (e.g. downsampled {resource: metric} on
+        # node_evaluated) or read siblings' own stage-log tails instead of the 500-char excerpt.
         for obj in _json_objects_newest_first(getattr(node, "stdout_tail", "") or ""):
             if _finite_number(obj.get(sample.resource_key)) != sample.resource:
                 continue

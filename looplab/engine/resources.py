@@ -388,6 +388,15 @@ class ResourceSchedulingMixin:
                 return None
             lease_path = self._gpu_host_lease_path
             if lease_path is not None and self._gpu_host_lease_handle is None:
+                # CLAUDE REVIEW: _try_acquire_gpu_host_lease raises GpuPinUnenforceable when the lease
+                # cannot even be OPENED (EACCES on a squatted/stale /tmp/looplab-gpu-pool-<uid>.lock,
+                # ELOOP, read-only fs) — and NO caller on this admission path handles it: it propagates
+                # through _try_reserve_node_resources into _dispatch_evals/speculation/confirm-wait
+                # (orchestrator has zero GpuPinUnenforceable handlers), aborting the whole run mid
+                # task-group with no terminal event and re-crashing deterministically on every resume.
+                # evaluate.py's handler for this type documents preventing exactly that outcome. Catch
+                # it at the admission boundary and convert to a durable node terminal
+                # (reason=gpu_unpinnable) or a paused-run contract instead of an engine abort.
                 handle = _try_acquire_gpu_host_lease(Path(lease_path))
                 if handle is None:
                     return None

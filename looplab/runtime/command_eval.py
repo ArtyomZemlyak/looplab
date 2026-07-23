@@ -48,6 +48,13 @@ MAX_STAGE_COUNT = 16
 # released) and tree-killed early — instead of sitting until the full, often multi-hour, stage
 # deadline. Bounded generously so a legitimately slow-but-quiet phase (hard-negative mining, a large
 # FAISS build, a checkpoint save) is not falsely killed; a real deadlock still dies in ~minutes.
+# CLAUDE REVIEW: this always-on kill has no reachable override — no engine caller passes
+# run_command_eval(stall_timeout=...) and validate_stages accepts no per-stage stall key, so a
+# healthy stage that is legitimately quiet on the pipes for >30 min (non-Python train wrapper with
+# block-buffered stdout, a repo script logging only to its own file — PYTHONUNBUFFERED helps Python
+# children only) is tree-killed and the node fails with no way to opt out. Wire the existing
+# stall_timeout seam through a Settings field or an optional per-stage manifest key (validated in
+# validate_stages) and document it in configuration.md.
 _MAX_STALL_S = 1800.0
 
 
@@ -791,6 +798,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             stage_results.append({"name": _sname, "status": _status, "exit_code": rc,
                                   "seconds": round(time.monotonic() - _t0, 3)})
             if _status != "ok":
+                # CLAUDE REVIEW: this return hard-codes metric=None and leaves stalled=False, so the
+                # STALL-SALVAGE contract is unreachable in pipeline mode: evaluate.py's gate
+                # (`res.metric is not None and (exit==0 or res.stalled)`) can never salvage a staged
+                # train+eval whose final stage printed its metric before hanging — the multi-hour
+                # result is discarded as a plain failure, though the single-command path (which sets
+                # stalled=(STALL_SENTINEL in err)) salvages exactly this case. Propagate
+                # stalled=(STALL_SENTINEL in err) here, and when the FAILED stage is the final/metric
+                # stage and stalled, attempt read_metric before returning.
                 return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
                                  metric=None, timed_out=to, stages=stage_results, failed_stage=_sname)
             # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail

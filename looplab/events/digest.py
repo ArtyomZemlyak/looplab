@@ -348,6 +348,12 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
         if (node is not None and node.attempt == generation and not node.tombstoned
                 and nid not in current_state.aborted_nodes):
             active.add(key)
+    # CLAUDE REVIEW: the max_shown slots are taken BEFORE checking whether a lifecycle's latest row
+    # still renders anything. A recovered lifecycle (latest train verdict healthy / ASHA
+    # underperforming=False) yields no segment yet occupies a slot, so two recently-recovered nodes
+    # evict an older still-FLAGGED node — and the function can return "" while a live alert exists,
+    # contradicting its purpose (recovery is meant to silence its OWN node, not its siblings). Filter
+    # `active` down to keys whose latest mon/asha row would render before applying [:max_shown].
     lifecycle_keys = sorted(
         active,
         key=lambda key: max(mon.get(key, ({}, -1))[1], asha.get(key, ({}, -1))[1]),

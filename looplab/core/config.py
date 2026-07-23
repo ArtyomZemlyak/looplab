@@ -66,6 +66,15 @@ def canonicalize_parallelism_source(values: dict) -> dict:
         if canonical not in out and out.get(legacy) is not None:
             # CODEX AGENT: canonicalize inside each precedence layer, never across the flattened
             # result. The alias migration must not invert CLI > file > env precedence.
+            # CLAUDE REVIEW: promoting a legacy-ONLY parallel_build layer (e.g. just
+            # LOOPLAB_PARALLEL_BUILD=1 in env) into canonical llm_parallel ALSO flips on the finite
+            # shared LLM broker: llm_parallel=1 -> orchestrator._startup_llm_total=1, serializing
+            # every provider call in the run (research overlap, novelty, tag_nodes_llm, monitors) —
+            # contradicting llm_broker.py's docstring, orchestrator's "legacy-only preserves unbounded
+            # overlap" note, the broker-neutral live-control path, and the configuration.md
+            # llm_parallel row ("falls back ... without enabling a shared total"). Promote only the
+            # build width (keep broker opt-in tied to an explicitly-spelled canonical value), or fix
+            # all four contracts and pin the env/file semantics with a test.
             out[canonical] = out[legacy]
     return out
 

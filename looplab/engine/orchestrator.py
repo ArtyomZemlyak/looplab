@@ -3147,6 +3147,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
                                 # exact lifecycle plus run-level operator gates before retrying.
+                                # CLAUDE REVIEW: with the cross-run host lease this wait is no longer
+                                # bounded by a sibling eval in this process — it lasts as long as
+                                # ANOTHER run holds the pool (hours of training), and every 0.5s tick
+                                # re-folds the WHOLE log (the parallel branch folds twice per tick):
+                                # an O(total-events) busy-poll, the same cost confirm F26 documents.
+                                # The stated reason (a re-pin doesn't bump the pool epoch) doesn't
+                                # need an unconditional fold — a re-pin always APPENDS, so gate the
+                                # re-fold on the tail seq having changed, or lengthen the idle tick.
                                 waiting = fold(self.store.read_all())
                                 live = waiting.nodes.get(node.id)
                                 if self._skip_if_aborted(a, waiting):
@@ -4855,6 +4863,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         state = reserved.state
         node_id = reserved.node_id
         kind = reserved.kind
+        # CLAUDE REVIEW: dead assignment — nothing reads _bparents since the node_building append moved
+        # into _reserve_node_build; every branch below recomputes parents from `action`. Delete it (or
+        # make it the authoritative parent list so the card-claimed path is visibly single-sourced).
         _bparents = reserved.parent_ids
         parent_generations = reserved.parent_generations
         idea = reserved.idea.model_copy(deep=True) if reserved.idea is not None else None

@@ -132,6 +132,14 @@ def event_sequence_continues(events: Sequence[Event], expected_seq: int) -> bool
     Historical repair and compatibility workflows can retain monotonic gaps between physical rows.
     Those gaps are part of the public timeline contract. A multi-event batch is different: its members
     are one atomic writer transaction and must remain dense (also enforced by its strict decoder).
+
+    CLAUDE REVIEW: this gap tolerance (16f941f) silently voided the same-size-rewrite fail-closed
+    fence 5f011a2 added: an in-place rewrite that bumps a mid-file seq FORWARD now reads as a legal
+    repaired gap — divergence stays None, the tail jumps to the tampered seq, and a CAS caller (e.g.
+    _drop_card_once's 64-try loop) sees EventStoreConcurrencyError, re-reads, and appends on top of
+    mutated history. Its pinned guard test test_same_size_rewrite_with_seq_gap_fails_closed now FAILS
+    on master. Reconcile deliberately: make legal repairs explicit (a repair receipt/marker) so
+    unexplained gaps still fail closed — or migrate/delete the stale test in the same change.
     """
 
     if not events:

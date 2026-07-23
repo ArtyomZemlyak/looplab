@@ -1259,6 +1259,15 @@ def _counterfactual_owned_selection_state(
                 continue
         elif sibling_card_id in merged_alias_ids:
             continue
+        # CLAUDE REVIEW: an alive-but-STALE sibling still lands in `pairs` — e.g. its parent was
+        # aborted/tombstoned/reset, so the fold gives its card blockers {"freshness_stale",
+        # "work_in_flight"} — and _counterfactual_owned_card_state rejects any blocker set beyond
+        # {"work_in_flight"}, nulling the WHOLE counterfactual. speculative_card_is_fresh then reports
+        # a healthy subject as not fresh and _drop_stale_speculation terminalizes it; at depth>=2 one
+        # stale member spuriously supersedes every fresh member (the lane collapse docs/23 §12.5 says
+        # this gate must avoid). Treat a restore failing only on the SIBLING's own staleness like the
+        # administratively-dead case (skip it — it is dropped on its own turn) instead of failing the
+        # subject closed.
         pairs.append((sibling_card_id, sibling_id))
 
     selection_state = state

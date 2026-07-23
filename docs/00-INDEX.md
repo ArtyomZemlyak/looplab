@@ -32,6 +32,13 @@
 
 ## Read in this order
 
+<!-- CLAUDE REVIEW: this authority map is missing the two design docs added this window —
+22-agent-parallelism-2026-07-19.md and 23-hypothesis-card-kanban-2026-07-20.md (the self-declared
+current implementation truth for the Card re-architecture, referenced by CLAUDE.md and
+core/config.py). Doc 22 has ZERO inbound links anywhere (index-absent + mkdocs not_in_nav = fully
+orphaned); doc 23 is reachable only via a ROADMAP banner. Add rows above doc 21 and refresh the
+"Validated/consistency-checked" header date. -->
+
 | # | Doc | What it answers |
 |---|-----|-----------------|
 | 21 | **[21-full-functionality-review-2026-07-13.md](21-full-functionality-review-2026-07-13.md#post-round-25-integration-ledger-pending-final-commit-2026-07-18)** | **Current implementation and validation chronology.** Successive integration/review rounds, applied fixes, superseded findings and exact checkpoint evidence. Round 25 is pinned to `4d1218c`; the post-Round-25 certificate records the validated/published `f956685` source/UI package and the exact remaining browser/provider boundaries. |

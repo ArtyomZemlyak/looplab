@@ -308,6 +308,11 @@ class CrossRunTools:
                 ["slug"]),
         ]
 
+    # CLAUDE REVIEW: dead code — no caller remains (all tool branches read through the governed strict
+    # snapshots: project_governed_sources + quarantine receipts), and this is the one LENIENT reader
+    # left on the class; a future branch reaching for it would silently bypass row quarantine, the
+    # source-health receipts, and the governance snapshot locks. Remove it (and the
+    # read_jsonl_lenient import).
     def _load(self, fname: str) -> list[dict]:
         from looplab.events.eventstore import read_jsonl_lenient
         p = self.dir / fname

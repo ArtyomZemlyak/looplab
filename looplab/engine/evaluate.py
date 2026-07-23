@@ -106,6 +106,14 @@ class EvaluateMixin:
             # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
             # devices across every inline repair/retry prevents a repaired process from jumping onto a
             # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
+            # CLAUDE REVIEW: the dispatcher registered this reservation under the ADMISSION-time
+            # generation, but `generation` here is node.attempt from this worker's fresher fold. An
+            # eval-stage node_reset landing in that window (attempt+1, still pending, rerun_from None)
+            # passes the prestart guard above, the lookup returns None, and _resource_eval_env(None)
+            # yields an UNPINNED env — this eval then sees every GPU while pinned siblings run and the
+            # dispatcher still holds this node's devices under the stale key. When dispatcher-admitted
+            # with _eval_parallel > 1, a miss here should fail closed / re-admit, not degrade to
+            # whole-box visibility.
             _resource_reservation = self._eval_resource_reservation(node_id, generation)
             try:
                 eval_env = self._resource_eval_env(

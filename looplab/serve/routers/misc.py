@@ -40,6 +40,12 @@ _SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_
 class SettingsUIField(BaseModel):
     """One inert editor-field descriptor served to the React settings surfaces."""
 
+    # CLAUDE REVIEW: this forbid-extras model is NARROWER than the catalogue's own import-time
+    # validator: settings_ui_schema._load_schema accepts an `essential` bool and injects
+    # `exclusiveMaximum` for lt= bounds — both rejected here — so the first catalogue/Settings field
+    # using either passes import validation yet turns GET /api/settings/schema/{v} into a
+    # ResponseValidationError 500. Add essential/exclusiveMaximum (or derive this model from the
+    # loader's accepted-key set).
     model_config = ConfigDict(extra="forbid")
 
     key: str
@@ -98,6 +104,11 @@ class SettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     settings: dict[str, Any]
+    # CLAUDE REVIEW: non-Optional `str` defaulted to None (here and in the two models below) publishes
+    # a self-contradictory OpenAPI contract — {"type": "string", "default": null} — and a
+    # schema-faithful client that serializes the documented null default is 400'd by
+    # _expected_revision (present-but-null fails isinstance str). Type these Optional[str] and treat
+    # explicit null as absent, or drop the null default so the property is just optional.
     expected_revision: Annotated[str, Field(min_length=1, max_length=256)] = None
 
 
