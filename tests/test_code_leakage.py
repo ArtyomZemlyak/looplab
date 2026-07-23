@@ -36,6 +36,33 @@ def test_fit_before_split_still_flagged_with_kfold_import():
     assert r["leak"] and any(f["signal"] == "fit_before_split" for f in r["flags"]), r
 
 
+def test_str_split_does_not_false_positive_an_honest_full_data_fit():
+    # Regression: `_SPLIT_RE` once contained a bare `\.split\(` that matched Python's `str.split(...)`.
+    # An honest final refit-on-all-data followed by an unrelated string split set split_at to the
+    # str.split line, so the earlier .fit() read as fit_before_split and was HARD-gated (thorough/gate
+    # profile). A string split must not anchor a train/test boundary.
+    assert not code_leakage_scan(
+        'model.fit(X, y)\nname = path.split("/")[-1]\nmodel.save(name)')["leak"]
+    assert not code_leakage_scan('kmeans.fit(X)\nparts = line.split(",")')["leak"]
+
+
+def test_str_split_does_not_suppress_a_real_fit_before_split_leak():
+    # The other direction of the same collision: a benign `str.split()` placed ABOVE a genuine
+    # fit-on-full-data-before-split used to set split_at=0, so the leaking fit read as post-split and the
+    # real leak slipped the hard gate. The split FUNCTION must still anchor the boundary.
+    r = code_leakage_scan(
+        'cols = header.split(",")\nscaler.fit(X)\nX_tr, X_te = train_test_split(X_scaled, y)')
+    assert r["leak"] and any(f["signal"] == "fit_before_split" for f in r["flags"]), r
+
+
+def test_fit_before_common_cv_splitter_instantiations_is_flagged():
+    # Anchoring on the splitter CLASS instantiation (not a bare `.split(`) keeps recall for the common
+    # sklearn splitters whose boundary the old bare-`.split(` used to catch via their `.split()` call.
+    for splitter in ("TimeSeriesSplit(5)", "GroupKFold(5)", "StratifiedShuffleSplit(5)", "LeaveOneOut()"):
+        r = code_leakage_scan(f"scaler.fit(X)\ncv = {splitter}\nfor a, b in cv.split(X):\n    pass\n")
+        assert r["leak"] and any(f["signal"] == "fit_before_split" for f in r["flags"]), (splitter, r)
+
+
 def test_clean_pipeline_no_flags():
     code = (
         "X_train, X_test, y_train, y_test = train_test_split(X, y)\n"

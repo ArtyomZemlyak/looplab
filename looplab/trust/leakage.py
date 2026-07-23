@@ -64,12 +64,28 @@ def target_leakage(features: dict[str, list[float]], target: list[float],
 
 
 _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
-# Every alternative must be a CALL/USE site, not a bare name: `KFold`/`StratifiedKFold` without the
-# `\s*\(` matched their own IMPORT line (`from sklearn.model_selection import KFold`), which — being at
-# the top of the file — set `split_at` to line 0 and silently disabled the fit_before_split detector for
-# the WHOLE solution (a real `scaler.fit(X)` before any split then reads as `line_i >= split_at`). Require
-# the instantiation `KFold(` / `StratifiedKFold(`; the actual split still also matches via `.split(`.
-_SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold\s*\(|StratifiedKFold\s*\(|\.split\s*\(")
+# Anchor the train/test boundary on the split FUNCTION or a CV-splitter INSTANTIATION — never a bare
+# `.split(`. Two reasons each alternative is a CALL/USE site, not a bare name:
+#   * `KFold`/`StratifiedKFold` without `\s*\(` matched their own IMPORT line
+#     (`from sklearn.model_selection import KFold`), which — being at the top of the file — set
+#     `split_at` to line 0 and silently disabled fit_before_split for the WHOLE solution.
+#   * a BARE `\.split\s*\(` (once used to catch `cv.split(X)`) collides with Python's ubiquitous
+#     `str.split(...)` — any `path.split("/")`, `header.split(",")`, tokenizer, log parse — so an
+#     unrelated string split corrupted the boundary anchor, BOTH hard-gating an honest full-data fit as
+#     `fit_before_split` (false positive) AND suppressing a real fit-before-split leak placed after a
+#     benign string split (false negative). Anchor on the splitter CLASS instantiation instead: it is the
+#     robust boundary for the common sklearn splitters (KFold/Stratified/Group/Repeated *KFold*, the
+#     *ShuffleSplit* family, TimeSeriesSplit, PredefinedSplit, LeaveOneOut/LeavePOut). ACCEPTED RECALL
+#     GAP (precision-over-recall, on purpose): a PRE-BUILT splitter passed in and only used via
+#     `cv.split(X)`, with no instantiation in the scanned code, no longer anchors a boundary — far better
+#     than hard-gating every solution that calls `str.split()`.
+_SPLIT_RE = re.compile(
+    r"train_test_split\s*\("
+    r"|[A-Za-z]*KFold\s*\("
+    r"|[A-Za-z]*ShuffleSplit\s*\("
+    r"|TimeSeriesSplit\s*\(|PredefinedSplit\s*\("
+    r"|Leave[A-Za-z]*Out\s*\("
+)
 # The early-stopping monitor kwarg (split off from the fit ARGS so a benign eval_set on VALIDATION
 # isn't read as fit-on-validation) and the TEST-monitor tell. The monitor tell matches the substring
 # `test` (NOT `\bx_test\b`): a suffixed name like `X_test_scaled`/`X_testing`/`y_test_final` has no
