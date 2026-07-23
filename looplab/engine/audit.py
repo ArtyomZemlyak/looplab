@@ -78,18 +78,21 @@ class AuditMixin:
         # `card_ranked`/`hypothesis_ranked` are BOARD-WIDE, last-write-wins registers (NOT in
         # BACKGROUND_APPENDABLE). Under a pooled build the concurrent fan-out runs `_create_node` in
         # `anyio.to_thread` WORKER threads, so a board-wide emission from a worker would fold in
-        # nondeterministic thread byte-order, outside invariant #1's per-node carve-out. DROP it ONLY when
-        # actually on a worker thread (peer review) — NOT merely when pooling is configured: most builds
-        # even under `llm_parallel > 1` (single-node draft/improve/merge, ablation, rerun, injected) still
-        # run serially on the MAIN task, and those (like every build at a settled width of 1) must keep
-        # emitting the deterministic, byte-identical ranking. Still consume this node's predictive
-        # telemetry on the dropped path so it can't leak onto the next node.
-        # CODEX AGENT: Python thread identity is not a receipt that this call belongs to pooled fan-out.
-        # A serial Engine embedded by a server/notebook/application in its own worker thread now drops
-        # every otherwise deterministic board ranking. Carry an explicit pooled-build context/flag from
-        # the fan-out call site and gate on that semantic concurrency state instead.
+        # nondeterministic thread byte-order, outside invariant #1's per-node carve-out. DROP it ONLY from
+        # such a fan-out worker — NOT merely when pooling is configured: most builds even under
+        # `llm_parallel > 1` (single-node draft/improve/merge, ablation, rerun, injected) still run
+        # serially on the main task, and those (like every build at a settled width of 1) must keep
+        # emitting the deterministic, byte-identical ranking.
+        # The discriminator is the engine's OWN main-loop thread ident, captured at run() start — NOT
+        # `threading.main_thread()`: a host that embeds a serial Engine in its own worker thread would
+        # otherwise drop every ranking (peer review). A fan-out worker runs on a different thread than the
+        # loop; a bare __new__ test engine that never entered run() falls back to the process main thread.
+        # Still consume this node's predictive telemetry on the dropped path so it can't leak to the next.
         import threading
-        if threading.current_thread() is not threading.main_thread():
+        _loop_ident = getattr(self, "_main_loop_thread_ident", None)
+        _on_loop_thread = (threading.get_ident() == _loop_ident if _loop_ident is not None
+                           else threading.current_thread() is threading.main_thread())
+        if not _on_loop_thread:
             setattr(role, "last_hyp_priority", None)
             return
         pick = dict(pick)
@@ -120,22 +123,22 @@ class AuditMixin:
                 matched = False                   # does THIS ranked direction own >= 1 live card?
                 direct = state.cards.get(raw)
                 if direct is not None and direct.merged_into is None:
+                    # A direct Card id is unambiguous — resolve to EXACTLY that card and short-circuit
+                    # (peer review). Replay permits a native card id A to coincide with another card B's
+                    # seed hash; still running the statement-hash fallback below would cross-wire B's
+                    # priority onto A. The hash scan is a fallback ONLY for a legacy hash-keyed order.
                     matched = True
                     if raw not in seen:
                         seen.add(raw)
                         card_order.append(raw)
-                # CODEX AGENT: a direct Card id must short-circuit the legacy statement-hash fallback.
-                # Replay permits native id A to equal Card B's seed hash and treats that spelling as
-                # namespace-ambiguous; this loop still appends A and then B, cross-wiring one ranked id
-                # onto unrelated work. Use the fold's canonical resolver, or scan hashes only when no
-                # direct match exists.
-                for card_id, card in sorted(state.cards.items()):
-                    seed = card.seed_statement or card.statement
-                    if card.merged_into is None and seed and hypothesis_id(seed) == raw:
-                        matched = True
-                        if card_id not in seen:
-                            seen.add(card_id)
-                            card_order.append(card_id)
+                else:
+                    for card_id, card in sorted(state.cards.items()):
+                        seed = card.seed_statement or card.statement
+                        if card.merged_into is None and seed and hypothesis_id(seed) == raw:
+                            matched = True
+                            if card_id not in seen:
+                                seen.add(card_id)
+                                card_order.append(card_id)
                 if not matched:
                     all_resolved = False          # unminted / all-merged direction -> a rank GAP
             # These are two projections of ONE ranking decision. One physical batch keeps a crash/torn

@@ -423,3 +423,54 @@ def test_worker_thread_drops_board_wide_ranking_main_task_keeps_it(tmp_path):
     engine._emit_hypothesis_ranked(4, generation=0)
     kept = store.read_all()
     assert [e for e in kept if e.type == "card_ranked"]     # emitted on the main task
+
+
+def test_embedded_serial_engine_on_a_worker_thread_still_emits(tmp_path):
+    # Peer review: the drop must key on the engine's OWN main-loop thread (captured at run() start), NOT
+    # the process main thread — else a host that embeds a SERIAL engine in its own worker thread would
+    # drop every deterministic ranking. Emulate that: `_main_loop_thread_ident` is this worker's ident,
+    # and a serial emission ON that same worker thread must EMIT (it is the loop thread, not a fan-out).
+    import threading
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append("card_added", {"id": "card-beta", "statement": "beta direction", "source": "researcher"})
+
+    class _Researcher:
+        last_hyp_priority = {"order": [hypothesis_id("beta direction")], "confidence": 0.7}
+
+    engine = Engine.__new__(Engine)
+    engine.store = store
+    engine.researcher = _Researcher()
+
+    def _serial_on_worker():
+        engine._main_loop_thread_ident = threading.get_ident()   # this worker IS the engine's loop
+        engine._emit_hypothesis_ranked(3, generation=0)
+
+    worker = threading.Thread(target=_serial_on_worker)
+    worker.start()
+    worker.join()
+    assert [e for e in store.read_all() if e.type == "card_ranked"]   # emitted despite being off-main
+
+
+def test_direct_card_id_short_circuits_the_hash_collision_fallback(tmp_path):
+    # Peer review: a direct Card id resolves to EXACTLY that card. Replay permits a native id to coincide
+    # with another card's seed hash; the statement-hash fallback must NOT then cross-wire the collision
+    # peer's priority onto the directly-named card.
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    beta_hash = hypothesis_id("beta direction")
+    # card A's literal id == beta's seed hash; card B is the hash-collision peer (its seed hashes to A's id).
+    store.append("card_added", {"id": beta_hash, "statement": "unrelated alpha work", "source": "researcher"})
+    store.append("card_added", {"id": "card-B", "statement": "beta direction", "source": "researcher"})
+
+    class _Researcher:
+        last_hyp_priority = {"order": [beta_hash], "confidence": 0.5}    # a DIRECT id for card A
+
+    engine = Engine.__new__(Engine)
+    engine.store = store
+    engine.researcher = _Researcher()
+    engine._emit_hypothesis_ranked(2, generation=0)
+
+    card_event = [e for e in store.read_all() if e.type == "card_ranked"][-1]
+    assert card_event.data["order"] == [beta_hash]   # ONLY the named card, not the hash-collision peer

@@ -1460,6 +1460,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     async def run(self) -> RunState:
         """Run under one shared broker context inherited by anyio tasks and worker threads."""
+        # The engine's OWN main-loop thread. The concurrent build fan-out dispatches `_create_node` to
+        # `anyio.to_thread` WORKER threads; comparing a caller's thread against THIS ident (not the
+        # process `main_thread()`) lets board-wide emitters tell a real fan-out worker from a serial
+        # main-task build even when a host embeds a serial Engine in its own worker thread (peer review).
+        import threading
+        self._main_loop_thread_ident = threading.get_ident()
         broker = getattr(self, "_llm_broker", None)
         if broker is None:  # defensive for test/library engines constructed through __new__
             broker = self._llm_broker = LLMConcurrencyBroker()
