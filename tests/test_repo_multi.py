@@ -91,6 +91,45 @@ def test_seed_workspace_mounts_each_repo_at_its_subdir(tmp_path):
     assert (wd / "b" / "val.txt").is_file()
 
 
+def test_seed_workspace_rejects_a_mount_that_shadows_a_root_repo_entry(tmp_path):
+    # Regression: the root repo is seeded at the workspace root FIRST, so a data/reference mount whose
+    # name matches a top-level repo entry (the repo ships a `data/` dir and the operator mounts a real
+    # dataset named `data`) had its dst already occupied — link_input silently skipped it, the eval read
+    # the repo's placeholder instead of the declared source, and WORKSPACE_SEEDED falsely reported the
+    # mount succeeded. The collision must fail loud instead of silently invalidating the run.
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "run.py").write_text("print('hi')\n", encoding="utf-8")
+    (repo / "data").mkdir()                                    # the top-level entry the mount name shadows
+    (repo / "data" / "placeholder.txt").write_text("REPO PLACEHOLDER", encoding="utf-8")
+    real = tmp_path / "real_data"; real.mkdir()
+    (real / "x.csv").write_text("1,2,3\n", encoding="utf-8")
+    t = RepoTask(id="r", direction="max", editable_path=str(repo), data={"data": str(real)},
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    eng = Engine(tmp_path / "run", task=t, researcher=t.build_roles()[0],
+                 developer=t.build_roles()[1], sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=1, max_nodes=1))
+    with pytest.raises(RuntimeError, match="collides with a top-level entry of the root repo"):
+        eng._seed_workspace(tmp_path / "ws")
+
+
+def test_seed_workspace_allows_a_non_colliding_mount(tmp_path):
+    # A mount whose name does NOT match a root-repo top-level entry mounts normally (the real source,
+    # not a repo placeholder).
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "run.py").write_text("print('hi')\n", encoding="utf-8")
+    real = tmp_path / "real_data"; real.mkdir()
+    (real / "x.csv").write_text("1,2,3\n", encoding="utf-8")
+    t = RepoTask(id="r", direction="max", editable_path=str(repo), data={"dataset": str(real)},
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    eng = Engine(tmp_path / "run", task=t, researcher=t.build_roles()[0],
+                 developer=t.build_roles()[1], sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=1, max_nodes=1))
+    wd = tmp_path / "ws"
+    eng._seed_workspace(wd)
+    assert (wd / "run.py").is_file()
+    assert (wd / "dataset").is_symlink() or (wd / "dataset" / "x.csv").is_file()   # real source mounted
+
+
 def test_engine_end_to_end_eval_spans_two_repos(tmp_path):
     a, b = _two_repos(tmp_path)
     t = RepoTask(id="m", direction="max",

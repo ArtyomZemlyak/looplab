@@ -138,6 +138,34 @@ class WorkspaceSeeder:
               else __import__("contextlib").nullcontext(None))
         with sp as _h:
             seeded: list[str] = []
+            # Fail loud on a data/reference mount name that collides with a top-level entry of the ROOT
+            # editable (name "."/"" — seeded at the workspace root). The root repo is materialized FIRST,
+            # so the mount's dst (`wd/<name>`) is already occupied and link_input/copy_input silently skip
+            # it — their `dst.exists()` idempotency guard can't tell a repo file from a resumed mount — so
+            # the eval reads the repo's placeholder instead of the declared source AND the WORKSPACE_SEEDED
+            # record falsely claims the mount succeeded, silently invalidating the whole run's metrics.
+            # (Non-root editables mount at `wd/<name>`, already guarded against name collisions at task
+            # build.) Read the SOURCE tree, not the persisted workdir, so this stays correct across resume;
+            # drop the entries the seed deliberately ignores so an absurd `.git`-named mount can't misfire.
+            import os as _os
+            _root_ed = next((ed for ed in self._e._repo_spec.get("editables", [])
+                             if ed.get("name") in (".", "")), None)
+            if _root_ed:
+                try:
+                    _shadow = {e for e in _os.listdir(_root_ed["path"])
+                               if e not in {".git", "__pycache__", ".venv", "node_modules"}
+                               and not e.endswith(".pyc")}
+                except OSError:
+                    _shadow = set()
+                _mounts = ([r["name"] for r in self._e._repo_spec.get("references", [])]
+                           + list(self._e._repo_spec.get("data", {})))
+                _clash = next((m for m in _mounts if m in _shadow), None)
+                if _clash is not None:
+                    raise RuntimeError(
+                        f"mount name {_clash!r} collides with a top-level entry of the root repo "
+                        f"({_root_ed['path']}): the repo is seeded at the workspace root first, so the "
+                        f"mount would be silently shadowed and the eval would read the repo's copy "
+                        f"instead of the declared source. Rename the mount or the repo entry.")
             for ed in self._e._repo_spec.get("editables", []):
                 dst = wd if ed["name"] in (".", "") else wd / ed["name"]
                 mode = (ed.get("seed_mode") or self._e._seed_mode or "auto")
