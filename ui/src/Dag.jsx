@@ -6,7 +6,8 @@ import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERA
   isSweep, sweepInfo, chipFontSize, storageGet, storageSet } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
-import { canonicalId, nodeTheme } from './conceptId.js'
+import { nodeTheme } from './conceptId.js'
+import { nodeCanonicalConcepts } from './conceptChips.js'
 import { activeNodeMap, conceptMaterializationStatus } from './nodeProjection.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
@@ -159,15 +160,10 @@ function ExpNode({ data }) {
   // past the glyph LOD. node_concepts keys are strings in the wire state; node.id is numeric, so read
   // both. Canonicalized through the consolidation rename so a retired raw id never shows next to its
   // canonical twin (conceptId.js keeps LLM-authored ids off the prototype chain).
-  const conceptTags = useMemo(() => {
-    if (conceptStatus === 'unavailable') return []
-    const nc = state.node_concepts
-    const raw = (nc && (nc[node.id] || nc[String(node.id)])) || []
-    const rn = state.concept_consolidation || {}
-    const seen = new Set(); const out = []
-    for (const r of raw) { const c = canonicalId(r, rn); if (c && !seen.has(c)) { seen.add(c); out.push(c) } }
-    return out
-  }, [conceptStatus, node.id, state.node_concepts, state.concept_consolidation])
+  const conceptTags = useMemo(() =>
+    conceptStatus === 'unavailable' ? []
+      : nodeCanonicalConcepts(state.node_concepts, node.id, state.concept_consolidation || {}),
+    [conceptStatus, node.id, state.node_concepts, state.concept_consolidation])
   const confirmed = node.confirmed_mean != null
   const cardCls = nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
   // FX "heat" (0..1) for the reactor-core glow — only read under [data-fx]; harmless when FX is off.
