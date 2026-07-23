@@ -703,8 +703,9 @@ def board_dedup(
     #   otherwise + a client -> tag the board LIVE agentically against the agent-built graph;
     #   else                 -> tag_text heuristic.
     # 1 card = 1 hypothesis: tag the single Card board. Read the DISPLAY `statement` (== the old
-    # Hypothesis.statement, including a merged card's consolidated wording); card.id == the old hypothesis
-    # id for a research card, so the `hypothesis_concepts` cache still joins.
+    # Hypothesis.statement, including a merged card's consolidated wording). A plain research card's id IS
+    # its seed-statement hash (the old hypothesis id), but a migrated native card-N is not — so the
+    # `hypothesis_concepts` cache is joined by BOTH keys (see `hypothesis_concept_cache_keys` below).
     hyps = list(state.research_cards())
     cache = getattr(state, "hypothesis_concepts", None) or {}
     # Cache-covered if ANY current-board card's tags are recorded under its id OR its seed-statement hash

@@ -1401,10 +1401,11 @@ function _CardKanbanCard({
   const [controlError, setControlError] = useState('')
   const ownPending = isRecord(controlState?.pending) ? controlState.pending : null
   const busy = !!ownPending || controlsLocked === true
-  // The research VERDICT (open/supported/refuted/abandoned) is distinct from the work-lifecycle STATUS
-  // (peer review): replay can publish status=proposed/evaluated with verdict=abandoned, so read the
-  // verdict separately — render it as its own chip (a supported/refuted outcome was otherwise invisible)
-  // and treat an abandoned belief as terminal so the board stops offering edit/priority/drop controls.
+  // The research VERDICT (open/supported/testing/tested/abandoned — the only values `_evidence_verdict`
+  // produces) is distinct from the work-lifecycle STATUS (peer review): replay can publish
+  // status=proposed/evaluated with verdict=abandoned, so read the verdict separately — render it as its
+  // own chip (a supported/tested outcome was otherwise invisible) and treat an abandoned belief as
+  // terminal so the board stops offering edit/priority/drop controls.
   const verdict = _cardText(card.verdict)
   const terminal = _cardStatus(card) === 'dropped' || !!_cardText(card.merged_into)
     || verdict === 'abandoned'
@@ -1472,7 +1473,7 @@ function _CardKanbanCard({
     <div className="card-kanban-meta">
       <span className="chip xs" title="durable Card identity">{card.id}</span>
       {verdict && verdict !== 'open' && <span
-        className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'refuted' ? 'alarm' : 'warn')}
+        className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
         title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
       {priority != null && <span className="chip xs" title="derived priority; 1 is highest">#{priority + 1}</span>}
       {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} /> pinned</span>}
