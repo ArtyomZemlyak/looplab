@@ -849,6 +849,10 @@ class SpeculationMixin:
             return "stale", None
 
         excluded = self._speculative_card_ids(state)
+        excluded.update(self._producer_failed_card_ids(state))
+        # ...but never exclude the exact card being claimed now: its head result is committing, so it
+        # must stay selectable even if a prior speculative attempt marked it producer-failed. Discard
+        # AFTER the union so the claim wins over the serial-fallback exclusion for this one id.
         excluded.discard(card_id)
         selected_actions = speculative_card_actions(
             state,
@@ -1308,15 +1312,14 @@ class SpeculationMixin:
         if self._terminal_intent(state):
             return False
         self._refresh_speculation_budget(state)
-        # CODEX AGENT: _request_card_build elects with _speculative_card_ids UNION
-        # _producer_failed_card_ids, but this freshness revalidation — and _claim_requested_card_build
-        # and the pre-GPU recheck in _run_card_session — pass only _speculative_card_ids. A durable
-        # producer-failed card (serial-fallback-only, never speculatively buildable) therefore competes
-        # inside the counterfactual set here; when it outranks the subject (it was elected first, so it
-        # usually does) a committed speculative node is dropped as superseded and a fresh head claim is
-        # rejected "stale". Union producer-failed ids at all three sites —
-        # _reserved_speculative_slots documents exactly that contract for excluded_card_ids.
+        # Match `_request_card_build`'s election set exactly: exclude committed speculative cards AND
+        # durable producer-failed ids. A producer-failed card is serial-fallback-only (never
+        # speculatively buildable); if it stayed in the counterfactual set here it would outrank the
+        # subject (it was elected first, so it usually does) and drop a committed speculative node as
+        # superseded. `_reserved_speculative_slots` documents that `excluded_card_ids` also carries
+        # producer-failed ids.
         excluded = self._speculative_card_ids(state)
+        excluded.update(self._producer_failed_card_ids(state))
         ignored_pending = self._acknowledged_pending_ids(state)
         envelope = self._resource_envelope()
         for node in self._speculative_pending_nodes(state):
@@ -1653,7 +1656,13 @@ class SpeculationMixin:
                                         card_id=chosen.idea.card_id,
                                         node_id=chosen.id,
                                         scoring=getattr(self, "_card_scoring", None),
-                                        excluded_card_ids=self._speculative_card_ids(current),
+                                        # Same election set as `_request_card_build`/`_drop_stale_speculation`:
+                                        # producer-failed ids must not compete in this counterfactual freshness
+                                        # check or a serial-fallback-only card would falsely supersede the subject.
+                                        excluded_card_ids=(
+                                            self._speculative_card_ids(current)
+                                            | self._producer_failed_card_ids(current)
+                                        ),
                                         ignored_pending_node_ids=self._acknowledged_pending_ids(current),
                                         resource_envelope=self._resource_envelope(),
                                         consumed_inflight=eval_inflight,

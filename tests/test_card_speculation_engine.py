@@ -1798,6 +1798,104 @@ def test_freshness_drop_keeps_physical_slot_spent_until_add_nodes(
     assert engine._speculation_depth_used(requested) == 1
 
 
+def _mark_producer_failed(engine: Engine, card_id: str, *, x: float) -> None:
+    """Register one durable producer give-up via the exact request→producer_failed done handoff.
+
+    The card must be the sole election candidate at call time so the request head is deterministic.
+    """
+    _add_ready_draft(engine, card_id, x=x)
+    request = _request(engine)
+    assert request["card_id"] == card_id
+    engine.store.append(EV_CARD_BUILD_DONE, {
+        "card_id": card_id,
+        "generation": request["generation"],
+        "skipped": "producer_failed",
+    })
+    assert engine._card_requires_serial_fallback(card_id) is True
+
+
+def test_drop_stale_speculation_excludes_producer_failed_from_freshness_set(
+    tmp_path, monkeypatch,
+):
+    """A durable producer-failed card is serial-fallback-only; it must never compete inside the
+    freshness counterfactual. If it did, it would outrank the healthy committed speculative node
+    and drop it as ``superseded`` — the exact lane-collapse this exclusion prevents. The election
+    (`_request_card_build`) already unions producer-failed ids; this revalidation must match it."""
+    engine, _producer = _engine(tmp_path / "drop-stale-producer-failed")
+    _start(engine)
+    _mark_producer_failed(engine, "card-pf", x=0.15)
+    _add_ready_draft(engine, "card-live", x=0.25)
+    _commit_speculative_node(engine)
+
+    captured: dict[str, set[str]] = {}
+
+    def _capture(*_args, excluded_card_ids, **_kwargs):
+        captured["excluded"] = set(excluded_card_ids)
+        return True  # keep the node alive; we only inspect the election set it was checked against
+
+    monkeypatch.setattr(speculation_module, "speculative_card_is_fresh", _capture)
+
+    assert anyio.run(engine._drop_stale_speculation) is False
+    # The committed speculative card was always excluded; the producer-failed id must be too.
+    assert captured["excluded"] == {"card-live", "card-pf"}
+
+
+def test_claim_requested_card_build_excludes_producer_failed_but_keeps_the_claimed_card(
+    tmp_path, monkeypatch,
+):
+    """The claim revalidation unions producer-failed ids like the election, but must discard the
+    exact card being committed now — its head result is landing, so a prior speculative give-up on
+    that same id cannot exclude it from its own claim."""
+    engine, _producer = _engine(tmp_path / "claim-producer-failed")
+    _start(engine)
+    _mark_producer_failed(engine, "card-pf", x=0.15)
+    _add_ready_draft(engine, "card-live", x=0.25)
+    request = _request(engine)
+    assert request["card_id"] == "card-live"
+    result = _build_result(engine, request)
+
+    captured: dict[str, set[str]] = {}
+    real_actions = speculation_module.speculative_card_actions
+
+    def _capture(*args, excluded_card_ids, **kwargs):
+        captured["excluded"] = set(excluded_card_ids)
+        return real_actions(*args, excluded_card_ids=excluded_card_ids, **kwargs)
+
+    monkeypatch.setattr(speculation_module, "speculative_card_actions", _capture)
+
+    outcome, node_id = engine._claim_requested_card_build(request, result)
+    assert outcome == "created" and node_id is not None
+    assert "card-pf" in captured["excluded"]       # serial-fallback-only card stays excluded
+    assert "card-live" not in captured["excluded"]  # ...but never the card being claimed now
+
+
+def test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_does_not():
+    """Source-parity tripwire for the two `_run_card_session` counterfactual consults that cannot be
+    reached without a live GPU dispatch: the pre-GPU freshness recheck shares the election set
+    (producer-failed excluded), while the raw-proposal lane deliberately keeps producer-failed cards
+    IN — a producer-failed card legitimately owns that counterfactual and must fall through to the
+    serial builder rather than restage as an unbuildable raw action."""
+    source = textwrap.dedent(inspect.getsource(Engine._run_card_session))
+    tree = ast.parse(source)
+
+    def _excluded_src(callee: str) -> str | None:
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == callee
+            ):
+                for keyword in node.keywords:
+                    if keyword.arg == "excluded_card_ids":
+                        return ast.unparse(keyword.value)
+        return None
+
+    fresh_src = _excluded_src("speculative_card_is_fresh")
+    raw_src = _excluded_src("speculative_raw_actions")
+    assert fresh_src is not None and "_producer_failed_card_ids" in fresh_src
+    assert raw_src is not None and "_producer_failed_card_ids" not in raw_src
+
+
 def test_speculative_admission_releases_old_pin_and_rescans_current_pin(
     tmp_path, monkeypatch,
 ):

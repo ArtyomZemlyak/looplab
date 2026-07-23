@@ -49,6 +49,17 @@ control, which remains trapped in an unreachable legacy fallback. Keep positive-
 parallel-GPU promotion, cards-only compatibility, and the ASHA live-kill claim blocked until those sites and
 adversarial tests close. -->
 
+<!-- BLOCKER RESOLUTION LOG (append-only; the snapshot above is pinned to 60e9a5f3 and left verbatim).
+(4) RESOLVED 2026-07-23 — producer-failed Card ids are now unioned into every counterfactual-election
+exclusion set that previously omitted them: `_claim_requested_card_build` (union then discard the exact
+claimed id), `_drop_stale_speculation`, and the pre-GPU freshness recheck in `_run_card_session`, matching
+`_request_card_build`'s election set. The raw-proposal lane (`speculative_raw_actions`) deliberately still
+keeps producer-failed ids IN — such a card owns that counterfactual and must fall through to the serial
+builder, not restage as an unbuildable raw action. Teeth-tested in
+`tests/test_card_speculation_engine.py::test_drop_stale_speculation_excludes_producer_failed_from_freshness_set`,
+`::test_claim_requested_card_build_excludes_producer_failed_but_keeps_the_claimed_card`, and
+`::test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_does_not`. -->
+
 ### Stage progress ledger (validated implementation, 2026-07-22)
 
 `Complete` means the acceptance behavior is present in `8d9952a1` and covered by the current validation
