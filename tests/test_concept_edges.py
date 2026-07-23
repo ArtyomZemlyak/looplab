@@ -58,6 +58,21 @@ def test_malformed_edges_skipped(tmp_path):
     assert st.concept_edges["ok\tr\td"]["confidence"] == 0.0
 
 
+def test_tab_in_a_component_is_rejected_so_distinct_triples_never_collide(tmp_path):
+    # Regression (invariant 5 order-tolerance): the map key tab-joins (src, rel, dst). If a component
+    # could contain the delimiter, two DISTINCT triples would collide on ONE key — ("a\tb","c","d") and
+    # ("a","b\tc","d") both join to "a\tb\tc\td" — and equal-ranked colliders become order-dependent
+    # first-write-wins, so reversing arrival order would change RunState. A real id/relation never
+    # contains a tab, so a tab-bearing component is a forged/malformed row and is skipped.
+    collide_a = {"src": "a\tb", "rel": "c", "dst": "d", "provenance": "asserted", "confidence": 1.0}
+    collide_b = {"src": "a", "rel": "b\tc", "dst": "d", "provenance": "asserted", "confidence": 1.0}
+    ok = {"src": "x", "rel": "r", "dst": "y", "provenance": "asserted", "confidence": 1.0}
+    forward = fold(_store(tmp_path / "f", [collide_a, collide_b, ok]).read_all()).concept_edges
+    reverse = fold(_store(tmp_path / "r", [collide_b, collide_a, ok]).read_all()).concept_edges
+    assert forward == reverse                          # order-tolerant: no collision leaks arrival order
+    assert list(forward) == ["x\tr\ty"]                # both tab-bearing rows skipped as malformed
+
+
 def test_empty_default(tmp_path):
     assert fold(_store(tmp_path, []).read_all()).concept_edges == {}
 

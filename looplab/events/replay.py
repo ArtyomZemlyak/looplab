@@ -2020,6 +2020,14 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                          str(ed.get("dst") or "").strip())
         if not (src and rel and dst):
             continue
+        if "\t" in src or "\t" in rel or "\t" in dst:
+            # The map key below tab-joins the triple; a component containing the delimiter would let two
+            # DISTINCT triples collide on one key (e.g. ("a\tb","c","d") and ("a","b\tc","d")), and equal-
+            # ranked colliders become order-dependent first-write-wins — breaking the commutative accumulate
+            # this reducer claims (invariant 5 order-tolerance). A real concept id / relation / provenance
+            # never contains a tab (ids are letters/digits/-._/), so a tab-bearing component is a
+            # forged/malformed row: skip it like any other, keeping the key injective over the triple.
+            continue
         if rel == "co_occurs":
             # CODEX AGENT: this relation is a cache of current node membership, not an immutable
             # assertion. The old max-wins fold cannot express count decreases or deletion, so retaining
@@ -2044,10 +2052,9 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if conf == 0.0:
             conf = 0.0
         prov = str(ed.get("provenance") or "")
-        # CODEX AGENT: This delimiter is also admitted inside every component, so distinct triples can
-        # collide. Equal-ranked colliders become first-wins and reversing event order changes RunState.
-        # Validate/canonicalize components or key the mapping by an unambiguous tuple/length-prefix before
-        # claiming the explicit-edge reducer is commutative.
+        # The tab join is now injective over the triple: any component containing the delimiter was
+        # rejected above, so distinct triples can never collide on one key and the accumulate below stays
+        # commutative (invariant 5 order-tolerance).
         key = "\t".join((src, rel, dst))
         cur = st.concept_edges.get(key)
         # A total order on (confidence, provenance-rank, provenance) makes the winner a pure function of
