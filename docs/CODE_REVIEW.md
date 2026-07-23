@@ -1,5 +1,25 @@
 # LoopLab — Comprehensive Code Review
 
+<!-- CODEX AGENT REVIEW(2026-07-23): Last-3-days mega-review addendum. The audited window is the
+grafted base d26e81d..HEAD (237 changed files, 34k+ inserted lines at review time), with emphasis on
+the Card-only board migration, speculative Card execution, GPU admission/leases, command evaluation,
+cross-run/Assistant exposure, and settings mutation surfaces. Confirmed open bugs were written back as
+inline `CODEX AGENT REVIEW(2026-07-23, ...)` comments at the affected authority boundaries:
+1) staged command-eval stall salvage is unreachable (`looplab/runtime/command_eval.py`);
+2) chained Card edits can inherit a stale editEventSeq (`ui/src/panels.jsx`);
+3) confirm retry on unavailable GPU pins is unbounded (`looplab/engine/confirm_phase.py`);
+4) speculative Card producer cancellation is not truly cancellable (`looplab/engine/speculation.py`);
+5) producer-failed Card ids are omitted from speculative freshness revalidation (`looplab/engine/speculation.py`);
+6) recovered unbuildable speculative heads can poll forever (`looplab/engine/speculation.py`);
+7) speculative idle polling refolds unchanged logs repeatedly (`looplab/engine/speculation.py`);
+8) GPU host-lease open failures can crash/re-crash runs without a terminal event (`looplab/engine/resources.py`);
+9) Card election scoring recomputes the full concept projection per candidate (`looplab/search/card_selection.py`);
+10) speculation-quality prefix snapshots can become quadratic (`looplab/search/speculation_quality.py`);
+11) owner Assistant cross-run reads are process-wide rather than tenant/principal-scoped (`looplab/serve/assistant.py`);
+12) per-run settings writes fence only snapshot revision, not run generation (`looplab/serve/routers/runs.py`);
+13) CrossRunTools scope construction is fail-open if bind_state is forgotten/failed (`looplab/tools/cross_run_tools.py`).
+-->
+
 **Date:** 2026-06-23 · **Scope:** entire repository (not a single diff) · **Method:** 9 parallel
 read-only review passes (6 backend subsystems + working-tree diff + test suite + remaining UI +
 CLI/tooling/packaging/docs), every CRITICAL cross-checked against source. No code was modified.

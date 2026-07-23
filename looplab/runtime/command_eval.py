@@ -803,14 +803,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             stage_results.append({"name": _sname, "status": _status, "exit_code": rc,
                                   "seconds": round(time.monotonic() - _t0, 3)})
             if _status != "ok":
-                # CODEX AGENT: this return hard-codes metric=None and leaves stalled=False, so the
-                # STALL-SALVAGE contract is unreachable in pipeline mode: evaluate.py's gate
-                # (`res.metric is not None and (exit==0 or res.stalled)`) can never salvage a staged
-                # train+eval whose final stage printed its metric before hanging — the multi-hour
-                # result is discarded as a plain failure, though the single-command path (which sets
-                # stalled=(STALL_SENTINEL in err)) salvages exactly this case. Propagate
-                # stalled=(STALL_SENTINEL in err) here, and when the FAILED stage is the final/metric
-                # stage and stalled, attempt read_metric before returning.
+                # CODEX AGENT REVIEW(2026-07-23, HIGH): this return hard-codes metric=None and leaves
+                # stalled=False, so the STALL-SALVAGE contract is unreachable in pipeline mode:
+                # evaluate.py's gate (`res.metric is not None and (exit==0 or res.stalled)`) can never
+                # salvage a staged train+eval whose final stage printed its metric before hanging — the
+                # multi-hour result is discarded as a plain failure, though the single-command path (which
+                # sets stalled=(STALL_SENTINEL in err)) salvages exactly this case. Propagate
+                # stalled=(STALL_SENTINEL in err) here, and when the FAILED stage is the final/metric stage
+                # and stalled, attempt read_metric before returning.
                 return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
                                  metric=None, timed_out=to, stages=stage_results, failed_stage=_sname)
             # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
@@ -888,5 +888,4 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials,
                      stages=stage_results, stalled=(STALL_SENTINEL in err))
-
 

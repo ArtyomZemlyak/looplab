@@ -2453,7 +2453,7 @@ def build_router(srv) -> APIRouter:
         if not isinstance(incoming, dict):
             raise HTTPException(400, "settings must be a JSON object")
         try:
-            # CODEX AGENT: expected_revision fences only snapshot bytes, not run generation. Reset keeps
+            # CODEX AGENT REVIEW(2026-07-23, HIGH): expected_revision fences only snapshot bytes, not run generation. Reset keeps
             # this file, so a delayed PUT from generation A can rewrite generation B or race reset's env
             # read. Require expected_generation and serialize this transaction with the reset-visible
             # run lifecycle/command lease in addition to the snapshot lock.

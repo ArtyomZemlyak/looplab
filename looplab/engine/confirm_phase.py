@@ -294,7 +294,7 @@ class ConfirmPhaseMixin:
                 if m is _CONFIRM_RETRYABLE:
                     # Infrastructure refusal is neither a completed seed nor confirmation completion.
                     # Leave the phase open so the same seed can run after a re-pin/runtime repair.
-                    # CODEX AGENT: this retry has no bound. run()'s empty-actions branch re-enters
+                    # CODEX AGENT REVIEW(2026-07-23, HIGH): this retry has no bound. run()'s empty-actions branch re-enters
                     # _confirm_phase on the very next iteration (orchestrator._run, "if not actions"),
                     # every attempt re-raises GpuPinUnenforceable instantly (required_unavailable
                     # returns without waiting) and appends another confirm_eval row, and replay
