@@ -433,3 +433,38 @@ def test_host_score_predictions_must_be_inside_the_workdir(tmp_path):
     spec2 = {"kind": "host_score", "scorer": "rmse", "predictions": "predictions.json",
              "labels": str(tmp_path / "labels.json")}
     assert read_metric("", str(wd), spec2) == 0.0
+
+
+def test_oversized_candidate_metric_file_is_rejected_not_slurped(tmp_path, monkeypatch):
+    # DoS guard: the stdout path is byte-capped, but the FILE readers slurped a candidate-written file
+    # whole via read_text on the HOST. Under the untrusted tier a candidate can write a multi-GB file
+    # into its bind-mounted workdir, OOM-killing the engine. A file above the read ceiling must fail the
+    # NODE (return None), not be read into host RAM.
+    from looplab.runtime import command_eval
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "m.json").write_text('{"metric": 0.5}', encoding="utf-8")
+    fj = {"kind": "file_json", "path": "m.json", "key": "metric"}
+    assert read_metric("", str(wd), fj) == 0.5                             # within the ceiling: read normally
+    monkeypatch.setattr(command_eval, "_MAX_METRIC_FILE_BYTES", 5, raising=False)
+    assert read_metric("", str(wd), fj) is None                            # above the ceiling: rejected, not OOM
+    # host_score predictions (also candidate-controlled) get the same bound; labels stay OUTSIDE the workdir
+    (tmp_path / "labels.json").write_text('{"predictions": [1, 2, 3]}', encoding="utf-8")
+    (wd / "predictions.json").write_text('{"predictions": [1, 2, 3]}', encoding="utf-8")
+    hs = {"kind": "host_score", "scorer": "rmse", "predictions": "predictions.json",
+          "labels": str(tmp_path / "labels.json")}
+    assert read_metric("", str(wd), hs) is None                            # oversized preds rejected
+
+
+def test_non_integer_regex_group_fails_the_node_not_the_run(tmp_path):
+    # A non-integer `group` in an operator-authored regex metric must read as "no metric" (None), never
+    # raise ValueError/TypeError out of read_metric and tear down the eval task with no terminal event
+    # (a deterministic re-crash on every resume) — the "malformed spec fails the NODE, not the run"
+    # contract every other branch of read_metric already honors.
+    for bad in ("x", "1.5", None, [1], {}):
+        assert read_metric("val=0.9", str(tmp_path),
+                           {"kind": "stdout_regex", "pattern": r"val=([\d.]+)", "group": bad}) is None
+    # a valid group still works, tolerant of a string spelling ("1") and a JSON float (1.0 -> group 1)
+    for good in (1, "1", 1.0):
+        assert read_metric("val=0.9", str(tmp_path),
+                           {"kind": "stdout_regex", "pattern": r"val=([\d.]+)", "group": good}) == 0.9

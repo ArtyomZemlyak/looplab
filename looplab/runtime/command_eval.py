@@ -85,10 +85,14 @@ def _dig(obj, key: str):
     return cur
 
 
-def _regex_metric(text: str, pattern: str, group: int) -> Optional[float]:
-    # A bad operator-supplied pattern (re.error) or out-of-range group (IndexError) must read
-    # as "no metric", not crash the eval.
+def _regex_metric(text: str, pattern: str, group=1) -> Optional[float]:
+    # A bad operator-supplied pattern (re.error), an out-of-range group (IndexError), OR a non-integer
+    # `group` (int() raising TypeError/ValueError on e.g. "x"/"1.5"/None) must all read as "no metric",
+    # not crash the eval — every other malformed-spec branch in read_metric fails the NODE, not the run.
+    # Coerce inside the try so a hostile/typo'd `group` can't propagate out of read_metric and tear the
+    # eval task down with no terminal event (which then re-crashes deterministically on every resume).
     try:
+        group = int(group)
         rx = re.compile(pattern)
 
         def _last(s):
@@ -107,7 +111,7 @@ def _regex_metric(text: str, pattern: str, group: int) -> Optional[float]:
         else:
             last = _last(text)
         return _to_float(last.group(group)) if last else None
-    except (re.error, IndexError):
+    except (re.error, IndexError, TypeError, ValueError):
         return None
 
 
@@ -132,6 +136,31 @@ def _file_is_fresh(p: Path, since: Optional[float]) -> bool:
         return False
 
 
+# Ceiling on a HOST read of a CANDIDATE-written metric/prediction file. The stdout path is already
+# bounded (`max_output_bytes`) because unbounded host-RAM buffering is a DoS (sandbox.run_argv); the
+# file readers were NOT. Under the untrusted tier the candidate writes into its bind-mounted workdir,
+# so an adversarial multi-GB predictions.json / metrics file, slurped whole via read_text on the HOST,
+# OOM-kills the engine — not just the one node. A real metric line is a few bytes and even a large
+# held-out prediction set is tens of MB, so reject a file above this ceiling as pathological (fail the
+# NODE, not the run). Labels are host-held (trusted) and read separately, so this bounds only the
+# candidate's own output.
+_MAX_METRIC_FILE_BYTES = 256 * 1024 * 1024   # 256 MiB
+
+
+def _read_metric_file(p: Path) -> Optional[str]:
+    """Read a candidate-written metric/prediction file, size-bounded so a huge adversarial file cannot
+    OOM the host. Returns None if the file is missing, unreadable, or larger than _MAX_METRIC_FILE_BYTES.
+    The eval command has already exited before this runs, so stat().st_size is a stable, race-free gate
+    (no concurrent writer). utf-8-sig strips a UTF-8 BOM (common on Windows-written files) that would
+    otherwise make json.loads fail / a first-line regex miss."""
+    try:
+        if p.stat().st_size > _MAX_METRIC_FILE_BYTES:
+            return None
+        return p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return None
+
+
 def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
                 since: Optional[float] = None) -> Optional[float]:
     """Read the metric for one eval according to `spec` (an eval_spec['metric']). Built-in
@@ -146,7 +175,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
         return json_line_metric(stdout, spec.get("key", "metric"))
     if kind == "stdout_regex":
         pat = spec.get("pattern") or spec.get("key")   # key = tolerant fallback (composable authoring)
-        return _regex_metric(stdout, pat, int(spec.get("group", 1))) if pat else None
+        return _regex_metric(stdout, pat, spec.get("group", 1)) if pat else None
     if kind in ("file_json", "file_regex"):
         fp = spec.get("path")
         if not fp:
@@ -165,12 +194,12 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
             return None
         if not _file_is_fresh(p, since):
             return None                                 # stale prior-attempt file in a reused workdir
-        # utf-8-sig strips a UTF-8 BOM (common on Windows-written metric files) that would
-        # otherwise make json.loads fail / regex miss the first line.
-        text = p.read_text(encoding="utf-8-sig", errors="replace")
+        text = _read_metric_file(p)                      # size-bounded: a huge candidate file can't OOM the host
+        if text is None:
+            return None
         if kind == "file_regex":
             pat = spec.get("pattern") or spec.get("key")
-            return _regex_metric(text, pat, int(spec.get("group", 1))) if pat else None
+            return _regex_metric(text, pat, spec.get("group", 1)) if pat else None
         try:
             return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
         except json.JSONDecodeError:
@@ -220,8 +249,11 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
             # The candidate's predictions must be written by THIS eval — a stale predictions.json from a
             # prior attempt in a reused workdir could otherwise score as a perfect result (false promo).
             return None
+        preds_text = _read_metric_file(preds_path)      # candidate-controlled: size-bounded against host OOM
+        if preds_text is None:
+            return None
         try:
-            preds = json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
+            preds = json.loads(preds_text)
             labels = json.loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
         except (json.JSONDecodeError, OSError):
             return None
