@@ -134,17 +134,24 @@ def latest_intermediate_sample(log_tail: str, workdir, metric_spec: dict) -> Opt
 
 
 def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) -> Optional[list]:
-    """A bounded, downsampled per-resource curve ``[[resource, metric], ...]`` mined from a FULL eval
-    stdout at node_evaluated time (#7). The completed node's persisted ``stdout_tail`` keeps only the
-    last ~500 chars, so a sibling curve read from it has only the FINAL epochs — a live node stopped at
-    an EARLY resource coordinate then never finds same-resource peers. Persisting this durable curve lets
-    ``sibling_metrics_at_resource`` compare a fresh early sample against PAST EXPERIMENTS at the SAME
-    coordinate. Reuses the eval's own metric contract (the operator/Developer-declared ``resource_key``
-    + metric key); returns None when the task declares no ``resource_key`` or the kind isn't
-    ``stdout_json``. Sorted by resource; when ``max_points >= 2`` (the default 32) it downsamples to at
-    most ``max_points`` evenly-sampled distinct coordinates with both endpoints kept, so the event stays
-    small AND an early coordinate survives the downsample. ``max_points < 2`` disables downsampling
-    (every distinct coordinate is returned) — no caller passes that, it only guards the index math."""
+    """A bounded, downsampled per-resource curve ``[[resource, metric], ...]`` mined from the eval's
+    CAPTURED stdout at node_evaluated time (#7). That capture is run_argv's bounded ~64 KB tail (and, for
+    a staged eval, the final stage's output) — 128× the 500-char ``stdout_tail`` and enough early rungs
+    for typical logs, though a very verbose or multi-stage job can still lose its earliest coordinates.
+    The completed node's persisted ``stdout_tail`` keeps only the last ~500 chars, so a sibling curve read
+    from it has only the FINAL epochs — a live node stopped at an EARLY resource coordinate then never
+    finds same-resource peers. Persisting this durable curve lets ``sibling_metrics_at_resource`` compare
+    a fresh early sample against PAST EXPERIMENTS at the SAME coordinate. Reuses the eval's own metric
+    contract (the operator/Developer-declared ``resource_key`` + metric key); returns None when the task
+    declares no ``resource_key`` or the kind isn't ``stdout_json``.
+
+    Sorted by resource; when ``max_points >= 2`` (the default 32) and there are more distinct coordinates,
+    it keeps the EARLIEST ``max_points - 1`` coordinates verbatim plus the final endpoint. Early rungs are
+    both where an ASHA kill saves real compute AND where the live poller's early samples must land on a
+    coordinate the siblings actually persisted to accumulate the consecutive comparable ticks a kill needs
+    (#7 review) — uniform sampling dropped step 2/3/… so a progressing early run rarely found a peer; the
+    sparse late-middle rungs (lower kill value) are the ones dropped instead. ``max_points < 2`` disables
+    downsampling (every distinct coordinate is returned) — no caller passes that, it only guards the math."""
     if not stdout or not isinstance(metric_spec, dict):
         return None
     resource_key = _declared_resource_key(metric_spec)
@@ -163,13 +170,11 @@ def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) ->
         return None
     coords = sorted(by_resource)
     if max_points >= 2 and len(coords) > max_points:
-        # CODEX AGENT: the monitor requires an EXACT resource match and resets its grace streak whenever
-        # a coordinate is absent. Uniformly retaining 32 of 100 steps drops (for example) step 2, so a
-        # progressing live run generally cannot produce the three consecutive comparable ticks needed
-        # to kill. Persist deterministic ASHA rung coordinates and evaluate live samples at those same
-        # rungs instead of points the poller may never query.
-        step = (len(coords) - 1) / (max_points - 1)
-        keep = sorted({int(round(i * step)) for i in range(max_points)})
+        # Early-dense retention (#7 review): keep the first `max_points-1` coordinates verbatim + the last
+        # endpoint, NOT a uniform sample. The live poller's early steps are exactly where a same-resource
+        # peer must exist for the kill to accumulate consecutive comparable ticks (and where a kill saves
+        # the most compute); uniform sampling dropped those early rungs and made the kill near-unreachable.
+        keep = sorted(set(range(max_points - 1)) | {len(coords) - 1})
         coords = [coords[i] for i in keep]
     return [[r, by_resource[r]] for r in coords]
 
@@ -217,8 +222,8 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
     for node in promotion_eligible_nodes(state):
         if node.id == node_id:
             continue
-        # #7 (resolved): read the durable downsampled per-resource curve mined from the FULL stdout at
-        # node_evaluated (extract_resource_curve). The 500-char stdout_tail retains only each sibling's
+        # #7 (resolved): read the durable downsampled per-resource curve mined from the eval's captured
+        # stdout (~64 KB tail) at node_evaluated (extract_resource_curve). The 500-char stdout_tail retains only each sibling's
         # FINAL epochs, so a live node at an EARLY resource coordinate — the only time a kill saves
         # compute — used to find no same-resource peers, and asha_live_kill only bit once the node
         # already neared its siblings' endpoints. Fall back to the tail whenever the curve holds no value

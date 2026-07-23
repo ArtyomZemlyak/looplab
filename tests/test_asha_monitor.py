@@ -130,14 +130,14 @@ def test_extract_resource_curve_requires_a_declared_stdout_json_resource_key():
     assert extract_resource_curve(stdout, None) is None
 
 
-def test_extract_resource_curve_downsamples_but_keeps_endpoints():
-    # 100 distinct coordinates, cap 32 -> at most 32 points; the FIRST (earliest) and last survive so an
-    # early live sample still has a same-resource peer after the downsample.
+def test_extract_resource_curve_downsamples_early_dense_plus_endpoint():
+    # 100 distinct coordinates, cap 32 -> keep the EARLIEST 31 coordinates verbatim + the final endpoint
+    # (#7 review): early rungs are where an ASHA kill saves compute and where the live poller's early
+    # samples must find same-resource peers, so they are retained densely, not uniformly sampled.
     lines = "".join('{"recall": %f, "step": %d}\n' % (i / 100.0, i) for i in range(1, 101))
     spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
     curve = extract_resource_curve(lines, spec, max_points=32)
-    assert 2 <= len(curve) <= 32
-    assert curve[0][0] == 1.0 and curve[-1][0] == 100.0        # endpoints retained
+    assert [p[0] for p in curve] == [float(i) for i in range(1, 32)] + [100.0]  # steps 1..31 + endpoint
     assert curve == sorted(curve)                              # ascending by resource
     assert extract_resource_curve(lines, spec, max_points=1000) == [
         [float(i), i / 100.0] for i in range(1, 101)]          # no downsample when under the cap
@@ -155,8 +155,8 @@ def test_curve_metric_at_reads_the_exact_coordinate_only():
 def test_sibling_metrics_prefer_the_durable_curve_over_the_truncated_tail():
     # #7 core: the 500-char stdout_tail retains only each sibling's FINAL epoch (step 10). A live node at
     # an EARLY step (1) — the only time an ASHA kill actually saves compute — finds NO same-resource peer
-    # in those tails. The durable resource_curve, mined from the FULL stdout at node_evaluated, keeps the
-    # early coordinate, so the same-resource population is now discoverable. The curve is read first.
+    # in those tails. The durable resource_curve, mined from the eval's captured stdout (~64 KB tail) at
+    # node_evaluated, keeps the early coordinate, so the same-resource population is now discoverable.
     state = _fake_state(
         [0.90, 0.85, 0.80],
         tails=['{"recall": 0.90, "step": 10}\n',
@@ -193,6 +193,32 @@ def test_node_evaluated_folds_resource_curve_and_old_logs_default_none(tmp_path)
     # A pre-#7 node_evaluated carries no resource_curve -> reader default None (byte-identical replay).
     st_old = _log("no_curve.jsonl", {"node_id": 0, "metric": 0.9})
     assert st_old.nodes[0].resource_curve is None
+
+
+def test_node_evaluated_normalizes_untrusted_resource_curve(tmp_path):
+    # #7 review: Node assignment validation is off, so the fold must coerce untrusted `resource_curve`
+    # event data to at most 32 sorted/unique/finite [resource, metric] pairs (or None) — a corrupt log
+    # must never land a scalar / huge nested value on the Node that then rides snapshots.
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    def _fold(name, curve):
+        s = EventStore(tmp_path / name)
+        s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+        s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}}})
+        s.append("node_evaluated", {"node_id": 0, "metric": 0.9, "resource_curve": curve})
+        return fold(s.read_all()).nodes[0].resource_curve
+
+    assert _fold("scalar.jsonl", 5) is None                    # non-list -> None
+    assert _fold("str.jsonl", "boom") is None
+    assert _fold("dict.jsonl", {"1": 2}) is None
+    # malformed/short/non-finite entries dropped; valid pairs kept, sorted, last-write-wins per resource
+    assert _fold("mixed.jsonl", [["bad"], [10, 0.9], [1, 0.1], [1, 0.15], [None, 3],
+                                 [float("inf"), 0.5]]) == [[1.0, 0.15], [10.0, 0.9]]
+    # an oversized (corrupt) curve is bounded to <=32 coordinates with both endpoints kept
+    out = _fold("big.jsonl", [[i, i / 1000.0] for i in range(200)])
+    assert len(out) <= 32 and out[0][0] == 0.0 and out[-1][0] == 199.0
 
 
 # --------------------------------------------------------------------- asha_underperforming (pure)

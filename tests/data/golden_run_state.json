@@ -333,7 +333,6 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 53.054167369999995}\n",
@@ -386,7 +385,6 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 35.66064084999999}\n",
@@ -442,7 +440,6 @@
         "at_node": 2,
         "trigger": "cadence"
       },
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 8.51019194}\n",
@@ -500,7 +497,6 @@
         "at_node": 2,
         "trigger": "cadence"
       },
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 9.73679185}\n",
@@ -555,7 +551,6 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 17.17538701}\n",
@@ -613,7 +608,6 @@
         "at_node": 5,
         "trigger": "cadence"
       },
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 5.57026258}\n",
@@ -672,7 +666,6 @@
         "at_node": 5,
         "trigger": "cadence"
       },
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 6.688963449999999}\n",
@@ -727,7 +720,6 @@
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
-      "resource_curve": null,
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 4.482711760000001}\n",

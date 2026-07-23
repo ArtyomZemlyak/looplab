@@ -596,6 +596,31 @@ def _finite_metric(value):
     return float(value) if is_usable_metric(value) else None
 
 
+def _normalize_resource_curve(raw):
+    """Coerce untrusted node_evaluated `resource_curve` event data (#7 review) to at most 32 sorted,
+    unique, finite `[resource, metric]` pairs, or None. Node assignment validation is off, so a hand-
+    edited / corrupt / future log could otherwise land a scalar or an arbitrarily large nested value on
+    the Node despite the promised 32-point bound. Invalid entries are dropped; the same shape the writer
+    (`extract_resource_curve`) emits is reproduced so the ASHA reader sees a consistent bound either way."""
+    if not isinstance(raw, list):
+        return None
+    by_resource: dict[float, float] = {}
+    for entry in raw:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            continue
+        r = _finite_metric(entry[0])
+        v = _finite_metric(entry[1])
+        if r is not None and v is not None:
+            by_resource[r] = v
+    if not by_resource:
+        return None
+    coords = sorted(by_resource)
+    if len(coords) > 32:                 # corruption guard: keep both endpoints on the (invalid) overflow
+        step = (len(coords) - 1) / 31
+        coords = [coords[i] for i in sorted({int(round(i * step)) for i in range(32)})]
+    return [[r, by_resource[r]] for r in coords]
+
+
 def _charge_eval_seconds(st: RunState, kind: str, raw) -> None:
     """P1-2 budget buckets: add a coerced non-negative eval-seconds to the cumulative total AND to its
     category bucket (node|confirm). One helper so the total and the per-kind split can never drift."""
@@ -842,11 +867,9 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             # ASHA past-experiment curve (#7): a bounded [[resource, metric], ...] the ASHA watchdog
             # reads to find same-resource peers for an EARLY live sample (the 500-char stdout_tail keeps
             # only the final epochs). Reader-defaulted to None so pre-#7 logs fold byte-identically.
-            # CODEX AGENT: resource_curve is untrusted event data, and assignment validation is off.
-            # This raw value can be a scalar or an arbitrarily large/nested list despite Node's type and
-            # the promised 32-point bound, then rides every folded/API snapshot. Normalize to at most 32
-            # unique, sorted finite [resource, metric] pairs (or None) before mutating the node.
-            n.resource_curve = d.get("resource_curve")
+            # NORMALIZED (#7 review): assignment validation is off, so an untrusted/corrupt event could
+            # otherwise land a scalar or huge nested value here despite the 32-point bound; coerce it.
+            n.resource_curve = _normalize_resource_curve(d.get("resource_curve"))
             n.eval_seconds = d.get("eval_seconds")
             n.extra_metrics = normalize_extra_metrics(d.get("extra_metrics"))
             n.violations = d.get("violations", []) or []

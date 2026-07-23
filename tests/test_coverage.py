@@ -177,11 +177,30 @@ def test_coverage_snapshot_folds_as_audit_only(tmp_path):
 
 
 def test_already_covered_at_gate():
+    from looplab.core.models import Idea, Node
+    # The producer always calls this with n == len(state.nodes); build a consistent 3-node state so the
+    # tokenless snapshot's node-boundary check (a legacy row is live only at its own node count) holds.
     st = RunState()
+    st.nodes = {i: Node(id=i, operator="draft", idea=Idea(operator="draft", params={})) for i in range(3)}
     assert not Engine._already_covered_at(st, 3)
     st.coverage_snapshots.append({"at_node": 3})
     assert Engine._already_covered_at(st, 3)
     assert not Engine._already_covered_at(st, 6)
+
+
+def test_tokenless_snapshot_requires_node_boundary():
+    # #5 review: a legacy tokenless snapshot must ALSO match the current node count, else the shared
+    # reverse-scan (latest_live_snapshot) can revive an ancient node-1 snapshot as live coverage for a
+    # later untouched run (behind a newer stale receipt) — the tokened path already binds `at_node`.
+    from looplab.core.models import Idea, Node, NodeStatus
+    from looplab.search.coverage import snapshot_matches_analytics_projection
+    st = RunState(direction="max", goal="g")
+    st.nodes = {i: Node(id=i, operator="draft", status=NodeStatus.evaluated,
+                        idea=Idea(operator="draft", params={})) for i in range(1, 21)}   # 20 nodes
+    assert snapshot_matches_analytics_projection(st, {"at_node": 20}) is True       # untouched, matches
+    assert snapshot_matches_analytics_projection(st, {"at_node": 1}) is False       # ancient node-1 row
+    assert snapshot_matches_analytics_projection(st, {"themes": 3}) is False        # no at_node -> closed
+    assert snapshot_matches_analytics_projection(st, {"at_node": True}) is False    # bool != canonical int
 
 
 def test_same_node_count_abort_refreshes_flat_coverage_snapshot(tmp_path):

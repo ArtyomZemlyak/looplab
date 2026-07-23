@@ -1032,17 +1032,18 @@ class Node(BaseModel):
     # digest can feed it to the NEXT proposal instead of dropping it (signal-delivery, §1).
     triage_rationale: str = ""
     stdout_tail: str = ""
-    # ASHA past-experiment curve (#7): a bounded, downsampled `[[resource, metric], ...]` mined from
-    # the FULL eval stdout at node_evaluated (set only when the task declares a stdout_json
-    # `resource_key`). The 500-char `stdout_tail` retains only the FINAL epochs, so a live node stopped
-    # at an EARLY resource coordinate finds no same-resource peers there; this durable curve lets the
-    # ASHA watchdog compare a fresh early sample against past experiments at the SAME coordinate.
-    # Additive/reader-defaulted (None on old logs) so replay folds byte-identically.
-    # CODEX AGENT: this is engine-internal ASHA evidence, but a normal model dump includes all 32 points
-    # in every lightweight /state and SSE node frame although no UI consumer reads them. That adds
-    # O(nodes × curve) transfer/serialization to every live fold. Exclude it from public Node dumps and
-    # expose a bounded diagnostic projection only where an operator actually requests the curve.
-    resource_curve: Optional[list] = None
+    # ASHA past-experiment curve (#7): a bounded, downsampled `[[resource, metric], ...]` mined from the
+    # eval's CAPTURED stdout (the ~64 KB run tail — far larger than the 500-char `stdout_tail`, though for
+    # a very verbose or multi-stage job not the literal full stream) at node_evaluated, set only when the
+    # task declares a stdout_json `resource_key`. The 500-char `stdout_tail` retains only the FINAL
+    # epochs, so a live node stopped at an EARLY resource coordinate finds no same-resource peers there;
+    # this durable curve lets the ASHA watchdog compare a fresh early sample against past experiments at
+    # the SAME coordinate. Additive/reader-defaulted (None on old logs).
+    # EXCLUDED from the model dump (#7 review): engine-internal ASHA evidence the watchdog reads off the
+    # in-process fold — no UI/API consumer reads it, so serializing up to 32 points per node into every
+    # lightweight /state and SSE frame was pure O(nodes × curve) transfer. `exclude=True` keeps it off
+    # public dumps while the fold still populates the attribute (like `terminal_event_seq`).
+    resource_curve: Optional[list] = Field(default=None, exclude=True)
     # Multi-seed confirmation (I12): set by a node_confirmed event. When present,
     # best-selection ranks by confirmed_mean (the robust metric) instead of `metric`.
     confirmed_mean: Optional[float] = None
