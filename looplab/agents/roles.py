@@ -579,8 +579,9 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
-    open_hyps = [h for h in (state.hypotheses or {}).values()
-                 if h.status == "open" and h.evidence == []]
+    # 1 card = 1 hypothesis: read the single Card board directly (open, no evidence yet). Card fields
+    # shadow the old Hypothesis (seed_statement == statement, verdict == status, id/evidence identical).
+    open_hyps = [c for c in state.open_research_cards() if not c.evidence]
     if open_hyps:
         # FOREAGENT predict-before-execute (search/foresight.py): when the world model has ranked the
         # board by expected payoff (`hyp_order` = hypothesis ids best-first), surface the batch of
@@ -594,7 +595,7 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
         lines.append("Untested hypotheses on the board (registered by the operator or deep research"
                      + (", ordered by predicted payoff — best first" if hyp_order else "")
                      + " — none has evidence yet):")
-        lines.extend(f'- "{" ".join(h.statement.split())[:200]}"' for h in open_hyps[:5])
+        lines.extend(f'- "{" ".join(h.seed_statement.split())[:200]}"' for h in open_hyps[:5])
         lines.append("If your next experiment tests one of these, copy its statement EXACTLY "
                      "(verbatim, unchanged wording) into `hypothesis` so the evidence links to "
                      "the board card.")

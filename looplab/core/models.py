@@ -1974,6 +1974,20 @@ class RunState(BaseModel):
     def best(self) -> Optional[Node]:
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
 
+    def research_cards(self) -> list["Card"]:
+        """The single research board: canonical (non-merged-away) cards. `1 card = 1 hypothesis` —
+        each card carries the hypothesis fields (seed_statement == statement, verdict == status,
+        evidence, priority), so this replaces the removed `RunState.hypotheses` board for every consumer.
+        Merged aliases are already collapsed OUT of `self.cards`; this only drops any lingering
+        `merged_into` row for safety."""
+        return [c for c in self.cards.values() if c.merged_into is None]
+
+    def open_research_cards(self) -> list["Card"]:
+        """Research cards still OPEN for evidence (verdict 'open', not dropped) — the card equivalent of
+        the old `open` hypotheses fed to proposal prompts and foresight ranking."""
+        return [c for c in self.research_cards()
+                if c.verdict == "open" and c.status != "dropped"]
+
     def evaluated_nodes(self) -> list[Node]:
         # `not n.tombstoned` gates ALL downstream selection at the source: feasible_nodes/
         # breedable_nodes and the best-pick post-pass all read through here, so a logically-deleted

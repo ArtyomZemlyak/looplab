@@ -398,14 +398,15 @@ class ForesightPanelResearcher:
         open hypotheses or on abstain; the resulting node's `idea.hypothesis` is what's recorded, so
         replay never re-ranks."""
         self.last_hyp_priority = None
-        hyps = [h for h in (state.hypotheses or {}).values()
-                if getattr(h, "status", "") == "open" and not getattr(h, "evidence", None)]
+        # 1 card = 1 hypothesis: rank the open Card board directly (card.id best-first, read back by
+        # roles._state_brief). Card fields shadow the old Hypothesis (seed_statement, verdict, evidence).
+        hyps = [c for c in state.open_research_cards() if not c.evidence]
         if len(hyps) < 2:
             setattr(self.base, "_hyp_order", None)
             return
         r = self._rank(
                  verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
-                 ["Hypothesis: " + h.statement for h in hyps],
+                 ["Hypothesis: " + h.seed_statement for h in hyps],
                  goal=state.goal, direction=state.direction, kind="board")
         if r is None:
             setattr(self.base, "_hyp_order", None)

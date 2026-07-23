@@ -4,7 +4,7 @@ over structural/text ideas (the hypothesis panel the numeric surrogate is blind 
 from __future__ import annotations
 
 from looplab.agents.roles import _state_brief
-from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState,
+from looplab.core.models import (Card, Event, Hypothesis, Idea, Node, NodeStatus, RunState,
                                  hypothesis_id)
 from looplab.events.replay import fold
 from looplab.search.best_of_n import BestOfNDeveloper
@@ -220,7 +220,11 @@ def _state_with_open_hyps(statements):
     st = RunState(direction="min", goal="minimize loss")
     for s in statements:
         hid = hypothesis_id(s)
+        # 1 card = 1 hypothesis: cid == hid == hypothesis_id(s). Both boards populated during the 1a
+        # transition (consumers read cards; assertions still read the coexisting hypotheses board).
         st.hypotheses[hid] = Hypothesis(id=hid, statement=s, status="open", evidence=[])
+        st.cards[hid] = Card(id=hid, seed_statement=s, statement=s, verdict="open",
+                             status="proposed", evidence=[])
     return st
 
 

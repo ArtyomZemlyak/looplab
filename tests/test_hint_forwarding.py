@@ -24,7 +24,7 @@ import inspect
 
 from looplab.agents.roles import RESEARCHER_HINT_ATTRS
 from looplab.agents.unified_agent import UnifiedAgent
-from looplab.core.models import Hypothesis, Idea, RunState, hypothesis_id
+from looplab.core.models import Card, Hypothesis, Idea, RunState, hypothesis_id
 from looplab.search.foresight import ForesightPanelResearcher
 
 # The handles engine/foresight code uses for "the ACTIVE researcher" when stamping hints.
@@ -125,6 +125,9 @@ def test_hints_reach_the_inner_researcher_through_both_wrappers():
         hid = hypothesis_id(s)
         ids.append(hid)
         st.hypotheses[hid] = Hypothesis(id=hid, statement=s, status="open", evidence=[])
+        # 1 card = 1 hypothesis: foresight now ranks the open Card board (cid == hid).
+        st.cards[hid] = Card(id=hid, seed_statement=s, statement=s, verdict="open",
+                             status="proposed", evidence=[])
 
     # Engine-style: every hint lands on the OUTERMOST wrapper. `_hyp_order` is special — foresight
     # OWNS it (its board ranking overwrites whatever the loop stamped), so it gets no sentinel here;
