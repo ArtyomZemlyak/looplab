@@ -26,7 +26,14 @@ import re
 # submission write.
 _GRADER_PATTERNS = [
     r"\bimport\s+grader\b", r"\bfrom\s+grader\b", r"grader\._Y", r"\b(?-i:_Y)\b",
-    r"answer[_-]?key", r"test[_-]?labels", r"y[_-]?test\b.*read",
+    # `\b`-anchored so a bare SUBSTRING can't hard-gate an honest node (grader_access is HARD under
+    # trust_gate=gate): unanchored `answer[_-]?key` matched `answer_keyword`, and `test[_-]?labels`
+    # matched the ubiquitous Keras split `(test_images, test_labels) = mnist.load_data()` — a legitimate
+    # train-derived variable, not the held-out file — silently excluding an honest (maybe best) node from
+    # selection/breeding/confirmation. `answer_key` stays a name-tell (a rare honest name; `load(answer_key)`
+    # is a genuine key read), but `test_labels` must be a FILE reference (a `.<ext>` follows) because the
+    # bare name is a normal variable — reading `test_labels.csv` is the actual held-out-label cheat.
+    r"\banswer[_-]?key\b", r"\btest[_-]?labels\.[A-Za-z]", r"y[_-]?test\b.*read",
 ]
 # A READ of a solutions/solution CSV — a possible answer-key read. Matched POSITIVELY (the file as
 # the argument of an unambiguous READER), NOT by suppressing writes: write-suppression both
@@ -39,11 +46,15 @@ _GRADER_PATTERNS = [
 # quoted literal right after `open(`) are excluded. Still misses the rare `f="solutions.csv"; read(f)`
 # variable-path read — an accepted heuristic limit shared by every tell — but never mistakes a
 # submission write for a read.
+# `(?<![A-Za-z0-9])` before the filename token so a coincidental SUBSTRING (`resolutions.csv`,
+# `absolutions.csv`, `dissolutions.csv` — "resolution(s)" is a common data word) is NOT read as a
+# `solutions.csv` answer-key access and hard-gated. The boundary allows a path/quote prefix
+# (`data/solutions.csv`, `"solutions.csv"`) but rejects an alnum letter directly before "solutions".
 _SOL_CSV_READ = re.compile(
-    r"(?:read_csv|read_table|read_parquet|loadtxt|genfromtxt|np\.load|pd\.read\w*)\s*\([^)]*solutions?\.csv"
+    r"(?:read_csv|read_table|read_parquet|loadtxt|genfromtxt|np\.load|pd\.read\w*)\s*\([^)]*(?<![A-Za-z0-9])solutions?\.csv"
     # open(...) with the CSV as a quoted literal and NO write/append/exclusive mode (default 'r', or an
     # explicit read mode) — the `(?![wax])` lookahead after the opening mode quote rejects w/a/x.
-    r"|open\s*\(\s*['\"][^'\"]*solutions?\.csv['\"]\s*(?:,\s*(?:mode\s*=\s*)?['\"](?![wax])[^'\"]*['\"])?\s*\)",
+    r"|open\s*\(\s*['\"][^'\"]*(?<![A-Za-z0-9])solutions?\.csv['\"]\s*(?:,\s*(?:mode\s*=\s*)?['\"](?![wax])[^'\"]*['\"])?\s*\)",
     re.IGNORECASE)
 # The two IMPORT tells, split out so a task whose eval contract SANCTIONS the import can waive
 # exactly them: the in-workdir mlebench brief MANDATES `from grader import score` (the task ships
