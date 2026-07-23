@@ -173,9 +173,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   GPU-owning Run may wait behind the conservative pool-wide host lease. The UI shows the configured
   request, not a live allocation or queue position. Dropping a Card is
   the explicit stop-now affordance for its matching in-flight eval; engine/freshness drops still burn
-  to a valid terminal result. An exact empty Card
-  projection keeps the legacy **Hypotheses** add/abandon board as a compatibility fallback for old or
-  not-yet-seeded runs.
+  to a valid terminal result. The Card board is the single research board (1 card = 1 hypothesis); the
+  operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
+  events that seed and update cards.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and

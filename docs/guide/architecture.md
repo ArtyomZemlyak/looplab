@@ -26,7 +26,7 @@ authoritative for replayable `RunState`, not for every value shown in the produc
 A boxes-and-arrows flowchart of one turn of the engine and its main adjacent systems. Read the top row
 left→right: **Propose → Novelty stage → Implement → Evaluate → Score · Trust → Refine**, then loop.
 Under each stage sit its detail boxes (the memory funnel under Propose, the trust/confirm stack under
-Score, …); the **Card lifecycle board** (with a legacy Hypotheses fallback), **cross-run memory**
+Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run memory**
 (write → hygiene → the five tiers) and the
 **event spine** hang below. Colour = which agent acts.
 
@@ -43,8 +43,9 @@ Score, …); the **Card lifecycle board** (with a legacy Hypotheses fallback), *
     **Solid teal arrows** are the main loop; **thin dashed arrows** are feedback / memory reads &
     writes. Two edges break the circle: a **repair ↺** loop (a crash/timeout is fed back with its
     stderr, fixed in place) and a **merge** branch (two strong lineages fused into one multi-parent
-    child). The **hypothesis board** is *derived on every fold* — beliefs are deduped (exact hash +
-    an agentic paraphrase merge), prioritized (foresight), and tracked to a verdict. The base
+    child). The **research board** (cards; 1 card = 1 hypothesis) is *derived on every fold* — beliefs
+    are deduped (exact hash + an agentic paraphrase merge), prioritized (foresight), and tracked to a
+    verdict. The base
     cross-run memory paths and reflection priors are **on by default** (`~/.looplab/memory` +
     `~/.looplab/knowledge`). Product `Settings` also enable the Part-IV concept, advisory and
     structured-claim reads by default; only callers that construct bare `EngineOptions` directly
@@ -75,8 +76,8 @@ Score, …); the **Card lifecycle board** (with a legacy Hypotheses fallback), *
 | Card model · replay/public projection · selection | `core/models.py`, `events/replay.py`, `serve/public_cards.py`, `search/card_selection.py` |
 | Resource admission · GPU lifecycle reservations | `engine/resources.py`, `core/hardware.py` |
 | Speculative Card producer/consumer · freshness/quality gates | `engine/speculation.py`, `search/speculation_quality.py`, `search/speculation_calibration.py` |
-| Foresight (hypothesis prioritization, predict-before-execute) | `search/foresight.py` |
-| Hybrid retrieval + agent-decided merge (lessons & hypothesis board) | `search/hybrid_merge.py` |
+| Foresight (belief-card prioritization, predict-before-execute) | `search/foresight.py` |
+| Hybrid retrieval + agent-decided merge (lessons & Card belief board) | `search/hybrid_merge.py` |
 | Search policies · operators | `search/policy.py`, `search/operators.py` |
 | Part IV/V concept materialization · graph · bounded frame | `core/concepts.py`, `search/concept_projection.py`, `search/concept_graph.py`, `serve/concept_frame.py` |
 | Repo Developer: env-inspector + auto-validate | `tools/env_inspect.py`, `adapters/repo_write_tools.py` (re-exported via `repo_developer.py`) |

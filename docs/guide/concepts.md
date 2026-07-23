@@ -706,7 +706,7 @@ result of each run is retained as a **case** (retain-on-improvement); at run end
 **lessons** (good *and* bad, with a verdict + evidence count), and reusable **skills** — all stamped
 with a task fingerprint and matched into the next similar run's proposal prompt. Duplicate lessons
 are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge pass); the in-run
-**hypothesis board** is deduped the same way and prioritized by foresight. See
+**research board** (cards; 1 card = 1 hypothesis) is deduped the same way and prioritized by foresight. See
 **[Memory & knowledge](memory.md)** for the full tier-by-tier breakdown.
 
 This shipped lesson/case memory should not be confused with the complete **portfolio research index**.

@@ -385,7 +385,7 @@ looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5] [--offline] [--model 
 
 ## `board-dedup`
 
-PART IV D4 (§21.5) read-only analytic. Tags the hypothesis board and surfaces the dominant **within-concept**
+PART IV D4 (§21.5) read-only analytic. Tags the Card belief board (1 card = 1 hypothesis) and surfaces the dominant **within-concept**
 redundancy (merge aggressively — e.g. the DCL cluster) plus **cross-branch** look-alike pairs a blind
 lexical/vector merge would wrongly collapse (keep distinct). The LLM builds/tags the graph by default;
 `--offline` forces the deterministic heuristic. Read-only; merges nothing.
@@ -396,7 +396,7 @@ looplab board-dedup RUN_DIR [--task-type NAME] [--offline] [--model ID]
 
 | Option | Default | Description |
 |---|---|---|
-| `RUN_DIR` | *(required)* | Run directory whose hypothesis board to analyze |
+| `RUN_DIR` | *(required)* | Run directory whose Card belief board to analyze |
 | `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
 | `--offline` | off | Do not call the LLM; use deterministic graph and hypothesis tags |
 | `--model ID` | configured model | Override the model used for the agentic build/tag pass |

@@ -26,7 +26,7 @@
 <div class="head">
   <div class="eyebrow">LoopLab · core process capability map</div>
   <h1>The core loop — defaults and optional paths</h1>
-  <p class="lede">Read the top row left→right: one node is proposed → passes the novelty stage <em>(shipped mode: LLM when a client is available)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the Card lifecycle board (with a legacy Hypotheses fallback), cross-run memory and the event spine hang below. Numbers can be caps, thresholds or cadences. Important status copy calls out selected default, opt-in and off paths; configuration remains authoritative.</p>
+  <p class="lede">Read the top row left→right: one node is proposed → passes the novelty stage <em>(shipped mode: LLM when a client is available)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the Card lifecycle board (1 card = 1 hypothesis), cross-run memory and the event spine hang below. Numbers can be caps, thresholds or cadences. Important status copy calls out selected default, opt-in and off paths; configuration remains authoritative.</p>
   <div class="legend">
     <span class="lg"><span class="sw" style="background:var(--r)"></span>Researcher</span>
     <span class="lg"><span class="sw" style="background:var(--d)"></span>Developer</span>
@@ -80,7 +80,7 @@ stack(40,330,DY,[
  {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","model hypothesis or stats fallback (≤700c)"]},
  {id:"f_less",h:108,t:"② Cross-run evidence",tag:"mixed defaults",c:C.mem,sub:["reflection lessons/meta-notes on with memory","concept/advisory/structured claims: product ON · bare EngineOptions off","direction-normalized concept profit is advisory (rank sign, not causal)","direction + exact-task / strict goal for lessons/capsules","rejected claims never steer prompts"]},
  {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
- {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
+ {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open cards ×5 (foresight order)"]},
  {id:"f_kb",h:56,t:"⑤ KB / Memora",tag:"k=3",c:C.mem,sub:["kb_search 3 + anchor-expand 3 · case 3"]},
  {id:"f_tools",h:80,t:"⑥ Mid-loop read tools",tag:"R",c:C.r,sub:["RunTools · DataTools · KnowledgeTools · AllRunsTools","concept tree·nodes·delta + cross_run_concept_map","list/read experiments·code·logs — this + every run"]},
 ]);
@@ -130,7 +130,7 @@ stack(1760,300,DY,[
 ]);
 // CROSS-CUTTING (right column)
 stack(2100,360,DY,[
- {id:"deepres",h:132,t:"Deep Researcher",tag:"LLM · every 3",c:C.dr,sub:["stage absent without an LLM client","tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · REPEATS on an adaptive timer for the whole window (dedup + converge-backoff)","merges the open hypothesis board mid-eval only outside Card queue selection (concurrent_consolidate)","memo: summary·findings·claims·directions×5","check claimed support against cited evidence","each direction → open hypothesis"]},
+ {id:"deepres",h:132,t:"Deep Researcher",tag:"LLM · every 3",c:C.dr,sub:["stage absent without an LLM client","tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · REPEATS on an adaptive timer for the whole window (dedup + converge-backoff)","merges the open Card belief board mid-eval only outside Card queue selection (concurrent_consolidate)","memo: summary·findings·claims·directions×5","check claimed support against cited evidence","each direction → open card"]},
  {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: concept-axes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","allocates eval width + LLM total / named lanes","off | rule | llm | agent","no client → deterministic rule fallback","agent_control allow-list per role"]},
  {id:"concept",h:168,t:"Concept graph (Part IV/V)",tag:"mixed defaults",c:C.s,sub:["run_concepts base + explicit full|delta Idea authoring → folded effective membership","bounded consolidation · mode/delta/rename corruption → receipt","tagger receipts: classifier evidence | operator/offline display | authored claim","concept_pivot: ON · coverage every concept_retag_every=30 → uncovered-region hint","graded_novelty: ON · L4 same-dir-new-impl / L5 wrongly-abandoned","typed concept_edge lenses + current co-occurrence → bounded /concepts frame"]},
  {id:"concept_ops",h:132,t:"Concept edits · governance",tag:"durable",c:C.s,sub:["operator retag/set-base intent → generation fence → concept_tag_edited/run_concepts","fold stamps operator provenance; explicit [] stays untagged","Assistant ConceptGovernanceTools: merge · purge/unpurge · split","approval binds normalized payload + revision; ledger CAS serializes mutation","read tools: concept_* in-run · cross_run_concept_map portfolio"]},
@@ -168,7 +168,7 @@ box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + d
 box("mC",672,TY,320,108,"C · Cross-run evidence","cross-run",C.mem,["lessons · capsules · v3 claims + producer/read-health receipts","alias/split/tombstone taxonomy ledger with global revision","stewards @finalize: proposals only","operator CLI / approved Assistant applies governed mutations"]);
 box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · memory/cases.jsonl · abstraction+anchors"]);
 box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
-box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
+box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → cards · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
 
 /* ============ EVENT SPINE (row y≈1480) ============ */
 box("spine",40,1480,2100,98,"THE EVENT SPINE","",C.sig,["domain/control event → serialized append → events.jsonl → replay.fold → RunState","concept path: run_concepts · concept_tag_edited · node_concepts · concept_edge","one live engine · deterministic RunState fold · traces/snapshots/memory retain explicit sidecars"]);
@@ -210,12 +210,12 @@ edge("evaluate","b","e_box","t",{c:C.ev,thin:1});
 edge("score","b","t_rh","t",{c:C.trust,thin:1});
 edge("refine","b","r_gt","t",{c:C.r,thin:1});
 // cross-cutting into loop
-edge("deepres","l","kanban","r",{c:C.dr,dash:1,label:"+ hypotheses"});
+edge("deepres","l","kanban","r",{c:C.dr,dash:1,label:"+ cards"});
 edge("deepres","t","evaluate","b",{c:C.dr,dash:1,thin:1,label:"overlap"});
 edge("strat","t","refine","b",{c:C.s,dash:1,thin:1,label:"retune"});
 edge("boss","b","concept_ops","t",{c:C.s,dash:1,thin:1,label:"retag / govern",arc:120});
 edge("concept_ops","t","concept","b",{c:C.s,thin:1,label:"folded concepts"});
-// hypothesis pipeline (propose feeds it down the LEFT margin to skirt the read funnel)
+// belief-card pipeline (propose states a belief that seeds a card; feeds down the LEFT margin to skirt the read funnel)
 edge("propose","l","h_state","l",{c:C.r,thin:1,dash:1,label:"states a belief",arc:30});
 edge("h_state","r","h_dedup","l",{c:C.r});
 edge("h_dedup","r","h_prio","l",{c:C.r});
