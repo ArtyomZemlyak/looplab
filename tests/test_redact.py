@@ -115,6 +115,25 @@ def test_short_quoted_and_authorization_credentials_are_fully_redacted():
         assert secret not in persisted and "***" in persisted
 
 
+def test_fat_arrow_secret_assignment_is_fully_masked():
+    # Regression: the assignment operator once accepted only `:`/`=`, so a fat-arrow (`secret => value`,
+    # Ruby/JS/Perl hashrocket) let `[:=]` consume just the `=`; the value class then captured the lone
+    # `>` and the real credential after the arrow leaked verbatim — a fail-OPEN in a security redactor.
+    for raw in ("secret => hunter2tok", "api_key => abc123def", "password => letmein",
+                "TOKEN =>topsecret", "access_key => 'quoted secret'"):
+        out = redact_secrets(raw, entropy=False)
+        leaked = raw.split("=>", 1)[1].strip().strip("'")
+        assert leaked not in out and "***" in out, (raw, out)
+
+
+def test_fat_arrow_does_not_overmask_non_secret_keys():
+    # The masking callbacks gate on `is_secret_key_name`, so a non-secret fat-arrow is left intact and a
+    # `>=` comparison is never treated as an assignment.
+    assert redact_secrets("count => 42", entropy=False) == "count => 42"
+    assert redact_secrets("width >= 1024", entropy=False) == "width >= 1024"
+    assert redact_secrets("tokenizer => gpt2", entropy=False) == "tokenizer => gpt2"
+
+
 def test_compound_key_scanner_handles_large_nonsecret_input_without_backtracking_blowup():
     raw = "ordinary_identifier=" + "x" * 100_000 + " password=z"
     persisted = redact_persisted_text(raw, max_chars=110_000, entropy=False)

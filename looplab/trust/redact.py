@@ -24,7 +24,15 @@ _SECRET_KEY_RE = re.compile(
     r"(?:api[_-]?key|secret|access[_-]?key|token|password|passwd|credential)",
     re.IGNORECASE,
 )
-_ASSIGN_PREFIX = r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(['\"]?\s*[:=]\s*)"
+# The assignment operator accepts a fat-arrow (`secret => value`, Ruby/JS/Perl hashrocket) as well as
+# `:`/`=`. Without the `=>` alternative, `[:=]` consumed only the `=`, the value class then captured the
+# lone `>` (a space stops it), and the real credential after the arrow leaked verbatim — a fail-OPEN in
+# a security redactor that carries free-form subprocess logs. `=>` is tried first so the operator spans
+# the whole arrow and the value class starts at the credential. Over-redaction is not a risk: both
+# callbacks gate masking on `is_secret_key_name(group1)`, so a non-secret arrow (`x => y`) is untouched,
+# and `a >= b` never matches (the char after the operator slot is `>`, not `:`/`=`, and `=>` needs `=`
+# then `>`).
+_ASSIGN_PREFIX = r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)(['\"]?\s*(?:=>|[:=])\s*)"
 
 
 def is_secret_key_name(value) -> bool:
