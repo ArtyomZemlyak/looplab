@@ -58,8 +58,9 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None) -> li
         # `hardcoded and not computed` is False and the hard-coded-metric cheat slips the HARD
         # `critic:hardcoded_metric` gate (one throwaway `symmetric = x` line defeats it). The quoted
         # `hardcoded`/second-alt regexes already require quotes around `metric`, so only this bare form
-        # needs the boundary. `(?<![A-Za-z0-9_])` still admits every legit computed form — `{"metric":
-        # score}`, a bare `metric = score`, `result["metric"] = value`.
+        # needs the boundary. Together the two alternatives still admit every legit computed form: the
+        # anchored first alt matches `{"metric": score}` and a bare `metric = score`, and the second alt
+        # matches the bracket-assignment `result["metric"] = value`.
         computed = re.search(r'(?<![A-Za-z0-9_])["\']?metric["\']?\s*[:=]\s*[A-Za-z_]', code) or \
             re.search(r'\[\s*["\']metric["\']\s*\]\s*=\s*[A-Za-z_]', code)
         if hardcoded and not computed:

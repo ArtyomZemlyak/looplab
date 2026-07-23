@@ -841,9 +841,9 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 # can rescue a train+eval that printed its metric then hung on teardown (a wedged CUDA
                 # finalize, a distributed barrier) and was tree-killed by the stall watchdog. Mirror it
                 # for the FINAL (metric-producing) stage — an earlier stage's failure has no metric to
-                # salvage, and the read is only attempted when it wasn't a hard timeout, matching
-                # read_metric's `if not to` guard. A plain crash reads a value too but stays unsalvaged
-                # (stalled False, exit!=0), exactly as in single-command mode.
+                # salvage, and the read is only attempted when it wasn't a hard timeout, via the call-site
+                # `not to` gate below (the same gate the single-command path uses). A plain crash reads a
+                # value too but stays unsalvaged (stalled False, exit!=0), exactly as in single-command mode.
                 _salvaged = (read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started)
                              if (_i == len(stages) - 1 and not to) else None)
                 return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",

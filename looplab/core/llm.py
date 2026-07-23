@@ -218,11 +218,12 @@ class OpenAICompatibleClient:
         # `header_timeout` bounds the TCP/TLS CONNECT (httpx `connect=`, see `_new_sdk`), so a connection
         # that never ESTABLISHES fails over fast instead of waiting the full idle `timeout`. It ALSO bounds
         # the wait for HTTP response HEADERS on the STREAM path: `create(stream=True)` runs under a wall-
-        # clock worker-thread guard (`_bounded_create`, join = header_timeout + up to header_timeout of
-        # slack), so an endpoint that completes TLS then sends no headers is failed over near `header_timeout`
-        # — not after the full idle `timeout` (the black-holed-request hang this used to have, when the
-        # header-read was left to httpx's `read` timeout). Once headers arrive, `_accumulate_stream` reuses
-        # `header_timeout` as the first-SSE-EVENT budget (and the idle `timeout` for the inter-token body).
+        # clock worker-thread guard (`_bounded_create`, join = header_timeout + min(10s, header_timeout) of
+        # slack), so an endpoint that completes TLS then sends no headers is failed over within ~10s of
+        # `header_timeout` — not after the full idle `timeout` (the black-holed-request hang this used to
+        # have, when the header-read was left to httpx's `read` timeout). Once headers arrive,
+        # `_accumulate_stream` reuses `header_timeout` as the first-SSE-EVENT budget (and the idle
+        # `timeout` for the inter-token body).
         # The bounded streaming Response is created in the worker and iterated on the caller thread: a sync-
         # httpx sequential handoff, no concurrent access.
         _ht = DEFAULT_HEADER_TIMEOUT_S if header_timeout is None else float(header_timeout)
@@ -316,10 +317,11 @@ class OpenAICompatibleClient:
             # an endpoint that completes TLS then never sends response HEADERS would block create() up to
             # the idle `timeout` (~180s) before failover — the "black-holed request" this design claims to
             # fail over fast. Run create() under the SAME wall-clock guard `_nonstream_bounded` uses, keyed
-            # on the header budget (header_timeout + up to header_timeout of slack, so a small header_timeout
-            # still fails over fast); it returns as soon as headers arrive, and `_accumulate_stream`'s idle
-            # watchdog then governs the body. Iterating that streaming Response on THIS thread after a
-            # worker thread created it is safe: sync-httpx sequential handoff, no concurrent access.
+            # on the header budget (header_timeout + min(10s, header_timeout) of slack, so a small
+            # header_timeout still fails over fast); it returns as soon as headers arrive, and
+            # `_accumulate_stream`'s idle watchdog then governs the body. Iterating that streaming Response
+            # on THIS thread after a worker thread created it is safe: sync-httpx sequential handoff, no
+            # concurrent access.
             header_join = self.header_timeout + min(10.0, self.header_timeout)
             return self._accumulate_stream(self._bounded_create(kwargs, header_join),
                                            self.timeout, self.header_timeout)
