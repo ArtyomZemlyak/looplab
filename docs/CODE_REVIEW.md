@@ -5,12 +5,18 @@ its head `99c39b08` descends from stale `9aaa0485` while master is `60e9a5f3`, a
 deletes the Card verdict chip, the authoritative `+ Add` control, and the current cards-only review
 annotation. Its thirteen substantive reliability/security/performance findings were independently
 rechecked and already exist on master at their authority boundaries, so copying the PR would add no
-finding while regressing newer UI work. This pass additionally confirms that (a) Card abandon remains
-available only in the unreachable legacy fallback, (b) `grouped_beliefs()` can merge the known
-short-hash collision pair despite replay's full-digest protection, and (c) the early-dense ASHA curve
-fix still leaves every mid/late coordinate incomparable under exact-rung lookup. The current Part IV/V
-release-blocker ledger is maintained in `23-hypothesis-card-kanban-2026-07-20.md`; this historical
-whole-repository review remains below unchanged. -->
+finding while regressing newer UI work. This pass additionally confirmed (at that time) that (a) Card
+abandon remained available only in the unreachable legacy fallback, (b) `grouped_beliefs()` could merge
+the known short-hash collision pair despite replay's full-digest protection, and (c) the early-dense
+ASHA curve fix still left every mid/late coordinate incomparable under exact-rung lookup.
+     RESOLVED on master since this addendum: (a) an "Abandon belief" control now lives on the
+authoritative `_CardKanbanCard` (19e1415); (b) `grouped_beliefs()` keys by the full
+`hypothesis_statement_digest`, not the short hash, so the collision pair stays two distinct beliefs
+(cc85059); and (c) `extract_resource_curve` + the live poller now snap to a SHARED geometric rung
+schedule (`_resource_rung`), so a live sample deep in the run compares against sibling checkpoints at
+its rung across the whole run, not only the early window (f6054f1). The current Part IV/V release-blocker
+ledger is maintained in `23-hypothesis-card-kanban-2026-07-20.md`; this historical whole-repository
+review remains below unchanged. -->
 
 **Date:** 2026-06-23 · **Scope:** entire repository (not a single diff) · **Method:** 9 parallel
 read-only review passes (6 backend subsystems + working-tree diff + test suite + remaining UI +
