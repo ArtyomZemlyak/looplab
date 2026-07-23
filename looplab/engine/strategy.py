@@ -921,14 +921,17 @@ class StrategyCadenceMixin:
                     stale_h = set(stale_tagged_nodes(list(known_h), h_at_vocab,
                                                      growth=_RETAG_GROWTH, cap=_RETAG_CAP))
                     tagged_this_cadence = 0
-                    for h in (state.hypotheses or {}).values():
-                        if not getattr(h, "statement", ""):
+                    # 1 card = 1 hypothesis: tag the single Card board. `seed_statement` is the immutable
+                    # belief text; `id` is the same hash/native key the `hypothesis_concepts` cache is keyed
+                    # by (card.id == the old hypothesis id for a research card), so the cache join holds.
+                    for h in state.research_cards():
+                        if not getattr(h, "seed_statement", ""):
                             continue
                         if h.id in known_h and h.id not in stale_h:   # already tagged & fresh -> skip
                             continue
                         if tagged_this_cadence >= _HYP_TAG_CAP:
                             break
-                        htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
+                        htags = sorted(tag_text_llm(h.seed_statement, graph, client, parser=parser,
                                                     allow_plural=True))
                         self.store.append(EV_HYPOTHESIS_CONCEPTS, {"hyp_id": str(h.id), "concepts": htags,
                                                                    "mode": mode, "at_vocab": v_now})

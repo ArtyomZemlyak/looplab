@@ -1,6 +1,7 @@
 """Taxonomy-aware hypothesis-board dedup analysis (PART IV D4, §21.5/§21.12 — Phase 1d, offline analytic).
 
-**Why this exists.** The hypothesis board (`RunState.hypotheses`) mirrors the node narrowing: measured on
+**Why this exists.** The research board (`RunState.research_cards()`, the single Card board — 1 card =
+1 hypothesis) mirrors the node narrowing: measured on
 the `rubertlite` run, **63 of 107 hypotheses touch `loss/decoupled-contrastive`** and 39 touch temperature
 (§21.12). Blind board consolidation (`hybrid_merge`) is either too lax (redundant siblings survive) or,
 tuned stricter, risks collapsing legitimate cross-branch variants. The right control is NOT a single
@@ -46,7 +47,10 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
       false_merge_risks- [{a, b, similarity}] lexically/vector-similar but concept-DISJOINT pairs (keep-distinct)
       false_merge_count- len(false_merge_risks)
     """
-    hyps = list((state.hypotheses or {}).values())
+    # 1 card = 1 hypothesis: analyse the single Card board. `seed_statement` is the immutable belief
+    # text, and card.id == the old hypothesis id for a research card, so the `hypothesis_concepts` cache
+    # keyed by that id still joins. Native work-item cards (no hypothesis twin) now analyse too.
+    hyps = list(state.research_cards())
     n = len(hyps)
     if n == 0:
         return {"n_hypotheses": 0, "tagged": 0, "untagged": 0, "concept_clusters": [],
@@ -59,7 +63,7 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
         # at the cadence). No cache -> the deterministic alias tagger, exactly as before.
         cache = getattr(state, "hypothesis_concepts", None) or {}
         tags = {h.id: (frozenset(cache[h.id]) if h.id in cache
-                       else tag_text(h.statement, graph, allow_plural=True)) for h in hyps}
+                       else tag_text(h.seed_statement, graph, allow_plural=True)) for h in hyps}
 
     # within-concept clusters (a hypothesis with several concepts appears in each) — the merge groups
     by_concept: dict[str, list[str]] = defaultdict(list)
@@ -88,21 +92,21 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
     risks: list[dict] = []
     try:
         from looplab.search.hybrid_merge import HybridRetriever
-        statements = [h.statement for h in hyps]
+        statements = [h.seed_statement for h in hyps]
         retr = HybridRetriever(statements, embed=embed)
         seen: set[tuple[int, int]] = set()
         # Collect EVERY disjoint-concept candidate pair (bounded: k=5 candidates × n hypotheses), then
         # sort by similarity and cap — truncating during collection would keep the first-DISCOVERED pairs
         # (ascending hypothesis index), not the highest-similarity ones the report is meant to surface.
         for i, h in enumerate(hyps):
-            for j, score in retr.candidates(h.statement, k=5, exclude=i, min_signals=min_signals):
+            for j, score in retr.candidates(h.seed_statement, k=5, exclude=i, min_signals=min_signals):
                 pair = (min(i, j), max(i, j))
                 if pair in seen:
                     continue
                 seen.add(pair)
                 ci, cj = tags.get(hyps[i].id, frozenset()), tags.get(hyps[j].id, frozenset())
                 if ci and cj and not (ci & cj):     # similar text, disjoint concepts -> keep distinct
-                    risks.append({"a": hyps[i].statement, "b": hyps[j].statement,
+                    risks.append({"a": hyps[i].seed_statement, "b": hyps[j].seed_statement,
                                   "similarity": round(score, 4)})
     except Exception:  # noqa: BLE001 — the retriever is optional; the concept analysis stands alone
         pass

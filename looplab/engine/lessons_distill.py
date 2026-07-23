@@ -145,12 +145,15 @@ class LessonDistillMixin:
         from looplab.engine.memory import write_auto_skill
         sk_dir = base / "skills"
         skills: list[str] = []
-        for h in (final.hypotheses or {}).values():
-            if h.status == "supported" and (h.best_delta or 0) > 0:
+        # 1 card = 1 hypothesis: distil skills from the single Card board. `verdict` is the research
+        # status (byte-identical to the old Hypothesis.status via `_evidence_verdict`); `seed_statement`
+        # is the immutable belief text (the stable skill identity, unaffected by an operator display edit).
+        for h in final.research_cards():
+            if h.verdict == "supported" and (h.best_delta or 0) > 0:
                 ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
-                write_auto_skill(sk_dir, h.statement,
+                write_auto_skill(sk_dir, h.seed_statement,
                                  self._e._distill_skill_body(final, h, ev), fp, final.task_id)
-                skills.append(h.statement)
+                skills.append(h.seed_statement)
 
         # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
         # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
@@ -233,10 +236,12 @@ class LessonDistillMixin:
         # The full experimental record — every RESOLVED hypothesis with its outcome + Δ — so the LLM can
         # CONSOLIDATE many trials of the SAME theme (e.g. every temperature experiment) into ONE lesson,
         # instead of the old one-verbatim-hypothesis-per-lesson dump that filled the store with near-dupes.
-        hyps = [f"[{h.status}{f' Δ{h.best_delta:+.4g}' if isinstance(h.best_delta, (int, float)) else ''}] "
-                f"{' '.join((h.statement or '').split())[:160]}"
-                for h in (final.hypotheses or {}).values()
-                if h.status in ("supported", "tested", "abandoned") and h.statement]
+        # 1 card = 1 hypothesis: consolidate over the single Card board. `verdict` == the old
+        # Hypothesis.status (RESOLVED lanes only); `seed_statement` is the immutable belief text.
+        hyps = [f"[{h.verdict}{f' Δ{h.best_delta:+.4g}' if isinstance(h.best_delta, (int, float)) else ''}] "
+                f"{' '.join((h.seed_statement or '').split())[:160]}"
+                for h in final.research_cards()
+                if h.verdict in ("supported", "tested", "abandoned") and h.seed_statement]
         prompt = ("Distil reusable LESSONS from a finished ML experiment run, to guide FUTURE runs on "
                   f"SIMILAR tasks.\nTask: {final.goal}\nWhat worked (best first):\n" + "\n".join(rows) +
                   ("\nWhat failed:\n" + "\n".join(fails) if fails else "") +
@@ -286,7 +291,11 @@ class LessonDistillMixin:
                         key=lambda n: (n.metric if n.metric is not None else -1e18), default=None)
         if client is None or code_node is None or not code_node.code:
             return base
-        prompt = (f"A technique that worked: {h.statement}\n\nThe winning solution's code:\n"
+        # 1 card = 1 hypothesis: prefer the immutable `seed_statement` (matches the skill title the
+        # caller writes) so an operator display edit can't drift the technique belief; fall back to
+        # `statement` for any legacy caller that still passes a bare hypothesis-shaped object.
+        belief = getattr(h, "seed_statement", "") or getattr(h, "statement", "")
+        prompt = (f"A technique that worked: {belief}\n\nThe winning solution's code:\n"
                   f"```\n{code_node.code[:4000]}\n```\n\n"
                   "Write a SHORT, REUSABLE skill card for THIS technique — not the whole script. Include:\n"
                   "1. The technique in 1-2 sentences (what it is + why it helps).\n"

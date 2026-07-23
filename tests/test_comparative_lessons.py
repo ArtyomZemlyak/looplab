@@ -567,7 +567,7 @@ def test_lessons_are_llm_only_no_templates_and_consolidate(tmp_path, monkeypatch
     # must NOT get (a) a templated "N node(s) failed with reason X" line, nor (b) the Researcher's raw
     # hypothesis statements dumped verbatim — the LLM reflection is fed the full hypothesis+outcome+Δ
     # record so it CONSOLIDATES same-theme trials into one lesson instead.
-    from looplab.core.models import Hypothesis
+    from looplab.core.models import Card
     eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(tmp_path / "mem"),
                   comparative_lessons=False)
     st = _state([
@@ -577,13 +577,18 @@ def test_lessons_are_llm_only_no_templates_and_consolidate(tmp_path, monkeypatch
         _node(3, status=NodeStatus.failed, metric=None, error_reason="oom", op="improve"),
     ])
     st.best_node_id = 1                         # best() reads the folded winner id (set by hand here)
-    # two same-theme hypotheses (verbatim, run-on) that must NOT appear as their own lesson rows
-    st.hypotheses = {
-        "h1": Hypothesis(id="h1", statement="VERBATIM_TEMP_A lowering temperature 0.05->0.02 helped and "
-                         "also weight decay and also batch size all combined in one run-on", status="tested",
-                         best_delta=0.01, evidence=[1]),
-        "h2": Hypothesis(id="h2", statement="VERBATIM_TEMP_B Experiment A: patch train.py temperature 0.01",
-                         status="supported", best_delta=0.02, evidence=[1]),
+    # two same-theme cards (verbatim, run-on) that must NOT appear as their own lesson rows. 1 card =
+    # 1 hypothesis: `verdict` is the research status the distiller filters on (tested/supported) and
+    # `seed_statement` is the belief text it feeds the reflection LLM to consolidate.
+    st.cards = {
+        "h1": Card(id="h1", verdict="tested", status="proposed", best_delta=0.01, evidence=[1],
+                   seed_statement="VERBATIM_TEMP_A lowering temperature 0.05->0.02 helped and "
+                   "also weight decay and also batch size all combined in one run-on",
+                   statement="VERBATIM_TEMP_A lowering temperature 0.05->0.02 helped and "
+                   "also weight decay and also batch size all combined in one run-on"),
+        "h2": Card(id="h2", verdict="supported", status="proposed", best_delta=0.02, evidence=[1],
+                   seed_statement="VERBATIM_TEMP_B Experiment A: patch train.py temperature 0.01",
+                   statement="VERBATIM_TEMP_B Experiment A: patch train.py temperature 0.01"),
     }
     fake = FakeClient("[GOOD] a sharper (lower) contrastive temperature around 0.01-0.02 improves recall")
     monkeypatch.setattr(eng, "_reflect_client", lambda: fake)
