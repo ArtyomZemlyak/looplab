@@ -401,8 +401,9 @@ class ResearchCadenceMixin:
 
     @in_llm_lane("novelty_dedup")
     def _maybe_merge_hypotheses(self, state: RunState) -> RunState:
-        """Agentic consolidation of the OPEN-hypothesis board (P1+). The fold merges hypotheses only by
-        EXACT statement hash, so paraphrases of one belief pile up as separate open entries. Here —
+        """Agentic consolidation of the OPEN research-card belief board (P1+; 1 card = 1 hypothesis).
+        The fold merges cards only by EXACT statement hash, so paraphrases of one belief pile up as
+        separate open cards. Here —
         LIVE only, gated on `track_hypotheses` + a reflect client — hybrid retrieval clusters near-dups
         and the agent decides the true merges, appended as `hypothesis_merged` events that the fold
         applies deterministically (alias evidence -> canonical). Best-effort: never raises, never
@@ -424,7 +425,12 @@ class ResearchCadenceMixin:
         client = self._reflect_client()
         if client is None:
             return state
-        open_hyps = [h for h in state.hypotheses.values() if getattr(h, "status", "") == "open"]
+        # 1 card = 1 hypothesis: consolidate the open BELIEF board — the Card equivalent of the old open
+        # hypotheses (verdict 'open' == the old status 'open'). Exclude selection-ready native work-item
+        # cards: this cadence merges near-duplicate research BELIEFS, and collapsing a receipt-backed
+        # work item's action identity is not its job. Merges emit `hypothesis_merged` with card ids
+        # (== the old hypothesis ids for a belief card), which `_derive_cards` applies unchanged.
+        open_hyps = [c for c in state.open_research_cards() if not c.selection_ready]
         n = len(open_hyps)
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
             return state

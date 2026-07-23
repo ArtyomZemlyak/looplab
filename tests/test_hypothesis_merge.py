@@ -96,14 +96,17 @@ def test_engine_pass_writes_merge_events_gated(tmp_path, monkeypatch):
     eng._reflect_client = lambda: object()
     eng.store = EventStore(tmp_path / "events.jsonl")
 
-    class _H:
-        def __init__(self, hid, stmt):
-            self.id, self.statement, self.status = hid, stmt, "open"
+    from looplab.core.models import Card
+
+    def _card(cid, stmt):
+        # 1 card = 1 hypothesis: the merge cadence reads the open BELIEF board (open_research_cards()),
+        # so populate real Cards — verdict 'open' (the old status) + a non-empty seed, not selection-ready.
+        return Card(id=cid, seed_statement=stmt, statement=stmt, verdict="open", status="proposed")
 
     ids = [f"h{i}" for i in range(5)]
-    hyps = {i: _H(ids[i], f"statement {i}") for i in range(5)}
+    cards = {ids[i]: _card(ids[i], f"statement {i}") for i in range(5)}
     st = RunState(goal="g", direction="max")
-    st.hypotheses = hyps
+    st.cards = cards
     st.nodes = {}
 
     # agent merges the first two open hypotheses
@@ -136,6 +139,6 @@ def test_engine_pass_writes_merge_events_gated(tmp_path, monkeypatch):
     eng2._reflect_client = lambda: object()
     eng2.store = EventStore(tmp_path / "e2.jsonl")
     small = RunState(goal="g", direction="max")
-    small.hypotheses = {0: _H("a", "x"), 1: _H("b", "y")}      # only 2 open (< 4)
+    small.cards = {"a": _card("a", "x"), "b": _card("b", "y")}      # only 2 open (< 4)
     eng2._maybe_merge_hypotheses(small)
     assert not (tmp_path / "e2.jsonl").exists() or not list(EventStore(tmp_path / "e2.jsonl").read_all())
