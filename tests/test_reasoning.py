@@ -18,6 +18,36 @@ def test_retry_after_parsing():
     assert _retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
 
 
+def test_retry_after_zero_falls_back_to_backoff_not_instant(monkeypatch):
+    # Regression: a `Retry-After: 0` / negative / past HTTP-date clamps to ra==0.0, which `if ra is not
+    # None` honored as sleep(0) — every 429/5xx retry then fired in milliseconds, defeating the backoff
+    # (a transient rate-limit blip could dev-crash the run). A non-positive directive must use backoff.
+    import httpx
+    import openai
+
+    slept: list[float] = []
+    monkeypatch.setattr(llm.time, "sleep", lambda s: slept.append(s))
+    resp = httpx.Response(429, headers={"retry-after": "0"},
+                          request=httpx.Request("POST", "http://x/v1/chat/completions"))
+    calls = {"n": 0}
+
+    class _OK:
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "hi"}}], "usage": {}}
+
+    def fake_create(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise openai.RateLimitError("rate limited", response=resp, body=None)
+        return _OK()
+
+    c = OpenAICompatibleClient("qwen3-30b-a3b", stream=False)
+    monkeypatch.setattr(c._sdk.chat.completions, "create", fake_create)
+    c.complete_text([{"role": "user", "content": "x"}])
+    assert calls["n"] == 2                             # retried once after the 429, then succeeded
+    assert slept and slept[0] > 0                      # exp backoff (2.0s), NOT the sleep(0) the bug caused
+
+
 def test_reasoning_body_unset_is_empty():
     assert reasoning_body("qwen3-coder", "") == {}
     assert reasoning_body("gpt-5", "") == {}

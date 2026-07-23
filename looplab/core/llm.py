@@ -560,10 +560,13 @@ class OpenAICompatibleClient:
             except (openai.RateLimitError, openai.InternalServerError) as e:   # 429 / 5xx
                 if attempt < self._max_retries:
                     ra = _retry_after_seconds(_retry_after_of(e))
-                    # Honor a server Retry-After up to RETRY_AFTER_CAP_S (a directive); otherwise use
-                    # our own exponential backoff (already ≤ BACKOFF_CAP_S). Capping `ra` at the 30s
-                    # backoff ceiling would re-issue too early and re-trip the same 429.
-                    time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra is not None else _backoff(attempt))
+                    # Honor a POSITIVE server Retry-After up to RETRY_AFTER_CAP_S (a directive); otherwise
+                    # use our own exponential backoff (already ≤ BACKOFF_CAP_S). `if ra` (not `is not
+                    # None`): `_retry_after_seconds` clamps to max(0.0, …), so a `Retry-After: 0`, a
+                    # negative value, or an HTTP-date already in the PAST (clock skew) yields ra==0.0 —
+                    # honoring that would sleep(0) and burn every retry in milliseconds, defeating the
+                    # 429/5xx backoff entirely. Treat a non-positive directive as "unusable" → backoff.
+                    time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra else _backoff(attempt))
                     continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
             except openai.APIConnectionError as e:
