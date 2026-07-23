@@ -2026,36 +2026,38 @@ class RunState(BaseModel):
         """Additive BELIEF projection (peer review): the board keeps ``1 card = 1 work item`` — two
         native actions that reuse the exact hypothesis wording stay DISTINCT cards — but they are ONE
         belief, and the removed statement-keyed ledger read their evidence together. Group the research
-        cards by their immutable seed-statement hash so a consumer (verdicts / lessons / a belief view)
+        cards by their immutable seed-statement DIGEST so a consumer (verdicts / lessons / a belief view)
         can read a belief's evidence and verdict as a whole instead of fragmented across work items.
 
         Pure, deterministic, and strictly additive: it NEVER mutates a card, a per-card verdict, or any
         folded field — the card identities and their own verdicts are untouched. Each group is
-        ``{seed_hash, seed_statement, card_ids, evidence, statements, verdict}`` in first-seen order,
-        with ``evidence`` the ordered union of the members' evidence and ``verdict`` a strength roll-up of
-        the members' own verdicts (supported > tested > testing > open; ``abandoned`` only when EVERY
-        member is abandoned)."""
-        _RANK = {"supported": 4, "tested": 3, "testing": 2, "open": 1, "abandoned": 0}
+        ``{seed_hash, seed_digest, seed_statement, card_ids, evidence, statements, verdict}`` in
+        first-seen order, with ``evidence`` the ordered union of the members' evidence and ``verdict`` a
+        strength roll-up of the members' own verdicts (supported > testing > tested > open, matching
+        ``_evidence_verdict``'s precedence on the unioned evidence; ``abandoned`` only when EVERY member
+        is abandoned)."""
+        # Precedence == `_evidence_verdict`'s status order: supported > testing > tested > open (peer
+        # review — `testing` OUTRANKS `tested`, so a still-running experiment is NOT hidden by a
+        # finished-no-improve sibling). A per-card-label max is EXACTLY the union recompute here: each
+        # node's supported/pending/evaluated class is intrinsic (independent of how cards are grouped),
+        # so those predicates are OR-composable across members and the precedence-max reproduces
+        # `_evidence_verdict(union)` without crossing the core→events layer to call the helper.
+        _RANK = {"supported": 4, "testing": 3, "tested": 2, "open": 1, "abandoned": 0}
         groups: "dict[str, dict]" = {}
-        # CODEX AGENT: this roll-up also disagrees with the removed aggregate's `_evidence_verdict`.
-        # There, one tested failure plus one pending experiment is `testing` (still inconclusive);
-        # `tested > testing` here hides the active experiment. Recompute from the unioned evidence with
-        # the shared helper/precedence instead of ranking already-lossy per-card labels.
         order: list[str] = []
         for card in self.research_cards():
             seed = (card.seed_statement or "").strip()
             if not seed:
                 continue
-            key = hypothesis_id(seed)
-            # CODEX AGENT: this grouping reintroduces the exact short-hash ambiguity that Card replay
-            # already closes with `hypothesis_statement_digest`. `test_short_hash_collision_*` supplies
-            # two distinct statements with the same `hypothesis_id`, so this dictionary silently merges
-            # unrelated beliefs and evidence. Key by the full normalized-statement digest and expose the
-            # short hash only as a legacy/display alias.
+            # Key by the FULL normalized-statement digest, not the short `hypothesis_id` (peer review):
+            # two distinct statements can share a short id (test_short_hash_collision_*), and keying on it
+            # would silently merge unrelated beliefs + their evidence. The short hash rides only as a
+            # display alias.
+            key = hypothesis_statement_digest(seed)
             group = groups.get(key)
             if group is None:
-                group = {"seed_hash": key, "seed_statement": seed, "card_ids": [], "evidence": [],
-                         "statements": [], "_verdicts": []}
+                group = {"seed_hash": hypothesis_id(seed), "seed_digest": key, "seed_statement": seed,
+                         "card_ids": [], "evidence": [], "statements": [], "_verdicts": []}
                 groups[key] = group
                 order.append(key)
             group["card_ids"].append(card.id)

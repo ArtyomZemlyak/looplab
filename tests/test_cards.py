@@ -1119,3 +1119,42 @@ def test_grouped_beliefs_aggregates_same_seed_cards_keeping_ids_distinct():
     st.cards["card-1"].verdict = "abandoned"
     solo = next(g for g in st.grouped_beliefs() if g["seed_hash"] == hypothesis_id(seed))
     assert solo["card_ids"] == ["card-1"] and solo["verdict"] == "abandoned"
+
+
+def test_grouped_beliefs_keys_by_full_digest_not_the_short_hash():
+    # Peer review: two DISTINCT statements can collide on the short `hypothesis_id`; grouping on it would
+    # silently merge unrelated beliefs. Group by the full statement digest instead.
+    from looplab.core.models import (Card, RunState, hypothesis_id,
+                                     hypothesis_statement_digest)
+    first = ("same collision slug that exceeds forty eight chars abcdefghijklmnopqrstuvwxyz "
+             "zkv1b41rqyc5sj96kmgg")
+    second = ("same collision slug that exceeds forty eight chars abcdefghijklmnopqrstuvwxyz "
+              "djo35wgfbw9l72jaw2h8")
+    assert hypothesis_id(first) == hypothesis_id(second)                       # short-hash collision...
+    assert hypothesis_statement_digest(first) != hypothesis_statement_digest(second)   # ...distinct digest
+    st = RunState(direction="max", goal="g")
+    st.cards = {
+        "card-1": Card(id="card-1", seed_statement=first, statement=first, verdict="open", evidence=[]),
+        "card-2": Card(id="card-2", seed_statement=second, statement=second, verdict="open", evidence=[]),
+    }
+    groups = st.grouped_beliefs()
+    assert len(groups) == 2                                                    # NOT merged into one belief
+    assert {g["seed_digest"] for g in groups} == {hypothesis_statement_digest(first),
+                                                  hypothesis_statement_digest(second)}
+
+
+def test_grouped_beliefs_verdict_matches_evidence_verdict_on_the_union():
+    # Peer review: `testing` (a still-running experiment) must OUTRANK `tested` (finished, no improvement)
+    # so the group is not reported "done" while an experiment is live — matching `_evidence_verdict`'s
+    # precedence on the unioned evidence rather than the old `tested > testing` label max.
+    from looplab.core.models import Card, RunState
+    seed = "shared belief across two work items"
+    st = RunState(direction="max", goal="g")
+    st.cards = {
+        "card-1": Card(id="card-1", seed_statement=seed, statement=seed, verdict="tested",
+                       evidence=[1], status="evaluated"),
+        "card-2": Card(id="card-2", seed_statement=seed, statement=seed, verdict="testing",
+                       evidence=[2], status="pending"),
+    }
+    [group] = st.grouped_beliefs()
+    assert group["verdict"] == "testing"          # active experiment not hidden by the finished sibling
