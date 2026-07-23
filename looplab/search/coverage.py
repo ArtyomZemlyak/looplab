@@ -90,6 +90,10 @@ def snapshot_matches_analytics_projection(state: RunState, snapshot: object) -> 
     if token is None:
         # Pre-token snapshots remain readable on an untouched legacy run. Once lifecycle identity changes,
         # their source boundary is unknowable and they must not steer a proposal.
+        # CODEX AGENT: this never checks the snapshot's node boundary, so a tokenless node-1 snapshot
+        # matches an untouched node-20 run. The new reverse scan can now revive that ancient row behind
+        # a newer stale receipt. Require a canonical at_node equal to the current node count (and fail
+        # closed when it is absent) before accepting legacy coverage as live.
         aborted = getattr(state, "aborted_nodes", None) or []
         return (not aborted
                 and not any(getattr(node, "tombstoned", False)

@@ -63,6 +63,9 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
         # tagged (a board entry newer than the last cadence). Stays PURE (no LLM here; the tagging happened
         # at the cadence). No cache -> the deterministic alias tagger, exactly as before.
         cache = getattr(state, "hypothesis_concepts", None) or {}
+        # CODEX AGENT: pre-migration cache keys are hypothesis_id(statement), but native research Cards
+        # use card-N ids. The id-only join below silently discards those durable agentic tags and changes
+        # replay analysis to heuristic tags; resolve an unambiguous seed-hash compatibility key too.
         tags = {h.id: (frozenset(cache[h.id]) if h.id in cache
                        else tag_text(h.statement, graph, allow_plural=True)) for h in hyps}
 

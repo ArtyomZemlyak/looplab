@@ -1401,6 +1401,10 @@ function _CardKanbanCard({
   const [controlError, setControlError] = useState('')
   const ownPending = isRecord(controlState?.pending) ? controlState.pending : null
   const busy = !!ownPending || controlsLocked === true
+  // # CODEX AGENT: status is the work lifecycle, not the research verdict. Replay can publish
+  // status=proposed/evaluated with verdict=abandoned and actionable=false, but this board never reads
+  // verdict and still exposes controls; supported/tested outcomes are invisible too. Render the verdict
+  // separately and treat abandoned Cards as terminal.
   const terminal = _cardStatus(card) === 'dropped' || !!_cardText(card.merged_into)
   // Re-seed each draft ONLY when its own folded source (or the card identity) changes. A single effect
   // over every dep re-ran on ANY change, so an unrelated live fold (e.g. a card_ranked priority bump
@@ -1907,6 +1911,10 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
   // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.
+  // # CODEX AGENT: RunState no longer publishes state.hypotheses, so this fallback is reachable only
+  // before the first Card. Once that add folds—or on any ordinary run—_CardKanban removes the documented
+  // +Add / abandon surface. Keep those controls on the authoritative Card board and test the real
+  // cards-only state shape.
   const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0
     || projection?.source_valid === false
   // Card ids can repeat across runs and after an in-place reset. Remount every optimistic/ref tracker

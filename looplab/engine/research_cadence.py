@@ -430,6 +430,10 @@ class ResearchCadenceMixin:
         # cards: this cadence merges near-duplicate research BELIEFS, and collapsing a receipt-backed
         # work item's action identity is not its job. Merges emit `hypothesis_merged` with card ids
         # (== the old hypothesis ids for a belief card), which `_derive_cards` applies unchanged.
+        # CODEX AGENT: readiness is transient, not identity. A native Card becomes selection_ready=False
+        # when it is stale, incomplete, in flight, or terminal, so this admits receipt-backed work items
+        # to belief consolidation and can merge distinct action identities. Exclude native Cards by
+        # identity regardless of their current blockers.
         open_hyps = [c for c in state.open_research_cards() if not c.selection_ready]
         n = len(open_hyps)
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:

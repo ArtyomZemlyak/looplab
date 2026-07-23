@@ -624,6 +624,11 @@ class EvaluateMixin:
                     # stdout_json `resource_key`, so a future live node stopped at an EARLY resource can
                     # find same-resource peers. Additive/only-when-present → old logs fold byte-identically.
                     _spec = getattr(self, "_eval_spec", None)
+                    # CODEX AGENT: res.stdout is only run_argv's capped 64-KiB tail and, for a staged
+                    # eval, only the final stage's output—not the FULL training stream claimed above.
+                    # Verbose jobs therefore lose the early coordinates this feature exists to retain.
+                    # Accumulate the bounded curve while teeing output, or read the attempt's full
+                    # stage log(s) through the same freshness fence.
                     _curve = extract_resource_curve(
                         res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
                     if _curve:

@@ -842,6 +842,10 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             # ASHA past-experiment curve (#7): a bounded [[resource, metric], ...] the ASHA watchdog
             # reads to find same-resource peers for an EARLY live sample (the 500-char stdout_tail keeps
             # only the final epochs). Reader-defaulted to None so pre-#7 logs fold byte-identically.
+            # CODEX AGENT: resource_curve is untrusted event data, and assignment validation is off.
+            # This raw value can be a scalar or an arbitrarily large/nested list despite Node's type and
+            # the promised 32-point bound, then rides every folded/API snapshot. Normalize to at most 32
+            # unique, sorted finite [resource, metric] pairs (or None) before mutating the node.
             n.resource_curve = d.get("resource_curve")
             n.eval_seconds = d.get("eval_seconds")
             n.extra_metrics = normalize_extra_metrics(d.get("extra_metrics"))
@@ -4566,6 +4570,11 @@ def _derive_cards(st: RunState) -> None:
         seed_id = hypothesis_id(stmt) if stmt else ""
         statement_id = hypothesis_statement_digest(stmt) if stmt else ""
         explicit_card_id = (n.idea.card_id or "").strip()
+        # CODEX AGENT: `card_id` is work-item identity, not belief identity. Two native actions that
+        # reuse the exact hypothesis wording now land in separate Cards, whereas the removed
+        # statement-keyed ledger accumulated both evidence rows. That fragments verdicts/lessons and
+        # contradicts the Researcher instruction to reuse wording. Preserve a grouped belief projection
+        # keyed by the seed hash while keeping the native action identities distinct.
         raw_cid = explicit_card_id or seed_id
         if explicit_card_id in conflicted_native_ids:
             continue

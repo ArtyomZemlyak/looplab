@@ -1038,6 +1038,10 @@ class Node(BaseModel):
     # at an EARLY resource coordinate finds no same-resource peers there; this durable curve lets the
     # ASHA watchdog compare a fresh early sample against past experiments at the SAME coordinate.
     # Additive/reader-defaulted (None on old logs) so replay folds byte-identically.
+    # CODEX AGENT: this is engine-internal ASHA evidence, but a normal model dump includes all 32 points
+    # in every lightweight /state and SSE node frame although no UI consumer reads them. That adds
+    # O(nodes × curve) transfer/serialization to every live fold. Exclude it from public Node dumps and
+    # expose a bounded diagnostic projection only where an operator actually requests the curve.
     resource_curve: Optional[list] = None
     # Multi-seed confirmation (I12): set by a node_confirmed event. When present,
     # best-selection ranks by confirmed_mean (the robust metric) instead of `metric`.

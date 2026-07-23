@@ -180,6 +180,10 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // it before creating the next. Gate the pending pulse on that (+ not paused), so an older queued or
   // injected pending node doesn't poll-spin every 4s or mislabel itself as "training".
   const latestId = Math.max(-1, ...Object.keys(state?.nodes || {}).map(Number))
+  // # CODEX AGENT: eval_parallel>1 starts several pending nodes concurrently, so "latest pending" is
+  // not an evaluation-ownership test. Inspecting an active older node disables detail polling and
+  // freezes its live Trace/metrics. Use explicit bounded eval ownership, or conservatively poll the
+  // selected pending lifecycle while the engine is active.
   const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
   // `withBuilding` splices EVERY in-flight build into `live.nodes` (building:true), so keying off the
   // spliced node — not the singular `live.building` — lights up whichever concurrent build this is.

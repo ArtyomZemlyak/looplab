@@ -163,6 +163,11 @@ def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) ->
         return None
     coords = sorted(by_resource)
     if max_points >= 2 and len(coords) > max_points:
+        # CODEX AGENT: the monitor requires an EXACT resource match and resets its grace streak whenever
+        # a coordinate is absent. Uniformly retaining 32 of 100 steps drops (for example) step 2, so a
+        # progressing live run generally cannot produce the three consecutive comparable ticks needed
+        # to kill. Persist deterministic ASHA rung coordinates and evaluate live samples at those same
+        # rungs instead of points the poller may never query.
         step = (len(coords) - 1) / (max_points - 1)
         keep = sorted({int(round(i * step)) for i in range(max_points)})
         coords = [coords[i] for i in keep]

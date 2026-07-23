@@ -362,6 +362,10 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
 
     lifecycle_keys = sorted(
         (key for key in active if _renders(key)),
+        # CODEX AGENT: _renders may be true because an old ASHA warning survives while the latest
+        # monitor row is healthy (or vice versa). Taking max over both rows ranks that lifecycle by
+        # the non-rendering recovery, so a stale warning can evict a newer live warning under the cap.
+        # Rank by the newest row whose signal actually renders.
         key=lambda key: max(mon.get(key, ({}, -1))[1], asha.get(key, ({}, -1))[1]),
         reverse=True,
     )[:max_shown]

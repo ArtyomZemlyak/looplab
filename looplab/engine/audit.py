@@ -124,6 +124,10 @@ class AuditMixin:
             # card's foresight_rank/confidence, stamps no priority, and suppresses the hypothesis_ranking
             # fallback that feeds _priority_signal in card selection. Only emit the Card projection when
             # at least one id resolved, or the board was genuinely empty to begin with.
+            # CODEX AGENT: guarding only the all-miss case still publishes a partial projection.
+            # ["missing", "card-b"] becomes ["card-b"], promotes B from rank 1 to 0, and suppresses the
+            # hypothesis fallback for every Card. Emit card_ranked only after complete exact resolution
+            # (or preserve unresolved positions); otherwise publish only hypothesis_ranked.
             if card_order or not raw_order:
                 card_data = {"order": card_order, "at_node": node_id}
                 if "confidence" in pick:

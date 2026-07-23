@@ -931,6 +931,10 @@ class StrategyCadenceMixin:
                     for h in state.research_cards():
                         if not getattr(h, "statement", ""):
                             continue
+                        # CODEX AGENT: historical hypothesis_concepts rows are keyed by
+                        # hypothesis_id(statement), while migrated native Cards are normally card-N.
+                        # Looking up only h.id orphans recorded agentic tags on resume and pays to retag
+                        # the same belief. Bridge the native id to its unambiguous seed hash.
                         if h.id in known_h and h.id not in stale_h:   # already tagged & fresh -> skip
                             continue
                         if tagged_this_cadence >= _HYP_TAG_CAP:

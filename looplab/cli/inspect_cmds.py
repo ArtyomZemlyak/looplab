@@ -707,6 +707,9 @@ def board_dedup(
     # id for a research card, so the `hypothesis_concepts` cache still joins.
     hyps = list(state.research_cards())
     cache = getattr(state, "hypothesis_concepts", None) or {}
+    # CODEX AGENT: that join is false for migrated native Cards: historical tag receipts use the
+    # statement hash while the Card id is card-N. This test then declares the board uncached and may
+    # purchase a new live tagging pass instead of reusing recorded evidence; share the seed-hash bridge.
     board_cached = any(h.id in cache for h in hyps)     # cache covers at least one CURRENT-board card
     tags, label = None, "heuristic"
     if offline:
