@@ -388,3 +388,33 @@ def test_developer_finalized_footprint_is_durable_and_idempotently_enriched(tmp_
     synced = engine._sync_card_enrichments(repaired)
     assert synced.cards["card-1"].footprint["gpus"] == 1
     assert len([row for row in store.read_all() if row.type == "card_enriched"]) == 2
+
+
+def test_pooled_build_drops_board_wide_ranking(tmp_path):
+    # Peer review: card_ranked/hypothesis_ranked are BOARD-WIDE last-write-wins registers (not in
+    # BACKGROUND_APPENDABLE), but _emit_hypothesis_ranked runs PER NODE — under a pooled build in worker
+    # threads the folded ranking would depend on nondeterministic worker byte-order. A pooled build
+    # (parallel_build > 1) must DROP the board-wide ranking; a settled width of 1 keeps it byte-identical.
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append("card_added", {"id": "card-beta", "statement": "beta direction", "source": "researcher"})
+
+    class _Researcher:
+        last_hyp_priority = {"order": [hypothesis_id("beta direction")], "confidence": 0.7}
+
+    engine = Engine.__new__(Engine)
+    engine.store = store
+    engine.researcher = _Researcher()
+    engine._llm_parallel = 4                       # pooled build
+    engine._emit_hypothesis_ranked(3, generation=0)
+
+    emitted = store.read_all()
+    assert not [e for e in emitted if e.type in ("card_ranked", "hypothesis_ranked")]   # dropped
+    assert engine.researcher.last_hyp_priority is None    # telemetry consumed, can't leak to the next node
+
+    # width 1 keeps the emission (byte-identical main-task path)
+    engine.researcher.last_hyp_priority = {"order": [hypothesis_id("beta direction")], "confidence": 0.7}
+    engine._llm_parallel = 1
+    engine._emit_hypothesis_ranked(4, generation=0)
+    kept = store.read_all()
+    assert [e for e in kept if e.type == "card_ranked"]     # emitted at a settled width of 1

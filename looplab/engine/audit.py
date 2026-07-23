@@ -75,6 +75,15 @@ class AuditMixin:
         pick = getattr(role, "last_hyp_priority", None)
         if not isinstance(pick, dict):
             return
+        # `card_ranked`/`hypothesis_ranked` are BOARD-WIDE, last-write-wins registers (NOT in
+        # BACKGROUND_APPENDABLE), but this method is called PER NODE — under a pooled build (parallel_build
+        # > 1) `_create_node` runs in worker threads, so the folded ranking would depend on nondeterministic
+        # worker byte-order, outside invariant #1's per-node carve-out. DROP the board-wide ranking on a
+        # pooled build (peer review); a settled build width of 1 keeps today's byte-identical behaviour.
+        # Still consume this node's predictive telemetry so a dropped ranking can't leak onto the next node.
+        if int(getattr(self, "_llm_parallel", 1) or 1) > 1:
+            setattr(role, "last_hyp_priority", None)
+            return
         pick = dict(pick)
         tid, sid = pick.pop("_trace_id", None), pick.pop("_span_id", None)
         hypothesis_data = {"node_id": node_id, **pick}
@@ -116,14 +125,11 @@ class AuditMixin:
                             card_order.append(card_id)
                 if not matched:
                     all_resolved = False          # unminted / all-merged direction -> a rank GAP
-            # CODEX AGENT: these are two projections of ONE ranking decision. One physical batch keeps
-            # a crash/torn tail from exposing a new Hypothesis order beside stale Card selection priority.
-            # CODEX AGENT: both events fold as GLOBAL last-write-wins registers, but this method is
-            # called from parallel-build worker threads (_create_node_guarded, speculation session) —
-            # so the folded card_ranking/hypothesis_ranking depend on nondeterministic worker
-            # byte-order, outside the invariant-1 carve-out (which only permits INDEPENDENT per-node
-            # events to interleave). Emit board-wide rankings from the main task (e.g. at batch join),
-            # or drop them on pooled builds. [FLAGGED for a design decision; not auto-fixed.]
+            # These are two projections of ONE ranking decision. One physical batch keeps a crash/torn
+            # tail from exposing a new Hypothesis order beside stale Card selection priority. Both fold as
+            # GLOBAL last-write-wins registers, so a pooled build's worker-thread emission would be
+            # nondeterministic — resolved above by DROPPING the board-wide ranking when parallel_build > 1
+            # (a settled width of 1 keeps this main-task-only, byte-identical path). Peer review.
             members = [(EV_HYPOTHESIS_RANKED, hypothesis_data)]
             # A resolution MISS (a ranked direction whose Card is not yet minted, or every match merged
             # away — the loop drops merged ids instead of canonicalizing to the survivor) is NOT a "rank
