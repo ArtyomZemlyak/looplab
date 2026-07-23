@@ -282,22 +282,32 @@ class RepoScoutTools:
         window = all_lines[start: (start + want) if want else n]
         body = "".join(window)
         mid_line = False
-        if len(body) > max_chars:                      # window ran into the char cap — truncate mid-window
-            body = body[:max_chars]
-            shown = body.count("\n")                   # whole lines that survived the cut
-            if shown == 0:
-                # A single line longer than one page: zero whole lines survived, so the generic marker
-                # would point at the SAME start_line and the model would loop on identical pages forever
-                # (reproduced). Guarantee progress: count the truncated line as shown and resume at the
-                # NEXT line — the marker says so honestly (the line's tail past the cap is skipped).
+        if len(body) > max_chars:                      # window ran into the char cap — truncate on a line boundary
+            # Accumulate WHOLE splitlines() entries (the SAME line model `all_lines` used) until the next
+            # would exceed the char cap. Counting/trimming the cut by `\n` alone (body.count("\n") /
+            # rfind("\n")) desynced from splitlines() whenever a NON-`\n` line boundary — \f, \v, lone \r,
+            # \x1c-\x1e, \x85, U+2028/U+2029 — fell inside the truncated window: `shown` and the resume
+            # start_line then disagreed with the split, re-serving or mislabeling lines across pages (and a
+            # boundary-only window counted 0 `\n`, falsely flagging an ordinary short line as "longer than
+            # one page"). Work over the entries directly so `shown` and the next start_line always agree.
+            kept: list[str] = []
+            used = 0
+            for _ln in window:
+                if used + len(_ln) > max_chars:
+                    break
+                kept.append(_ln)
+                used += len(_ln)
+            if kept:
+                body = "".join(kept)                   # the whole lines that fit; the rest is the next page
+                shown = len(kept)
+            else:
+                # A single line longer than one page: NO whole line fits, so a whole-line marker would
+                # point at the SAME start_line and the model would loop on identical pages forever
+                # (reproduced). Guarantee progress: show the truncated head of that one line, count it
+                # shown, and resume at the NEXT line — the marker says so honestly (its tail is skipped).
+                body = window[0][:max_chars]
                 shown = 1
                 mid_line = True
-            else:
-                # Drop the partial trailing fragment (chars past the last complete line): the header
-                # and the resume marker count WHOLE lines, and the next page re-serves that line in
-                # full from start_line — keeping the fragment would double-serve its head and show a
-                # half-line the stated range doesn't cover.
-                body = body[: body.rfind("\n")]
             more = True
         else:                                          # the full line-window was returned
             shown = len(window)

@@ -197,6 +197,26 @@ def test_mid_line_marker_ends_with_the_canonical_stem(tmp_path):
     assert re.search(r"… \(more below — continue with start_line=2\)$", p1), p1[-120:]
 
 
+def test_read_file_non_newline_boundaries_do_not_desync_pagination(tmp_path):
+    # Regression: `_paginate` split with splitlines() (which breaks on \f, \x0b, lone \r, \x1c-\x1e,
+    # \x85, U+2028/U+2029) but counted/trimmed the cut window with `\n` ONLY. A truncated window of
+    # \f-separated SHORT lines counted zero `\n`, so it was falsely reported as "one line longer than
+    # one page" (F5 marker) — and other non-\n boundaries re-served/mislabeled lines across pages. The
+    # `shown` count and the resume start_line must agree with splitlines().
+    import re
+    r = tmp_path / "repo"; r.mkdir()
+    # Many short \f-separated lines totaling well over one page before the first \n.
+    (r / "ff.py").write_text(("chunk\f" * 1000) + "tail = 1\nmore = 2\n", encoding="utf-8")
+    t = RepoScoutTools(roots=[str(r)], default_root=str(r))
+    p1 = t.execute("read_file", {"path": "ff.py", "start_line": 1, "lines": 2000})
+    assert "longer than one page" not in p1                  # MANY short lines, not one long one
+    hm = re.match(r"\(lines 1-(\d+) of \d+\)", p1)
+    mm = re.search(r"continue with start_line=(\d+)\)$", p1)
+    assert hm and mm, p1[:120]
+    assert int(hm.group(1)) > 2                              # many \f-lines shown, not a false shown==1
+    assert int(hm.group(1)) + 1 == int(mm.group(1))         # header end + 1 == resume start_line (no re-serve)
+
+
 def test_char_cap_cut_drops_the_partial_trailing_line(tmp_path):
     """H4b: when the char cap cuts a multi-line window mid-line, the partial fragment past the last
     complete line is DROPPED — header, body, and marker then agree on whole lines, and the next page
