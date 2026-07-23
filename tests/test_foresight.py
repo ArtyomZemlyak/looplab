@@ -239,6 +239,33 @@ def test_prioritize_board_orders_open_hypotheses():
     assert [c["id"] for c in lp["ranked"]] == base._hyp_order   # id->statement pairs for the UI
 
 
+def test_board_rank_input_matches_the_receipt_after_a_card_edit():
+    # Peer review: foresight ranks the CURRENT display `statement` — the SAME text the receipt records —
+    # not the immutable seed. After an operator edit/merge (statement != seed_statement) the old code
+    # ranked the seed while recording the statement, so telemetry claimed the model saw text it never got.
+    st = RunState(direction="min", goal="minimize loss")
+    seed, edited = "ZZZ immutable seed wording", "AAA operator-edited direction"
+    cid = hypothesis_id(seed)
+    st.cards[cid] = Card(id=cid, seed_statement=seed, statement=edited, verdict="open",
+                         status="proposed", evidence=[])
+    st.cards["card-2"] = Card(id="card-2", seed_statement="other seed", statement="other display",
+                              verdict="open", status="proposed", evidence=[])
+
+    captured = {}
+
+    class _CapClient(_RankClient):
+        def complete_tool(self, messages, json_schema):
+            captured["blob"] = repr(messages)
+            return super().complete_tool(messages, json_schema)
+
+    panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], _CapClient([0, 1])), k=2)
+    panel._prioritize_board(st, None)
+
+    assert edited in captured["blob"] and seed not in captured["blob"]   # ranked the display statement
+    ranked = {c["id"]: c["statement"] for c in panel.last_hyp_priority["ranked"]}
+    assert ranked[cid] == edited                        # receipt records the SAME text that was ranked
+
+
 def test_board_and_idea_ranks_trace_under_distinct_spans():
     # The two Researcher ranking steps must NOT collapse into look-alike trace bands: board
     # prioritization (BEFORE propose) traces as `hyp_prioritize`; idea predict-before-execute

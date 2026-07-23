@@ -586,12 +586,14 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
     # 1 card = 1 hypothesis: read the single Card board directly (open, no evidence yet). Card fields
-    # shadow the old Hypothesis (seed_statement == statement, verdict == status, id/evidence identical).
-    # CODEX AGENT: ``seed_statement == statement`` stops being true after an operator edit or a merge.
-    # This prompt still shows the immutable seed and asks the model to copy it verbatim, so the visible
-    # Card edit does not change the live research direction even though other analysis/render consumers
-    # were moved to ``Card.statement``. Preserve an explicit hidden join id while prompting with the
-    # current statement, or document that edits are cosmetic and stop presenting them as direction edits.
+    # shadow the old Hypothesis (verdict == status, id/evidence identical); `seed_statement == statement`
+    # only until an operator edit or a merge diverges them.
+    # This feed DELIBERATELY shows the immutable `seed_statement` (not the display `statement`) and asks
+    # the model to copy it EXACTLY: evidence links only when the built node's `idea.hypothesis` hashes to
+    # the card id (== hypothesis_id(seed_statement)), so copying an edited/merged `statement` would hash
+    # elsewhere and the card would never gain evidence. Consequence (by design): an operator statement
+    # edit changes render/analysis/selection (which read `statement`) but NOT the seed the proposal feed
+    # asks the model to test — a display/analysis edit, not a re-seed of the linkable research direction.
     open_hyps = [c for c in state.open_research_cards() if not c.evidence]
     if open_hyps:
         # FOREAGENT predict-before-execute (search/foresight.py): when the world model has ranked the

@@ -405,13 +405,15 @@ class ForesightPanelResearcher:
         if len(hyps) < 2:
             setattr(self.base, "_hyp_order", None)
             return
-        # CODEX AGENT: the model ranks immutable ``seed_statement`` below, but the emitted audit row
-        # records ``Card.statement``. After card_edited/merge these can express different hypotheses,
-        # so telemetry claims the model saw/ranked text it never received. Rank and receipt must share
-        # one exact bounded input (prefer the current display statement plus an opaque id).
+        # Rank on the CURRENT display `statement` — the SAME text the audit receipt records below
+        # (peer review). The order is by card id (`ids` below), so the text only informs the model's
+        # judgment; ranking the immutable `seed_statement` while recording `statement` made the telemetry
+        # claim the model saw text it never received after a card_edited/merge. (Unlike the proposal feed
+        # in roles._state_brief, which must keep showing the seed so a copied hypothesis links by hash —
+        # foresight does no evidence-linking, only ordering.)
         r = self._rank(
                  verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
-                 ["Hypothesis: " + h.seed_statement for h in hyps],
+                 ["Hypothesis: " + h.statement for h in hyps],
                  goal=state.goal, direction=state.direction, kind="board")
         if r is None:
             setattr(self.base, "_hyp_order", None)
