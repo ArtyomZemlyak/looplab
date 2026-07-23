@@ -1,11 +1,10 @@
 """Card ledger (Kanban re-architecture, docs/23 Layer 1a).
 
-`_derive_cards` is the durable, ADVISORY card projection that MIRRORS `_derive_hypotheses`: it never
-touches best-selection, folds order-tolerantly, and — crucially — computes a card's verdict with the
-SAME `_evidence_verdict` helper the hypotheses use, so a card is byte-identical to its hash-joined
-hypothesis wherever their evidence coincides. These tests pin: the shadow invariant, the id/statement-
-hash join, card_added/merged/dropped, the derived lifecycle lanes, empty-on-old-logs, and the reserved
-operator-override overlay phase (filled by Layer 6, a no-op here)."""
+`_derive_cards` is the durable, ADVISORY research board: it never touches best-selection, folds
+order-tolerantly, and computes a card's verdict with the `_evidence_verdict` helper. These tests pin:
+the id/statement-hash join, card_added/merged/dropped, the legacy hypothesis_* bridges, the derived
+lifecycle lanes, empty-on-old-logs, and the reserved operator-override overlay phase (filled by
+Layer 6, a no-op here)."""
 from __future__ import annotations
 
 import pytest
@@ -60,19 +59,6 @@ def _fold_with_cursor(events):
     actual = cursor.snapshot()
     assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
     return expected
-
-
-def test_card_is_a_byte_identical_shadow_of_the_hypothesis():
-    # The load-bearing Layer-1a invariant: for every hypothesis there is a card with the SAME id whose
-    # verdict/best_delta/evidence match exactly (the shared _evidence_verdict helper guarantees it).
-    st = _run()
-    assert set(st.cards) == set(st.hypotheses)
-    for cid, h in st.hypotheses.items():
-        c = st.cards[cid]
-        assert c.verdict == h.status
-        assert c.best_delta == h.best_delta
-        assert c.evidence == h.evidence
-        assert c.seed_statement == c.statement == h.statement
 
 
 def test_link_by_card_id_overrides_the_statement_hash():
@@ -152,7 +138,7 @@ def test_card_merged_unions_evidence_into_the_canonical():
     assert hypothesis_id(a) in canon.aliases
 
 
-def test_transitive_card_merge_verdict_matches_one_hash_joined_hypothesis():
+def test_transitive_card_merge_verdict_matches_one_hash_joined_card():
     nodes = [
         ("node_created", {"node_id": 0, "operator": "draft", "parent_ids": [],
                           "idea": {"operator": "draft", "hypothesis": "direction A"}}),
@@ -171,7 +157,7 @@ def test_transitive_card_merge_verdict_matches_one_hash_joined_hypothesis():
             copied["idea"] = {**data["idea"], "hypothesis": "one canonical direction"}
         reference_rows.append((event_type, copied))
     reference = fold(_mk(reference_rows))
-    hypothesis = reference.hypotheses[hypothesis_id("one canonical direction")]
+    reference_card = reference.cards[hypothesis_id("one canonical direction")]
 
     card_rows = [("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})]
     for card_id, statement in (("card-a", "direction A"), ("card-b", "direction B"),
@@ -188,7 +174,7 @@ def test_transitive_card_merge_verdict_matches_one_hash_joined_hypothesis():
     ])
     merged = fold(_mk(card_rows)).cards["card-c"]
     assert (merged.verdict, merged.evidence, merged.best_delta) == (
-        hypothesis.status, hypothesis.evidence, hypothesis.best_delta)
+        reference_card.verdict, reference_card.evidence, reference_card.best_delta)
 
 
 def test_alias_enrichment_and_drop_resolve_to_the_canonical_card():
@@ -258,39 +244,27 @@ def test_reserved_operator_override_overlay_is_applied_last():
     assert c.resource_pin == {"gpus": 2, "gpu_mem_mib": 8000, "pinned_by": "operator"}
 
 
-def test_derive_cards_does_not_touch_selection_or_hypotheses():
-    # Advisory guarantee: the card pass runs AFTER best-selection and mutates only st.cards.
+def test_derive_cards_does_not_touch_selection():
+    # Advisory guarantee: the card pass runs AFTER best-selection and mutates only st.cards, and it is
+    # idempotent — a re-run reproduces the same cards and leaves best-selection untouched.
     st = _run()
     best_before = st.best_node_id
-    hyps_before = {k: (v.status, list(v.evidence), v.best_delta) for k, v in st.hypotheses.items()}
+    cards_before = {k: (v.verdict, list(v.evidence), v.best_delta) for k, v in st.cards.items()}
     _derive_cards(st)                                  # idempotent re-run
     assert st.best_node_id == best_before
-    assert {k: (v.status, list(v.evidence), v.best_delta) for k, v in st.hypotheses.items()} == hyps_before
+    assert {k: (v.verdict, list(v.evidence), v.best_delta) for k, v in st.cards.items()} == cards_before
 
 
-def _shadow_holds(st):
-    """The Layer-1a invariant: every hypothesis has a same-id card with an identical verdict/evidence."""
-    if set(st.cards) != set(st.hypotheses):
-        return False
-    for cid, h in st.hypotheses.items():
-        c = st.cards[cid]
-        if (c.verdict, c.evidence, c.best_delta) != (h.status, h.evidence, h.best_delta):
-            return False
-    return True
-
-
-def test_shadow_holds_across_engine_hypothesis_events():
+def test_card_board_tracks_engine_hypothesis_events():
     # The engine mints hypothesis_added (deep research), hypothesis_merged (consolidation) and
-    # hypothesis_updated(deleted) on the DEFAULT path (track_hypotheses=True) — but never card_* yet.
-    # In Layer 1a `_derive_cards` mirrors those same inputs, so the shadow must survive all three. (This
-    # is the case the first shadow test missed: its fixture emitted none of these events.)
+    # hypothesis_updated(deleted) on the DEFAULT path — `_derive_cards` folds those same inputs into the
+    # card board, so all three legacy bridges must land on the cards.
     a, b = "interaction features help", "a linear baseline is enough"
     st = _run(extra=[
         ("hypothesis_added", {"statement": "external data raises accuracy", "source": "deep_research"}),
         ("hypothesis_merged", {"canonical": hypothesis_id(b), "aliases": [hypothesis_id(a)]}),
         ("hypothesis_updated", {"id": hypothesis_id("a deeper model helps"), "status": "deleted"}),
     ])
-    assert _shadow_holds(st)
     # spot-check each path: node-less added card exists; merged canonical carries the union; deleted gone.
     assert hypothesis_id("external data raises accuracy") in st.cards
     assert st.cards[hypothesis_id(b)].evidence == [1, 2]
@@ -324,7 +298,6 @@ def test_string_merge_aliases_are_not_iterated_as_card_ids():
         ("hypothesis_merged", {"canonical": "b", "aliases": "a"}),
     ]))
     assert set(st.cards) == {"a", "b"}
-    assert set(st.hypotheses) == {"a", "b"}
 
 
 def test_gated_lane_for_infeasible_only_evidence():
@@ -693,15 +666,16 @@ def test_card_enriched_applies_allow_listed_fields_and_tolerates_malformed():
     assert c.footprint == {"gpus": 2}                              # dict delta applied, string one skipped
 
 
-def test_card_enriched_cannot_overwrite_shadow_load_bearing_fields():
-    # The allow-list is the ONLY thing protecting the shadow: a delta naming a REAL Card field that is
-    # NOT in the allow-list (verdict/status/evidence/best_delta/id/statement) must be a no-op — otherwise
-    # a hostile/buggy enrichment could silently corrupt the card away from its hypothesis.
+def test_card_enriched_cannot_overwrite_load_bearing_fields():
+    # The allow-list is the ONLY thing protecting the derived fields: a delta naming a REAL Card field
+    # that is NOT in the allow-list (verdict/status/evidence/best_delta/id/statement) must be a no-op —
+    # otherwise a hostile/buggy enrichment could silently corrupt the card's derived verdict/evidence.
     cid = hypothesis_id("interaction features help")
     st = _run(extra=[("card_enriched", {"id": cid, "verdict": "abandoned", "status": "dropped",
                                         "evidence": [], "best_delta": 99.0, "statement": "HIJACK"})])
-    c, h = st.cards[cid], st.hypotheses[cid]
-    assert c.verdict == h.status and c.evidence == h.evidence and c.best_delta == h.best_delta
+    c = st.cards[cid]
+    # node 2 (0.88) improved over its parent (0.80): supported, evidence [2], delta +0.08 — all unchanged.
+    assert c.verdict == "supported" and c.evidence == [2] and c.best_delta == pytest.approx(0.08)
     assert c.status == "evaluated" and c.statement == "interaction features help"
 
 
@@ -891,17 +865,16 @@ def test_native_seed_bridge_composes_with_legacy_merge_and_alias_controls():
         ("hypothesis_updated", {"id": ha, "status": "abandoned"}),
     ])
     st = _fold_with_cursor(base)
-    assert set(st.hypotheses) == {hb}
     assert set(st.cards) == {"card-b"}
-    assert st.hypotheses[hb].evidence == st.cards["card-b"].evidence == [1, 2]
-    assert st.hypotheses[hb].status == st.cards["card-b"].verdict == "abandoned"
+    assert st.cards["card-b"].evidence == [1, 2]
+    assert st.cards["card-b"].verdict == "abandoned"
     assert st.cards["card-b"].research_origin == "memo-through-alias"
     assert st.cards["card-b"].status == "dropped"
 
     deleted = _fold_with_cursor(base + _mk([
         ("hypothesis_updated", {"id": ha, "status": "deleted"}),
     ]))
-    assert deleted.hypotheses == {} and deleted.cards == {}
+    assert deleted.cards == {}
 
 
 def test_ambiguous_native_ids_preserve_both_and_do_not_guess_legacy_hash_binding():
@@ -943,7 +916,6 @@ def test_native_id_reused_for_two_seeds_fails_closed_instead_of_conflating_cards
                                    "card_id": "card-shared"}}),
     ]))
     assert st.cards == {}  # both raw card_added rows remain the audit receipt; no identity is guessed
-    assert set(st.hypotheses) == {hypothesis_id("seed A"), hypothesis_id("seed B")}
 
 
 def test_node_only_native_id_reuse_is_detected_before_evidence_can_be_conflated():
@@ -957,7 +929,6 @@ def test_node_only_native_id_reuse_is_detected_before_evidence_can_be_conflated(
                                    "card_id": "card-shared"}}),
     ]))
     assert st.cards == {}
-    assert set(st.hypotheses) == {hypothesis_id("node seed A"), hypothesis_id("node seed B")}
 
 
 def test_short_hash_collision_uses_full_statement_identity_and_suppresses_ambiguous_controls():
@@ -1022,18 +993,20 @@ def test_research_origin_is_rehomed_from_the_node_provenance():
     assert st.cards[hypothesis_id("researched idea")].research_origin == "node:4"
 
 
-def test_priority_falls_back_to_hypothesis_ranking_and_matches_the_shadow():
+def test_priority_falls_back_to_hypothesis_ranking():
     # No card_ranked producer exists yet, so hypothesis_ranking is the SOLE live card-priority path in
-    # Layer 1b. The shadow requires card.priority == hypothesis.priority wherever both derive from it.
+    # Layer 1b: a hypothesis_ranked event ranks the OPEN (evidence-free) card and leaves the rest unpinned.
     a = "an open direction with no evidence"
     order = [hypothesis_id(a), hypothesis_id("interaction features help")]
     st = _run(extra=[
         ("hypothesis_added", {"statement": a, "source": "deep_research"}),   # open, no node
         ("hypothesis_ranked", {"order": order}),                              # NOT card_ranked
     ])
-    for cid, h in st.hypotheses.items():
-        assert st.cards[cid].priority == h.priority                          # fallback == shadow
     assert st.cards[hypothesis_id(a)].priority == 0                          # open card ranked first
+    # every other card (all carry evidence) keeps no ranking-derived priority
+    for cid, card in st.cards.items():
+        if cid != hypothesis_id(a):
+            assert card.priority is None
 
 
 # --- Layer 1c: the actionable exclusion seam ------------------------------------------------------

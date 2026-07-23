@@ -246,7 +246,10 @@ def load(sc: Scenario) -> tuple[dict, list]:
                              "theme": node_theme(n),
                              "hypothesis": (n.idea.hypothesis if n.idea else None),
                              "code": (n.code or "")} for nid, n in st.nodes.items()},
-             "hypotheses": getattr(st, "hypotheses", {})}
+             # 1 card = 1 hypothesis: the belief board is now `st.cards` (verdict == the old status).
+             "cards": {cid: {"statement": c.statement, "seed_statement": c.seed_statement,
+                             "verdict": c.verdict}
+                       for cid, c in getattr(st, "cards", {}).items()}}
     return state, events
 
 
@@ -297,15 +300,16 @@ def _rf(nid, theme, rationale, metric, n=100):
 
 
 def _hyp_texts(st):
-    """Flatten the hypothesis board to lowercase strings, whatever the item type."""
-    board = st.get("hypotheses") or {}
+    """Flatten the belief board (now the Card board) to lowercase strings, whatever the item type."""
+    board = st.get("cards") or {}
     items = board.values() if isinstance(board, dict) else board
     out = []
     for h in items:
         if isinstance(h, dict):
-            out.append(str(h.get("text") or h.get("statement") or h))
+            out.append(str(h.get("text") or h.get("statement") or h.get("seed_statement") or h))
         else:
-            out.append(str(getattr(h, "text", None) or getattr(h, "statement", None) or h))
+            out.append(str(getattr(h, "text", None) or getattr(h, "statement", None)
+                           or getattr(h, "seed_statement", None) or h))
     return [s.lower() for s in out]
 
 

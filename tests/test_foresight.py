@@ -4,7 +4,7 @@ over structural/text ideas (the hypothesis panel the numeric surrogate is blind 
 from __future__ import annotations
 
 from looplab.agents.roles import _state_brief
-from looplab.core.models import (Card, Event, Hypothesis, Idea, Node, NodeStatus, RunState,
+from looplab.core.models import (Card, Event, Idea, Node, NodeStatus, RunState,
                                  hypothesis_id)
 from looplab.events.replay import fold
 from looplab.search.best_of_n import BestOfNDeveloper
@@ -333,7 +333,9 @@ def test_surrogate_wrapper_reads_through_foresight_telemetry():
 
 
 # --------------------------------------------------------------------------- #
-# fold: hypothesis_ranked -> RunState.hypothesis_ranking + Hypothesis.priority
+# fold: hypothesis_ranked -> RunState.hypothesis_ranking (raw accumulator) -> Card.priority.
+# 1 card = 1 hypothesis: a `hypothesis_ranked` event with no native `card_ranked` stamps Card.priority
+# via the hypothesis_ranking fallback (replay.py `st.card_ranking or st.hypothesis_ranking`).
 # --------------------------------------------------------------------------- #
 
 def test_fold_stamps_priority_and_keeps_trace():
@@ -350,7 +352,7 @@ def test_fold_stamps_priority_and_keeps_trace():
                                                          {"id": id0, "statement": s0}]}),
     ]
     st = fold(evs)
-    assert st.hypotheses[id1].priority == 0 and st.hypotheses[id0].priority == 1
+    assert st.cards[id1].priority == 0 and st.cards[id0].priority == 1
     assert st.hypothesis_ranking["reason"] == "small data favors it"
     assert st.hypothesis_ranking["confidence"] == 0.8
 
@@ -369,14 +371,14 @@ def test_fold_priority_only_stamped_on_open_cards():
                                          "idea": {"operator": "draft", "hypothesis": s0}}),
         Event(type="node_evaluated", data={"node_id": 1, "metric": 0.9}),   # node 1 becomes best -> s0 supported
     ])
-    assert st.hypotheses[id0].status == "supported" and st.hypotheses[id0].priority is None
-    assert st.hypotheses[id1].status == "open" and st.hypotheses[id1].priority == 1
+    assert st.cards[id0].verdict == "supported" and st.cards[id0].priority is None
+    assert st.cards[id1].verdict == "open" and st.cards[id1].priority == 1
 
 
 def test_fold_priority_none_without_ranking():
     st = fold([Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "max"}),
                Event(type="hypothesis_added", data={"statement": "x helps"})])
-    assert next(iter(st.hypotheses.values())).priority is None
+    assert next(iter(st.cards.values())).priority is None
     assert st.hypothesis_ranking is None
 
 

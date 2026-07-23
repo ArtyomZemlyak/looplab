@@ -410,8 +410,9 @@ def test_runs_list_state_and_node_detail(tmp_path):
 
 
 def test_add_and_abandon_hypothesis_via_control(tmp_path):
-    """P1: a human posts a hypothesis to the board through /control (it's in CONTROL_EVENTS), it folds
-    into state.hypotheses as `open`, and an abandon control event flips it to `abandoned`."""
+    """P1 (1 card = 1 hypothesis): a human posts a hypothesis to the board through /control (it's in
+    CONTROL_EVENTS); it folds into the single Card board as a card with verdict `open`, and an abandon
+    control event flips that verdict to `abandoned`. The separate `state.hypotheses` view is gone."""
     from looplab.core.models import hypothesis_id
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
@@ -419,14 +420,14 @@ def test_add_and_abandon_hypothesis_via_control(tmp_path):
     r = client.post("/api/runs/demo/control",
                     json={"type": "hypothesis_added", "data": {"statement": stmt, "source": "human"}})
     assert r.status_code == 200
-    hyps = client.get("/api/runs/demo/state").json()["state"]["hypotheses"]
+    cards = client.get("/api/runs/demo/state").json()["state"]["cards"]
     hid = hypothesis_id(stmt)
-    assert hid in hyps and hyps[hid]["status"] == "open" and hyps[hid]["source"] == "human"
+    assert hid in cards and cards[hid]["verdict"] == "open" and cards[hid]["source"] == "human"
 
     client.post("/api/runs/demo/control",
                 json={"type": "hypothesis_updated", "data": {"id": hid, "status": "abandoned"}})
-    hyps = client.get("/api/runs/demo/state").json()["state"]["hypotheses"]
-    assert hyps[hid]["status"] == "abandoned"
+    cards = client.get("/api/runs/demo/state").json()["state"]["cards"]
+    assert cards[hid]["verdict"] == "abandoned"
 
 
 def test_engine_liveness_lock_probe(tmp_path):

@@ -34,7 +34,7 @@ from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGES
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      node_concept_event_provenance,
                      Card, CardConceptSource, CardIdentityProvenance, CardSelectionProvenance,
-                     Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial, card_action_digest,
+                     Event, Idea, Node, NodeStatus, RunState, Trial, card_action_digest,
                      card_ownership_receipt, legacy_card_ownership_receipt_v1,
                      transitional_card_action_digest_v1,
                      transitional_card_ownership_receipt_v1,
@@ -2098,9 +2098,9 @@ def _on_strategy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
                                 "ctx": d.get("ctx")})
 
 def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # FOREAGENT board prioritization: latest wins. The order does not re-rank evaluated nodes, but
-    # `_derive_hypotheses` exposes it to later proposal context and `_derive_cards` uses it as the
-    # compatibility priority fallback when no native card_ranked receipt exists.
+    # FOREAGENT board prioritization: latest wins. The order does not re-rank evaluated nodes; the sole
+    # board derivation `_derive_cards` uses it to stamp Card.priority (the compatibility priority
+    # fallback when no native card_ranked receipt exists).
     n = _node_for_event(st, d)
     generation = _event_generation(d)
     if generation is not _MISSING and (
@@ -2157,8 +2157,8 @@ def _on_cross_run_prior(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     st.cross_run_priors.append(d)   # §21.20 Step 2: concept tried in a SIMILAR earlier run (audit; surface)
 
 def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # P1+: engine-written agentic merge — fold alias hypotheses into a canonical. Collected
-    # here, APPLIED deterministically in `_derive_hypotheses` (no LLM in the fold). A malformed
+    # P1+: engine-written agentic merge — fold alias beliefs into a canonical. Collected
+    # here, APPLIED deterministically in `_derive_cards` (no LLM in the fold). A malformed
     # entry is tolerated there; unknown on old logs -> skipped by the outer dispatch.
     if d.get("canonical") and d.get("aliases"):
         st.hypotheses_merged.append(d)
@@ -3465,8 +3465,6 @@ def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
     flagged = _apply_trust_gate(st)
     _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)
 
-    # P1 derives after best so it cannot re-rank this fold; later proposal prompts consume open rows.
-    _derive_hypotheses(st)
     _derive_cards(st)        # docs/23 Layer 1a: the card ledger (mirrors hypotheses); advisory, after best
     return st
 
@@ -3687,149 +3685,6 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
     else:
         status = "tested"                          # all evidence evaluated, none improved
     return best_delta, status, supported
-
-
-def _derive_hypotheses(st: RunState) -> None:
-    """Build the hypothesis ledger from the folded state (P1). DERIVED, not stored: every node whose
-    `idea.hypothesis` is set contributes a hypothesis (id = slug of the statement) with itself as
-    evidence, merged with any explicitly-added ones (`hypothesis_added`). The verdict is computed from
-    evidence outcomes — supported if an experiment IMPROVED over its parent (or became the run best),
-    tested if evaluated without improvement, testing while still running, open with no evidence.
-    Advisory: never directly re-ranks evaluated nodes or picks the champion, but the OPEN board is fed
-    to later proposal prompts and is the compatibility fallback for Card priority in card-driven
-    selection (see f019358 / the RunState.hypotheses + Hypothesis docs)."""
-    hyps: dict[str, Hypothesis] = {}
-
-    # 1) explicitly-added hypotheses (human / deep-research) — may start with no evidence.
-    # Coerce defensively: control events arrive from the API verbatim, and one malformed entry
-    # must not brick every subsequent fold of the run (same convention as node_created).
-    for d in st.hypotheses_added:
-        try:
-            stmt = str(d.get("statement", "")).strip()
-            if not stmt:
-                continue
-            hid = str(d.get("id") or hypothesis_id(stmt))
-            if hid in hyps:
-                continue
-            try:
-                at_node = int(d.get("at_node", 0) or 0)
-            except (TypeError, ValueError):
-                at_node = 0
-            hyps[hid] = Hypothesis(id=hid, statement=stmt, source=str(d.get("source") or "human"),
-                                   rationale=str(d.get("rationale", ""))[:400],
-                                   created_at_node=at_node)
-        except Exception:
-            continue
-
-    # 2) derive/merge from nodes that state a hypothesis (evidence = the node).
-    for nid in sorted(st.nodes):
-        n = st.nodes[nid]
-        stmt = (n.idea.hypothesis or "").strip() if n.idea else ""
-        if not stmt:
-            continue
-        hid = hypothesis_id(stmt)
-        h = hyps.get(hid)
-        if h is None:
-            h = Hypothesis(id=hid, statement=stmt, source="researcher",
-                           rationale=(n.idea.rationale or "")[:400], created_at_node=n.id)
-            hyps[hid] = h
-        if n.id not in h.evidence:
-            h.evidence.append(n.id)
-
-    # 2b) apply agentic merges (`hypothesis_merged` events): fold each ALIAS hypothesis's evidence into
-    # its CANONICAL. Fully DETERMINISTIC — no LLM here (the decision was made + recorded by the engine);
-    # order-tolerant (evidence is unioned then sorted); back-compat (no merge events -> untouched).
-    alias: dict[str, str] = {}
-    merged_stmt: dict[str, str] = {}
-    for d in st.hypotheses_merged:
-        # Per-entry guard: the dispatch only checks `aliases` is TRUTHY, so a malformed record (a
-        # hand-edited log, a foreign/future writer where `aliases` is a scalar like `1`/`true`) would
-        # make `for a in aliases` raise TypeError and — since `_derive_hypotheses` runs unwrapped —
-        # brick EVERY subsequent fold of the run (no replay/resume/view). Tolerate it here, matching
-        # the node_created / hypotheses_added handlers and the "malformed entry is tolerated" promise.
-        try:
-            raw_canonical = d.get("canonical")
-            raw_aliases = d.get("aliases")
-            if not isinstance(raw_canonical, str) or not isinstance(raw_aliases, list):
-                continue
-            canon = raw_canonical.strip()
-            if not canon or len(canon) > 256:
-                continue
-            s = str(d.get("statement", "")).strip()
-            if s:
-                merged_stmt[canon] = s
-            seen_aliases: set[str] = set()
-            for raw_alias in raw_aliases[:256]:
-                if not isinstance(raw_alias, str):
-                    continue
-                a = raw_alias.strip()
-                if a and len(a) <= 256 and a != canon and a not in seen_aliases:
-                    seen_aliases.add(a)
-                    alias[a] = canon
-        except Exception:  # noqa: BLE001 — one bad merge record must not brick the whole fold
-            continue
-
-    def _canon(x: str) -> str:                      # resolve alias chains a->b->c, cycle-safe
-        seen: set[str] = set()
-        while x in alias and x not in seen:
-            seen.add(x)
-            x = alias[x]
-        return x
-
-    control_ids: dict[str, set[str]] = {hid: {hid} for hid in hyps}
-    if alias:
-        folded: dict[str, Hypothesis] = {}
-        folded_control_ids: dict[str, set[str]] = {}
-        for hid in list(hyps):
-            cid = _canon(hid)
-            folded_control_ids.setdefault(cid, {cid}).update(control_ids.get(hid, {hid}))
-            tgt = folded.get(cid)
-            if tgt is None:
-                base = hyps.get(cid, hyps[hid])     # seed from the canonical row if it exists, else this
-                tgt = Hypothesis(id=cid, statement=merged_stmt.get(cid, base.statement),
-                                 source=base.source, rationale=base.rationale,
-                                 created_at_node=base.created_at_node)
-                folded[cid] = tgt
-            for e in hyps[hid].evidence:
-                if e not in tgt.evidence:
-                    tgt.evidence.append(e)
-        for tgt in folded.values():
-            tgt.evidence.sort()
-        for alias_id in alias:
-            canonical_id = _canon(alias_id)
-            if canonical_id in folded and alias_id != canonical_id:
-                folded_control_ids.setdefault(canonical_id, {canonical_id}).add(alias_id)
-        hyps = folded
-        control_ids = folded_control_ids
-
-    # A node "supported" its hypothesis by ADVANCING the run's SOTA — and a record it set STAYS a support
-    # even after a later node overtakes it (extracted to `_record_setter_ids`, Layer 1a, reused by
-    # `_derive_cards` so a card sees the identical sticky-support set).
-    _record_setters = _record_setter_ids(st.nodes, st.direction)
-
-    # 3) compute a verdict per hypothesis from its evidence nodes — the pure `_evidence_verdict` helper
-    #    (Layer 1a) returns VALUES; `_derive_cards` reuses it so a card's verdict is byte-identical to the
-    #    hash-joined hypothesis wherever their evidence coincides. Never mutates the evidence nodes.
-    for h in hyps.values():
-        h.best_delta, h.status, _ = _evidence_verdict(
-            h.evidence, st.nodes, st.direction, _record_setters,
-            any(control_id in st.hypotheses_abandoned
-                for control_id in control_ids.get(h.id, {h.id})))
-
-    # FOREAGENT board prioritization: stamp each ranked card's `priority` (0-based position in the
-    # latest `hypothesis_ranked` order) so the UI kanban sorts open cards by predicted payoff. Derived,
-    # not stored on the event's cards — the ranking is by hypothesis id, robust to a card changing lane.
-    order = (st.hypothesis_ranking or {}).get("order") or []
-    for rank_i, hid in enumerate(order):
-        h = hyps.get(str(hid))
-        if h is not None and h.status == "open":   # priority is the OPEN lane's ordering; None once resolved
-            h.priority = rank_i
-
-    st.hypotheses = {
-        hid: hypothesis for hid, hypothesis in hyps.items()
-        if not any(control_id in st.hypotheses_deleted
-                   for control_id in control_ids.get(hid, {hid}))
-    }
 
 
 def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None = None):

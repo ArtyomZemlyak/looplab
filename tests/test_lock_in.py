@@ -119,7 +119,7 @@ def test_pure_analytics_are_hash_seed_stable():
     import textwrap
     script = textwrap.dedent("""
         import json
-        from looplab.core.models import Hypothesis, Idea, Node, NodeStatus, RunState
+        from looplab.core.models import Card, Idea, Node, NodeStatus, RunState
         from looplab.search.concept_graph import skeleton_for
         from looplab.search.lock_in import lock_in_signal
         from looplab.search.taxonomy_dedup import dedup_analysis
@@ -130,9 +130,10 @@ def test_pure_analytics_are_hash_seed_stable():
                                idea=Idea(operator="improve", params={"seed": float(i)},
                                          rationale="decoupled contrastive r-drop ema temperature"))
         for i in range(6, 10):
-            h = Hypothesis(id="h%d" % i,
-                           statement="decoupled contrastive r-drop temperature variant %d" % i)
-            st.hypotheses[h.id] = h
+            # 1 card = 1 hypothesis: the board dedup reads research_cards(); populate the Card board.
+            s = "decoupled contrastive r-drop temperature variant %d" % i
+            st.cards["h%d" % i] = Card(id="h%d" % i, seed_statement=s, statement=s,
+                                       verdict="open", status="proposed")
         g = skeleton_for("dense-retrieval")
         print(json.dumps({"lock": lock_in_signal(st, g), "dedup": dedup_analysis(st, g),
                           "targets": research_targets(st, g)}, sort_keys=True))

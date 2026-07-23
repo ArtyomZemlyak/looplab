@@ -781,8 +781,8 @@ def _card_action_digest(
         expanded_v1: bool = False) -> str | None:
     """Return one versioned exact bounded identity of a Card work item.
 
-    This is deliberately narrower than :func:`idea_proposal_digest`: a card is a queued work item,
-    not the aggregate research direction represented by ``Hypothesis``.  The digest binds the stable
+    This is deliberately narrower than :func:`idea_proposal_digest`: this digest binds ONLY the
+    executable work-item identity, not the card's research-direction / belief facet.  The digest binds the stable
     card id and immutable seed statement to the concrete build action and its freshness/parent anchors.
     Concept membership is metadata with its own completeness receipt and is intentionally not a
     prerequisite for execution.
@@ -1154,28 +1154,10 @@ def run_setup_key(command) -> str:
     return hashlib.md5(canon.encode("utf-8")).hexdigest()[:12]
 
 
-class Hypothesis(BaseModel):
-    """A first-class research hypothesis (P1). It never directly re-ranks evaluated nodes, but open
-    hypotheses are shown to the Researcher and may be foresight-ordered, so the board can steer later
-    proposals. It also makes the run legible ("what have we learned?"). Mostly DERIVED by the fold
-    from nodes whose `idea.hypothesis` is set (evidence + verdict computed from their outcomes); an
-    `hypothesis_added` event can also register one with no evidence yet (a human ask, or a
-    deep-research direction) that later accrues evidence when a matching node runs."""
-    id: str
-    statement: str
-    source: str = "researcher"          # researcher | deep_research | human | strategist
-    # open (no evaluated evidence) | testing (evidence running) | supported (an experiment improved) |
-    # tested (evaluated, no improvement) | abandoned (explicitly dropped)
-    status: str = "open"
-    rationale: str = ""
-    evidence: list[int] = Field(default_factory=list)   # node ids that tested it
-    created_at_node: int = 0
-    best_delta: Optional[float] = None  # best improvement-over-parent among evidence (audit)
-    # FOREAGENT board prioritization (search/foresight.py): 0-based rank among the OPEN hypotheses in
-    # the latest `hypothesis_ranked` event — 0 = predicted highest payoff. DERIVED each fold from that
-    # event; None when unranked (no predictor run, or the card isn't open). This Hypothesis-view field
-    # drives UI order; the same atomic ranking receipt also produces Card priority for Card selection.
-    priority: Optional[int] = None
+# The `Hypothesis` class was removed once `1 card = 1 hypothesis`: the single research board is now
+# `Card` (see below), which carries the former hypothesis fields — `seed_statement` (== the old
+# `statement`), `verdict` (== the old `status`, byte-identical via `_evidence_verdict`), `evidence`,
+# `priority`, `best_delta`. The frozen `hypothesis_*` events still feed `_derive_cards` for old-log replay.
 
 
 class CardConceptSource(BaseModel):
@@ -1283,7 +1265,9 @@ class CardSelectionProvenance(BaseModel):
 class Card(BaseModel):
     """One stable-identity proposal/work item in the target Card queue (docs/23).
 
-    ``Hypothesis`` remains the many-experiment research-direction aggregate. The projection also
+    The Card IS the research-direction aggregate now (1 card = 1 hypothesis): it carries the former
+    Hypothesis fields — ``seed_statement`` (the old statement / hash join key), ``verdict`` (the old
+    status), ``evidence``, ``priority``, ``best_delta``. The projection also
     materializes legacy/hash/synthesized Card shadows so old logs retain a useful board, but those rows
     are advisory and never selection-ready. Only a unique receipt-bound ``card_added`` establishes
     native work-item identity. Current Card selection consumes ``selection_ready`` and never infers
@@ -1895,10 +1879,10 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
-    # Hypothesis ledger (P1). It never directly ranks evaluated nodes; open entries are shown to the
-    # Researcher and can steer later proposals. Derived each fold from every node whose
-    # `idea.hypothesis` is set plus explicit `hypothesis_added` events. Keyed by `hypothesis_id`.
-    hypotheses: dict[str, Hypothesis] = Field(default_factory=dict)
+    # The former derived hypothesis board (`hypotheses: dict[str, Hypothesis]`) was removed once
+    # `1 card = 1 hypothesis`: every consumer now reads `research_cards()`/`open_research_cards()`, and
+    # `_derive_cards` folds the raw accumulators below directly. The accumulators stay (frozen event
+    # inputs the card fold reads); only the separate derived board + `Hypothesis` class are gone.
     # Explicitly-added hypotheses (human `add_hypothesis` control event or a deep-research direction),
     # kept separately so the derived-from-nodes pass can merge evidence into them. `abandoned` ids are
     # a human/agent override of the derived status.

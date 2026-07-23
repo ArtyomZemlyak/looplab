@@ -153,7 +153,6 @@
   "holdout_fraction": 0.25,
   "holdout_select": true,
   "host_grading": null,
-  "hypotheses": {},
   "hypotheses_abandoned": [],
   "hypotheses_added": [],
   "hypotheses_deleted": [],

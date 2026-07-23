@@ -1,8 +1,10 @@
-"""Agentic hypothesis-board merge: the engine decides paraphrase merges (hybrid retrieval + agent) and
-records `hypothesis_merged` events; the FOLD applies them deterministically (alias evidence -> canonical,
-no LLM in the fold). Replay-safe, order-tolerant, back-compat."""
+"""Agentic belief-board merge (1 card = 1 hypothesis): the engine decides paraphrase merges (hybrid
+retrieval + agent) and records `hypothesis_merged` events; the FOLD (`_derive_cards`) applies them
+deterministically to the single Card board (alias evidence -> canonical, no LLM). The canonical card's
+DISPLAY `statement` becomes the merged text; `seed_statement` stays the original join key.
+Replay-safe, order-tolerant, back-compat."""
 from looplab.core.models import RunState, hypothesis_id
-from looplab.events.replay import _derive_hypotheses
+from looplab.events.replay import _derive_cards
 
 
 def _state(added, merged=None):
@@ -16,8 +18,8 @@ def test_no_merge_events_leaves_board_untouched():
     h1, h2 = "increase the learning rate", "add dropout regularization"
     st = _state([{"statement": h1, "id": hypothesis_id(h1), "at_node": 1},
                  {"statement": h2, "id": hypothesis_id(h2), "at_node": 2}])
-    _derive_hypotheses(st)
-    assert len(st.hypotheses) == 2                       # back-compat: no merge -> nothing folded
+    _derive_cards(st)
+    assert len(st.cards) == 2                       # back-compat: no merge -> nothing folded
 
 
 def test_merge_folds_alias_into_canonical():
@@ -26,9 +28,9 @@ def test_merge_folds_alias_into_canonical():
     st = _state([{"statement": h1, "id": id1, "at_node": 1},
                  {"statement": h2, "id": id2, "at_node": 2}],
                 [{"canonical": id1, "aliases": [id2], "statement": "raise the learning rate"}])
-    _derive_hypotheses(st)
-    assert list(st.hypotheses) == [id1]                  # only the canonical survives
-    assert st.hypotheses[id1].statement == "raise the learning rate"
+    _derive_cards(st)
+    assert list(st.cards) == [id1]                  # only the canonical survives
+    assert st.cards[id1].statement == "raise the learning rate"
 
 
 def test_merge_unions_evidence_from_nodes():
@@ -43,9 +45,9 @@ def test_merge_unions_evidence_from_nodes():
         2: Node(id=2, operator="draft", idea=Idea(operator="draft", params={}, hypothesis=h2),
                 status=NodeStatus.evaluated),
     }
-    _derive_hypotheses(st)
-    assert list(st.hypotheses) == [id1]
-    assert st.hypotheses[id1].evidence == [1, 2]         # unioned + sorted
+    _derive_cards(st)
+    assert list(st.cards) == [id1]
+    assert st.cards[id1].evidence == [1, 2]         # unioned + sorted
 
 
 def test_merge_resolves_alias_chains():
@@ -56,8 +58,8 @@ def test_merge_resolves_alias_chains():
                  {"statement": c, "id": ic, "at_node": 3}],
                 [{"canonical": ib, "aliases": [ic], "statement": "b or c"},
                  {"canonical": ia, "aliases": [ib], "statement": "the one"}])
-    _derive_hypotheses(st)
-    assert list(st.hypotheses) == [ia]                   # c -> b -> a all collapse to a
+    _derive_cards(st)
+    assert list(st.cards) == [ia]                   # c -> b -> a all collapse to a
 
 
 def test_merge_is_deterministic_and_order_tolerant():
@@ -66,9 +68,9 @@ def test_merge_is_deterministic_and_order_tolerant():
     added = [{"statement": h1, "id": id1, "at_node": 1}, {"statement": h2, "id": id2, "at_node": 2}]
     merged = [{"canonical": id1, "aliases": [id2], "statement": "raise LR"}]
     a, b = _state(list(added), list(merged)), _state(list(added), list(merged))
-    _derive_hypotheses(a)
-    _derive_hypotheses(b)
-    assert list(a.hypotheses) == list(b.hypotheses)
+    _derive_cards(a)
+    _derive_cards(b)
+    assert list(a.cards) == list(b.cards)
 
 
 def test_malformed_merge_event_is_tolerated():
@@ -79,8 +81,8 @@ def test_malformed_merge_event_is_tolerated():
                  # truthy but NON-ITERABLE aliases — the dispatch guard admits it (both fields truthy),
                  # so an un-guarded `for a in aliases` would TypeError and brick EVERY subsequent fold.
                  {"canonical": "z", "aliases": 1}, {"canonical": "w", "aliases": True, "statement": 5}])
-    _derive_hypotheses(st)                                # must not raise
-    assert id1 in st.hypotheses
+    _derive_cards(st)                                # must not raise
+    assert id1 in st.cards
 
 
 def test_engine_pass_writes_merge_events_gated(tmp_path, monkeypatch):

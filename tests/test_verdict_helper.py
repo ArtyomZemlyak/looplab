@@ -1,7 +1,7 @@
 """Characterization + purity guard for the extracted verdict helpers (Layer 1a).
 
-`_record_setter_ids` and `_evidence_verdict` were extracted VERBATIM from `_derive_hypotheses` so
-`_derive_cards` (Layer 1a-model) can reuse the identical verdict logic. `tests/test_golden_replay.py`
+`_record_setter_ids` and `_evidence_verdict` were extracted VERBATIM from the (now removed)
+`_derive_hypotheses` so `_derive_cards` — the sole board derivation — reuses the identical logic. `tests/test_golden_replay.py`
 already pins byte-identity on a REAL run; these tests LOCK the extracted behavior on the tricky paths
 the toy golden never reaches — merge/`_canon` alias chain, `abandoned` override, record-setter
 stickiness after being overtaken, testing-vs-open — and prove the helpers NEVER mutate the evidence
@@ -49,7 +49,7 @@ def _base():
 
 
 def _by_stmt(st):
-    return {h.statement: h for h in st.hypotheses.values()}
+    return {h.statement: h for h in st.cards.values()}
 
 
 def test_record_setters_are_the_sota_advancers_only():
@@ -64,29 +64,29 @@ def test_record_setter_stickiness_survives_being_overtaken():
     # set the run's first SOTA — even though node 2 later overtook it. The regression this guards is the
     # old "is the CURRENT best" bug that flipped it supported->tested the moment something beat it.
     h = _by_stmt(_base())["draft baseline"]
-    assert h.status == "supported" and h.best_delta is None
+    assert h.verdict == "supported" and h.best_delta is None
 
 
 def test_supported_carries_positive_best_delta():
     h = _by_stmt(_base())["interactions help"]
-    assert h.status == "supported" and h.best_delta is not None and h.best_delta > 0
+    assert h.verdict == "supported" and h.best_delta is not None and h.best_delta > 0
 
 
 def test_testing_when_evaluated_worse_plus_pending():
     h = _by_stmt(_base())["a deeper model helps"]
     # evidence 3 (evaluated, worse) + 4 (pending) -> inconclusive; best_delta is the (negative) 3-vs-2 gap.
-    assert h.status == "testing" and h.evidence == [3, 4]
+    assert h.verdict == "testing" and h.evidence == [3, 4]
     assert h.best_delta is not None and h.best_delta < 0
 
 
 def test_open_when_only_evidence_failed():
     h = _by_stmt(_base())["regularization only"]
-    assert h.status == "open" and h.best_delta is None
+    assert h.verdict == "open" and h.best_delta is None
 
 
 def test_abandoned_override_wins_over_evidence():
     h = _by_stmt(_base())["external data raises accuracy"]
-    assert h.status == "abandoned"
+    assert h.verdict == "abandoned"
 
 
 def test_merge_alias_chain_unions_evidence_into_the_canonical():
@@ -112,7 +112,7 @@ def test_merge_alias_chain_unions_evidence_into_the_canonical():
     survivors = _by_stmt(st)
     assert set(survivors) == {c}
     assert survivors[c].evidence == [1, 2, 3]
-    assert survivors[c].status == "supported"
+    assert survivors[c].verdict == "supported"
 
 
 def test_helpers_never_mutate_the_evidence_nodes():
@@ -120,7 +120,7 @@ def test_helpers_never_mutate_the_evidence_nodes():
     st = _base()
     before = {nid: n.model_dump(mode="json") for nid, n in st.nodes.items()}
     setters = _record_setter_ids(st.nodes, st.direction)
-    for h in st.hypotheses.values():
+    for h in st.cards.values():
         _evidence_verdict(h.evidence, st.nodes, st.direction, setters, h.id in st.hypotheses_abandoned)
     after = {nid: n.model_dump(mode="json") for nid, n in st.nodes.items()}
     assert before == after

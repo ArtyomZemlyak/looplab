@@ -1,4 +1,4 @@
-"""Two hypothesis-board fixes:
+"""Two belief-board fixes (1 card = 1 hypothesis — the single Card board):
 - a hypothesis "supported" by a node that ADVANCED the run's SOTA stays supported after a later node
   overtakes it (before: it flipped supported→tested because support keyed on the CURRENT best, a moving
   target — the "board bug" the operator saw);
@@ -14,7 +14,7 @@ def _mk(evs):
 
 
 def _by_statement(st):
-    return {h.statement: h for h in st.hypotheses.values()}
+    return {h.statement: h for h in st.cards.values()}
 
 
 def test_support_is_sticky_when_a_record_setter_is_overtaken():
@@ -34,9 +34,9 @@ def test_support_is_sticky_when_a_record_setter_is_overtaken():
     ]))
     b = _by_statement(st)
     assert st.best_node_id == 3                                       # #3 is now best
-    assert b["H2 record"].status == "supported"                      # ... yet #2's verdict STANDS
-    assert b["H3 winner"].status == "supported"                      # the current record too
-    assert b["H1 baseline"].status == "supported"                    # the first node ESTABLISHED the SOTA
+    assert b["H2 record"].verdict == "supported"                      # ... yet #2's verdict STANDS
+    assert b["H3 winner"].verdict == "supported"                      # the current record too
+    assert b["H1 baseline"].verdict == "supported"                    # the first node ESTABLISHED the SOTA
 
 
 def test_hypothesis_delete_removes_it_from_the_board():
@@ -45,11 +45,11 @@ def test_hypothesis_delete_removes_it_from_the_board():
         ("hypothesis_added", {"statement": "a log transform helps", "source": "human"}),
     ]
     st = fold(_mk(base))
-    hid = next(iter(st.hypotheses))                                   # the added card's id
-    assert st.hypotheses[hid].statement == "a log transform helps"
+    hid = next(iter(st.cards))                                   # the added card's id
+    assert st.cards[hid].statement == "a log transform helps"
 
     st2 = fold(_mk(base + [("hypothesis_updated", {"id": hid, "status": "deleted"})]))
-    assert hid not in st2.hypotheses                                 # gone entirely
+    assert hid not in st2.cards                                 # gone entirely
     assert hid in st2.hypotheses_deleted
 
 
@@ -58,9 +58,9 @@ def test_delete_beats_abandon_and_survives_reopen_attempt():
         ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
         ("hypothesis_added", {"statement": "x", "source": "human"}),
     ]
-    hid = next(iter(fold(_mk(base)).hypotheses))
+    hid = next(iter(fold(_mk(base)).cards))
     st = fold(_mk(base + [
         ("hypothesis_updated", {"id": hid, "status": "abandoned"}),
         ("hypothesis_updated", {"id": hid, "status": "deleted"}),
     ]))
-    assert hid not in st.hypotheses                                   # deleted wins, not shown
+    assert hid not in st.cards                                   # deleted wins, not shown

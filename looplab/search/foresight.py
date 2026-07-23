@@ -388,9 +388,10 @@ class ForesightPanelResearcher:
         forward_hints(self, self.base)
 
     def _prioritize_board(self, state, parent) -> None:
-        """FOREAGENT prioritization of the OPEN-hypothesis board. Untested beliefs arrive in batches
+        """FOREAGENT prioritization of the OPEN research-card board (1 card = 1 hypothesis). Untested
+        beliefs arrive in batches
         from many sources — deep-research `recommended_directions`, a human "+ Add", the strategist —
-        and all land as `open` hypotheses in `state.hypotheses`; today `_state_brief` shows them in
+        and all land as `open` cards in `state.open_research_cards()`; today `_state_brief` shows them in
         arbitrary insertion order and truncates to 5, so which gets tested (and which is silently
         dropped) is luck. Here the world model PREDICTS which is most likely to pay off (primed with
         the data profile + experiment memory) and steers the base Researcher to test it first, by
