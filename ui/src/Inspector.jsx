@@ -14,6 +14,7 @@ import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import { traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail } from './traceProjection.js'
 import { nodeTheme } from './conceptId.js'
+import { buildingMarkers } from './buildingModel.js'
 
 // # CODEX AGENT: Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
@@ -176,24 +177,19 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   //     tab froze after "Developer implement" for the whole training run.
   const nodeStatus = state?.nodes?.[nodeId]?.status
   const engineActive = !readOnly && !!live && live.engine_running !== false && !live.finished && nodeId != null
-  // The node being EVALUATED right now is the LATEST pending one — the loop creates a node then scores
-  // it before creating the next. Gate the pending pulse on that (+ not paused), so an older queued or
-  // injected pending node doesn't poll-spin every 4s or mislabel itself as "training".
-  const latestId = Math.max(-1, ...Object.keys(state?.nodes || {}).map(Number))
-  // # CODEX AGENT: eval_parallel>1 starts several pending nodes concurrently, so "latest pending" is
-  // not an evaluation-ownership test. Inspecting an active older node disables detail polling and
-  // freezes its live Trace/metrics. Use explicit bounded eval ownership, or conservatively poll the
-  // selected pending lifecycle while the engine is active.
-  const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
-  // `withBuilding` splices EVERY in-flight build into `live.nodes` (building:true), so keying off the
-  // spliced node — not the singular `live.building` — lights up whichever concurrent build this is.
-  // # CODEX AGENT: the claim above is false for EXISTING nodes — withBuilding skips ids already in
-  // state.nodes (buildingModel.js "never overwrite either with a ghost"), yet node_reset re-builds
-  // emit node_building for an existing pending node (orchestrator re-propose/re-implement paths). So
-  // after an operator resets a node, building is never true here: the /nodes/{id} poll stops and the
-  // Trace tab never shows writing/repairing during the rebuild. Check the raw building markers for
-  // nodeId (like Dock's buildingGenerations(live)) instead of the spliced flag.
-  const nodeWorking = engineActive && (live?.nodes?.[nodeId]?.building === true || evaluatingThis)
+  // Poll ANY pending node the user is inspecting while the engine is active (peer review). "Latest
+  // pending" was not an evaluation-ownership test: under eval_parallel>1 several nodes are evaluated
+  // concurrently, so inspecting an active OLDER pending node used to disable detail polling and freeze
+  // its live Trace/metrics. There is no client-visible eval-ownership marker, so poll the selected
+  // pending lifecycle conservatively (the poll is per-inspected-node — it never spins more than the one
+  // open node, and a pending node in an active run is genuinely in the eval pipeline).
+  const evaluatingThis = nodeStatus === 'pending' && !live?.paused
+  // Building = a RAW build marker for this node (buildingMarkers), NOT the spliced `building` flag:
+  // withBuilding skips ids already in state.nodes, so a node_reset re-build (which emits node_building
+  // for an EXISTING pending node) never sets the spliced flag — the poll then stopped and the Trace tab
+  // never showed writing/repairing during the rebuild.
+  const buildingThis = buildingMarkers(live).some(m => Number(m?.node_id) === Number(nodeId))
+  const nodeWorking = engineActive && (buildingThis || evaluatingThis)
   usePoll((alive) => {
     // alive() gates the async resolution: if the user selects a different node (or the poll is
     // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
@@ -916,11 +912,12 @@ function Trace({ n, runId, live, working, onReload }) {
   // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
   // training / scoring). `_op` is only set in the building case (the eval has no operator), so it
   // cleanly disambiguates the two.
-  // Read this node's OWN build marker off the spliced node (`withBuilding` sets building:true + operator
-  // on every concurrent build), not the singular `live.building` which is only the last-appended one.
-  const _bnode = live?.nodes?.[n.id]
-  const building = working && _bnode?.building === true
-  const _op = building ? (_bnode.operator || '') : ''
+  // Read this node's OWN raw build marker (buildingMarkers covers EVERY concurrent build AND a
+  // node_reset re-build of an existing node, which the spliced `building` flag misses because
+  // withBuilding never overwrites an id already in state.nodes), not the singular `live.building`.
+  const _bmarker = buildingMarkers(live).find(m => Number(m?.node_id) === Number(n.id))
+  const building = working && !!_bmarker
+  const _op = building ? (_bmarker.operator || '') : ''
   const statusLabel = !working ? null
     : building
       ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')

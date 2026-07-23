@@ -355,3 +355,16 @@ test('owner lifecycle is announced without duplicating the review banner', async
   assert.match(runView, /historyActive && <span aria-hidden="true"> · history<\/span>/)
   assert.match(runView, /className="review-banner" role="status"/)
 })
+
+test('Inspector polls any inspected pending node and reads raw build markers (peer review)', async () => {
+  const inspector = await source('Inspector.jsx')
+  // eval_parallel>1: several nodes evaluate at once, so the poll must NOT gate on the single latest
+  // pending node (an active older node would freeze its live Trace/metrics).
+  assert.doesNotMatch(inspector, /latestId/, 'poll ownership must not gate on the single latest pending node')
+  assert.match(inspector, /const evaluatingThis = nodeStatus === 'pending' && !live\?\.paused/)
+  // node_reset re-build: read the RAW build markers, not the spliced `building` flag (withBuilding never
+  // sets it for an id already in state.nodes), for both the poll gate and the Trace live-status label.
+  assert.match(inspector, /const buildingThis = buildingMarkers\(live\)\.some\(m => Number\(m\?\.node_id\) === Number\(nodeId\)\)/)
+  assert.match(inspector, /const nodeWorking = engineActive && \(buildingThis \|\| evaluatingThis\)/)
+  assert.match(inspector, /const _bmarker = buildingMarkers\(live\)\.find\(m => Number\(m\?\.node_id\) === Number\(n\.id\)\)/)
+})
