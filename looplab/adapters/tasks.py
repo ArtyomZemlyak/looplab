@@ -525,6 +525,9 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
 
     stage_models = settings.agent_stage_models or {}
     stage_urls = settings.agent_stage_base_urls or {}
+    # CODEX AGENT: implement and repair share one mutable Developer object, so the second override
+    # replaces the first and both stages use the repair client. Give each stage an immutable role/client
+    # wrapper instead of mutating a shared instance during unified-agent construction.
     def maybe_override(stage, role):
         m, u = stage_models.get(stage), stage_urls.get(stage)
         if (m or u) and role is not None:
@@ -641,6 +644,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # do NOT wire the editing agent even if a developer_backend preset was requested.
     if settings.developer_backend in PRESETS and not _param_search:
         from looplab.agents.cli_agent import CliAgentDeveloper, opencode_config
+        # CODEX AGENT: external coding developers route through `.model`/`.host`, not the role `.client`
+        # changed by stage overrides; `developer_model`/`developer_base_url` therefore fall back to the
+        # shared endpoint. Resolve the developer-stage model/base explicitly at this constructor.
         agent_model = _agent_model(settings.developer_backend, settings.llm_model)
         # Drop a self-contained provider config in the agent's workdir so OpenCode talks
         # to the local Ollama endpoint and never fetches the external model registry.

@@ -298,6 +298,10 @@ def sweep_stale_lifecycle_locks(root: Path, *, max_age_s: float = 3600.0) -> int
                 except OSError:
                     continue                   # held by a live op (or flock unsupported) → leave it
                 try:
+                    # CODEX AGENT: unlinking a flock pathname while a waiter may already have the old
+                    # inode open creates two independent lock domains: a newcomer locks the recreated
+                    # file while the waiter later owns the unlinked inode. Never remove lifecycle lock
+                    # files; keep a stable inode and clean stale metadata inside the lock instead.
                     lp.unlink()                # unlink WHILE holding the flock: no op can be mid-write
                     removed += 1
                 finally:

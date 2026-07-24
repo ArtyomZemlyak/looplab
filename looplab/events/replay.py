@@ -224,6 +224,10 @@ class _FoldCtx:
         self.run_base_seen = False
         self.event_index = -1
 
+# CODEX AGENT: `run_started` carries immutable run identity, direction, trust and selection authority,
+# but every duplicate currently overwrites the first start. A replay-spliced second row can reverse
+# champion ordering and command policy after nodes exist; accept only the first start or quarantine
+# conflicting duplicates before folding any of these fields.
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Read with defaults like every other fold handler (RunState already defaults these to ""): the
     # fold loop dispatches handlers with NO per-event try/except, so a bare d["run_id"] KeyError on a
@@ -1605,6 +1609,9 @@ def _clean_llm_totals(d: dict | None) -> dict:
 def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """PART V (B): set the RUN's BASE concept set (last-write-wins). Nodes may then author only deltas vs
     this base; the fold post-pass materializes their node_concepts. Additive; malformed input -> ignored."""
+    # CODEX AGENT: a malformed later replacement is silently ignored while the previous base and
+    # clean integrity receipt remain authoritative. Record the invalid replacement as unavailable/
+    # incomplete; otherwise the ConceptFrame certifies stale taxonomy bytes as current.
     concepts = d.get("concepts")
     if isinstance(concepts, list):
         base, overflow, invalid = bounded_raw_concept_values(concepts)
@@ -2004,6 +2011,9 @@ def _on_concept_consolidation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") 
     # DETERMINISTIC winner — the lexicographically smallest canonical — never last-write, so
     # fold(perm(events)) is byte-identical. The B3 producer fixes each decision once and never re-maps an
     # existing raw id, so a conflict only arises in an adversarial / spliced log; this just hardens it.
+    # CODEX AGENT: lexicographic conflict resolution lets a later lower endpoint replace an already
+    # durable consolidation decision and reinterpret historical coverage. Preserve first authority
+    # (quarantining conflicts), or require an explicit versioned governance event for remapping.
     rename = d.get("rename")
     if isinstance(rename, dict):
         for raw, canon in rename.items():
@@ -3312,6 +3322,9 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
     st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
+    # CODEX AGENT: this counter advance is not bound to the current manual request. A duplicate or
+    # orphan completion can consume a future request; persist and compare request identity/generation
+    # instead of treating every `served_manual` row as one fungible acknowledgement.
     if d.get("served_manual"):
         st.research_served += 1
 
@@ -4710,6 +4723,9 @@ def _derive_cards(st: RunState) -> None:
                 resolved_alias = seed_owner.get(a, a)
                 if resolved_alias != canon and resolved_alias not in seen_aliases:
                     seen_aliases.add(resolved_alias)
+                    # CODEX AGENT: conflicting merge receipts remap the same immutable alias by
+                    # last-event-wins, redirecting evidence and control authority. Reject a second
+                    # target or choose a commutative winner while surfacing a durable conflict.
                     # Preserve hash -> native ownership and compose native -> canonical. Overwriting the
                     # first edge would strand the stable card beside its merged hypothesis shadow.
                     alias[resolved_alias] = canon
@@ -4830,6 +4846,9 @@ def _derive_cards(st: RunState) -> None:
         bounded_id = _card_id(raw_id)
         if bounded_id is None:
             continue
+        # CODEX AGENT: canonicalizing historical drop receipts through a later merge transfers one
+        # member's terminal lifecycle onto the healthy survivor. Bind closure to merge generation/member
+        # identity, or merge evidence without rewriting per-Card lifecycle provenance.
         cid = _canon(bounded_id)
         if cid:
             dropped[cid] = d

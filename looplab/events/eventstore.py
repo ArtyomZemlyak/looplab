@@ -120,6 +120,10 @@ def decode_event_record(obj: dict, *, strict: bool = False) -> list[Event]:
     the same ``type`` string without being an event envelope.
     """
 
+    # CODEX AGENT: ordinary envelopes accept unsupported `v` values and are then folded with today's
+    # semantics, so a future/corrupt v2 row can acquire v1 run and command authority. Validate the
+    # supported envelope-version set here (with an explicit migration path) instead of treating `v`
+    # as inert metadata.
     if is_event_batch_record(obj):
         return _decode_batch_envelope(obj)
     event = Event.model_validate(obj, strict=True) if strict else Event(**obj)

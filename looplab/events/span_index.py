@@ -401,6 +401,10 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
     p = Path(spans_path)
     with _LOCK:
         try:
+            # CODEX AGENT: stat and open resolve the pathname independently. A replace between them
+            # validates/cache-keys inode A while the probe and later reads observe inode B, producing
+            # a cross-generation trace view. Open first and derive identity/size from `fstat` on that
+            # same descriptor (and keep/revalidate it through the scan).
             stt = p.stat()
         except FileNotFoundError:
             return None  # no spans.jsonl (tracing off / pre-tracing run) — caller degrades

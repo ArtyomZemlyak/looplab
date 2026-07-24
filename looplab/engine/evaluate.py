@@ -329,6 +329,10 @@ class EvaluateMixin:
                     # retry. CUDA_VISIBLE_DEVICES contains physical ids (logical→physical remap), while
                     # an unspecified serial eval keeps eval_env=None and sees the whole box as before.
                     try:
+                        # CODEX AGENT: an evaluator may finish paid/external side effects here, but its
+                        # terminal event is appended much later. A process death in that gap makes resume
+                        # run the evaluator again. Persist an attempt-scoped outcome/outbox before exposing
+                        # success, or require a reconciliable idempotency key at the evaluator boundary.
                         res = await anyio.to_thread.run_sync(
                             self._run_eval, node, str(workdir), eval_env, None, cancel, next_start
                         )
@@ -540,6 +544,10 @@ class EvaluateMixin:
                             "idea_footprint": repaired_footprint,
                             "footprint_finalized": True,
                         })
+                    # CODEX AGENT: replay commits the repaired code before the repaired files are
+                    # materialized below. A crash in this window lets resume reuse a stale workdir while
+                    # state claims the new repair; stage reuse can then evaluate the wrong bytes. Publish
+                    # one manifest only after an atomic workdir generation is ready, or rematerialize first.
                     self.store.append(EV_NODE_REPAIRED, repair_payload)
                 node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code
                 if node.attempt != generation:

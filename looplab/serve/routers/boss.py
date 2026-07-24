@@ -764,6 +764,10 @@ def build_router(srv) -> APIRouter:
                     return {"ok": False, **_safe_boss_failure(e)}
             finally:
                 context.__exit__(None, None, None)
+        # CODEX AGENT: the job registry provides transport polling, not logical idempotency. A worker
+        # restart or lost POST response discards the only outcome handle, and retry repeats the paid
+        # tool/model route. Reserve a durable generation-scoped request key and rejoin its result as
+        # report_refresh already does.
 
         return await srv.jobs.run_as_job(_compute)
 

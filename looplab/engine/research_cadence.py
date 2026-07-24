@@ -102,6 +102,10 @@ class ResearchCadenceMixin:
         # research LLM spans + the research_completed append both live in THIS op-trace → the event is
         # stamped with it (UI scopes the event's trace to just the research, not a node).
         with self._op_span("deep_research", trigger=trigger):
+            # CODEX AGENT: the paid/provider result is not durable until `_record_deep_research`.
+            # A crash after the model returns but before that append leaves the trigger outstanding,
+            # so resume repeats the spend. Give each trigger a durable request/result identity or
+            # an outbox receipt that can be reconciled without calling the provider again.
             memo = self._compute_deep_research(state, trigger, trace=False)
             self._record_deep_research(memo, trigger=trigger, manual=manual)
         return fold(self.store.read_all())

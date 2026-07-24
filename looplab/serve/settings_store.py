@@ -166,6 +166,9 @@ class SettingsStore:
                 pass
             env_name = _SECRET_ENV[key]           # live-apply: in-process LLM + future spawns see it now
             if value:
+                # CODEX AGENT: secret rotation updates only this worker's environment. Sibling server
+                # processes retain the revoked credential and can launch paid work with it; make secret
+                # lookup revision-aware per request/spawn or broadcast a cross-process invalidation.
                 os.environ[env_name] = value
             else:
                 os.environ.pop(env_name, None)

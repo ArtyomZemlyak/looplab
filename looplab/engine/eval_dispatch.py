@@ -87,6 +87,9 @@ class EvalDispatchMixin:
         to = float((self._eval_spec or {}).get("run_setup_timeout", 1800.0))
         self.store.append(EV_RUN_SETUP_STARTED, {"command": cmd, "cwd": cwd})
         log = str(Path(self.run_dir) / "run_setup.log")
+        # CODEX AGENT: arbitrary setup side effects happen before their success receipt. A crash
+        # here makes resume execute the command again, so this is at-least-once rather than the
+        # documented exactly-once contract; require an idempotent/transactional external receipt.
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
         # Carry the command so the fold can key the exactly-once record on it (arch-review §5 P2).
         self.store.append(EV_RUN_SETUP_FINISHED,

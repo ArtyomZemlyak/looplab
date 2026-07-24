@@ -199,6 +199,10 @@ def build_router(srv) -> APIRouter:
         return liveness
 
     # ------------------------------------------------------------------ control
+    # CODEX AGENT: this compatibility mutation endpoint has no durable request identity or mandatory
+    # run-generation fence. A lost-response retry can append a second additive/paid intent; restrict
+    # it to provably idempotent events or route mutations through `/commands` with Idempotency-Key and
+    # exact generation.
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request):
         rd = _run_dir(run_id)
@@ -241,6 +245,9 @@ def build_router(srv) -> APIRouter:
                 expected = body.get("expected_seq")
                 if expected is None and gated_baseline is not None:
                     expected = gated_baseline
+                # CODEX AGENT: require an actual JSON integer. `int(7.9)` truncates to 7 and numeric
+                # strings are coerced, so a malformed CAS token can authorize a mutation against a
+                # tail the caller did not exactly name.
                 if expected is not None:
                     if isinstance(expected, bool):
                         raise HTTPException(400, "expected_seq must be an integer")

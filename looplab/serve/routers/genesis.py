@@ -406,6 +406,10 @@ def build_router(srv) -> APIRouter:
         # returned in THIS request (no polling round-trips, no added latency for a normal environment);
         # a slow one returns a job_id the UI polls (no 504). `with_progress` threads the scout-step
         # annotations into the job record the /api/genesis/{job_id} poll surfaces.
+        # CODEX AGENT: this paid, potentially unbounded job has no durable logical request identity.
+        # If the POST response/job registry is lost, the instructed retry starts the full provider
+        # loop again and bills twice. Reserve/rejoin a generation-scoped idempotency key and persist
+        # the logical outcome outside the process-local registry.
         return await srv.jobs.run_as_job(_compute, inline_wait=_GENESIS_INLINE_WAIT, with_progress=True)
 
     @router.get("/api/genesis/{job_id}")
