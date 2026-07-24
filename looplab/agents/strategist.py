@@ -117,7 +117,7 @@ class StrategyContext(BaseModel):
     node_budget_frac: float = 0.0              # fraction of the node budget spent (P2 endgame reserve)
     current_policy: str = "greedy"             # the ACTIVE policy (for switch-back rules, D3)
     eval_parallel: int = 1                     # current settled eval width (never startup AUTO/0)
-    # `_llm_parallel` is also the settled build fan-out used by legacy-compatible producer code.
+    # `llm_parallel` is also the settled build fan-out used by legacy-compatible producer code.
     # It is *not* proof that the shared broker has a finite total: canonical-unset startup preserves
     # legacy parallel_build, while canonical startup AUTO resolves this width from eval concurrency;
     # both modes deliberately keep the broker total unbounded.
