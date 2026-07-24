@@ -136,6 +136,12 @@ def event_sequence_continues(events: Sequence[Event], expected_seq: int) -> bool
     then writes on top of. (Restores the 5f011a2 fail-closed fence that 16f941f's gap tolerance voided;
     that tolerance covered a repair workflow that does not exist in this codebase.)
     """
+    # EMPTY is not a continuation: `all([])` is vacuously True, but every caller then dereferences
+    # `events[-1].seq` (iter_event_jsonl / log_divergence / the incremental cache) -> IndexError. Today's
+    # callers pre-filter empties (the batch decoder requires count>=1), so this is a defensive guard on a
+    # public exported helper, restoring the pre-rewrite `if not events: return False`.
+    if not events:
+        return False
     return all(
         type(event.seq) is int and event.seq == expected_seq + offset
         for offset, event in enumerate(events)

@@ -210,3 +210,17 @@ def test_append_is_thread_safe_for_concurrent_writers(tmp_path):
     seqs = sorted(r["seq"] for r in rows)
     assert len(set(seqs)) == N * M                          # every seq UNIQUE (no collision)
     assert seqs == list(range(seqs[0], seqs[0] + N * M))    # a dense, gap-free consecutive range
+
+
+def test_event_sequence_continues_empty_is_not_a_continuation():
+    """`event_sequence_continues([])` must be False, not a vacuously-True `all([])`: every caller
+    then dereferences `events[-1].seq` (IndexError). A dense prefix from `expected_seq` is True; a
+    forward seq gap or a non-int seq is False (fail-closed)."""
+    from types import SimpleNamespace
+    from looplab.events.eventstore import event_sequence_continues
+    ev = lambda s: SimpleNamespace(seq=s)  # noqa: E731 - tiny local Event stand-in (duck-typed .seq)
+
+    assert event_sequence_continues([], 5) is False              # empty -> not a continuation
+    assert event_sequence_continues([ev(5), ev(6), ev(7)], 5) is True   # dense prefix from expected
+    assert event_sequence_continues([ev(5), ev(7)], 5) is False         # forward gap -> fail closed
+    assert event_sequence_continues([ev("5")], 5) is False              # non-int seq -> fail closed
