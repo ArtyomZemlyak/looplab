@@ -448,3 +448,21 @@ def test_legacy_log_route_rejects_symlinked_events_log(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "is_symlink", looks_like_symlink)
     assert client.get("/api/runs/demo/log", headers=OWNER).status_code == 404
+
+
+def test_legacy_log_route_is_byte_bounded(tmp_path, monkeypatch):
+    """A row cap is not a memory cap: /log also bounds the aggregate serialized bytes, so a handful of
+    very large events can't be materialized whole into one response (OOM)."""
+    import looplab.serve.routers.runs as runs_mod
+    monkeypatch.setattr(runs_mod, "_LEGACY_LOG_MAX_ROWS", 10_000)    # rows are not the limit here
+    monkeypatch.setattr(runs_mod, "_LEGACY_LOG_MAX_BYTES", 2_000)    # tiny byte budget forces the cut
+    big = "x" * 400
+    _write_events(tmp_path / "demo" / "events.jsonl",
+                  [_event(0)] + [_event(s, payload=big) for s in range(1, 20)])
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+    got = client.get("/api/runs/demo/log", headers=OWNER)
+    assert got.status_code == 200
+    seqs = [event["seq"] for event in got.json()]
+    assert seqs == list(range(len(seqs)))           # oldest-first, contiguous prefix
+    assert 0 < len(seqs) < 20                        # byte budget stopped it before all 20 rows

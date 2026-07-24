@@ -6,7 +6,6 @@ from __future__ import annotations
 from collections import OrderedDict
 import hashlib
 import hmac
-from itertools import islice
 import json
 import os
 import re
@@ -88,12 +87,15 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONCEPT_LENS_KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")
 _CONCEPT_LENS_RECOVERY_SCHEMA = 1
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
-# Legacy /log returns the oldest-first envelopes past `since` as one flat array. Cap the rows it
-# materializes so a multi-GB events.jsonl can't be read whole into one response (OOM). Chosen large
-# enough that every realistic run is byte-identical to the old unbounded behaviour; only a pathological
-# log is bounded, and an incremental caller pages forward by advancing `since`. The modern bounded
-# transport is /log-page (byte + row limits). `islice` also stops the scan once the cap is reached.
+# Legacy /log returns the oldest-first envelopes past `since` as one flat array. Bound BOTH the row
+# count AND the aggregate serialized bytes it materializes, so neither 100k envelopes nor a handful of
+# very large ones can be read whole into one response (OOM). A row cap alone is not a memory cap: one
+# fat event or many large events blow the list past memory even under the row limit. Both caps are
+# chosen large enough that every realistic run is byte-identical to the old unbounded behaviour; only a
+# pathological log is bounded, and an incremental caller pages forward by advancing `since`. The modern
+# streaming-bounded transport is /log-page (per-page byte + row limits).
 _LEGACY_LOG_MAX_ROWS = 100_000
+_LEGACY_LOG_MAX_BYTES = 64 * 1024 * 1024        # ~64 MiB aggregate response ceiling for the flat array
 _RUN_CONFIG_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
 _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
     "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
@@ -2082,24 +2084,32 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):
         """Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive
-        seq lower bound. Returns the oldest-first envelopes past `since`, bounded to
-        `_LEGACY_LOG_MAX_ROWS` so a multi-GB log can't be materialized whole into one response (OOM);
-        an incremental caller pages forward by advancing `since`, and `/log-page` is the modern
-        byte+row-bounded transport."""
+        seq lower bound. Returns the oldest-first envelopes past `since`, bounded by BOTH
+        `_LEGACY_LOG_MAX_ROWS` rows and `_LEGACY_LOG_MAX_BYTES` of serialized response, so neither many
+        rows nor a few very large events can be materialized whole into one response (OOM); an
+        incremental caller pages forward by advancing `since`, and `/log-page` is the modern
+        streaming-bounded transport. (`iter_event_jsonl` still reads each physical line whole, so a
+        single pathological multi-GB event line is not bounded here — the writer bounds event size.)"""
         rd = _run_dir(run_id)
         # Defence-in-depth, mirroring /log-page: `run_dir` confines the directory, but a crafted
         # events.jsonl SYMLINK (e.g. inside an imported run bundle) could still escape the run dir.
         candidate = rd / "events.jsonl"
         if candidate.is_symlink() or rd not in candidate.resolve().parents:
             raise HTTPException(404, "no such run")
-        # CODEX AGENT: a row limit is not a memory limit. `iter_event_jsonl` reads one whole physical
-        # line before parsing and this list retains as many as 100k unbounded legacy/imported envelopes,
-        # so one giant event or many large events can still OOM despite the route/docstring claiming the
-        # multi-GB case is bounded. Reuse EventLogPager's byte budget (with a compatible continuation)
-        # or enforce a physical-byte ceiling before materializing JSON.
-        return list(islice(
-            (o for o in iter_event_jsonl(candidate) if o.get("seq", -1) > since),
-            _LEGACY_LOG_MAX_ROWS))
+        # A row cap is not a memory cap: 100k large envelopes (or a few fat ones) still OOM under it.
+        # Stop at whichever limit hits first — row count OR cumulative serialized bytes — so the flat
+        # array a legacy caller receives is memory-bounded. iter_event_jsonl preserves batch-envelope
+        # expansion; measuring the retained dicts is the response's own serialization cost.
+        out: list = []
+        budget = _LEGACY_LOG_MAX_BYTES
+        for o in iter_event_jsonl(candidate):
+            if not (isinstance(o, dict) and o.get("seq", -1) > since):
+                continue
+            out.append(o)
+            budget -= len(json.dumps(o, default=str))
+            if len(out) >= _LEGACY_LOG_MAX_ROWS or budget <= 0:
+                break
+        return out
 
     @router.get("/api/runs/{run_id}/log-page")
     def event_log_page(
