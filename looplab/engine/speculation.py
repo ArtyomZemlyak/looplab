@@ -996,7 +996,7 @@ class SpeculationMixin:
             return self._append_card_build_done(request, skipped="stale")
         result = self._spec_builds.get(key)
         if result is None:
-            # a kill between node_building and node_created leaves the
+            # Crash-recovery wedge: a kill between node_building and node_created leaves the
             # interrupted build's Node id permanently spent (it still counts against the physical ceiling
             # via `_node_id_ceiling`) AND recovery drops its Card, yet the durable request survives at head
             # with no in-memory result. Capacity is then zero, so `_start_head_producer`'s slot gate never
