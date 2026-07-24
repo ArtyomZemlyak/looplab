@@ -276,6 +276,23 @@ def test_fold_tolerates_null_metric_node(tmp_path):
     DiversityArchive(0.1).summary(st)        # archive must also tolerate the null-metric node
 
 
+def test_fold_tolerates_a_scalar_trials_container(tmp_path):
+    # a hand-edited/BYO node_evaluated whose `trials` is a bare scalar (int/float/bool) must fold to an
+    # evaluated node with no trials, NOT raise. The per-trial try/except only guards a bad ITEM; a
+    # non-iterable CONTAINER made `for t_d in trials` raise TypeError outside it and brick every re-fold
+    # (permanently un-replayable + un-resumable) — the same "assignment validation is off, a scalar can
+    # land here" hole the adjacent resource_curve coercion already closes.
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    for node_id, bad_trials in ((1, 5), (2, 3.14), (3, True)):
+        s.append("node_created", {"node_id": node_id, "parent_ids": [], "operator": "improve",
+                                  "idea": {"operator": "improve", "params": {}}, "code": ""})
+        s.append("node_evaluated", {"node_id": node_id, "metric": 1.0, "trials": bad_trials})
+    st = fold(s.read_all())                      # raised TypeError('int' not iterable) before the fix
+    assert all(st.nodes[node_id].trials == [] for node_id in (1, 2, 3))
+    assert st.nodes[0].metric == 0.5             # the well-formed node still folds normally
+
+
 def test_fold_quarantines_non_numeric_and_non_finite_node_metrics(tmp_path):
     s = EventStore(tmp_path / "events.jsonl")
     _seed(s)

@@ -880,13 +880,16 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.violations = d.get("violations", []) or []
             n.feasible = not n.violations       # #5: constraint-violating -> infeasible
             # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
-            # CODEX AGENT: Event.data is untyped; a schema-valid scalar `trials` makes this loop raise and
-            # poisons every replay/resume even though repair-log sees no JSON divergence. Require a
-            # bounded list container before iterating.
             # best trial, set by the engine). Coerce defensively per trial so one malformed
             # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.
+            # Event.data is untyped and assignment validation is off, so `trials` itself can arrive as a
+            # bare scalar (int/float/bool); the per-trial try/except only guards a bad ITEM, so a
+            # non-iterable CONTAINER would raise TypeError OUTSIDE it and poison every replay/resume with
+            # no JSON divergence for repair-log to see. Require a list/tuple before iterating — the same
+            # defence the resource_curve normalization above applies for the identical reason.
+            _raw_trials = d.get("trials", [])
             trials = []
-            for t_d in (d.get("trials", []) or []):
+            for t_d in (_raw_trials if isinstance(_raw_trials, (list, tuple)) else []):
                 try:
                     trials.append(Trial(**t_d))
                 except Exception:
