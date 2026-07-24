@@ -1096,6 +1096,10 @@ class SpeculationMixin:
                 # provider can make an operator stop take the full transport timeout. Use a genuinely
                 # cancellable producer or quarantine/abandon this isolated role pair after cancellation.
                 result = await anyio.to_thread.run_sync(
+                    # CODEX AGENT: the Card request identifies logical work, not a provider attempt. A
+                    # kill after provider acceptance but before this process-local result makes resume
+                    # reissue possibly charged work; persist attempt receipts plus an idempotency key and
+                    # quarantine ambiguous attempts until reconciled.
                     functools.partial(self._build_requested_card, dict(request), roles),
                     abandon_on_cancel=False,
                 )
@@ -1448,6 +1452,10 @@ class SpeculationMixin:
             try:
                 await self._evaluate(node_id, anyio.CapacityLimiter(1), max_es)
             finally:
+                # CODEX AGENT: this session-wide first-completion fence prevents the Card path from
+                # refilling a freed GPU while unrelated long-running siblings finish. Preserve the outer
+                # cadence boundary without turning one terminal child into head-of-line blocking for
+                # every remaining slot; add an unequal-duration refill regression.
                 # One terminal/attempt boundary closes this admitted batch. Existing children still
                 # burn to terminal, but no later scorer/admission may bypass outer controls/cadences.
                 consumer_completed = True

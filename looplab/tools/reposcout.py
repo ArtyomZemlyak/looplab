@@ -250,6 +250,9 @@ class RepoScoutTools:
             except OSError:
                 sz = "?"
             return f"(unsupported/binary type {p.suffix or '<none>'}; {sz}b — exists, not read)"
+        # CODEX AGENT: the advertised 16-KB page is applied only after `read_text` and `splitlines`
+        # materialize the entire source. One huge readable log/CSV can OOM the shared process; decode
+        # only the requested bounded window and impose a maximum physical line size.
         try:
             data = p.read_text(encoding="utf-8-sig", errors="replace")
         except OSError as e:

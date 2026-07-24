@@ -2809,6 +2809,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if await self._defer_for_node_budget(state):
                     return True
                 generation = current.attempt
+                # CODEX AGENT: `_create_node` performs paid work and durably creates the child before
+                # `fork_done` exists. A crash in that gap re-serves the queue head and duplicates the
+                # experiment/spend; claim the request durably by identity and recover an existing child
+                # before invoking the producer again.
                 self._create_node({"kind": "improve", "parent_id": pid,
                                    "parent_generations": {str(pid): generation}})
             self.store.append(EV_FORK_DONE, {

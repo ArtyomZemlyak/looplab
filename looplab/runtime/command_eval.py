@@ -759,6 +759,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         return (["timeout", "-k", "5", str(max(1, int(secs)))] + argv) if is_docker else argv
 
     grace = 15.0 if is_docker else 0.0
+    # CODEX AGENT: a Docker wrap creates a fresh `docker run --rm` for every call. Setup-installed
+    # dependencies live only in this disposable container, while eval/stages/readers run in pristine
+    # containers. Persist setup state under /work or retain one per-eval container, and test a real
+    # setup install followed by an import.
     if setup:
         swd = Path(setup_cwd).resolve() if setup_cwd else wd
         swd.mkdir(parents=True, exist_ok=True)

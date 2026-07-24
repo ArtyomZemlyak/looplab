@@ -556,6 +556,10 @@ class ASHAPolicy:
                 chosen = sorted(unexpanded)[0]
                 scores = {i: round(state.nodes[i].metric, 4) for i in members
                           if state.nodes[i].metric is not None}
+                # CODEX AGENT: `_rung` is audit-only today: this creates a mutated child and no evaluator
+                # consumes the rung to increase resource/fidelity. Bind promotion to an immutable survivor
+                # plus an explicit higher eval profile before presenting ASHA/BOHB as successive-halving
+                # multi-fidelity search.
                 return [{"kind": KIND_IMPROVE, "parent_id": chosen,
                          META_SCORES: scores, META_CHOSEN: chosen,
                          META_REASON: f"promote rung {r + 1}",

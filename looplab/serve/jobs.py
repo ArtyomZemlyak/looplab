@@ -45,6 +45,10 @@ class JobRegistry:
 
     def _make_room_locked(self, now: float) -> bool:
         """Evict only old completed receipts; running work and fresh results are never displaced."""
+        # CODEX AGENT: only done jobs can leave this fixed-cap registry, but daemon workers have no
+        # endpoint-owned deadline/cancellation or provably-dead transition. Enough hung calls permanently
+        # exhaust every job-backed feature after clients time out; add a server-side terminal and
+        # reconciliation lifecycle before claiming bounded capacity.
         if len(self._jobs) < _MAX_JOBS:
             return True
         completed = sorted(

@@ -738,6 +738,9 @@ class OpenAICompatibleClient:
                             # here until the long idle read timeout. Now it fails over near
                             # `header_timeout`; `_stream_with_idle_guard` then governs the body.
                             header_join = self.header_timeout + min(10.0, self.header_timeout)
+                            # CODEX AGENT: own and close the SDK Stream in a finally block. Consumer
+                            # cancellation currently releases the broker permit without guaranteeing
+                            # that the HTTP response/socket was closed.
                             for ev in _stream_with_idle_guard(
                                     self._bounded_create(kwargs, header_join),
                                     self.timeout, self.header_timeout):
@@ -751,6 +754,9 @@ class OpenAICompatibleClient:
                                 if piece:
                                     pieces.append(piece)
                                     yield piece
+                        # CODEX AGENT: a role-only/empty clean EOF is not a successful assistant answer.
+                        # Mirror `_post`'s empty-envelope retry/fallback; otherwise callers persist a
+                        # zero-content "success" and no recovery path runs.
                         stream_completed = True
                         break                    # streamed (or cleanly ended) -> done
                     except openai.BadRequestError as e:

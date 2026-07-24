@@ -145,6 +145,9 @@ class BackgroundManager:
         outside it: `_enforce_deadline`/`_reap` operate on the handle directly and must not re-enter it."""
         with self._lock:
             tasks = list(self._tasks.values())
+        # CODEX AGENT: deadline_lock must cover every poll/reap, including this sweep and eviction. If
+        # enforcement skips an in-flight explicit kill, unlocked `_reap` can consume the parent while
+        # tree-kill still owns its PID, reopening the PID-reuse/orphan window that read/list/kill fence.
         for t in tasks:
             self._enforce_deadline(t)
             self._reap(t)

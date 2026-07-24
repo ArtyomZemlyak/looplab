@@ -520,6 +520,10 @@ def repair_log(path: str | os.PathLike) -> dict:
     hand), (2) atomically truncates the log to its last valid boundary — exactly the recoverable prefix
     `iter_jsonl`/`fold` already consume — and (3) records the repair provenance as a `log_repaired`
     diagnostic event (unfolded) appended to the now-clean log. Returns the repair record."""
+    # CODEX AGENT: repair is one read/derive/replace transaction, but it holds neither the run lifecycle
+    # guard nor the event-log lock. A concurrent repair/resume can append after this stale boundary and
+    # then have authoritative events replaced away; hold both fences across detection, backup, truncate,
+    # and repair-marker publication, and require the run to be offline.
     p = Path(path)
     div = log_divergence(p)
     if div is None:
@@ -897,6 +901,10 @@ class EventStore:
                 mtime_ns = None
                 identity = None
             replaced = (self._cache_identity is not None and identity != self._cache_identity)
+            # CODEX AGENT: growth does not prove append-only continuity. A cached prefix can be rewritten
+            # and then extended before this read, top-upping a new tail onto stale Events. Validate a
+            # prefix fingerprint (or invalidate on any intervening mtime change) before extending the
+            # cache, and cover rewrite-plus-growth.
             same_size_rewrite = (size == self._cache_bytes and self._cache_mtime_ns is not None
                                  and mtime_ns != self._cache_mtime_ns)
             cache_invalidated = size < self._cache_bytes or replaced or same_size_rewrite

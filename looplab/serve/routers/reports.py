@@ -2669,6 +2669,10 @@ def build_router(srv) -> APIRouter:
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             from looplab.serve.scope_report import generate_scope_report as _gen
             s = srv.llm_settings(None)
+            # CODEX AGENT: this paid client bypasses the durable usage/cost ledger. Success and
+            # provider-accepted-then-crashed attempts can reach an at-most-once action receipt with no
+            # reconstructible spend. Bind usage to the action outbox and withhold authoritative `done`
+            # until its receipt is reconciled.
             try:
                 client = srv.make_llm_client(s)
                 # Paid cross-run synthesis is an interactive bounded operation. Global agent settings

@@ -324,6 +324,10 @@ def apply_claim_curation(memory_dir, curation: dict, *, by: str = "steward", at:
                 skipped.append({"statement": d.get("statement"), "reason": "duplicate claim operation"})
                 continue
             seen.add(key)
+            # CODEX AGENT: this compatibility mutation bypasses the observed-decision lifecycle: it has
+            # no live claim UID, evidence digest, expected revision, portfolio identity, or action receipt.
+            # Remove it or require/forward those fences before an old proposal can append a
+            # last-write-wins decision over changed/disappeared evidence.
             record_claim_decision(memory_dir, statement=d["statement"], decision=d["decision"],
                                   scope=d.get("scope", ""), metric=d.get("metric", ""),
                                   note=d.get("why", ""), by=by, at=at)

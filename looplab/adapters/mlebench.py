@@ -191,6 +191,10 @@ class MLEBenchTask(BaseModel):
     sep: float = 2.0
     noise: float = 1.0
     max_k: int = 15
+    # CODEX AGENT: synthetic labels are deterministic from these serialized fields, and the evaluator
+    # mounts `task.snapshot.json`. Candidate code can reconstruct `_data()` and emit the exact y_test
+    # despite host grading. Use host-only entropy/opaque identity or explicitly downgrade this mode's
+    # confidentiality claim.
     # Out-of-process grading (recommended for untrusted/real benchmarks): the solution writes
     # predictions.json and the HOST scores it against held-out labels never placed on the candidate
     # FS — there is no answer key to read or self-report. False keeps the legacy in-workdir grader.

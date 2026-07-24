@@ -286,6 +286,10 @@ def build_router(srv) -> APIRouter:
             # ``cards_projection``, so the review response could claim exact/complete coverage of data
             # it silently redacted. Preserve the canonical Cards fragment verbatim through the scrub —
             # owner/SSE never re-scrub it either — so the completeness receipt stays truthful.
+            # CODEX AGENT: this still returns owner state wholesale, including cross_run_priors and Card
+            # cross_run_prior metadata that names/metrics sibling runs. A one-run review capability needs
+            # a dedicated DTO that removes or safely aggregates foreign portfolio records; preserving
+            # Card completeness cannot expand authorization.
             payload = srv.state_payload(rd)
             inner = payload.get("state")
             preserved = ({key: inner[key] for key in ("cards", "cards_projection") if key in inner}

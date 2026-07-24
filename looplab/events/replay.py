@@ -3222,6 +3222,10 @@ def _on_fork(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
           and _event_generation(d) is _MISSING):
         st.fork_requests.append(dict(d))  # legacy queued-before-create intent
 
+# CODEX AGENT: completion must advance only the current durable request whose identity/generation (or
+# explicit queue index) matches. Unconditional counting lets a duplicate/orphan `fork_done` consume a
+# later request; Card-build replay below already demonstrates the required head-validation pattern, and
+# inject completion has the same defect.
 def _on_fork_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.forks_done += 1   # one per processed fork request (gate for replay-safe fulfillment)
 
@@ -3285,6 +3289,8 @@ def _on_inject_node(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.inject_requests.append(d)        # operator-authored experiment (manual tree edit)
 
 def _on_inject_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # CODEX AGENT: bind this receipt to the current request; a duplicate old done row must not advance
+    # past a newly appended inject intent and leave it permanently unserved.
     st.injects_done += 1                 # one per processed inject (replay-safe gate)
 
 def _on_deep_research(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

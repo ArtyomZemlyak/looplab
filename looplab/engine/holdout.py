@@ -62,6 +62,10 @@ class HoldoutGrader:
         # above-median report rides along in extra_metrics for the trust panel + final report.
         if g.get("kind") == "mlebench":
             from looplab.adapters.mlebench_grade import grade_in_subprocess
+            # CODEX AGENT: this is a host confused-deputy boundary. `resolve()` plus `is_file()` follows a
+            # candidate-created symlink, including one to the private answer CSV. Require a simple
+            # relative name, lstat a non-symlink regular file, and prove containment in this exact
+            # attempt workdir before any host-side grader reads it.
             # Resolve so the grader subprocess (run from the repo root) reads the submission from the
             # node workdir regardless of whether run_dir was relative.
             sub = (Path(workdir) / g.get("submission", "submission.csv")).resolve()

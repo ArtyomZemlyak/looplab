@@ -374,6 +374,10 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
         _mem = int(mem_bytes) if (mem_bytes and mem_bytes > 0) else None
         _fsize = int(fsize_bytes) if (fsize_bytes and fsize_bytes > 0) else None
         if _mem is not None or _fsize is not None:
+            # CODEX AGENT: threaded evaluators must not use Python `preexec_fn`: fork can inherit an
+            # interpreter/import/allocator lock and deadlock before `Popen` returns, so no timeout or
+            # cancellation machinery exists. Use a fresh single-threaded launcher that applies setrlimit
+            # and then execs argv.
             # Best-effort resource caps for the trusted_local tier (#5 / doc 17 §7.6, P1-5). RLIMIT_AS
             # bounds the child's VIRTUAL address space so a runaway trainer hits MemoryError instead of
             # OOM-killing the whole host (+ the engine); RLIMIT_FSIZE bounds the size of any single file
@@ -709,6 +713,10 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 timed_out = True
                 break
     # Let the final lines flush before we read the buffers.
+    # CODEX AGENT: clean exit of the direct child is not proof its process group/job is gone. A
+    # metric-producing parent can leave a redirected long-lived descendant, yet this path accepts the
+    # result and releases resources. Preserve the group/job handle and reap residual descendants on
+    # every terminal path, not only timeout/stall/cancel.
     t_out.join(timeout=5)
     t_err.join(timeout=5)
     marker = (f"\n‼ {DIVERGED_SENTINEL} — non-finite loss/grad_norm "

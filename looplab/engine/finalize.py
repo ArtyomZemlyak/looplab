@@ -529,6 +529,10 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
     # run errored out — that IS its terminal state — so close the scope idempotently instead. (A
     # NON-error target, e.g. a transient error finish over a durable ``time_budget`` intent, still
     # re-materializes the original terminal below and converges normally.)
+    # CODEX AGENT: `state.last_finish_seq` may be a later bare fallback error finish that quiescence
+    # deliberately ignores. Acknowledging that foreign finish closes this scope without its checklist.
+    # Require an exact scoped finish with valid adjacency; otherwise abandon only this scoped attempt
+    # and let the fallback own its recovery.
     if str(finish_data.get("reason") or "").lower() == "error":
         if (state.finished and state.last_finish_seq >= 0
                 and not _has_finish_step(events, EV_FINALIZATION_FINISHED, state.last_finish_seq)):

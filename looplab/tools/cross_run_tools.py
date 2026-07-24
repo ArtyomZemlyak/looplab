@@ -197,6 +197,10 @@ class CrossRunTools:
         # live run's identity is never "prior" evidence, even when its task and direction still match.
         if self._is_current_run(row):
             return False
+        # CODEX AGENT: current lesson writers omit `direction`, while bound fixtures manufacture it.
+        # This check therefore discards production lessons from claims/Atlas/search and leaves
+        # agent-facing memory empty. Persist direction at each writer and add a production
+        # writer-to-bound-reader integration test before treating this as an enforced polarity fence.
         # a bound provider is agent-facing. Exact task identity cannot override missing or
         # malformed polarity provenance; only an explicitly unbound human/CLI audit stays portfolio-wide.
         if not same_live_direction(self._direction, row.get("direction")):
