@@ -730,6 +730,12 @@ class OpenAICompatibleClient:
                         # Keep a stream's slot until its final chunk (or consumer close). The context
                         # exits before either blocking fallback below, so total=1 cannot self-deadlock.
                         with llm_request_permit():
+                            # CODEX AGENT: the public Assistant stream bypasses `_sdk_chat`'s new
+                            # `_bounded_create` header guard. Python evaluates create(**kwargs) before
+                            # `_stream_with_idle_guard` receives the stream, so an endpoint that accepts
+                            # the connection but never sends response headers can still hang this path
+                            # until the long SDK read timeout. Route creation through the same bounded
+                            # seam and add an end-to-end complete_text_stream black-hole test.
                             for ev in _stream_with_idle_guard(
                                     self._sdk.chat.completions.create(**kwargs),
                                     self.timeout, self.header_timeout):

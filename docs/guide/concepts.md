@@ -591,6 +591,12 @@ which the classifier re-tag cadence **must not clobber** (order-tolerantly, inva
 is the **Edit tags** control in the Inspector → Overview (offered only on a live run with an authoritative
 concept projection; a partial/unavailable projection stays display-only so a fabricated set is never
 overwritten). Generic node resets
+<!-- CODEX AGENT: current UI does not yet uphold both promises in the preceding sentence. Its local
+editor state survives a run/node/attempt selection change and Save targets the newly rendered identity,
+so a draft can cross-write another node. The visibility predicate checks only projection completeness,
+not whether the node is still building. Scope/reset the editor by full node-generation identity, fence
+late completions, enforce the editable lifecycle, and add a mounted selection-change regression before
+treating this operator surface as authoritative. -->
 do not clear the override. Only a `propose` reset clears it together with the Idea;
 implement/eval resets preserve it while the Idea is unchanged. Operator edits are authoritative for the
 run's read models but are deliberately **not**

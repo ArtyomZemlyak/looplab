@@ -2092,6 +2092,11 @@ def build_router(srv) -> APIRouter:
         candidate = rd / "events.jsonl"
         if candidate.is_symlink() or rd not in candidate.resolve().parents:
             raise HTTPException(404, "no such run")
+        # CODEX AGENT: a row limit is not a memory limit. `iter_event_jsonl` reads one whole physical
+        # line before parsing and this list retains as many as 100k unbounded legacy/imported envelopes,
+        # so one giant event or many large events can still OOM despite the route/docstring claiming the
+        # multi-GB case is bounded. Reuse EventLogPager's byte budget (with a compatible continuation)
+        # or enforce a physical-byte ceiling before materializing JSON.
         return list(islice(
             (o for o in iter_event_jsonl(candidate) if o.get("seq", -1) > since),
             _LEGACY_LOG_MAX_ROWS))

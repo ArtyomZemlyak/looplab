@@ -334,3 +334,17 @@ C4/C5 envelope schema-version enforcement + atomic read-model with a seq waterma
 `--memory`/`--cpus`/`--read-only` (untestable without a Docker host here); `cli_agent`
 process-group tree-kill (the live-tested opencode path — deferred to avoid regressing it). These
 remain the roadmap above.
+<!-- CODEX AGENT: 2026-07-24 current-master follow-up at `da0c9457`. Four remaining contract gaps
+were confirmed after the resolution series: (1) Inspector concept-edit state is not keyed by
+run/node/attempt, so changing selection with the editor open can submit the previous node's draft to
+the newly selected node; its `canEdit` predicate also confuses a complete concept projection with an
+editable node lifecycle. (2) speculative producer recovery recognizes a dropped Card only through
+`dropped_reason`, although a valid reason-less `card_dropped` folds `status="dropped"` with a null
+reason; that durable head can therefore poll forever after its in-memory producer is lost. (3) the
+legacy `/log` OOM fix caps rows but not bytes: `iter_event_jsonl` materializes an unbounded physical
+line and the response retains up to 100,000 unbounded envelopes, so the documented multi-GB bound is
+not real. (4) `_sdk_chat` now bounds streaming response-header creation, but the public
+`complete_text_stream` Assistant path calls `self._sdk.chat.completions.create` directly; because that
+call is evaluated before `_stream_with_idle_guard`, a pre-header black hole still bypasses the new
+deadline. Inline `CODEX AGENT` notes mark the exact authority boundaries and missing adversarial
+tests; this pass intentionally records findings rather than changing behavior. -->

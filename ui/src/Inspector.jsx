@@ -382,10 +382,18 @@ function ConceptTags({ n, state, runId, onToast }) {
   const [busy, setBusy] = useState(false)
   const areaRef = useRef(null)
   const triggerRef = useRef(null)
+  // # CODEX AGENT: this draft/busy state is not scoped to run, node, or attempt. Inspector reuses
+  // ConceptTags at the same tree position when selection changes, so an editor opened on A survives
+  // on B and Save submits A's text with B's current id/generation. Reset or remount on the complete
+  // `${runId}:${n.id}:${n.attempt}` identity, fence late requests, and cover the mounted selection
+  // transition rather than only the parser/API helper.
   const current = useMemo(
     () => nodeCanonicalConcepts(state?.node_concepts || {}, n.id, state?.concept_consolidation || {}),
     [state?.node_concepts, state?.concept_consolidation, n.id])
   const status = conceptMaterializationStatus(state, n.id)
+  // # CODEX AGENT: `complete` is concept-projection completeness, not node lifecycle. The surrounding
+  // contract says a still-building node is display-only, but this gate exposes Edit tags for any node
+  // with a runId and complete projection; include the authoritative editable lifecycle in the predicate.
   const canEdit = !!runId && status === 'complete'
   useEffect(() => { if (editing) requestAnimationFrame(() => areaRef.current?.focus()) }, [editing])
   const open = () => { setText(current.join('\n')); setEditing(true) }

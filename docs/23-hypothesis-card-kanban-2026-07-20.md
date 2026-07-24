@@ -1227,3 +1227,12 @@ the stage scopes.
    new canonical fields (set-legacy → writes new; unset → new wins); nothing new is built on them, the
    Strategist never emits them, and docs/UI present only the new names. Removing them entirely is a
    separate post-migration deprecation window.
+<!-- CODEX AGENT: POST-RESOLUTION REVIEW 2026-07-24 (`da0c9457`). Merged-away producer recovery now
+uses the canonical alias receipt, but the sibling dropped branch still tests `dropped_reason` rather
+than lifecycle `status`. Replay explicitly permits a reason-less `card_dropped` and folds it as
+`status="dropped", dropped_reason=None`; selection has a regression for that shape, while
+`test_recovery_dropped_head_with_no_result_closes_stale_instead_of_wedging` supplies a non-empty
+reason. After a crash loses the in-memory producer, the reason-less durable head therefore never
+closes and keeps the session polling. Reuse the shared administratively-dead semantics and test this
+exact shape. This post-resolution finding does not rewrite the pinned `60e9a5f3` blocker snapshot or
+its historical resolution receipts. -->

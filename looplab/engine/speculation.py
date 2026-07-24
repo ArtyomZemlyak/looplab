@@ -1019,6 +1019,11 @@ class SpeculationMixin:
                 for alias in (getattr(c, "aliases", None) or [])
                 if isinstance(alias, str) and alias
             }
+            # CODEX AGENT: merged-away recovery is now receipt-based, but dropped recovery still keys
+            # on `dropped_reason`. A valid `card_dropped` with an empty/missing reason folds to
+            # status=="dropped" and dropped_reason=None (already covered by the selection guard), so
+            # this head remains outstanding forever after a crash. Reuse the lifecycle-dead predicate
+            # or status here too, and add the reason-less variant to the producer-recovery test.
             if key not in self._spec_build_inflight and (
                 (card is not None
                  and (card.dropped_reason is not None or card.merged_into is not None))
