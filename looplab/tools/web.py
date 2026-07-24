@@ -117,6 +117,10 @@ class WebTools:
 
     def _get(self, url: str, data: bytes | None = None) -> str:
         req = urllib.request.Request(url, data=data, headers={"User-Agent": _UA})
+        # CODEX AGENT: the allow-check and socket connect perform independent DNS resolutions, so
+        # DNS rebinding can replace a validated public address with loopback/RFC1918/metadata here.
+        # Pin the validated address in the transport (preserving Host/SNI), or verify the connected
+        # peer for every redirect hop; preflight getaddrinfo is not an SSRF boundary.
         with _SSRF_OPENER.open(req, timeout=self.timeout) as r:   # re-checks SSRF on each redirect hop
             # Bounded read (see _MAX_DOWNLOAD_BYTES): `read(n)` returns AT MOST n bytes, so a multi-GB /
             # endless response can't exhaust host memory; the unread tail is dropped when the stream closes.

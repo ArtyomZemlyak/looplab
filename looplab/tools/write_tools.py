@@ -221,6 +221,10 @@ class WriteTools:
             return refusal
         if self.backups and not self.backups.save(p):
             return "(refused: could not create a recovery snapshot; no file change was applied)"
+        # CODEX AGENT: containment was proved on a resolved pathname before approval, but the path is
+        # reopened here by name. A concurrent symlink/junction ancestor swap can redirect the approved
+        # write outside the allowed root; use descriptor-relative no-follow opens and revalidate the
+        # final file identity immediately before the atomic replacement.
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         self.applied.append(action)

@@ -83,6 +83,10 @@ def _resolve_launcher(name: str) -> list[str]:
             if exes:
                 return [str(exes[0])]  # real binary -> no cmd.exe arg mangling
         if p.lower().endswith((".cmd", ".bat")):
+            # CODEX AGENT: Windows batch launchers are reparsed by cmd.exe even though Popen receives
+            # an argv list and shell=False; the model-generated prompt contains metacharacters that
+            # can become host commands. Never pass untrusted prompt text through a batch command line:
+            # require a native executable or deliver the prompt via stdin/a protected response file.
             return [p]             # subprocess can run a .cmd/.bat shim directly
         # .ps1 with no bundled .exe: cmd.exe can't run it -> invoke PowerShell.
         return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", p]

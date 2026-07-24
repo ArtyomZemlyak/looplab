@@ -715,6 +715,10 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # reflection must precede claim curation so this run's durable lessons are visible;
         # every steward still precedes llm_cost so its provider usage enters the terminal roll-up.
         if getattr(engine, "_cross_run_curation", False):
+            # CODEX AGENT: three independent stewards share one failure boundary. A concept-ledger
+            # exception skips claim and task-facet governance while the run still publishes complete;
+            # isolate each call and persist a per-steward success/unavailable receipt so one subsystem
+            # cannot silently disable the other Part-IV/V outputs.
             try:
                 final = fold(engine.store.read_all())
                 engine._store_concept_curation(final)

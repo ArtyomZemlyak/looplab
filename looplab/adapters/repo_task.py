@@ -123,6 +123,9 @@ class EvalSpec(BaseModel):
     # When it can't corroborate the frozen adapter within `drift_tolerance`, the metric is
     # discarded and a `spec_drift` event is recorded. None disables the check.
     cross_check: Optional[dict] = None
+    # CODEX AGENT: validate this and every constraint min/max as finite non-negative numbers at task
+    # admission. `NaN` makes drift/constraint comparisons false (fail-open), a negative tolerance
+    # rejects equal metrics, and string bounds escape later as a batch-cancelling TypeError.
     drift_tolerance: float = 1e-6
     # Multi-objective (#5). `metrics`: extra named readers reported alongside the primary
     # (audit/observability), e.g. {"latency_ms": {"kind": "stdout_json", "key": "latency"}}.

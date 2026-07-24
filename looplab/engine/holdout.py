@@ -85,6 +85,10 @@ class HoldoutGrader:
                 except OSError:
                     pass
             return res
+        # CODEX AGENT: generic host grading has neither the MLE branch's planned no-symlink boundary
+        # nor the declarative reader's eval-start freshness fence. A candidate can point this at host
+        # JSON outside the workdir, or a clean no-op repair can promote predictions left by an abandoned
+        # attempt. Require a fresh non-symlink regular file contained in this physical attempt.
         preds_path = Path(workdir) / g.get("predictions", "predictions.json")
         m = None
         if preds_path.is_file():

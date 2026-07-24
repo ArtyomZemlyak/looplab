@@ -252,6 +252,14 @@ class KnowledgeTools:
                     continue
                 goal = c.get("goal") if isinstance(c.get("goal"), str) else ""
                 rationale = c.get("rationale") if isinstance(c.get("rationale"), str) else ""
+                # CODEX AGENT: `params` are untrusted durable bytes, but stringifying them before any
+                # recursive size/redaction fence can send credentials and prompt injection to the
+                # embedding/abstractor provider and later return them to another run. Sanitize structured
+                # keys/values and preserve an explicit untrusted-data boundary before indexing.
+                # CODEX AGENT: retrieval also drops objective direction and metric identity. Identical
+                # goals with opposite min/max objectives or incomparable metrics become equal semantic
+                # hits; bind the provider to the live task and require a compatible direction+metric
+                # contract before model-facing reuse.
                 text = (f"PAST CASE — task {c.get('task_id')}: {goal}\n"
                         f"best params={c.get('params')} metric={c.get('metric')}\n"
                         f"{rationale}")

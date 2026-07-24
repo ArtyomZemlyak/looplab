@@ -390,6 +390,10 @@ class ResourceSchedulingMixin:
                 return None
             lease_path = self._gpu_host_lease_path
             if lease_path is not None and self._gpu_host_lease_handle is None:
+                # CODEX AGENT: one pool-wide lease serializes independent runs even when they need
+                # disjoint physical GPUs, and immediate nonblocking reacquisition has no fairness.
+                # Use stable per-device leases (ordered by UUID) or a fair cross-process allocator so
+                # one lightly-loaded run cannot strand the rest of the host or starve its neighbours.
                 # `_try_acquire_gpu_host_lease` returns None when the lease is HELD by another live
                 # holder (retryable contention → wait/re-scan) but RAISES GpuPinUnenforceable when the
                 # lease cannot even be OPENED (EACCES on a squatted/stale /tmp/looplab-gpu-pool-<uid>.lock,

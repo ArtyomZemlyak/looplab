@@ -312,6 +312,10 @@ class OpenAICompatibleClient:
             kwargs["extra_body"] = extra
         if use_stream:
             kwargs["stream"] = True
+            # CODEX AGENT: `stream_options` is an optional OpenAI-compatible capability. A provider
+            # that rejects only this field is retried with the identical payload, including by the
+            # text fallback. Detect that rejection, retry streaming without usage options, then force
+            # a genuinely non-stream request if necessary.
             kwargs["stream_options"] = {"include_usage": True}
             # Bound the header-WAIT. The static httpx.Timeout treats `header_timeout` as connect-only, so
             # an endpoint that completes TLS then never sends response HEADERS would block create() up to
@@ -363,6 +367,10 @@ class OpenAICompatibleClient:
             # getattr guard (D8b): an SDK shape WITHOUT `_client` (a mock in tests, a foreign SDK)
             # must still reach the intended APITimeoutError below — a bare `self._sdk._client` here
             # turned the timeout into an AttributeError (`_shutdown_pool_sockets` no-ops on None).
+            # CODEX AGENT: this client is shared by parallel lanes, but timeout recovery shuts every
+            # pooled socket and replaces `self._sdk` without synchronization. One stalled call can abort
+            # healthy siblings and make them retry/spend again; isolate transports per in-flight request
+            # or serialize generation-scoped teardown.
             _shutdown_pool_sockets(getattr(self._sdk, "_client", None))
             try:
                 self._sdk._client.close()
@@ -655,6 +663,10 @@ class OpenAICompatibleClient:
                 empty_stream = (use_stream and parsed is not None and parsed.get("choices")
                                 and not m.get("content") and not m.get("tool_calls")
                                 and not m.get("reasoning") and not ch0.get("finish_reason"))
+                # CODEX AGENT: an empty stream may still carry provider-reported billable usage, but
+                # this retry path discards it before `accountant.add` below. Account every completed
+                # attempt before semantic retry/degrade so cost limits and the durable ledger include
+                # charges for empty/invalid responses too.
                 if parsed is not None and not empty_stream:
                     body = parsed
                     break
@@ -850,6 +862,10 @@ class OpenAICompatibleClient:
                 usage = body.get("usage")
                 gen.usage(usage).cost(_usage_cost(usage)).error("no tool_calls in response")
                 raise KeyError("no tool_calls in response")
+            # CODEX AGENT: a forced structured completion must prove there is exactly one call and
+            # its function name is `emit`. Any non-empty tool_calls list currently passes, so a backend
+            # that ignores tool_choice can have another tool's coincidentally-valid arguments accepted
+            # under the wrong semantic operation.
             args = calls[0]["function"]["arguments"]
             # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
             # `content`) alongside the tool call; capture it (debug channel) instead of discarding it.

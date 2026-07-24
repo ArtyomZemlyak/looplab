@@ -76,6 +76,10 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
     ledger = _handoff_ctx.get()
     if ledger:                              # earlier phases produced briefs → inject them up front
         ins = 1 if (messages and messages[0].get("role") == "system") else 0
+        # CODEX AGENT: the summary flattens repository/tool output controlled by the candidate, then
+        # this next write-capable phase is explicitly told to TRUST it. That launders untrusted prompt
+        # instructions through a model-authored brief; preserve provenance and inject it as quoted,
+        # non-authoritative evidence with an explicit instruction-isolation guard.
         messages.insert(ins, {"role": "user", "content": (
             "CONTEXT FROM EARLIER PHASES of this node (a coding agent — possibly a different role — "
             "already explored this; TRUST it and do NOT re-read the same files/dirs, read only what is "

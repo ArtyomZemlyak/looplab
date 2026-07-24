@@ -491,6 +491,10 @@ class SpanHandle:
         self._rec = rec
         self._otel = otel_span
 
+    # CODEX AGENT: generic attributes/events are a durable JSONL and OTLP egress boundary, but these
+    # methods persist arbitrary values before any redaction (traceview protects only the UI projection).
+    # Sanitize secret-named keys and recursively bound/redact values here so future instrumentation
+    # cannot write credentials/PII to disk or an external collector.
     def set(self, key: str, value) -> "SpanHandle":
         self._rec["attributes"][key] = value
         if self._otel is not None:

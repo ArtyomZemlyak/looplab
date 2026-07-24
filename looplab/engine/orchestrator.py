@@ -1926,6 +1926,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
                         # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
                         # the configured fan-out — this span makes the actual per-batch cost observable.
+                        # CODEX AGENT: this join is a bulk-synchronous build barrier, not independent
+                        # adaptive research threads. Fast workers cannot select/propose from completed
+                        # sibling evidence until the slowest build and later eval batch finish; feed each
+                        # completion back to a central scheduler and refill the freed lane immediately.
                         with self.tracer.span("parallel_build_batch", fan=_fan, built=len(_chunk),
                                               parallel_build=self._llm_parallel):
                             async with anyio.create_task_group() as _tg:
@@ -3290,6 +3294,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # Budget guard (parallel path): now that `cur` reflects mid-batch completions,
                             # this actually enforces the eval-second cap — admit no more once spent. The
                             # overshoot is bounded to the ~max_parallel evals already in flight.
+                            # CODEX AGENT: a "hard cumulative" budget cannot count only completed
+                            # charges: every lane can enter under the same remaining balance and each
+                            # timeout may exceed it. Reserve the worst-case/time-bounded charge atomically
+                            # at admission, then release the unused portion when the evaluation settles.
                             if (max_es is not None and cur.total_eval_seconds >= max_es):
                                 break
                             await slots.acquire()     # blocks only when the pool is full -> the refill point
@@ -3314,6 +3322,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     continue
                                 kept.append(a)
                             pending = kept
+                            # CODEX AGENT: work-conserving first-fit can starve a multi-GPU head behind
+                            # a continuing stream of smaller jobs: every partial release is consumed before
+                            # all requested GPUs become free together. Add bounded bypass/aging or reserve
+                            # capacity once a large request has waited.
                             for pos, a in enumerate(pending):
                                 node = cur.nodes.get(a["node_id"])
                                 if node is None or not hasattr(self, "_try_reserve_node_resources"):

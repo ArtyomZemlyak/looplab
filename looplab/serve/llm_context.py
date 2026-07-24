@@ -212,6 +212,10 @@ def _boss_context(st, nid: Optional[int], full: "Path", *, advisory: bool = Fals
         parts.append(operational_attention_points())
     except Exception:  # noqa: BLE001 - env-awareness is additive
         pass
+    # CODEX AGENT: node code, model text, reports and errors are durable untrusted content, but the
+    # caller concatenates this block into the Boss system prompt. Delimit/escape it as data in a lower
+    # authority message; otherwise a prior candidate/provider can inject system-level instructions
+    # into future owner advisory and command-routing calls.
     parts.append(_node_context(st, nid, full))
     dg = experiments_digest(st)
     if dg:
