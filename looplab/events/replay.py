@@ -602,8 +602,11 @@ def _normalize_resource_curve(raw):
     """Coerce untrusted node_evaluated `resource_curve` event data (#7 review) to at most 32 sorted,
     unique, finite `[resource, metric]` pairs, or None. Node assignment validation is off, so a hand-
     edited / corrupt / future log could otherwise land a scalar or an arbitrarily large nested value on
-    the Node despite the promised 32-point bound. Invalid entries are dropped; the same shape the writer
-    (`extract_resource_curve`) emits is reproduced so the ASHA reader sees a consistent bound either way."""
+    the Node despite the promised 32-point bound. Invalid entries are dropped and the <=32 bound is
+    re-enforced HERE, independently of the writer. A VALID log never exceeds 32 points (the writer
+    `extract_resource_curve` already caps it), so the overflow branch below fires only on already-corrupt
+    input; there it keeps both endpoints via even spacing — it does NOT reproduce the writer's
+    earliest-N-plus-last shape, but the shapes can only differ on input the writer could never emit."""
     if not isinstance(raw, list):
         return None
     by_resource: dict[float, float] = {}
