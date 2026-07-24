@@ -1,5 +1,47 @@
 # LoopLab — Comprehensive Code Review
 
+<!-- CODEX AGENT: 2026-07-24 SECOND INDEPENDENT THIRTY-PASS MEGA-REVIEW.
+The review began at `3c9aa698`, refreshed to the then-current `1cbe616f`, and was applied only after
+rechecking every selected producer/consumer boundary against that fresh master. Thirty independent
+read-only agent passes covered replay/state machines; crash recovery; paid-work receipts; authority;
+schema adversaries; cross-run provenance/retrieval; Card/concept governance; budgets; GPU scheduling;
+LLM transport/prompt trust; filesystem/process/security; grading; packaging/platform; API semantics;
+backend/browser scale; accessibility; documentation/tests; and a final holistic Part-IV/V synthesis.
+Master advanced during the pass with fixes for scalar trials, non-finite foresight confidence and a
+non-positive resume override; those resolved findings were rechecked and deliberately not re-commented.
+
+Highest-confidence unresolved contracts:
+
+1. Durability/replay: run setup, deep research, Genesis/Boss jobs and evaluator results have external
+   side effects before a durable logical outcome; duplicate `run_started`, manual-research completions,
+   conflicting concept/Card merges and historical drops can rewrite or consume later authority.
+2. Parallel execution: the cumulative eval budget reserves no in-flight charge; one host-wide GPU lease
+   serializes disjoint devices; first-fit can starve large requests; build/eval are bulk-synchronous
+   barriers rather than the documented continuously adaptive research workers.
+3. Cross-run Part IV/V: case retrieval can export unredacted params and loses direction/metric identity;
+   import/provenance identities omit run/node generations; live input trees are presented as run-produced
+   artifacts; "all machine runs" actually means one configured run-root.
+4. Trust/security: DNS validation is separate from socket connection; approved writes can race a
+   symlink/junction swap; Windows batch launchers can reparse model prompts; generic trace fields reach
+   JSONL/OTLP before redaction; prior tool/repo text is summarized and explicitly promoted to TRUST.
+5. Evaluator integrity: generic host grading follows candidate links and accepts stale prior-attempt
+   outputs; NaN/string policy bounds can bypass gates or crash a worker; terminal receipts trail
+   externally completed evaluation work.
+6. Provider/platform: one LLM timeout tears down a shared parallel client; unsupported stream options
+   never downgrade; empty billed streams lose usage; forced `emit` does not verify the called tool;
+   wheels omit the advertised React UI and snapshots lack a fail-closed runtime/schema version.
+7. API/UI: legacy control is not replay-safe, nested Boss inputs and review capability booleans coerce
+   or 500, full state is retransmitted per event, completed runs hot-poll forever, DAG layout rebuilds
+   on unrelated frames, several retry identities are not bound to the exact visible entity, and lazy/
+   Assistant modal/live-region behavior is incomplete for keyboard and screen-reader users.
+8. Product semantics: proposer-authored concept tags self-award coverage; provenance-free self-confidence
+   drives Card selection; belief-labelled abandon acts on one Card despite same-seed siblings.
+
+This remains a comment-only review: no production behavior was changed. Adjacent
+`# CODEX AGENT:` / `// # CODEX AGENT:` / HTML comments are the actionable handoff. Remove a comment
+only with a behavioral regression test or an explicit architecture/product decision. -->
+
+
 <!-- CODEX AGENT: 2026-07-24 THIRTY-AGENT WHOLE-REPOSITORY FOLLOW-UP (base `f9e23aa5`,
 rechecked and rebased through `97cf11cb`). Exactly 30 independent read-only passes ran in ten waves of
 three because the execution pool had three worker slots. The angles were: architecture; event replay;

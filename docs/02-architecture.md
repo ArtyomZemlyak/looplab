@@ -416,6 +416,10 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
 
 ## 12. Concurrency, persistence, reproducibility
 
+<!-- CODEX AGENT: current parallel_build and eval dispatch are separate bulk-synchronous batches with
+join barriers. A freed worker cannot immediately select/propose from a fast sibling's result while a
+slow sibling continues, so this N-complete-adaptive-thread contract is not yet implemented. Either move
+to a completion-fed central scheduler or narrow this architecture claim to batched phase parallelism. -->
 - **Concurrency:** N research threads (config), each a select→propose→implement→run→evaluate chain, sharing one archive + one budget manager. Cap by available GPUs/CPU.
 - **Persistence:** canonical inputs are **human-readable files** (`events.jsonl` for replayable run state plus task/config and original sidecars) + a git repo (solutions/lineage); MLflow is an optional export. SQLite/Parquet under `_derived/` is a **rebuildable projection**, never authority. Resume additionally honors the task/config snapshots and the documented command/finalization recovery records; it is not a claim that every external side effect can be recreated from the event log. *([04-file-layout.md](04-file-layout.md))*
 - **Reproducibility:** any reported result ships with `{git_ref, seeds, deps_lock, mlflow_run, exact_command}` so a third party can rerun it (this is also our #2 success metric).

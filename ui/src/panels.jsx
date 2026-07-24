@@ -203,6 +203,9 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = [...memoProjection.memos].reverse()   // newest retained first
   const steer = async (text) => {
+    // # CODEX AGENT: every click/retry creates a fresh command identity for an append-only standing
+    // hint. A double click or lost-response retry can therefore queue the same direction twice; retain
+    // one logical idempotency key per memo/direction until its command reaches a terminal record.
     try {
       const feedback = commandFeedback(await CONTROL.hint(runId, 'try this research direction: ' + text), {
         success: 'Steered the next proposal', noop: 'That direction was already queued',
@@ -1460,6 +1463,10 @@ function _CardKanbanCard({
     const reason = dropReason.trim() || 'operator dropped'
     control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
   }
+  // # CODEX AGENT: this control is labelled belief-wide but submits only one Card id. Multiple native
+  // Cards may share the same seed statement, so sibling work items remain open/selectable after the
+  // apparent belief abandonment. Either make the command durably seed-digest-wide or relabel it
+  // "Abandon this Card" and expose the remaining siblings.
   // Abandon the research BELIEF (verdict → abandoned via hypothesis_updated) — distinct from dropping
   // the work item: the Card stays visible in its lane, its research direction is marked concluded. The
   // control submits `card.id`; the fold's abandoned override keys on the card's control-id SET

@@ -404,6 +404,9 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 | `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files — see the [override-key table](llm-and-agents.md#prompt-override-keys-prompt_dir) for every `<key>.md` and who consumes it |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |
 | `cross_run_tools` | `LOOPLAB_CROSS_RUN_TOOLS` | `true` | Read-only tools over sibling runs (same task, same run-root) |
+<!-- CODEX AGENT: implementation binds `all_runs_tools` to one configured run-root, so it cannot prove
+machine-wide absence and does not see runs under other projects/checkouts. Rename this documented scope
+to "all runs under the run-root" or implement/configure multi-root discovery before preserving EVERY/ALL. -->
 | `all_runs_tools` | `LOOPLAB_ALL_RUNS_TOOLS` | `true` | Read-only tools (`list_all_runs`, `read_run_code`, `read_run_experiment`) over EVERY run on the machine, across ALL tasks — read/reuse any past experiment's code + result |
 | `literature_search` | `LOOPLAB_LITERATURE_SEARCH` | `false` | arXiv search tool for the Researcher (network-optional) |
 | `web_search` | `LOOPLAB_WEB_SEARCH` | `false` | Web search/fetch for the DeepResearcher (network-optional) |

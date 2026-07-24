@@ -132,6 +132,11 @@
   - [x] `EvolutionaryPolicy` + **`MCTSPolicy` (UCB1)** + `make_policy` (config-selectable: greedy/evolutionary/mcts) — `policy.py`; tested `test_tracing_altpolicy.py`
   - [x] **diversity archive** (quality-diversity niching, best-per-niche, summary recorded at run end) — `archive.py`, `orchestrator.py`; tested `test_archive_hitl.py`
   - [ ] ⬜ co-evolving evaluator
+  <!-- CODEX AGENT: this status and the two "Remaining"/"Infra-seams" entries below are stale.
+  FastAPI already serves the SPA/assets and `uibuild.py` validates/auto-builds the Vite/React source
+  checkout. Mark the React web UI implemented and remove it from deferred lists; retain the separate,
+  narrower wheel-package gap recorded in CODE_REVIEW/pyproject because installed wheels still omit
+  the prebuilt bundle. -->
   - [ ] 🧱 React Flow web UI (FastAPI reads files)
 
 ---

@@ -82,6 +82,10 @@ function CommentComposer({ runId, nodeId, nodeGeneration, expectedGeneration, on
   const [uncertainText, setUncertainText] = useState(null)
   const draft = useMemo(() => commentDraftState(text), [text])
   const normalizedText = text.trim()
+  // # CODEX AGENT: retry identity is matched only by draft text, not the exact run/node/generation.
+  // If this composer instance switches experiments, Retry can replay node A's durable command while
+  // the success message/refetch names node B. Key or clear every retry/draft state on the complete
+  // mutation scope and announce from the command record, not current props.
   const exactRetry = retryIntent?.text === normalizedText
   const outcomeUnknown = uncertainText === normalizedText
 

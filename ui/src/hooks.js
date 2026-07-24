@@ -121,6 +121,10 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
           if (stopped || controller.signal.aborted) return
           if (event.lastEventId !== '') lastStreamEventId = event.lastEventId
           if (event.type === 'done') {
+            // # CODEX AGENT: a terminal stream immediately emits done again, so this fixed 2.5s
+            // reconnect becomes permanent hot polling; each cycle authenticates and makes the server
+            // fold/send full state. Back off terminal probes aggressively, pause while hidden, or poll
+            // a lightweight generation endpoint and reopen the stream only after it changes.
             // A terminal run can later be reopened. End this request and reconnect-poll just as the
             // former EventSource path did; seq/generation dedup keeps the idle refresh cheap.
             terminal = true

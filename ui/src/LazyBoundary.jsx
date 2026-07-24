@@ -27,6 +27,10 @@ function LoadSurface({ label, mode, failed = false, onReload = reloadPage }) {
     data-route-main tabIndex={-1} role={failed ? 'alert' : 'status'} aria-live={failed ? 'assertive' : 'polite'}>
     <div className="auth-card">{body}</div>
   </main>
+  // # CODEX AGENT: when the scope-report overlay suspends/fails, this replaces ScopeReport and loses
+  // its close control and dialog focus handling. Add an onClose prop to LazyBoundary/LoadSurface,
+  // pass the caller's close action, render Close alongside Reload, handle Escape, trap focus while
+  // mounted, and restore focus to the invoking Report control after unmount.
   if (mode === 'overlay') return <div className="overlay lazy-overlay-state">
     <div ref={surfaceRef} className="panel" role={failed ? 'alertdialog' : 'dialog'} aria-modal="true"
       aria-label={`${failed ? 'Load failure' : 'Loading'}: ${label}`} tabIndex={-1}>

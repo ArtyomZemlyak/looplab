@@ -1649,6 +1649,9 @@ export default function AssistantBar({ runId, hidden = false }) {
     {view === 'side' && <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
       role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
       tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
+      {/* # CODEX AGENT: hide this separator at the compact breakpoint where CSS forces 100vw.
+          It remains keyboard-focusable and announces changing values although the rendered panel
+          cannot resize, so its accessible operation is false. */}
       <div className="asst-resize" role="separator" aria-label="Resize Assistant panel"
         aria-orientation="vertical" aria-valuemin={320} aria-valuemax={maxSideWidth()}
         aria-valuenow={Math.round(sideW)} tabIndex={0} onPointerDown={startResize}
@@ -1662,6 +1665,10 @@ export default function AssistantBar({ runId, hidden = false }) {
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         <button className="btn sm ghost" title="collapse to the bar" onClick={collapseToBar}>▾ bar</button>
       </div>
+      {/* # CODEX AGENT: busy turns disable the only live transcript region, while the thinking
+          indicator has no status role and completion has no atomic announcement. Keep token prose
+          quiet if needed, but expose persistent "Assistant responding" / "response ready" status
+          transitions for nonvisual users in both side and full views. */}
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
         aria-live={busy ? 'off' : 'polite'} aria-busy={busy} aria-relevant="additions" tabIndex={0}
         onScroll={onFeedScroll}>{renderThread()}</div>

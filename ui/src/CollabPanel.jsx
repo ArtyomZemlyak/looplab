@@ -55,6 +55,10 @@ export default function CollabPanel({
     if (busy) return
     setBusy(true); setError(''); setCreatedUrl('')
     try {
+      // # CODEX AGENT: this bearer is returned exactly once and the server stores only its digest.
+      // If the mutation lands but the response is lost, the enabled retry mints another unrecoverable
+      // bearer. Give creation a durable client request identity/rejoin contract or surface the first
+      // outcome as unknown instead of inviting a fresh create.
       const result = await createRunReview(runId, { ttl_seconds: ttl, include_evidence: includeEvidence })
       const base = `${location.origin}${apiPrefix()}/`
       const target = new URL(result.path, base)

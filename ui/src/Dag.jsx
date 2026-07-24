@@ -431,6 +431,10 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   }
   const toggleMap = () => setShowMap(v => { storageSet('ll.minimap', v ? '0' : '1'); return !v })
 
+  // # CODEX AGENT: this layout-heavy memo depends on the entire folded state object. Every SSE frame,
+  // including report/log/liveness-only changes, creates a new state and relayouts/rebuilds every
+  // ReactFlow node and edge. Derive a stable graph projection key and keep volatile state out of the
+  // layout dependency so active large runs do not freeze the browser.
   const base = useMemo(() => {
     const ns = activeNodeMap(state?.nodes || {}, state)
     const groups = groupMode === 'none' ? new Map() : computeGroups(ns, groupMode, state)
