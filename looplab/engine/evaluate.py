@@ -607,6 +607,20 @@ class EvaluateMixin:
                 sp.set("violations", len(res.violations))
             if res.drift is not None:
                 sp.set("drift", True)
+            # ASHA past-experiment curve (#7): a bounded per-RUNG [[rung, metric], ...] (canonical
+            # geometric rungs) mined from the eval's CAPTURED stdout when the task declares a stdout_json
+            # `resource_key`, so a future live node — snapping its sample to the same rung — finds a sibling
+            # checkpoint across the whole run. Additive/only-when-present → old logs fold byte-identically.
+            # Computed OUTSIDE the write-lock: it parses `res.stdout` (run_argv's bounded ~64 KB tail — for a
+            # staged eval, the FINAL stage's output) and depends only on the eval result + `_eval_spec`,
+            # nothing the lock guards, so doing it under the global append lock needlessly serialized every
+            # other writer once per completed node. (Widening the tail to a teed full-curve accumulator is a
+            # follow-up; the fold + reader already degrade safely to the tail.)
+            _curve = None
+            if ok:
+                _spec = getattr(self, "_eval_spec", None)
+                _curve = extract_resource_curve(
+                    res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
             async with self._write_lock:
                 # Multi-stage pipeline (Phase 1): record each stage's pass/fail BEFORE the terminal so the
                 # fold + trace show data_prep ✓ / train ✓ / eval ✗, and a later stage-scoped re-run knows
@@ -629,20 +643,7 @@ class EvaluateMixin:
                         # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
                         "trials": res.trials or [],
                     }
-                    # ASHA past-experiment curve (#7): a bounded per-RUNG [[rung, metric], ...] (canonical
-                    # geometric rungs) mined from the eval's CAPTURED stdout when the task declares a
-                    # stdout_json `resource_key`, so a future live node — snapping its sample to the same
-                    # rung — finds a sibling checkpoint across the whole run. Additive/only-when-present →
-                    # old logs fold byte-identically.
-                    # SCOPE (#7 review): `res.stdout` is run_argv's bounded ~64 KB tail (and, for a staged
-                    # eval, the FINAL stage's output), NOT the literal full stream — 128× the 500-char
-                    # stdout_tail and enough rungs for typical logs, but a very verbose or multi-stage job
-                    # can still lose its earliest rungs. Widening this to a teed full-curve accumulator is a
-                    # follow-up; the fold + reader already degrade safely to the tail.
-                    _spec = getattr(self, "_eval_spec", None)
-                    _curve = extract_resource_curve(
-                        res.stdout, _spec.get("metric") if isinstance(_spec, dict) else None)
-                    if _curve:
+                    if _curve:                     # computed above, outside the write-lock (see the #7 note)
                         _eval_payload["resource_curve"] = _curve
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
