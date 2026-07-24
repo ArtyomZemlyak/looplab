@@ -750,6 +750,16 @@ class SpeculationMixin:
             if isinstance(card_id, str) and card_id
         }
 
+    def _election_excluded_card_ids(self, state: RunState) -> set[str]:
+        """The counterfactual-election exclusion set shared by `_request_card_build` and the freshness
+        gate: committed speculative cards UNION durable producer-failed ids. A producer-failed card is
+        serial-fallback-only (never speculatively buildable); left in the counterfactual set it would
+        outrank the subject (elected first) and falsely supersede a committed speculative node. One
+        helper so the three call sites can't drift (each gets a FRESH mutable set to `.discard` from)."""
+        excluded = self._speculative_card_ids(state)
+        excluded.update(self._producer_failed_card_ids(state))
+        return excluded
+
     def _card_requires_serial_fallback(self, card_id: object) -> bool:
         state = fold(self.store.read_all())
         return bool(
@@ -780,8 +790,7 @@ class SpeculationMixin:
         self._refresh_speculation_budget(state)
         if self._node_reservation_slots_remaining(state, events=events) < 1:
             return False
-        excluded = self._speculative_card_ids(state)
-        excluded.update(self._producer_failed_card_ids(state))
+        excluded = self._election_excluded_card_ids(state)
         actions = speculative_card_actions(
             state,
             self.policy,
@@ -848,8 +857,7 @@ class SpeculationMixin:
         if card_budget_used(state) >= selection_limit:
             return "stale", None
 
-        excluded = self._speculative_card_ids(state)
-        excluded.update(self._producer_failed_card_ids(state))
+        excluded = self._election_excluded_card_ids(state)
         # ...but never exclude the exact card being claimed now: its head result is committing, so it
         # must stay selectable even if a prior speculative attempt marked it producer-failed. Discard
         # AFTER the union so the claim wins over the serial-fallback exclusion for this one id.
@@ -1351,8 +1359,7 @@ class SpeculationMixin:
         # subject (it was elected first, so it usually does) and drop a committed speculative node as
         # superseded. `_reserved_speculative_slots` documents that `excluded_card_ids` also carries
         # producer-failed ids.
-        excluded = self._speculative_card_ids(state)
-        excluded.update(self._producer_failed_card_ids(state))
+        excluded = self._election_excluded_card_ids(state)
         ignored_pending = self._acknowledged_pending_ids(state)
         envelope = self._resource_envelope()
         for node in self._speculative_pending_nodes(state):
