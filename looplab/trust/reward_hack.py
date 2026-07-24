@@ -31,9 +31,13 @@ _GRADER_PATTERNS = [
     # matched the ubiquitous Keras split `(test_images, test_labels) = mnist.load_data()` — a legitimate
     # train-derived variable, not the held-out file — silently excluding an honest (maybe best) node from
     # selection/breeding/confirmation. `answer_key` stays a name-tell (a rare honest name; `load(answer_key)`
-    # is a genuine key read), but `test_labels` must be a FILE reference (a `.<ext>` follows) because the
-    # bare name is a normal variable — reading `test_labels.csv` is the actual held-out-label cheat.
-    r"\banswer[_-]?key\b", r"\btest[_-]?labels\.[A-Za-z]", r"y[_-]?test\b.*read",
+    # is a genuine key read). `test_labels` must be a real DATA-FILE reference (an explicit extension —
+    # `test_labels.csv`/`.npy`/… — the actual held-out-label read), NOT any attribute access: a bare
+    # `\.[A-Za-z]` also matched honest `test_labels.astype(...)`/`.reshape(...)`/`.shape`. `y_test` needs a
+    # LEFT `\b` too, else honest `entropy_test`/`accuracy_test` + a `read` on the same line false-fired.
+    r"\banswer[_-]?key\b",
+    r"\btest[_-]?labels\.(?:csv|tsv|txt|npy|npz|parquet|json|jsonl|pkl|pickle|h5|hdf5|feather|arrow)\b",
+    r"\by[_-]?test\b.*read",
 ]
 # A READ of a solutions/solution CSV — a possible answer-key read. Matched POSITIVELY (the file as
 # the argument of an unambiguous READER), NOT by suppressing writes: write-suppression both
