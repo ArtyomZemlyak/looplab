@@ -742,13 +742,15 @@ class SiblingRunTools:
         return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
 
     def _read(self, run_id, nid: int, trials_arg=None) -> str:
-        # discovery is same-task scoped, but this direct lookup is not. A caller that
-        # guesses a run_id can bypass _sibling_ids() and read another task (or this run); enforce
-        # membership/task_id equality here and in _code, because the model-supplied id is the actual
-        # authorization boundary rather than evidence that list_sibling_runs was used first.
+        # Discovery is same-task scoped, but this DIRECT lookup takes a model-supplied run_id — so the id
+        # itself is the authorization boundary, not evidence that list_sibling_runs was used first. A caller
+        # that guesses a run_id must not read ANOTHER task through a same-task tool: enforce task_id equality
+        # here (and in `_code`). Cross-task reads are the separate, deliberately-scoped MachineRunsTools.
         st = self._state(run_id)
         if st is None:
             return f"(no such sibling run: {run_id!r})"
+        if self.task_id and getattr(st, "task_id", "") != self.task_id:
+            return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
         self._reader.bind_state(st, None)
         return f"run {run_id} · " + self._reader.execute(
             "read_experiment", {"node_id": nid, "trials": trials_arg})
@@ -757,6 +759,8 @@ class SiblingRunTools:
         st = self._state(run_id)
         if st is None:
             return f"(no such sibling run: {run_id!r})"
+        if self.task_id and getattr(st, "task_id", "") != self.task_id:   # same-task boundary (see `_read`)
+            return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
         self._reader.bind_state(st, None)
         return f"# from run {run_id}\n" + self._reader.execute("read_code", {"node_id": nid})
 

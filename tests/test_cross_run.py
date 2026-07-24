@@ -62,6 +62,34 @@ def test_sibling_tools_read_filter_and_traversal_guard(tmp_path):
         "read_sibling_code", {"run_id": "nope", "node_id": 0})
 
 
+def test_sibling_direct_read_refuses_a_foreign_task_run(tmp_path):
+    """SiblingRunTools is same-task by contract, but read/code take a model-supplied run_id that IS the
+    authorization boundary — a guessed FOREIGN-task run_id must be refused (not folded and returned), else
+    an operator relying on SiblingRunTools for same-task scope leaks other tasks. Cross-task reads are the
+    separate MachineRunsTools. `list_sibling_runs` already excludes other tasks; this closes the direct path."""
+    rdA = tmp_path / "runA"
+    stA = anyio.run(_engine(rdA).run)
+    task_id, nidA = stA.task_id, stA.best().id
+
+    # runC: a fully-formed run of a DIFFERENT task, with a marker string in its code.
+    storeC = EventStore(tmp_path / "runC" / "events.jsonl")
+    storeC.append("run_started", {"run_id": "runC", "task_id": "other-task", "direction": "min"})
+    storeC.append("node_created", {"node_id": 0, "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}}, "code": "FOREIGN_SECRET=1"})
+
+    tools = SiblingRunTools(tmp_path, "runB")
+    tools.bind_state(RunState(run_id="runB", task_id=task_id))   # learns self id + task to scope by
+
+    # a same-task sibling stays readable
+    assert "run runA" in tools.execute("read_sibling_experiment", {"run_id": "runA", "node_id": nidA})
+    # the foreign-task run is REFUSED on both the direct experiment read and the code read — a guessed id
+    # cannot cross the task boundary, and its content never leaks.
+    detail = tools.execute("read_sibling_experiment", {"run_id": "runC", "node_id": 0})
+    assert "not a sibling of task" in detail
+    code = tools.execute("read_sibling_code", {"run_id": "runC", "node_id": 0})
+    assert "not a sibling of task" in code and "FOREIGN_SECRET" not in code
+
+
 # --------------------------------------------------------------------------- AllRunsTools
 def test_all_runs_tools_span_all_tasks(tmp_path):
     from looplab.tools.run_tools import AllRunsTools
