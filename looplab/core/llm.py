@@ -730,14 +730,16 @@ class OpenAICompatibleClient:
                         # Keep a stream's slot until its final chunk (or consumer close). The context
                         # exits before either blocking fallback below, so total=1 cannot self-deadlock.
                         with llm_request_permit():
-                            # CODEX AGENT: the public Assistant stream bypasses `_sdk_chat`'s new
-                            # `_bounded_create` header guard. Python evaluates create(**kwargs) before
-                            # `_stream_with_idle_guard` receives the stream, so an endpoint that accepts
-                            # the connection but never sends response headers can still hang this path
-                            # until the long SDK read timeout. Route creation through the same bounded
-                            # seam and add an end-to-end complete_text_stream black-hole test.
+                            # Bound the header-WAIT exactly as `_sdk_chat`'s stream path does: run
+                            # create() under `_bounded_create`'s wall-clock worker-thread guard (join =
+                            # the header budget). Python evaluates create(**kwargs) BEFORE
+                            # `_stream_with_idle_guard` ever sees the stream, so without this an endpoint
+                            # that accepts the connection then never sends response HEADERS would hang
+                            # here until the long idle read timeout. Now it fails over near
+                            # `header_timeout`; `_stream_with_idle_guard` then governs the body.
+                            header_join = self.header_timeout + min(10.0, self.header_timeout)
                             for ev in _stream_with_idle_guard(
-                                    self._sdk.chat.completions.create(**kwargs),
+                                    self._bounded_create(kwargs, header_join),
                                     self.timeout, self.header_timeout):
                                 observed = getattr(ev, "usage", None)
                                 if observed is not None:

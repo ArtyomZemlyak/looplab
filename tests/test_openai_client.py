@@ -995,3 +995,25 @@ def test_stream_bounded_aborts_a_blackholed_create(monkeypatch):
         c._sdk_chat({"model": "m", "messages": []}, use_stream=True)
     assert _t.monotonic() - t0 < 20                      # fired near the header budget + cleanup, did not hang
     assert closed["n"] == 1 and rebuilt["n"] == 1
+
+
+def test_complete_text_stream_bounds_a_blackholed_create(monkeypatch):
+    """The Assistant's live-answer stream must bound create() by the header budget too (like _sdk_chat):
+    an endpoint that accepts the socket then never sends response headers must fail over near
+    header_timeout and fall back, NOT hang until the idle read timeout. Regression for the bypass where
+    complete_text_stream called create() directly instead of through `_bounded_create`."""
+    import time as _t
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", api_key="k", stream=True,
+                                   timeout=0.3, header_timeout=0.3)
+
+    class _Comp:
+        def create(self, **k): _t.sleep(30)              # black hole: never returns response headers
+    c._sdk = type("S", (), {"chat": type("Ch", (), {"completions": _Comp()})(),
+                            "_client": type("Cl", (), {"close": lambda s: None})()})()
+    monkeypatch.setattr(c, "_new_sdk", lambda: c._sdk)
+    monkeypatch.setattr(c, "complete_text", lambda messages: "FALLBACK")
+    t0 = _t.monotonic()
+    out = list(c.complete_text_stream([{"role": "user", "content": "hi"}]))
+    assert _t.monotonic() - t0 < 20                       # bounded by header budget + cleanup, did not hang
+    assert out == ["FALLBACK"]                            # aborted create -> APITimeoutError -> fallback
