@@ -1007,11 +1007,22 @@ class SpeculationMixin:
             # strand a live producer: skip while one is in-flight (its eventual result is released by
             # `_discard_orphaned_spec_results` once the request closes), and leave an ALIVE card's request
             # open so a producer can still be started for it.
+            # Two DEAD shapes: a DROPPED Card stays PRESENT with status=="dropped" (dropped_reason set);
+            # a MERGED Card is folded OUT of `state.cards` (ABSENT) and recorded only in its canonical's
+            # `aliases` — the fold never assigns `Card.merged_into`, so a merged head resolves via alias
+            # membership (a PROVEN merge receipt), not a present `merged_into` row. An absent id that is
+            # NOT a known alias is a corrupt/partial chain — leave it open (do not force-close on an
+            # unproven receipt), matching the counterfactual path's fail-closed stance.
             card = state.cards.get(key[0])
-            if (
-                key not in self._spec_build_inflight
-                and card is not None
-                and (card.dropped_reason is not None or card.merged_into is not None)
+            merged_away = card is None and key[0] in {
+                alias for c in state.cards.values()
+                for alias in (getattr(c, "aliases", None) or [])
+                if isinstance(alias, str) and alias
+            }
+            if key not in self._spec_build_inflight and (
+                (card is not None
+                 and (card.dropped_reason is not None or card.merged_into is not None))
+                or merged_away
             ):
                 return self._append_card_build_done(request, skipped="stale")
             return False

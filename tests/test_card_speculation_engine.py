@@ -748,6 +748,44 @@ def test_recovery_dropped_head_with_no_result_closes_stale_instead_of_wedging(tm
     assert final.card_builds_done == 1 and engine._head_request(final) is None  # outstanding cleared
 
 
+def test_recovery_merged_head_with_no_result_closes_stale_instead_of_wedging(tmp_path):
+    # Sibling of the dropped-head wedge: a durable card_build_requested survives at head with no in-memory
+    # result, but its Card was MERGED away (folded into a canonical) rather than dropped. A merged Card is
+    # ABSENT from state.cards (recorded only in the canonical's `aliases`; the fold never sets
+    # `merged_into`), so the b421d4e close-on-dropped/merged branch must recognize it via ALIAS membership
+    # — else the head stays outstanding and the session polls forever, the exact wedge that branch exists
+    # to prevent (the `merged_into is not None` half alone never fires, since merged cards are absent).
+    engine, _producer = _engine(tmp_path / "recovery-merge-wedge")
+    _start(engine)
+    _add_ready_draft(engine, "card-7")
+    request = _request(engine)                 # durable card_build_requested for card-7 at head
+    key = engine._request_key(request)
+    engine._ensure_speculation_state()
+    assert not engine._spec_builds and not engine._spec_build_inflight
+
+    # An ALIVE head with no result and no in-flight producer must stay open.
+    assert engine._serve_card_builds() is False
+    assert fold(engine.store.read_all()).card_builds_done == 0
+
+    # Merge card-7 INTO a canonical: the fold collapses card-7 OUT of state.cards and records it only in
+    # the canonical's aliases (merged_into is never assigned).
+    _add_ready_draft(engine, "card-9")         # the canonical card-7 is folded into
+    engine.store.append(
+        "card_merged", {"canonical": "card-9", "aliases": ["card-7"], "merged_by": "engine"})
+    merged = fold(engine.store.read_all())
+    assert "card-7" not in merged.cards                        # merged away -> ABSENT
+    assert "card-7" in (merged.cards["card-9"].aliases or [])  # tracked via the canonical's aliases
+    assert engine._request_key(engine._head_request(merged)) == key  # request still outstanding at head
+
+    # The merged head is permanently unbuildable: close it stale via alias membership, never wedge.
+    assert engine._serve_card_builds() is True
+    events = engine.store.read_all()
+    done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
+    assert len(done) == 1 and done[0].data.get("skipped") == "stale"
+    final = fold(events)
+    assert final.card_builds_done == 1 and engine._head_request(final) is None  # outstanding cleared
+
+
 def test_producer_exception_closes_head_as_skipped_without_live_wedge(
     tmp_path, monkeypatch,
 ):
