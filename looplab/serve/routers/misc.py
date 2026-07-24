@@ -147,7 +147,7 @@ class SecretUpdateResponse(BaseModel):
 
 def _request_body_contract(*models: type[BaseModel]) -> dict[str, Any]:
     """Publish raw-Request bodies without changing the established 400/legacy runtime semantics."""
-    # CODEX AGENT: making these Pydantic body parameters would turn established malformed-JSON 400s
+    # making these Pydantic body parameters would turn established malformed-JSON 400s
     # into framework 422s. The strict schemas therefore document the wire while the handler retains
     # its compatibility parser; the legacy branch explicitly excludes the reserved `settings` key.
     variants = [model.model_json_schema() for model in models]
@@ -638,7 +638,7 @@ def build_router(srv) -> APIRouter:
         md = Path(s.memory_dir)
         out["dir"] = str(md)
         receipts = {}
-        # CODEX AGENT: allow-list only the three UI tiers. Every tier gets an independent bounded
+        # allow-list only the three UI tiers. Every tier gets an independent bounded
         # recent source window and result cap; governance/capsule ledgers are not accidental "cases".
         for tier, filename in (("cases", "cases.jsonl"), ("lessons", "lessons.jsonl"),
                                ("notes", "meta_notes.jsonl")):

@@ -589,7 +589,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
             logf = None
     lock = threading.Lock()
     bufs: dict[str, list[bytes]] = {"out": [], "err": []}
-    # CODEX AGENT: stdout and stderr need independent record buffers (never splice two partial lines),
+    # stdout and stderr need independent record buffers (never splice two partial lines),
     # but one shared threshold. Framework loggers commonly use stderr while user metrics use stdout.
     monitors = ({"out": _StageHealthMonitor(), "err": _StageHealthMonitor()}
                 if health_check else None)

@@ -89,7 +89,7 @@ def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
     cross the provenance sidecar through this helper so missing, malformed, and future producers fail closed.
     """
     provenance = getattr(state, "node_concept_provenance", None) or {}
-    # CODEX AGENT: only the exact reviewed producer is evidence; proposer-authored labels remain display-only.
+    # only the exact reviewed producer is evidence; proposer-authored labels remain display-only.
     if provenance.get(node_id) != NODE_CONCEPT_PROVENANCE_CLASSIFIER:
         return []
     receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
@@ -118,7 +118,7 @@ def node_concept_event_provenance(data: Any) -> str:
         return NODE_CONCEPT_PROVENANCE_CLASSIFIER
     if mode == "offline-heuristic":
         return NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC
-    # CODEX AGENT: explicit-but-unknown is not legacy. Treating it like an absent legacy field would
+    # explicit-but-unknown is not legacy. Treating it like an absent legacy field would
     # let a typo or future producer silently enter graded-novelty and cross-run evidence.
     return NODE_CONCEPT_PROVENANCE_UNTRUSTED
 
@@ -198,9 +198,9 @@ class Idea(BaseModel):
     # PART V (B) run-base + node-DELTA authoring. The discriminator is semantic: `delta` makes the two
     # delta lists authoritative EVEN WHEN BOTH ARE EMPTY (inherit without changing anything); `full`
     # makes `concepts` the exact membership. Reader-side absence preserves old Idea payloads.
-    # CODEX AGENT: never infer this choice from list truthiness or serializer field presence — either
+    # never infer this choice from list truthiness or serializer field presence — either
     # collapses an explicit zero delta into an absent legacy membership.
-    # CODEX AGENT: this is the tolerant durable reader. Absent is distinct from authoritative full+[];
+    # this is the tolerant durable reader. Absent is distinct from authoritative full+[];
     # modern producers cross the required/closed IdeaEmission boundary below.
     concept_mode: Optional[str] = None
     # In delta mode, instead of re-stating the full `concepts` set, a node may
@@ -244,7 +244,7 @@ class Idea(BaseModel):
     @field_validator("card_id", mode="before")
     @classmethod
     def _read_bounded_card_id(cls, value):
-        # CODEX AGENT: card linkage is advisory. A future/corrupt scalar must not reject node_created and
+        # card linkage is advisory. A future/corrupt scalar must not reject node_created and
         # thereby change best-selection; only a bounded, printable string can participate in the join.
         if value is None or not isinstance(value, str):
             return None
@@ -392,7 +392,7 @@ class IdeaEmission(Idea):
     @field_validator("concepts", "concepts_added", "concepts_removed", mode="before")
     @classmethod
     def _strict_concept_list(cls, value):
-        # CODEX AGENT: the tolerant reader heals old logs, but a modern writer must retry malformed ids.
+        # the tolerant reader heals old logs, but a modern writer must retry malformed ids.
         # Otherwise base Idea's drop-validator could turn full+[bad] into authoritative known-empty or
         # delta+[bad] into a semantically different zero delta.
         if not isinstance(value, list):
@@ -500,7 +500,7 @@ def effective_card_footprint(
         return out
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 0:
         raise ValueError("gpu_count must be a non-negative integer or None")
-    # CODEX AGENT: a positive declaration on a zero-device host remains explicitly unavailable. The
+    # a positive declaration on a zero-device host remains explicitly unavailable. The
     # scheduler consumes the same contract and emits a fail-closed reservation marker; only a genuine
     # operator/researcher ``gpus=0`` declaration owns CPU-only semantics.
     if "gpus" in out and (gpu_count > 0 or out["gpus"] == 0):
@@ -689,7 +689,7 @@ IDEA_PROPOSAL_DIGEST_V1_FIELDS = (
 def idea_proposal_digest(idea: Idea) -> str | None:
     """Versioned exact digest of one bounded normalized durable Idea, or None when it is oversized."""
     try:
-        # CODEX AGENT: V1 is a frozen semantic field set. Hashing the whole model dump would make a
+        # V1 is a frozen semantic field set. Hashing the whole model dump would make a
         # future additive Idea default invalidate every already-stamped event when an old log is replayed.
         # Start at the durable boundary as well: an absent legacy concept envelope and an explicitly
         # authored empty envelope replay differently, so model defaults must not collapse their identity.
@@ -1218,7 +1218,7 @@ class CardConceptSource(BaseModel):
 
     @model_validator(mode="after")
     def _coherent_owner(self) -> "CardConceptSource":
-        # CODEX AGENT: a node provenance label without an exact lifecycle owner is forgeable metadata,
+        # a node provenance label without an exact lifecycle owner is forgeable metadata,
         # not a receipt.  Proposal-only sources deliberately carry neither a node id nor trusted producer.
         if self.kind == "node":
             if self.node_id is None or self.node_generation is None:
@@ -1371,7 +1371,7 @@ class Card(BaseModel):
     eval_profile: Optional[str] = None
     eval_timeout: Optional[float] = Field(default=None, gt=0)
     concept_tags: list[str] = Field(default_factory=list)
-    # CODEX AGENT: exact, additive ownership receipt for concept_tags.  Without it a merged card could
+    # exact, additive ownership receipt for concept_tags.  Without it a merged card could
     # show the union/override from several evidence nodes beside one misleading scalar provenance tier.
     concept_source: Optional[CardConceptSource] = None
     # Board prioritization (foresight) — stamped from card_ranked in Layer 1b; audit/UI only.
@@ -1721,14 +1721,14 @@ class RunState(BaseModel):
     # topological read-time resolution (not folded in event order) so `fold` stays ORDER-TOLERANT
     # (invariant 5): the post-pass sees the complete DAG, so a spliced/reordered log resolves identically.
     node_concept_deltas: dict[int, dict] = Field(default_factory=dict)
-    # CODEX AGENT: partial/unavailable materialization is represented by a closed, ordered reason envelope.
+    # partial/unavailable materialization is represented by a closed, ordered reason envelope.
     # An unresolved dependency (including every active descendant) materializes to [] fail-closed; bounded
     # identity loss keeps the valid subset. The receipt prevents either fallback from being presented as an
     # exact membership by ConceptFrame. Keys are current/historic node ids; current-state projections apply
     # the same tombstone/abort lifecycle filter as memberships.
     node_concept_materialization_receipts: dict[int, ConceptMaterializationReceipt] = Field(
         default_factory=dict)
-    # CODEX AGENT: proposer-authored taxonomy is an untrusted claim, never classifier evidence. This
+    # proposer-authored taxonomy is an untrusted claim, never classifier evidence. This
     # replay-derived sidecar records the producer of the CURRENT last-write-wins membership. Missing and
     # unknown values are deliberately untrusted; legacy generation-zero `node_concepts` events replay as
     # `classifier`, while old `node_created` Idea.concepts replay as `researcher-authored` without migration.
@@ -1925,7 +1925,7 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
-    # CODEX AGENT: removing this field is a breaking public-state migration, not a derived-view cleanup:
+    # removing this field is a breaking public-state migration, not a derived-view cleanup:
     # `/api/runs/{id}/state` no longer contains ``hypotheses`` and external clients cannot distinguish
     # "known empty" from "schema removed". docs/23 explicitly deferred retirement to a post-L6
     # deprecation window, but this change shipped without a compatibility projection, API version bump,

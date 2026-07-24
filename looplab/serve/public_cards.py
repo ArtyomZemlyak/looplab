@@ -12,7 +12,7 @@ from looplab.core.concepts import normalized_concept_materialization_receipt
 from looplab.core.models import hypothesis_id, valid_card_action_digest
 
 
-# CODEX AGENT: these are replay inputs/override journals, not a public read model. Excluding them before
+# these are replay inputs/override journals, not a public read model. Excluding them before
 # Pydantic serialization prevents future producer-only fields and oversized event blobs from being copied
 # into every owner state/SSE frame and review summary.
 INTERNAL_CARD_STATE_FIELDS = frozenset({
@@ -29,7 +29,7 @@ _MAX_TEXT_BYTES = 2_048
 _MAX_REF_BYTES = 256
 _SKIP = object()
 
-# CODEX AGENT: this is the explicit wire DTO. Adding a Card or event field does not publish it until this
+# this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
     "id", "status", "verdict", "actionable", "identity", "selection_provenance",
@@ -98,7 +98,7 @@ _CONCEPT_SOURCE_KEYS = {
     "source_rows_quarantined", "source_malformed_rows", "source_invalid_capsule_rows",
     "source_duplicate_run_rows",
 }
-# CODEX AGENT: this is the CARD's exact node/proposal owner receipt.  It is intentionally separate from
+# this is the CARD's exact node/proposal owner receipt.  It is intentionally separate from
 # `_CONCEPT_SOURCE_KEYS`, which describes cross-run capsule-store completeness inside cross_run_prior.
 _CARD_CONCEPT_SOURCE_KINDS = frozenset({"card_added", "card_enriched", "node"})
 _CARD_CONCEPT_SOURCE_KEYS = frozenset({
@@ -209,13 +209,13 @@ def _text(value, limit: int, *, free_text: bool = False):
         return _SKIP
     from looplab.trust.redact import redact_secrets
 
-    # CODEX AGENT: scan a bounded look-ahead so a credential crossing the display cut is redacted as one
+    # scan a bounded look-ahead so a credential crossing the display cut is redacted as one
     # token, while an attacker-sized prose field never costs O(raw size) on each SSE tick.
     bounded = value[:max(0, limit) + 512]
     try:
         return _clip_utf8(redact_secrets(bounded, entropy=free_text), limit)
     except UnicodeError:
-        # CODEX AGENT: an unpaired surrogate cannot be represented by the UTF-8 JSON wire contract.
+        # an unpaired surrogate cannot be represented by the UTF-8 JSON wire contract.
         # Omit it instead of letting one corrupt Card terminate every state/SSE/review projection.
         return _SKIP
 
@@ -941,7 +941,7 @@ def _field_slice(name: str, raw, projected, *, exact: bool) -> PublicProjectionS
         if exact:
             returned = total
         elif isinstance(projected, str):
-            # CODEX AGENT: redaction/clipping preserves order but may transform a suffix. Count only
+            # redaction/clipping preserves order but may transform a suffix. Count only
             # the exact prefix; stopping at the first changed character cannot overstate coverage.
             returned = next(
                 (index for index, (source, public) in enumerate(zip(raw, projected))
@@ -956,7 +956,7 @@ def _field_slice(name: str, raw, projected, *, exact: bool) -> PublicProjectionS
         if exact:
             returned = total
         elif isinstance(projected, list):
-            # CODEX AGENT: count only source values that survived byte clipping/redaction exactly.
+            # count only source values that survived byte clipping/redaction exactly.
             # The projector considers at most `_MAX_ITEMS`, so this stays bounded even for a hostile list.
             remaining = list(raw[:_MAX_ITEMS])
             returned = 0
@@ -1019,7 +1019,7 @@ def _field_slice(name: str, raw, projected, *, exact: bool) -> PublicProjectionS
 
 
 def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
-    # CODEX AGENT: the mapping key, not a spoofable object field, is the authoritative public Card.id.
+    # the mapping key, not a spoofable object field, is the authoritative public Card.id.
     total = 1
     returned = 1
     exact_fields: dict[str, bool] = {"id": True}
@@ -1073,7 +1073,7 @@ def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
 
 
 def _dto(card, authoritative_id: str) -> dict:
-    # CODEX AGENT: fixed admission order keeps identity/lifecycle available; rich optional fields enter
+    # fixed admission order keeps identity/lifecycle available; rich optional fields enter
     # only while the complete UTF-8 JSON representation remains inside the per-card SSE envelope.
     out: dict = {"id": authoritative_id}
     concept_source_claimed_complete = False
@@ -1083,7 +1083,7 @@ def _dto(card, authoritative_id: str) -> dict:
             continue
         if name == "concept_source" and isinstance(value, dict):
             concept_source_claimed_complete = value.get("complete") is True
-            # CODEX AGENT: source completeness is end-to-end on the public DTO. Start fail-closed and
+            # source completeness is end-to-end on the public DTO. Start fail-closed and
             # restore True only after the exact tag set itself survives size/ref projection below.
             value = {**value, "complete": False}
         candidate = {**out, name: value}
@@ -1106,7 +1106,7 @@ def _dto(card, authoritative_id: str) -> dict:
             and provenance.get("freshness") == "current"
             and provenance.get("owner_state") == "none"
             and out.get("selection_blockers") == []
-            # CODEX AGENT: a receipt alone is not the queue boundary. Preserve readiness only when
+            # a receipt alone is not the queue boundary. Preserve readiness only when
             # lifecycle ownership is also exact; hostile/legacy mappings must not publish a running,
             # evaluated, dropped, or merged Card as executable work.
             and _public_selection_lifecycle_is_coherent(card, out)
@@ -1130,7 +1130,7 @@ def _dto(card, authoritative_id: str) -> dict:
         if (concept_source_claimed_complete and exact_tags is not None
                 and out.get("concept_tags", _SKIP) == exact_tags):
             concept_source["complete"] = True  # false -> true only shrinks the bounded JSON envelope
-        # CODEX AGENT: never ship two disagreeing provenance claims.  The exact node receipt is the
+        # never ship two disagreeing provenance claims.  The exact node receipt is the
         # authority; proposal-only/malformed/size-omitted receipts clear the compatibility scalar.
         exact_provenance = (
             concept_source.get("provenance") if concept_source.get("kind") == "node" else None)
@@ -1158,7 +1158,7 @@ def _authoritative_id(value) -> bool:
         return False
     if not bounded:
         return False
-    # CODEX AGENT: a public key must remain the exact durable key. Secret redaction, clipping, or any
+    # a public key must remain the exact durable key. Secret redaction, clipping, or any
     # other rewrite omits the card fail-closed instead of publishing it under a new identity.
     return _text(value, _MAX_REF_BYTES) == value
 
@@ -1171,7 +1171,7 @@ def _selection_int(card, name: str):
 def _selection_key(cards: dict, card_id: str):
     card = cards[card_id]
     status = _field(card, "status")
-    # CODEX AGENT: this is DTO admission/display relevance only. `actionable` is deliberately NOT the
+    # this is DTO admission/display relevance only. `actionable` is deliberately NOT the
     # executable queue contract; active Card selection requires folded `selection_ready`.
     actionable = _field(card, "actionable") is True
     active = isinstance(status, str) and status in {"proposed", "building", "coded", "running"}
@@ -1217,7 +1217,7 @@ def public_cards_projection(cards) -> PublicCardsEnvelope:
         return PublicCardsEnvelope(cards={}, cards_projection=metadata)
 
     total = len(cards)
-    # CODEX AGENT: The wire count is bounded, but ``nsmallest`` still traverses every source Card on each
+    # The wire count is bounded, but ``nsmallest`` still traverses every source Card on each
     # cache-invalidating owner/SSE/review projection. Bound admission upstream or maintain a cached bounded
     # relevance index with an overflow receipt; an attacker-sized folded map must not make this public read
     # boundary O(total Cards) CPU despite its small response.
@@ -1239,7 +1239,7 @@ def public_cards_projection(cards) -> PublicCardsEnvelope:
             separators=(",", ":"),
         ).encode("utf-8")
         metadata_entry_bytes = len(key_bytes) + 1 + len(receipt_bytes) + bool(admitted)
-        # CODEX AGENT: metadata is part of the public surface, not an unbounded diagnostic sidecar.
+        # metadata is part of the public surface, not an unbounded diagnostic sidecar.
         # Admit a card only when both its DTO and its exact receipt fit their independently fixed budgets.
         if (board_bytes + entry_bytes > PUBLIC_CARDS_MAX_BYTES
                 or metadata_items_bytes + metadata_entry_bytes
@@ -1255,7 +1255,7 @@ def public_cards_projection(cards) -> PublicCardsEnvelope:
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8"))
-    # CODEX AGENT: keep the limit executable even though admission reserves more than today's fixed
+    # keep the limit executable even though admission reserves more than today's fixed
     # envelope, so a future metadata field cannot silently invalidate the SSE byte bound.
     while admitted and metadata_bytes > PUBLIC_CARDS_PROJECTION_MAX_BYTES:
         admitted.pop()
@@ -1266,7 +1266,7 @@ def public_cards_projection(cards) -> PublicCardsEnvelope:
             separators=(",", ":"),
         ).encode("utf-8"))
 
-    # CODEX AGENT: relevance decides admission, while the wire mapping is id-sorted for exact replay and
+    # relevance decides admission, while the wire mapping is id-sorted for exact replay and
     # cache determinism independent of source insertion order.
     public = {card_id: dto for card_id, dto, _receipt in sorted(admitted)}
     return PublicCardsEnvelope(cards=public, cards_projection=metadata)

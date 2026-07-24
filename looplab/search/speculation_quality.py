@@ -976,7 +976,7 @@ def _validate_calibration_greedy_authority(
     baseline_stages = 0
 
     for event in events:
-        # CODEX AGENT: snapshot() deep-copies accumulated RunState and reruns all fold finalizers, yet
+        # snapshot() deep-copies accumulated RunState and reruns all fold finalizers, yet
         # this prefix is consumed only for card_added/card_build_requested. At the admitted 100k-event
         # bound this approaches quadratic work. Extend on every row, but snapshot only immediately
         # before the authority event types that actually consult the prefix.
@@ -1951,7 +1951,7 @@ def speculation_implementation_digest() -> str:
         # package root directly instead of assuming a repository checkout surrounds it.
         package_root = Path(__file__).resolve().parents[1]
         root = package_root.parent
-    # CODEX AGENT: hashing raw source bytes makes comments, formatting and line-ending conversion
+    # hashing raw source bytes makes comments, formatting and line-ending conversion
     # revoke every previously issued receipt even when runtime semantics are identical. That turns
     # review-only commits into an operational stop/resume outage and forces six fresh GPU calibration
     # runs after documentation edits. Bind a versioned semantic/runtime manifest (or an explicit

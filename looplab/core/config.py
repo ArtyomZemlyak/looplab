@@ -146,7 +146,7 @@ def run_start_pinned_settings(state) -> dict:
 # toy `Engine(...)` in a test doesn't fire cross-run LLM work unasked. The trust/confirm/ablate QUALITY
 # bundle still ships OFF and is turned on by `thorough`. Every value here is reachable by hand — the
 # profile is a convenience, never a hidden mode.
-# CODEX AGENT: keep this rationale behavioral and evidence-based; do not relabel read-only storage
+# keep this rationale behavioral and evidence-based; do not relabel read-only storage
 # access or proposal-only governance as a no-op for agent behavior, cost, or proposal admission.
 #
 # `thorough` deliberately touches only QUALITY/TRUST machinery, not spend: it does NOT raise
@@ -285,12 +285,12 @@ class Settings(BaseSettings):
     # are generous; tests top out near 50.
     n_seeds: int = Field(default=3, ge=1, le=1024)
     max_nodes: int = Field(default=8, ge=1, le=1_000_000)
-    # CODEX AGENT: legacy evaluation-width input. `eval_parallel` below is canonical and wins when set;
+    # legacy evaluation-width input. `eval_parallel` below is canonical and wins when set;
     # keep this field for old env/config/snapshots and direct Engine call sites. A width > 1 admits
     # concurrent evals, whose resource reservations may be CPU-only or span one/more GPUs — there is no
     # one-node/one-GPU promise. `max_parallel=0` is launch-time AUTO (detected GPU count, at least 1).
     max_parallel: int = Field(default=1, ge=0, le=1024)
-    # CODEX AGENT: legacy build-width input. `llm_parallel` below is canonical and also controls the
+    # legacy build-width input. `llm_parallel` below is canonical and also controls the
     # shared provider-call total when positive. A width > 1 uses fresh pooled researcher/developer pairs;
     # it says nothing about the later eval's CPU/GPU reservation. Startup `0` derives build fan-out from
     # resolved eval width; a live Strategist/operator zero settles to 1. Without role_factory it clamps to 1.
@@ -314,7 +314,7 @@ class Settings(BaseSettings):
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
     # surface (Settings). Its alert event is fold-ignored and cannot directly change lifecycle/champion;
-    # CODEX AGENT: with watchdog_reflection on, that alert is nevertheless advice in a later Researcher
+    # with watchdog_reflection on, that alert is nevertheless advice in a later Researcher
     # prompt and can change future proposals. It only fires on the command-eval path with an LLM client;
     # bare-library EngineOptions stays OFF. See test_options_divergence.
     # `_interval_s` is the BASE tick cadence (the effective one adapts to the per-experiment budget).
@@ -551,7 +551,7 @@ class Settings(BaseSettings):
     operator_bandit: bool = False
     # P1 hypothesis ledger: ask the Researcher to state the one-line hypothesis each experiment tests,
     # register deep-research directions as hypotheses, and track them to a verdict on the board. ON by
-    # default. CODEX AGENT: the board is shown to the Researcher and can be foresight-ordered, so it can
+    # default. The board is shown to the Researcher and can be foresight-ordered, so it can
     # steer later proposals even though it never directly re-ranks already-evaluated nodes. Set False
     # to drop the prompt nudge + registration.
     track_hypotheses: bool = True
@@ -595,7 +595,7 @@ class Settings(BaseSettings):
     #             win OR seed its lineage" hole;
     #   "block" = additionally mark it fully INFEASIBLE (removed from feasible_nodes entirely).
     # Deliberately gates only high-precision CHEATING/LEAKAGE signals. Broad `critic:*` findings stay
-    # advisory; CODEX AGENT: `critic:hardcoded_metric` is the one narrow high-precision critic exception
+    # advisory; `critic:hardcoded_metric` is the one narrow high-precision critic exception
     # and gates because it requires a literal metric with no computed assignment anywhere.
     trust_gate: str = "audit"
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
@@ -723,7 +723,7 @@ class Settings(BaseSettings):
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
     # ESCALATES from "broaden" to "expand the ACTION SPACE — build the missing infra (external mining,
-    # a new data pipeline, a different eval), do NOT swap another {locked} lever." CODEX AGENT: the same
+    # a new data pipeline, a different eval), do NOT swap another {locked} lever." The same
     # gate also stamps the proposal's authoritative operator as `expand`; that node competes normally
     # under SearchFitness and its separate operator yield is measured. It does not force a winner.
     # Reads the 2a concept-coverage snapshot, so it needs `concept_pivot` to record one. OPT-IN
@@ -743,7 +743,7 @@ class Settings(BaseSettings):
     # reject — D3 level 3). Audit-only, off the selection path; ON by default in the product Settings
     # (ce4a379), EngineOptions off. Needs a `memory_dir` to share capsules.
     # See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
-    # PREREQUISITES (CODEX — this flag is NOT standalone): the WRITE needs per-run concept tags
+    # PREREQUISITES (this flag is NOT standalone): the WRITE needs per-run concept tags
     # (`node_concepts`, produced by `concept_pivot`/F1 tagging) — no tags => no capsule; the SURFACE path
     # runs inside the graded-novelty precheck, so it also needs `graded_novelty` on. With only this flag +
     # `memory_dir` it persists/surfaces nothing. Enable `concept_pivot` + `graded_novelty` alongside it.
@@ -1122,7 +1122,7 @@ class Settings(BaseSettings):
     deep_research_every: int = 3
     # Overlap a DUE deep-research "think" with the GPU-bound eval instead of running it in its own
     # serial step (the agent is otherwise idle while a node trains). research() computes from a state
-    # snapshot; CODEX AGENT: the joined background task records only allowlisted, order-tolerant
+    # snapshot; the joined background task records only allowlisted, order-tolerant
     # research/hint/hypothesis events as soon as the memo finishes. ON by default: the LLM is typically
     # remote (no GPU contention with eval), so overlapping hides latency behind long training.
     concurrent_research: bool = True

@@ -996,7 +996,7 @@ class SpeculationMixin:
             return self._append_card_build_done(request, skipped="stale")
         result = self._spec_builds.get(key)
         if result is None:
-            # CODEX AGENT (crash-recovery wedge): a kill between node_building and node_created leaves the
+            # a kill between node_building and node_created leaves the
             # interrupted build's Node id permanently spent (it still counts against the physical ceiling
             # via `_node_id_ceiling`) AND recovery drops its Card, yet the durable request survives at head
             # with no in-memory result. Capacity is then zero, so `_start_head_producer`'s slot gate never
@@ -1083,7 +1083,7 @@ class SpeculationMixin:
             return
         try:
             try:
-                # CODEX AGENT: abandon_on_cancel=False makes pause/abort wait for the entire blocking
+                # abandon_on_cancel=False makes pause/abort wait for the entire blocking
                 # Developer/provider call even after the main task has durably closed this request as
                 # stale. The session's exit gate still counts _spec_build_inflight, so an unavailable
                 # provider can make an operator stop take the full transport timeout. Use a genuinely
@@ -1250,7 +1250,7 @@ class SpeculationMixin:
         )
         if card_id is None:
             return True, False
-        # CODEX AGENT: the Card commit above and these proposal-audit events are separate appends. A crash
+        # the Card commit above and these proposal-audit events are separate appends. A crash
         # or append failure after EV_CARD_ADDED leaves an executable durable Card whose novelty/governance
         # audit prefix was silently lost; `_spec_raw_stage_result` was already cleared, so resume cannot
         # repair it. Commit the Card and its bounded audit intents in one tail-fenced append_many, or add a
@@ -1479,7 +1479,7 @@ class SpeculationMixin:
                             or key in self._spec_builds
                         ):
                             return False
-                        # CODEX AGENT: recovery may have terminalized this head's interrupted
+                        # recovery may have terminalized this head's interrupted
                         # node_building after it consumed the final physical Node id. The request then
                         # has no result but capacity remains zero, so no worker can close it and this
                         # session polls forever. Close recovered unbuildable heads before this gate.
@@ -1526,7 +1526,7 @@ class SpeculationMixin:
                                     yield_outer = True
                             else:
                                 yield_outer = True
-                        # CODEX AGENT: one idle polling turn performs this full replay plus several more
+                        # one idle polling turn performs this full replay plus several more
                         # below, then repeats even when the log tail is unchanged. read_all caches bytes,
                         # but fold still rebuilds all Cards/concepts. Cache one snapshot per observed tail
                         # and invalidate it only after a write/wakeup, or extend a FoldCursor by suffix.

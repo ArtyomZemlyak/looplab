@@ -690,7 +690,7 @@ def _serialize_scope_record(record: dict[str, Any]) -> str:
         encoded = json.dumps(record, indent=2)
     except (TypeError, ValueError) as exc:
         raise _ScopeReportStorageConflict("scope report is not serializable") from exc
-    # CODEX AGENT: this is the persisted-report resource boundary. Check encoded bytes, not Python
+    # this is the persisted-report resource boundary. Check encoded bytes, not Python
     # characters, before atomic replacement so a model result can never create an unreadable record.
     if len(encoded.encode("utf-8")) > _SCOPE_REPORT_RECORD_MAX_BYTES:
         raise _ScopeReportStorageConflict("scope report exceeds its persisted byte limit")
@@ -982,7 +982,7 @@ def _write_scope_action_receipt(
     try:
         _validated_reports_dir(reports_dir, create=True)
         path = _scope_action_path(reports_dir, action_id)
-        # CODEX AGENT: claims and terminals gate an external paid side effect. Best-effort fsync is
+        # claims and terminals gate an external paid side effect. Best-effort fsync is
         # insufficient here: the worker may start only after the exact receipt survived strict sync.
         strict_atomic_write_text(path, _serialize_scope_action_receipt(receipt))
         verified = _read_scope_action_receipt(
@@ -1290,7 +1290,7 @@ def _public_scope_record(rec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         "learnings", "next_directions", "caveats",
     ):
         content[field] = []
-    # CODEX AGENT: outcome-bearing legacy narrative is quarantined, not merely relabelled. Renaming
+    # outcome-bearing legacy narrative is quarantined, not merely relabelled. Renaming
     # an invented winner would still let a client accidentally render it as trusted prose.
     return {**rec, "content": content, "authoritative": False}, True
 
@@ -1348,7 +1348,7 @@ def _prior_learnings_index(reports_dir: Path) -> str:
     discovered_names: list[str] = []
     try:
         with os.scandir(base) as entries:
-            # CODEX AGENT: this is a prompt-input authority boundary. Bound directory work before
+            # this is a prompt-input authority boundary. Bound directory work before
             # inspecting names, then revalidate every selected path and redact every copied string.
             while inspected_files < _PRIOR_REPORT_MAX_FILES:
                 try:
@@ -1602,7 +1602,7 @@ def build_router(srv) -> APIRouter:
                 "nodes": len(st.nodes),
                 "report": st.report if isinstance(st.report, dict) else None,
                 "comparison_contract": task_contract,
-                # CODEX AGENT: this single bounded receipt is the only cross-run numeric evidence.
+                # this single bounded receipt is the only cross-run numeric evidence.
                 # Scope projection must copy it atomically; phase/source/uncertainty are inseparable.
                 "comparison_measurement": measurement}
 
@@ -1837,7 +1837,7 @@ def build_router(srv) -> APIRouter:
         after = _source_probe_key(run_id, source.revision["log_sig"])
         if before != after or source.revision["log_sig"] != log_sig:
             return False, source.event_bytes
-        # CODEX AGENT: ordinary rewrites invalidate dev/ino/ctime/size/mtime immediately. The bounded
+        # ordinary rewrites invalidate dev/ino/ctime/size/mtime immediately. The bounded
         # TTL retains a periodic full-byte check for exotic filesystems that can preserve all of those
         # fields, while stable GETs reuse one parsed revision instead of rebuilding every Event object.
         _remember_revision(after, source.revision)
@@ -1874,7 +1874,7 @@ def build_router(srv) -> APIRouter:
             # exact successful revision so subsequent GET observers do not repeatedly parse the same
             # unchanged event prefix while the operator decides whether to regenerate.
             _remember_revision(after_key, source.revision)
-        # CODEX AGENT: a negative cache may skip work only when the answer is already stale. An
+        # a negative cache may skip work only when the answer is already stale. An
         # omitted receipt needs a current failed-open observation before it can authorize
         # ``stale:false``: accessibility is not part of the cheap stat key, so a transient lock can
         # clear without changing that key. A formerly omitted run is therefore always new evidence.
@@ -1959,7 +1959,7 @@ def build_router(srv) -> APIRouter:
             _release_retained_scope_action_leases(
                 _reports_dir, receipt["action_id"])
             return reconciled
-        # CODEX AGENT: JobRegistry is process-local, but deployments may run multiple ASGI workers.
+        # JobRegistry is process-local, but deployments may run multiple ASGI workers.
         # The OS lease is the cross-process liveness authority; a sibling must not orphan live paid
         # work merely because it cannot see this worker's in-memory job receipt.
         if _scope_action_lease_is_live(_reports_dir, receipt["action_id"]):
@@ -2173,7 +2173,7 @@ def build_router(srv) -> APIRouter:
             return None
         return receipt
 
-    # CODEX AGENT: action observation has its own namespace because scope ids are opaque paths. A
+    # action observation has its own namespace because scope ids are opaque paths. A
     # suffix route under ``/scope-report/...`` would steal a legitimate scope such as
     # ``family/actions/<uuid>`` from the catch-all report GET. The expected scope stays explicit in
     # the query and is verified against the durable receipt before any result is disclosed.
@@ -2192,7 +2192,7 @@ def build_router(srv) -> APIRouter:
         except _ScopeReportStorageConflict as exc:
             raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
         if receipt is None:
-            # CODEX AGENT: unknown means no durable claim exists. The client may safely retry only the
+            # unknown means no durable claim exists. The client may safely retry only the
             # same UUID; it must never mint a replacement action merely because a volatile job vanished.
             return {"status": "unknown", "action_id": normalized}
         return _action_response(receipt)
@@ -2392,7 +2392,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
         return _action_response(receipt)
 
-    # CODEX AGENT: scope ids are opaque persisted identities, so the route must preserve legal
+    # scope ids are opaque persisted identities, so the route must preserve legal
     # task/project ids containing ``/`` instead of truncating or rejecting them at the HTTP boundary.
     @router.get("/api/scope-report/{scope_type}/{scope_id:path}")
     def get_scope_report(scope_type: str, scope_id: str):
@@ -2581,7 +2581,7 @@ def build_router(srv) -> APIRouter:
             for rid in frozen_scope_ids:
                 expected_bytes = frozen_source_sizes.get(rid, 0)
                 before_probe, before_key = _source_probe_receipt(rid, frozen_sig_by_id[rid])
-                # CODEX AGENT: the reservation owns the source probe observed by the POST handler.
+                # the reservation owns the source probe observed by the POST handler.
                 # Task/config snapshots are intentionally absent from the event-log signature and
                 # size map, so accepting a different first worker probe would silently rebase this
                 # paid job and let a later request reserve a second identity for the same evidence.
@@ -2616,7 +2616,7 @@ def build_router(srv) -> APIRouter:
                 "type": scope_type,
                 "id": scope_id,
                 "label": _scope_label(scope_type, scope_id),
-                # CODEX AGENT: preserve honest scope coverage even when a corrupt/unreadable run cannot
+                # preserve honest scope coverage even when a corrupt/unreadable run cannot
                 # contribute a brief. The model sees only frozen briefs; the receipt counts the omission.
                 "source_run_count": len(frozen_scope_ids),
             }
@@ -2662,7 +2662,7 @@ def build_router(srv) -> APIRouter:
                 except ScopeSourceError:
                     return False
 
-            # CODEX AGENT: the capture already bound every model-visible byte. Re-check its complete
+            # the capture already bound every model-visible byte. Re-check its complete
             # cheap identity before client construction/publication so ordinary races consume no paid
             # call, without reparsing the same event log three more times inside one generation job.
             if not _inputs_unchanged():
@@ -2688,7 +2688,7 @@ def build_router(srv) -> APIRouter:
             rec = {"scope_identity": _scope_identity(scope_type, scope_id), "scope": scope,
                    "action_id": action_id,
                    "generated_at": int(time.time() * 1000), "run_ids": frozen_scope_ids,
-                   # CODEX AGENT: sig and run_ids use the complete scope vocabulary even when one
+                   # sig and run_ids use the complete scope vocabulary even when one
                    # source is unreadable. omitted_runs says exactly which members supplied no brief.
                    "sig": frozen_scope_sig,
                    "source_revisions": source_revisions,
@@ -2740,7 +2740,7 @@ def build_router(srv) -> APIRouter:
                 action_lease = None
 
         try:
-            # CODEX AGENT: reserve and durably claim under the same interprocess store fence. No
+            # reserve and durably claim under the same interprocess store fence. No
             # worker can start before this receipt exists, so a lost initial POST can always rejoin
             # by UUID and never needs to guess whether paid work was accepted.
             with _scope_store_lock(_reports_dir):

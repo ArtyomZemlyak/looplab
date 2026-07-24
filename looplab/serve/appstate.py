@@ -166,7 +166,7 @@ class AppState:
         last_seq = evs[-1].seq if evs else -1
         # Trim heavy per-node payloads from the live state (code/files/stdout/error) — they are
         # fetched on demand via /nodes/{id}. Keeps SSE ticks small even for code-writing runs.
-        # CODEX AGENT: exclude open event journals before Pydantic copies them, then publish only the
+        # exclude open event journals before Pydantic copies them, then publish only the
         # bounded derived DTO. This shared boundary feeds owner state, SSE, and review state.
         d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
         # Scrub the broad folded state before inserting the independently bounded/redacted Card DTO.
@@ -174,7 +174,7 @@ class AppState:
         # Card projection has declared them exact, leaving a completeness receipt that describes data
         # no longer present on the wire.
         d = _public_state_value(d)
-        # CODEX AGENT: `cards` and its completeness receipt must come from one projection invocation.
+        # `cards` and its completeness receipt must come from one projection invocation.
         # Re-projecting the two halves separately would let mutable caller input or a later selector
         # change publish counts that do not describe the actual mapping in this SSE/state frame.
         card_fragment = public_cards_projection(st.cards).model_dump(mode="json")
@@ -296,7 +296,7 @@ class AppState:
         # is cheap and adds a semantic reset fence even on filesystems with weak/reused inode metadata.
         generation = run_generation_token(iter_event_jsonl(events_path))
         span_sig = _sig(sp, unavailable_raises=True)
-        # CODEX AGENT: a derived response cache is never authority after source readability changes.
+        # a derived response cache is never authority after source readability changes.
         # A stat-only
         # cache hit must not turn a permission loss into exact cached truth. Probe the
         # source before returning the derived view, just as get_index does for its own warm cache.
@@ -324,7 +324,7 @@ class AppState:
             span_cap=TRACE_VIEW_SPAN_CAP)
         with self._trace_view_lock:      # only the dict ops — the slow build above ran lock-free
             self._trace_view_cache[key] = (sig, view)
-            # CODEX AGENT: the cached response itself is span-capped by TRACE_VIEW_SPAN_CAP.  Count-only
+            # the cached response itself is span-capped by TRACE_VIEW_SPAN_CAP.  Count-only
             # eviction previously retained up to four ~200 MB views and let one request exhaust memory.
             while len(self._trace_view_cache) > 4:
                 self._trace_view_cache.pop(next(iter(self._trace_view_cache)))

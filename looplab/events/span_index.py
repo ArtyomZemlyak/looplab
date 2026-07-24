@@ -157,7 +157,7 @@ class SpanIndex:
             self._append(light, off, length)
 
     def _rebuild(self, size: int) -> None:
-        # CODEX AGENT: unavailable trace bytes must propagate as unavailable; publishing an empty
+        # unavailable trace bytes must propagate as unavailable; publishing an empty
         # index here would turn an ACL/read failure into false evidence that the run had no spans.
         # A readable empty source and an unreadable source are different facts. Let I/O failures
         # reach the HTTP projection boundary instead of publishing a complete-looking empty index.
@@ -247,7 +247,7 @@ class SpanIndex:
             rows = list(self.by_tid.get(tid, ()))
             if anchor_sid is not None:
                 anchor = self.by_sid.get(anchor_sid)
-                # CODEX AGENT: a caller may find a just-appended span by scanning past this index's
+                # a caller may find a just-appended span by scanning past this index's
                 # snapshot. In an append-only log that missing anchor follows every indexed row, so
                 # keep the whole indexed prefix; emptying it would destroy the input_from ancestry.
                 if anchor is not None:
@@ -404,7 +404,7 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
             stt = p.stat()
         except FileNotFoundError:
             return None  # no spans.jsonl (tracing off / pre-tracing run) — caller degrades
-        # CODEX AGENT: cached indexes are accelerators, not authority once the source is unreadable.
+        # cached indexes are accelerators, not authority once the source is unreadable.
         # `stat()` may succeed while opening the source is denied. Probe on every lookup, including
         # cache hits, so a permission loss cannot turn a previously indexed source into exact zero.
         # A disappearance *after* the successful stat is an availability race, not known-empty truth.

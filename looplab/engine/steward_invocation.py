@@ -183,13 +183,13 @@ def run_steward_invocation(
     with _invocation_guard(path):
         existing = _cached(path, kind=kind, action_id=action_id)
         if existing is not None:
-            # CODEX AGENT: a paid action id is scoped to one caller-controlled request. Without this
+            # a paid action id is scoped to one caller-controlled request. Without this
             # binding, task-facets could replay goal A's proposal as the apparent result for goal B, and
             # the shared CLI/HTTP ledgers could silently cross-replay different manual invocations.
             prior_digest = existing.get("request_digest")
             if prior_digest is not None and prior_digest != request_digest:
                 raise StewardInvocationIdempotencyConflict()
-            # CODEX AGENT: terminal replay happens before provider setup; an unresolved begun claim is
+            # terminal replay happens before provider setup; an unresolved begun claim is
             # equally final for this identity because replacing an unknown paid outcome can double-charge.
             # Reconfirm the file and its directory before acknowledging a row whose original response may
             # have failed during fsync after bytes reached the page cache.

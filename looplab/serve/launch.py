@@ -406,7 +406,7 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
         _reject(422, "invalid_task", f"task is invalid: {exc}", "task")
     # Some embedders/tests inject a validator returning the canonical dict directly; the production
     # registry returns a Pydantic TaskAdapter. Supporting both keeps the helper dependency-injectable.
-    # CODEX AGENT: this typed adapter dump is the one task document shared by browser, TUI, and
+    # this typed adapter dump is the one task document shared by browser, TUI, and
     # direct API launches.  In particular it preserves the validated comparison_contract and its
     # canonical contract_id into task.input.json -> task.snapshot.json; never merge the raw body back.
     canonical_task = (dict(adapter) if isinstance(adapter, dict)

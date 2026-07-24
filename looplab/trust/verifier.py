@@ -55,7 +55,7 @@ _VERDICT_VALUE: dict[str, float] = {
     "strong_no": 0.0, "no": 0.25, "unclear": 0.5, "yes": 0.75, "strong_yes": 1.0,
 }
 _VERDICT_ORDER = ["strong_no", "no", "unclear", "yes", "strong_yes"]
-# CODEX AGENT: every sample is a synchronous provider call. Direct/library callers bypass Settings,
+# every sample is a synchronous provider call. Direct/library callers bypass Settings,
 # so the primitive itself owns a hard emergency ceiling as well as exposing the truncation receipt.
 MAX_VERIFIER_SAMPLES = 32
 # Synonyms a model reaches for — normalized before lookup so a near-miss verdict still scores.

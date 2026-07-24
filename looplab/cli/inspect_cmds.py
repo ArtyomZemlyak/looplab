@@ -44,7 +44,7 @@ def _governance_cli_read(project):
     except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
         _governance_cli_error(exc)
     except OSError:
-        # CODEX AGENT: an unreadable source is unknown, never an empty portfolio. Keep the OS path and
+        # an unreadable source is unknown, never an empty portfolio. Keep the OS path and
         # platform parser text out of CLI output while preserving argument/validation ValueErrors.
         _governance_cli_error(
             GovernanceLedgerUnavailable("cross_run_sources", "storage_unreadable"))
@@ -78,7 +78,7 @@ def _run_cli_steward(memory_dir: Path, kind: str, action_id: str, *, prepare, in
         raise typer.Exit(2) from exc
     invocation_id = str(record.get("action_id") or record.get("invocation_id") or "")
     if record.get("action") == "steward-invocation-begun":
-        # CODEX AGENT: this is not a retryable provider error. The old process may have paid already;
+        # this is not a retryable provider error. The old process may have paid already;
         # preserving the identity as ambiguous is the only fail-closed crash/restart outcome.
         typer.echo(
             "steward invocation outcome is unknown; the same --action-id will not call the model again. "
@@ -129,7 +129,7 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *
     tail = events[-1].seq if events else -1
     if expected_last_seq is not None and tail != expected_last_seq:
         raise EventStoreConcurrencyError(store.path, expected_last_seq, tail)
-    # CODEX AGENT: re-fold inside the mutation transaction. The caller's pre-analysis state can be
+    # re-fold inside the mutation transaction. The caller's pre-analysis state can be
     # minutes old after an agentic build and must never choose provenance/idempotency on its own.
     state = fold(events)
     known = dict(getattr(state, "node_concepts", {}) or {})
@@ -140,7 +140,7 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *
         node = state.nodes.get(nid)
         if node is None:
             continue
-        # CODEX AGENT: preserve mixed-batch provenance through retro-tag persistence too; a heuristic
+        # preserve mixed-batch provenance through retro-tag persistence too; a heuristic
         # fallback row must remain display-only even when the command's default mode is agentic.
         modes = node_modes or {}
         row_mode = modes.get(nid, modes.get(str(nid), mode))
@@ -152,7 +152,7 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *
         if (requested_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER
                 and (any(cid is None for cid in normalized)
                      or len(raw_ids) > MAX_MATERIALIZED_CONCEPTS)):
-            # CODEX AGENT: retro-tagging is the same evidence boundary as the live cadence. A malformed
+            # retro-tagging is the same evidence boundary as the live cadence. A malformed
             # or over-wide classifier row is at most a bounded display fallback, never a trusted subset.
             row_mode = "offline-heuristic"
             requested_provenance = node_concept_event_provenance({"mode": row_mode})
@@ -211,7 +211,7 @@ def _retro_tag_finished(events, state) -> bool:
         scope = finish_data.get("finalize_scope")
         if not isinstance(scope, str) or not scope:
             return False
-        # CODEX AGENT: ``incomplete_finalize_scope`` intentionally forgets a scope invalidated by a
+        # ``incomplete_finalize_scope`` intentionally forgets a scope invalidated by a
         # later foreign event. Absence from that recovery queue is therefore not proof that the modern
         # terminal checklist completed; the accepted finish itself must have its durable success marker.
         if not any(
@@ -444,7 +444,7 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
     # keeps the inverse (--llm opt-in) because ITS agentic path is a much heavier full tool-loop.
     if not offline:
         # Use the RUN's pinned endpoint (config.snapshot.json), not ambient Settings, so a diagnostic
-        # sends node code/logs where the run was pinned (CODEX #1); ambient fallback + `model` override.
+        # sends node code/logs where the run was pinned; ambient fallback + `model` override.
         settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
@@ -913,7 +913,7 @@ def cross_run_concepts_cmd(
         def _project(governance):
             if observed_path_missing(path):
                 return None
-            # CODEX AGENT: read capsules and apply taxonomy while both policy and evidence locks are held;
+            # read capsules and apply taxonomy while both policy and evidence locks are held;
             # separate reads can otherwise render a merge against a capsule generation that never coexisted.
             return portfolio_concept_overview(
                 ConceptCapsuleStore(path).all(), aliases=governance["aliases"],
@@ -942,7 +942,7 @@ def cross_run_concepts_cmd(
                       if ov.get("source_unknown_capsules", 0) else "")
                    + (f"; {ov.get('source_rows_quarantined', 0)} durable row(s) quarantined"
                       if ov.get("source_rows_quarantined", 0) else ""))
-    # CODEX AGENT: capsule-source completeness and this read-model's display cap are independent. The
+    # capsule-source completeness and this read-model's display cap are independent. The
     # headline is an exact retained total, so text mode must disclose when its backing row projection is not.
     if ov.get("concepts_omitted"):
         typer.echo(f"  Bounded overview omitted {ov['concepts_omitted']} concept row(s); "
@@ -1093,7 +1093,7 @@ def concept_steward_cmd(
 
     def _preflight():
         concept_governance_snapshot(str(memory_dir))
-        # CODEX AGENT: a paid proposal is not allowed to run against an unreadable invocation history.
+        # a paid proposal is not allowed to run against an unreadable invocation history.
         # Validate that history before even constructing a provider client so corruption cannot spend money.
         read_curation_rows(Path(memory_dir) / "concept_curation_log.jsonl")
 
@@ -1215,7 +1215,7 @@ def task_facets_cmd(
                    "classification, then record it with `task-facets-set MEMORY TASK_ID --domain ... "
                    "--language ...`.")
         raise typer.Exit(2)
-    # CODEX AGENT: task faceting is the third paid steward. Its audit history gets the same pre-client
+    # task faceting is the third paid steward. Its audit history gets the same pre-client
     # fail-closed boundary as concept/claim stewardship, even though this CLI remains proposal-only.
     _governance_cli_read(
         lambda: read_curation_rows(Path(memory_dir) / "task_facets_curation_log.jsonl"))
@@ -1311,7 +1311,7 @@ def claim_steward_cmd(
 
     def _preflight():
         claim_governance_revision(str(memory_dir))
-        # CODEX AGENT: fail before provider construction when the paid-call audit trail is unknown.
+        # fail before provider construction when the paid-call audit trail is unknown.
         read_curation_rows(Path(memory_dir) / "claim_curation_log.jsonl")
 
     _governance_cli_read(_preflight)
@@ -1372,7 +1372,7 @@ def cross_run_digest_cmd(
             if (not caps
                     and getattr(caps, "source_health", {}).get("source_store_complete") is not False):
                 return None
-            # CODEX AGENT: digest labels and capsule rows are one governed observation, not adjacent reads.
+            # digest labels and capsule rows are one governed observation, not adjacent reads.
             return portfolio_digest(
                 caps, aliases=governance["aliases"], splits=governance["splits"])
 
@@ -1423,7 +1423,7 @@ def cross_run_search_cmd(
                f"[intent={rc.get('intent', '?')}, {rc.get('n_caveats', 0)} caveat(s) reserved] "
                f"(channels: {', '.join(rc['channels'])})")
     if not source_complete:
-        # CODEX AGENT: retrieval counts only the concepts that survived each bounded/legacy capsule.  Keep
+        # retrieval counts only the concepts that survived each bounded/legacy capsule.  Keep
         # both positive frequencies and an empty match explicitly lower-bound instead of implying absence.
         typer.echo("  WARNING: concept capsule source is partial; concept matches and run counts describe "
                    "retained records only: "
@@ -1469,7 +1469,7 @@ def atlas_cmd(
     """
     from looplab.engine.claims import atlas_for_memory
     base = Path(memory_dir)
-    # CODEX AGENT: leaving every source argument unset delegates loading to atlas_for_memory's single
+    # leaving every source argument unset delegates loading to atlas_for_memory's single
     # policy+evidence transaction. Preloading here defeated that boundary and created hybrid Atlases.
     atlas = _governance_cli_read(lambda: atlas_for_memory(base, max_items=max_items))
     claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
@@ -1494,7 +1494,7 @@ def atlas_cmd(
         concept_source = (context_pack.get("coverage")
                           if isinstance(context_pack.get("coverage"), dict) else {})
     if concept_source.get("source_complete") is not True:
-        # CODEX AGENT: legacy/bounded capsule rows make Atlas concept counts lower bounds. The human CLI
+        # legacy/bounded capsule rows make Atlas concept counts lower bounds. The human CLI
         # must carry the same receipt as JSON/UI/agent consumers instead of printing retained rows as exact.
         unknown = int(concept_source.get("source_unknown_capsules", 0) or 0)
         typer.echo(
@@ -1616,7 +1616,7 @@ def claims_cmd(
                     overview, concept_rows = _portfolio_concept_overview_data(
                         ConceptCapsuleStore(caps_path).all(), aliases=governance["aliases"],
                         splits=governance["splits"])
-                # CODEX AGENT: build the pack before releasing any policy/source lock. Its claims,
+                # build the pack before releasing any policy/source lock. Its claims,
                 # taxonomy, source receipts and decisions must all describe the same durable era.
                 context_pack = build_context_pack(
                     claims, concept_overview=overview, max_claims=top,

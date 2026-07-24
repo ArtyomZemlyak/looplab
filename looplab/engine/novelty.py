@@ -265,7 +265,7 @@ class NoveltyGateMixin:
 
     def _idea_prompt_identity(self, idea, *, prose_chars: int) -> str:
         """A bounded claim + action identity for the live LLM novelty adjudicator."""
-        # CODEX AGENT: rationale/hypothesis are not the experiment action. Keep every structural axis
+        # rationale/hypothesis are not the experiment action. Keep every structural axis
         # independently bounded and receipt-bearing so a huge params map cannot hide space/eval_profile.
         action = {
             "operator": _bounded_prompt_text(getattr(idea, "operator", ""), 160),
@@ -499,7 +499,7 @@ class NoveltyGateMixin:
                 operator="draft",
                 eval_timeout=self._effective_researcher_eval_timeout(other),
             )
-            # CODEX AGENT: policy owns the batch operator (every accepted sibling executes as draft),
+            # policy owns the batch operator (every accepted sibling executes as draft),
             # while a governed finite timeout is a real budget axis. Compare that one canonical action
             # before prose so model-authored labels cannot admit duplicate drafts or erase long trials.
             if has_action_axis or other_has_action_axis:
@@ -554,7 +554,7 @@ class NoveltyGateMixin:
         native = getattr(self.researcher, "propose_batch", None)
         ideas: list = []
         dropped: list[dict] = []
-        # CODEX AGENT: admission receipts belong to the slot that will actually be reserved. Advancing
+        # admission receipts belong to the slot that will actually be reserved. Advancing
         # by accepted ideas (not raw attempts) keeps retries on one slot and gives batch siblings unique ids.
         prospective_base = self._prospective_node_id(state)
         proposal_events = self.store.read_all()
@@ -589,7 +589,7 @@ class NoveltyGateMixin:
                 from itertools import islice
 
                 self._set_complexity_hint(state, None)
-                # CODEX AGENT: native batching is only a latency/diversity optimization. It must not
+                # native batching is only a latency/diversity optimization. It must not
                 # bypass the same history/graded-novelty admission boundary as sequential proposals,
                 # and a broken backend must not make us materialize an unbounded iterable.
                 produced = list(islice(native(state, n) or (), n))
@@ -784,7 +784,7 @@ class NoveltyGateMixin:
         agreement = verdict.get("agreement")
         n_samples = verdict.get("n_samples")
         requested = verdict.get("requested_samples")
-        # CODEX AGENT: L5 changes admission, so one lucky parse or an unstable split verdict is not
+        # L5 changes admission, so one lucky parse or an unstable split verdict is not
         # "repeated verification". Require a strict parsed majority and a strict modal majority; every
         # unavailable, closed, malformed or low-agreement result falls through to the ordinary flat gate.
         return bool(
@@ -827,7 +827,7 @@ class NoveltyGateMixin:
         all_node_concepts = getattr(state, "node_concepts", None) or {}
         concept_provenance = getattr(state, "node_concept_provenance", None) or {}
         receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
-        # CODEX AGENT: an Idea's concepts are authored by the same proposer whose admission is being
+        # an Idea's concepts are authored by the same proposer whose admission is being
         # decided, so they cannot certify their own graded-novelty bypass. Only replay-proven
         # `node_concepts` classifier events enter the agentic path; missing/unknown provenance fails
         # closed to the curated heuristic path (or no-op when no curated vocabulary exists).
@@ -857,7 +857,7 @@ class NoveltyGateMixin:
             if concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_OPERATOR
             and nid not in receipts
         }
-        # CODEX AGENT: a partial cadence is UNKNOWN coverage, not evidence that the remaining nodes
+        # a partial cadence is UNKNOWN coverage, not evidence that the remaining nodes
         # touch no concepts. Once any classifier receipt exists, every experiment must be covered (a
         # classifier receipt — an explicit empty list is valid — or an operator assertion) before this
         # precheck may issue an L4/L5 admission override. Otherwise a post-cadence near-repeat or win
@@ -917,7 +917,7 @@ class NoveltyGateMixin:
         # grade_novelty's own dedup (levels 1/2) is PARAM-based, so empty/key-disjoint params can skip it
         # and make a textual repeat reach a level-4/5 ALLOW. Compare against EVERY tried node, not merely
         # `grade.near_node`: the concept-sharing node selected by the grader need not be the duplicated one.
-        # CODEX AGENT: a graded score is never sufficient evidence of a new implementation. A level-4/5
+        # a graded score is never sufficient evidence of a new implementation. A level-4/5
         # short-circuit is allowed only when its bounded canonical prose is complete, non-empty, and differs
         # from every prior proposal after NFKC, Unicode case-folding and punctuation/whitespace separation.
         # Oversize/empty identities defer to the flat gate because we cannot prove a concrete difference.
@@ -978,7 +978,7 @@ class NoveltyGateMixin:
             # a bounded, versioned, scope-keyed query index replaces it once the retrieval planner lands.
             store = ConceptCapsuleStore(Path(self.memory_dir) / "concept_capsules.jsonl")
             fp = self.lessons.task_fingerprint(state, state.best())
-            # HARD direction gate (CODEX): a min/rmse task and a max/recall task can share enough goal
+            # HARD direction gate: a min/rmse task and a max/recall task can share enough goal
             # tokens to clear the fuzzy Jaccard floor, but their outcomes are not comparable — require the
             # same optimization direction before a prior counts (a lean stand-in for the full contract).
             my_dir = str(getattr(state, "direction", "") or "min")
@@ -1011,7 +1011,7 @@ class NoveltyGateMixin:
                         if not target or target not in concepts:
                             continue
                         candidate, current = raw_outcomes[source], outcomes.get(target)
-                        # CODEX AGENT: several raw aliases can collapse to one canonical concept. Mirror
+                        # several raw aliases can collapse to one canonical concept. Mirror
                         # portfolio_concept_overview: retain the best observation in this run's direction,
                         # never the value of whichever raw spelling sorts first.
                         better = (current is None and candidate is not None) or (
@@ -1020,7 +1020,7 @@ class NoveltyGateMixin:
                         )
                         if target not in outcomes or better:
                             outcomes[target] = candidate
-                # CODEX AGENT: canonicalization can merge/purge retained labels, so completeness cannot be
+                # canonicalization can merge/purge retained labels, so completeness cannot be
                 # recomputed from the transformed list. Freeze the already-validated raw capsule receipt
                 # before replacing membership with its governed projection.
                 source_receipt = {
@@ -1037,7 +1037,7 @@ class NoveltyGateMixin:
                 normalized = {
                     **capsule, "concepts": concepts, "concept_outcomes": outcomes,
                     "_source_receipt": source_receipt,
-                    # CODEX AGENT: a valid matching capsule does not make unreadable sibling rows vanish.
+                    # a valid matching capsule does not make unreadable sibling rows vanish.
                     # Carry one snapshot-level health receipt into the durable v2 prior event.
                     "_store_source_health": dict(store.source_health),
                 }
@@ -1060,7 +1060,7 @@ class NoveltyGateMixin:
             if not matched:
                 return
             # Filter capsules to those actually contributing a matched concept FIRST, THEN cap — so a
-            # matching capsule past the top-N is never silently dropped from the receipt (CODEX).
+            # matching capsule past the top-N is never silently dropped from the receipt.
             runs = []
             source_receipts = []
             store_health = None
@@ -1076,7 +1076,7 @@ class NoveltyGateMixin:
                         "concept_outcomes_total": None, "concept_outcomes_omitted": None,
                         "concept_outcomes_complete": False,
                     }
-                # CODEX AGENT: source completeness is a denominator over ALL eligible prior capsules. A
+                # source completeness is a denominator over ALL eligible prior capsules. A
                 # partial row where the target is not retained may have omitted that target; filtering to
                 # matching rows would repeat the false-completeness bug fixed in concept_card.
                 source_receipts.append(source)

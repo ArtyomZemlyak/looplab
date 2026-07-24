@@ -143,7 +143,7 @@ class ResearchCadenceMixin:
         # researcher can expose secrets/prompt controls to the verifier and receive a verdict over
         # evidence that is later truncated into a materially different durable memo.
         memo_payload = memo.model_dump(mode="json")
-        # CODEX AGENT: ResearchMemo excludes the receipt from generic dumps for replay compatibility;
+        # ResearchMemo excludes the receipt from generic dumps for replay compatibility;
         # this durable writer must explicitly carry the original pre-cap denominator across sanitizers.
         if getattr(memo, "claims_receipt", None) is not None:
             memo_payload["claims_receipt"] = memo.claims_receipt
@@ -152,7 +152,7 @@ class ResearchCadenceMixin:
         # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).
         # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a
         # client is wired. Verdicts ride INSIDE the folded memo and cannot change this run's champion;
-        # CODEX AGENT: finalize later uses their aligned support as the gate for positive D8 evidence.
+        # finalize later uses their aligned support as the gate for positive D8 evidence.
         if self._research_verify and memo_d.get("claims"):
             try:
                 from looplab.trust.verify import verify_memo

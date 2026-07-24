@@ -434,7 +434,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         # via the append-only, reversible governance ledger. The provider itself gates: it contributes
         # only the read `concept_taxonomy` in plan mode and adds the mutation verbs (mode+approver gated,
         # like the KB/write tools) in mutating modes — so it is safe to add in every non-recovery mode.
-        # CODEX AGENT: the documented flag is the owner Assistant's portfolio ACL/redaction
+        # the documented flag is the owner Assistant's portfolio ACL/redaction
         # kill-switch. It must gate taxonomy reads and shared governance mutations as well as the
         # sibling CrossRunTools reads; memory_dir alone is storage configuration, not authorization.
         from looplab.tools.concept_tools import ConceptGovernanceTools

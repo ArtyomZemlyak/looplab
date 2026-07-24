@@ -466,7 +466,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     recognized_mode = raw_mode if isinstance(raw_mode, str) and raw_mode in ("full", "delta") else None
     unsupported_mode = mode_present and recognized_mode is None
     if unsupported_mode:
-        # CODEX AGENT: forward compatibility belongs at the node boundary. Keep the experiment and its
+        # forward compatibility belongs at the node boundary. Keep the experiment and its
         # audit Idea, but never guess how a future/malformed envelope changes membership.
         ctx.concept_mode_untrusted.add(n.id)
     else:
@@ -477,7 +477,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         for field in ("concepts_added", "concepts_removed")
     )
     if not mode_present and raw_transitional_delta:
-        # CODEX AGENT: 40a5a94 briefly wrote non-empty delta lists before the discriminator existed.
+        # 40a5a94 briefly wrote non-empty delta lists before the discriminator existed.
         # Preserve those durable rows, but canonicalize the replayed Idea to explicit `delta` so a
         # subsequent dump round-trips the semantic choice. Modern zero-deltas rely only on the mode.
         delta_mode = True
@@ -529,7 +529,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # provenance sidecar prevents an admission consumer from mistaking that self-authored taxonomy for
     # independent classifier evidence. A later `node_concepts` event overrides both, last-write-wins.
     if current is not None and not concept_subject_unchanged:
-        # CODEX AGENT: a replacement node_created is a new tagging subject even if a malformed writer
+        # a replacement node_created is a new tagging subject even if a malformed writer
         # skipped the propose reset. Clear every old receipt symmetrically: an authored mapping is just
         # as stale as a classifier/operator mapping when the replacement Idea carries no concepts of its own.
         st.node_concepts.pop(n.id, None)
@@ -1222,14 +1222,14 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 st.node_concepts.pop(n.id, None)
                 st.node_concept_provenance.pop(n.id, None)
                 st.node_concepts_at_vocab.pop(n.id, None)   # keep the B1 staleness map in sync
-                # CODEX AGENT: the raw delta belongs to the Idea being abandoned. Clear it at the reset
+                # the raw delta belongs to the Idea being abandoned. Clear it at the reset
                 # boundary itself; otherwise a replay between reset and rebuild rematerializes stale
                 # taxonomy for the pending node from a proposal that no longer exists.
                 st.node_concept_deltas.pop(n.id, None)
                 ctx.concept_mode_untrusted.discard(n.id)
                 ctx.concept_input_capped.discard(n.id)
                 ctx.concept_input_invalid.discard(n.id)
-                # CODEX AGENT: generation stamps did not exist on early classifier events. Remember
+                # generation stamps did not exist on early classifier events. Remember
                 # the idea boundary inside this fold so those ambiguous receipts still fail closed,
                 # while unstamped receipts after eval/implement-only attempt bumps remain readable.
                 ctx.concept_subject_invalidated.add(n.id)
@@ -1557,7 +1557,7 @@ def _on_diversity_archive(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     st.archive = d
 
 def _on_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # CODEX AGENT: direct-best-neutral, not behaviorally inert: Strategist/proposal cues read it.
+    # direct-best-neutral, not behaviorally inert: Strategist/proposal cues read it.
     st.coverage_snapshots.append(d)   # at_node/projection gates dedup and reject stale snapshots
 
 _MAX_LLM_COUNTER = (1 << 63) - 1
@@ -1599,7 +1599,7 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     concepts = d.get("concepts")
     if isinstance(concepts, list):
         base, overflow, invalid = bounded_raw_concept_values(concepts)
-        # CODEX AGENT: keep the folded/FoldCursor base bounded; the append-only event remains the raw
+        # keep the folded/FoldCursor base bounded; the append-only event remains the raw
         # audit source. Last valid run_concepts wins for both membership and its integrity receipt.
         st.run_base_concepts = list(dict.fromkeys(base))
         ctx.run_base_capped = overflow
@@ -1623,7 +1623,7 @@ def _materialize_concept_deltas(
     deep lineages. Identity failures omit only malformed operands (``partial``); missing/unknown parents,
     unsupported modes, and dependency cycles make the result ``unavailable`` and propagate unchanged.
     """
-    # CODEX AGENT: receipts are derived from scratch on every full fold and FoldCursor snapshot. A
+    # receipts are derived from scratch on every full fold and FoldCursor snapshot. A
     # repaired suffix therefore clears stale failures instead of carrying snapshot-finalization state.
     seed_reasons: dict[int, set[ConceptMaterializationReason]] = {
         nid: {CONCEPT_MODE_UNSUPPORTED_REASON}
@@ -1652,7 +1652,7 @@ def _materialize_concept_deltas(
     )
     public_base_reasons = set(base_reasons)
     if any_component_needs_run_base and not run_base_seen:
-        # CODEX AGENT: an absent EV_RUN_CONCEPTS is not an exact empty base. Order-tolerant logs may append
+        # an absent EV_RUN_CONCEPTS is not an exact empty base. Order-tolerant logs may append
         # the base after their nodes, so a live prefix must fail closed until that inheritance source exists;
         # an explicit ``run_concepts: []`` sets ``run_base_seen`` and remains a valid known-empty base.
         base_reasons.add(CONCEPT_DELTA_MISSING_RUN_BASE_REASON)
@@ -1750,7 +1750,7 @@ def _materialize_concept_deltas(
                     unavailable = True
                     continue
                 parent_provenance = st.node_concept_provenance.get(parent_id)
-                # CODEX AGENT: an explicit full-set producer may be low-trust display taxonomy and still
+                # an explicit full-set producer may be low-trust display taxonomy and still
                 # define inheritance (offline heuristic), but an unknown/future producer or missing
                 # provenance is not an exact set. Classifier/operator/authored-full remain authoritative.
                 if parent_provenance not in {
@@ -1862,7 +1862,7 @@ def _materialize_concept_deltas(
 def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV Phase 2a: the fold only retains the coverage / uncovered-region curve and never selects
     # from it; the live proposal path may later consume the record as a steering cue. at_node dedups resume.
-    # CODEX AGENT: This journal is behavioral, not audit-only: ``capability_expansion_due`` can rewrite
+    # This journal is behavioral, not audit-only: ``capability_expansion_due`` can rewrite
     # the proposal cue and stamp KIND_EXPAND. Admit a detached, allow-listed, bounded schema and compact
     # history; retaining raw event data lets malformed/oversized fields steer search and inflate every
     # fold, owner-state response, and SSE update.
@@ -1900,7 +1900,7 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             and incoming_provenance != NODE_CONCEPT_PROVENANCE_CLASSIFIER):
         return
     if generation is _MISSING:
-        # CODEX AGENT: lifecycle generation != concept-subject generation. Preserve legacy replay
+        # lifecycle generation != concept-subject generation. Preserve legacy replay
         # after same-Idea retries, but never guess once this node crossed an observed Idea boundary.
         if nid in ctx.concept_subject_invalidated:
             return
@@ -1921,7 +1921,7 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # B1 (§21.18): remember the vocabulary size at tag time so the cadence can spot tags made against an
     # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> no receipt (oldest).
     av = d.get("at_vocab")
-    # CODEX AGENT: only classifier vocabulary receipts may delay the classifier refresh cadence.
+    # only classifier vocabulary receipts may delay the classifier refresh cadence.
     # An offline/future producer's integer is display metadata, not proof of semantic classification.
     if (incoming_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER
             and isinstance(av, int) and not isinstance(av, bool) and av >= 0):
@@ -1982,7 +1982,7 @@ def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") ->
     if isinstance(av, int) and not isinstance(av, bool) and av >= 0:   # bool is an int subclass — reject
         st.hypothesis_concepts_at_vocab[str(hid)] = av
     else:
-        # CODEX AGENT: concepts and their vocabulary receipt are one LWW value. An older receipt would
+        # concepts and their vocabulary receipt are one LWW value. An older receipt would
         # make newly-derived tags look fresh and incorrectly suppress their next retag cadence.
         st.hypothesis_concepts_at_vocab.pop(str(hid), None)
 
@@ -2031,7 +2031,7 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # forged/malformed row: skip it like any other, keeping the key injective over the triple.
             continue
         if rel == "co_occurs":
-            # CODEX AGENT: this relation is a cache of current node membership, not an immutable
+            # this relation is a cache of current node membership, not an immutable
             # assertion. The old max-wins fold cannot express count decreases or deletion, so retaining
             # legacy rows creates permanent ghost edges. ConceptFrame derives it from the exact folded
             # membership snapshot; omit it here so large legacy caches cannot consume live edge budgets.
@@ -2049,7 +2049,7 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         conf = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else 0.0
         if conf != conf:
             conf = 0.0
-        # CODEX AGENT: -0.0 and 0.0 tie numerically but serialize differently. Canonicalize the sign
+        # -0.0 and 0.0 tie numerically but serialize differently. Canonicalize the sign
         # before the commutative max so replay order cannot leak into RunState / ConceptFrame bytes.
         if conf == 0.0:
             conf = 0.0
@@ -2359,7 +2359,7 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
             "parent_id", "parent_ids",
         }
         if any(field not in known_fields for field in value):
-            # CODEX AGENT: retain only the fact that executable meaning was discarded. Copying an
+            # retain only the fact that executable meaning was discarded. Copying an
             # unknown value would defeat the replay bound; forgetting its existence could turn a
             # lossy future-schema action into a receipt-backed selectable Card.
             out["_unknown_action_fields"] = True
@@ -2524,7 +2524,7 @@ def _on_card_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # native identity/readiness. Evidence/verdict/status are derived.
     receipt = _bounded_card_added_receipt(d)
     if receipt is not None:
-        # CODEX AGENT: RunState is deep-copied on every incremental snapshot. Never retain Event.data
+        # RunState is deep-copied on every incremental snapshot. Never retain Event.data
         # here: one unknown megabyte field would otherwise be multiplied by every live state read.
         st.cards_added.append(receipt)
 
@@ -2533,7 +2533,7 @@ def _on_card_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # deterministically in `_derive_cards` (no LLM in the fold), order-tolerant, back-compat on old logs.
     receipt = _bounded_card_merge_receipt(d)
     if receipt is not None:
-        # CODEX AGENT: aliases are identity-bearing, so cap the durable prefix before RunState owns it;
+        # aliases are identity-bearing, so cap the durable prefix before RunState owns it;
         # unknown merge metadata has no replay semantics and remains only in the append-only log.
         st.cards_merged.append(receipt)
 
@@ -2543,7 +2543,7 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # handler so old logs retain byte-for-byte replay semantics after the event namespace split.
     receipt = _bounded_card_drop_receipt(d)
     if receipt is not None:
-        # CODEX AGENT: keep a typed lifecycle receipt, not the raw control payload. This also prevents
+        # keep a typed lifecycle receipt, not the raw control payload. This also prevents
         # arbitrary objects from becoming enormous strings later in `_derive_cards`.
         st.cards_dropped.append(receipt)
 
@@ -2625,13 +2625,13 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             "concept_tags", "lesson_refs", "claim_refs", "research_origin",
             "foresight_rank", "confidence",
         )
-        # CODEX AGENT: bound each allow-listed sibling independently. A huge lexically-early unknown
+        # bound each allow-listed sibling independently. A huge lexically-early unknown
         # field must not consume a shared budget and erase id or a later valid field.
         for key in allowed:
             if key not in d:
                 continue
             if key == "concept_tags":
-                # CODEX AGENT: keep enough derived receipt data to say that a node-less enrichment was
+                # keep enough derived receipt data to say that a node-less enrichment was
                 # lossy.  The caller-provided provenance_tier is intentionally not copied: a free-form
                 # delta must never promote its own tags to classifier/operator truth.
                 if not isinstance(d[key], list):
@@ -2682,11 +2682,11 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             valid, bounded = _bounded_card_enrichment(value)
             if valid:
                 rec[key] = bounded
-        # CODEX AGENT: envelope seq is authoritative; physical order is the deterministic tie-break for
+        # envelope seq is authoritative; physical order is the deterministic tie-break for
         # legacy/default envelopes. Assign both after copying so payload fields can never spoof ordering.
         rec["_seq"] = e.seq if type(e.seq) is int else -1
         rec["_event_index"] = ctx.event_index if type(ctx.event_index) is int else -1
-        # CODEX AGENT: each delta is bounded, but this journal is not. Every FoldCursor snapshot deep
+        # each delta is bounded, but this journal is not. Every FoldCursor snapshot deep
         # copies the full history and _derive_cards sorts/replays it although only last-write-per-field
         # affects the projection. Retain a bounded per-Card/per-field LWW receipt in RunState and leave
         # full audit history in events.jsonl.
@@ -2706,7 +2706,7 @@ def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 continue
             seen.add(cid)
             order.append(cid)
-    # CODEX AGENT: a malformed/future order is an honest empty ranking, never an iterable assumption
+    # a malformed/future order is an honest empty ranking, never an iterable assumption
     # that can brick replay. Preserve metadata while replacing only the bounded, deduplicated order.
     metadata: dict = {"order": order}
     raw_at_node = d.get("at_node")
@@ -3117,7 +3117,7 @@ def _on_budget_extend(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             _v = float(_raw)
         except (TypeError, ValueError, OverflowError):
             continue
-        # CODEX AGENT: malformed historical control events must remain total under replay. Reject
+        # malformed historical control events must remain total under replay. Reject
         # non-finite/non-positive ceilings instead of persisting a resume-crashing poison value.
         if math.isfinite(_v) and _v > 0:
             st.budget_overrides[_k] = _v
@@ -3143,13 +3143,13 @@ def _on_budget_extend(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 _selected = (_k, _v)
         if _selected is not None:
             _key, _value = _selected
-            # CODEX AGENT: one folded key per authority family preserves true event-order LWW while
+            # one folded key per authority family preserves true event-order LWW while
             # retaining the latest event's spelling for old/no-broker resume compatibility.
             st.budget_overrides.pop(
                 _legacy if _key == _canonical else _canonical, None)
             st.budget_overrides[_key] = _value
             if _canonical == "llm_parallel" and _key == _canonical:
-                # CODEX AGENT: the legacy alias historically governed only build fan-out. Preserve the
+                # the legacy alias historically governed only build fan-out. Preserve the
                 # last explicit canonical shared-total intent independently, so canonical->legacy
                 # sequences behave identically before and after process restart without retroactively
                 # throttling legacy-only logs.
@@ -3291,7 +3291,7 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # Deep-Research memo: never re-ranks current nodes/best; later proposal context and cross-run
     # evidence may read it. `served_manual` also prevents replay from re-serving the request.
     from looplab.core.advisory_payloads import sanitize_research_memo_payload
-    # CODEX AGENT: old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
+    # old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
     st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
     if d.get("served_manual"):
@@ -3545,7 +3545,7 @@ class FoldCursor:
 
     def snapshot(self) -> RunState:
         """Return an independently mutable state byte-equivalent to ``fold`` of this prefix."""
-        # CODEX AGENT: never finalize the accumulator itself. Several post-passes are destructive
+        # never finalize the accumulator itself. Several post-passes are destructive
         # (``block`` marks nodes infeasible; concept DELTAs overwrite effective memberships). A deep
         # Pydantic copy makes every GET independent and preserves the raw state for the next append.
         state = self._state.model_copy(deep=True)
@@ -3606,7 +3606,7 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
     # the confirm phase ran on it (the mean-based pick above already excluded infeasibles).
     # The confirm certificate is the confirm phase's OWN authoritative winner (robust_selection over the
-    # multi-seed means + a significance test), so it overrides the mean pick. R1-d COMPOSITION (CODEX #7):
+    # multi-seed means + a significance test), so it overrides the mean pick. R1-d COMPOSITION:
     # the certificate overrides only when it found a SIGNIFICANT winner — OR when verifier_ci_tie is off
     # (then it overrides unconditionally, byte-identical to before). When the confirm found NO significant
     # winner (a statistical tie) AND ci_tie is on, the `best_ci` soundness pick above STANDS, because that
@@ -3753,7 +3753,7 @@ def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None 
         return True, out
     if isinstance(value, dict):
         out = {}
-        # CODEX AGENT: sorting the whole hostile map is an O(n) temporary-memory amplification before
+        # sorting the whole hostile map is an O(n) temporary-memory amplification before
         # the 64-row output cap. A lexical heap keeps deterministic top-K semantics in O(K) memory.
         rows = heapq.nsmallest(
             64,
@@ -4040,7 +4040,7 @@ def _card_added_ownership(
     if receipt_variant == "legacy-v1":
         return True, False, expected["action_digest"]
 
-    # CODEX AGENT: the receipt covers the complete executable subset. Unknown Idea members may gain
+    # the receipt covers the complete executable subset. Unknown Idea members may gain
     # execution meaning in a later schema, so an old reader cannot silently discard them and still call
     # the action complete. Concept membership is the sole exception: it is metadata with its own receipt.
     if not set(raw_idea) <= _CARD_ADDED_ACTION_FIELDS:
@@ -4278,7 +4278,7 @@ def _card_novelty_projection(st: RunState, d: dict) -> dict:
     if type(near_generation) is int and near_generation >= 0:
         projection["near_generation"] = near_generation
     if "proposal_ref" in d or "generation" in d:
-        # CODEX AGENT: a modern near-node reference names a lifecycle, not a reusable numeric slot.
+        # a modern near-node reference names a lifecycle, not a reusable numeric slot.
         # Never let a reset, tombstone, abort, absent row, or malformed generation re-home the verdict
         # onto whichever proposal happens to occupy that id at the end of replay.
         near = st.nodes.get(near_node) if near_node is not None else None
@@ -4389,7 +4389,7 @@ def _card_node_concept_projection(st: RunState, node: Node) -> tuple[list[str], 
         raw_provenance if provenance_known else
         NODE_CONCEPT_PROVENANCE_UNTRUSTED if raw_provenance is not None else None
     )
-    # CODEX AGENT: `[]` with membership_present=True and no receipt is an exact empty set.  The same
+    # `[]` with membership_present=True and no receipt is an exact empty set.  The same
     # value with an absent key, a corrupt receipt, or an unavailable delta is explicitly incomplete.
     source = CardConceptSource(
         kind="node",
@@ -4455,7 +4455,7 @@ def _derive_cards(st: RunState) -> None:
         if statement_id not in native_statements:
             native_statements.append(statement_id)
 
-    # CODEX AGENT: identity conflicts can enter through a staged card, a legacy hypothesis, or a node
+    # identity conflicts can enter through a staged card, a legacy hypothesis, or a node
     # whose Idea already carries card_id. Scan all three durable sources before creating any card; only
     # scanning card_added would let node-only logs reuse one stable id and silently conflate evidence.
     for d in st.cards_added:
@@ -4544,7 +4544,7 @@ def _derive_cards(st: RunState) -> None:
             raw_cid = _card_id(raw_id) or seed_id
             if raw_cid in conflicted_native_ids:
                 continue
-            # CODEX AGENT: never materialize a third, hash-addressed queue item beside ambiguous native
+            # never materialize a third, hash-addressed queue item beside ambiguous native
             # cards. The raw hypothesis/card event remains the durable audit receipt.
             if seed_id in ambiguous_seeds and (not native_row or raw_cid == seed_id):
                 continue
@@ -4603,7 +4603,7 @@ def _derive_cards(st: RunState) -> None:
         seed_id = hypothesis_id(stmt) if stmt else ""
         statement_id = hypothesis_statement_digest(stmt) if stmt else ""
         explicit_card_id = (n.idea.card_id or "").strip()
-        # CODEX AGENT: `card_id` is work-item identity, not belief identity. Two native actions that
+        # `card_id` is work-item identity, not belief identity. Two native actions that
         # reuse the exact hypothesis wording now land in separate Cards, whereas the removed
         # statement-keyed ledger accumulated both evidence rows. That fragments verdicts/lessons and
         # contradicts the Researcher instruction to reuse wording. Preserve a grouped belief projection
@@ -4637,7 +4637,7 @@ def _derive_cards(st: RunState) -> None:
             card_origins[cid] = "node_card_id" if explicit_card_id else "node_statement_hash"
             action_owned_cards.add(cid)
         elif not c.evidence and cid not in action_owned_cards:
-            # CODEX AGENT: card_added is intentionally thin. Backfill its missing action block from the
+            # card_added is intentionally thin. Backfill its missing action block from the
             # earliest linked node; otherwise the normal card_added -> node_created staging path leaves a
             # permanently substance-free card. Copy the whole block atomically (including legitimate
             # empties) so later evidence cannot synthesize a chimera from several proposals.
@@ -4651,7 +4651,7 @@ def _derive_cards(st: RunState) -> None:
             c.parent_generations = _node_parent_generations(n)
             action_owned_cards.add(cid)
         if c.concept_source is None or c.concept_source.kind != "node":
-            # CODEX AGENT: the first linked node is the exact action/evidence owner.  Later evidence may
+            # the first linked node is the exact action/evidence owner.  Later evidence may
             # have classifier/operator tags of its own, but folding those into one card would create a
             # provenance lie.  Node ids are visited in sorted order, so ownership is replay-order stable.
             c.concept_tags = node_concept_tags
@@ -4726,7 +4726,7 @@ def _derive_cards(st: RunState) -> None:
             grouped.setdefault(_canon(cid), []).append(cid)
         for tid in sorted(grouped):
             members = grouped[tid]
-            # CODEX AGENT: if a merge names no materialized canonical row, event insertion order must not
+            # if a merge names no materialized canonical row, event insertion order must not
             # choose the surviving action/concept owner. Prefer a canonical action; otherwise choose the
             # lexically first concrete action and copy its WHOLE block plus concept receipt together.
             action_candidates = [cid for cid in members if cid in action_owned_cards]
@@ -4850,7 +4850,7 @@ def _derive_cards(st: RunState) -> None:
             c.status = "building"
         elif not ev_nodes:
             c.status = "proposed"
-        # CODEX AGENT: every pending Node collapses directly to running and the log has no durable
+        # every pending Node collapses directly to running and the log has no durable
         # evaluation-start boundary, so the frozen coded lane advertised by the model/UI is unreachable.
         # Add replayable eval ownership/start state, or remove the lane until coded-versus-running can
         # be represented truthfully.
@@ -4956,7 +4956,7 @@ def _derive_cards(st: RunState) -> None:
                     overflow=d.get("_concept_tags_overflow") is True,
                     invalid=d.get("_concept_tags_invalid") is True,
                 )
-                # CODEX AGENT: enrichment is proposal metadata, never independent classifier/operator
+                # enrichment is proposal metadata, never independent classifier/operator
                 # evidence.  Keep the legacy scalar synchronized with the exact owner receipt.
                 c.provenance_tier = None
             elif k in _ENRICH_REFS and isinstance(v, list):

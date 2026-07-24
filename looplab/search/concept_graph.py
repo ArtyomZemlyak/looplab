@@ -369,7 +369,7 @@ def skeleton_for(task_type: str) -> ConceptGraph:
 def _experiment_nodes(state: RunState) -> list:
     """Current idea-carrying nodes in id order (failed live attempts still count as experiments)."""
     aborted = set(getattr(state, "aborted_nodes", None) or [])
-    # CODEX AGENT: Part-IV signals steer the next action, so append-only audit history must not remain in
+    # Part-IV signals steer the next action, so append-only audit history must not remain in
     # the current search projection after an abort or tombstone.
     return sorted((
         n for n in state.nodes.values()
@@ -383,7 +383,7 @@ def _node_text(node) -> str:
     """The searchable surface text for a node: theme + rationale + hypothesis + operator + param names.
     Lowercased. This is what the heuristic tagger and the LLM tagger both describe an experiment by."""
     idea = getattr(node, "idea", None)
-    # CODEX AGENT: Idea.concepts is the proposer's claim. Feeding it to the classifier would let the
+    # Idea.concepts is the proposer's claim. Feeding it to the classifier would let the
     # producer manufacture the supposedly independent evidence used by graded-novelty admission.
     parts = [
         getattr(idea, "theme", "") or "",
@@ -462,7 +462,7 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
             "Key on the underlying METHOD/family, not the surface name. Call `emit` once with `concept_ids` "
             "(a subset of the known ids, possibly empty if none fits).\n\nKNOWN VOCABULARY:\n"
             + ("\n".join(f"- {c.id}: {c.label}" for c in known) or "(empty)"))
-        # CODEX AGENT: ``text`` is persisted behavioral input, not trusted prompt prose. Bound and
+        # ``text`` is persisted behavioral input, not trusted prompt prose. Bound and
         # secret-redact it, serialize it as an explicitly untrusted data envelope, and forbid embedded
         # instructions. Raw interpolation lets an idea/hypothesis command known ids and manipulate F2
         # novelty admission while also expanding or leaking the external-provider payload.
@@ -490,7 +490,7 @@ def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, froze
     tags: dict[int, frozenset[str]] = {}
     for n in _experiment_nodes(state):
         low = _node_text(n)
-        # CODEX AGENT: this is a coarse display projection, not independent evidence. Bound it at the
+        # this is a coarse display projection, not independent evidence. Bound it at the
         # producer with the same deterministic lexical cap as replay so a wide alias graph cannot create
         # an enormous event that replay later truncates to a different-looking membership.
         matches = sorted({cid for pat, cid in index if pat.search(low)})
@@ -530,7 +530,7 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
         @field_validator("concept_ids")
         @classmethod
         def _valid_concept_ids(cls, value: list[str]) -> list[str]:
-            # CODEX AGENT: classifier provenance is all-or-nothing for one response. Silently retaining
+            # classifier provenance is all-or-nothing for one response. Silently retaining
             # only the valid subset would turn a malformed classifier output into trusted evidence.
             if any(normalize_concept_id(raw) is None for raw in value):
                 raise ValueError("concept_ids contains an invalid concept id")
@@ -589,7 +589,7 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
         if n.id in known_tags:
             # REUSE a previously-recorded node's tags without another model call.
             reused = _ensure_ids(known_tags[n.id])
-            # CODEX AGENT: an explicit empty result is valid classifier evidence. Replacing it with an
+            # an explicit empty result is valid classifier evidence. Replacing it with an
             # alias match launders heuristic output through the already-verified classifier channel.
             tags[n.id] = reused
         else:
@@ -645,7 +645,7 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                 if producer_modes is not None:
                     producer_modes[nid] = "offline-heuristic"
                 return
-        # CODEX AGENT: empty is a legitimate successful classifier answer. Preserve it and its
+        # empty is a legitimate successful classifier answer. Preserve it and its
         # classifier provenance instead of substituting a heuristic tag.
         tags[nid] = frozenset(got)
         if producer_modes is not None:
@@ -664,7 +664,7 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
             import concurrent.futures as _futures
             from contextvars import copy_context
 
-            # CODEX AGENT: ThreadPoolExecutor (unlike anyio.to_thread) does not propagate
+            # ThreadPoolExecutor (unlike anyio.to_thread) does not propagate
             # ContextVars. Capture one independent Context per worker item so concept tagging keeps
             # the Engine's shared broker + enrichment lane instead of silently becoming unbounded.
             contextual_batch = [(copy_context(), n) for n in batch]
@@ -695,7 +695,7 @@ def graph_from_node_concepts(node_concepts, seed_graph: Optional["ConceptGraph"]
             cid = _normalize_concept_id(raw)
             if not cid:
                 continue
-            # CODEX AGENT: A slash describes hierarchy, not validity. Root-only concepts are first-class
+            # A slash describes hierarchy, not validity. Root-only concepts are first-class
             # vocabulary entries too; dropping them here makes replay lose exactly the broad concepts that
             # an authored/classifier event recorded.
             if cid not in graph:
@@ -734,7 +734,7 @@ def stale_tagged_nodes(node_ids, at_vocab: dict, *, growth: float = 0.7, cap: in
 
 
 def _normalize_concept_id(raw) -> str:
-    # CODEX AGENT: search analytics share the core bounded identity contract with replay and serve.
+    # search analytics share the core bounded identity contract with replay and serve.
     return normalize_concept_id(raw) or ""
 
 
@@ -744,7 +744,7 @@ def _describe_node(node) -> str:
     bits = [f"operator={getattr(node, 'operator', '')}"]
     if getattr(idea, "theme", None):
         bits.append(f"theme={idea.theme}")
-    # CODEX AGENT: do not show proposer-authored concept claims to the independent node classifier;
+    # do not show proposer-authored concept claims to the independent node classifier;
     # it must infer memberships from the experiment description rather than rubber-stamp its input label.
     if getattr(idea, "hypothesis", None):
         bits.append(f"hypothesis={idea.hypothesis}")
@@ -1030,11 +1030,11 @@ def node_concept_delta(state, node_id) -> dict:
     empty = {"parent_ids": sorted(parent_ids), "added": [], "removed": [], "inherited": []}
     if (invalid_parent_shape or len(integer_parent_ids) != len(raw_parent_ids)
             or any(parent_id not in nodes for parent_id in parent_ids)):
-        # CODEX AGENT: silently dropping a missing edge reclassifies a corrupt child as an exact root.
+        # silently dropping a missing edge reclassifies a corrupt child as an exact root.
         # Retain every integer reference for diagnosis and fail closed with replay's typed dependency reason.
         return {**empty, "unavailable": True,
                 "reasons": [CONCEPT_DELTA_MISSING_PARENT_REASON]}
-    # CODEX AGENT: a malformed global identity/store projection cannot support either side of a diff.
+    # a malformed global identity/store projection cannot support either side of a diff.
     # Keep the stable empty shape and expose the receipt instead of calculating authoritative-looking
     # additions from the valid-looking subset that survived canonicalization.
     if projection.global_reasons:
@@ -1062,7 +1062,7 @@ def node_concept_delta(state, node_id) -> dict:
         if (isinstance(raw_deltas, dict) and node_id in raw_deltas
                 and isinstance(provenance, dict)
                 and provenance.get(node_id) == NODE_CONCEPT_PROVENANCE_AUTHORED):
-            # CODEX AGENT: replay gives an authored delta root the run base. Calling all of those ids
+            # replay gives an authored delta root the run base. Calling all of those ids
             # `added` makes an explicit zero delta look like it authored the base. Legacy full roots and
             # classifier/operator overrides have no active authored-delta sidecar and retain all-added.
             if projection.run_base_status != "complete":
@@ -1076,7 +1076,7 @@ def node_concept_delta(state, node_id) -> dict:
         "inherited": sorted(own & inherited_base),
     }
     local_reasons = set(projection.partial_nodes.get(node_id, ()))
-    # CODEX AGENT: structural identity/store corruption affects every comparison. An unrelated receipt
+    # structural identity/store corruption affects every comparison. An unrelated receipt
     # makes the broad projection partial, but must not contaminate this node's otherwise exact delta.
     local_reasons.update(projection.global_reasons)
     if node_status == "partial" or local_reasons:
@@ -1143,7 +1143,7 @@ def concept_touch_counts(node_concepts) -> dict:
     from collections import Counter as _C
     c: _C = _C()
     for ids in (node_concepts or {}).values():
-        # CODEX AGENT: Touch is a distinct-node statistic, not a tag-occurrence statistic. The endpoint
+        # Touch is a distinct-node statistic, not a tag-occurrence statistic. The endpoint
         # applies consolidation before this function; normalizing and deduplicating per node here prevents
         # an alias+canonical pair (or case/whitespace variants) from inflating hub orientation.
         seen = {k for k in (_normalize_concept_id(cid) for cid in (ids or ())) if k}
@@ -1244,7 +1244,7 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
         for ch in sorted(children.get(cid, [])):
             dq.append((ch, d + 1))
     nodes = {}
-    # CODEX AGENT: Iterate SORTED ids (not the raw set): a raw-set iteration makes the `nodes` dict's key order
+    # Iterate SORTED ids (not the raw set): a raw-set iteration makes the `nodes` dict's key order
     # string-hash-dependent (randomized per process via PYTHONHASHSEED), so json.dumps of this
     # projection is not byte-stable across processes despite the "DETERMINISTIC" docstring — the concepts
     # endpoint returns this tree, so byte-instability breaks its HTTP etag/caching and diff-based tests.
@@ -1384,7 +1384,7 @@ def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_b
         out = parse_structured(client, [{"role": "system", "content": system},
                                         {"role": "user", "content": user}], _Out, parser)
     except Exception:  # noqa: BLE001 — best-effort: no importance signal beats crashing the diagnostic
-        # CODEX AGENT: ``[]`` is also a valid successful verdict. The live cadence durably snapshots this
+        # ``[]`` is also a valid successful verdict. The live cadence durably snapshots this
         # failure sentinel and de-duplicates the projection, turning a transient outage into permanent
         # "no important blind spots." Return typed availability/provenance (or raise to the durable caller)
         # and persist empty only after a confirmed provider response parsed successfully.
@@ -1420,7 +1420,7 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
     new = ConceptGraph(task_type=graph.task_type)
     for c in graph.concepts():
         cid = rename.get(c.id, c.id)
-        # DELIBERATE (CODEX #10, design-tension): a RENAMED concept takes its axis from the CANONICAL id's
+        # DELIBERATE (design-tension): a RENAMED concept takes its axis from the CANONICAL id's
         # prefix, NOT a union of source+canonical parents. This keeps id/axis CONSISTENT — a global
         # axis-rename is ambiguous when one source axis maps to several targets (`aug/crop→data/crop`,
         # `aug/flip→vision/flip`) and would leave a concept whose id prefix disagrees with its stored axes.
@@ -1535,7 +1535,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
     except Exception:  # noqa: BLE001 — deriving NEW merges is best-effort; never break the diagnostic
         # A failure to derive new merges must NOT discard the AUTHORITATIVE recorded decisions (B3): still
         # apply + return `known_renames` so the vocabulary stays stable (raw ids don't resurrect). Empty
-        # only when there were no known renames either (CODEX P1).
+        # only when there were no known renames either.
         if known_renames:
             g2, t2 = _apply_consolidation(graph, tags, known_renames)
             return g2, t2, dict(known_renames)

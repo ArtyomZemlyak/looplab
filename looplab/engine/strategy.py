@@ -149,7 +149,7 @@ class StrategyCadenceMixin:
             self._cross_run_note_receipt = {}
             return ""
         current_direction = getattr(state, "direction", None) if state is not None else None
-        # CODEX AGENT: the Strategist consumes this as live decision context. No state or an invalid
+        # the Strategist consumes this as live decision context. No state or an invalid
         # current objective must yield no guidance rather than a portfolio-wide legacy projection.
         if not valid_live_direction(current_direction):
             self._cross_run_note_receipt = {}
@@ -268,7 +268,7 @@ class StrategyCadenceMixin:
             )
             if not concept_source["source_complete"]:
                 source_part += "; concept observations/counts are retained lower bounds only"
-            # CODEX AGENT: the source receipt is model-visible AND part of both semantic/render digests.
+            # the source receipt is model-visible AND part of both semantic/render digests.
             # Partial→complete with identical retained rows must create a different advisory identity.
             parts.append(source_part)
             if claim_source is None:
@@ -290,7 +290,7 @@ class StrategyCadenceMixin:
                     claim_part += (
                         "; retained claim counts, zero mixed-evidence, and absence are lower bounds only"
                     )
-            # CODEX AGENT: zero mixed-evidence records is exact only when both evidence stores and the D8
+            # zero mixed-evidence records is exact only when both evidence stores and the D8
             # producer denominator are complete. Keep that authority bit inside both model-visible digests.
             parts.append(claim_part)
             def _safe(value, limit):
@@ -381,7 +381,7 @@ class StrategyCadenceMixin:
 
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
-        # CODEX AGENT: every newly recorded decision has one canonical spelling per concurrency
+        # every newly recorded decision has one canonical spelling per concurrency
         # axis. Legacy records remain replayable, but stale aliases cannot survive into the next merge.
         strat = canonicalize_strategy_parallelism(strat)
         ctx_fields = {"phase", "eval_budget_remaining", "failure_rate", "cross_run_receipt"}
@@ -521,7 +521,7 @@ class StrategyCadenceMixin:
                         continue
                     self._llm_parallel = max(1, _value)
                     if _k == "llm_parallel":
-                        # CODEX AGENT: mutate the broker active tasks already reference. Replacing
+                        # mutate the broker active tasks already reference. Replacing
                         # it here would split old/new borrowers across two independent totals.
                         self._reconfigure_llm_broker(_value)
                 except (TypeError, ValueError, OverflowError):
@@ -601,7 +601,7 @@ class StrategyCadenceMixin:
                 and dev != self._developer_name and not self.unified_agent:
             try:
                 self.developer = self.developer_factory(dev)
-                # CODEX AGENT: cached parallel workers otherwise keep sending implementation calls
+                # cached parallel workers otherwise keep sending implementation calls
                 # through the previous backend after the primary Developer has visibly switched.
                 self._role_pool = None
                 # Layer-5 leases one pair out of that pool. Sessions are joined before the outer
@@ -684,7 +684,7 @@ class StrategyCadenceMixin:
                and snapshot_matches_analytics_projection(state, c)
                for c in state.concept_coverage_snapshots):
             return state
-        # CODEX AGENT: ``_concept_coverage_snapshot`` can issue several paid tagging/consolidation calls
+        # ``_concept_coverage_snapshot`` can issue several paid tagging/consolidation calls
         # before any durable invocation claim exists. A crash after provider success but before the event
         # append purchases the same semantic work again on resume. Claim the bounded input digest before
         # dispatch and persist terminal/ambiguous receipts; an eventual snapshot is not a payment fence.
@@ -722,7 +722,7 @@ class StrategyCadenceMixin:
         if state.run_base_concepts or (raw_base_receipt is not None and not derived_missing_base):
             # A partial/unavailable empty base is still an authored base event. Never overwrite it with
             # a later apparently exact seed; operator repair remains an explicit last-write-wins action.
-            # CODEX AGENT: the fold-derived missing-base receipt is the one exception: it proves that no
+            # the fold-derived missing-base receipt is the one exception: it proves that no
             # EV_RUN_CONCEPTS exists, so a later exact evaluated full node may still perform the intended seed.
             return state
         prov = getattr(state, "node_concept_provenance", None) or {}
@@ -734,7 +734,7 @@ class StrategyCadenceMixin:
             if (node.id in state.aborted_nodes or not concepts
                     or prov.get(node.id) != NODE_CONCEPT_PROVENANCE_AUTHORED
                     or node.id in receipts):
-                # CODEX AGENT: a bounded/invalid/otherwise partial membership cannot become an exact
+                # a bounded/invalid/otherwise partial membership cannot become an exact
                 # run base merely because the next event contains only its retained valid subset.
                 continue
             # Normalize EXACTLY as _on_run_concepts folds it (drop empty/dup), and only seed a NON-EMPTY
@@ -776,7 +776,7 @@ class StrategyCadenceMixin:
         client = _rc() if callable(_rc) else None
         seed = skeleton_for(state.task_id or "")
         seed = seed if seed.concepts() else None
-        # CODEX AGENT: guard the whole producer so a failed snapshot cannot perturb the run. A successfully
+        # guard the whole producer so a failed snapshot cannot perturb the run. A successfully
         # recorded snapshot is deliberately behavioral: its uncovered-region cue can steer later proposals.
         try:
             graph = tags = cov = None
@@ -794,7 +794,7 @@ class StrategyCadenceMixin:
                 # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
                 # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
                 provenance = getattr(state, "node_concept_provenance", None) or {}
-                # CODEX AGENT: Researcher-authored Idea.concepts are visible read-model claims, not an
+                # Researcher-authored Idea.concepts are visible read-model claims, not an
                 # independent tagging result. Reusing them as known_tags would prevent the classifier from
                 # ever examining that node and would later let the claim masquerade as classifier evidence.
                 # Operator-edited tags ARE authoritative for THIS node (a human/assistant asserted them via
@@ -853,7 +853,7 @@ class StrategyCadenceMixin:
                     node = state.nodes.get(nid)
                     if node is None:
                         continue
-                    # CODEX AGENT: one classifier batch may contain per-node heuristic fallbacks. Stamp
+                    # one classifier batch may contain per-node heuristic fallbacks. Stamp
                     # the actual producer so those rows cannot enter admission/capsules as independent
                     # classifier evidence merely because their successful siblings used the LLM.
                     producer_mode = raw_tag_modes.get(
@@ -866,7 +866,7 @@ class StrategyCadenceMixin:
                     if classifier_row and (
                             any(cid is None for cid in normalized)
                             or len(raw_ids) > MAX_MATERIALIZED_CONCEPTS):
-                        # CODEX AGENT: a classifier row outside its reviewed schema is only a bounded
+                        # a classifier row outside its reviewed schema is only a bounded
                         # display fallback. Never persist a filtered subset as independent evidence.
                         producer_mode = "offline-heuristic"
                     new_ids = sorted({cid for cid in normalized if cid})[:MAX_MATERIALIZED_CONCEPTS]
@@ -878,7 +878,7 @@ class StrategyCadenceMixin:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
                                                              "mode": producer_mode, "at_vocab": v_now,
                                                              "generation": node.attempt})
-                # CODEX AGENT: do not persist co-tag edges. They can decrease or disappear after
+                # do not persist co-tag edges. They can decrease or disappear after
                 # re-tagging, while the commutative max ledger can only ratchet upward and therefore
                 # leaves ghost co-occurrences. ConceptFrame derives that relation from its exact bounded
                 # membership snapshot for online, offline and legacy runs. Explicit is_a assertions remain

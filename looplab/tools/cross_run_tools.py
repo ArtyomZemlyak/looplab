@@ -130,7 +130,7 @@ class CrossRunTools:
         self._concepts: set[str] = set()      # E2: the current run's concept set (for similar_runs overlap)
         self._concept_projection_status = "complete"
         self._concept_projection_reasons: tuple[str, ...] = ()
-        # CODEX AGENT: Scope construction is fail-open: a forgotten/failed ``bind_state`` leaves the
+        # Scope construction is fail-open: a forgotten/failed ``bind_state`` leaves the
         # provider portfolio-wide, and ``bind_state(None)`` silently preserves that exposure. Because the
         # same class is model-facing and human-facing, require an explicit audience/scope mode at creation;
         # an unbound agent provider should return no rows rather than inherit CLI-level visibility.
@@ -193,11 +193,11 @@ class CrossRunTools:
         """
         if not self._bound:
             return True                                        # unbound -> portfolio-wide
-        # CODEX AGENT: run_id is the replacement-generation fence. A stale durable row carrying the
+        # run_id is the replacement-generation fence. A stale durable row carrying the
         # live run's identity is never "prior" evidence, even when its task and direction still match.
         if self._is_current_run(row):
             return False
-        # CODEX AGENT: a bound provider is agent-facing. Exact task identity cannot override missing or
+        # a bound provider is agent-facing. Exact task identity cannot override missing or
         # malformed polarity provenance; only an explicitly unbound human/CLI audit stays portfolio-wide.
         if not same_live_direction(self._direction, row.get("direction")):
             return False
@@ -207,7 +207,7 @@ class CrossRunTools:
         if isinstance(fp, list) and self._scope_terms:
             if source == "capsule":
                 from looplab.engine.memory import _capsule_fingerprint_scope_complete
-                # CODEX AGENT: only an exact persisted fingerprint may grant related-task visibility.
+                # only an exact persisted fingerprint may grant related-task visibility.
                 # A legacy/trimmed capsule remains available through exact task identity or unbound audit.
                 if not _capsule_fingerprint_scope_complete(row):
                     return False
@@ -356,7 +356,7 @@ class CrossRunTools:
                 eligible.append(capsule)
                 continue
             if not _capsule_fingerprint_scope_complete(capsule):
-                # CODEX AGENT: failing closed at the visibility gate is not permission to erase the row
+                # failing closed at the visibility gate is not permission to erase the row
                 # from the denominator. Its related-task applicability is UNKNOWN, so every bound absence
                 # and frequency surface must carry this aggregate receipt.
                 unknown.append(capsule)
@@ -374,7 +374,7 @@ class CrossRunTools:
             "scope_fingerprint_items_omitted": fingerprint_omitted,
             "scope_direction_unknown_capsules": direction_unknown,
         }
-        # CODEX AGENT: scope filtering cannot erase file/schema quarantine health. A damaged row has no
+        # scope filtering cannot erase file/schema quarantine health. A damaged row has no
         # trustworthy task/direction with which to prove it was ineligible, so every absence stays partial.
         return (_capsule_rows(eligible, source=caps),
                 _capsule_rows(unknown, source=caps), receipt)
@@ -415,7 +415,7 @@ class CrossRunTools:
             # consuming model turn share no durable invocation id. Generic traces cannot prove which
             # mutable portfolio bytes influenced a later proposal after restart/replay. Persist a bounded
             # result digest + source watermark and reference that receipt from the resulting decision event.
-            # CODEX AGENT: this final boundary covers every current/future tool branch, including a
+            # this final boundary covers every current/future tool branch, including a
             # malformed legacy value that bypasses a field-level formatter. Tool results are persisted
             # in traces and fed back to the model, so they are never allowed to carry raw credentials.
             return cross_run_text(
@@ -471,7 +471,7 @@ class CrossRunTools:
                 scoped_capsules, aliases=governance["aliases"],
                 splits=governance["splits"])
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
-            # CODEX AGENT: the six-row tool envelope is the only result cap. Search the full retained
+            # the six-row tool envelope is the only result cap. Search the full retained
             # canonical set first so a query for public-overview row #513 cannot yield an exact-looking miss.
             scored = sorted(concept_rows,
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
@@ -726,7 +726,7 @@ class CrossRunTools:
                          if not fully_complete
                          else "(no cross-run knowledge matched)"]
                 if not source_complete:
-                    # CODEX AGENT: a legacy/capped capsule may have omitted the matching concept entirely;
+                    # a legacy/capped capsule may have omitted the matching concept entirely;
                     # an empty retrieval is only absence from retained records, never proof of novelty.
                     lines.append(_partial_source_warning(rc))
                 if not scope_complete:
@@ -779,7 +779,7 @@ class CrossRunTools:
             limit = max(1, min(limit, 50))
             from looplab.engine.concept_registry import canonicalize_concepts
 
-            # CODEX AGENT: visibility and identity are one retrieval boundary. A bound model may compare
+            # visibility and identity are one retrieval boundary. A bound model may compare
             # only `_scoped_capsules()` (task family + compatible direction), and both sides must use the
             # SAME locked taxonomy snapshot so an alias/split/purge cannot change just one Jaccard operand.
             taxonomy = _governance
@@ -897,7 +897,7 @@ class CrossRunTools:
             from looplab.engine.concept_registry import canonicalize_concepts
             from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
 
-            # CODEX AGENT: identity, cross-run visibility, and display trust are one boundary. Resolve every
+            # identity, cross-run visibility, and display trust are one boundary. Resolve every
             # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
             # run "cross", while the explicitly requested global tier remains the broader synergy surface.
             taxonomy = _governance
@@ -978,7 +978,7 @@ class CrossRunTools:
                                     and self._concept_projection_status != "complete")) else "")
             if want != "all":
                 if want == "global":
-                    # CODEX AGENT: prior vocabulary stays usable; only its relationship to this
+                    # prior vocabulary stays usable; only its relationship to this
                     # run is unknown until current membership materializes.
                     vocab = {s: m for s, m in vocab.items()
                              if not m["own"] and not m["cross_runs"]}
@@ -1000,7 +1000,7 @@ class CrossRunTools:
                 lines = [f"Known concept AXES in scope '{want}' ({len(vocab)} slugs) — "
                          "search within one: find_concept_slugs('<your concept>'):"]
                 ordered_axes = sorted(by_axis.items(), key=lambda item: (-item[1], item[0]))
-                # CODEX AGENT: the validated response limit applies to the no-query axis listing too; many
+                # the validated response limit applies to the no-query axis listing too; many
                 # one-off axes must not bypass the tool's hard output bound.
                 lines += [f"  UNTRUSTED_MEMORY_AXIS={_safe_text(axis, 80)!r} ({count} slugs)"
                           for axis, count in ordered_axes[:limit]]
@@ -1106,7 +1106,7 @@ class CrossRunTools:
             # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's
             # "world concept map"); the trustworthy relative-rank TENDENCY below is task-family scoped.
             mine = set(canonicalize_concepts(sorted(self._concepts), aliases=aliases, splits=splits))
-            # CODEX AGENT: keep the per-capsule canonical set. Besides avoiding repeated governance work,
+            # keep the per-capsule canonical set. Besides avoiding repeated governance work,
             # this lets a card compute the requested concept's counts from every matching run instead of
             # looking it up in portfolio_concept_overview's intentionally display-capped top 512 rows.
             canonical_caps = [
@@ -1193,7 +1193,7 @@ class CrossRunTools:
                 c for c, concepts in canonical_caps
                 if canon in concepts and id(c) in scoped_ids]
             global_canon_caps = [c for c, concepts in canonical_caps if canon in concepts]
-            # CODEX AGENT: absence/completeness denominators include every eligible capsule, not only rows
+            # absence/completeness denominators include every eligible capsule, not only rows
             # where this concept survived the bounded source projection. Matching rows still own the
             # observed metrics/signs, but a non-matching partial row may have omitted this exact concept.
             scoped_source_summary = _capsule_source_summary(scoped_caps)
@@ -1202,7 +1202,7 @@ class CrossRunTools:
             row = next((r for r in scoped_rows if r["concept"] == canon), None)
             _global_overview, global_rows = _portfolio_concept_overview_data(
                 global_canon_caps, aliases=aliases, splits=splits)
-            # CODEX AGENT: card lookup is exact-key aggregation, not a display projection. Resolve the
+            # card lookup is exact-key aggregation, not a display projection. Resolve the
             # requested row from the helper's complete retained aggregate, never its bounded first value.
             grow = next((r for r in global_rows if r["concept"] == canon), None)
             scoped_complete = (scoped_source_summary.get("source_complete") is True
@@ -1239,7 +1239,7 @@ class CrossRunTools:
             # Use only the bound task-family row: global usage is context, never permission to let an
             # incompatible task reverse the actionable tendency shown beside the scoped track record.
             tend = concept_profit_tendencies([row] if row else [])
-            # CODEX AGENT: an omitted matching row/sign can reverse a consistency claim. Keep the retained
+            # an omitted matching row/sign can reverse a consistency claim. Keep the retained
             # observations visible above, but emit a directional tendency only for an exact scoped source.
             if scoped_complete and any(c == canon for c, _ in tend["helps"]):
                 lines.append("  cross-run tendency: consistently RANKED BETTER within comparable runs "

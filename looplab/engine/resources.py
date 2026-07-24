@@ -564,7 +564,7 @@ class ResourceSchedulingMixin:
             # GpuPinUnenforceable handler converts it into a durable node terminal / retry.
             raise GpuPinUnenforceable(reservation["admission_unpinnable"])
         if reservation and reservation.get("required_unavailable"):
-            # CODEX AGENT: discovery failure must not turn an explicit positive declaration into an
+            # discovery failure must not turn an explicit positive declaration into an
             # unpinned full-host launch. Evaluate/confirm convert this defensive refusal into their
             # durable terminal/retry contracts before any candidate process is started.
             raise GpuPinUnenforceable(

@@ -92,7 +92,7 @@ def _folded_axes(state, node):
     from looplab.search.concept_graph import _canonical_with_rename
     for concept in (nc.get(nid) or []):
         try:
-            # CODEX AGENT: a rename is a bounded CHAIN, not a one-hop dictionary lookup. Resolve and
+            # a rename is a bounded CHAIN, not a one-hop dictionary lookup. Resolve and
             # normalize through the same canonical helper as /concepts and run tools; cycles/malformed
             # ids are omitted instead of leaking a retired or case-sensitive parallel axis.
             canonical = _canonical_with_rename(concept, rename)
@@ -316,7 +316,7 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
     from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
 
     rows = list(events or ())
-    # CODEX AGENT: proposal generation already owns the fold that selected this action. Reuse it instead
+    # proposal generation already owns the fold that selected this action. Reuse it instead
     # of re-folding the complete append-only log on every proposal; standalone readers still self-fold.
     current_state = state if state is not None else fold(rows)
     mon: dict[tuple[int, int], tuple[dict, int]] = {}
@@ -328,7 +328,7 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
         d = getattr(e, "data", None) or {}
         nid = d.get("node_id")
         generation = d.get("generation")
-        # CODEX AGENT: diagnostics are untrusted append-only rows too. Keying on raw ids both mixed
+        # diagnostics are untrusted append-only rows too. Keying on raw ids both mixed
         # lifecycles and let a bool/string/list brick sorting or hashing during the next proposal.
         if (not isinstance(nid, int) or isinstance(nid, bool) or nid < 0
                 or not isinstance(generation, int) or isinstance(generation, bool)
@@ -339,7 +339,7 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
         key = (nid, generation)
         (mon if etype == EV_TRAIN_MONITOR_ALERT else asha)[key] = (d, position)
 
-    # CODEX AGENT: a reset is an evidence boundary. Diagnostics from an older generation must not steer
+    # a reset is an evidence boundary. Diagnostics from an older generation must not steer
     # fresh code, and an aborted/tombstoned lifecycle is no longer a proposal precedent.
     active: set[tuple[int, int]] = set()
     for key in set(mon) | set(asha):
@@ -416,7 +416,7 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
                 seg += (f" {comparable_pop} same-resource sibling(s)"
                         if isinstance(comparable_pop, int) and not isinstance(comparable_pop, bool)
                         else " same-resource siblings")
-            # CODEX AGENT: an endpoint rank is still useful curve context, but must not be narrated to
+            # an endpoint rank is still useful curve context, but must not be narrated to
             # the next proposer as proof of a doomed run when same-progress peers say it is on track.
             if endpoint_under and comparable is False:
                 seg += (f"; on track against {comparable_pop} same-resource sibling(s)"

@@ -38,13 +38,13 @@ from looplab.search.concept_graph import (ConceptGraph, _experiment_nodes, tag_n
 # --------------------------------------------------------------------------- #
 
 def _idea_text(idea: Idea) -> str:
-    # CODEX AGENT: concepts are authored by the proposal being admitted. They remain display metadata,
+    # concepts are authored by the proposal being admitted. They remain display metadata,
     # not classifier input; otherwise a proposal can self-assign a shared/failed concept and earn L4/L5.
     # Include the search-SPACE key names alongside params (as concept_graph._node_text does), so the idea
     # tagger and the node tagger describe the SAME experiment by the same structural fields — a sweep whose
     # only signal is in `space` (params={}, space={"temperature": [...]}) otherwise tags empty as an idea
     # but tags "hyperparameter/temperature" as the executed node. These are structural dimension names, not
-    # the self-assertable `concepts` field the CODEX note excludes, so this adds no admission-gaming surface.
+    # the self-assertable `concepts` field the note above excludes, so this adds no admission-gaming surface.
     parts = [getattr(idea, "theme", "") or "", getattr(idea, "rationale", "") or "",
              getattr(idea, "hypothesis", "") or "", getattr(idea, "operator", "") or "",
              " ".join(str(k) for k in (getattr(idea, "params", None) or {})),

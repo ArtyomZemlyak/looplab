@@ -60,7 +60,7 @@ def _concept_prompt_payload(overview: dict) -> tuple[list[dict], dict[str, str]]
                                   "has_metric": run.get("metric") is not None})
         n_runs = e.get("n_runs")
         n_runs = n_runs if isinstance(n_runs, int) and not isinstance(n_runs, bool) else 0
-        # CODEX AGENT: opaque ids bind model choices to the raw canonical vocabulary; the display label and
+        # opaque ids bind model choices to the raw canonical vocabulary; the display label and
         # run provenance are still persisted cross-run data and must be redacted before leaving for a paid
         # provider. Keep the private id map raw so a returned id resolves to the exact governance target.
         payload.append({
@@ -118,11 +118,11 @@ def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
     prompt_omitted = concepts_total - len(payload) if projection_consistent else 0
     return {
         "receipt_known": receipt_known,
-        # CODEX AGENT: missing/malformed/future receipts fail closed. A bare concept list is never proof
+        # missing/malformed/future receipts fail closed. A bare concept list is never proof
         # that unseen concepts or runs do not exist in the bounded capsule source.
         "source_complete": receipt_known and source.get("source_complete") is True,
         **counts,
-        # CODEX AGENT: an exact capsule source does not make a 200-row steward prompt a complete
+        # an exact capsule source does not make a 200-row steward prompt a complete
         # vocabulary. Split/purge need both receipts; direct synonym merges remain safe on a bounded tail.
         "projection_receipt_known": projection_consistent,
         "projection_complete": projection_consistent and prompt_omitted == 0,
@@ -175,10 +175,10 @@ def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
             source_names=("concept_capsules.jsonl",),
         )
     cp = base / "concept_capsules.jsonl" if base else None
-    # CODEX AGENT: unreadable evidence is unknown, not an empty graph eligible for an empty paid verdict.
+    # unreadable evidence is unknown, not an empty graph eligible for an empty paid verdict.
     caps = ConceptCapsuleStore(cp).all() if cp and not observed_path_missing(cp) else []
     if aliases is None or splits is None:
-        # CODEX AGENT: aliases and splits form one taxonomy. A mutation between two independent
+        # aliases and splits form one taxonomy. A mutation between two independent
         # reads could ask the paid steward to review a hybrid policy state that never existed.
         governance = _governance
         aliases = governance["aliases"] if aliases is None else aliases
@@ -303,7 +303,7 @@ def _validate_curation(out, known: set, *, id_to_concept: Optional[dict] = None,
                 and len(merges) + len(splits) + len(purges) < budget):
             merges.append({"from_concept": src, "to_concept": dst, "why": str(m.why or "")[:200]})
             used_sources.add(src)
-    # CODEX AGENT: prompt instructions are not a trust boundary. On a partial source or prompt projection,
+    # prompt instructions are not a trust boundary. On a partial source or prompt projection,
     # enforce the same no-absence-inference policy after parsing so omitted evidence cannot justify a purge.
     for s in ((out.splits or []) if allow_absence_curation else ()):
         src = _known(getattr(s, "from_id", ""), getattr(s, "from_concept", ""))

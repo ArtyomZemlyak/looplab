@@ -208,7 +208,7 @@ class LessonReconcileMixin:
                 if current != stored:
                     return True
                 continue
-            # CODEX AGENT: old outcome-only signatures remain compatible on untouched attempt zero. Once
+            # old outcome-only signatures remain compatible on untouched attempt zero. Once
             # reset/tombstone/abort occurred they cannot prove which realization they described, so stale
             # guidance fails closed even when the replacement happens to reproduce the same metric.
             if (getattr(node, "attempt", 0) != 0 or getattr(node, "tombstoned", False)
@@ -293,7 +293,7 @@ class LessonReconcileMixin:
                     comp, pairs_used = self._e._comparative_lessons(state, fp, exclude=exclude)
                 derivation = "rederived" if fresh_reflect or comp else "empty"
             except Exception:  # noqa: BLE001
-                # CODEX AGENT: model-backed rewriting can fail without keeping superseded evidence active.
+                # model-backed rewriting can fail without keeping superseded evidence active.
                 fresh_reflect, comp, pairs_used = [], [], []
                 derivation = "failed"
         try:
@@ -340,7 +340,7 @@ class LessonReconcileMixin:
                 kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
                 n_retired = len(cur) - len(kept)   # rows ACTUALLY dropped (audit); reflect-sweep included
                 committed_fresh = fresh if n_retired else []
-                # CODEX AGENT: replace only current understood lesson rows. Malformed/future raw records
+                # replace only current understood lesson rows. Malformed/future raw records
                 # remain byte-preserved quarantine and continue to make claim-source health incomplete.
                 replace_jsonl_rows_atomic_preserving_quarantine(
                     path, kept + committed_fresh,

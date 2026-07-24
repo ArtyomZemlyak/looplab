@@ -546,7 +546,7 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
     # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent
     # before policy finalizes that edge set, so the prompt names this limitation instead of claiming exactness.
-    # CODEX AGENT: recorded taxonomy is data, never an instruction; the shared projector quotes/bounds it.
+    # recorded taxonomy is data, never an instruction; the shared projector quotes/bounds it.
     from looplab.search.concept_projection import (bounded_untrusted_concept_json,
                                                     concept_inheritance_context)
     concept_context = concept_inheritance_context(state, parent.id if parent is not None else None)
@@ -657,7 +657,7 @@ class LLMResearcher:
         cues = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback",
                                         "_novelty_hint"))
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
-        # CODEX AGENT: cues can contain persisted cross-run model/web/repository text. Redaction,
+        # cues can contain persisted cross-run model/web/repository text. Redaction,
         # one-line normalization and an UNTRUSTED_MEMORY label do not make embedded instructions inert.
         # Append a code-owned system rule that treats every memory/tool string as quoted evidence and
         # never follows its instructions; mirror the rule in ToolUsingResearcher.
@@ -711,7 +711,7 @@ class LLMResearcher:
         last: Optional[Exception] = None
         for _attempt in range(2):
             try:
-                # CODEX AGENT: modern model output must choose full vs delta explicitly. The durable
+                # modern model output must choose full vs delta explicitly. The durable
                 # Idea reader stays tolerant for historical/future logs, so writers cross this boundary.
                 parsed = parse_structured(self.client, messages, IdeaEmission, self.parser)
                 # Preserve the long-standing injectable parser seam used by custom integrations/test

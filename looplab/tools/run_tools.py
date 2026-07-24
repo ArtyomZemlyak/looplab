@@ -188,7 +188,7 @@ class RunTools:
                 projection = self._concept_projection(current_state)
                 axes_by_node = self._current_theme_axes(current_state, projection)
             axes = axes_by_node.get(n.id, ())
-            # CODEX AGENT: a line is a current projection too. Do not revive the frozen authored theme when
+            # a line is a current projection too. Do not revive the frozen authored theme when
             # the folded membership receipt is unavailable, and never borrow a same-numbered node's axis
             # from whichever sibling state happened to be bound to the reusable reader last.
             node_theme = sorted(axes)[0] if axes else None
@@ -208,7 +208,7 @@ class RunTools:
         theme = args.get("theme")
         projection = self._concept_projection(st)
         axes_by_node = self._current_theme_axes(st, projection)
-        # CODEX AGENT: append-only audit rows are not current experiments. Use the shared lifecycle
+        # append-only audit rows are not current experiments. Use the shared lifecycle
         # boundary even for `recent`, whose raw state.nodes traversal used to resurrect tombstones and
         # aborted work that every other current concept surface had already removed.
         active_nodes = projection.active_nodes
@@ -221,7 +221,7 @@ class RunTools:
             nodes = [node for node in digest.top_nodes(
                 st, len(st.nodes), worst=(sort == "worst")) if node.id in active_nodes]
         if theme:
-            # CODEX AGENT: filter on the SAME receipt-aware multi-axis projection `_themes` advertises.
+            # filter on the SAME receipt-aware multi-axis projection `_themes` advertises.
             # Unavailable nodes contribute no inferred authored fallback; absent legacy rows may retain a
             # compatibility hint, but the response remains explicitly non-authoritative.
             nodes = [node for node in nodes if theme in axes_by_node.get(node.id, ())]
@@ -405,7 +405,7 @@ class RunTools:
             if len(rendered) <= self.max_chars:
                 return rendered
             visible.pop()
-        # CODEX AGENT: the tool loop head-clips over-budget strings. Fail explicitly when even one
+        # the tool loop head-clips over-budget strings. Fail explicitly when even one
         # complete row cannot fit, rather than returning a severed axis that looks authoritative.
         return qualifier + f"(theme output exceeds the {self.max_chars}-character budget)"
 
@@ -424,7 +424,7 @@ class RunTools:
                 node = st.nodes.get(node_id)
                 axes = digest.node_axes(st, node) if node is not None else set()
             else:
-                # CODEX AGENT: a receipt-unavailable membership is unknown, not a license to revive
+                # a receipt-unavailable membership is unknown, not a license to revive
                 # frozen authored concepts as if they were the node's current classification.
                 axes = set()
             if axes:
@@ -551,7 +551,7 @@ class RunTools:
             if len(rendered) <= self.max_chars:
                 return rendered
             visible.pop()
-        # CODEX AGENT: preserve the population truth even when a single bounded experiment line is
+        # preserve the population truth even when a single bounded experiment line is
         # wider than this caller's budget; the outer generic truncator must not fabricate a partial row.
         return prefix + f"(concept membership output exceeds the {self.max_chars}-character budget)"
 
@@ -591,7 +591,7 @@ class RunTools:
                              _fmt("=inherited", d["inherited"])) if p]
         kin = "parent" if len(parents) <= 1 else "parents"
         if d.get("partial"):
-            # CODEX AGENT: a partial child can expose retained additions/inheritance, never an exact
+            # a partial child can expose retained additions/inheritance, never an exact
             # removal. Name every suppressed dimension so an agent cannot read an empty list as zero.
             unknown = [str(value) for value in (d.get("unknown_dimensions") or [])]
             unknown_note = "; ".join(f"?{dimension}: unknown" for dimension in unknown)
@@ -742,7 +742,7 @@ class SiblingRunTools:
         return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
 
     def _read(self, run_id, nid: int, trials_arg=None) -> str:
-        # CODEX AGENT: discovery is same-task scoped, but this direct lookup is not. A caller that
+        # discovery is same-task scoped, but this direct lookup is not. A caller that
         # guesses a run_id can bypass _sibling_ids() and read another task (or this run); enforce
         # membership/task_id equality here and in _code, because the model-supplied id is the actual
         # authorization boundary rather than evidence that list_sibling_runs was used first.

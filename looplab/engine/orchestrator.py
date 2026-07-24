@@ -2565,7 +2565,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             generation = (raw_generation if isinstance(raw_generation, int)
                           and not isinstance(raw_generation, bool) and raw_generation >= 0
                           else node.attempt if node is not None else 0)
-            # CODEX AGENT: every durable reservation gets a terminal outcome before any new work. Merely
+            # every durable reservation gets a terminal outcome before any new work. Merely
             # ignoring the transient projection resurrects its breathing card on every subsequent replay.
             card_id = (marker.get("card_id") if isinstance(marker, dict)
                        and isinstance(marker.get("card_id"), str) else None)
@@ -2606,7 +2606,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return fallback
             return value if math.isfinite(value) and value > 0 else fallback
 
-        # CODEX AGENT: apply stays total even for a manually constructed/forward-version RunState;
+        # apply stays total even for a manually constructed/forward-version RunState;
         # replay normally sanitizes these first, but a poison ceiling must never disable a budget.
         max_s = _finite_ceiling("max_seconds", self.max_seconds)
         # A `budget_extend` is a HUMAN control intent, NOT an agent decision: CONTROL_EVENTS are
@@ -2986,7 +2986,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         loop when the evals join (see `_dispatch_evals`)."""
         if not self.concurrent_research:
             return
-        # CODEX AGENT: repeat is a continuation of a research episode, not an independent timer.
+        # repeat is a continuation of a research episode, not an independent timer.
         # Requiring a due cadence/strategist trigger here keeps ``deep_research_every=0`` truly
         # manual-only and prevents a long eval from silently starting paid research on its own.
         rtrig = self._due_research_trigger(state)
@@ -3084,7 +3084,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         functools.partial(self._maybe_merge_hypotheses, snap))
                 if cap > 0 and calls >= cap:
                     return                   # research LLM budget spent; the health monitor still runs
-                # CODEX AGENT: DeepResearcher owns a paid client and mutable run-bound tools. Its worker
+                # DeepResearcher owns a paid client and mutable run-bound tools. Its worker
                 # must be joined before the eval window closes; abandoning it permits post-finalization
                 # usage events and lets the next research pass rebind the same tools under a live call.
                 memo = await anyio.to_thread.run_sync(
@@ -3157,7 +3157,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # re-pin does not release a GPU (and therefore does not bump the pool
                                 # epoch), so re-fold after every bounded condition tick and fence the
                                 # exact lifecycle plus run-level operator gates before retrying.
-                                # CODEX AGENT: with the cross-run host lease this wait is no longer
+                                # with the cross-run host lease this wait is no longer
                                 # bounded by a sibling eval in this process — it lasts as long as
                                 # ANOTHER run holds the pool (hours of training), and every 0.5s tick
                                 # re-folds the WHOLE log (the parallel branch folds twice per tick):
@@ -3289,7 +3289,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             if (max_es is not None and cur.total_eval_seconds >= max_es):
                                 break
                             await slots.acquire()     # blocks only when the pool is full -> the refill point
-                            # CODEX AGENT: the pre-check above may be minutes old after a genuine refill
+                            # the pre-check above may be minutes old after a genuine refill
                             # wait. Re-fold while owning the freed slot so a sibling that crossed the hard
                             # eval budget (or an operator abort) cannot be followed by one more admission.
                             cur = fold(self.store.read_all())
@@ -3762,7 +3762,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "rationale": (idea.rationale or "")[:400],
             # Deliberately narrow: replay treats any future executable member in this block as an
             # incomplete v1 action rather than silently blessing lossy semantics.
-            # CODEX AGENT: the production writer also drops Idea.concepts, while novelty/card-enriched
+            # the production writer also drops Idea.concepts, while novelty/card-enriched
             # signals gain a Card subject only after a Node exists. Such a Card is then work-owned and
             # no longer selection-ready, so real selectable Cards reach novelty/coverage scoring empty.
             # Persist bounded proposal-time scoring receipts, or remove these terms from live ranking.
@@ -4616,7 +4616,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             raw_total = int(value)
         except (TypeError, ValueError, OverflowError):
             return
-        # CODEX AGENT: this method is also a defensive resume boundary for manually-constructed or
+        # this method is also a defensive resume boundary for manually-constructed or
         # forward-version state. Never turn an invalid/huge value into a different valid paid-call cap.
         if not 0 <= raw_total <= 64:
             return
@@ -4659,7 +4659,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 except Exception:  # noqa: BLE001 - cap fan-out if the selected backend cannot be built
                     break
             self._role_pool.append(pair)
-        # CODEX AGENT: workers are constructed lazily, after Engine.__init__ bound the primary role
+        # workers are constructed lazily, after Engine.__init__ bound the primary role
         # graph. Attach every newly reachable accountant before the first concurrent paid request.
         bind_cost_accountants(self)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]

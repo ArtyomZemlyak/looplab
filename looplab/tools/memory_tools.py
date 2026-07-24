@@ -159,7 +159,7 @@ class MemoryTools:
         try:
             return self._execute(name, args)
         except Exception as exc:  # noqa: BLE001
-            # CODEX AGENT: exception strings can contain credentialed URLs and private paths. The
+            # exception strings can contain credentialed URLs and private paths. The
             # tool result and log therefore expose only allow-listed operation/failure categories.
             tool = name if isinstance(name, str) and name in _TOOL_NAMES else "unknown"
             if isinstance(exc, OSError):

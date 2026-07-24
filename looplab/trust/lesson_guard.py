@@ -121,7 +121,7 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
         ds = rep.per_criterion.get("direction_sound", {}).get("mean")
         # A lesson counts as SCORED only when the verdict is COMPLETE — BOTH criteria graded — since
         # flagging (below) needs both. An og-only partial verdict would let the aggregate claim adjudication
-        # it can't actually act on (CODEX P2); a partial verdict is not a usable score.
+        # it can't actually act on; a partial verdict is not a usable score.
         if og is not None and ds is not None:
             n_scored += 1               # a COMPLETE verdict (vs endpoint failure / partial coverage)
         flagged = (og is not None and ds is not None

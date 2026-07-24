@@ -319,7 +319,7 @@ def _mark_finalize_step(engine: "Engine", scope: str, step: str, **data) -> None
 
 def _claim_paid_finalize_step(engine: "Engine", scope: str, step: str) -> None:
     """Persist the at-most-once boundary before dispatching a paid/external effect."""
-    # CODEX AGENT: both guarantees are mandatory here.  The surrounding paid_effect_guard closes
+    # both guarantees are mandatory here.  The surrounding paid_effect_guard closes
     # the live/live race, while strict fsync closes the crash window.  A sync failure may leave a
     # visible ambiguous marker, but it must propagate before the provider is called.
     engine.store.append(
@@ -364,7 +364,7 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
     the upstream replay contract can keep ``report_generated`` immediately adjacent to its finish.
     """
     # ``events`` remains part of the compatibility signature, but every decision uses a fresh read.
-    # CODEX AGENT: a missing writer is a free/no-provider recovery path.  It must observe an existing
+    # a missing writer is a free/no-provider recovery path.  It must observe an existing
     # terminal or ambiguous attempt without requiring paid-work locking/fsync on lock-less filesystems.
     del events
     current = engine.store.read_all()
@@ -458,7 +458,7 @@ def ensure_finalize_reflection(engine: "Engine", scope: str, finish_seq: int) ->
                     outcome="prior_attempt_incomplete_not_replayed",
                 )
                 return
-            # CODEX AGENT: the real reflection implementation immediately returns for these configs.
+            # the real reflection implementation immediately returns for these configs.
             # Keep free finalization compatible with filesystems that cannot provide strict locking;
             # ordinary legacy-shaped markers are sufficient because no paid/shared write can happen.
             _mark_finalize_step(engine, scope, "reflection_begun", outcome="disabled")
@@ -708,7 +708,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         except Exception:  # noqa: BLE001 - advisory Card links must never block terminal completion
             pass
 
-        # CODEX AGENT: reflection must precede claim curation so this run's durable lessons are visible;
+        # reflection must precede claim curation so this run's durable lessons are visible;
         # every steward still precedes llm_cost so its provider usage enters the terminal roll-up.
         if getattr(engine, "_cross_run_curation", False):
             try:
@@ -722,7 +722,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         events = engine.store.read_all()
         cost_step_done = _finalize_step_done(
             events, scope, finish_seq, "llm_cost", EV_LLM_COST)
-        # CODEX AGENT: a legacy roll-up marker is not proof that newly-added steward usage was
+        # a legacy roll-up marker is not proof that newly-added steward usage was
         # presented.  Refresh only when a later exact usage delta exists; the new roll-up then becomes
         # the boundary, so repeated recovery remains idempotent.
         cost_refresh_needed = not cost_step_done or _llm_cost_rollup_stale(

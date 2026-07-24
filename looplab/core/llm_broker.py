@@ -176,13 +176,13 @@ class LLMConcurrencyBroker:
                         self._peak_by_lane[lane] = max(
                             self._peak_by_lane[lane], self._borrowed_by_lane[lane])
                         self._last_lane_index = LLM_LANES.index(lane)
-                        # CODEX AGENT: more total capacity may remain. Wake another lane head now
+                        # more total capacity may remain. Wake another lane head now
                         # rather than waiting for release and accidentally serializing total>1.
                         self._condition.notify_all()
                         break
                     self._condition.wait()
             except BaseException:
-                # CODEX AGENT: cancellation/KeyboardInterrupt while queued must not leave a dead
+                # cancellation/KeyboardInterrupt while queued must not leave a dead
                 # lane-head ticket behind. Such a ghost is permanently selected by round-robin but
                 # has no thread left to consume it, poisoning this lane (and often the whole total).
                 if admitted:

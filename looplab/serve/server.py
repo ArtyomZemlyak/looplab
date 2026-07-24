@@ -547,7 +547,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                        and parts[4] == "log-page")
         is_report_refresh = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
                              and parts[4] == "report_refresh")
-        # CODEX AGENT: scope reports are live, membership-bound observations. A cached GET or paid
+        # scope reports are live, membership-bound observations. A cached GET or paid
         # generation result can claim authority for a scope snapshot that no longer exists.
         is_scope_report = (route_path == "/api/scope-report"
                            or route_path.startswith("/api/scope-report/"))
@@ -559,7 +559,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         is_comments = (route_path == "/api/review/comments"
                        or (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                            and parts[4] == "comments"))
-        # CODEX AGENT: ConceptFrames are generation/sequence-bound live projections. Apply this in
+        # ConceptFrames are generation/sequence-bound live projections. Apply this in
         # middleware, not only in the handler, so unknown lenses/runs, auth denials and validation errors
         # cannot be cached as if they described a later generation.
         is_concepts = (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"

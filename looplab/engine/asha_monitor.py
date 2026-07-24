@@ -331,7 +331,7 @@ class AshaMonitorMixin:
         _ms = getattr(self, "_asha_live_min_siblings", 3)
         min_siblings = max(1, int(_ms)) if isinstance(_ms, (int, float)) and not isinstance(_ms, bool) else 3
         last_flag: Optional[tuple[bool, Optional[bool]]] = None
-        # CODEX AGENT: preserve an open episode across process re-entry; otherwise an initially healthy
+        # preserve an open episode across process re-entry; otherwise an initially healthy
         # resumed curve looks like a first observation and never emits the recovery edge. Modern rows
         # retain endpoint/resource truth separately; legacy rows safely map their single bit to endpoint.
         try:
@@ -401,7 +401,7 @@ class AshaMonitorMixin:
                                     comparable_population=len(comparable_population))
                         if sample.resource_key is not None and sample.resource is not None:
                             sp.set_many(resource_key=sample.resource_key, resource=sample.resource)
-                        # CODEX AGENT: publish both warning and recovery edges for the combined endpoint /
+                        # publish both warning and recovery edges for the combined endpoint /
                         # same-resource advisory. Otherwise digest and Attention retain a historical flag
                         # after this exact node generation recovers.
                         if underperforming or previous_underperforming:
@@ -428,7 +428,7 @@ class AshaMonitorMixin:
                 if (kill_signal is not None and comparable_under is True
                         and under_streak > _ASHA_GRACE_TICKS
                         and getattr(self, "_asha_live_kill", False)):
-                    # CODEX AGENT: never promote a finished endpoint into a fake peer at the live
+                    # never promote a finished endpoint into a fake peer at the live
                     # resource. Without explicit same-resource curve evidence this is unreachable.
                     claim_watchdog_kill(
                         kill_signal, cancel,

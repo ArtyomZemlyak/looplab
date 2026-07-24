@@ -185,7 +185,7 @@ class JobRegistry:
         launch_state = "pending"
 
         def _worker():
-            # CODEX AGENT: ``Thread.start`` is allowed to fail only before a target begins, but custom
+            # ``Thread.start`` is allowed to fail only before a target begins, but custom
             # runtimes can violate that convention by starting and then raising. Never let paid work
             # cross this boundary until start() returned and authorization was atomically committed.
             with launch_lock:

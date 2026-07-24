@@ -36,7 +36,7 @@ class EvalDispatchMixin:
         if len(aliases) == 1:
             return role in (self._agent_control.get(setting) or ())
         canonical, legacy = aliases
-        # CODEX AGENT: a canonical entry is the migrated authority record even when its allow-list is
+        # a canonical entry is the migrated authority record even when its allow-list is
         # empty (an explicit revocation). Fall back to a legacy snapshot grant only when the canonical
         # key is absent; unioning both would let a stale alias silently bypass a new canonical lock.
         authority_key = canonical if canonical in self._agent_control else legacy

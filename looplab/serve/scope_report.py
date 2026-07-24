@@ -152,7 +152,7 @@ def _safe_comparison_measurement(value: object, contract: dict | None) -> dict |
         if set(uncertainty) != {"protocol"}:
             return None
         safe_uncertainty = {"protocol": contract["uncertainty_protocol"]}
-    # CODEX AGENT: this receipt is copied atomically. Reconstructing it from legacy ``best_metric``
+    # this receipt is copied atomically. Reconstructing it from legacy ``best_metric``
     # would erase its phase/source/uncertainty identity and manufacture comparability.
     return {
         "authority": "declared",
@@ -170,7 +170,7 @@ def _safe_run_id(value: object) -> str | None:
             or "/" in value or "\\" in value or any(ord(ch) < 32 for ch in value)
             or value.split(".", 1)[0].upper() in _WINDOWS_RESERVED_RUN_STEMS):
         return None
-    # CODEX AGENT: known credential syntax must still fail closed, but generic entropy redaction is
+    # known credential syntax must still fail closed, but generic entropy redaction is
     # inappropriate for authoritative opaque identities such as ULIDs and UUIDs.
     clean = redact_persisted_text(
         value, max_chars=_MAX_ID_CHARS, entropy=False, single_line=True)
@@ -410,7 +410,7 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
             "verdict": verdict,
             "verdict_authority": "server-derived-v3",
             "narrative_authority": "model-advisory",
-            # CODEX AGENT: numeric authority is derived from frozen measurements and an explicit exact
+            # numeric authority is derived from frozen measurements and an explicit exact
             # contract. Model-authored run ids, metrics, and rankings are discarded at this boundary.
             "best_runs": [],
             "comparison_groups": kept_groups,
@@ -481,7 +481,7 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
         items = raw if isinstance(raw, (list, tuple)) else ()
         for item in itertools.islice(items, _MAX_LIST_ITEMS):
             fit_text(field, item, 1_200, single_line=True, append=True)
-    # CODEX AGENT: this is the persisted-content boundary. The cap is checked on the exact compact
+    # this is the persisted-content boundary. The cap is checked on the exact compact
     # JSON serialization after escaping, structure, server-derived projections, and auto-caveats.
     return out
 
@@ -722,7 +722,7 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
             briefs, coverage,
         )
     if not briefs:
-        # CODEX AGENT: never spend provider budget when the exact evidence receipt proves that no run
+        # never spend provider budget when the exact evidence receipt proves that no run
         # survived the prompt cap; the deterministic response still exposes the incomplete coverage.
         return _deterministic(label, briefs, coverage)
     if client is None:
@@ -775,7 +775,7 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
         # through to the honest metrics rollup rather than persisting an empty report.
         for cand in (result, box.get("r"), box.get("forced")):
             if _has_content(cand):
-                # CODEX AGENT: every model path stays raw until this single persisted-content boundary.
+                # every model path stays raw until this single persisted-content boundary.
                 # Copies/wrappers can no longer turn object identity into a second sanitize pass that
                 # duplicates structural caveats and crowds model caveats out of the bounded receipt.
                 return _sanitize_content(cand, briefs, coverage)

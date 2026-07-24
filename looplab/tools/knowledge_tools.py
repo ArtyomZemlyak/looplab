@@ -246,7 +246,7 @@ class KnowledgeTools:
             # keep_bad=True: `i` is the RAW line number — the stable "case:<i>" record id.
             for i, c in enumerate(read_jsonl_lenient(self.cases_path, loads=json.loads,
                                                      keep_bad=True)):
-                # CODEX AGENT: valid JSON is not necessarily a valid case. Apply the writer/search schema
+                # valid JSON is not necessarily a valid case. Apply the writer/search schema
                 # fence here too so a poisoned goal/params/metric cannot crash or enter agent retrieval.
                 if c is None or not valid_case_record(c):
                     continue

@@ -276,7 +276,7 @@ EV_RUN_SETUP_STARTED = "run_setup_started"
 EV_RUN_SETUP_FINISHED = "run_setup_finished"
 # Training-log monitor (engine/train_monitor.py): a NON-healthy verdict (watch|broken) from the per-eval
 # LLM log observer. DIAGNOSTIC — the fold never reads it (splice-neutral even though the concurrent
-# monitor appends it), so it cannot directly change lifecycle, ranking, or replay. CODEX AGENT: the raw
+# monitor appends it), so it cannot directly change lifecycle, ranking, or replay. The raw
 # event may still enter a later Researcher prompt through watchdog_reflection; it also feeds owner
 # attention + audit. Healthy verdicts stay trace-only except for a recovery transition after an alert.
 EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"

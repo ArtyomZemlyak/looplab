@@ -96,7 +96,7 @@ class ComparisonContract(BaseModel):
 
     @model_validator(mode="after")
     def _confirmed_phase_declares_uncertainty(self) -> "ComparisonContract":
-        # CODEX AGENT: confirmed_mean is an estimate backed by confirmed_std/seeds.  Calling its
+        # confirmed_mean is an estimate backed by confirmed_std/seeds.  Calling its
         # protocol "none" would let downstream code treat a sortable point estimate as a certain
         # cross-run winner, so the comparability contract is invalid rather than silently weakened.
         if self.measurement_phase == "confirmed" and self.uncertainty_protocol == "none":
@@ -190,10 +190,10 @@ def comparison_measurement(contract_value: object, best: object) -> dict | None:
             "seeds": seeds,
             "seeds_source": "best.confirmed_seeds",
         })
-    # CODEX AGENT: phase, value source, and uncertainty evidence travel together.  Consumers must
+    # phase, value source, and uncertainty evidence travel together.  Consumers must
     # never reconstruct this receipt from a generic `best_metric`, which would erase phase semantics.
     return {
-        # CODEX AGENT: equality proves equality of adapter-declared semantics, not an independent
+        # equality proves equality of adapter-declared semantics, not an independent
         # fingerprint of the actual dataset/evaluator/budget. Keep that authority explicit downstream.
         "authority": "declared",
         "value": value,

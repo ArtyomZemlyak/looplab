@@ -16,7 +16,7 @@ from looplab.core.models import (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
                                  NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                                  NODE_CONCEPT_PROVENANCE_OPERATOR, valid_concept_id)
 
-try:  # CODEX AGENT: the owner lands in the paired core commit; keep this commit testable alone.
+try:  # the owner lands in the paired core commit; keep this commit testable alone.
     from looplab.core.concepts import (
         CONCEPT_MATERIALIZATION_REASONS as _CORE_MATERIALIZATION_REASONS,
         normalize_concept_id as _core_normalize_concept_id,
@@ -138,7 +138,7 @@ def _rename_projection(raw: Any) -> tuple[dict[str, Optional[str]], set[str]]:
 def _materialization_receipt(raw: Any) -> Optional[tuple[ProjectionStatus, tuple[str, ...]]]:
     """Normalize a canonical receipt envelope, with old bare-reason compatibility at this read boundary."""
     if _core_normalized_receipt is not None:
-        # CODEX AGENT: once the owner exists, only its exact typed envelope crosses this boundary.
+        # once the owner exists, only its exact typed envelope crosses this boundary.
         # In particular, a recognized bare reason is still malformed and must fail closed.
         normalized = _core_normalized_receipt(raw)
     else:
@@ -298,7 +298,7 @@ def current_concept_projection(state: Any) -> CurrentConceptProjection:
                 continue
             receipt = _materialization_receipt(raw_receipt)
             if receipt is None:
-                # CODEX AGENT: valid historical receipts follow a deleted node out of the CURRENT
+                # valid historical receipts follow a deleted node out of the CURRENT
                 # projection, but a malformed durable row is not a receipt and remains global source
                 # corruption. Validate before the lifecycle filter, matching ConceptFrame exactly.
                 reasons.add("invalid_concept_materialization_receipt")
@@ -356,14 +356,14 @@ def current_concept_projection(state: Any) -> CurrentConceptProjection:
         else:
             for node_id in available_nodes:
                 if raw_provenance.get(node_id) not in _EXACT_INHERITANCE_PROVENANCE:
-                    # CODEX AGENT: display can retain the strict valid subset, but unknown authorship
+                    # display can retain the strict valid subset, but unknown authorship
                     # cannot certify exact inheritance or feed a supposedly exact cross-run overlap.
                     reasons.add(_UNKNOWN_PARENT_MEMBERSHIP_REASON)
                     trusted_nodes.discard(node_id)
                     partial_nodes.setdefault(node_id, set()).add(
                         _UNKNOWN_PARENT_MEMBERSHIP_REASON)
 
-    # CODEX AGENT: exact/trusted membership is a subset of nodes whose local projection is COMPLETE.
+    # exact/trusted membership is a subset of nodes whose local projection is COMPLETE.
     # A canonical partial receipt, or a malformed retained raw id discovered without a receipt, means the
     # displayed valid subset is useful but incomplete.  It must not authorize exact inheritance or
     # cross-run overlap merely because its producer provenance is otherwise trusted.
@@ -371,7 +371,7 @@ def current_concept_projection(state: Any) -> CurrentConceptProjection:
 
     absent_nodes = active_nodes - available_nodes - set(unavailable)
     if absent_nodes:
-        # CODEX AGENT: absence is classification-pending, not an honest empty membership. Keep this
+        # absence is classification-pending, not an honest empty membership. Keep this
         # node-local (so a clean selected parent can still author delta) while broad tools report PARTIAL.
         reasons.add("membership_not_recorded")
 
@@ -446,7 +446,7 @@ def concept_inheritance_context(state: Any, parent_id: Optional[int]) -> dict[st
     else:
         primary_status, primary_reasons = projection.node_status(parent_id)
         inherited = projection.memberships.get(parent_id, ()) if primary_status != "unavailable" else ()
-    # CODEX AGENT: only actual inheritance inputs and globally malformed stores/identity maps gate authoring.
+    # only actual inheritance inputs and globally malformed stores/identity maps gate authoring.
     # A receipt on an unrelated branch still makes broad tools PARTIAL, but cannot disable a clean parent.
     delta_safe = (
         not projection.global_reasons

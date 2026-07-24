@@ -2,7 +2,7 @@
 polarity-safe identity for a cross-run claim.
 
 The lean claim identity was the display STATEMENT (`normalize_statement`, a 160-char prose truncation), and
-the lean merge was a token-Jaccard union-find. CODEX flagged three failure modes this module closes:
+the lean merge was a token-Jaccard union-find. The review flagged three failure modes this module closes:
 
 1. GLOBAL prose identity — rejecting a claim in task A rejected a same-worded claim in task B, and two long
    claims sharing a 160-char prefix collided. -> the key carries SCOPE (task) + optional metric.
@@ -69,7 +69,7 @@ overall generally consistently substantially better best worse worst good bad st
 # EFFECT verbs carry the assertion's DIRECTION, not its subject: "X improves Y" and "X degrades Y" are two
 # opposite assertions about the SAME entities {X, Y}. Stripping both from the subject and encoding their
 # sign as polarity makes them contradiction partners (same subject, opposite polarity) instead of two
-# unrelated claims — the core of the structured key (CODEX).
+# unrelated claims — the core of the structured key.
 _POS_EFFECT = _stems("improve boost help increase raise gain enhance benefit outperform beat accelerate "
                      "stabilize fix solve speed strengthen cause lead")
 _NEG_EFFECT = _stems("hurt degrade worsen reduce decrease harm break fail drop lower lose regress damage "
@@ -143,7 +143,7 @@ def _analyze(statement: str) -> tuple:
 
 def claim_signature(statement: str, *, scope: str = "", metric: str = "") -> dict:
     """The structured semantic key for a claim. `scope` (task id) and `metric` qualify identity so the same
-    words in two different tasks/metrics are two claims (CODEX). Returns:
+    words in two different tasks/metrics are two claims. Returns:
       - subject:   ordered stemmed content-token tuple (flattened from ``roles``)
       - roles:     ordered semantic sides (lhs/rhs around the first recognized effect verb)
       - polarity:  +1 / -1 / 0

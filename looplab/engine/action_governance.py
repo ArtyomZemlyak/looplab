@@ -7,7 +7,7 @@ from typing import Optional
 
 def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
     """Return the governed, finite and hard-clamped per-node timeout override."""
-    # CODEX AGENT: identity must describe the EXECUTED action, not an untrusted model request.
+    # identity must describe the EXECUTED action, not an untrusted model request.
     # RepoTask profiles own their timeout, and a locked researcher override is ignored by execution;
     # only the finite positive solution.py override that crosses governance is an action axis.
     if idea is None or getattr(engine, "_eval_spec", None):

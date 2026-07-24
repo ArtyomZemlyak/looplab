@@ -91,7 +91,7 @@ def canonical_source_ref(value: object, *, persisted_identity: object = None) ->
         ))
     except (UnicodeError, ValueError):
         return None
-    # CODEX AGENT: display redaction is lossy, so it must never be the evidence/cache identity.
+    # display redaction is lossy, so it must never be the evidence/cache identity.
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     derived = "http-sha256:" + digest
     identity = str(persisted_identity) if valid_source_identity(persisted_identity) else derived

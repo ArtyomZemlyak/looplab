@@ -448,7 +448,7 @@ def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
         live_free = gpu_free_mib_uncached()
     except Exception:  # noqa: BLE001 - stay count-safe if the live query is unavailable
         live_free = {}
-    # CODEX AGENT: even a successful live probe is a different authority from the Engine scheduler,
+    # even a successful live probe is a different authority from the Engine scheduler,
     # which initializes `_gpu_mem` once via detect_gpu_inventory/detect_gpus. A pin accepted after VRAM
     # is freed can still wait forever against the engine's older lower ceiling, while the opposite drift
     # can admit work the host no longer fits. Admission and scheduling need one capacity/reservation model.
@@ -883,7 +883,7 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
                 sst.node_concepts[sn],
                 normalized_concept_renames(getattr(sst, "concept_consolidation", None)))
         if receipt is None and receipt_valid and membership_known and membership_problem is None:
-            # CODEX AGENT: a source delta is relative to the SOURCE base/DAG. Import its effective
+            # a source delta is relative to the SOURCE base/DAG. Import its effective
             # snapshot as an exact full set so the target run cannot reinterpret it against new parents.
             sidea.update({"concept_mode": "full", "concepts": sorted(effective),
                           "concepts_added": [], "concepts_removed": []})
@@ -935,7 +935,7 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             if data.get(name) is None:
                 continue
             value = _integer(name)
-            # CODEX AGENT: 0 is a valid live request but settles to serial width 1. Only startup
+            # 0 is a valid live request but settles to serial width 1. Only startup
             # Settings interpret 0 as hardware/eval-coupled AUTO.
             if value < 0 or value > upper:
                 raise HTTPException(400, f"{name} must be between 0 and {upper}")
@@ -1071,7 +1071,7 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         try:
             concept_fields = {"concepts", "concepts_added", "concepts_removed"} & set(idea)
             if "concept_mode" in idea or concept_fields:
-                # CODEX AGENT: replay's tolerant Idea reader is not a mutation boundary. Upgrade legacy
+                # replay's tolerant Idea reader is not a mutation boundary. Upgrade legacy
                 # manual concept envelopes to an explicit modern mode, then validate BEFORE any field can
                 # be bounded/dropped and laundered into an apparently exact durable event.
                 emission = dict(idea)
@@ -3071,7 +3071,7 @@ class RunCommandService:
                     "message": "Only retryable failed/timed_out commands can be retried.",
                     "remediation": f"GET /commands/{command_id} and observe its current status.",
                 })
-            # CODEX AGENT: retry preserves the same concurrency contract as first admission. A
+            # retry preserves the same concurrency contract as first admission. A
             # collaboration append may overtake a live driver command, but a driver retry may not.
             if record.get("event_type") not in COLLABORATION_EVENTS:
                 _active_path, active = self._active_record(rd)

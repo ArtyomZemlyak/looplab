@@ -490,7 +490,7 @@ def run(
         # task identity/provenance field (id/direction/noise/seed included), not just the flags the
         # command happened to spell.
         task_dict = task.model_dump(mode="json", exclude_none=False)
-    # CODEX AGENT: the task adapters own comparison-contract validation and identity.  Persist their
+    # the task adapters own comparison-contract validation and identity.  Persist their
     # canonical value (including contract_id), never the pre-validation authoring dict, so CLI and
     # Web/TUI/API launches produce the same scientific provenance in task.snapshot.json.
     comparison_contract = getattr(task, "comparison_contract", None)

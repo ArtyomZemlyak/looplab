@@ -186,7 +186,7 @@ def _filter_claim_source_rows(rows, predicate, *, research: bool) -> _ClaimSourc
 def _claim_source_semantic_projection(row: dict) -> dict:
     """Exact fields consumed by claim identity, evidence, scope and producer-receipt logic."""
     out = {key: row[key] for key in _CLAIM_SOURCE_SEMANTIC_FIELDS if key in row}
-    # CODEX AGENT: nested v3 dictionaries are extensible, but their unknown keys must not consume the
+    # nested v3 dictionaries are extensible, but their unknown keys must not consume the
     # sanitizer's item budget and push an authoritative field past the retained prefix. Select exact
     # contract keys before bounding/redacting, just as the top-level projection does.
     nested_fields = {
@@ -272,7 +272,7 @@ def _valid_node_source(raw) -> bool:
     for value in values:
         if type(value) is int:
             continue
-        # CODEX AGENT: claim source health is an authority signal, so a poisoned element cannot be
+        # claim source health is an authority signal, so a poisoned element cannot be
         # silently dropped by ``_node_ids`` while the surrounding row remains "complete". Numeric-string
         # compatibility stays bounded and exact; bool/float/container/arbitrary strings quarantine the row.
         if isinstance(value, str):
@@ -354,7 +354,7 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
     if research and row.get("record_kind") == "source_receipt":
         run_id, task_id, direction = row.get("run_id"), row.get("task_id"), row.get("direction")
         return (
-            # CODEX AGENT: a sentinel is an exact cardinality record, never an open claim envelope. If
+            # a sentinel is an exact cardinality record, never an open claim envelope. If
             # statement/evidence/verification fields hitch a ride, assessment code must not be able to
             # index them while the same row advertises an authoritative retained count of zero.
             set(row) == _RESEARCH_SOURCE_RECEIPT_ROW_FIELDS
@@ -367,7 +367,7 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
     if research:
         version = row.get("v")
         if version == _RESEARCH_CLAIM_VERSION:
-            # CODEX AGENT: v3 is exact, not a duck-typed extension point. Unknown kinds and malformed
+            # v3 is exact, not a duck-typed extension point. Unknown kinds and malformed
             # producer receipts stay quarantined as raw rows; they cannot become claim evidence merely by
             # also carrying a plausible statement.
             if (row.get("record_kind") != "claim"
@@ -611,7 +611,7 @@ def _research_source_summary(rows) -> dict:
     producer_complete = receipt_known and partial == 0
     read_complete = read_health["read_complete"]
     return {
-        # CODEX AGENT: this field is the policy gate consumed by claim verdicts/stewards. The producer-
+        # this field is the policy gate consumed by claim verdicts/stewards. The producer-
         # prefixed fields intentionally leave an additive seam for store read-health (`quarantined_rows`,
         # `read_complete`): overall source completeness can later become their conjunction without changing
         # what this receipt says about the memo producer's 256-row cap.
@@ -655,7 +655,7 @@ def _safe_research_source_summary(raw) -> Optional[dict]:
     known = out["producer_receipt_known"]
     base_consistent = (
         out["producer_partial_runs"] + out["producer_unknown_runs"] <= out["producer_runs"]
-        # CODEX AGENT: `known=true` and a non-zero unknown-run count is not a harmless diagnostic
+        # `known=true` and a non-zero unknown-run count is not a harmless diagnostic
         # mismatch: it would let a forged aggregate claim exact one-sided evidence while admitting an
         # unreadable producer receipt. The boolean and count are one invariant at every boundary.
         and known == (out["producer_unknown_runs"] == 0)
@@ -735,7 +735,7 @@ def _claim_source_summary(lessons, research, *, research_source: Optional[dict] 
     return {
         "v": _CLAIM_READ_HEALTH_VERSION,
         "receipt_known": True,
-        # CODEX AGENT: exact one-sided/absence claims cross BOTH mutable files and the D8 producer cap.
+        # exact one-sided/absence claims cross BOTH mutable files and the D8 producer cap.
         # Poisoned rows remain excluded as evidence, but they cannot disappear from this authority bit.
         "source_complete": lesson_read["read_complete"] and research_source["source_complete"],
         "read_complete": read_complete,
@@ -827,7 +827,7 @@ def _filter_claim_assessments(rows, predicate) -> _ClaimAssessmentRows:
 def _source_guarded_epistemic(support, oppose, claim_source: dict) -> str:
     state = _epistemic(support, oppose)
     # A missing lesson/research row or D8 tail may contain the other side. Preserve retained refs, but do not
-    # emit either one-sided state from a lower-bound evidence source (CODEX AGENT).
+    # emit either one-sided state from a lower-bound evidence source.
     return ("inconclusive" if state in ("supported", "refuted")
             and claim_source["source_complete"] is not True else state)
 
@@ -944,7 +944,7 @@ def _bounded_claim_projection(row: dict) -> dict:
     else:
         out["claim_source"] = claim_source
     if omitted:
-        # CODEX AGENT: per-field omission metadata is part of the projection contract; a hard nested cap
+        # per-field omission metadata is part of the projection contract; a hard nested cap
         # must never silently turn "64 shown of 3,000" into "there are 64".
         out["nested_omitted"] = omitted
     return out
@@ -1025,7 +1025,7 @@ def _validate_claim_decision_row(row: dict) -> str | None:
         scope = _identity_text(row.get("scope"), _MAX_DECISION_SCOPE)
         metric = _identity_text(row.get("metric"), _MAX_DECISION_METRIC)
         canonical_statement = _claim_text(statement, _MAX_DECISION_STATEMENT)
-        # CODEX AGENT: current-version rows are writer receipts, not migration input. Replay must
+        # current-version rows are writer receipts, not migration input. Replay must
         # never sanitize one durable identity and then expose/apply it under another key.
         if (statement != canonical_statement
                 or row.get("scope") != scope or row.get("metric") != metric
@@ -1068,7 +1068,7 @@ def _bounded(value, name: str, maximum: int, *, required: bool = False) -> str:
     else:
         bounded = cross_run_text(
             text, max_chars=maximum, single_line=True, entropy=True)
-    # CODEX AGENT: requiredness applies to the persisted value. A control-only statement passed
+    # requiredness applies to the persisted value. A control-only statement passed
     # the raw ``strip`` check but sanitized to empty, was acknowledged, and poisoned the next replay.
     if required and not bounded.strip():
         raise ValueError(f"empty {name}")
@@ -1126,7 +1126,7 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                           validate_evidence: Optional[Callable[[list[dict]], None]] = None) -> dict:
     """Persist an OPERATOR verdict on a claim (ratify / reject / pin). Append-only JSONL, keyed BOTH by the
     legacy `normalize_statement` (so the lean projection still overlays) AND by a structured `claim_uid`
-    (scope+polarity-precise, so a decision in task A never reaches a same-worded claim in task B — CODEX).
+    (scope+polarity-precise, so a decision in task A never reaches a same-worded claim in task B).
     `scope` (task id) / `metric` qualify the structured key. This is the §22.4 governance write — agents
     never call it. Returns the record. Durable locked+fsynced append; raises on an invalid decision or
     missing memory dir (a real operator error)."""
@@ -1160,7 +1160,7 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
     # Idempotency lookup, revision CAS, allocation and append are one critical section. A
     # pre-lock check lets two UI writers both accept revision N and silently create divergent policy.
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-        # CODEX AGENT: governance corruption is not a zero-row revision. Refuse every operator
+        # governance corruption is not a zero-row revision. Refuse every operator
         # write until the ledger is explicitly repaired; a later pin/clear must never hide the
         # quarantine behind a fresh, apparently healthy revision.
         rows = _read_claim_decision_rows(path)
@@ -1211,7 +1211,7 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         if validate_evidence is None:
             return _persist()
 
-        # CODEX AGENT: claim policy is already locked. Acquire evidence only after it, then keep every
+        # claim policy is already locked. Acquire evidence only after it, then keep every
         # lock through digest validation and the durable append. This is the same global order used by
         # read projections and prevents a lesson/research rewrite from slipping under the operator CAS.
         from looplab.engine.governance_health import project_governed_sources
@@ -1278,7 +1278,7 @@ def record_observed_claim_decision(
                 current_evidence_digest=current.get("evidence_digest"),
             )
 
-    # CODEX AGENT: never pre-resolve the target in a CLI/API wrapper. The replay lookup must happen first
+    # never pre-resolve the target in a CLI/API wrapper. The replay lookup must happen first
     # for lost-response retries, then CAS + evidence validation + append must remain one locked operation.
     return record_claim_decision(
         memory_dir, statement=statement, scope=scope, metric=metric,
@@ -1419,7 +1419,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
         source_total = claims_total
     else:
         source_total = derived_total
-    # CODEX AGENT: select the first bounded set of VALID claims rather than slicing the raw list first. A
+    # select the first bounded set of VALID claims rather than slicing the raw list first. A
     # malformed prefix must not hide a valid opposition row later in the memo, and every skipped/capped input
     # remains visible in the repeated per-run receipt below.
     for c in source:
@@ -1479,7 +1479,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
         # Every explicitly processed empty snapshot needs a durable denominator too. Otherwise a successful
         # empty extraction is indistinguishable from a run that never produced D8 at all, and a same-run
         # refresh can erase its only receipt. This sentinel participates in completeness only; assessment/
-        # index loops ignore it because it has no statement (CODEX AGENT).
+        # index loops ignore it because it has no statement.
         rows.append({
             "v": _RESEARCH_CLAIM_VERSION,
             "record_kind": "source_receipt",
@@ -1531,7 +1531,7 @@ def load_research_claims(memory_dir) -> list[dict]:
         # Keep every schema-bounded field consumed by claim identity, evidence and source digest while
         # dropping unrelated legacy extensions before they can exhaust the redaction budget. Outward claim
         # projections remain capped separately; this internal snapshot must retain an allowed 65th..256th
-        # reference so a tail rewrite changes governance identity instead of disappearing (CODEX AGENT).
+        # reference so a tail rewrite changes governance identity instead of disappearing.
         durable = _claim_source_semantic_projection(row)
         # Missing version in a persisted file is not the direct pure-API snapshot compatibility case.
         durable.setdefault("v", 0)
@@ -1663,7 +1663,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     lessons = _valid_claim_source_rows(lessons, research=False)
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
-        # CODEX AGENT: Path.exists() can collapse permission/storage failures into false. Only a confirmed
+        # Path.exists() can collapse permission/storage failures into false. Only a confirmed
         # FileNotFound is an authoritative empty capsule source inside this governed snapshot.
         capsules = (ConceptCapsuleStore(cp).all()
                     if cp and not observed_path_missing(cp) else [])
@@ -1843,7 +1843,7 @@ def _structured_assessments(lessons, research_claims, decisions, *,
         if g is None:
             continue
         if rc.get("run_id"):
-            g["runs"].add(_identity_text(rc["run_id"], 500))  # D8 registers run/scope now (CODEX)
+            g["runs"].add(_identity_text(rc["run_id"], 500))  # D8 registers run/scope now
         if rc.get("task_id"):
             g["scopes"].add(_identity_text(rc["task_id"], _MAX_DECISION_SCOPE))
         refs = _qualify_refs(rc.get("run_id"), _node_ids(rc.get("node_ids")))
@@ -1985,7 +1985,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         s = _claim_text(stmt)
         if not s:
             return None
-        # NOTE (CODEX): identity here is the normalized STATEMENT (the shipped lesson `normalize_statement`
+        # NOTE: identity here is the normalized STATEMENT (the shipped lesson `normalize_statement`
         # key) — it can merge same-worded claims across incompatible scopes and the 160-char cap can
         # collide. A structured semantic claim key (subject/intervention/comparator/scope) is the CR1b TODO
         # (§21.20.13); this lean projection keeps scope/runs as metadata on the claim.
@@ -2154,7 +2154,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     Pure/deterministic and
     'silent' by construction — it just returns structured data; promoting it to advisory prompt-grounding
     is a separate, gated step (never wired here). No LLM, no I/O."""
-    # NOTE (CODEX): this bounds by CLAIM COUNT + per-claim field caps (below), not a serialized token/byte
+    # NOTE: this bounds by CLAIM COUNT + per-claim field caps (below), not a serialized token/byte
     # budget — a true token envelope is the CR2b TODO. `max_claims<1` is normalized to 1.
     max_claims = max(1, min(int(max_claims), _MAX_CONTEXT_CLAIMS))
     # Governance precedence is explicit: rejected is absent; pinned is retention-critical; ratified is the
@@ -2176,7 +2176,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     if picked and not any(c["epistemic"] in _CAVEAT_STATES for c in picked):
         # Include RATIFIED caveats too: a ratified mixed/refuted/inconclusive claim pushed past max_claims by
         # the ratified block must still be able to fill the reserved slot, or a slate of ratified-supported
-        # claims could crowd opposition out — the exact §20.5 rule this slot exists to protect (CODEX).
+        # claims could crowd opposition out — the exact §20.5 rule this slot exists to protect.
         caveats = ([c for c in pinned if c["epistemic"] in _CAVEAT_STATES]
                    + [c for c in ratified if c["epistemic"] in _CAVEAT_STATES]
                    + by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"])
@@ -2190,7 +2190,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
 
     def _slim(c: dict) -> dict:
         # Evidence refs are run-QUALIFIED ("run:node"), so the truncated support/oppose lists stay citable;
-        # keep runs/scopes too so a reader can resolve the claim's provenance (CODEX).
+        # keep runs/scopes too so a reader can resolve the claim's provenance.
         return {"statement": _claim_text(c.get("statement"), 300), "epistemic": c["epistemic"],
                 "maturity": c.get("maturity", "machine-proposed"),
                 "claim_uid": c.get("claim_uid", ""), "scope": c.get("scope", ""),
@@ -2241,7 +2241,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         pack["claim_source"] = claim_source
     if concept_overview:
         from looplab.engine.memory import concept_profit_tendencies
-        # CODEX AGENT: callers that own the retained capsule snapshot may supply its private pre-cap rows.
+        # callers that own the retained capsule snapshot may supply its private pre-cap rows.
         # The pack still emits only `max_claims` labels/tendencies; this prevents the public overview's
         # display cap from becoming a silent analytics cap while keeping the outward prompt bounded.
         row_source = (_concept_rows if _concept_rows is not None
@@ -2251,7 +2251,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         # PART V Phase 1 profit signal: surface concepts with a CONSISTENT, MULTI-RUN rank tendency (advisory
         # only — prompts, never selection). The threshold lives in ONE shared helper so the context pack and
         # the cross_run_atlas tool can never diverge; a concept with mixed/thin evidence appears in neither.
-        # CODEX AGENT: consistency also needs a complete denominator. A non-matching partial capsule may
+        # consistency also needs a complete denominator. A non-matching partial capsule may
         # have omitted this exact concept and an opposite sign, so retained positive rows remain observable
         # below but cannot support a directional portfolio tendency until every capsule receipt is exact.
         tendency = (concept_profit_tendencies(rows, limit=max_claims) if source_complete
@@ -2416,7 +2416,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
 
     Every source is SCOPED before indexing: pass scoped `lessons`/`capsules` plus their aggregate
     `scope_receipt`, and `scope_task` filters the D8 research claims to that task so a task-bound agent
-    cannot retrieve another task's claims (CODEX).
+    cannot retrieve another task's claims.
     Operator-rejected claims never enter the corpus. Advisory; pure w.r.t. the passed/loaded stores."""
     from pathlib import Path
 
@@ -2471,7 +2471,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                     or _claim_source_summary(lessons, research, research_source=research_source))
     overview, concept_rows = _portfolio_concept_overview_data(
         capsules, aliases=governance["aliases"], splits=governance["splits"])
-    # CODEX AGENT: source completeness is part of the retrieval corpus, even when a query happens to match
+    # source completeness is part of the retrieval corpus, even when a query happens to match
     # only claims or the same retained concept rows.  Aggregate it across every eligible capsule before
     # query preselection so legacy/omitted concepts cannot masquerade as authoritative absence or exact
     # frequency, and a partial->complete transition changes the auditable corpus identity.
@@ -2516,7 +2516,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                       and fingerprint_unknown + direction_unknown <= unknown)
         scope_source = {
             "scope_receipt_known": consistent,
-            # CODEX AGENT: a caller-supplied malformed applicability receipt fails closed. Retrieval may
+            # a caller-supplied malformed applicability receipt fails closed. Retrieval may
             # retain its positive documents, but neither an empty result nor a frequency is exact.
             "scope_complete": consistent and source.get("scope_complete") is True,
             **{key: source.get(key) if counts_valid else 0 for key in scope_keys},
@@ -2541,7 +2541,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             "decision_revision": (c.get("decision") or {}).get("revision"),
             "governance_digest": _json_digest(c.get("decision") or {}),
             "evidence_digest": evidence_digest}))
-    # CODEX AGENT: query-aware preselection must see every validated canonical row. Iterating the public
+    # query-aware preselection must see every validated canonical row. Iterating the public
     # top-512 projection made concept #513 look absent with source_complete=true and truncated=0.
     for e in concept_rows:
         docs.append(_retrieval_doc("concept", _claim_text(e.get("concept"), 500), {
@@ -2566,7 +2566,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     corpus_digest = _retrieval_corpus_digest(
         docs, concept_source=concept_source, research_source=research_source,
         claim_source=claim_source)
-    # CODEX AGENT: ``max_corpus`` bounds only the hybrid index: this digest still sorts and serializes
+    # ``max_corpus`` bounds only the hybrid index: this digest still sorts and serializes
     # every full claim/concept after preselection already scanned them all. Use a persisted/incremental
     # corpus revision plus a bounded candidate index and omission receipt so portfolio growth cannot make
     # one retrieval request O(all stored evidence) in memory and CPU before the advertised cap applies.
@@ -2702,12 +2702,12 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # cross_run_claims. Pin priority applies inside the embedded context pack; this human-facing contested
     # summary remains evidence-ordered and independently capped.
     contested = [c for c in claims if c["epistemic"] == "mixed" and c.get("maturity") != "operator-rejected"]
-    # CODEX AGENT: Atlas is independently bounded. Derive single-run observations and rank tendencies from
+    # Atlas is independently bounded. Derive single-run observations and rank tendencies from
     # every canonical retained row BEFORE its outward cap; the old overview-capped path silently returned
     # `thin_coverage=[]` once 512 more-frequent concepts occupied the entire overview projection.
     thin = [e["concept"] for e in full_concept_rows if e["n_runs"] == 1]
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy
-    # memory (no opt-in capsules) is not reported as zero runs (CODEX). The authoritative scoped corpus
+    # memory (no opt-in capsules) is not reported as zero runs. The authoritative scoped corpus
     # join (cross_run_index) is the full-CR TODO; this at least unions what the two memory stores know.
     run_ids = {c.get("run_id") for c in capsules if c.get("run_id")}
     for cl in claims:
@@ -2716,7 +2716,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # Keep the embedded context-pack coverage n_runs CONSISTENT with the top-level count (both the union of
     # capsule + lesson-cited runs), so one atlas payload never reports two different run counts — otherwise a
     # lesson-only memory says n_runs>0 at the top but coverage.n_runs==0, the very "zero runs" artifact the
-    # union set out to fix (CODEX).
+    # union set out to fix.
     pack_overview = {**overview, "n_runs": n_runs}
     explored = full_concept_rows[:max_items]
     thin_coverage = thin[:max_items]
@@ -2724,7 +2724,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     payload = {
         "n_runs": n_runs, "n_concepts": overview["n_concepts"],
         "n_claims": len(claims), "n_contested": len(contested),
-        # CODEX AGENT: the Atlas UI must not infer capsule-source completeness from returned rows or from
+        # the Atlas UI must not infer capsule-source completeness from returned rows or from
         # transport freshness. Keep one small aggregate receipt at the read-model boundary; the embedded
         # context-pack copy remains for agents and backward-compatible consumers.
         "concept_source": {key: overview[key] for key in (
@@ -2807,7 +2807,7 @@ def render_context_pack(pack: dict) -> str:
         if maturity in {"operator-ratified", "operator-pinned"}:
             freshness = {True: "current", False: "stale-evidence", None: "unknown"}.get(
                 c.get("decision_fresh"), "unknown")
-            # CODEX AGENT: operator policy persists until clear, but its evidence fence can age.
+            # operator policy persists until clear, but its evidence fence can age.
             # Surface both axes so retention priority never masquerades as a fresh ratification.
             policy = (f"; operator_policy={maturity.removeprefix('operator-')}; "
                       f"decision_freshness={freshness}")
@@ -2839,7 +2839,7 @@ def render_context_pack(pack: dict) -> str:
         helps = ", ".join(repr(_safe_text(x, 100)) for x in (cov.get("helps") or [])[:6])
         hurts = ", ".join(repr(_safe_text(x, 100)) for x in (cov.get("hurts") or [])[:6])
         if helps or hurts:
-            # CODEX AGENT: concept slugs are persisted, LLM-originated data. Keep the explicit trust
+            # concept slugs are persisted, LLM-originated data. Keep the explicit trust
             # marker on rank tendencies just as on the coverage line and the sibling cross-run tool;
             # repr quoting alone does not tell a proposing model that the span is inert memory.
             parts = ([f"tended to RANK BETTER UNTRUSTED_MEMORY={helps}"] if helps else []) + (

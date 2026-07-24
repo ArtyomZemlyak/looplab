@@ -207,7 +207,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         rename = {}
     elif not isinstance(rename, dict):
         reasons.add("invalid_consolidation_map")
-    # CODEX AGENT: normalize once at the projection boundary; replay/search/serve now follow the
+    # normalize once at the projection boundary; replay/search/serve now follow the
     # identical bounded chain semantics and invalid targets remain poison markers rather than aliases.
     rename = normalized_concept_renames(rename)
     if rename.endpoint_problem:
@@ -228,7 +228,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
 
     current_nodes = _current_nodes(state)
 
-    # CODEX AGENT: [] is otherwise indistinguishable from an explicitly authored known-empty set.
+    # [] is otherwise indistinguishable from an explicitly authored known-empty set.
     # Replay stamps every unresolved delta-cycle member/descendant, and the public frame carries that
     # as a corruption-class reason so the UI cannot present fail-closed emptiness as authoritative.
     # Apply the same CURRENT lifecycle boundary as memberships: tombstoned/aborted historical receipts
@@ -251,7 +251,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
                 reasons.update(receipt["reasons"])
                 materialization_unavailable |= receipt["status"] == "unavailable"
 
-    # CODEX AGENT: insertion order is replay history, not semantic priority. Each level keeps a bounded
+    # insertion order is replay history, not semantic priority. Each level keeps a bounded
     # lexicographic top-K while scanning the full source for integrity receipts. Empty/invalid-only and
     # deleted lifecycle rows have no canonical membership, so they cannot consume a live node slot.
     # The resulting memory is O(MAX_NODE_MEMBERSHIPS * MAX_CONCEPTS_PER_NODE), while the chosen paid-lens
@@ -320,7 +320,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
     if not isinstance(raw_edges, dict):
         raw_edges = {}
         reasons.add("invalid_edge_map")
-    # CODEX AGENT: canonical edge identity is the cap ordering key. Retain the bounded smallest distinct
+    # canonical edge identity is the cap ordering key. Retain the bounded smallest distinct
     # tuples while scanning: raw aliases, duplicates and legacy co_occurs rows neither consume capacity
     # nor create a false truncation receipt. A retained duplicate still uses edge_rank's total winner.
     canonical_edges: dict[tuple[str, str, str], dict] = {}
@@ -332,14 +332,14 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
             continue
         relation = edge.get("rel")
         if relation == "co_occurs":
-            # CODEX AGENT: co-occurrence is a materialized observation of CURRENT memberships, not an
+            # co-occurrence is a materialized observation of CURRENT memberships, not an
             # immutable assertion. Legacy max-folded receipts cannot represent a lower count/removal
             # after re-tagging, so they are audit history only; the live projection is derived below.
             continue
         src, src_problem = canonical_concept(edge.get("src"), rename)
         dst, dst_problem = canonical_concept(edge.get("dst"), rename)
         confidence = finite_metric(edge.get("confidence"))
-        # CODEX AGENT: ``confidence`` is the replay field for both normalized confidence and the
+        # ``confidence`` is the replay field for both normalized confidence and the
         # integer co-occurrence evidence emitted by strategy.py. Bound the weight by the largest
         # self-contained evidence receipt instead of silently discarding every repeated pairing.
         # REVIEW(2026-07-16): the MAX_EDGE_WEIGHT bound fixes the count>=2 rejection, but a run whose
@@ -353,7 +353,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
                 or confidence < 0.0):
             reasons.add(src_problem or dst_problem or "invalid_edge")
             continue
-        # CODEX AGENT: IEEE signed zero compares equal but has different JSON bytes. Normalize it before
+        # IEEE signed zero compares equal but has different JSON bytes. Normalize it before
         # duplicate ranking/storage so -0.0 versus 0.0 arrival order cannot change the cached core or the
         # exact paid-lens input derived from it (legacy/manual states may bypass the replay sanitizer).
         if confidence == 0.0:
@@ -410,7 +410,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         derived_edge_count += 1
         return True
 
-    # CODEX AGENT: co-occurrence is a projection of the bounded CURRENT membership snapshot.
+    # co-occurrence is a projection of the bounded CURRENT membership snapshot.
     # Recompute it on every core build for online, offline and legacy runs alike; persisting monotone
     # max receipts made stale weights and removed pairs impossible to retract.
     if "co_occurs" in registered_rels:
@@ -423,7 +423,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
                 for j in range(i + 1, len(cs)):
                     pair = (cs[i], cs[j])
                     pair_counts[pair] = pair_counts.get(pair, 0) + 1
-                    # CODEX AGENT: a full static edge budget still has to inspect the bounded membership
+                    # a full static edge budget still has to inspect the bounded membership
                     # snapshot. The second observation proves that one valid derived edge was omitted;
                     # only then is edge_cap truthful. Stop immediately because no derived edge can fit.
                     if static_capacity_full and pair_counts[pair] == 2:

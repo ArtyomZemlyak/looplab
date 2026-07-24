@@ -217,7 +217,7 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             monitor_latest[(nid, gen)] = event
     rid = _run_id(run_id)
     for (nid, gen), event in sorted(monitor_latest.items()):
-        # CODEX AGENT: select the latest lifecycle verdict before filtering. Filtering to broken while
+        # select the latest lifecycle verdict before filtering. Filtering to broken while
         # scanning made a later healthy recovery invisible and left the old warning permanently active.
         if str((event.data or {}).get("status") or "").strip().lower() != "broken":
             continue

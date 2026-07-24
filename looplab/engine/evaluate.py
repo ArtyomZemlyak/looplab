@@ -130,7 +130,7 @@ class EvaluateMixin:
                 eval_env = self._resource_eval_env(
                     _resource_reservation, inherit_host=True)
             except GpuPinUnenforceable as exc:
-                # CODEX AGENT: an explicit positive declaration on a zero-device inventory is a
+                # an explicit positive declaration on a zero-device inventory is a
                 # fail-closed, zero-compute terminal — never an unpinned launch and never an endless
                 # resource wait. The dispatcher's finally still releases/clears the marker exactly once.
                 async with self._write_lock:
@@ -212,7 +212,7 @@ class EvaluateMixin:
             full_retrains = 0
             while True:
                 _t0 = time.time()
-                # CODEX AGENT: repair/retry attempts reuse the workdir and sandbox stage logs append.
+                # repair/retry attempts reuse the workdir and sandbox stage logs append.
                 # When either watchdog is enabled, snapshot every existing log before this attempt
                 # starts so it cannot rank/classify prior-attempt bytes. Keep the monitor-off path free
                 # of extra filesystem work (`off == today`).
@@ -646,7 +646,7 @@ class EvaluateMixin:
                         _eval_payload["resource_curve"] = _curve
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
-                    # CODEX AGENT: emission does not rewrite the metric, but the folded trust_gate policy
+                    # emission does not rewrite the metric, but the folded trust_gate policy
                     # can exclude high-precision signals from champion/breeding under gate/block.
                     sigs = []
                     # Scan the WHOLE solution surface, not just solution.py — a patch-gated multi-file

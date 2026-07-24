@@ -239,7 +239,7 @@ def build_router(srv) -> APIRouter:
             "content": "UNTRUSTED_GENESIS_CONTEXT_JSON\n" + context_json,
         }]
         prior = _prior_learnings_index(srv.reports_dir)
-        # CODEX AGENT: stored reports are model-authored advisory data, never system authority. Keep
+        # stored reports are model-authored advisory data, never system authority. Keep
         # their JSON in a separately labelled user message in both plain and agentic planning paths.
         evidence_messages += ([{
             "role": "user",

@@ -140,7 +140,7 @@ def _evidence_snapshot(claim: dict, state: RunState,
         if type(nid) is not int:
             continue
         n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
-        # CODEX AGENT: a node id is an ABA-prone slot, not an evidence identity. Only the current,
+        # a node id is an ABA-prone slot, not an evidence identity. Only the current,
         # non-deleted lifecycle may enter the verifier prompt and its promotion receipt.
         if (n is None or n.tombstoned or nid in aborted
                 or n.status not in (NodeStatus.evaluated, NodeStatus.failed)):
@@ -188,7 +188,7 @@ def _evidence_snapshot(claim: dict, state: RunState,
         matched_identities.append(identity)
         matched_sources.append(source)
 
-    # CODEX AGENT: completeness covers every retained citation, not merely one usable channel. A matched
+    # completeness covers every retained citation, not merely one usable channel. A matched
     # node must not conceal an unfetched URL (or vice versa), and pending attempts are not terminal evidence.
     complete = bool(
         receipt["complete"]
@@ -257,7 +257,7 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
         if nid < 0 or generation < 0 or nid not in cited_nodes:
             return None, "verification evidence identity does not match the claim"
         n = final_nodes.get(nid) if isinstance(final_nodes, dict) else None
-        # CODEX AGENT: reset is an ABA boundary and delete/abort removes a lifecycle from active
+        # reset is an ABA boundary and delete/abort removes a lifecycle from active
         # evidence. Never ratify a verdict whose inspected node no longer exists in that exact state.
         if (n is None or n.attempt != generation or n.tombstoned or nid in aborted
                 or n.status not in (NodeStatus.evaluated, NodeStatus.failed)):
@@ -288,7 +288,7 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
         url_ids.append(identity)
         urls.append(url_lookup[identity])
 
-    # CODEX AGENT: the replayed verdict's ``complete`` bit is untrusted input. Reconstruct the exact unique
+    # the replayed verdict's ``complete`` bit is untrusted input. Reconstruct the exact unique
     # identity set from the claim and require equality, so a forged/subset receipt cannot survive finalize.
     if node_refs != expected_node_refs or url_ids != expected_url_ids:
         return None, "verification evidence identity does not cover the complete claim"
@@ -446,7 +446,7 @@ def verify_memo(memo: dict, state: RunState, client=None,
                 if k < len(out.verdicts) and out.verdicts[k] in ("supported", "unsupported",
                                                                  "unclear"):
                     proposed = out.verdicts[k]
-                    # CODEX AGENT: a semantic "supported" applies only to the complete evidence snapshot
+                    # a semantic "supported" applies only to the complete evidence snapshot
                     # the judge actually saw. A capped, unresolved, deleted, or aborted citation is not
                     # permission to promote the visible prefix as if the entire citation set were checked.
                     if proposed == "supported" and verdicts[i]["evidence"]["complete"] is not True:

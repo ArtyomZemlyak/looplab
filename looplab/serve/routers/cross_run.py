@@ -308,7 +308,7 @@ class CrossRunAtlasResponse(_CrossRunResponse):
     n_concepts: int
     n_claims: int
     n_contested: int
-    # CODEX AGENT: these receipts are semantic UI authority, not opaque payloads. Their executable
+    # these receipts are semantic UI authority, not opaque payloads. Their executable
     # response models keep generated clients aligned with the complete/partial/unknown contract while
     # allowing additive versioned fields.
     concept_source: CrossRunConceptSource
@@ -435,7 +435,7 @@ def build_router(srv) -> APIRouter:
         from looplab.events.eventstore import EventStoreLockError
 
         if isinstance(exc, GovernanceLedgerUnavailable):
-            # CODEX AGENT: never reflect poisoned JSON, parser text, or a filesystem path. The
+            # never reflect poisoned JSON, parser text, or a filesystem path. The
             # closed health receipt is sufficient for an operator to identify the ledger to repair.
             raise HTTPException(
                 503, detail=exc.public_receipt(), headers={"Cache-Control": "no-store"}) from exc
@@ -757,7 +757,7 @@ def build_router(srv) -> APIRouter:
                 record.get("invocation_id"), max_chars=160,
                 single_line=True, entropy=False)
         if record.get("action") == "steward-invocation-begun":
-            # CODEX AGENT: replaying an ambiguous external call can charge twice. Same-key retries
+            # replaying an ambiguous external call can charge twice. Same-key retries
             # therefore surface the durable begin claim and require an explicit new paid identity.
             raise HTTPException(409, detail={
                 "code": "steward_invocation_outcome_unknown",

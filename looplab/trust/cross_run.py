@@ -35,7 +35,7 @@ def same_live_direction(current, persisted) -> bool:
     Audit projections may deliberately show legacy rows without direction provenance, but an
     agent-facing prompt/tool must know that the objective polarity is identical before reusing them.
     """
-    # CODEX AGENT: direction is part of the semantic identity of live guidance. Missing, coerced or
+    # direction is part of the semantic identity of live guidance. Missing, coerced or
     # garbled provenance fails closed; an exact task id must never manufacture polarity compatibility.
     return (valid_live_direction(current) and isinstance(persisted, str)
             and persisted == current)
@@ -121,7 +121,7 @@ def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
                     if len(aliases) == 1:
                         selected[aliases[0][0]] = aliases[0]
                         continue
-                    # CODEX AGENT: NFKC is useful for schema/display keys but is not injective.  A
+                    # NFKC is useful for schema/display keys but is not injective.  A
                     # compatibility-spelled alias must never overwrite an exact governance field such as
                     # ``decision``. Prefer the unique exact spelling; if none exists, omit the ambiguous
                     # field entirely instead of making input order authoritative.
@@ -140,7 +140,7 @@ def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
                         break
                     remaining[0] -= len(safe_key)
                     if is_secret_key_name(key):
-                        # CODEX AGENT: redact by the original structured key before stringifying the
+                        # redact by the original structured key before stringifying the
                         # child.  A nested ``api_key`` must never rely on its value looking secret-like.
                         # (Classifying the truncated/entropy-masked ``safe_key`` here would let a secret
                         # name that the 160-char cap or entropy mask rewrote slip past and leak its value.)

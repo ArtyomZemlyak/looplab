@@ -31,7 +31,7 @@ def _fsync_timeout() -> float:
 _FSYNC_TIMEOUT = _fsync_timeout()
 _FSYNC_DISABLED = False   # flips permanently once fsync is seen to BLOCK — a stalled FUSE mount
 
-# # CODEX AGENT: strict syncs are process-wide single-flight. If the kernel blocks one fsync past
+# Strict syncs are process-wide single-flight. If the kernel blocks one fsync past
 # the deadline, retries fail closed without allocating another thread or duplicated descriptor.
 # The worker clears these tokens only after the original syscall really returns.
 _STRICT_FSYNC_CONDITION = threading.Condition()

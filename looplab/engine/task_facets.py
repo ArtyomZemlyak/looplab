@@ -72,7 +72,7 @@ def _read_task_facet_rows(path: Path) -> list[dict]:
 
 def _task_facets_prompt_payload(goal: str, kind: str) -> dict:
     """Return the exact bounded data envelope shown to the model."""
-    # CODEX AGENT: task faceting runs automatically during finalize and may use an external provider.
+    # task faceting runs automatically during finalize and may use an external provider.
     # Redact before bounding, digesting and sending so the paid-call identity and provider-visible JSON
     # are one exact envelope; a raw slice would retain credentials and signed URLs from task prose.
     return {
@@ -178,7 +178,7 @@ def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "ste
             raise ValueError(f"facet {axis} exceeds {_MAX_FACET} characters")
         if value:
             clean[axis] = value
-    # CODEX AGENT: `{}` would be an implicit last-write-wins clear. Clearing applicability metadata
+    # `{}` would be an implicit last-write-wins clear. Clearing applicability metadata
     # needs an explicit typed action; whitespace/control-only CLI values must not manufacture one.
     if not clean:
         raise ValueError("give at least one non-empty facet axis")
@@ -189,7 +189,7 @@ def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "ste
     except (OSError, TimeoutError, RuntimeError) as exc:
         from looplab.engine.governance_health import raise_governance_storage_unavailable
         raise_governance_storage_unavailable(path, exc)
-    # CODEX AGENT: facets are operator meaning too. Refuse an append when any historical row is unknown;
+    # facets are operator meaning too. Refuse an append when any historical row is unknown;
     # a fresh last-write-wins record must never make a torn/corrupt decision appear repaired.
     return _append_governance(
         path, rec, read_rows=_read_task_facet_rows, require_durable=True)

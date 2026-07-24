@@ -480,7 +480,7 @@ def capture_scope_source(
     event_limit = min(MAX_SCOPE_EVENT_BYTES, event_budget_bytes)
     run_dir, run_status = _run_path(root, run_id)
 
-    # CODEX AGENT: this is the report-authority boundary.  Parse only bytes captured from one
+    # this is the report-authority boundary.  Parse only bytes captured from one
     # lstat/open/fstat identity, then revalidate every pathname before publishing their digests.
     event_file = _capture_file(
         run_dir / "events.jsonl", limit=event_limit, required=True

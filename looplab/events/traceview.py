@@ -53,7 +53,7 @@ _CONVERSATION_TURN_CAP = 256
 
 def unavailable_projection(*, light: bool | None = None) -> dict:
     """Projection receipt for a source that could not be read at all."""
-    # CODEX AGENT: unavailable cardinality is unknown. Never turn an I/O failure into plausible zero
+    # unavailable cardinality is unknown. Never turn an I/O failure into plausible zero
     # counts (or ``truncated=False``), because clients would present missing telemetry as complete.
     projection = {
         "schema": TRACE_PROJECTION_SCHEMA,
@@ -369,7 +369,7 @@ def _normalize_span(value) -> Optional[dict]:
                 budget.omit("omitted_attributes")
             else:
                 attributes[key] = normalized
-    # CODEX AGENT: _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS / _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS
+    # _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS / _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS
     # are SETS, so these four loops insert into `attributes` in string-hash order — randomized per
     # process via PYTHONHASHSEED. The serialized projection (and any persisted index record built from
     # it) is therefore not byte-stable across two server runs, the same raw-set-iteration defect this
@@ -484,7 +484,7 @@ def _bounded_node_trace_tail(values, node_id, cap: int) -> tuple[list, int]:
         if trace_id is not None and raw_node_id is not None and str(raw_node_id) == target:
             matching_trace_ids.add(trace_id)
 
-    # CODEX AGENT: Filtering precedes the global cap.  This must stay equivalent to the index's
+    # Filtering precedes the global cap.  This must stay equivalent to the index's
     # ``node_tids -> rows -> tail`` path or an unrelated busy node can erase the requested story.
     matching = (
         raw for raw in values
@@ -952,7 +952,7 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
     stages.sort(key=lambda x: x.get("start", 0.0))
     total_stages = len(stages)
     total_turns = sum(len(stage.get("turns") or []) for stage in stages)
-    # CODEX AGENT: Bound the rendered thread globally, not merely each text field.  A crafted trace
+    # Bound the rendered thread globally, not merely each text field.  A crafted trace
     # with thousands of tiny stages/turns otherwise remains a multi-megabyte response and DOM tree.
     visible: list[dict] = []
     remaining = _CONVERSATION_TURN_CAP

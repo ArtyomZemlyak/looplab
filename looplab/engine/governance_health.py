@@ -90,7 +90,7 @@ def read_governance_rows(
 
     rows: list[dict] = []
     for line_number, raw_line in enumerate(raw_file.splitlines(keepends=True), start=1):
-        # CODEX AGENT: an un-terminated governance tail has unknown semantics. Appending a newline
+        # an un-terminated governance tail has unknown semantics. Appending a newline
         # and a new action must not magically turn that unknown operator decision into a skipped row.
         if not raw_line.endswith((b"\n", b"\r")):
             raise GovernanceLedgerUnavailable(ledger, "torn_tail", line=line_number)
@@ -401,7 +401,7 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
     if version == 2 and action is None:
         return _validate_v2_curation_row(row, kind=kind)
 
-    # CODEX AGENT: v1 finalize/HTTP rows predate semantic paid-work identity.  Reject, rather
+    # v1 finalize/HTTP rows predate semantic paid-work identity.  Reject, rather
     # than ignore, v2-only members so old schemas cannot forge a key that suppresses a paid v2 run.
     if set(row) & _V2_CURATION_IDENTITY_FIELDS:
         return "invalid_record"
@@ -425,7 +425,7 @@ def _validate_curation_row(row: dict, *, kind: str) -> str | None:
                 return "invalid_record"
         return None
 
-    # CODEX AGENT: task faceting is also a paid on-demand steward in the CLI. It uses the same durable
+    # task faceting is also a paid on-demand steward in the CLI. It uses the same durable
     # begun/terminal envelope as claim/concept review even though it has no HTTP endpoint; keeping one
     # schema is what lets crash recovery refuse a duplicate provider call across CLI processes.
 
@@ -651,13 +651,13 @@ def project_governed_sources(
             raise ValueError("invalid governed source path")
         source = Path(raw_path)
         source = (source if source.is_absolute() else base / source).absolute()
-        # CODEX AGENT: the CLI accepts an explicitly named lessons/capsule JSONL. Let the shared
+        # the CLI accepts an explicitly named lessons/capsule JSONL. Let the shared
         # transaction lock that exact sibling while preventing path traversal or recursive policy locks.
         if (source.parent != base
                 or source.name.casefold() in _GOVERNANCE_LEDGER_FILES):
             raise ValueError("governed source path must be a non-policy file directly under memory_dir")
         requested_paths.append(source)
-    # CODEX AGENT: bootstrap an absent memory root before taking the ordinary policy/source locks.
+    # bootstrap an absent memory root before taking the ordinary policy/source locks.
     # Returning an unlocked "empty" policy snapshot let the callback observe evidence created a moment
     # later and label it revision zero. Once the directory exists, every compliant writer and this reader
     # rendezvous on the same inner locks; whichever side wins is projected as one complete era.
@@ -683,6 +683,6 @@ def project_governed_sources(
                         Path(str(source) + ".lock"), required=True))
                 governance = _read_governance_locked(
                     base, include_concepts=include_concepts)
-                # CODEX AGENT: the callback, not just its input reads, remains inside the locks.
+                # the callback, not just its input reads, remains inside the locks.
                 # Otherwise a writer can land after payload construction but before its revision label.
                 return project(governance)

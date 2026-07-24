@@ -560,7 +560,7 @@ class _StrategyOut(BaseModel):
     @field_validator("timeout", "eval_parallel", "llm_parallel", mode="before")
     @classmethod
     def _resource_scalars_are_not_booleans(cls, value):
-        # CODEX AGENT: JSON booleans are numeric subclasses in Python; accepting true as width/timeout
+        # JSON booleans are numeric subclasses in Python; accepting true as width/timeout
         # 1 makes a malformed tool result look valid and diverges from validate_strategy's contract.
         if isinstance(value, bool):
             raise ValueError("resource scalar must not be boolean")

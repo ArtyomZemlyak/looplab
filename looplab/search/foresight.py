@@ -458,7 +458,7 @@ class ForesightPanelResearcher:
                 return None
             # `improves_objective` is the primary signal, but COMPOSE `sound_and_feasible` so a
             # plausible-but-broken proposal (high improves, low soundness/feasibility) can't earn a top
-            # confidence (CODEX #9): dampen multiplicatively — confidence = improves × feasible, both in
+            # confidence: dampen multiplicatively — confidence = improves × feasible, both in
             # [0,1]. A missing feasibility grade (criterion not scored) leaves improves undampened rather
             # than penalizing an ungraded proposal. Falls back to the weighted overall if improves wasn't
             # graded at all.

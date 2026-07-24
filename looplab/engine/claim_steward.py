@@ -84,7 +84,7 @@ def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
                 "research": {"rows_quarantined": 0},
             }
         payload.append({
-            # CODEX AGENT: the opaque claim id remains bound to the raw reviewed identity, while every
+            # the opaque claim id remains bound to the raw reviewed identity, while every
             # persisted evidence string is redacted at the external-provider boundary. The private id map
             # below still resolves a returned id to the exact statement/scope/metric governance target.
             "id": cid,
@@ -280,7 +280,7 @@ def _validate(out, known: set, *, id_to_claim: dict | None = None, max_proposals
             n_oppose = raw_oppose if isinstance(raw_oppose, int) and not isinstance(raw_oppose, bool) else 0
             source = claim.get("claim_source")
             source_complete = isinstance(source, dict) and source.get("source_complete") is True
-            # CODEX AGENT: ratification is an exact positive governance proposal. Legacy/partial producer
+            # ratification is an exact positive governance proposal. Legacy/partial producer
             # receipts and quarantined physical rows fail closed even when the retained prefix is positive.
             if dec == "ratified" and (not source_complete
                                       or claim.get("epistemic") != "supported"

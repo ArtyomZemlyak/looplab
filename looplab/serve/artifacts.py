@@ -81,7 +81,7 @@ def _artifact_exposure_policy(run_dir: Path) -> ArtifactExposure:
     hardlinks and platform aliases; canonical comparison catches symlinks. A separately generated file
     with the same basename outside the run remains a normal artifact.
     """
-    # CODEX AGENT: generic artifact routes must never become an alternate raw-trace API. Bind this to
+    # generic artifact routes must never become an alternate raw-trace API. Bind this to
     # canonical paths and file identities so symlink/hardlink aliases fail closed too.
     try:
         run = Path(run_dir).resolve(strict=True)
@@ -132,7 +132,7 @@ def _artifact_exposure_policy(run_dir: Path) -> ArtifactExposure:
         # snapshot. Existing canonical paths and file identities close symlink/hardlink aliases.
         if target.parent == run and _trace_internal_name(target.name):
             return False
-        # CODEX AGENT: a protected trace-family directory reserves its whole subtree, not only the
+        # a protected trace-family directory reserves its whole subtree, not only the
         # entry itself. Otherwise `trace.json.backup/secret.txt` becomes a raw-trace side channel.
         if any(target == protected or protected in target.parents
                for protected in protected_paths):

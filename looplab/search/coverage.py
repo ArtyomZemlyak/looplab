@@ -106,7 +106,7 @@ def snapshot_matches_analytics_projection(state: RunState, snapshot: object) -> 
     if (not isinstance(token, str) or len(token) != 64
             or snapshot.get("at_node") != len((getattr(state, "nodes", None) or {}))):
         return False
-    # CODEX AGENT: node count is not lifecycle identity. Abort/reset/tag edits can change live steering
+    # node count is not lifecycle identity. Abort/reset/tag edits can change live steering
     # inputs without allocating a node, so every behavioral snapshot is bound to this exact projection.
     return token == analytics_projection_token(state)
 
@@ -176,7 +176,7 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
       top_themes           - [[axis, count], ...] top few, so the LLM can name the concentration
     """
     aborted = set(getattr(state, "aborted_nodes", None) or [])
-    # CODEX AGENT: breadth is live steering context. Aborted attempts remain in the event audit trail but
+    # breadth is live steering context. Aborted attempts remain in the event audit trail but
     # cannot dilute current coverage or the recent-window denominator.
     nodes = [n for n in state.nodes.values()
              if (getattr(n, "idea", None) is not None and n.id not in aborted

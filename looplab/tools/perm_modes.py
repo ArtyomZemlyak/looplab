@@ -68,7 +68,7 @@ _ACTION_RISK = {
     ("concept_edit", "concept_purge"): RISK_HIGH,
     ("concept_edit", "concept_split"): RISK_CONSEQUENTIAL,
     ("concept_edit", "concept_edit_clear"): RISK_CONSEQUENTIAL,
-    # CODEX AGENT: clearing a tombstone re-exposes content that an operator deliberately removed.  Give
+    # clearing a tombstone re-exposes content that an operator deliberately removed.  Give
     # that state-derived transition a concrete central identity; providers cannot downgrade it with an
     # arbitrary risk field, and Auto must still obtain an explicit approval.
     ("concept_edit", "concept_unpurge"): RISK_HIGH,

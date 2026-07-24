@@ -79,7 +79,7 @@ _PATTERNS = [
     # RFC-3986 userinfo occasionally appears in a consulted URL.  It is credential material even
     # without an explicit ``password=`` label, and source URLs are copied into durable memos.
     (re.compile(r"(?i)(?<=://)([^:/\s]+):([^@/\s]+)@"), "***:***@"),
-    # CODEX AGENT: run this before the generic assignment scanner. Without a URL-specific pass,
+    # run this before the generic assignment scanner. Without a URL-specific pass,
     # that scanner consumes ``https://...?token=value`` as one benign ``https:`` assignment and
     # never revisits the credential-bearing query parameter inside the match.
     (re.compile(

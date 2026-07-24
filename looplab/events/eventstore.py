@@ -309,7 +309,7 @@ def read_jsonl_lenient_with_health(path: str | os.PathLike, *, loads=orjson.load
     out: list = []
     source_lines = malformed_lines = invalid_shape_lines = 0
     try:
-        # CODEX AGENT: one binary snapshot both preserves invalid UTF-8 as a quarantinable row and keeps
+        # one binary snapshot both preserves invalid UTF-8 as a quarantinable row and keeps
         # non-absence OSErrors visible to the caller. A preflight exists()/second read would introduce a
         # TOCTOU window and could launder an unreadable store into an exact empty source.
         raw_file = p.read_bytes()
@@ -440,7 +440,7 @@ def replace_jsonl_rows_atomic_preserving_quarantine(
             if not raw.strip():
                 continue
             try:
-                # CODEX AGENT: parse with the same UTF-8 text contract as read_jsonl_lenient. Python's
+                # parse with the same UTF-8 text contract as read_jsonl_lenient. Python's
                 # json.loads(bytes) accepts a BOM that json.loads(str) rejects; using bytes here could
                 # therefore classify a reader-quarantined row as understood and erase it during upsert.
                 decoded = loads(raw.decode("utf-8"))
@@ -623,7 +623,7 @@ class EventStore:
         Free reconciliation may pass ``required=False``: it waits for a live buyer where locking is
         supported, while safely degrading when a required buyer could not have started there.
         """
-        # CODEX AGENT: a durable marker alone prevents crash replay, but it does not stop two live
+        # a durable marker alone prevents crash replay, but it does not stop two live
         # processes that both observed the marker as absent.  Hold this required interprocess guard
         # across the complete paid-attempt window; EventStore.append uses its own distinct lock.
         with _interprocess_lock(

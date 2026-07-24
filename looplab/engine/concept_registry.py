@@ -735,7 +735,7 @@ def _observed_concept_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     except OSError as exc:
         raise GovernanceLedgerUnavailable("concept_capsules", "storage_unreadable") from exc
     if store.source_health.get("source_store_complete") is not True:
-        # CODEX AGENT: quarantine is safe for advisory display, but not authority to prove that
+        # quarantine is safe for advisory display, but not authority to prove that
         # an operator's merge/purge/split source exists (or is absent) in the complete portfolio.
         raise GovernanceLedgerUnavailable("concept_capsules", "invalid_record")
     known: set[str] = set()

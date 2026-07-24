@@ -172,7 +172,7 @@ class PublicRunStateResponse(BaseModel):
 
 def _run_config_request_body_contract() -> dict[str, Any]:
     """Describe both bodies while retaining raw-Request error and compatibility behavior."""
-    # CODEX AGENT: parsing these routes as a Pydantic union would silently change malformed JSON
+    # parsing these routes as a Pydantic union would silently change malformed JSON
     # from the established 400 response to FastAPI's 422, so models drive OpenAPI while the handler
     # continues to perform the compatibility-preserving runtime parse below.
     variants = [
@@ -462,14 +462,14 @@ class _ConceptCoreCache:
             run_id: Optional[str] = None) -> Optional[dict]:
         with self._lock:
             source = identity[0]
-            # CODEX AGENT: an append, same-path replacement, or corruption changes at least one exact
+            # an append, same-path replacement, or corruption changes at least one exact
             # stat field. Drop every old version for that path before lookup so generations and damaged
             # versus authoritative prefixes cannot coexist indefinitely in this bounded cache.
             for key in [key for key in self._entries
                         if key[0][0] == source and key[0] != identity]:
                 del self._entries[key]
             for key in reversed(tuple(self._entries)):
-                # CODEX AGENT: run_id is request identity echoed in the cached core. Two legal URL
+                # run_id is request identity echoed in the cached core. Two legal URL
                 # aliases can resolve to one events file, so sharing their source identity must not
                 # make one endpoint return the other alias in its versioned response.
                 if (key[0] == identity and key[1] == requested_seq
@@ -610,7 +610,7 @@ class _ConceptReplayCache:
                         and source.boundary_event != events[source.cursor.event_count - 1])
                     or (events and source.first_event is not None and source.first_event != events[0])
                 )
-                # CODEX AGENT: corruption changes the meaning of "complete prefix" even if no valid event
+                # corruption changes the meaning of "complete prefix" even if no valid event
                 # was added. Rebuild from the recoverable prefix on every clean<->corrupt/detail transition;
                 # never reuse an authoritative cursor while merely attaching a partial-source receipt.
                 if reset or boundary_changed or divergence != source.divergence:
@@ -735,7 +735,7 @@ def build_router(srv) -> APIRouter:
                 state = fold(events)
                 divergence = source.divergence
                 after = _concept_event_file_identity(path)
-            # CODEX AGENT: equality is required even when the first stat failed. Treating
+            # equality is required even when the first stat failed. Treating
             # ``None -> identity B`` as stable could cache bytes read from replaced generation A
             # under B's identity and poison every later hit until the file changed again.
             if after != identity:
@@ -857,7 +857,7 @@ def build_router(srv) -> APIRouter:
                 "message": "Historical concept sequence must be -1 or greater.",
             })
 
-        # CODEX AGENT: the exact event-prefix fold and every lens-independent bounded read model are
+        # the exact event-prefix fold and every lens-independent bounded read model are
         # cached together; switching lenses now performs only this pure tree projection.
         core = _materialize_concept_core(rd, run_id, seq, lens_pack)
         frame = _project_concept_frame(
@@ -1927,7 +1927,7 @@ def build_router(srv) -> APIRouter:
                     s = next((h for h in hydrate_inputs(trace_spans) if h.get("span_id") == sid), s)
                 s = _cap_span_io(s)
                 projection = dict(s.get("_projection") or {})
-                # CODEX AGENT: Snapshot the selected span's own omission truth BEFORE folding in
+                # Snapshot the selected span's own omission truth BEFORE folding in
                 # trace cardinality. Hidden siblings make the aggregate response partial, but they
                 # do not make this span's bounded input/output projection incomplete.
                 detail_truncated = projection.get("truncated") is True
@@ -2186,7 +2186,7 @@ def build_router(srv) -> APIRouter:
                     raise HTTPException(503, "artifact access unavailable")
                 if current_identity != opened_identity:
                     raise HTTPException(404, "no such artifact")
-                # CODEX AGENT: authorize the opened descriptor as well as the path; writable roots can
+                # authorize the opened descriptor as well as the path; writable roots can
                 # otherwise swap a safe pathname to a protected trace hardlink before open. Refresh
                 # protected identities too in case the run-root source was replaced during the race.
                 opened_exposed = _artifact_exposure_policy(rd)

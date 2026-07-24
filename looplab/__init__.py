@@ -131,7 +131,7 @@ _LAYOUT = {
     "lessons_reconcile": "engine",
     "literature": "tools",
     "llm": "core",
-    # CODEX AGENT: the shared paid-call concurrency boundary is a canonical core module; registering
+    # the shared paid-call concurrency boundary is a canonical core module; registering
     # it keeps both the package-layout audit and the supported flat import alias exhaustive.
     "llm_broker": "core",
     "llm_streaming": "core",
@@ -168,7 +168,7 @@ _LAYOUT = {
     "prompts": "core",
     "proposal_cues": "engine",
     "proxy": "runtime",
-    # CODEX AGENT: keep the bounded Card DTO boundary canonical; an unregistered serve module fails
+    # keep the bounded Card DTO boundary canonical; an unregistered serve module fails
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
     "readmodel": "events",

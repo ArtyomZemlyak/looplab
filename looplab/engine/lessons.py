@@ -114,7 +114,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         """M2: content fingerprint of this task so cross-run transfer reaches SIMILAR tasks, not only
         the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params."""
         from looplab.engine.memory import task_fingerprint
-        # NOTE (CODEX): the winner's param NAMES are outcome-derived, so this fingerprint shifts when a new
+        # NOTE: the winner's param NAMES are outcome-derived, so this fingerprint shifts when a new
         # node wins / the run extends — i.e. it is a fuzzy RETRIEVAL key, not an immutable scope identity.
         # This is the SHIPPED convention (store_case / lesson priors key the same way); the capsule reuses
         # it for consistency. The immutable task/ComparisonContract identity is the CR0 TODO (§21.20.13) —
@@ -153,7 +153,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 # prompts/parser travel WITH the client so a merge_system.md override and the run's
                 # configured structured-output parser reach the merge's adjudication call (I18/ADR-8).
                 prompts, parser = self._merge_prompt_opts()
-                # CODEX AGENT: This can run remote paraphrase adjudication while ``lessons.jsonl.lock``
+                # This can run remote paraphrase adjudication while ``lessons.jsonl.lock``
                 # is held, so one slow provider blocks every concurrent lesson writer and governed reader
                 # needing this source. Snapshot under the lock, release it for paid inference, then reacquire
                 # and CAS/reconcile before the rewrite instead of holding a global I/O lock across the call.
@@ -266,7 +266,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             merged = consolidate_lessons(rows, client=client, embed=embed,
                                          parser=parser, prompts=prompts)
             if len(merged) < len(rows):
-                # CODEX AGENT: hygiene owns only understood lesson rows. Raw malformed/future records stay
+                # hygiene owns only understood lesson rows. Raw malformed/future records stay
                 # byte-preserved quarantine until an explicit repair/migration acknowledges them.
                 replace_jsonl_rows_atomic_preserving_quarantine(
                     path, merged,
@@ -331,7 +331,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             def _better(a, b) -> bool:          # is metric a strictly better than b for this direction?
                 return a < b if direction == "min" else a > b
 
-            # NOTE (CODEX): raw per-run concept LABELS — no `concept_consolidation` canonicalization / UID /
+            # NOTE: raw per-run concept LABELS — no `concept_consolidation` canonicalization / UID /
             # taxonomy version yet (the CR1a concept_uid resolver is the §21.20.13 TODO), so a later reader
             # matches by exact string. Attempt coverage retains every tagged node, while a durable numeric
             # outcome may come only from the same feasible, live, unflagged pool used for promotion.
@@ -353,7 +353,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 evidence_nodes_total += 1
                 evidence_nodes_incomplete += int(nd.id in materialization_receipts)
                 m = getattr(nd, "robust_metric", None)
-                # CODEX AGENT: the valid retained subset of a partial classifier result remains positive
+                # the valid retained subset of a partial classifier result remains positive
                 # evidence, but the producer-level denominator below permanently forbids absence/frequency
                 # inference. Authored/heuristic labels and deleted/aborted attempts never cross this wall.
                 for c in node_concepts.get(nd.id) or []:
@@ -377,7 +377,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             return
         # The WRITE is NOT swallowed (mirrors store_case): a real persistence failure must reach finalize's
         # retry handshake (which sets complete=False and retries on the next re-entry) rather than being
-        # silently lost while `finalization_finished` is committed (CODEX).
+        # silently lost while `finalization_finished` is committed.
         from looplab.engine.memory import ConceptCapsuleStore
         capsule_store = ConceptCapsuleStore(
             Path(self._e.memory_dir) / "concept_capsules.jsonl")
@@ -426,7 +426,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
     def _portfolio_curation_key(kind: str, input_digest: str) -> str:
         if kind not in {"concept", "claim"} or len(input_digest) != 64:
             raise ValueError("invalid portfolio curation identity")
-        # CODEX AGENT: paid portfolio work is identified by the exact frozen model input, never by
+        # paid portfolio work is identified by the exact frozen model input, never by
         # whichever run happened to trigger finalize.  This is both cross-run dedup and the TOCTOU fence.
         return f"{kind}:v2:{input_digest}"
 
@@ -714,7 +714,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         claim_path = self._curation_claim_path(log_name, curation_key)
         if not claim_path.exists():
             return False
-        # CODEX AGENT: recovery metadata comes exclusively from the durable paid claim. A retrying
+        # recovery metadata comes exclusively from the durable paid claim. A retrying
         # run/model may observe the same semantic key, but it never impersonates the lost attempt.
         claim_final, claim_provenance, claim_auto_requested = self._read_curation_claim(
             claim_path, log_name, kind, curation_key)
@@ -769,7 +769,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         locked_rows: list[dict] = []
 
         def _read_locked(current: Path) -> list[dict]:
-            # CODEX AGENT: paid history is policy. Capture the complete validated ledger under the
+            # paid history is policy. Capture the complete validated ledger under the
             # physical append lock so dedup and the next revision are derived from the same snapshot.
             rows = read_curation_rows(current)
             locked_rows[:] = rows
@@ -781,7 +781,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                     continue
                 prior_outcome = str(row.get("outcome") or "")
                 if outcome == "unavailable":
-                    # CODEX AGENT: a late no-client observer is an audit only. Once another process
+                    # a late no-client observer is an audit only. Once another process
                     # commits a terminal result it may never append after or supersede that result.
                     if prior_outcome != "unavailable":
                         raise _AlreadyLogged
@@ -843,7 +843,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 if self._curation_attempt_already_resolved_locked(
                         log_name, steward_kind, final, curation_key, incomplete):
                     return
-                # CODEX AGENT: the semantic decision lock covers every fast path and the paid attempt.
+                # the semantic decision lock covers every fast path and the paid attempt.
                 # Otherwise a stale empty/unavailable observer can commit while another process is
                 # paying, then suppress that provider's terminal result at append time.
                 if not concept_curation_has_input(overview):
@@ -1010,7 +1010,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 "auto": False, "auto_requested": auto_requested,
                 "proposals": {"task_id": tid, "facets": {}}, "receipt": None,
             }
-            # CODEX AGENT: facets are once/task, so differently worded runs share this decision lock.
+            # facets are once/task, so differently worded runs share this decision lock.
             # Fast empty/governed decisions must not race a paid attempt and discard its result.
             with self._curation_decision_lock(log_name, final, curation_key):
                 if self._curation_attempt_already_resolved_locked(
@@ -1089,7 +1089,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             raw_research = getattr(final, "research", None)
             if raw_research is None:
                 return
-            # CODEX AGENT: a malformed outer memo collection is one UNKNOWN producer slot, not an
+            # a malformed outer memo collection is one UNKNOWN producer slot, not an
             # iterable of trusted memos (a dict/string used to be walked key/character by character).
             memos = raw_research if type(raw_research) in (list, tuple) else (None,)
             # An explicitly observed empty research collection is a complete zero-row D8 snapshot. It must
@@ -1159,7 +1159,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                             from looplab.trust.verify import finalize_verified_evidence
                             verified_evidence, stale_reason = finalize_verified_evidence(c, v, final)
                             if verified_evidence is None:
-                                # CODEX AGENT: an old bare node id, a capped evidence set, or a lifecycle
+                                # an old bare node id, a capped evidence set, or a lifecycle
                                 # changed after verification is audit history, never durable positive support.
                                 verdict = "unverified"
                                 note = stale_reason

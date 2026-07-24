@@ -200,7 +200,7 @@ class ConceptGovernanceTools:
                 return self._clear(str(args.get("concept") or ""), str(args.get("kind") or ""))
             return "(unknown concept governance tool)"
         except Exception as exc:  # noqa: BLE001 — ToolProvider contract: never raise from execute
-            # CODEX AGENT: registry exceptions may interpolate persisted slugs and paths. Reflect only
+            # registry exceptions may interpolate persisted slugs and paths. Reflect only
             # stable categories so a legacy secret or prompt-injection string cannot reach the transcript.
             from looplab.engine.governance_health import GovernanceLedgerUnavailable
             if isinstance(exc, GovernanceLedgerUnavailable):
@@ -225,7 +225,7 @@ class ConceptGovernanceTools:
         # A purge is stored as the _TOMBSTONE sentinel target (a truthy string), NOT "" — classify by it.
         merges = sorted((f, t) for f, t in aliases.items() if t and t != _TOMBSTONE)
         purges = sorted(f for f, t in aliases.items() if t == _TOMBSTONE)
-        # CODEX AGENT: taxonomy rows are durable, cross-run, and historically model-authored. Treat each
+        # taxonomy rows are durable, cross-run, and historically model-authored. Treat each
         # field as data, show enough split semantics for audit, and retain a fixed aggregate budget with
         # exact omission counts. Revisions are a consistent receipt from the same governance lock.
         lines = [
@@ -332,7 +332,7 @@ class ConceptGovernanceTools:
         payload = prepare_concept_split(src, rules, default)
         preview = self._split_preview(payload)
         snapshot = concept_governance_snapshot(self.dir)
-        # CODEX AGENT: the card shows normalized targets/triggers/default; its exact payload digest and
+        # the card shows normalized targets/triggers/default; its exact payload digest and
         # both CAS revisions make the operator's decision specific even when the bounded preview omits a
         # tail. A concurrent alias or split edit invalidates the approval at append time.
         gate = self._gate(
@@ -366,7 +366,7 @@ class ConceptGovernanceTools:
         preview = (f"clear {kind} policy for {_memory(source)}; "
                    f"exact_payload_sha256={_semantic_digest(payload)}")
         snapshot = concept_governance_snapshot(self.dir)
-        # CODEX AGENT: a source may be purged directly or through an alias chain. Clearing either
+        # a source may be purged directly or through an alias chain. Clearing either
         # active source edge re-exposes content, so both paths receive the central HIGH action identity;
         # exact CAS keeps this classification valid through the approval pause.
         is_unpurge = (kind == "alias"

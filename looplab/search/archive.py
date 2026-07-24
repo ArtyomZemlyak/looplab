@@ -49,7 +49,7 @@ class DiversityArchive:
             # also crash the `better` compare.) NOTE: this is the run-end DIVERSITY/AUDIT view, so it
             # deliberately KEEPS trust-gate-flagged-but-feasible nodes (they stay `feasible` for exactly
             # this diversity/audit picture) — unlike the breeding pools, which use breedable_nodes().
-            # CODEX AGENT: evaluated_nodes preserves aborted attempts for audit compatibility; the current
+            # evaluated_nodes preserves aborted attempts for audit compatibility; the current
             # diversity archive must share the selector's lifecycle boundary and exclude them explicitly.
             if n.id in aborted or n.metric is None or not n.feasible:
                 continue

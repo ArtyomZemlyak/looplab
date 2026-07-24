@@ -53,7 +53,7 @@ def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
     the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names.
     `universal` (opt-in) removes the ASCII-only allowlist on goal keywords so non-Latin goals are not
     silently dropped; default False keeps the legacy fingerprint byte-identical (see `_goal_tokens`)."""
-    # NOTE (CODEX): kind/direction/metric are Jaccard TOKENS here, not hard compatibility gates — two
+    # NOTE: kind/direction/metric are Jaccard TOKENS here, not hard compatibility gates — two
     # incompatible tasks (min/rmse vs max/recall) can clear the fuzzy floor on shared goal words. The live
     # cross-run consumer therefore applies a HARD `direction` gate on top (engine/novelty._cross_run_prior);
     # the full immutable-facet ComparisonContract that would make this rigorous is the CR0 TODO (§21.20.13).
@@ -359,7 +359,7 @@ def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
             continue
         for pid in n.parent_ids:
             p = state.nodes.get(pid)
-            # CODEX AGENT: deleted/aborted attempts are audit history, never live evidence from which a
+            # deleted/aborted attempts are audit history, never live evidence from which a
             # reusable comparative lesson may be distilled or re-derived.
             if (p is None or p.tombstoned or pid in aborted
                     or (n.id, pid) in excl):
@@ -535,7 +535,7 @@ class JsonlCaseLibrary:
         copy. One malformed/truncated line is skipped, never making the whole cross-run memory
         permanently unloadable."""
         rows = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
-        # CODEX AGENT: a syntactically-valid scalar (or a dict with an incompatible metric/params
+        # a syntactically-valid scalar (or a dict with an incompatible metric/params
         # shape) is still a poisoned case row. Quarantine it here so search and the next locked
         # upsert cannot crash on ``.get`` or on a cross-type metric comparison.
         self.cases = [case for case in rows if self._valid_case(case)]
@@ -569,7 +569,7 @@ class JsonlCaseLibrary:
                 better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
                 if not better:
                     return False
-        # CODEX AGENT: quarantine is a read decision, never permission for an unrelated upsert to erase
+        # quarantine is a read decision, never permission for an unrelated upsert to erase
         # malformed or future-schema bytes. Replace only understood current rows for this task; retain every
         # other raw line byte-for-byte and append the new current record atomically under the required lock.
         replace_jsonl_rows_atomic_preserving_quarantine(
@@ -599,7 +599,7 @@ class JsonlCaseLibrary:
 
 
 # Schema version for the durable capsule record — bump when the shape changes so a reader can migrate/
-# reject incompatible generations instead of silently mis-reading them (a CODEX finding; the full record
+# reject incompatible generations instead of silently mis-reading them (the full record
 # — evidence node-refs, visibility/retention/purge key, concept UID+taxonomy version — is the CR1a TODO).
 # v2 makes the evidence producer explicit. V1 and unversioned rows predate the authored-vs-classifier
 # trust boundary and cannot be upgraded honestly from their payload alone, so readers quarantine them.
@@ -733,7 +733,7 @@ def _capsule_completeness(
                 return None
             complete = False
         elif evidence_meta[3] is not True:
-            # CODEX AGENT: an observed-empty marker is what separates a deletion tombstone from an
+            # an observed-empty marker is what separates a deletion tombstone from an
             # unknown/never-classified empty projection.  Legacy or explicit unknown empty rows remain
             # readable, but their optimistic collection flags are never repeated downstream.
             if complete != (omitted == 0 if evidence_meta[3] is None else False):
@@ -772,7 +772,7 @@ def _capsule_source_summary(capsules: list[dict]) -> dict:
         **(getattr(capsules, "source_health", None) or {}),
     }
     return {
-        # CODEX AGENT: quarantine keeps poisoned content out, but it cannot turn an unreadable durable row
+        # quarantine keeps poisoned content out, but it cannot turn an unreadable durable row
         # into proof of absence. Completeness crosses both the per-capsule bounds and file/schema health.
         "source_complete": partial == 0 and store_health["source_store_complete"] is True,
         "partial_capsules": partial,
@@ -806,7 +806,7 @@ def _valid_capsule_record(capsule) -> bool:
     """
     if not isinstance(capsule, dict):
         return False
-    # CODEX AGENT: missing `v` is legacy, never the current schema. Defaulting it to the current version
+    # missing `v` is legacy, never the current schema. Defaulting it to the current version
     # would silently bless old proposer-authored labels after a schema bump.
     version = capsule.get("v", _LEGACY_CONCEPT_CAPSULE_VERSION)
     run_id = capsule.get("run_id")
@@ -821,7 +821,7 @@ def _valid_capsule_record(capsule) -> bool:
             or capsule.get("concept_evidence") != NODE_CONCEPT_PROVENANCE_CLASSIFIER
             or not isinstance(run_id, str) or not run_id or len(run_id) > _MAX_CAPSULE_ID_CHARS
             or not isinstance(task_id, str) or len(task_id) > _MAX_CAPSULE_ID_CHARS
-            # CODEX AGENT: every v2 producer wrote an explicit direction.  Treat a missing field as
+            # every v2 producer wrote an explicit direction.  Treat a missing field as
             # quarantine evidence instead of silently inventing ``min`` and potentially reversing the
             # meaning of retained outcomes/rank signs in unbound portfolio projections.
             or capsule.get("direction") not in ("min", "max")
@@ -836,7 +836,7 @@ def _valid_capsule_record(capsule) -> bool:
         return False
     from looplab.core.concepts import valid_concept_id
     concept_set = set(concepts)
-    # CODEX AGENT: a capsule is a durable evidence boundary. Quarantine the entire poisoned row instead of
+    # a capsule is a durable evidence boundary. Quarantine the entire poisoned row instead of
     # letting one invalid/out-of-membership key disagree with canonical run cards and concept projections.
     if (len(concept_set) != len(concepts)
             or any(not valid_concept_id(value) for value in concepts)
@@ -998,7 +998,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     ) + int(not fingerprint_collection)
     bounded_fingerprint = valid_fingerprint[:_MAX_CAPSULE_FINGERPRINT]
     if not isinstance(direction, str) or direction not in ("min", "max"):
-        # CODEX AGENT: direction controls both sign polarity and task-family scope. A writer typo must fail
+        # direction controls both sign polarity and task-family scope. A writer typo must fail
         # closed, never be coerced to `min` and persisted as inverted cross-run evidence.
         raise ValueError("concept capsule direction must be exactly 'min' or 'max'")
     normalized_direction = direction
@@ -1014,7 +1014,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         if not valid_concept_id(raw_key) or raw_key not in concept_set or not _finite_metric(value):
             continue
         all_outcomes[raw_key] = value
-    # CODEX AGENT: compute the run-relative baseline over the COMPLETE valid source field. Truncating first
+    # compute the run-relative baseline over the COMPLETE valid source field. Truncating first
     # shifts its median/neutral band and can reverse the persisted sign of retained concepts.
     all_signs = _concept_profit_signs(all_outcomes, normalized_direction)
     bounded_concept_set = set(bounded_concepts)
@@ -1039,7 +1039,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
             or type(concept_evidence_nodes_incomplete) is not int
             or not 0 <= concept_evidence_nodes_total <= _MAX_CAPSULE_SOURCE_ITEMS
             or not 0 <= concept_evidence_nodes_incomplete <= concept_evidence_nodes_total):
-        # CODEX AGENT: these counts are the durable denominator for classifier memberships.  Coercion or
+        # these counts are the durable denominator for classifier memberships.  Coercion or
         # clipping here would turn a corrupt producer receipt into permission to infer absent concepts.
         raise ValueError("concept capsule evidence-node receipt is invalid")
     if concept_evidence_observed is None:
@@ -1054,7 +1054,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-        # CODEX AGENT: ``observed=true`` plus empty collections is a same-run tombstone. ``false`` is an
+        # ``observed=true`` plus empty collections is a same-run tombstone. ``false`` is an
         # unknown snapshot and must stay partial; this additive bit keeps old positive v2 rows readable.
         "concept_evidence_observed": concept_evidence_observed,
         "concept_evidence_nodes_total": concept_evidence_nodes_total,
@@ -1102,7 +1102,7 @@ class ConceptCapsuleStore:
 
     @staticmethod
     def _valid_capsule(c: dict) -> bool:
-        """Per-row schema guard (CODEX): `dicts_only` alone lets a row with an int `fingerprint` or a
+        """Per-row schema guard: `dicts_only` alone lets a row with an int `fingerprint` or a
         string `concepts` poison retrieval (a string iterates into CHARACTER concepts). Quarantine the
         bad row instead of letting it disable the feature: require the list-typed fields to be lists and
         `run_id` to be a non-empty string. Unknown extra fields are fine (forward-compat)."""
@@ -1133,17 +1133,17 @@ class ConceptCapsuleStore:
         from looplab.events.eventstore import _interprocess_lock
         if not self._valid_capsule(capsule):
             return False
-        # CODEX AGENT: run_id is only a run-root-local label (separate checkouts default to run_local),
+        # run_id is only a run-root-local label (separate checkouts default to run_local),
         # while memory_dir is global by default. Unrelated runs therefore replace each other's capsule,
         # and current-run exclusion hides the older row first. Key upsert/exclusion by a persisted
         # globally unique run-incarnation UID; retain run_id only for display.
         rid = str(capsule.get("run_id") or "")
         with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
-            # CODEX AGENT: quarantine is a read policy, not permission to erase old/future durable data.
+            # quarantine is a read policy, not permission to erase old/future durable data.
             # Preserve raw malformed AND decoded future rows; supersede only the exact run id.
             replace_jsonl_rows_atomic_preserving_quarantine(
                 self.path, [capsule],
-                # CODEX AGENT: matching an opaque key is not permission to delete a future/invalid schema.
+                # matching an opaque key is not permission to delete a future/invalid schema.
                 # Supersede only a row this reader fully understands; keep an unknown same-run record for
                 # explicit repair/migration alongside the new current-schema capsule.
                 replace_if=lambda row: (self._valid_capsule(row)
@@ -1162,7 +1162,7 @@ class ConceptCapsuleStore:
         Results are most-similar first, excluding this run; each tuple is ``(similarity, capsule)`` so a
         surfacing cue can rank and cite by run.
         """
-        # NOTE (CODEX, full-CR TODO §21.20.13 CR2a): O(portfolio) scan+sort per call, on top of the
+        # NOTE (full-CR TODO §21.20.13 CR2a): O(portfolio) scan+sort per call, on top of the
         # whole-file reload/rewrite this store inherits from JsonlCaseLibrary — fine at tens–hundreds of
         # runs, replaced by a bounded scope/version-keyed index snapshot at portfolio scale.
         out = []
@@ -1170,7 +1170,7 @@ class ConceptCapsuleStore:
             if exclude_run_id and str(c.get("run_id") or "") == str(exclude_run_id):
                 continue
             exact_task = bool(task_id) and str(c.get("task_id") or "") == str(task_id)
-            # CODEX AGENT: the writer bounds fingerprints.  A retained prefix (or a pre-receipt v2 row)
+            # the writer bounds fingerprints.  A retained prefix (or a pre-receipt v2 row)
             # can inflate Jaccard and is not authority for related-task transfer.  Exact task identity is
             # still usable because it does not depend on the lossy fingerprint projection.
             if not exact_task and not _capsule_fingerprint_scope_complete(c):
@@ -1226,7 +1226,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
         oc = c.get("concept_outcomes") or {}
         outcome_meta = _capsule_completeness(
             c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
-        # CODEX AGENT: pre-receipt v2 writers could truncate BEFORE computing rank signs. Keep their positive
+        # pre-receipt v2 writers could truncate BEFORE computing rank signs. Keep their positive
         # concept/outcome observations, but never aggregate a sign whose comparison field may be incomplete.
         signs = (c.get("concept_signs") or {}) if outcome_meta and outcome_meta[2] else {}
         direction = str(c.get("direction") or "min")
@@ -1234,7 +1234,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
         # Deterministic per-(canonical, run) aggregation: canonicalize each raw slug through the shared
         # alias-source -> split -> alias-target pipeline,
         # then collapse the run's raw concepts that map to the SAME canonical into ONE run-row, so a run
-        # never appears twice for one concept (CODEX). The row's metric is the outcome of the sorted-first
+        # never appears twice for one concept. The row's metric is the outcome of the sorted-first
         # raw concept that HAS an outcome (deterministic tie-break), else None.
         by_canon: dict[str, list] = {}
         for i, concept in enumerate(raw):
@@ -1245,7 +1245,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
             by_canon.setdefault(key, []).append(concept)
         for key, raws in by_canon.items():
             observed = [oc[r] for r in sorted(raws) if r in oc and oc[r] is not None]
-            # CODEX AGENT: governance asserts collapsed raw labels are one canonical technique. Its run
+            # governance asserts collapsed raw labels are one canonical technique. Its run
             # outcome is therefore the best retained observation in THIS run's direction, not the value of
             # whichever alias sorts first (which can present a losing sibling beside a winning canonical).
             metric = ((min(observed) if direction == "min" else max(observed)) if observed else None)
@@ -1284,7 +1284,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
         card = {"run_id": str(c.get("run_id") or ""), "n_concepts": len(canonical),
                  "best_metric": c.get("best_metric"), "direction": str(c.get("direction") or "min"),
                  "concepts": canonical[:_MAX_OVERVIEW_CARD_CONCEPTS],
-                 # CODEX AGENT: retained labels are positive observations, not a complete assignment
+                 # retained labels are positive observations, not a complete assignment
                  # denominator.  Preserve the producer receipt on every run card so a mixed/partial run
                  # cannot be mistaken for an exact concept inventory after aggregation.
                  "source_concept_evidence_nodes_total": evidence_meta[0],
@@ -1300,7 +1300,7 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
             card["concepts_omitted"] = len(canonical) - len(card["concepts"])
         cards.append(card)
     cards.sort(key=lambda k: k["run_id"])
-    # CODEX AGENT: every outward collection has an independent hard cap. Totals and explicit omission
+    # every outward collection has an independent hard cap. Totals and explicit omission
     # counters describe the full validated snapshot, so a bounded response never masquerades as complete.
     result = {"n_runs": len(valid_capsules), "n_concepts": len(concepts),
                "concepts": concepts[:_MAX_OVERVIEW_CONCEPTS],
@@ -1366,7 +1366,7 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
         if parent and parent in kept:
             edges.append({"src": cid, "rel": "is_a", "dst": parent, "n_runs": concept_runs[cid]})
     is_a_candidates = len(edges)
-    # CODEX AGENT: select the bounded node set BEFORE O(k^2) pairing. The old one-pass implementation
+    # select the bounded node set BEFORE O(k^2) pairing. The old one-pass implementation
     # retained pair sets for every source concept even though at most 512 nodes could reach the response.
     pair_runs: dict[tuple[str, str], int] = {}
     for c in valid_capsules:
@@ -1388,11 +1388,11 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
             break
         edges.append({"src": a, "rel": "co_occurs", "dst": b, "n_runs": n_runs})
     edge_candidates = is_a_candidates + len(cooc)
-    # CODEX AGENT: edge generation intentionally runs only over the bounded node projection. Keep that
+    # edge generation intentionally runs only over the bounded node projection. Keep that
     # O(N^2) guard, but never present `edges_omitted` as a count of every edge in the full graph: edges that
     # touch a pruned node were not materialized at all and their distinct-pair count is deliberately UNKNOWN.
     capsule_source = _capsule_source_summary(valid_capsules)
-    # CODEX AGENT: bounding is not the only way an edge can be missing.  A partial classifier membership
+    # bounding is not the only way an edge can be missing.  A partial classifier membership
     # can hide an entire node and every incident edge even when the retained graph fits under its node cap.
     edge_source_complete = pruned_nodes == 0 and capsule_source["source_complete"] is True
     return {
@@ -1440,7 +1440,7 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
             cl["_concepts"].add(concept)
             cl["_runs"].add(run_id)
 
-    # CODEX AGENT: compute exact axis/concept/run totals from the full validated, de-duplicated retained
+    # compute exact axis/concept/run totals from the full validated, de-duplicated retained
     # snapshot BEFORE bounding display collections. Building on `portfolio_concept_overview` silently capped
     # each axis at 64 run ids and the whole digest at 512 concepts while presenting both counts as exact.
     axes = []

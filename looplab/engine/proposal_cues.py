@@ -244,7 +244,7 @@ class ProposalCuesMixin:
         # per-node annotations stay minimal and inherit down the DAG. Dynamic + gated here (the static
         # system prompt keeps authoring the full set when no base exists — a base-absent run is unchanged).
         if getattr(self, "_concept_run_base", False) and state.run_base_concepts:
-            # CODEX AGENT: unresolved inheritance must force full authoring; fallback [] never enables delta.
+            # unresolved inheritance must force full authoring; fallback [] never enables delta.
             from looplab.search.concept_projection import (bounded_untrusted_concept_json,
                                                             concept_inheritance_context)
             concept_context = concept_inheritance_context(
@@ -340,7 +340,7 @@ class ProposalCuesMixin:
             self._cross_run_advisory_receipt = {}
             return ""
         current_direction = getattr(state, "direction", None)
-        # CODEX AGENT: this text enters the Researcher prompt. An invalid current direction cannot
+        # this text enters the Researcher prompt. An invalid current direction cannot
         # safely interpret any historical outcome, even when a legacy row has the same task id.
         if not valid_live_direction(current_direction):
             self._cross_run_advisory_receipt = {}
@@ -440,7 +440,7 @@ class ProposalCuesMixin:
                     return False
                 if capsule:
                     from looplab.engine.memory import _capsule_fingerprint_scope_complete
-                    # CODEX AGENT: capsule fingerprints are bounded durable projections. A capped or
+                    # capsule fingerprints are bounded durable projections. A capped or
                     # pre-receipt fingerprint may still support its exact task above, but cannot authorize
                     # fuzzy transfer into a different task's live Researcher prompt.
                     if not _capsule_fingerprint_scope_complete(row):
@@ -461,7 +461,7 @@ class ProposalCuesMixin:
             # an alias map from before a split with a claim overlay from after it.
             governance = _governance
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
-            # concept never leaks into the proactive prompt through this raw overview (CODEX).
+            # concept never leaks into the proactive prompt through this raw overview.
             capsule_source = _capsule_source_summary(capsules)
             if capsules or capsule_source.get("source_complete") is not True:
                 overview, concept_rows = _portfolio_concept_overview_data(
@@ -480,14 +480,14 @@ class ProposalCuesMixin:
                     and claim_source.get("source_complete") is True):
                 self._cross_run_advisory_receipt = {}
                 return ""
-            # CODEX AGENT: live tendency selection consumes the exact scoped retained aggregate before the
+            # live tendency selection consumes the exact scoped retained aggregate before the
             # overview's display cap; build_context_pack still bounds every model-visible list itself.
             pack = build_context_pack(
                 claims, concept_overview=overview, _concept_rows=concept_rows)
             pack["concept_scope"] = concept_scope
             text = render_context_pack(pack)
             if not concept_scope["scope_complete"]:
-                # CODEX AGENT: filtered unknown-scope capsules remain part of the model-visible receipt.
+                # filtered unknown-scope capsules remain part of the model-visible receipt.
                 # Otherwise a live prompt with zero eligible rows silently turns unknown applicability into
                 # exact absence even though the fingerprint writer explicitly reported a lossy projection.
                 text += ("\nCross-run capsule applicability scope is PARTIAL: "
@@ -516,7 +516,7 @@ class ProposalCuesMixin:
             }
             return ("\n" + text) if text else ""
         except GovernanceLedgerUnavailable as exc:
-            # CODEX AGENT: suppressing untrusted policy is safe; erasing its health state is not.
+            # suppressing untrusted policy is safe; erasing its health state is not.
             # Keep a closed, content-free receipt so audit distinguishes disabled/empty from unavailable.
             self._cross_run_advisory_receipt = {
                 "v": 2, "status": "unavailable", "complete": False,

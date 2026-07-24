@@ -315,7 +315,7 @@ def validate_task(data: dict) -> TaskAdapter:
     adapter = cls.model_validate(data)
     contract = getattr(adapter, "comparison_contract", None)
     if contract is not None and contract.direction != adapter.direction:
-        # CODEX AGENT: direction is part of both execution and comparison semantics.  A mismatch
+        # direction is part of both execution and comparison semantics.  A mismatch
         # cannot be resolved later without silently reversing a ranking, so every launch surface
         # rejects it at the shared task-validation boundary.
         raise ValueError(

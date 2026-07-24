@@ -557,7 +557,7 @@ class OpenAICompatibleClient:
             use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
                           and not _stalled_prev)
             try:
-                # CODEX AGENT: admit immediately around the real provider attempt, not around a
+                # admit immediately around the real provider attempt, not around a
                 # whole node build. Retries take fresh fair turns and nested build -> novelty work
                 # cannot retain a build permit while asking for another lane at total=1.
                 with llm_request_permit():
@@ -1000,7 +1000,7 @@ class LiteLLMClient:
         last: Optional[BaseException] = None
         for attempt in range(4):
             try:
-                # CODEX AGENT: match the OpenAI-compatible transport seam. One attempt borrows one
+                # match the OpenAI-compatible transport seam. One attempt borrows one
                 # atomic total+lane slot; backoff/retry waiting itself consumes no shared capacity.
                 with llm_request_permit():
                     return litellm.completion(model=self.model, **kwargs)

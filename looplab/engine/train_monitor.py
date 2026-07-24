@@ -82,7 +82,7 @@ def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000
     if not text:
         return ""
     records: list[str] = []
-    # CODEX AGENT: normalize only the platform newline pair. Splitting each Windows `\r\n` record on
+    # normalize only the platform newline pair. Splitting each Windows `\r\n` record on
     # bare `\r` first made its final segment empty, silently disabling both watchdogs on Windows;
     # genuine standalone carriage-return progress redraws remain intact for the collapse below.
     for rec in text.replace("\r\n", "\n").split("\n"):
@@ -130,7 +130,7 @@ def _normalize_monitor_confidence(value: object) -> tuple[float, bool]:
         confidence = float(value)
     except (TypeError, ValueError, OverflowError):
         return 0.0, False
-    # CODEX AGENT: max/min is not a validity check: ``min(1.0, NaN)`` evaluates to 1.0 in Python.
+    # max/min is not a validity check: ``min(1.0, NaN)`` evaluates to 1.0 in Python.
     # Treat every non-finite model value as invalid and observable-at-zero, never as kill authority.
     if not math.isfinite(confidence):
         return 0.0, False
@@ -156,7 +156,7 @@ def claim_watchdog_kill(kill_signal: dict, cancel, *, reason: str, terminal_reas
     same tick. Only the first decision may own the persisted failure explanation; a later sibling still
     exits because the winner has already set ``cancel``. Returns whether this caller won the claim.
     """
-    # CODEX AGENT: there is deliberately no await between this guard and the one-shot dict update. Both
+    # there is deliberately no await between this guard and the one-shot dict update. Both
     # watchdogs run on the same cooperative event loop, so the first writer owns reason + terminal_reason
     # as one indivisible decision instead of a later task producing a mixed/overwritten terminal record.
     if kill_signal.get("kill"):
@@ -319,7 +319,7 @@ def read_training_tail_raw(workdir, *, max_read_bytes: int = 131_072,
                 if not replaced and not truncated:
                     fh.seek(cursor.probe_start)
                     boundary_changed = fh.read(len(cursor.probe)) != cursor.probe
-                # CODEX AGENT: only a proven append may inherit the old EOF. Rotation/replacement or a
+                # only a proven append may inherit the old EOF. Rotation/replacement or a
                 # truncate-and-regrow (including past the old size before the first watchdog tick) starts
                 # at zero; if identity is unavailable, the boundary probe supplies the same protection.
                 floor = 0 if (replaced or truncated or boundary_changed) else cursor.offset
@@ -400,7 +400,7 @@ class TrainingMonitorMixin:
 
         Advisory (always): every tick with a CHANGED digest emits a `train_monitor` trace span carrying
         the verdict; a NON-healthy verdict additionally appends an EV_TRAIN_MONITOR_ALERT diagnostic event
-        (fold-ignored, so it cannot directly change lifecycle/champion/replay). CODEX AGENT: the raw
+        (fold-ignored, so it cannot directly change lifecycle/champion/replay). The raw
         diagnostic can still steer a later Researcher prompt when watchdog_reflection is enabled, and it
         also feeds the owner attention view + audit.
         Healthy verdicts stay trace-only except for a healthy transition after an alert; that explicit
@@ -426,7 +426,7 @@ class TrainingMonitorMixin:
         last_digest: Optional[str] = None
         healthy_streak = 0
         last_event_status: Optional[str] = None
-        # CODEX AGENT: resume may restart the observer inside the same node generation. Recover its last
+        # resume may restart the observer inside the same node generation. Recover its last
         # durable state so the first healthy verdict can close a pre-crash warning instead of losing it.
         try:
             prior_rows = await anyio.to_thread.run_sync(self.store.read_all)
@@ -468,7 +468,7 @@ class TrainingMonitorMixin:
                     if llm_calls >= _MAX_MONITOR_LLM_CALLS:
                         sp.set("llm_capped", True)
                     else:
-                        # CODEX AGENT: the verdict is advisory, but its client usage is billable and is
+                        # the verdict is advisory, but its client usage is billable and is
                         # recorded on shared run state. Join an in-flight call on eval cancellation so
                         # no detached worker can emit cost after the node/run has finalized. Endpoint
                         # timeouts remain the upper bound for this ownership hand-off.
@@ -494,7 +494,7 @@ class TrainingMonitorMixin:
                         sp.set("next_check_s", round(next_sleep, 2))
                         if (verdict.status != "healthy"
                                 or last_event_status in ("watch", "broken")):
-                            # CODEX AGENT: healthy is normally trace-only, but the transition from an alert
+                            # healthy is normally trace-only, but the transition from an alert
                             # is a durable recovery edge. Without it, projections can only ever discover the
                             # old bad verdict and keep warning after the live curve has recovered.
                             assert EV_TRAIN_MONITOR_ALERT in DIAGNOSTIC_EVENTS

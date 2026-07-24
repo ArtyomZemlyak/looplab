@@ -120,8 +120,8 @@ def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric:
                   universal: bool = True, facets: Optional[dict] = None) -> dict:
     """The task PASSPORT (§21.20.3): an IMMUTABLE task identity + fingerprint + salient goal terms.
     Deliberately derives ONLY from the immutable task (kind/direction/metric/goal) — NOT the winner's
-    params, which are outcome-derived and would make identity shift when a new node wins or a run extends
-    (CODEX). Result features belong on `run_facts` attempts, not the passport. `fp_mode`/`v` version the
+    params, which are outcome-derived and would make identity shift when a new node wins or a run extends.
+    Result features belong on `run_facts` attempts, not the passport. `fp_mode`/`v` version the
     tokenizer+schema so records built under different modes are never silently joined.
 
     `facets` (from the AGENTIC `task_facets`, §21.20.2) is an OPTIONAL advisory overlay — a "facets" key is
@@ -149,18 +149,18 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
     `task.snapshot.json` (not carried on `RunState`); everything else is folded. Deterministic: attempts are
     emitted in node-id order, all sets sorted. This is `ExecutionAttempt`/`Measurement` in lean JSON form."""
     best = state.best()
-    # The passport derives ONLY from the immutable task (no winner params) — see scope_profile (CODEX).
+    # The passport derives ONLY from the immutable task (no winner params) — see scope_profile.
     scope = scope_profile(task_id=state.task_id, kind=kind, direction=state.direction, goal=state.goal,
                           metric=metric, universal=universal)
     attempts = []
-    # NOTE (CODEX): these attempts are folded LATEST-generation facts — a `node_reset` (.1 -> reset -> .9)
+    # NOTE: these attempts are folded LATEST-generation facts — a `node_reset` (.1 -> reset -> .9)
     # collapses to one attempt at .9, and concept labels are raw (no concept_uid/taxonomy). Immutable
     # per-generation attempt/measurement facts (with trust/feasibility/holdout/uncertainty + concept UIDs)
     # are the full-CR0 TODO (§21.20.13); this lean projection is the deterministic-rebuild foundation.
     for nid in sorted(state.nodes):
         nd = state.nodes[nid]
         idea = getattr(nd, "idea", None)
-        # CODEX AGENT: cross-run facts are reusable evidence, so display-only authored claims fail closed.
+        # cross-run facts are reusable evidence, so display-only authored claims fail closed.
         # DESIGN NOTE (2026-07-17 critique): the authored-vs-classifier trust wall is HARD here — authored
         # concepts fail closed, and the classifier only runs WITH a reflect client, so an OFFLINE run's
         # concepts never reach cross-run facts ([] for the whole passport, #4). "Concepts as the single
@@ -173,7 +173,7 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
             "node_id": nid,
             "operator": str(getattr(idea, "operator", "") or "") if idea is not None else "",
             "params": dict(getattr(idea, "params", {}) or {}) if idea is not None else {},
-            # `.value` (a NodeStatus is a `str, Enum`) — `str(status)` would emit "NodeStatus.evaluated" (CODEX).
+            # `.value` (a NodeStatus is a `str, Enum`) — `str(status)` would emit "NodeStatus.evaluated".
             "status": str(getattr(st, "value", None) or getattr(st, "name", None) or st or ""),
             "metric": getattr(nd, "robust_metric", None),
             "concepts": sorted(str(c) for c in concepts),
@@ -191,7 +191,7 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
     """Best-effort (kind, metric) from a run's `task.snapshot.json` — tolerant of the legacy `kind` enum
     and the newer nested `metric.{reader,kind}` spelling (see adapters/tasks.py). Never raises."""
     try:
-        # CODEX AGENT: parse only the same bounded regular-file contract used by source identity. The
+        # parse only the same bounded regular-file contract used by source identity. The
         # final digest recheck in ``build_index_incremental`` fences replacement between these two reads.
         path = run_dir / "task.snapshot.json"
         snap = json.loads(_read_bounded_regular_bytes(
@@ -199,7 +199,7 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
         if not isinstance(snap, dict):
             return "", ""
     except Exception:  # noqa: BLE001 — a missing/garbled snapshot just yields empty facets (see NOTE below)
-        # NOTE (CODEX): "" here is indistinguishable from a genuinely empty facet; a full record would carry
+        # NOTE: "" here is indistinguishable from a genuinely empty facet; a full record would carry
         # explicit degraded/error provenance so an incomplete passport isn't treated as compatible evidence.
         return "", ""
     kind = str(snap.get("kind") or "")
@@ -210,7 +210,7 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
         return str(v or "")
 
     # Metric location varies by adapter contract: top-level `metric` (dataset tasks — real snapshots use a
-    # bare string here), or nested under `eval`/`cmd` for repo/cmd tasks (CODEX). Try each in order.
+    # bare string here), or nested under `eval`/`cmd` for repo/cmd tasks. Try each in order.
     metric = _metric_of(snap.get("metric"))
     for key in ("eval", "cmd"):
         if not metric and isinstance(snap.get(key), dict):
@@ -221,7 +221,7 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
 def _content_digest(record: dict) -> str:
     """A canonical content hash of a full facts record — the FINAL sort tie-break so two runs that are
     otherwise identical on (run_id, task_id, n_attempts, best-metric) but differ in their attempts still
-    order deterministically by content, never by input/traversal order (CODEX)."""
+    order deterministically by content, never by input/traversal order."""
     return hashlib.sha1(json.dumps(record, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -249,7 +249,7 @@ def rebuild_index_from_run_root(run_root: str | Path, *, universal: bool = True)
 # --------------------------------------------------------------------------- #
 # Incremental rebuild (full-CR §21.20.13) — source-digest cached, receipted, atomically persistable.
 # Only runs whose event log / snapshot CHANGED are re-folded; unchanged runs reuse cached facts, and a
-# torn/unreadable run produces an explicit SKIP receipt instead of vanishing silently (CODEX).
+# torn/unreadable run produces an explicit SKIP receipt instead of vanishing silently.
 # --------------------------------------------------------------------------- #
 
 def run_source_digest(run_dir: str | Path) -> str:
@@ -314,7 +314,7 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
     """Rebuild the portfolio index over `<run_root>/*/events.jsonl`, REUSING cached facts for runs whose
     `run_source_digest` is unchanged vs `prior` (from a previous `build_index_incremental`/`load_index`).
     Returns `{"index", "runs": {dir: {digest, facts}}, "receipts": {"built", "cached", "skipped"}}` where
-    `skipped` is a list of `{dir, reason}` for torn/unreadable/empty runs (explicit, not silent — CODEX).
+    `skipped` is a list of `{dir, reason}` for torn/unreadable/empty runs (explicit, not silent).
     Pure w.r.t. the on-disk logs + the passed `prior`; deterministic (index is `build_index`-sorted)."""
     from looplab.events.eventstore import EventStore
     from looplab.events.replay import fold
@@ -372,7 +372,7 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
             continue
         # A torn log folds LENIENTLY to an identity-less empty state (no run_started parsed): the lenient
         # reader never raised, but a run with no run_id AND no attempts cannot be joined/deduped and would
-        # otherwise index as a phantom "" run (CODEX). Report it as a skip, not silent portfolio evidence.
+        # otherwise index as a phantom "" run. Report it as a skip, not silent portfolio evidence.
         if not facts["run_id"] and facts["n_attempts"] == 0:
             receipts["skipped"].append({"dir": name, "reason": "empty/unreadable projection (no run identity)"})
             continue

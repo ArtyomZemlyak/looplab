@@ -153,7 +153,7 @@ class ToolUsingResearcher:
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
             "name": "emit", "description": "Emit the final Idea for the next experiment.",
-            # CODEX AGENT: expose the strict modern writer schema, not the tolerant durable reader.
+            # expose the strict modern writer schema, not the tolerant durable reader.
             "parameters": IdeaEmission.model_json_schema()}}
 
     @staticmethod

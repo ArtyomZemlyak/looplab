@@ -124,7 +124,7 @@ def build_router(srv) -> APIRouter:
             # The command sequencer excludes command workers/current spawn leases. The lifecycle
             # fence additionally excludes the durable-resume reconciler and reset's pre-lock launch
             # window introduced by older/CLI-compatible control paths.
-            # CODEX AGENT: Acquire the required metadata lock before deleting bytes. Returning 503
+            # Acquire the required metadata lock before deleting bytes. Returning 503
             # after rmtree would falsely report failure for a run that was already irreversibly gone.
             with _run_lifecycle_lock(rd), _project_transaction():
                 liveness = _engine_liveness(rd)

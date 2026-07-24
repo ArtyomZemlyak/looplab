@@ -388,7 +388,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         deep_researcher=deep_researcher,
         report_writer=report_writer,
         developer_factory=dev_factory,
-        # CODEX AGENT: a fresh wired pair per concurrent build prevents mutable role state from being
+        # a fresh wired pair per concurrent build prevents mutable role state from being
         # shared when the settled build width is >1 (canonical llm_parallel; legacy parallel_build).
         # This is LLM/build isolation, not proof of the later evaluation's CPU/GPU allocation.
         role_factory=(lambda: role_builder(task, settings, run_dir)),
