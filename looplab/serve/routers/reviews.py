@@ -21,6 +21,9 @@ from looplab.trust.redact import redact_secrets
 
 class ReviewCreate(BaseModel):
     ttl_seconds: int = DEFAULT_TTL_SECONDS
+    # CODEX AGENT: Pydantic coercion accepts strings such as "yes" here and mints an
+    # evidence-scoped bearer despite the caller not sending JSON true. Use StrictBool/a strict request
+    # model because this field expands a public capability boundary.
     include_evidence: bool = False
 
 

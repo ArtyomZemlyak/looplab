@@ -1692,6 +1692,10 @@ def build_router(srv) -> APIRouter:
                     last_generation = generation
                     last_event_count = event_count
                     last_beat = time.monotonic()
+                    # CODEX AGENT: every event serializes and retransmits the complete growing folded
+                    # state, so one long-lived client receives quadratic bytes and repeats whole-state
+                    # encoding. Stream bounded deltas/event batches plus generation/checkpoint receipts,
+                    # reserving full snapshots for initial/recovery sync.
                     yield (f"id: {payload['seq']}\n"
                            f"event: {SSE_STATE}\n"
                            f"data: {json.dumps(payload)}\n\n")
@@ -2145,6 +2149,10 @@ def build_router(srv) -> APIRouter:
         repo / reference / data paths the task declared, so outputs a training command wrote straight
         into the actual repo (not under runs/) are reachable too. Each file carries size + mtime + a
         cheap is_text guess; /artifact serves the content."""
+        # CODEX AGENT: this request-time walk has no baseline, lifecycle generation or content manifest,
+        # so declared repo/reference/data inputs and files created after the run are labelled as outputs.
+        # Persist an output manifest or expose explicit `live_workspace` / `provenance_unknown` semantics
+        # instead of claiming that the run produced every current file.
         rd = _run_dir(run_id)
         try:
             exposed = _artifact_exposure_policy(rd)
@@ -2283,6 +2291,9 @@ def build_router(srv) -> APIRouter:
         agent = f"agent:looplab/{st.config_hash or 'run'}"
         ent, act, wgb, used, wdf, waw = {}, {}, {}, {}, [], {}
         for n in st.nodes.values():
+            # CODEX AGENT: provenance identities omit lifecycle generation even though node ids survive
+            # reset. A child derived from parent generation 0 is later reported as derived from replacement
+            # generation 1; retain parent_generations and key entities/activities by `(node_id, attempt)`.
             e, a = f"sol:{n.id}", f"exp:{n.id}"
             ent[e] = {"prov:label": f"solution node {n.id}",
                       "ll:metric": n.robust_metric,

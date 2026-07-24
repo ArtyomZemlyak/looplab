@@ -553,6 +553,10 @@ class MachineRunsTools:
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_runs",
+                # CODEX AGENT: this provider scans only its configured run_root, not every run on the
+                # machine. The stronger wording makes absence look portfolio-wide and can cause repeated
+                # experiments; either discover/configure all roots or name this capability "all runs
+                # under this run root" consistently in schema and docs.
                 "List EVERY LoopLab run on this machine with its goal, phase, best metric, node count "
                 "and whether its engine is LIVE right now. Use to reference an existing run, see what "
                 "is running, or pick one to inspect/steer.",

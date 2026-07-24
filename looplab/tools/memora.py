@@ -213,6 +213,10 @@ class CachedAbstractor:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             from looplab.core.atomicio import atomic_write_text
+            # CODEX AGENT: this cache is unbounded and every miss serializes/replaces the complete
+            # map. A shared long-lived memory corpus therefore consumes unbounded RAM and quadratic
+            # cumulative I/O; use a bounded/compacted on-disk KV or append-log index, enforce limits,
+            # and coordinate concurrent writers.
             atomic_write_text(self.path, json.dumps(self._cache))
         except Exception:  # noqa: BLE001 — a cache we can't persist is a perf miss, not an error
             pass

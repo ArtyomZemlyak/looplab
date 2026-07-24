@@ -1278,6 +1278,10 @@ def migrate_config_snapshot(data: dict) -> dict:
 
 
 def settings_from_snapshot(data: dict) -> Settings:
+    # CODEX AGENT: snapshots have no schema/runtime version and Settings ignores unknown fields.
+    # An older binary can silently drop newer behavior-affecting controls and resume the same event
+    # history with different paid/concurrency/selection semantics. Version snapshots and fail closed
+    # on an unsupported downgrade before migration/default filling.
     """Build re-entry Settings from a masked snapshot under its historical missing-field contract."""
     migrated = migrate_config_snapshot(data)
     migrated.pop("llm_api_key", None)

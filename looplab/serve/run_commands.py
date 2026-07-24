@@ -899,6 +899,9 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         data["code"] = snode.code or None
         data["files"] = dict(snode.files)
         data["deleted"] = list(snode.deleted)
+        # CODEX AGENT: run_id and node_id are both reused across resets, so this receipt and its UI
+        # link can later identify different source bytes. Bind the origin to source run generation,
+        # `snode.attempt`, and preferably a content digest before importing the snapshot.
         data["origin"] = {"run_id": sr, "node_id": sn, "metric": snode.robust_metric}
 
     # The event fold is intentionally tolerant of historical hand-authored logs.  HTTP mutation is a

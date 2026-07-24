@@ -65,6 +65,10 @@ build-backend = "setuptools.build_meta"
 include = ["looplab*"]
 
 [tool.setuptools.package-data]
+# CODEX AGENT: wheels omit the top-level `ui/` source and dist although installed UI/Jupyter
+# entrypoints resolve it beside site-packages. A normal `pip install looplab[ui|jupyterhub]` cannot
+# build or serve the advertised React app; ship a prebuilt bundle as package data and resolve it via
+# importlib.resources, or narrow the installation contract.
 looplab = ["serve/*.json"]
 
 [tool.pytest.ini_options]

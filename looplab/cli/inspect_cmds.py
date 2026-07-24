@@ -977,6 +977,10 @@ def cross_run_index_cmd(
     )
     if incremental:
         cache = run_root / ".cross_run_index.json"
+        # CODEX AGENT: incremental update is an interprocess read-build-replace transaction, but no
+        # lock spans load through save. Concurrent indexers can let an older scan overwrite the newer
+        # cache (atomic replace prevents tearing, not lost updates), causing stale receipts and repeated
+        # folds. Hold a cache-specific lock or save with a source-generation CAS and retry.
         res = build_index_incremental(run_root, prior=load_index(cache))
         idx = res["index"]
         if idx:

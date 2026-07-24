@@ -666,6 +666,9 @@ def _coverage_signal(
     # Card proposal tags preserve their bounded raw spelling for audit. Compare them only after the
     # SAME normalization/consolidation projection that produced ``trusted_memberships``; otherwise
     # ``Loss X``/``loss-x`` or a retired alias receives a false uncovered bonus.
+    # CODEX AGENT: candidate coverage is self-reported by the same Researcher competing for selection.
+    # A plausible new slug earns maximal exploration bonus before independent classification/evidence;
+    # require a complete independent concept-source receipt or score only post-build trusted tags.
     concepts = sorted({
         concept
         for tag in card.concept_tags
@@ -748,6 +751,9 @@ def card_score(
     )
     confidence = _unit_float(card.confidence, 0.0)
     priority = _priority_signal(card)
+    # CODEX AGENT: provenance-free model self-confidence is known by the foresight module to be
+    # outcome-uncorrelated, yet it carries 65% of this active selection signal. Persist confidence
+    # source/evidence and admit only verifier-calibrated values; otherwise keep it display-only.
     foresight = 0.65 * confidence + 0.35 * priority
     if treatment.stance == "explore":
         primary, secondary = exploration, foresight

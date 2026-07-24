@@ -162,6 +162,9 @@ class SpanIndex:
         # A readable empty source and an unreadable source are different facts. Let I/O failures
         # reach the HTTP projection boundary instead of publishing a complete-looking empty index.
         with open(self.path, "rb") as f:
+            # CODEX AGENT: a cold rebuild materializes the entire spans.jsonl before parsing, so a
+            # multi-GB trace can OOM the server even though the resulting index is lightweight. Scan
+            # bounded chunks/lines incrementally and publish only after a complete validated pass.
             buf = _read_exact(f, size, label="trace source")
         records, consumed = _scan_light(buf, 0)      # parse OUTSIDE the lock (the slow part)
         with self._rlock:                            # publish the new maps atomically vs a lock-free read

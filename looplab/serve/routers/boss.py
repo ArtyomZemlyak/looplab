@@ -454,6 +454,9 @@ async def _json_object(request) -> dict:
         raise HTTPException(400, "request body must be valid JSON") from exc
     if not isinstance(body, dict):
         raise HTTPException(400, "request body must be a JSON object")
+    # CODEX AGENT: validating only the outer object leaves `messages`, `instruction` and `node_id`
+    # untyped; valid JSON such as `{"instruction": 1}` or scalar message entries escapes as a 500,
+    # making paid/advisory retries ambiguous. Give each endpoint one strict nested request model.
     return body
 
 

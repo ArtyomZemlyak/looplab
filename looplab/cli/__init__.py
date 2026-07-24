@@ -168,6 +168,10 @@ def _engine_singleton(run_dir: Path):
                 f.seek(0)
                 try:
                     msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                # CODEX AGENT: not every Windows OSError means lock contention. Permission, invalid
+                # handle, network-filesystem and I/O failures become a phantom "already running"
+                # engine and silently no-op; distinguish the documented contention errno set and fail
+                # closed with an actionable infrastructure error for everything else.
                 except OSError:
                     acquired = False    # byte held by a live engine (Windows local FS supports locking)
             else:
