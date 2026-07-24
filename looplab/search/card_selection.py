@@ -1178,9 +1178,12 @@ def _counterfactual_owned_card_state(
 
 def _card_administratively_dead(card) -> bool:
     """Whether a PRESENT Card is closed to further work: operator/engine/freshness/novelty dropped
-    (``status == "dropped"``) or merged into a canonical row (``merged_into`` set). Deliberately keys
-    on the FOLDED status, not ``dropped_reason`` — a reason-less card_dropped folds to status="dropped"
-    with dropped_reason=None, so a reason-keyed check would let it slip through."""
+    (``status == "dropped"``). Deliberately keys on the FOLDED status, not ``dropped_reason`` — a
+    reason-less card_dropped folds to status="dropped" with dropped_reason=None, so a reason-keyed
+    check would let it slip through. The ``merged_into`` disjunct is DEFENSIVE only: the fold collapses
+    a merged Card OUT of ``state.cards`` (absent, tracked via its canonical's ``aliases``) and never
+    assigns ``merged_into``, so a merged Card never reaches this helper as a present row — callers
+    exclude a merged id by alias membership, not here."""
     return card.status == "dropped" or card.merged_into is not None
 
 
@@ -1341,15 +1344,26 @@ def _reserved_speculative_slots(state: RunState, excluded_card_ids: frozenset[st
     """Count request/build reservations not represented by a Node budget row yet."""
 
     reserved = 0
+    # A merged-away Card is ABSENT from `state.cards`: the fold collapses an alias INTO its canonical and
+    # records the alias only in the canonical's `.aliases` — `Card.merged_into` is never actually assigned
+    # by the fold, so a merged id resolves via alias membership, NOT a present `merged_into` row.
+    merged_alias_ids = {
+        alias for card in state.cards.values()
+        for alias in (getattr(card, "aliases", None) or [])
+        if isinstance(alias, str) and alias
+    }
     # `excluded_card_ids` also carries durable producer-failed ids (append-only). A live Card with no Node
     # budget row yet IS a genuine outstanding request/build reservation, so it counts. But an
-    # administratively-dead Card (operator-dropped, status=="dropped", or merged, merged_into set) owns no
-    # live request/build: a producer-failed id that is later dropped/merged would otherwise be counted as
-    # an outstanding reservation FOREVER and monotonically starve speculative capacity. Exclude those.
+    # administratively-DEAD Card owns no live request/build: operator-dropped / status=="dropped" (a
+    # PRESENT row, caught by `_card_administratively_dead`), OR merged away (ABSENT, its id in
+    # `merged_alias_ids`). A producer-failed id later dropped/merged would otherwise be counted as an
+    # outstanding reservation FOREVER and monotonically starve speculative capacity. Exclude both shapes.
     for card_id in excluded_card_ids:
         card = state.cards.get(card_id)
         if card is not None and _card_administratively_dead(card):
             continue
+        if card is None and card_id in merged_alias_ids:
+            continue                                # merged into a canonical — folded, not outstanding
         if card is None or not card.evidence:
             reserved += 1
     return reserved

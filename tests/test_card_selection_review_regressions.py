@@ -205,3 +205,27 @@ def test_coverage_canonicalizes_card_alias_case_and_space_with_explored_identity
         scoring={"stance": "explore", "novelty_weight": 0.0, "coverage_weight": 1.0},
     )
     assert [card.id for card in selected] == ["z-new"]
+
+
+def test_reserved_speculative_slots_excludes_a_merged_away_alias():
+    """A merged-away Card is folded OUT of state.cards (absent) and recorded only in its canonical's
+    `aliases` — `Card.merged_into` is never set. `_reserved_speculative_slots` must not count such an
+    absent alias as an outstanding reservation FOREVER (which monotonically starves speculative
+    capacity); it excludes it via alias membership, matching the sibling counterfactual path."""
+    from looplab.search.card_selection import _reserved_speculative_slots
+
+    canonical = _ready_card("canon", "c").model_copy(update={
+        "selection_ready": False,                        # avoid the RunState fresh-work-item validator
+        "aliases": ["merged-alias"],                     # "merged-alias" was folded INTO canon
+    })
+    state = RunState(direction="min", cards={"canon": canonical})
+
+    # canon itself has no evidence yet -> a genuine outstanding reservation (counts).
+    assert _reserved_speculative_slots(state, frozenset({"canon"})) == 1
+    # the merged-away alias is absent AND a known alias -> NOT outstanding (must be excluded).
+    assert _reserved_speculative_slots(state, frozenset({"merged-alias"})) == 0
+    # a genuinely-unknown absent id is still a reservation (fix must not over-exclude).
+    assert _reserved_speculative_slots(state, frozenset({"ghost"})) == 1
+    # combined: canon (1) + ghost (1) counted, merged-alias (0) excluded -> 2.
+    assert _reserved_speculative_slots(
+        state, frozenset({"canon", "merged-alias", "ghost"})) == 2
