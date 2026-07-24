@@ -74,6 +74,17 @@ def test_rank_drops_out_of_range_and_dupes():
     assert order == [1, 0]
 
 
+def test_rank_neutralizes_nonfinite_confidence_to_abstain():
+    # untrusted model output: NaN/+inf confidence slips through the min/max clamp AS 1.0
+    # (min(1.0, nan) == 1.0 because every NaN comparison is False), so a garbage confidence would read
+    # as MAXIMUM and pass best_of_n's `conf >= min_confidence` gate, committing a low-quality pick as a
+    # "confident" foresight_selected. The advisory predictor must fail open (0.0 -> abstain), not high.
+    for bad in (float("nan"), float("inf")):
+        order, conf, _ = rank(_RankClient([1, 0], bad), "r", [_A, _B])
+        assert order == [1, 0]
+        assert conf == 0.0, f"non-finite confidence {bad!r} must neutralize to 0.0, got {conf}"
+
+
 def test_rank_abstains_below_two_items():
     assert rank(_RankClient([0]), "r", [_A]) is None
     assert rank(_RankClient([0]), "r", []) is None

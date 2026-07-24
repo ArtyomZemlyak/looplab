@@ -127,9 +127,6 @@ def _sanitize_ranking(out, n: int) -> Optional[tuple[list[int], float, str]]:
         return None
     seen: set[int] = set()
     order: list[int] = []
-    # CODEX AGENT: model output is untrusted: bool is an int here, and bool/NaN confidence can become a
-    # full-confidence ranking that bypasses abstention. Reject bool indices and bool/non-finite
-    # confidence before ordering (prefer strict schema fields).
     for idx in getattr(out, "order", None) or []:
         if isinstance(idx, int) and 0 <= idx < n and idx not in seen:
             seen.add(idx)
@@ -137,8 +134,19 @@ def _sanitize_ranking(out, n: int) -> Optional[tuple[list[int], float, str]]:
     if not order:
         return None
     order.extend(i for i in range(n) if i not in seen)
-    conf = out.confidence if isinstance(getattr(out, "confidence", None), (int, float)) else 0.0
-    return order, max(0.0, min(1.0, float(conf))), (getattr(out, "reason", "") or "").strip()[:600]
+    # Untrusted model output: NaN/+inf confidence slips through the min/max clamp AS 1.0 —
+    # min(1.0, nan) is 1.0 because every NaN comparison is False, and min(1.0, +inf) is 1.0 — so a
+    # garbage confidence would read as MAXIMUM and pass best_of_n's `conf >= min_confidence` gate,
+    # committing a low-quality pick as a "confident" foresight_selected. Fail open for the advisory
+    # predictor: neutralize any non-finite value to 0.0 (lowest -> abstain) before clamping. (`x != x`
+    # is the portable NaN test; the ±inf equality catches the infinities without a math import.) A bool
+    # is coerced to 0.0/1.0 at the pydantic `_Ranking` boundary before it reaches here, so rejecting it
+    # would need strict schema fields — a deeper change that raises the abstention rate — and is deferred.
+    conf = getattr(out, "confidence", None)
+    conf = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else 0.0
+    if conf != conf or conf in (float("inf"), float("-inf")):
+        conf = 0.0
+    return order, max(0.0, min(1.0, conf)), (getattr(out, "reason", "") or "").strip()[:600]
 
 
 def _rank_user_msg(report: str, items: list[str], goal: str, direction: str) -> str:
