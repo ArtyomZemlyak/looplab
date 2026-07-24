@@ -557,7 +557,11 @@ def ablation_attribution(state: RunState) -> dict:
         for comp, imp in (ab.get("impacts") or {}).items():
             try:
                 v = abs(float(imp))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError (NOT a ValueError/TypeError) is `float(imp)` on a huge int — a crafted/
+                # hand-edited `impact` of a 300-digit JSON integer, stored raw by the fold (no numeric
+                # coercion). Left uncaught it tore down the always-on `experiments_digest`. Match the
+                # module's canonical guard `core/fitness.py::is_usable_metric`, which also catches it.
                 continue
             if not math.isfinite(v):
                 # abs(inf)/abs(nan) don't raise, so the try above doesn't catch them — a crafted/

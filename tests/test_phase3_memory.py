@@ -145,6 +145,20 @@ def test_ablation_attribution_skips_non_finite_impacts():
     assert "model" not in attr and "aug" not in attr        # inf/NaN dropped, not summed
 
 
+def test_ablation_attribution_skips_huge_int_impact():
+    # Regression: `float(imp)` on a huge int raises OverflowError (NOT ValueError/TypeError), which the
+    # except above did not catch — a crafted/hand-edited 300-digit integer `impact` (stored raw by the
+    # fold) tore down the always-on `experiments_digest`. It must be skipped like the non-finite case.
+    st = _state([_node(0, metric=1.0)])
+    st.ablations = [{"parent_id": 0, "impacts": {"features": 0.3, "model": 10 ** 400}},
+                    {"parent_id": 0, "impacts": {"features": 0.2}}]
+    attr = ablation_attribution(st)                          # must not raise OverflowError
+    assert list(attr) == ["features"]                        # only the finite component survives
+    assert attr["features"]["impact"] == pytest.approx(0.5) and attr["features"]["n"] == 2
+    assert "model" not in attr                               # huge int dropped, not summed
+    assert "Component attribution" in experiments_digest(st)  # digest builds without crashing
+
+
 def test_experiments_digest_excludes_tombstoned_nodes():
     # §6.3: tombstoned (logically-deleted) nodes are invisible to selection; the always-on Researcher
     # context (fail count, failures list, theme rollup) must hide them too — else a deleted dead-end
