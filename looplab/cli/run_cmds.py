@@ -639,10 +639,13 @@ def resume(
     if snap.exists():
         data = json.loads(snap.read_text(encoding="utf-8"))
         settings = settings_from_snapshot(data)
-    # CODEX AGENT: assignment validation is disabled, so this direct override accepts 0/negative despite
-    # Settings.max_nodes ge=1 and can append resume/reopen work only to finish immediately. Reconstruct
-    # and validate Settings with the override before any lifecycle event.
+    # Settings.max_nodes carries ge=1, but assignment validation is disabled (flat-settings/snapshot
+    # design), so this direct override would silently accept 0/negative and then append resume/reopen
+    # work that can only finish immediately. Enforce the field's own floor here, before `_engine` and
+    # before any lifecycle event (`run` validates the same 1<= bound on the fresh path).
     if max_nodes is not None:
+        if max_nodes < 1:
+            raise typer.BadParameter("--max-nodes must be >= 1")
         settings.max_nodes = max_nodes
     eng = _engine(run_dir, task, settings, crash_after=None)
     _preflight_speculation_authority(eng)

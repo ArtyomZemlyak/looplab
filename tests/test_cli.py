@@ -35,6 +35,21 @@ def test_run_toy_task_offline(tmp_path):
     assert "finished=True" in result.output
 
 
+def test_resume_rejects_a_nonpositive_max_nodes_override(tmp_path):
+    # Settings.max_nodes is ge=1, but assignment validation is off, so a resume override of 0/negative
+    # would slip past and append resume/reopen work that can only finish immediately. Reject it up front,
+    # before `_engine` and any lifecycle event.
+    out = tmp_path / "r"
+    assert runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
+        "--set", "max_nodes=2", "--out", str(out),
+    ]).exit_code == 0
+    for bad in ("0", "-3"):
+        result = runner.invoke(app, ["resume", str(out), "--max-nodes", bad])
+        assert result.exit_code != 0, result.output
+        assert "max-nodes" in result.output.lower()
+
+
 def test_run_refuses_a_different_task_in_an_existing_run_dir(tmp_path):
     # arch-review §3 P0-5: a `run` on a dir that already holds a DIFFERENT task must refuse rather than
     # overwrite its snapshot and reopen the old log (mixing experiments in one event log).
