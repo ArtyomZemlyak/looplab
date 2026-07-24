@@ -4528,10 +4528,11 @@ def _derive_cards(st: RunState) -> None:
 
     # 1) explicitly-added cards — may start with no evidence. Coerce defensively (engine/control events
     #    arrive verbatim; one malformed entry must not brick every fold). The compatibility projection
-    #    also MIRRORS `_derive_hypotheses` by seeding from the
+    #    also MIRRORS the removed `_derive_hypotheses` by seeding from the
     #    engine-populated `hypotheses_added` (deep-research/human directions), so a node-less hypothesis
-    #    still becomes a card and `st.cards` stays a faithful shadow of `st.hypotheses`. `card_*` first so
-    #    a real card_added (explicit id/source) wins the id over its hypothesis twin (dedup = first wins).
+    #    still becomes a card — `st.cards` now SUBSUMES the removed `st.hypotheses` board (its cards-only
+    #    replacement). `card_*` first so a real card_added (explicit id/source) wins the id over its
+    #    hypothesis twin (dedup = first wins).
     for native_row, d in (
             [(True, row) for row in st.cards_added]
             + [(False, row) for row in st.hypotheses_added]):
