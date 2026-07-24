@@ -1328,14 +1328,16 @@ class Card(BaseModel):
     created_at_node: int = 0
     # Lifecycle lane (DERIVED; frozen UI-contract vocabulary, kept OPEN so Layer 5 can add
     # speculating/built-awaiting-commit without a model rework): proposed (no node yet) | building
-    # (node_building in flight) | coded (pending node with code) | running (pending eval) | evaluated
-    # (>=1 terminal) | gated (only trust-gated / breed-excluded evidence) | dropped (drop/merge event).
+    # (node_building in flight) | running (pending eval) | evaluated (>=1 terminal) | gated (only
+    # trust-gated / breed-excluded evidence) | dropped (drop/merge event). `coded` (pending node with
+    # code) is a RESERVED lane the fold does NOT currently produce — every pending Node collapses
+    # directly to `running` (no durable eval-start boundary in the log; see `_derive_cards`).
     status: str = "proposed"
     # Research verdict (DERIVED via the shared `_evidence_verdict` helper — byte-identical to the
     # hash-joined hypothesis): open | testing | supported | tested | abandoned.
     verdict: str = "open"
     # Layer-1c compatibility flag for board filtering only: False for dropped/gated/abandoned, True for
-    # proposed/running/evaluated. It deliberately does NOT imply that one fresh executable action exists.
+    # proposed/building/running/evaluated. It deliberately does NOT imply one fresh executable action exists.
     actionable: bool = True
     # `actionable` is a compatibility/advisory board flag, never proof that a card is one executable
     # work item. Only the receipt-backed, fail-closed seam below is consumed by the active Card queue.
@@ -1940,11 +1942,12 @@ class RunState(BaseModel):
     # a human/agent override of the derived status.
     hypotheses_added: list[dict] = Field(default_factory=list)
     # P1+ agentic merge: `hypothesis_merged` events fold ALIAS hypotheses (paraphrases the exact-hash
-    # ledger kept separate) into a CANONICAL id, deterministically applied in `_derive_hypotheses`.
+    # ledger kept separate) into a CANONICAL id, deterministically applied in `_derive_cards`.
     hypotheses_merged: list[dict] = Field(default_factory=list)
     hypotheses_abandoned: list[str] = Field(default_factory=list)
     # Human-DELETED hypotheses (hypothesis_updated status=deleted): removed from the board entirely,
-    # unlike `abandoned` (which stays visible in its own column). Excluded from `hypotheses` on fold.
+    # unlike `abandoned` (which stays visible in its own column). Excluded from `cards` on fold
+    # (`RunState.hypotheses` was removed — card ids == hypothesis ids in Layer 1a).
     hypotheses_deleted: list[str] = Field(default_factory=list)
     # FOREAGENT board prioritization. The latest `hypothesis_ranked` event carries
     # {at_node, order:[ids], confidence, reason, ranked:[{id,statement}]}. It never re-ranks evaluated
