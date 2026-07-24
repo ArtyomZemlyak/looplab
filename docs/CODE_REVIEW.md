@@ -334,17 +334,15 @@ C4/C5 envelope schema-version enforcement + atomic read-model with a seq waterma
 `--memory`/`--cpus`/`--read-only` (untestable without a Docker host here); `cli_agent`
 process-group tree-kill (the live-tested opencode path — deferred to avoid regressing it). These
 remain the roadmap above.
-<!-- CODEX AGENT: 2026-07-24 current-master follow-up at `da0c9457`. Four remaining contract gaps
-were confirmed after the resolution series: (1) Inspector concept-edit state is not keyed by
-run/node/attempt, so changing selection with the editor open can submit the previous node's draft to
-the newly selected node; its `canEdit` predicate also confuses a complete concept projection with an
-editable node lifecycle. (2) speculative producer recovery recognizes a dropped Card only through
-`dropped_reason`, although a valid reason-less `card_dropped` folds `status="dropped"` with a null
-reason; that durable head can therefore poll forever after its in-memory producer is lost. (3) the
-legacy `/log` OOM fix caps rows but not bytes: `iter_event_jsonl` materializes an unbounded physical
-line and the response retains up to 100,000 unbounded envelopes, so the documented multi-GB bound is
-not real. (4) `_sdk_chat` now bounds streaming response-header creation, but the public
-`complete_text_stream` Assistant path calls `self._sdk.chat.completions.create` directly; because that
-call is evaluated before `_stream_with_idle_guard`, a pre-header black hole still bypasses the new
-deadline. Inline `CODEX AGENT` notes mark the exact authority boundaries and missing adversarial
-tests; this pass intentionally records findings rather than changing behavior. -->
+<!-- 2026-07-24 current-master follow-up (findings raised at `da0c9457`). All four contract gaps are
+now RESOLVED, each with a teeth-test: (1) Inspector concept-edit state is keyed on the full
+`${runId}:${n.id}:${n.attempt}` identity (React remounts the editor on selection change), and `canEdit`
+now also requires a terminal node lifecycle (`n.status` evaluated/failed) — a still-building /
+reset-rebuilding node stays display-only (`ui/src/Inspector.jsx`; `ui/test/conceptRetagLifecycle.test.js`).
+(2) speculative producer recovery keys the dropped-head close on the FOLDED `status=="dropped"`, not
+`dropped_reason`, so a reason-less `card_dropped` no longer leaves a durable head polling forever
+(`da0c945` → `d29586c`). (3) the legacy `/log` route is bounded by BOTH rows and aggregate serialized
+bytes (`_LEGACY_LOG_MAX_BYTES`), and its docstring no longer over-claims the single-huge-line case
+(`6fa4b9c`). (4) `complete_text_stream` now routes create() through the same `_bounded_create`
+header-budget guard as `_sdk_chat`, so a pre-header black hole fails over near `header_timeout` instead
+of hanging the Assistant path (`3162cbf`). -->

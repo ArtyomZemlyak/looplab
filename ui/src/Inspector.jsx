@@ -382,19 +382,21 @@ function ConceptTags({ n, state, runId, onToast }) {
   const [busy, setBusy] = useState(false)
   const areaRef = useRef(null)
   const triggerRef = useRef(null)
-  // # CODEX AGENT: this draft/busy state is not scoped to run, node, or attempt. Inspector reuses
-  // ConceptTags at the same tree position when selection changes, so an editor opened on A survives
-  // on B and Save submits A's text with B's current id/generation. Reset or remount on the complete
-  // `${runId}:${n.id}:${n.attempt}` identity, fence late requests, and cover the mounted selection
-  // transition rather than only the parser/API helper.
+  // The editor's draft/busy state is per-mount; the CALL SITE keys <ConceptTags> on the complete
+  // `${runId}:${n.id}:${n.attempt}` identity so React REMOUNTS it (fresh editing/text/busy) when the
+  // selection changes — an editor opened on A can no longer survive onto B and Save submit A's text
+  // with B's id/generation (a `save()` already in flight keeps A's id, captured in its closure).
   const current = useMemo(
     () => nodeCanonicalConcepts(state?.node_concepts || {}, n.id, state?.concept_consolidation || {}),
     [state?.node_concepts, state?.concept_consolidation, n.id])
   const status = conceptMaterializationStatus(state, n.id)
-  // # CODEX AGENT: `complete` is concept-projection completeness, not node lifecycle. The surrounding
-  // contract says a still-building node is display-only, but this gate exposes Edit tags for any node
-  // with a runId and complete projection; include the authoritative editable lifecycle in the predicate.
+  // Editable only for a SETTLED experiment (terminal lifecycle) with an authoritative complete concept
+  // projection. `status === 'complete'` is concept-PROJECTION completeness, NOT node lifecycle — a
+  // still-building or reset-rebuilding node folds back to `pending` yet can keep a prior 'complete'
+  // projection, so gating on the projection alone would wrongly expose Edit on a node whose concepts
+  // aren't settled. Require a terminal node status too; read-only history (runId null) stays display-only.
   const canEdit = !!runId && status === 'complete'
+    && (n.status === 'evaluated' || n.status === 'failed')
   useEffect(() => { if (editing) requestAnimationFrame(() => areaRef.current?.focus()) }, [editing])
   const open = () => { setText(current.join('\n')); setEditing(true) }
   const cancel = () => {
@@ -460,7 +462,7 @@ function Overview({ n, state, runId, onToast }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
-    <ConceptTags n={n} state={state} runId={runId} onToast={onToast} />
+    <ConceptTags key={`${runId}:${n.id}:${n.attempt}`} n={n} state={state} runId={runId} onToast={onToast} />
     <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
