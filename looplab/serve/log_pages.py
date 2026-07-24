@@ -375,6 +375,9 @@ class EventLogPager:
         key = str(path)
         generation = _first_generation(handle, snapshot_size)
         index = self._indexes.get(key)
+        # CODEX AGENT: growth is not proof of append-only continuity. An in-place prefix rewrite plus
+        # append retains this index revision, so an old cursor materializes replacement bytes and creates
+        # a hybrid audit timeline. Verify the cached prefix or rotate/rebuild the revision before extending.
         if (index is None or index.identity != identity or index.generation != generation
                 or snapshot_size < index.observed_size
                 or (snapshot_size == index.observed_size and index.metadata != metadata)):

@@ -1,5 +1,48 @@
 # LoopLab — Comprehensive Code Review
 
+<!-- CODEX AGENT: 2026-07-24 THIRTY-AGENT WHOLE-REPOSITORY FOLLOW-UP (base `f9e23aa5`,
+rechecked and rebased through `97cf11cb`). Exactly 30 independent read-only passes ran in ten waves of
+three because the execution pool had three worker slots. The angles were: architecture; event replay;
+concurrency; Card speculation; search/ASHA; LLM transport; tool permissions; security; cross-run scope;
+claims/memory governance; concepts; serve API; paid jobs; UI state/SSE; Card/concept UX; UI API;
+performance; filesystem/cache; sandbox/processes; grading; config/CLI; architecture docs; user docs;
+test quality; typing/validation; observability; finalization/cost; lifecycle; multi-user boundaries; and
+holistic Part-IV/V semantics.
+
+Strong new findings, cross-checked against producer/consumer paths:
+
+1. Replay/durability: repair-log is an unlocked stale read/replace transaction; growing in-place
+   rewrites bypass EventStore and page-index cache invalidation; duplicate fork/inject completion rows
+   consume later requests; forced-fork and speculative provider calls can repeat paid work after crash;
+   request-only Cards are publicly projected as unowned; scalar trials can poison every fold.
+2. Parallel architecture: the Card session stops refilling freed GPUs after the first completion and
+   waits for unrelated long siblings; its idle loop still performs repeated whole-log folds. ASHA/BOHB
+   emits rung metadata without increasing fidelity, so "promotion" is another smoke mutation rather
+   than successive halving.
+3. Cross-run Part IV/V: production lesson writers omit direction while bound readers require it;
+   unified-pilot core_only drops CrossRunTools; shared Strategist construction hard-codes Researcher
+   filtering; one-run review links disclose sibling-run prior metadata; compatibility claim mutation
+   bypasses UID/evidence/revision/action fences.
+4. Trust/runtime: host MLE grading follows candidate symlinks; synthetic host labels are reproducible
+   from the mounted task snapshot; Docker setup dependencies vanish between disposable containers;
+   threaded preexec resource limits can deadlock before timeout supervision; clean parents can leave
+   descendants alive; non-finite trust thresholds fail open.
+5. LLM/jobs/cost: empty streams are accepted, cancelled SDK streams are not explicitly closed, stream
+   transport resets become `(no reply)` without reconciliation, Stop can trigger forced/title calls,
+   hung jobs permanently consume registry capacity, and paid scope reports bypass durable usage/cost.
+6. UI/observability: overlapping polls can roll state backward; Attention can freeze forever on one
+   hung source; curves, drift alarms and trace drill-down cross attempt boundaries; new_trace retains
+   outer ancestry; LLM-I/O capture policy is process-global across concurrent runs.
+7. Lifecycle/config/docs: lifecycle locks fail open on unsupported locking; delete can remove a run
+   before metadata commit; backend typos fall back to toy; resume bypasses validated max_nodes bounds;
+   booleans coerce into numeric budgets; several current-authority/default/mutation/concurrency claims in
+   the guides are stale.
+
+The generic security pass found no additional broad vulnerability beyond the concrete capability,
+grading, path and process-boundary issues above. No runtime fix was made in this review-only change:
+the adjacent `# CODEX AGENT:` / `// # CODEX AGENT:` / HTML comments are the actionable handoff and
+should be removed only with a behavioral regression test or an explicit architecture decision. -->
+
 <!-- CODEX AGENT: 2026-07-23 current-master addendum. PR #7 was inspected but is not safe to merge:
 its head `99c39b08` descends from stale `9aaa0485` while master is `60e9a5f3`, and its effective diff
 deletes the Card verdict chip, the authoritative `+ Add` control, and the current cards-only review

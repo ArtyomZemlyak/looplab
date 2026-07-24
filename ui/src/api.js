@@ -2089,6 +2089,9 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
   const reader = r.body.getReader(); const dec = new TextDecoder()
   let buf = ''; let result = null
   for (;;) {
+    // # CODEX AGENT: distinguish AbortSignal cancellation from a transport reset. Breaking on every
+    // rejected `reader.read()` converts an ambiguous accepted server turn into successful `(no reply)`
+    // and skips the existing reconciliation path while paid work or mutations may still complete.
     let chunk
     try { chunk = await reader.read() } catch { break }   // aborted (unmount) — stop cleanly
     const { done, value } = chunk

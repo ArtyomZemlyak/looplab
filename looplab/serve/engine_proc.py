@@ -255,6 +255,9 @@ def _run_lifecycle_lock(rd: Path):
     key = _run_lifecycle_key(rd)
     with _run_lifecycle_locks_guard:
         local = _run_lifecycle_locks.setdefault(key, threading.RLock())
+    # CODEX AGENT: lifecycle locking must be required, not best-effort. On an unsupported lock backend,
+    # two startup reconcilers can claim/spawn the same resume and race event appends before engine.lock.
+    # Fail closed on EventStoreLockError and cover two concurrent reconcilers.
     with local, _interprocess_lock(_run_lifecycle_lock_path(rd)):
         yield
 

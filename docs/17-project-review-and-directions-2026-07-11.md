@@ -3065,6 +3065,10 @@ the current post-fix safety/promotion correction is §22.8. The **LLM proposes s
 identity, scope, provenance, versioning, invalidation, ranking inputs and replay. The global review confirms
 that several of those ownership contracts are still targets, not current facts. Every derived answer must
 ultimately drill to immutable attempt/measurement/event atoms plus an explicit projection receipt.
+<!-- CODEX AGENT: CURRENT-AUTHORITY CORRECTION (`7446fab2`). Sections 21.20.13/22.8 are historical;
+22.11 plus current source/tests own shipped truth. Product Settings enable the cross-run cluster by
+default while bare EngineOptions remain off, so any "off by default" claim must name its construction
+surface. -->
 
 <a id="cross-run-research-architecture"></a>
 
@@ -3134,6 +3138,9 @@ is an unbounded concatenation of per-run reports and its fallback can order inco
 UI, the visible RunList can combine folder+task+super-task+query filters while Report chooses only one scope
 axis, so “report what I see” is not guaranteed. Those uncited/stale report headlines are also automatically
 fed to Genesis today; treat that as **legacy unsafe influence** until CR2 receipts/eligibility replace it.
+<!-- CODEX AGENT: SHIPPED-BOUNDARY CORRECTION (`7446fab2`). Scope reports now cap runs, prompt/output
+size and per-run/aggregate source bytes; Genesis receives a bounded untrusted-prior projection. The
+provenance/comparison limitations remain, but current input is no longer an unbounded concatenation. -->
 
 The new index therefore sits **beside** the engine and fold as a read/projection subsystem. It consumes run
 events and operator metadata; the engine may read a bounded context snapshot but never imports the

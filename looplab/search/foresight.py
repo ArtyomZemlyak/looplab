@@ -127,6 +127,9 @@ def _sanitize_ranking(out, n: int) -> Optional[tuple[list[int], float, str]]:
         return None
     seen: set[int] = set()
     order: list[int] = []
+    # CODEX AGENT: model output is untrusted: bool is an int here, and bool/NaN confidence can become a
+    # full-confidence ranking that bypasses abstention. Reject bool indices and bool/non-finite
+    # confidence before ordering (prefer strict schema fields).
     for idx in getattr(out, "order", None) or []:
         if isinstance(idx, int) and 0 <= idx < n and idx not in seen:
             seen.add(idx)

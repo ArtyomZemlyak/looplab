@@ -270,6 +270,9 @@ def _valid_node_source(raw) -> bool:
     if not isinstance(values, (list, tuple)) or len(values) > _MAX_SOURCE_EVIDENCE:
         return False
     for value in values:
+        # CODEX AGENT: node identities are non-negative, but negative ints/signed strings pass this
+        # completeness fence and become authoritative phantom refs such as `run:-1`. Reject them here
+        # and in the v3 writer/validator.
         if type(value) is int:
             continue
         # claim source health is an authority signal, so a poisoned element cannot be

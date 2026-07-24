@@ -639,6 +639,9 @@ def resume(
     if snap.exists():
         data = json.loads(snap.read_text(encoding="utf-8"))
         settings = settings_from_snapshot(data)
+    # CODEX AGENT: assignment validation is disabled, so this direct override accepts 0/negative despite
+    # Settings.max_nodes ge=1 and can append resume/reopen work only to finish immediately. Reconstruct
+    # and validate Settings with the override before any lifecycle event.
     if max_nodes is not None:
         settings.max_nodes = max_nodes
     eng = _engine(run_dir, task, settings, crash_after=None)

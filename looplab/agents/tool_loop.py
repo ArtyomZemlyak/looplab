@@ -375,6 +375,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # emit now so we always get a structured result; only if that's unsupported do we nudge
             # and retry (bounded, so an unlimited loop can't spin forever on a model that won't emit).
             messages.append({"role": "assistant", "content": msg.get("content") or ""})
+            # CODEX AGENT: re-check cancellation before every forced emit. Stop may arrive while chat or
+            # a tool is in flight; issuing this extra provider call after cancellation adds spend and
+            # delays completion instead of terminating the turn.
             ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
             if ok:
                 return result

@@ -32,6 +32,9 @@ def _stable_events(srv, rd):
 
 
 def _assert_still_current(srv, rd, generation: str) -> None:
+    # CODEX AGENT: first-event generation does not identify a repaired/replaced log revision. A retained
+    # comment anchor lets page one come from the old file and page two from the replacement. Bind cursors
+    # to a reset-safe file revision and reject same-generation replacement.
     if srv.commands.run_generation(rd) != generation:
         raise HTTPException(409, {
             "code": "run_generation_changed",

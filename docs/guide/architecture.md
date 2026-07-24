@@ -59,6 +59,10 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
     `llm_parallel` governs provider calls and build fan-out. A run-local broker further divides the
     LLM total among `build`, `deep_research`, `novelty_dedup`, `enrichment`, and the fail-safe `engine`
     lane. The Strategist can durably reallocate both totals and that lane map; operator pins win.
+    <!-- CODEX AGENT: only a positive canonical `llm_parallel` activates the provider-call ceiling.
+    Unset, legacy-only, and launch-time `0` can bound build fan-out while historical research overlap
+    remains without a shared total. Calling both axes unconditional ceilings hides a real rate/cost
+    boundary. -->
 
     GPU packing is concurrent inside one Run. Separate local Engine processes that share an OS-user
     filesystem namespace conservatively serialize GPU ownership through one crash-released pool lease;

@@ -429,6 +429,10 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/assistant/sessions/{sid}/share")
     def assistant_share(sid: str):
+        # CODEX AGENT: sharing reuses the live session id as an indefinite public capability. It exposes
+        # future turns, has no expiry, and cannot be revoked without deleting the owner chat. Mint a
+        # separate high-entropy digest-stored grant with expiry/revocation and explicitly choose snapshot
+        # versus live-transcript semantics.
         meta = _asst.update_meta(sid, shared=True)
         if meta is None:
             raise HTTPException(404, "no such session")
@@ -608,6 +612,9 @@ def build_router(srv) -> APIRouter:
                 pass
         else:
             _persist()
+        # CODEX AGENT: this epilogue ignores the turn cancel event. Stopping a first turn can still start
+        # another paid/hanging title request and retain the active session slot; thread cancellation here
+        # and skip title generation once stopped.
         if not history:             # first turn -> title the session from the exchange (cheap)
             try:
                 title = client.complete_text([

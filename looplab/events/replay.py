@@ -880,6 +880,9 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.violations = d.get("violations", []) or []
             n.feasible = not n.violations       # #5: constraint-violating -> infeasible
             # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
+            # CODEX AGENT: Event.data is untyped; a schema-valid scalar `trials` makes this loop raise and
+            # poisons every replay/resume even though repair-log sees no JSON divergence. Require a
+            # bounded list container before iterating.
             # best trial, set by the engine). Coerce defensively per trial so one malformed
             # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.
             trials = []
@@ -2049,6 +2052,9 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         #     could WIN over a legitimate edge; treat it as 0.0 (lowest) so a mis-typed flag never ranks.
         # Both map to 0.0, keeping the order total and the accumulate order-independent. (`x != x` is the
         # portable NaN test — no math import.)
+        # CODEX AGENT: +Infinity is still accepted and permanently outranks every finite repair, while
+        # ConceptFrame rejects it and remains partial. Normalize every non-finite confidence to 0.0 and
+        # cover both event orders.
         conf = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else 0.0
         if conf != conf:
             conf = 0.0
@@ -4835,6 +4841,10 @@ def _derive_cards(st: RunState) -> None:
     # Its explicit card_id is nevertheless the durable in-flight ownership link. Resolve it through the
     # same merge/statement aliases as every other card control so a reservation made just before a merge
     # follows the surviving work item. Unknown or malformed ids cannot synthesize a substance-free card.
+    # CODEX AGENT: outstanding `card_build_requests[card_builds_done:]` are also durable in-flight
+    # owners. A crash before node_building currently publishes the reserved Card as proposed,
+    # owner_state=none, selection_ready=true even though the engine excludes it. Alias-resolve request
+    # heads into this ownership projection.
     building_card_ids: set[str] = set()
     for marker in st.buildings.values():
         if not isinstance(marker, dict):

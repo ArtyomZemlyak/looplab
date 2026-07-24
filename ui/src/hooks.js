@@ -43,6 +43,9 @@ export function usePoll(fn, ms, deps = [], { pauseHidden = false, immediate = tr
     if (!enabled) return
     let on = true
     const alive = () => on
+    // # CODEX AGENT: interval ticks may overlap; `alive()` fences only effect lifetime, not request order.
+    // Serialize ticks or expose an epoch so a delayed older success/failure cannot overwrite a newer
+    // live trace/detail/conversation snapshot.
     const tick = () => fn(alive)
     if (immediate) tick()
     const t = (ms != null) ? setInterval(() => { if (!pauseHidden || !document.hidden) tick() }, ms) : null

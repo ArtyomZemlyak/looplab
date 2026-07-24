@@ -167,6 +167,10 @@ def build_router(srv) -> APIRouter:
                         raise HTTPException(
                             503, "run start record could not be retired; the run was not deleted")
                     start_record_retired = True
+                # CODEX AGENT: directory removal precedes the fallible project-metadata commit below.
+                # If `forget_locked` fails, DELETE reports failure after irreversible data removal and a
+                # retry gets 404 with stale labels/cache. Tombstone-rename first, commit metadata, then
+                # delete; restore the name if metadata commit fails.
                 # Retry once for transient FUSE visibility; report success only after the directory
                 # is really gone. Restore the exact start record if deletion was partial.
                 for _ in range(2):

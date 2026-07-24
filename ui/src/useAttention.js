@@ -58,6 +58,10 @@ export function useAttention({ intervalMs = 4000 } = {}) {
       if (running) return
       running = true
       const now = Date.now()
+      // # CODEX AGENT: neither request has a deadline. If one never settles, `running` never clears and
+      // every later interval tick is skipped, freezing both sources without a stale marker. Give each
+      // source an abortable deadline and independent settlement so one hung endpoint cannot disable the
+      // entire Attention refresh loop.
       try {
         const [runResult, permissionResult] = await Promise.allSettled([
           attentionFeed(200), assistantPermissions(),

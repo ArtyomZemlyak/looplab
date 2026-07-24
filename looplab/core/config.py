@@ -283,6 +283,9 @@ class Settings(BaseSettings):
     # unbounded `eval_parallel` (or legacy `max_parallel`; e.g. 100000 from a crafted preflight) would
     # fan out that many sandboxes → resource exhaustion. Reject at config time, not mid-run. Ceilings
     # are generous; tests top out near 50.
+    # CODEX AGENT: Pydantic coerces JSON booleans into these numeric fields (`true` -> 1/1.0), so a UI
+    # type error can silently collapse run/eval budgets instead of returning 422. Apply shared
+    # before-validation that rejects bool at every numeric settings boundary.
     n_seeds: int = Field(default=3, ge=1, le=1024)
     max_nodes: int = Field(default=8, ge=1, le=1_000_000)
     # legacy evaluation-width input. `eval_parallel` below is canonical and wins when set;
@@ -788,6 +791,9 @@ class Settings(BaseSettings):
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
     cross_run_curation_auto: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
+    # CODEX AGENT: non-typed sources (`--set`, file, env) accept any string; a typo then falls through to
+    # toy roles instead of failing an intended LLM run. Validate this as Literal["toy", "llm"] across
+    # all construction paths.
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
     # CLI coding agent: "opencode" | "aider" | "goose" | "continue".

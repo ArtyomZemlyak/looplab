@@ -227,6 +227,9 @@ def current_ids() -> tuple[Optional[str], Optional[str]]:
 # Settings.trace_llm_io. When on, record_llm_call attaches the prompt+completion as a span
 # event on whatever operation span is active (propose/implement/repair), so the UI gets a bounded,
 # canonicalized and heuristically redacted diagnostic view — without a new transport or event-log change.
+# CODEX AGENT: this policy is process-global even though tracers/runs are concurrent. The last run to
+# call `set_llm_capture` can expose prompts from an opted-out run or suppress an opted-in run. Bind the
+# permission to Tracer/scoped context and test interleaved opposite-policy traces.
 _CAPTURE_LLM_IO = False
 
 
@@ -523,6 +526,9 @@ class Tracer:
         st = _stack.get()
         parent = st[-1] if st else None
         # Propagate node_id via a contextvar (see _node_ctx): a span that names an explicit node_id sets
+        # CODEX AGENT: `new_trace` resets only the JSONL id chain below; it still retains this parent and
+        # starts OTel from ambient context. Clear parent_id and supply an explicit root OTel context, or
+        # the promised isolated operation has a cross-trace parent / remains in the outer collector trace.
         # it for the block; a span that doesn't INHERITS the active one, so nested generation/tool spans
         # get attributed to the node even when they open in a trace of their own. Stamp onto attributes
         # so the on-disk span (and the trace view that reads it) carries it.

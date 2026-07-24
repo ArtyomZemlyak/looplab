@@ -224,6 +224,9 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   }
   // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
   // per-node detail payload has no `drifts` key, so filter the run state down to this node.
+  // # CODEX AGENT: spec_drift rows are attempt-stamped and survive node_reset, but this node-id-only
+  // filter assigns old-code alarms to the replacement attempt. Filter to n.attempt and label legacy
+  // history separately.
   const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id)
   // Sweep nodes get a Trials tab (right after Overview). `activeTab` guards against a stale tab
   // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
@@ -1116,6 +1119,9 @@ function Code({ n }) {
 // Live online metric curves (loss, recall@k, lr, grad norms, …) read from the node's TensorBoard
 // events via the metrics adapters. Polls while the node is still running so the curves fill in as
 // training progresses; keyed on n.status so a repair-retrain (pending→failed→pending) re-arms the poll.
+// # CODEX AGENT: node ids survive reset. Scope/reset curve state by `attempt` and require an
+// attempt-bound server receipt; the stale fallback must never present a prior implementation's
+// training curves as current.
 export function MetricCurves({ runId, nodeId, status }) {
   const done = ['evaluated', 'failed', 'confirmed'].includes(status)
   const [resource, setResource] = useState(null)

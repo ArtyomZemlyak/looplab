@@ -721,6 +721,9 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
     && liveBuilding[traceNid] === traceGeneration
   // Clear the error flag only on a SUCCESSFUL load (not eagerly at the start of every poll tick):
   // clearing then re-setting each 4s tick made the error/Retry banner flicker on a persistent failure.
+  // # CODEX AGENT: traceGeneration is derived above but never sent to the route. A reset/repaired node
+  // therefore mixes spans from other attempts while this row claims to explain one exact lifecycle
+  // event. Thread a validated generation fence through the endpoint and filter before projection.
   const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid, `/trace?limit=${nodeTraceLimit}`))
     .then(d => { if (alive()) { setNodeTrace(d); setNodeTraceError(false) } })
     .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })

@@ -125,6 +125,9 @@ def test_hypothesis_merge_is_not_background_neutral_for_native_card_selection():
 
 
 def test_background_task_appends_only_via_the_gated_method():
+    # CODEX AGENT: this immediate-source scan misses writes in callees. The overlap loop reaches
+    # `_maybe_merge_hypotheses`, which appends from the background worker, so the stated gated-method
+    # guarantee is already false; assert behavioral event types/order across the transitive call path.
     # The background research coroutines must reach the store ONLY through _record_deep_research
     # (whose appends carry the BACKGROUND_APPENDABLE assertions). A direct store.append added to the
     # one-shot spawn OR the repeating overlap loop would bypass the gate silently — this source scan

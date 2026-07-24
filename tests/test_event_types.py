@@ -70,6 +70,9 @@ def test_registry_is_sane():
 
 
 def test_every_emitted_event_type_is_registered():
+    # CODEX AGENT: the scanner recognizes only `.append(...)`; production also emits through
+    # `append_many`, so a typo in a batch tuple can silently no-op while this "every emitted type" test
+    # stays green. Include literal tuple heads from both APIs.
     """AST-scan all of looplab/ for `store.append("<literal>", ...)` emissions — a typo'd
     event name (even in a file still using raw literals) fails here instead of silently
     no-oping in the fold."""
