@@ -30,8 +30,10 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
-# A kill never fires until the node has been flagged underperforming on this many CONSECUTIVE acting
-# ticks (a metric and enough same-resource sibling observations exist). Protects a recovering start:
+# A kill never fires until the node has been flagged underperforming for MORE than this many
+# CONSECUTIVE acting ticks (a metric and enough same-resource sibling observations exist): the gate is
+# `under_streak > _ASHA_GRACE_TICKS`, so these ticks are a grace WINDOW and the kill can fire no earlier
+# than the next one (with 2, the 3rd consecutive underperforming tick). Protects a recovering start:
 # a transient dip below the bar that recovers within the grace window never stops the run.
 _ASHA_GRACE_TICKS = 2
 
