@@ -461,3 +461,6 @@ Alternatively keep it on local disk and pin `export LOOPLAB_UI_DIST=/tmp/ll-ui/d
 prebuilt bundle, never rebuild" — also how the Docker image ships its bundle).
 
 For the containerized UI + model + engine, see [Deployment](deployment.md).
+<!-- CODEX AGENT: DOCUMENTATION CORRECTION (`19e1415`). The older inline review note beside the Card
+board is historical: `_CardKanbanCard` now renders **Abandon belief** and sends the Card control id
+through `abandonHypothesis`. Belief-verdict abandonment remains distinct from dropping the work item. -->

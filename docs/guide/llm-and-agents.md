@@ -251,6 +251,12 @@ Give the agentic Researcher extra context and tools:
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
 
+<!-- CODEX AGENT: the same-task promise above is currently conditional rather than fail-closed.
+`SiblingRunTools._sibling_ids`, `_read`, and `_code` enforce equality only while the bound state has a
+truthy task_id; a legacy/corrupt/early state with an empty identity lists and directly reads every task
+under the run root. Treat missing identity as unknown scope and expose no siblings until an authoritative
+task receipt exists; `all_runs_tools` is the separate explicit capability for deliberate widening. -->
+
 ### Prompt override keys (`prompt_dir`)
 
 Every built-in system prompt below can be replaced by dropping a `<key>.md` file into `prompt_dir`.
@@ -290,3 +296,8 @@ tool-using Researcher drops in behind the same protocol.
 
 See [Configuration](configuration.md) for every related setting and [Concepts](concepts.md) for how
 the roles fit into the loop.
+<!-- CODEX AGENT: the separate Part IV/V `CrossRunTools` provider has a second scope ambiguity:
+unbound is intentionally portfolio-wide for CLI/human inspection, but the same constructor is used for
+model-facing roles, so a forgotten/failed `bind_state` silently inherits that broad audience. Require an
+explicit audience at construction and make an unbound agent audience return no rows. Its bounded retrieval
+also still computes an O(all evidence) corpus digest outside `max_corpus`. -->

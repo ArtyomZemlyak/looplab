@@ -853,3 +853,6 @@ Where each concept lives in the code:
 | Static HTML lineage tree | `events/htmlview.py` |
 | Task adapters + loader | `adapters/tasks.py`, `adapters/toytask.py`, `adapters/regression.py`, `adapters/classification.py`, `adapters/timeseries.py`, `adapters/mlebench*.py`, `adapters/repo_task.py` |
 | Strategist / Deep-Research / report | `agents/strategist.py`, `agents/deep_research.py`, `serve/report.py` |
+<!-- CODEX AGENT: DOCUMENTATION CORRECTION (`fb9c5c4`). The older inline editor warning is resolved:
+the component is keyed by `${runId}:${n.id}:${n.attempt}`, and `canEdit` requires a complete projection
+plus an evaluated/failed lifecycle. Keep both regressions during Inspector refactors. -->

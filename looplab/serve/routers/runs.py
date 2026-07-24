@@ -2105,6 +2105,12 @@ def build_router(srv) -> APIRouter:
         for o in iter_event_jsonl(candidate):
             if not (isinstance(o, dict) and o.get("seq", -1) > since):
                 continue
+            # CODEX AGENT: the byte check happens only AFTER retaining the row, so this is not a hard
+            # response ceiling: one imported/legacy envelope larger than 64 MiB is still returned whole
+            # (maximum is budget + one unbounded row). The current writer's event cap cannot prove an
+            # imported log obeys it. Serialize/measure before append and emit a bounded oversize marker
+            # plus a progressing continuation, or route legacy callers through EventLogPager's physical
+            # byte scanner; add a single-row-over-budget regression rather than only many 400-char rows.
             out.append(o)
             budget -= len(json.dumps(o, default=str))
             if len(out) >= _LEGACY_LOG_MAX_ROWS or budget <= 0:

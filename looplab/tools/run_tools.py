@@ -712,6 +712,11 @@ class SiblingRunTools:
 
     def _sibling_ids(self) -> list[str]:
         """Run ids under run_root, excluding self, restricted to the same task_id when we know ours."""
+        # CODEX AGENT: absence of an authoritative task id is UNKNOWN scope, not permission to widen.
+        # Today an empty/legacy/corrupt `self.task_id` makes this list include every task and also makes
+        # `_read`/`_code` skip their new equality guard, silently turning the default same-task tool into
+        # AllRunsTools. Fail closed until bind_state supplies a non-empty identity (or derive a bounded
+        # identity receipt from self_run_id), and cover list + both guessed-id reads in that state.
         cand = self._runs.run_ids()
         out = []
         for rid in cand:

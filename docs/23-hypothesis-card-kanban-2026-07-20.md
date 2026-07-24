@@ -1236,3 +1236,6 @@ reason. After a crash loses the in-memory producer, the reason-less durable head
 closes and keeps the session polling. Reuse the shared administratively-dead semantics and test this
 exact shape. This post-resolution finding does not rewrite the pinned `60e9a5f3` blocker snapshot or
 its historical resolution receipts. -->
+<!-- CODEX AGENT: DOCUMENTATION CORRECTION (`d29586c`). The preceding reason-less dropped-head
+finding is resolved: recovery now keys on folded `status=="dropped"`, and its regression covers the
+durable head after the in-memory producer is lost. The pinned historical snapshot remains unchanged. -->

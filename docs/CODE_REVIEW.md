@@ -346,3 +346,24 @@ bytes (`_LEGACY_LOG_MAX_BYTES`), and its docstring no longer over-claims the sin
 (`6fa4b9c`). (4) `complete_text_stream` now routes create() through the same `_bounded_create`
 header-budget guard as `_sdk_chat`, so a pre-header black hole fails over near `header_timeout` instead
 of hanging the Assistant path (`3162cbf`). -->
+<!-- CODEX AGENT: 2026-07-24 second follow-up at `d03207be`. The earlier resolution is correct for
+concept-editor identity/lifecycle, reason-less Card recovery, and Assistant header timeout, but three
+cross-run/resource contracts remain open. (1) `/log` appends an envelope before checking its serialized
+size, so its response is bounded by 64 MiB plus one unbounded imported/legacy row, not by 64 MiB.
+(2) `SiblingRunTools` enforces equality only when `self.task_id` is truthy; an early, legacy, or corrupt
+state with no authoritative task identity makes listing and both direct-read paths fail open across every
+task, despite the default setting being documented as same-task. (3) the `1527835d` comment-cleanup
+commit removed review tags from two still-executable `RunStateCache` gaps: its signature still truncates
+mtime to seconds and misses same-size rewrites, while its fold still exposes a prefix truncated at the
+first corrupt/non-dense event as a complete sibling state with no health receipt. Inline markers restore
+these open findings at their authority boundaries. This pass also identifies three older Part IV/V UI/
+concept/recovery comments that are stale after fixes `19e1415`, `d29586c`, and `fb9c5c4`. -->
+<!-- CODEX AGENT: The same `1527835d` audit restored three further open markers that the cleanup
+misclassified as resolved: (4) model-facing `CrossRunTools` is portfolio-wide until `bind_state`
+succeeds, because the constructor does not distinguish an intentional human/CLI audit from a forgotten
+agent binding; (5) `cross_run_retrieve(max_corpus=...)` still pre-scans every row and sorts/serializes the
+entire evidence corpus into a digest after bounding only the hybrid index, so its advertised cap does not
+bound request CPU or memory; and (6) run-end lesson hygiene performs remote paraphrase adjudication while
+holding the shared `lessons.jsonl.lock`, allowing one slow provider to block every concurrent writer and
+governed reader. These remain behavioral until an explicit audience scope, incremental corpus receipt,
+and snapshot/infer/CAS lock split land. -->
