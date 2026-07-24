@@ -38,12 +38,13 @@ class RunStateCache:
     def sig(rd: Path):
         try:
             s = (rd / "events.jsonl").stat()
-            # CODEX AGENT: truncating mtime to whole seconds makes this cache blind to a same-size
-            # replacement/rewrite inside one second. That is not only a freshness issue: these folded
-            # states feed default-on SiblingRunTools/AllRunsTools, so an agent can keep reasoning from
-            # an obsolete cross-run evidence prefix. Use mtime_ns plus stable file identity (and keep
-            # the read snapshot fenced) before treating a hit as the current run state.
-            return (s.st_size, int(s.st_mtime))
+            # Nanosecond mtime + file identity (inode/device), NOT `int(st_mtime)`: truncating mtime to
+            # whole seconds made this cache blind to a same-size replacement/rewrite inside one second.
+            # That is not only a freshness issue — these folded states feed default-on SiblingRunTools/
+            # AllRunsTools, so a stale hit lets an agent keep reasoning from an obsolete cross-run evidence
+            # prefix. `st_mtime_ns` catches any in-place rewrite; `st_ino`/`st_dev` catch a same-size,
+            # mtime-restored REPLACEMENT (rm+recreate, or a sync tool that preserves mtime).
+            return (s.st_size, s.st_mtime_ns, s.st_ino, s.st_dev)
         except OSError:
             return (0, 0)
 
