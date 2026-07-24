@@ -1007,26 +1007,25 @@ class SpeculationMixin:
             # strand a live producer: skip while one is in-flight (its eventual result is released by
             # `_discard_orphaned_spec_results` once the request closes), and leave an ALIVE card's request
             # open so a producer can still be started for it.
-            # Two DEAD shapes: a DROPPED Card stays PRESENT with status=="dropped" (dropped_reason set);
-            # a MERGED Card is folded OUT of `state.cards` (ABSENT) and recorded only in its canonical's
-            # `aliases` — the fold never assigns `Card.merged_into`, so a merged head resolves via alias
-            # membership (a PROVEN merge receipt), not a present `merged_into` row. An absent id that is
-            # NOT a known alias is a corrupt/partial chain — leave it open (do not force-close on an
-            # unproven receipt), matching the counterfactual path's fail-closed stance.
+            # Two DEAD shapes: a DROPPED Card stays PRESENT with status=="dropped" (its reason MAY be
+            # None); a MERGED Card is folded OUT of `state.cards` (ABSENT) and recorded only in its
+            # canonical's `aliases` — the fold never assigns `Card.merged_into`, so a merged head
+            # resolves via alias membership (a PROVEN merge receipt), not a present `merged_into` row.
+            # An absent id that is NOT a known alias is a corrupt/partial chain — leave it open (do not
+            # force-close on an unproven receipt), matching the counterfactual path's fail-closed stance.
             card = state.cards.get(key[0])
             merged_away = card is None and key[0] in {
                 alias for c in state.cards.values()
                 for alias in (getattr(c, "aliases", None) or [])
                 if isinstance(alias, str) and alias
             }
-            # CODEX AGENT: merged-away recovery is now receipt-based, but dropped recovery still keys
-            # on `dropped_reason`. A valid `card_dropped` with an empty/missing reason folds to
-            # status=="dropped" and dropped_reason=None (already covered by the selection guard), so
-            # this head remains outstanding forever after a crash. Reuse the lifecycle-dead predicate
-            # or status here too, and add the reason-less variant to the producer-recovery test.
+            # Key the dropped case on FOLDED status=="dropped", NOT `dropped_reason`: a valid reason-less
+            # `card_dropped` folds to status=="dropped" with dropped_reason=None, so a reason-keyed check
+            # would leave this head outstanding forever after a crash. Matches the selection guard
+            # `_card_administratively_dead`. (`merged_into` stays a defensive disjunct; it is never set.)
             if key not in self._spec_build_inflight and (
                 (card is not None
-                 and (card.dropped_reason is not None or card.merged_into is not None))
+                 and (card.status == "dropped" or card.merged_into is not None))
                 or merged_away
             ):
                 return self._append_card_build_done(request, skipped="stale")

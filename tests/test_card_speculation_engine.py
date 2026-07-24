@@ -786,6 +786,34 @@ def test_recovery_merged_head_with_no_result_closes_stale_instead_of_wedging(tmp
     assert final.card_builds_done == 1 and engine._head_request(final) is None  # outstanding cleared
 
 
+def test_recovery_reason_less_dropped_head_closes_stale_instead_of_wedging(tmp_path):
+    # Regression: a valid reason-less `card_dropped` folds to status=="dropped" with dropped_reason=None.
+    # Keying the crash-recovery close on `dropped_reason is not None` (instead of the folded status) left
+    # such a head outstanding forever — the session polls without exit. Key on status=="dropped".
+    engine, _producer = _engine(tmp_path / "reasonless-drop-wedge")
+    _start(engine)
+    _add_ready_draft(engine, "card-7")
+    request = _request(engine)
+    key = engine._request_key(request)
+    engine._ensure_speculation_state()
+    assert not engine._spec_builds and not engine._spec_build_inflight
+
+    assert engine._serve_card_builds() is False           # an alive head with no result stays open
+
+    engine._drop_card_once("card-7", reason="")           # REASON-LESS drop -> dropped_reason folds None
+    dropped = fold(engine.store.read_all())
+    assert dropped.cards["card-7"].status == "dropped"
+    assert dropped.cards["card-7"].dropped_reason is None  # the exact gap this regression covers
+    assert engine._request_key(engine._head_request(dropped)) == key  # request still at head
+
+    assert engine._serve_card_builds() is True            # closed stale via status, not wedged
+    events = engine.store.read_all()
+    done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
+    assert len(done) == 1 and done[0].data.get("skipped") == "stale"
+    final = fold(events)
+    assert final.card_builds_done == 1 and engine._head_request(final) is None
+
+
 def test_producer_exception_closes_head_as_skipped_without_live_wedge(
     tmp_path, monkeypatch,
 ):
