@@ -777,6 +777,23 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # parent.children() then kills each, which races a late fork: a DataLoader/worker spawned after the
     # snapshot escapes and keeps using a GPU the scheduler then releases. So on POSIX do the group kill
     # first and reserve psutil for Windows / a fallback if the group kill itself fails.
+    # NEVER signal an already-REAPED process: once `wait()`/`communicate()` has collected the child,
+    # its PID is free for the OS to reuse, and `os.getpgid(reused_pid)` then names a STRANGER's group.
+    # Callers really do reach here post-reap (`agents/cli_agent.py`'s `except BaseException: _kill_tree(p)`
+    # runs after `communicate()` returned), and a helper the engine spawned with plain `subprocess.run`
+    # shares the ENGINE's process group — so an unguarded killpg could SIGKILL the engine itself. This is
+    # the same PID-reuse hazard `runtime/bg_tasks.py` documents and guards with `deadline_lock`; here the
+    # `returncode` check is the fence, and it must precede BOTH the group kill and the psutil path.
+    _rc = getattr(proc, "returncode", None)
+    if _rc is None:
+        _poll = getattr(proc, "poll", None)
+        if callable(_poll):
+            try:
+                _rc = _poll()
+            except Exception:      # noqa: BLE001 - an unpollable handle is treated as still-running
+                _rc = None
+    if _rc is not None:
+        return
     if os.name != "nt":
         try:
             os.killpg(os.getpgid(proc.pid), 9)

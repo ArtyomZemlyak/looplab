@@ -416,3 +416,42 @@ def test_run_argv_cleanup_swallows_a_cidfile_oserror(tmp_path, monkeypatch):
     rc, _out, _err, _timed = sb.run_argv(
         ["docker", "run", "--rm", "image", "python", "solution.py"], str(tmp_path), timeout=30)
     assert rc == 0
+
+
+def test_kill_tree_never_signals_an_already_reaped_process():
+    """A reaped PID is FREE — signalling its group can hit a stranger, including the engine itself.
+
+    `_kill_tree` issues `os.killpg(os.getpgid(proc.pid), 9)` unconditionally. Once `wait()` /
+    `communicate()` has collected the child the OS may reuse that PID, and callers do reach here
+    post-reap (`agents/cli_agent.py`'s `except BaseException: _kill_tree(p)` runs after
+    `communicate()` returned). A helper the engine spawned with plain `subprocess.run` shares the
+    ENGINE's process group, so an unguarded killpg could SIGKILL the engine itself.
+    """
+    import os
+    import looplab.runtime.sandbox as sb
+    if os.name == "nt":
+        pytest.skip("POSIX process-group kill")
+
+    fired: list = []
+
+    class _Reaped:
+        pid = 4321
+        returncode = 0                 # already collected
+
+        def poll(self):
+            return 0
+
+    class _Live:
+        pid = 4322
+        returncode = None
+
+        def poll(self):
+            return None
+
+    import unittest.mock as _mock
+    with _mock.patch.object(sb.os, "getpgid", lambda pid: pid), \
+         _mock.patch.object(sb.os, "killpg", lambda pgid, sig: fired.append((pgid, sig))):
+        sb._kill_tree(_Reaped())
+        assert fired == [], "must not signal a reaped PID's group"
+        sb._kill_tree(_Live())
+        assert fired == [(4322, 9)], "a live process is still group-killed"

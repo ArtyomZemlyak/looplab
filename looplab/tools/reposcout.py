@@ -38,6 +38,10 @@ _readable = _pathsafe.readable
 # old 16KB page lost both its tail and its pointer at the cap). Derived, not hard-coded: the -400
 # headroom covers the window header + resume marker so page+header+marker ≤ RESULT_CAP.
 _MAX_READ = RESULT_CAP - 400   # chars of file content returned per read_file page
+# Hard host-RAM ceiling for ONE `read_file`. `_readable` gates on extension, not size, and
+# TEXT_EXT covers .csv/.jsonl/.log — so without this a multi-GB repo data file is decoded whole
+# (twice, counting the splitlines copy) into the shared engine process before any page bound.
+_MAX_FILE_BYTES = 64 * 1024 * 1024   # 64 MiB
 _MAX_ENTRIES = 200         # entries per list_dir / find_files
 
 
@@ -250,9 +254,20 @@ class RepoScoutTools:
             except OSError:
                 sz = "?"
             return f"(unsupported/binary type {p.suffix or '<none>'}; {sz}b — exists, not read)"
-        # CODEX AGENT: the advertised 16-KB page is applied only after `read_text` and `splitlines`
-        # materialize the entire source. One huge readable log/CSV can OOM the shared process; decode
-        # only the requested bounded window and impose a maximum physical line size.
+        # Size-fence BEFORE the read. `_readable` gates on EXTENSION only, and TEXT_EXT includes
+        # `.csv`/`.jsonl`/`.log`, so a repo task's multi-GB training CSV or a run's events.jsonl passed
+        # every earlier check — then `read_text` slurped the whole file and `_paginate`'s
+        # `splitlines(keepends=True)` built a SECOND full copy (a per-line str object each, well over 2x
+        # the file size at peak) before `_MAX_READ` was applied to the returned page. This is agent-
+        # reachable during a run (`tools/asset_brief.py` hands RepoScoutTools the task repo root), so one
+        # `read_file("data/train.csv")` could OOM the engine host. Same host-RAM rule the eval reader
+        # applies via `_MAX_METRIC_FILE_BYTES`; the read-whole-then-paginate contract is unchanged below.
+        try:
+            if p.stat().st_size > _MAX_FILE_BYTES:
+                return (f"(file too large to page: {p.stat().st_size}b > {_MAX_FILE_BYTES}b — "
+                        f"use grep/find_files to locate the region instead)")
+        except OSError as e:
+            return f"(could not read: {e})"
         try:
             data = p.read_text(encoding="utf-8-sig", errors="replace")
         except OSError as e:
