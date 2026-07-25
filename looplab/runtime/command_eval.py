@@ -837,11 +837,18 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 # stdout for a diverged (non-finite) loss and tree-kill early instead of burning the whole
                 # timeout on a model that can no longer learn — the killed stage then fails with a DIVERGED
                 # marker the agent reads. Off for the short scorer `cmd` (it is not a training loop).
+                # `_sig` is the AUTHENTICATED watchdog verdict. `err` mixes the watchdog marker with
+                # the CANDIDATE's own stderr, so `STALL_SENTINEL in err` is forgeable — and this is the
+                # only health_check=True path, where the DIVERGE watchdog forces a non-zero exit against
+                # the candidate's will. A forged stall marker turned that fail-closed verdict back into
+                # an accepted self-reported metric; read the out-of-band flag instead.
+                _sig: dict = {}
                 rc, out, err, to = run_argv(
                     _w(_bound(_scmd, _sto), str(wd)), wd, _sto + grace, env, max_output_bytes, cancel,
                     log_path=_log(f"{_sname}.log"), health_check=True,
                     stall_timeout=(stall_timeout if stall_timeout is not None
-                                   else _stall_window(_sto, stall_cap)))
+                                   else _stall_window(_sto, stall_cap)),
+                    signals=_sig)
                 to = to or (is_docker and docker_timed_out(rc))
                 if _sh is not None:
                     _sh.set_many(exit_code=rc, timed_out=to, stage=_sname)
@@ -862,7 +869,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                              if (_i == len(stages) - 1 and not to) else None)
                 return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
                                  metric=_salvaged, timed_out=to, stages=stage_results,
-                                 failed_stage=_sname, stalled=(STALL_SENTINEL in err))
+                                 failed_stage=_sname, stalled=bool(_sig.get("stalled")))
             # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
             # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
             # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)

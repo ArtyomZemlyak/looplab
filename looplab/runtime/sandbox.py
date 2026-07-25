@@ -332,7 +332,7 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
              log_path: Optional[str] = None, mem_bytes: Optional[int] = None,
              fsize_bytes: Optional[int] = None, health_check: bool = False,
-             stall_timeout: Optional[float] = None):
+             stall_timeout: Optional[float] = None, signals: Optional[dict] = None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -463,7 +463,8 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
     rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel,
-                                         health_check=health_check, stall_timeout=stall_timeout)
+                                         health_check=health_check, stall_timeout=stall_timeout,
+                                         signals=signals)
     if docker_cidfile is not None:
         # Defense-in-depth: the cidfile now lives in the host temp dir (unreachable by the container),
         # but never let a cleanup hiccup (a FUSE OSError, or — pre-#5 — untrusted code having replaced
@@ -569,7 +570,7 @@ class _StageHealthMonitor:
 
 
 def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=False,
-               stall_timeout=None):
+               stall_timeout=None, signals=None):
     """Drain `proc`'s stdout+stderr concurrently in fixed-size binary chunks: mirror them to
     `log_path` (a live, tail-able combined log) while accumulating bounded per-stream tails.
     Honors the same wall-clock timeout + cancel-event tree-kill as the buffered path. Reader
@@ -746,6 +747,17 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     rc = proc.returncode if proc.returncode is not None else -1
     out = b"".join(bufs["out"]).decode("utf-8", "replace")
     err = b"".join(bufs["err"]).decode("utf-8", "replace")
+    # AUTHENTICATED watchdog verdict. The markers below are appended to `err`, which also carries the
+    # CANDIDATE's own stderr, so `SENTINEL in err` is forgeable: a solution could print the STALLED
+    # sentinel, print a metric, and exit non-zero — and the stall-salvage gate
+    # (`metric is not None and not timed_out and (exit == 0 or stalled)`) would accept the crashed run.
+    # Worse on the staged path, which is the only `health_check=True` caller: the DIVERGE watchdog
+    # deliberately forces a non-zero exit against the candidate's will, and a forged stall marker
+    # converted that fail-closed verdict back into an accepted metric. `signals` is the out-of-band
+    # channel the candidate cannot write to; callers that pass it must prefer it over the text test.
+    if signals is not None:
+        signals["stalled"] = stalled.is_set()
+        signals["diverged"] = diverged.is_set()
     if diverged.is_set() or stalled.is_set():
         err += active_marker
         # A short process can exit before the 250 ms parent poll observes the flag. A set flag means we

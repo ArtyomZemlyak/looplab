@@ -532,3 +532,30 @@ def test_non_string_metric_key_fails_the_node_not_the_run(tmp_path):
     assert read_metric(out, str(tmp_path), {"kind": "stdout_json", "key": "metric"}) == 0.5
     assert read_metric(out, str(tmp_path),
                        {"kind": "file_json", "path": "m.json", "key": "metric"}) == 0.5
+
+
+def test_staged_stall_salvage_cannot_be_forged_from_candidate_stderr(tmp_path):
+    """The stall-salvage verdict must come from the WATCHDOG, not from candidate-controlled text.
+
+    `err` mixes the watchdog's marker with the candidate's own stderr, so `STALL_SENTINEL in err` was
+    forgeable. The staged path is the only `health_check=True` caller — the one place the DIVERGE
+    watchdog deliberately forces a non-zero exit against the candidate's will — so a solution that
+    printed a metric, echoed the sentinel and crashed flipped that fail-closed verdict back into an
+    accepted self-reported score via evaluate.py's `exit == 0 or stalled` gate.
+    """
+    from looplab.runtime.sandbox import STALL_SENTINEL, run_argv
+
+    script = tmp_path / "forge.py"
+    script.write_text(
+        "import sys\n"
+        'print(\'{"metric": 0.999}\')\n'
+        f"sys.stderr.write({STALL_SENTINEL!r} + '\\n')\n"
+        "sys.exit(1)\n", encoding="utf-8")
+    signals: dict = {}
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, str(script)], str(tmp_path), 30.0, health_check=True, signals=signals)
+
+    assert rc != 0 and not timed_out
+    assert STALL_SENTINEL in err                  # the candidate really did forge the text...
+    assert signals.get("stalled") is False        # ...but the authenticated verdict is not fooled
+    assert signals.get("diverged") is False
