@@ -2056,20 +2056,23 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # membership snapshot; omit it here so large legacy caches cannot consume live edge budgets.
             continue
         conf = ed.get("confidence")
-        # REVIEW(2026-07-16): the tuple order below can only rank a REAL finite/±inf float. Two agent-
-        # supplied values must be neutralized to keep the fold commutative (invariant 5 order-tolerance):
-        #   * NaN — every `>` comparison against a NaN tuple-head is False, so whichever edge arrived
-        #     FIRST would stick forever ([nan, 5.0] keeps nan while [5.0, nan] keeps 5.0). NaN is reachable
-        #     because stdlib json round-trips `NaN` literals by default (dumps allow_nan / loads parses).
+        # REVIEW(2026-07-16): the tuple order below can only rank a REAL finite float. Agent-supplied
+        # values must be neutralized to keep the fold commutative (invariant 5 order-tolerance):
         #   * bool — isinstance(True, int) is True, so a stray `confidence: true` would coerce to 1.0 and
         #     could WIN over a legitimate edge; treat it as 0.0 (lowest) so a mis-typed flag never ranks.
-        # Both map to 0.0, keeping the order total and the accumulate order-independent. (`x != x` is the
-        # portable NaN test — no math import.)
-        # CODEX AGENT: +Infinity is still accepted and permanently outranks every finite repair, while
-        # ConceptFrame rejects it and remains partial. Normalize every non-finite confidence to 0.0 and
-        # cover both event orders.
+        #   * NaN — every `>` comparison against a NaN tuple-head is False, so whichever edge arrived
+        #     FIRST would stick forever ([nan, 5.0] keeps nan while [5.0, nan] keeps 5.0).
+        #   * ±inf — a `+inf` head would permanently outrank every finite repair while `ConceptFrame`
+        #     drops the same edge (`finite_metric` returns None -> rejected at serve/concept_frame.py:352),
+        #     so replay and the UI read would disagree with no way to converge.
+        # NaN/±inf are unreachable over the event log TODAY — it is orjson end to end: `orjson.dumps`
+        # writes a non-finite float as `null` (-> the isinstance guard below yields 0.0) and
+        # `orjson.loads` REJECTS the `NaN`/`Infinity` literals (and any `1e400`-style overflow) that
+        # stdlib json would accept, so such a row ends the recoverable prefix instead of folding.
+        # Normalizing anyway is free and keeps the total order a property of THIS function rather than
+        # of the transport, so swapping a parser can never silently reopen the hole.
         conf = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else 0.0
-        if conf != conf:
+        if not math.isfinite(conf):
             conf = 0.0
         # -0.0 and 0.0 tie numerically but serialize differently. Canonicalize the sign
         # before the commutative max so replay order cannot leak into RunState / ConceptFrame bytes.

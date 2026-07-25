@@ -2234,3 +2234,34 @@ def test_inject_receipt_binds_to_its_own_queue_head(tmp_path):
     legacy.append("inject_node", {"idea": {"operator": "manual", "params": {}}, "parent_id": None})
     legacy.append("inject_done", {})
     assert fold(legacy.read_all()).injects_done == 1
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_concept_edge_confidence_ranking_is_order_tolerant_over_non_finites(bad):
+    """A non-finite confidence must not decide the max-wins winner (invariant 5 order-tolerance).
+
+    `_on_concept_edge` keys on the (src, rel, dst) triple and keeps the highest confidence, so the
+    ranking key must be a TOTAL order or the winner depends on arrival order. A `+inf` head would also
+    permanently outrank every finite repair while `ConceptFrame` DROPS the same edge (`finite_metric`
+    returns None for non-finites), leaving replay and the UI read disagreeing with no way to converge.
+
+    These values are unreachable over the event log today — it is orjson end to end, which writes a
+    non-finite float as `null` and rejects `NaN`/`Infinity` literals on read — so this pins the
+    ordering as a property of the reducer rather than of the transport. `fold` is a pure function over
+    Events, so the events are built directly here rather than round-tripped through a store.
+    """
+    def _ev(seq, conf):
+        return Event(seq=seq, ts=float(seq), type="concept_edge",
+                     data={"src": "a", "rel": "improves", "dst": "b",
+                           "confidence": conf, "provenance": "agent"})
+
+    head = Event(seq=0, ts=0.0, type="run_started",
+                 data={"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+    forward = fold([head, _ev(1, bad), _ev(2, 0.5)])
+    reverse = fold([head, _ev(1, 0.5), _ev(2, bad)])
+    assert forward.concept_edges == reverse.concept_edges, (
+        f"confidence={bad!r} made the concept-edge winner depend on arrival order")
+    key = "a\timproves\tb"
+    assert forward.concept_edges[key]["confidence"] == 0.5, (
+        f"a non-finite confidence ({bad!r}) outranked a legitimate finite edge; ConceptFrame drops "
+        "the same edge, so replay and the UI read could never converge")
