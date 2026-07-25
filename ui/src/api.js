@@ -2089,11 +2089,18 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
   const reader = r.body.getReader(); const dec = new TextDecoder()
   let buf = ''; let result = null
   for (;;) {
-    // # CODEX AGENT: distinguish AbortSignal cancellation from a transport reset. Breaking on every
-    // rejected `reader.read()` converts an ambiguous accepted server turn into successful `(no reply)`
-    // and skips the existing reconciliation path while paid work or mutations may still complete.
+    // An AbortSignal cancellation and a mid-stream TRANSPORT RESET are not the same event. Breaking on
+    // every rejected `reader.read()` turned an ambiguous but possibly-accepted server turn into a
+    // successful `(no reply)`: the caller took its success path and never reached the `catch` that runs
+    // `recoverReply(...)`, even though the server may have completed the turn (mutations, paid tokens).
+    // Abort still breaks cleanly — the caller's `if (!runningRef.current) return` owns that case — but a
+    // real transport error is rethrown so reconciliation runs.
     let chunk
-    try { chunk = await reader.read() } catch { break }   // aborted (unmount) — stop cleanly
+    try { chunk = await reader.read() }
+    catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') break   // aborted (stop/unmount) — stop cleanly
+      throw error                                                  // transport reset — reconcile, don't fake success
+    }
     const { done, value } = chunk
     if (done) break
     buf += dec.decode(value, { stream: true })
