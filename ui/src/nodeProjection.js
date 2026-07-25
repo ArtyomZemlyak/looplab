@@ -27,7 +27,7 @@ export function activeNodeConcepts(state = null) {
   return out
 }
 
-// CODEX AGENT: A retained concept row is authoritative only when replay emitted no
+// A retained concept row is authoritative only when replay emitted no
 // materialization receipt for it. The trust boundary is receipt presence (never the reason text);
 // malformed envelopes fail unavailable while future partial reasons remain safely display-only.
 const UNAVAILABLE_REASON = /^(?:concept_mode_|delta_dependency_|invalid_consolidation)/
@@ -69,7 +69,7 @@ export function conceptMaterializationStatus(state = null, nodeId = undefined) {
   if (receipts == null) return aggregate
   if (typeof receipts !== 'object' || Array.isArray(receipts)) return 'unavailable'
   const nodes = state?.nodes
-  // # CODEX AGENT: ConceptFrame rejects an orphan or malformed receipt globally. Validate the whole
+  // ConceptFrame rejects an orphan or malformed receipt globally. Validate the whole
   // immutable snapshot once before serving any node-specific theme, including inactive receipt rows.
   if (!receiptStoreValid(receipts, nodes)) return 'unavailable'
   if (nodeId !== undefined) {

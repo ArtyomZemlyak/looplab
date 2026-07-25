@@ -23,7 +23,7 @@ const SearchIcon = ({ small }) => (
 // The pure model (chip counts, breadcrumb, matching set) lives in conceptChips.js and is unit-tested;
 // this component is only wiring + markup.
 export default function ConceptChipBar({ state, onHighlight }) {
-  // CODEX AGENT: partial rows may be rendered on their node, but absence within them is not truth.
+  // partial rows may be rendered on their node, but absence within them is not truth.
   // Keep them out of chip counts, search, selection and DAG filtering as one indivisible gate.
   const [materialization, nodeConcepts] = useMemo(() => {
     const status = conceptMaterializationStatus(state)
@@ -37,7 +37,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
   const [query, setQuery] = useState('')               // live free-text concept query
   const [cursor, setCursor] = useState(-1)             // keyboard-focused result index
   const inputRef = useRef(null)
-  // CODEX AGENT: keyboard focus intentionally remains on the combobox input. A per-instance stable
+  // keyboard focus intentionally remains on the combobox input. A per-instance stable
   // listbox id plus concept-identity option ids lets aria-activedescendant expose the visual cursor
   // without adding results to the Tab order or colliding when two run views coexist.
   const searchInstanceId = useId().replace(/[^a-zA-Z0-9_-]/g, '')

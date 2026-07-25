@@ -1732,7 +1732,7 @@ export const getScopeReport = (type, id, options = {}) => {
     return commandResponseJson(response, path)
   })
 }
-// # CODEX AGENT: durable action reads use a separate route namespace. Appending `/actions/...` to
+// durable action reads use a separate route namespace. Appending `/actions/...` to
 // an opaque scope path would make valid ids ending in that shape impossible to read as reports.
 const _scopeActionUrl = (type, id, actionId) =>
   `/api/scope-report-actions/${encodeURIComponent(actionId)}`
@@ -1745,7 +1745,7 @@ const scopeActionId = value => typeof value === 'string' && UUID_V4_RE.test(valu
   ? value.toLowerCase() : null
 const scopeJobId = value => typeof value === 'string' && safeIdentityText(value) ? value : null
 
-// # CODEX AGENT: once paid work may have crossed the POST boundary, every error carries only bounded
+// once paid work may have crossed the POST boundary, every error carries only bounded
 // client-owned identity metadata. Presentation never needs the server/provider body to recover the
 // exact action, and callers can never mistake an identity-less failure for permission to re-bill.
 const scopeGenerationErrorIdentity = (cause, actionId, jobId = null, ambiguous = true) => {
@@ -1927,7 +1927,7 @@ export async function jobAwait(resp, {
       await commandSleep(intervalMs, signal)
     }
   } catch (error) {
-    // # CODEX AGENT: a failed observation never erases the already accepted paid identity. This
+    // a failed observation never erases the already accepted paid identity. This
     // includes local abort, auth/protocol failures, and a response body that failed after the server
     // atomically consumed its terminal job receipt.
     throw scopeGenerationErrorIdentity(error, error?.actionId || '', acceptedJobId, true)

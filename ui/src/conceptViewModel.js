@@ -17,7 +17,7 @@ export const CONCEPT_COLUMNS = [
 ]
 export const DEFAULT_COLUMNS = ['touched', 'best', 'delta_best']
 
-// CODEX AGENT: `co_occurs` is materialized from the CURRENT membership projection, while the other
+// `co_occurs` is materialized from the CURRENT membership projection, while the other
 // relationship edges are persisted claims. Use neutral "projected" wording for the shared edge view
 // and disclose co-occurrence derivation explicitly instead of calling every displayed link recorded.
 export function relationshipProjectionCopy(rels = []) {

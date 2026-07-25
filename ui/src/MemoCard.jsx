@@ -53,7 +53,7 @@ export default function MemoCard({ memo, idx, open, onToggle }) {
         <div className="section-h">Findings</div>
         <ul className="bul">{value.findings.map((finding, index) => <li key={index}>{finding}</li>)}</ul>
       </>}
-      {/* # CODEX AGENT: Render only the normalized verifier projection so unsupported claims remain
+      {/* Render only the normalized verifier projection so unsupported claims remain
           visible in the report without trusting provider-supplied aggregate counts. */}
       <MemoVerification verification={value.verification} />
       {value.recommended_directions.length > 0 && <>

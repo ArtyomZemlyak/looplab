@@ -79,7 +79,7 @@ export function dagEmptyPresentation({
   displayed = {}, live = null, resourceStatus = 'ready', connected = true,
   historyActive = false, reviewMode = false, sequence = null,
 } = {}) {
-  // CODEX AGENT: Tombstoned/aborted rows remain in replay state for audit, but Dag renders only
+  // Tombstoned/aborted rows remain in replay state for audit, but Dag renders only
   // active nodes. Base the empty-state decision on the same projection or the canvas goes blank
   // when the last visible experiment is retired.
   if (resourceStatus !== 'ready'

@@ -268,7 +268,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
     const epoch = ++requestEpoch.current
     let flight = restoredFlight(key, { reprobeStorageError: true })
     if (flight?.uncertain && !flight.active && flight.actionId) {
-      // # CODEX AGENT: remount/reload never invents a new action. It observes the known job/receipt;
+      // remount/reload never invents a new action. It observes the known job/receipt;
       // only a strict server `unknown` may safely replay this same UUID through POST.
       flight = driveGeneration(key, flight, async () => completedGeneration(
         await reconcileScopeReportGeneration(scope.type, scope.id, {
@@ -306,7 +306,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
     }))
     getScopeReport(scope.type, scope.id, { signal: controller.signal })
       .then(value => {
-        // # CODEX AGENT: A late GET must not overwrite a regeneration or a newly selected scope.
+        // A late GET must not overwrite a regeneration or a newly selected scope.
         if (requestEpoch.current !== epoch || keyRef.current !== key) return
         if (!valid(value)) {
           setView({ key, data: null, busy: false, uncertain: false,
@@ -358,7 +358,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
 
   const generateReplacement = () => {
     if (!publicationUnconfirmed) return
-    // # CODEX AGENT: This escape hatch starts a new paid UUID after an unconfirmed publication.
+    // This escape hatch starts a new paid UUID after an unconfirmed publication.
     // Require an explicit static, client-owned cost warning; never interpolate raw server/provider copy.
     const warning = 'The previous paid generation may have completed, but its report publication was not durably confirmed. A replacement starts a new paid action and may incur additional provider cost. Continue?'
     if (typeof window === 'undefined' || typeof window.confirm !== 'function'

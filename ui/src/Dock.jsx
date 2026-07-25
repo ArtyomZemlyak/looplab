@@ -133,7 +133,7 @@ const NARR = {
   node_tombstoned: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return ids.length ? `deleted node${ids.length === 1 ? '' : 's'} ${ids.map(n => '#' + n).join(', ')}` : 'deleted a node subtree' },
   holdout_evaluated: (d) => `holdout (final-exam) score for #${d.node_id} → ${fmt(d.metric)}`,
   novelty_graded: (d) => `novelty graded ${d.node_id != null ? '#' + d.node_id + ' ' : ''}level ${d.level}${d.grade ? ' (' + d.grade + ')' : ''} → ${d.recommendation || 'allow'}`,
-  // # CODEX AGENT: A capsule's best metric is run-wide, not the matched concept's outcome. Only the
+  // A capsule's best metric is run-wide, not the matched concept's outcome. Only the
   // v2 retained-outcome row earns concept-level wording; every fallback says "run best" explicitly.
   cross_run_prior: crossRunPriorNarration,
   comment_created: (d) => `comment on #${d.node_id ?? '?'}: ${String(d.text || d.body || '').slice(0, 80)}`,
@@ -358,7 +358,7 @@ function LiveTrace({ runId, generation, active }) {
   const [open, setOpen] = useState(false)
   const [limit, setLimit] = useState(TRACE_LIMIT_DEFAULT)
   const bodyRef = useRef(null)
-  // # CODEX AGENT: Keep one scalar bottom offset while paging upward. Storing both height and top
+  // Keep one scalar bottom offset while paging upward. Storing both height and top
   // duplicated the same invariant and made this hot owner-route code larger than its bundle budget.
   const stickRef = useRef(true)
   const preserveRef = useRef(null)
@@ -643,7 +643,7 @@ export function eventNarration(event) {
       throw new TypeError('incomplete event narration payload')
     }
     const value = render ? render(data) : JSON.stringify(data ?? {}).slice(0, 80)
-    // # CODEX AGENT: Narration contains agent/user prose. Validate its structured input and renderer
+    // Narration contains agent/user prose. Validate its structured input and renderer
     // result; never infer a template failure from a legitimate word inside the rendered data.
     if (!value) throw new TypeError('incomplete event narration')
     return String(value || event?.type || 'event')
@@ -707,7 +707,7 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const [nodeTrace, setNodeTrace] = useState(null)
   const [nodeTraceError, setNodeTraceError] = useState(false)
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
-  // # CODEX AGENT: Use the server's documented default explicitly, then double to its bounded ceiling.
+  // Use the server's documented default explicitly, then double to its bounded ceiling.
   // This removes the special zero/default request path without changing the first response window.
   const [nodeTraceLimit, setNodeTraceLimit] = useState(512)
   const loadMoreNodeTrace = () => setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_CAP_MAX))

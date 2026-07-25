@@ -171,7 +171,7 @@ function ExpNode({ data }) {
   const coreI = node.id === state.best_node_id ? 1 : (d && d.improved) ? 0.85
     : node.status === 'evaluated' ? 0.55 : node.status === 'failed' ? 0.45 : 0.3
   const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
-  // # CODEX AGENT: the tag strip is pointer-transparent and visually caps at two leaves. Put the
+  // the tag strip is pointer-transparent and visually caps at two leaves. Put the
   // complete canonical set on the card itself so the +N overflow has a reachable mouse tooltip.
   const conceptTruth = conceptStatus === 'unavailable' ? 'concepts unavailable, not empty'
     : conceptStatus === 'partial' ? `PARTIAL concepts (display-only): ${conceptTags.join(', ') || 'none retained'}`

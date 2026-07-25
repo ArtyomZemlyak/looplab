@@ -16,7 +16,7 @@ const PORTFOLIO_ID_RE = /^portfolio-sha256:[0-9a-f]{64}$/
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 const list = value => Array.isArray(value) ? value : []
-// # CODEX AGENT: JSON booleans and numeric strings are not receipt counts. Number-coercing them would
+// JSON booleans and numeric strings are not receipt counts. Number-coercing them would
 // fabricate evidence (true -> 1) or let an untyped total hide rows omitted by the client projection.
 const count = (value, fallback = 0) => Number.isSafeInteger(value) && value >= 0 ? value : fallback
 
@@ -48,7 +48,7 @@ const normalizeConceptSource = atlas => {
     'source_malformed_rows', 'source_invalid_capsule_rows', 'source_duplicate_run_rows']
   const store = storeKeys.map(key => count(receipt[key], -1))
   const complete = receipt.source_complete
-  // # CODEX AGENT: the current Atlas API always emits one atomic capsule+store receipt. Legacy/missing
+  // the current Atlas API always emits one atomic capsule+store receipt. Legacy/missing
   // response shapes remain safely UNKNOWN instead of shipping a second client-side compatibility mode.
   const valid = typeof complete === 'boolean' && typeof receipt.source_store_complete === 'boolean'
     && counts.every(value => value >= 0) && store.every(value => value >= 0)
@@ -99,7 +99,7 @@ const normalizeClaimSource = value => {
   return consistent ? receipt : null
 }
 
-// # CODEX AGENT: the server's validated combined claim-source receipt is the one UI authority. Requiring
+// the server's validated combined claim-source receipt is the one UI authority. Requiring
 // the same bounded receipt on both envelopes and every visible row keeps refresh races fail-closed without
 // shipping a second, subtly different implementation of the server's producer-ledger validator.
 const claimSection = (envelope, rows, hasRows = rows.length > 0) => {
@@ -178,7 +178,7 @@ export function isValidAtlasSourceEnvelope(key, value) {
       || !value.entries.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry))) {
       return false
     }
-    // # CODEX AGENT: current UI and server ship together; require the complete v1 health envelope so a
+    // current UI and server ship together; require the complete v1 health envelope so a
     // legacy/torn 200 response retains last-good state exactly like an unavailable read.
     return value.v === 1 && value.status === 'complete' && value.complete === true
       && Number.isSafeInteger(value.n) && value.n >= value.entries.length
@@ -298,7 +298,7 @@ const normalizeClaim = (value, source = unknownClaimSource()) => {
   const evidenceEpistemic = mixed
     ? 'mixed'
     : (nSupport > 0 ? 'supported' : (nOppose > 0 ? 'refuted' : 'inconclusive'))
-  // # CODEX AGENT: D8 is only one input. A quarantined lesson row can contain the missing opposite side even
+  // D8 is only one input. A quarantined lesson row can contain the missing opposite side even
   // when D8 is complete, so only the combined claim-source authority may unlock a one-sided state.
   const epistemic = ['supported', 'refuted'].includes(evidenceEpistemic)
     && source.status !== 'complete'
@@ -347,7 +347,7 @@ export function mergeCurationLogs(conceptValue, claimValue) {
     { kind: 'claim', envelope: record(claimValue) },
   ]
   // Each API log is newest-first. One entry per steward keeps this preview useful and bounded without
-  // recreating a cross-ledger ordering that the independent snapshots cannot prove (CODEX AGENT).
+  // recreating a cross-ledger ordering that the independent snapshots cannot prove.
   const entries = sources.flatMap(({ kind, envelope }) => list(envelope.entries).length
     ? [{ ...record(envelope.entries[0]), kind }] : [])
   const total = sources.reduce((sum, { envelope }) =>

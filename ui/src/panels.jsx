@@ -1110,7 +1110,7 @@ export function HyperImportancePanel({ state, onClose }) {
   )
 }
 
-// # CODEX AGENT: Same-task IDs are an operational lookup key, not a ComparisonContract. Keep this
+// Same-task IDs are an operational lookup key, not a ComparisonContract. Keep this
 // legacy panel useful for navigation without ranking raw objectives whose metric unit, dataset/eval
 // identity, and protocol are absent from /api/runs. The Research Atlas owns contract-bound comparison.
 const CROSS_RUN_OBSERVATION_LIMIT = 100
@@ -1119,7 +1119,7 @@ export function CrossRunPanel({ state, onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
   const task = typeof state.task_id === 'string' && state.task_id.trim() ? state.task_id : ''
-  // CODEX AGENT: an absent task identity is not a shared identity. Never combine legacy rows merely
+  // an absent task identity is not a shared identity. Never combine legacy rows merely
   // because they all encode the missing value as an empty string.
   const observations = (task ? runs.filter(r => r.task_id === task) : [])
     .map(r => ({ ...r, m: r.best_confirmed ?? r.best_metric }))
@@ -1177,7 +1177,7 @@ const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', 
 
 const _CARD_COLUMNS = [
   ['proposed', 'Proposed', 'work item is open and has not started'],
-  // CODEX AGENT: these speculative lanes are unreachable from the production Card projection:
+  // these speculative lanes are unreachable from the production Card projection:
   // requested/done receipts live only in recovery journals, while public status derives from
   // proposed/building/running/gated/evaluated/dropped. Paid in-flight or commit-buffered work therefore
   // appears Proposed; project a bounded speculative owner state before advertising these lanes.

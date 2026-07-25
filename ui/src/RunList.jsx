@@ -24,7 +24,7 @@ export function useResource(read, initial) {
   useEffect(() => () => { version.current += 1 }, [])
   const load = () => {
     const owner = ++version.current
-    // # CODEX AGENT: Poll, visibility and post-mutation reads can overlap. Only the newest request
+    // Poll, visibility and post-mutation reads can overlap. Only the newest request
     // owns the resource; cleanup invalidates every late settlement after this component unmounts.
     return Promise.resolve().then(read)
       .then(value => {

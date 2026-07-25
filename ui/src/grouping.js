@@ -144,7 +144,7 @@ export function groupAggregate(memberIds, nodesObj, direction, state = null) {
   const members = memberIds.map(id => nodesObj[id]).filter(node => nodeIsActive(node, state))
   members.sort((a, b) => a.id - b.id).forEach(n => {
     const m = n.confirmed_mean ?? n.metric
-    // CODEX AGENT: collapsed-card best/trajectory must obey the same eligibility boundary as
+    // collapsed-card best/trajectory must obey the same eligibility boundary as
     // winner selection; pending, failed, infeasible, and non-finite observations remain counts only.
     if (n.status === 'evaluated' && n.feasible !== false && Number.isFinite(m)) {
       series.push(m)

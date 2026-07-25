@@ -307,7 +307,7 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
             "uncertainty_protocol": _text(
                 contract["uncertainty_protocol"], 128, single_line=True),
             "contract_authority": "declared",
-            # CODEX AGENT: schema-v1 contracts are observational. Winner authority requires a future
+            # schema-v1 contracts are observational. Winner authority requires a future
             # schema that binds an effect size and a machine-evaluable significance decision.
             "outcome_policy": "observations-only-v1",
             "measurements": measurements,

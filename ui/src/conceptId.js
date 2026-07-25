@@ -16,7 +16,7 @@ export function normalizeConceptId(raw) {
   if (typeof raw !== 'string' || [...raw].length > MAX_ID_CHARS) return ''
   const value = raw.trim().toLowerCase().replaceAll(' ', '-').replace(/^\/+|\/+$/g, '')
   const parts = value.split('/')
-  // CODEX AGENT: mirror core.models.valid_concept_id, not just ConceptFrame's old whitespace gate.
+  // mirror core.models.valid_concept_id, not just ConceptFrame's old whitespace gate.
   // Every segment needs a Unicode letter/number and may otherwise contain only -._; this keeps the
   // DAG/report vocabulary identical to replay/search for emoji, markup and punctuation-only ids.
   const validSegment = /^(?=[\p{L}\p{N}._-]*[\p{L}\p{N}])[\p{L}\p{N}._-]+$/u
@@ -61,7 +61,7 @@ export function conceptMap() {
 export function nodeTheme(node, state = null) {
   const memberships = state?.node_concepts
   const nodeId = node?.id
-  // CODEX AGENT: grouping, charts, Inspector and reports all converge here. An own/run-base receipt
+  // grouping, charts, Inspector and reports all converge here. An own/run-base receipt
   // makes retained ids display-only; never resurrect an authored fallback as an authoritative theme.
   if (state && conceptMaterializationStatus(state, nodeId) !== 'complete') return null
   if (memberships && typeof memberships === 'object' && !Array.isArray(memberships)

@@ -8,7 +8,7 @@
 // back-compat. We render every entry. Falls back to the singular marker for a serial-build run or an
 // older server that doesn't send `buildings`. Extracted from hooks.js so it can be unit-tested without
 // pulling in React.
-// # CODEX AGENT: Keep legacy-singular and parallel marker decoding in one pure projection. Dock status,
+// Keep legacy-singular and parallel marker decoding in one pure projection. Dock status,
 // trace polling and synthetic DAG nodes previously disagreed at the edges because each decoded it.
 export function buildingMarkers(state) {
   const bag = state?.buildings

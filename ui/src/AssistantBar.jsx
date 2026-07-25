@@ -1649,7 +1649,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     {view === 'side' && <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
       role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
       tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
-      {/* # CODEX AGENT: hide this separator at the compact breakpoint where CSS forces 100vw.
+      {/* hide this separator at the compact breakpoint where CSS forces 100vw.
           It remains keyboard-focusable and announces changing values although the rendered panel
           cannot resize, so its accessible operation is false. */}
       <div className="asst-resize" role="separator" aria-label="Resize Assistant panel"

@@ -18,7 +18,7 @@ import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 
-// # CODEX AGENT: Comments are an explicit Inspector interaction. Keep their independently secured
+// Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
 const CommentsThread = React.lazy(() => import('./CommentsThread.jsx'))
 

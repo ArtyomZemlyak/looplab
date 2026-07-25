@@ -139,7 +139,7 @@ function _pearson(xs, ys) {
 // evaluated feasible nodes ("which knobs mattered"). Needs ≥3 points per param. One source of truth
 // shared by the Report's Learnings section and the Importance panel.
 export function hyperImportance(state) {
-  // CODEX AGENT: lifecycle-retired rows remain in the append-only fold for audit, but every current
+  // lifecycle-retired rows remain in the append-only fold for audit, but every current
   // report projection must use the same active population as analyze/DAG/Concepts.
   const nodes = Object.values(activeNodeMap(state.nodes || {}, state))
     .filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
@@ -219,7 +219,7 @@ export function regressions(nodes, direction, state = null) {
 }
 
 export function failureBreakdown(nodes) {
-  // CODEX AGENT: provider-authored error reasons are untrusted keys. A null-prototype index keeps
+  // provider-authored error reasons are untrusted keys. A null-prototype index keeps
   // values such as "__proto__" and "constructor" as ordinary buckets instead of object internals.
   const by = Object.create(null)
   Object.values(nodes).filter(n => n.status === 'failed').forEach(n => {

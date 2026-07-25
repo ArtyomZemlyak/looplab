@@ -3,7 +3,7 @@ export const SCOPE_VERDICT_AUTHORITY = 'server-derived-v3'
 export const SCOPE_NARRATIVE_AUTHORITY = 'model-advisory'
 export const SCOPE_PUBLICATION_UNCONFIRMED = 'scope_report_publication_unconfirmed'
 
-// # CODEX AGENT: Recognize only the server-owned safe projection marker. Extra response fields are
+// Recognize only the server-owned safe projection marker. Extra response fields are
 // deliberately irrelevant so an accidentally overfull response still takes the non-rendering quarantine
 // branch instead of falling through to the ordinary paid-generation invitation.
 export function scopeReportPublicationUnconfirmed(value) {
@@ -12,7 +12,7 @@ export function scopeReportPublicationUnconfirmed(value) {
     && value?.code === SCOPE_PUBLICATION_UNCONFIRMED
 }
 
-// # CODEX AGENT: Authority and freshness are independent protocol facts. A stale exact-schema report
+// Authority and freshness are independent protocol facts. A stale exact-schema report
 // remains inspectable historical evidence, but only an exact `stale:false` receipt may expose its
 // snapshot-bound verdict.
 export function scopeReportAuthority(value) {
@@ -62,7 +62,7 @@ export function scopeReportGenerationError(error) {
   if (error?.status === 413
       || code === 'scope_report_too_large'
       || code === 'scope_report_source_too_large') {
-    // # CODEX AGENT: use client-owned remediation copy; never echo provider/server detail into UI.
+    // use client-owned remediation copy; never echo provider/server detail into UI.
     return 'Scope exceeds bounded report limits. Generate a narrower child scope or compact oversized run history.'
   }
   return 'Generation failed.'

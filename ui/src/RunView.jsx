@@ -153,7 +153,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // URL effect would start DAG chunks and the owner log-page request for a surface never displayed.
   const autoReport = !historyActive && liveTerminalReady && !landedRef.current
     && !deepLinkLandingRef.current && !runRouteStateHasTarget(routeState, { reviewMode })
-  // # CODEX AGENT: review capabilities do not expose concept frames. Owner history does, through an
+  // review capabilities do not expose concept frames. Owner history does, through an
   // exact seq; redirect only the unsupported review route instead of hiding owner history.
   const requestedView = reviewMode && requestedRouteView === 'concepts' ? 'dag' : requestedRouteView
   const view = autoReport ? 'report' : requestedView

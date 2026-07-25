@@ -32,7 +32,7 @@ const derivedLensId = value => typeof value === 'string' && value.length <= 64
 export const validDerivedLensLabel = value => typeof value === 'string'
   && value.length >= 1 && value.length <= 60 && value === value.trim()
   && /\S/u.test(value) && !/[\p{C}]/u.test(value)
-// # CODEX AGENT: Keep this contract explicit and aligned with
+// Keep this contract explicit and aligned with
 // concept_frame.TRUNCATION_CAP_REASONS.
 // A reason merely ending in "_cap" is not necessarily monotone truncation:
 // rename_hop_cap, for example, means taxonomy resolution could not be trusted.
@@ -43,7 +43,7 @@ const TRUNCATION_CAP_REASONS = new Set([
 const MATERIALIZATION_CORRUPTION_REASON = /^(?:delta_dependency_|rename_|concept_mode_|invalid_(?:concept|consolidation|membership|experiment))/
 const MATERIALIZATION_REMEDIATION = 'Refresh cannot repair durable state. Inspect Lab → Events/Authoring; '
   + 'fix delta/consolidation or fork and replay.'
-// CODEX AGENT: Cap receipts describe a deterministic, safe subset. Delta/consolidation/membership
+// Cap receipts describe a deterministic, safe subset. Delta/consolidation/membership
 // receipts mean durable concept materialization could not be trusted; a read retry cannot repair them.
 export function classifyConceptCompleteness(reasons = []) {
   if (!Array.isArray(reasons) || reasons.length === 0) return 'complete'
@@ -158,7 +158,7 @@ export function validateConceptPayload(value, expected = {}) {
   const nodeIds = Object.keys(nodes)
   let treeReferences = roots.length
   if (nodeIds.length > 10_000 || treeReferences > nodeIds.length) invalidPayload()
-  // # CODEX AGENT: One bounded walk proves ownership, topology, reachability and tagged receipts;
+  // One bounded walk proves ownership, topology, reachability and tagged receipts;
   // the reference budget prevents an invalid fan-out from allocating an unbounded pending stack.
   const seenNodes = new Set()
   const pending = roots.map(id => [id, null, 0])
@@ -311,7 +311,7 @@ export function conceptProjectionKey(state) {
   const edges = entries(state?.concept_edges).map(([key, edge]) => [
     key, edge?.src, edge?.rel, edge?.dst, edge?.confidence,
   ])
-  // CODEX AGENT: effective memberships can stay byte-identical while replay adds or clears a typed
+  // effective memberships can stay byte-identical while replay adds or clears a typed
   // materialization receipt. Those receipts change ConceptFrame authority, so they are projection inputs,
   // not incidental state; omitting them leaves a stale "complete" frame on screen indefinitely.
   const materializationReceipts = entries(state?.node_concept_materialization_receipts)
@@ -1262,7 +1262,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   else if (projectionStatus.state === 'unavailable') stateCard = { tone: 'error',
     title: 'Concepts are unavailable', action: refresh, pending: refreshing,
     body: 'No safe concept projection returned. Run unchanged; retry.' }
-  // CODEX AGENT: Fail-closed materialization emptiness is not an honest "no concepts" result and
+  // Fail-closed materialization emptiness is not an honest "no concepts" result and
   // refreshing the same durable receipt cannot resolve it. Surface the repair path without a Retry.
   else if (empty && completenessKind === 'materialization-corruption') stateCard = { tone: 'error',
     title: 'Concept materialization is blocked',
