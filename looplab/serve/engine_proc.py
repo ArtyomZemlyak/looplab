@@ -255,11 +255,37 @@ def _run_lifecycle_lock(rd: Path):
     key = _run_lifecycle_key(rd)
     with _run_lifecycle_locks_guard:
         local = _run_lifecycle_locks.setdefault(key, threading.RLock())
-    # CODEX AGENT: lifecycle locking must be required, not best-effort. On an unsupported lock backend,
-    # two startup reconcilers can claim/spawn the same resume and race event appends before engine.lock.
-    # Fail closed on EventStoreLockError and cover two concurrent reconcilers.
-    with local, _interprocess_lock(_run_lifecycle_lock_path(rd)):
+    # REQUIRED, not best-effort. Without it, `_interprocess_lock` swallows an unsupported lock backend
+    # and this degrades to the in-process RLock alone — so two server processes (or two startup
+    # reconcilers) could claim and spawn the SAME resume, and race event appends before engine.lock
+    # exists to catch them. reset/delete are pure check-then-act around `_fresh_resume_launch_pending`,
+    # so they have no CAS to fall back on. Callers map the resulting EventStoreLockError to a 503; the
+    # same fail-closed contract `_put_run_config_locked` already uses for run config.
+    with local, _interprocess_lock(_run_lifecycle_lock_path(rd), required=True):
         yield
+
+
+@contextmanager
+def run_lifecycle_lock_http(rd: Path):
+    """`_run_lifecycle_lock` for HTTP routes: an unavailable lock backend is a 503, not a 500.
+
+    The lock is REQUIRED (see above), so a filesystem that cannot provide it now raises instead of
+    silently degrading. For an operator that is a retryable infrastructure condition — the run was not
+    touched — so it must read as one. Mirrors the `run_config_lock_unavailable` contract on
+    `PUT /api/runs/{id}/config`. Non-HTTP callers (the agent run tools) keep the raw error."""
+    # Both imported LAZILY: this module spawns engines and must stay importable without the [ui]
+    # extra, so fastapi cannot be a module-level dependency here.
+    from fastapi import HTTPException
+    from looplab.events.eventstore import EventStoreLockError
+
+    try:
+        with _run_lifecycle_lock(rd):
+            yield
+    except EventStoreLockError as exc:
+        raise HTTPException(503, {
+            "code": "run_lifecycle_lock_unavailable",
+            "message": "Run lifecycle locking is unavailable; the run was not modified.",
+        }) from exc
 
 
 def sweep_stale_lifecycle_locks(root: Path, *, max_age_s: float = 3600.0) -> int:
@@ -267,9 +293,12 @@ def sweep_stale_lifecycle_locks(root: Path, *, max_age_s: float = 3600.0) -> int
     root and are deliberately never deleted inline (their inode is the fence during a run's own delete),
     so a long-lived server slowly accumulates one `.looplab-lifecycle-*.lock` dot-file per run ever
     resumed/reset/deleted. Remove one ONLY when it is (a) OLD — untouched for `max_age_s`, while a real
-    lifecycle op touches its lock within seconds — AND (b) not currently held (a non-blocking flock
-    acquires cleanly). Removing an unheld stale lock never breaks locking: a later op recreates the file
-    on demand. Skips silently on any error or a mount without flock. Returns the count removed."""
+    lifecycle op touches its lock within seconds.
+
+    POSIX is a deliberate NO-OP (see the loop): there is no way to remove a `flock` pathname without
+    risking two lock domains over one run, and the accumulation it would clean is bounded by run count.
+    Windows can unlink safely because the OS refuses to remove a file that is open/locked, which is
+    exactly the check this GC needs. Skips silently on any error. Returns the count removed."""
     import time
     try:
         candidates = list(root.glob(".looplab-lifecycle-*.lock"))
@@ -290,24 +319,16 @@ def sweep_stale_lifecycle_locks(root: Path, *, max_age_s: float = 3600.0) -> int
             except OSError:
                 pass
             continue
-        try:
-            import fcntl
-            with open(lp, "a") as f:
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
-                    continue                   # held by a live op (or flock unsupported) → leave it
-                try:
-                    # CODEX AGENT: unlinking a flock pathname while a waiter may already have the old
-                    # inode open creates two independent lock domains: a newcomer locks the recreated
-                    # file while the waiter later owns the unlinked inode. Never remove lifecycle lock
-                    # files; keep a stable inode and clean stale metadata inside the lock instead.
-                    lp.unlink()                # unlink WHILE holding the flock: no op can be mid-write
-                    removed += 1
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            continue
+        # POSIX: DO NOT UNLINK. `flock` is per-INODE, and holding the lock while unlinking is not
+        # enough — a lifecycle op already blocked in `flock(LOCK_EX)` on this inode can still be
+        # waiting (`flock` gives no FIFO fairness, so the sweeper's LOCK_NB can win the race the
+        # instant a holder releases). It then acquires the now-unlinked inode, while the very next
+        # `_run_lifecycle_lock` caller's `open(lp, "a+")` creates a FRESH inode and locks that: two
+        # live lock domains over one run, i.e. reset/delete/resume-claim running concurrently with the
+        # single fence they rely on. The `max_age_s` filter does not help — it excludes recently
+        # TOUCHED files, not waiters. The leak this was cleaning is one empty dot-file per run ever
+        # resumed/reset/deleted (bounded by run count); the split-brain is unbounded corruption.
+        continue
     return removed
 
 # A resume can arrive after ``run_finished`` has landed but before the old engine releases its

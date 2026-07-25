@@ -3,6 +3,8 @@ future change can't silently reintroduce it. Finding ids (F1, F4, …) match the
 import os
 import tempfile
 
+import pytest
+
 from looplab.events.eventstore import Event
 from looplab.events.replay import fold
 from looplab.events import types as T
@@ -174,9 +176,20 @@ def test_public_state_value_keeps_identifiers():
 
 
 # ---------------------------------------------------- F22: stale lifecycle lock sweep is safe
-def test_sweep_stale_lifecycle_locks_only_old_and_unheld(tmp_path):
-    """F22: the startup GC removes only OLD, UNHELD lifecycle lock files — never a fresh one, a held
-    one, or a non-lock file."""
+def test_sweep_stale_lifecycle_locks_never_unlinks_a_flock_pathname(tmp_path):
+    """F22 GC: on POSIX the sweep must be a NO-OP — removing a `flock` pathname splits the lock.
+
+    `flock` is per-INODE, and holding the lock across the unlink is not enough: `flock` gives no FIFO
+    fairness, so a lifecycle op already blocked in `flock(LOCK_EX)` can still be waiting when the
+    sweeper's `LOCK_NB` wins the instant a holder releases. The waiter then acquires the UNLINKED
+    inode while the next `_run_lifecycle_lock` caller's `open(lp, "a+")` creates a fresh one and locks
+    that — two live lock domains over one run, so reset/delete/resume-claim can run concurrently with
+    the single fence they rely on. The leak this GC was cleaning is one empty dot-file per run ever
+    resumed/reset/deleted (bounded by run count); the split-brain is unbounded corruption.
+
+    Windows keeps unlinking, because there the OS itself refuses to remove an open/locked file —
+    exactly the check this GC needs and the one POSIX cannot provide.
+    """
     import os
     import time
     from looplab.serve.engine_proc import sweep_stale_lifecycle_locks
@@ -185,8 +198,14 @@ def test_sweep_stale_lifecycle_locks_only_old_and_unheld(tmp_path):
     keep = tmp_path / "events.jsonl"; keep.write_text("x")
     past = time.time() - 7200
     os.utime(old, (past, past))
-    assert sweep_stale_lifecycle_locks(tmp_path) == 1
-    assert not old.exists() and fresh.exists() and keep.exists()
+
+    removed = sweep_stale_lifecycle_locks(tmp_path)
+    if os.name == "nt":
+        assert removed == 1 and not old.exists()
+    else:
+        assert removed == 0, "a flock pathname was unlinked — this splits the run's lifecycle lock"
+        assert old.exists(), "the stale lock file must survive: its inode IS the fence"
+    assert fresh.exists() and keep.exists()
 
 
 # --------------------------------------------- F9: fresh-run (reset/replay) launch marker fences delete
@@ -268,3 +287,45 @@ def test_scrub_json_bounds_recursion_depth():
     assert node == "***(nested too deep)***"
     # a shallow structure is copied through untouched (with normal redaction semantics)
     assert _scrub_json({"a": {"b": [1, 2, "ok"]}}) == {"a": {"b": [1, 2, "ok"]}}
+
+
+def test_lifecycle_lock_is_required_and_reports_503(tmp_path, monkeypatch):
+    """The cross-process half of the lifecycle fence must FAIL, not silently degrade.
+
+    `_interprocess_lock` swallows an unsupported lock backend by default, so the lifecycle lock
+    quietly collapsed to the in-process RLock alone — and reset/delete are pure check-then-act around
+    `_fresh_resume_launch_pending`, with no CAS to fall back on. Two server processes (or two startup
+    reconcilers) could then claim and spawn the SAME resume and race event appends before engine.lock
+    existed to catch them. Requiring the lock turns that into a retryable 503 that names the lock and
+    leaves the run untouched — the contract `PUT /api/runs/{id}/config` already uses.
+    """
+    pytest.importorskip("fastapi")
+    from contextlib import contextmanager
+
+    from fastapi.testclient import TestClient
+
+    from looplab.events import eventstore
+    from looplab.events.eventstore import EventStoreLockError
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    (rd / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t","direction":"min"}}\n',
+        encoding="utf-8")
+    original = eventstore._interprocess_lock
+
+    @contextmanager
+    def unavailable(path, *, required=False):
+        if not required:
+            with original(path, required=required):
+                yield
+            return
+        raise EventStoreLockError(path, OSError("locking unsupported"))
+
+    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    client = TestClient(make_app(tmp_path))
+    for method, path in (("post", "/api/runs/demo/reset"), ("delete", "/api/runs/demo")):
+        r = getattr(client, method)(path)
+        assert r.status_code == 503, f"{path} degraded to an unlocked {method} instead of failing"
+    assert (rd / "events.jsonl").is_file(), "a lock failure must never destroy run bytes"

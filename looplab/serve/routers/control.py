@@ -29,7 +29,7 @@ from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import (
     _claim_and_spawn_resume, _clear_run_launching, _engine_alive, _engine_liveness,
     _fresh_resume_launch_pending, _fresh_run_launch_pending, _mark_run_launching,
-    _resolve_task_file, _run_lifecycle_lock)
+    _resolve_task_file, run_lifecycle_lock_http)
 from looplab.serve.launch import (
     idempotency_key_digest,
     launch_request_digest,
@@ -357,7 +357,7 @@ def build_router(srv) -> APIRouter:
                 raise HTTPException(
                     400, "run is not resumable — no task.snapshot.json or ui_meta.json "
                          "(it predates self-describing runs; start it via the UI to enable resume)")
-            with _run_lifecycle_lock(rd):
+            with run_lifecycle_lock_http(rd):
                 known_alive = _known_engine_liveness(rd, "resume the run")
                 # Durable before every liveness branch: a current owner in its final tail, or a
                 # detached child that dies before engine.lock, leaves a recoverable intent.
@@ -406,7 +406,7 @@ def build_router(srv) -> APIRouter:
         # lock additionally serializes durable resume reconciliation and CLI-compatible launch
         # markers. Keep this lock order (command → lifecycle) everywhere to avoid inversion.
         with srv.commands.destructive_guard(rd, "reset run") as rd:
-            with _run_lifecycle_lock(rd):
+            with run_lifecycle_lock_http(rd):
                 known_alive = _known_engine_liveness(rd, "reset the run")
                 if (known_alive or _engine_alive(rd) or _fresh_resume_launch_pending(rd)
                         or _fresh_run_launch_pending(rd)

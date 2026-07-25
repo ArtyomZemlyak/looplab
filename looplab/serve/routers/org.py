@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending, _fresh_run_launch_pending,
-    _run_lifecycle_lock)
+    run_lifecycle_lock_http)
 from looplab.serve.projects import ProjectError, ProjectStoreLockError
 
 
@@ -126,7 +126,7 @@ def build_router(srv) -> APIRouter:
             # window introduced by older/CLI-compatible control paths.
             # Acquire the required metadata lock before deleting bytes. Returning 503
             # after rmtree would falsely report failure for a run that was already irreversibly gone.
-            with _run_lifecycle_lock(rd), _project_transaction():
+            with run_lifecycle_lock_http(rd), _project_transaction():
                 liveness = _engine_liveness(rd)
                 if liveness is None:
                     raise HTTPException(409, {

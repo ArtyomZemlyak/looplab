@@ -209,7 +209,14 @@ def test_delete_run_acquires_project_lock_before_removing_run_bytes(tmp_path, mo
     monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
     response = TestClient(make_app(tmp_path)).delete("/api/runs/demo")
     assert response.status_code == 503
-    assert "project metadata lock is unavailable" in response.json()["detail"]
+    # Delete takes TWO required locks in a fixed order — lifecycle, then project (see org.py) — so
+    # either may be the one that reports unavailable. What matters is the fail-closed contract: a 503
+    # naming the specific lock, and NOTHING deleted. Pinning one code made this test a hostage of
+    # which lock happened to come first.
+    detail = response.json()["detail"]
+    code = detail.get("code") if isinstance(detail, dict) else str(detail)
+    assert code in ("run_lifecycle_lock_unavailable", "project_metadata_lock_unavailable") \
+        or "lock is unavailable" in str(detail), detail
     assert (run_dir / "events.jsonl").is_file(), "lock failure must precede irreversible deletion"
     assert project_store.path.read_bytes() == before
 
