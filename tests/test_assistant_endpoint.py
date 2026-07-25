@@ -924,3 +924,47 @@ def test_assistant_and_genesis_reject_non_object_body_with_400(tmp_path):
     ]:
         r = client.post(url, json=[])           # valid JSON, not an object
         assert r.status_code == 400, f"{url} -> {r.status_code} (expected 400): {r.text[:200]}"
+
+
+def test_cancel_skips_the_paid_session_titling_call(tmp_path, monkeypatch):
+    """Stop must also stop the FIRST-TURN titling call — it is a second paid request.
+
+    `_finish_turn`'s epilogue titles a new session with its own `complete_text`, issued after the
+    turn's model work is done. It ignored the cancel event entirely, so stopping a first turn still
+    launched that call: money spent right after the operator asked us to stop, and the session's
+    active slot held for as long as it hung. Persisting the reply still runs — it was already
+    produced and paid for; only the NEW spend is skipped.
+    """
+    import threading
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
+    titled = threading.Event()
+
+    class _Client:
+        def complete_text(self, _messages):
+            titled.set()
+            return "a title"
+
+        def chat(self, *a, **k):
+            return {"content": "", "tool_calls": []}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _Client())
+    entered, release = threading.Event(), threading.Event()
+
+    def fake_run_turn(_client, _root, _history, instruction, mode, **_kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"ok": True, "reply": "done", "steps": [], "applied": [],
+                "proposals": [], "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    started = client.post(f"/api/assistant/sessions/{sid}/message",
+                          json={"instruction": "first turn", "mode": "auto"}).json()
+    assert started.get("status") == "running"
+    assert entered.wait(timeout=2)
+    assert client.post(f"/api/assistant/sessions/{sid}/cancel").json()["cancelling"] is True
+    release.set()
+    assert not titled.wait(timeout=1.5), (
+        "a cancelled first turn still issued the paid titling call")

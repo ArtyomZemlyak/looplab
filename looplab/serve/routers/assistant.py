@@ -583,7 +583,7 @@ def build_router(srv) -> APIRouter:
         return _on_step, _on_todos
 
     def _finish_turn(sid: str, history: list, instruction: str, client, res: dict,
-                     best_effort_persist: bool) -> dict:
+                     best_effort_persist: bool, cancelled=None) -> dict:
         """Everything a turn does AFTER the model ran, for both endpoints: token accounting, the
         stale-reply-safe conditional append, and first-turn titling. `best_effort_persist` keeps the
         non-stream endpoint's swallow-and-return behavior; the stream worker lets a persistence error
@@ -612,9 +612,12 @@ def build_router(srv) -> APIRouter:
                 pass
         else:
             _persist()
-        # CODEX AGENT: this epilogue ignores the turn cancel event. Stopping a first turn can still start
-        # another paid/hanging title request and retain the active session slot; thread cancellation here
-        # and skip title generation once stopped.
+        # Titling is a SECOND paid provider call, issued after the turn's own model work. Stop had no
+        # effect here, so cancelling a first turn still launched it — spending money the operator just
+        # asked us not to spend, and holding the session's active slot for as long as that request hung.
+        # The persistence above deliberately still runs: the reply was already produced and paid for.
+        if cancelled is not None and cancelled():
+            return res
         if not history:             # first turn -> title the session from the exchange (cheap)
             try:
                 title = client.complete_text([
@@ -659,7 +662,7 @@ def build_router(srv) -> APIRouter:
                                            mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
                                            mutation_recovery=recover_turn)
                 return _finish_turn(sid, history, instruction, client, res,
-                                    best_effort_persist=True)
+                                    best_effort_persist=True, cancelled=cancel_ev.is_set)
             finally:
                 _release_turn(sid, cancel_ev, turn_epoch)
 
@@ -729,7 +732,7 @@ def build_router(srv) -> APIRouter:
                                            mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
                                            mutation_recovery=recover_turn)
                 res = _finish_turn(sid, history, instruction, client, res,
-                                   best_effort_persist=False)
+                                   best_effort_persist=False, cancelled=cancel_ev.is_set)
                 q.put((SSE_DONE, {k: res.get(k) for k in
                                   ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
             except Exception as e:  # noqa: BLE001
