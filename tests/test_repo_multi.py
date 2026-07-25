@@ -141,3 +141,43 @@ def test_engine_end_to_end_eval_spans_two_repos(tmp_path):
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
     state = anyio.run(eng.run)
     assert state.best() is not None and state.best().metric == 4.0   # read repo B via mount
+
+
+def test_shadow_guard_ignores_untracked_dirs_and_unmounted_references(tmp_path):
+    """The collision guard must fire on a REAL shadow only — it aborted whole valid runs otherwise.
+
+    It read the root repo's SOURCE listdir, but the seeder writes only what it materializes, so two
+    legitimate layouts raised RuntimeError out of `_materialize` — a path with no try/except, so the
+    run died with NO terminal event for the node and every resume re-crashed identically (breaking
+    invariants 2 and 3):
+      * `seed_mode="auto"` copies git-TRACKED files only, so a gitignored top-level `data/` (datasets
+        are never committed — the standard layout) "shadowed" a `data:` mount that seeds fine;
+      * every `references` entry was counted, though only `mount=True` ones are materialized.
+    """
+    import subprocess
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "run.py").write_text("print('hi')\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("data/\n", encoding="utf-8")
+    (repo / "data").mkdir()                       # UNTRACKED — never seeded, so it cannot shadow
+    (repo / "data" / "local.csv").write_text("local\n", encoding="utf-8")
+    (repo / "docs").mkdir()                       # tracked, but the `docs` reference is NOT mounted
+    (repo / "docs" / "readme.md").write_text("# d\n", encoding="utf-8")
+    for cmd in (["init", "-q"], ["add", "run.py", ".gitignore", "docs/readme.md"],
+                ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"]):
+        subprocess.run(["git", *cmd], cwd=repo, check=True, capture_output=True)
+
+    real = tmp_path / "real_data"
+    real.mkdir()
+    (real / "x.csv").write_text("1,2,3\n", encoding="utf-8")
+    other = tmp_path / "other_docs"
+    other.mkdir()
+    t = RepoTask(id="r", direction="max", editable_path=str(repo), data={"data": str(real)},
+                 references=[{"name": "docs", "path": str(other)}],   # mount defaults to False
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    eng = Engine(tmp_path / "run", task=t, researcher=t.build_roles()[0],
+                 developer=t.build_roles()[1], sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=1, max_nodes=1))
+    wd = tmp_path / "ws"
+    eng._seed_workspace(wd)                       # raised RuntimeError before the fix
+    assert (wd / "data" / "x.csv").is_file()      # the REAL dataset mounted, not the untracked dir

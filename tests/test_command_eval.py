@@ -505,3 +505,30 @@ def test_non_integer_regex_group_fails_the_node_not_the_run(tmp_path):
     for good in (1, "1", 1.0):
         assert read_metric("val=0.9", str(tmp_path),
                            {"kind": "stdout_regex", "pattern": r"val=([\d.]+)", "group": good}) == 0.9
+
+
+def test_non_string_metric_key_fails_the_node_not_the_run(tmp_path):
+    """Same class as `group`: a malformed eval-spec field must abstain, never tear the run down.
+
+    `key` is validated nowhere — `_valid_metric_kind` checks only `kind`, and the spec is authored by
+    Genesis from LLM JSON, where expressing a nested path as a LIST (`["metrics","val_acc"]` instead of
+    the dotted string) is a natural model error. `_dig`'s `key.split(".")` raised AttributeError and
+    `json_line_metric`'s `key in o` raised TypeError; both escaped `read_metric` into the eval worker,
+    whose only handler is `except GpuPinUnenforceable`, so the node got NO terminal event and the run
+    re-crashed deterministically on every resume.
+    """
+    import json as _json
+    from looplab.runtime.command_eval import read_metric
+
+    (tmp_path / "m.json").write_text(_json.dumps({"metric": 0.5}), encoding="utf-8")
+    out = '{"metric": 0.5}'
+    for spec in ({"kind": "stdout_json", "key": ["metrics", "v"]},
+                 {"kind": "stdout_json", "key": 3},
+                 {"kind": "file_json", "path": "m.json", "key": ["metric"]},
+                 {"kind": "file_json", "path": "m.json", "key": {"a": 1}}):
+        assert read_metric(out, str(tmp_path), spec) is None, spec
+
+    # honest specs are unaffected
+    assert read_metric(out, str(tmp_path), {"kind": "stdout_json", "key": "metric"}) == 0.5
+    assert read_metric(out, str(tmp_path),
+                       {"kind": "file_json", "path": "m.json", "key": "metric"}) == 0.5

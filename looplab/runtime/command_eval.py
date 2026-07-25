@@ -76,7 +76,17 @@ def safe_stage_name(name: str) -> bool:
 
 
 def _dig(obj, key: str):
-    """Fetch a possibly-dotted key from nested dicts: 'metrics.val_acc'."""
+    """Fetch a possibly-dotted key from nested dicts: 'metrics.val_acc'.
+
+    `key` comes from the eval spec, which Genesis authors from LLM JSON and `_valid_metric_kind`
+    validates only for `kind` — so a natural model error like `"key": ["metrics", "val_acc"]` (a list
+    instead of the dotted string) used to raise AttributeError from `key.split(".")`. That escaped
+    `read_metric` into the eval worker, whose only handler is `except GpuPinUnenforceable`, tearing the
+    run down with NO terminal event for the node and re-crashing on every resume. Abstain instead —
+    the node fails with no_metric, exactly as the sibling `group` coercion does.
+    """
+    if not isinstance(key, str):
+        return None
     cur = obj
     for part in key.split("."):
         if not isinstance(cur, dict) or part not in cur:

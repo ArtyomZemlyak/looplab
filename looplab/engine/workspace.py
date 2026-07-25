@@ -145,32 +145,34 @@ class WorkspaceSeeder:
             # the eval reads the repo's placeholder instead of the declared source AND the WORKSPACE_SEEDED
             # record falsely claims the mount succeeded, silently invalidating the whole run's metrics.
             # (Non-root editables mount at `wd/<name>`, already guarded against name collisions at task
-            # build.) Read the SOURCE tree, not the persisted workdir, so this stays correct across resume;
-            # drop the entries the seed deliberately ignores so an absurd `.git`-named mount can't misfire.
-            import os as _os
+            # build.) The check runs AFTER the editables are seeded and reads the REAL workspace, not the
+            # source listdir, because only the materialized tree can actually shadow a mount. Reading the
+            # source instead produced two false RuntimeErrors that aborted every node of a valid task:
+            #   * `seed_mode="auto"` copies only git-TRACKED files, so a gitignored top-level `data/` —
+            #     the standard layout, datasets are never committed — was "shadowing" a `data:` mount that
+            #     in fact seeded fine;
+            #   * `_mounts` listed EVERY reference, but only `ref.get("mount")` ones are materialized
+            #     below, so a context-only reference collided with nothing yet still raised.
+            # Post-seed `dst.exists()` is exactly the condition link_input/copy_input silently skip on, so
+            # it has no false positives by construction and stays correct across resume.
+            for ed in self._e._repo_spec.get("editables", []):
+                dst = wd if ed["name"] in (".", "") else wd / ed["name"]
+                mode = (ed.get("seed_mode") or self._e._seed_mode or "auto")
+                n = self._e._seed_repo_tree(ed["path"], dst, ignore, mode)
+                seeded.append(f"{ed['name']}[{mode}]:{'copytree' if n < 0 else str(n)+' tracked'}")
             _root_ed = next((ed for ed in self._e._repo_spec.get("editables", [])
                              if ed.get("name") in (".", "")), None)
             if _root_ed:
-                try:
-                    _shadow = {e for e in _os.listdir(_root_ed["path"])
-                               if e not in {".git", "__pycache__", ".venv", "node_modules"}
-                               and not e.endswith(".pyc")}
-                except OSError:
-                    _shadow = set()
-                _mounts = ([r["name"] for r in self._e._repo_spec.get("references", [])]
+                _mounts = ([r["name"] for r in self._e._repo_spec.get("references", [])
+                            if r.get("mount")]
                            + list(self._e._repo_spec.get("data", {})))
-                _clash = next((m for m in _mounts if m in _shadow), None)
+                _clash = next((m for m in _mounts if m and (wd / m).exists()), None)
                 if _clash is not None:
                     raise RuntimeError(
                         f"mount name {_clash!r} collides with a top-level entry of the root repo "
                         f"({_root_ed['path']}): the repo is seeded at the workspace root first, so the "
                         f"mount would be silently shadowed and the eval would read the repo's copy "
                         f"instead of the declared source. Rename the mount or the repo entry.")
-            for ed in self._e._repo_spec.get("editables", []):
-                dst = wd if ed["name"] in (".", "") else wd / ed["name"]
-                mode = (ed.get("seed_mode") or self._e._seed_mode or "auto")
-                n = self._e._seed_repo_tree(ed["path"], dst, ignore, mode)
-                seeded.append(f"{ed['name']}[{mode}]:{'copytree' if n < 0 else str(n)+' tracked'}")
             for ref in self._e._repo_spec.get("references", []):
                 if ref.get("mount"):             # runtime dependency -> symlink read-only input
                     self._e._link_input(ref["path"], wd / ref["name"])

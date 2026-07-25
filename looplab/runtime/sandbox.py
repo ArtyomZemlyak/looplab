@@ -249,7 +249,14 @@ def _last_json_dict(text: str, pred) -> Optional[dict]:
 
 def json_line_metric(text: str, key: str = "metric") -> Optional[float]:
     """Last stdout line that is a JSON object containing `key`. The one tolerant metric-line
-    scanner — both the solution.py path (_parse_metric) and the command-eval readers use it."""
+    scanner — both the solution.py path (_parse_metric) and the command-eval readers use it.
+
+    `key` reaches here straight from the (LLM-authored, `kind`-only-validated) eval spec, so a
+    non-string like `["metrics", "val_acc"]` would raise `TypeError: unhashable type` out of `key in o`
+    and escape the eval worker with no terminal event for the node. Abstain instead — same contract as
+    `_dig`'s guard on the file_json path."""
+    if not isinstance(key, str):
+        return None
     obj = _last_json_dict(text, lambda o: key in o)
     return None if obj is None else _to_float(obj[key])
 
