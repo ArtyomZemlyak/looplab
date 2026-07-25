@@ -245,16 +245,14 @@ def build_router(srv) -> APIRouter:
                 expected = body.get("expected_seq")
                 if expected is None and gated_baseline is not None:
                     expected = gated_baseline
-                # CODEX AGENT: require an actual JSON integer. `int(7.9)` truncates to 7 and numeric
-                # strings are coerced, so a malformed CAS token can authorize a mutation against a
-                # tail the caller did not exactly name.
+                # Require an actual JSON integer. This is a compare-and-swap token naming the EXACT tail
+                # the caller observed, so coercion defeats its purpose: `int(7.9)` silently truncates to
+                # 7 and `int("7")` accepts a string, either of which would fence the append against a
+                # tail the caller never named — authorizing a mutation on a state it did not see.
+                # (`bool` is an `int` subclass in Python, hence the explicit reject.)
                 if expected is not None:
-                    if isinstance(expected, bool):
+                    if isinstance(expected, bool) or not isinstance(expected, int):
                         raise HTTPException(400, "expected_seq must be an integer")
-                    try:
-                        expected = int(expected)
-                    except (TypeError, ValueError, OverflowError) as exc:
-                        raise HTTPException(400, "expected_seq must be an integer") from exc
                 try:
                     ev = EventStore(local_rd / "events.jsonl").append(
                         etype, data, expected_last_seq=expected)

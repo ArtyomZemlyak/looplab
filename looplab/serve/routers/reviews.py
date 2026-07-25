@@ -40,6 +40,12 @@ _REVIEW_CONFIG_KEYS = {
 _SUMMARY_OMIT_KEYS = {
     "adapter_files", "artifacts", "code", "files", "logs", "messages", "parent_code",
     "prompt", "prompts", "raw_log", "raw_logs", "spans", "system_prompt", "trace",
+    # A review link is a capability over ONE run, so it must not disclose the PORTFOLIO.
+    # `RunState.cross_run_priors` folds `cross_run_prior` events whose `prior_runs` name sibling
+    # run_ids and their similarity — other runs' identities, which a one-run bearer was never
+    # granted. (The Card-level `cross_run_prior` metadata rides through the preserved Cards
+    # fragment and still needs the review-specific DTO tracked separately.)
+    "cross_run_priors",
 }
 _BENIGN_SECRET_KEYS = {
     "tokenizer", "max_tokens", "num_tokens", "n_tokens", "total_tokens", "prompt_tokens",

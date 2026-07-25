@@ -167,10 +167,12 @@ def build_router(srv) -> APIRouter:
                         raise HTTPException(
                             503, "run start record could not be retired; the run was not deleted")
                     start_record_retired = True
-                # CODEX AGENT: directory removal precedes the fallible project-metadata commit below.
-                # If `forget_locked` fails, DELETE reports failure after irreversible data removal and a
-                # retry gets 404 with stale labels/cache. Tombstone-rename first, commit metadata, then
-                # delete; restore the name if metadata commit fails.
+                # Retire the project metadata BEFORE the irreversible directory removal. Both run inside
+                # the same `_project_transaction()` + `_run_lifecycle_lock`, but `forget_locked` -> `_save`
+                # can raise OSError: doing it after the rmtree meant DELETE reported failure with the data
+                # already gone, and the retry then 404s while stale labels/summary linger.
+                projects.forget_locked(run_id)
+                srv.summary_cache.pop(run_id, None)
                 # Retry once for transient FUSE visibility; report success only after the directory
                 # is really gone. Restore the exact start record if deletion was partial.
                 for _ in range(2):
@@ -188,8 +190,6 @@ def build_router(srv) -> APIRouter:
                     raise HTTPException(
                         500, f"run dir could not be fully removed (e.g. {leftover!r} — a file "
                              "may be open or the storage is read-only); retry once nothing holds it")
-                projects.forget_locked(run_id)
-                srv.summary_cache.pop(run_id, None)
         return {"ok": True}
 
     return router
