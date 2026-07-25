@@ -458,9 +458,23 @@ async def _json_object(request) -> dict:
         raise HTTPException(400, "request body must be valid JSON") from exc
     if not isinstance(body, dict):
         raise HTTPException(400, "request body must be a JSON object")
-    # CODEX AGENT: validating only the outer object leaves `messages`, `instruction` and `node_id`
-    # untyped; valid JSON such as `{"instruction": 1}` or scalar message entries escapes as a 500,
-    # making paid/advisory retries ambiguous. Give each endpoint one strict nested request model.
+    # The outer-object check alone left the three fields every boss endpoint reads untyped, so valid
+    # JSON like `{"instruction": 1}` reached `.strip()` and a scalar message entry reached `.get()`,
+    # each surfacing as a 500. A 500 on a PAID advisory endpoint is the worst possible answer: the
+    # caller cannot tell a rejected request from one that spent money before failing, so a retry is
+    # ambiguous. Validate the shared shape here — one place, all four endpoints — and 400 instead.
+    # Anything else in the body stays untouched (endpoints read their own extras).
+    if "instruction" in body and not isinstance(body["instruction"], str):
+        raise HTTPException(400, "instruction must be a string")
+    if "node_id" in body and body["node_id"] is not None \
+            and (type(body["node_id"]) is not int):
+        raise HTTPException(400, "node_id must be an integer")
+    msgs = body.get("messages")
+    if msgs is not None:
+        if not isinstance(msgs, list):
+            raise HTTPException(400, "messages must be a list of objects")
+        if not all(isinstance(m, dict) for m in msgs):
+            raise HTTPException(400, "each message must be a JSON object")
     return body
 
 

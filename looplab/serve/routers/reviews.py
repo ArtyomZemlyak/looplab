@@ -8,7 +8,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from looplab.serve.metrics_adapters import read_node_metrics
 from looplab.events.comment_projection import (
@@ -21,10 +21,11 @@ from looplab.core.redact import redact_secrets
 
 class ReviewCreate(BaseModel):
     ttl_seconds: int = DEFAULT_TTL_SECONDS
-    # CODEX AGENT: Pydantic coercion accepts strings such as "yes" here and mints an
-    # evidence-scoped bearer despite the caller not sending JSON true. Use StrictBool/a strict request
-    # model because this field expands a public capability boundary.
-    include_evidence: bool = False
+    # StrictBool, not bool: this flag EXPANDS a public capability boundary (it mints an
+    # evidence-scoped bearer), and pydantic's lax coercion accepted "yes"/"on"/"1"/"true" — verified
+    # live — so a client that never sent JSON `true` still got the wider token. Only the boolean
+    # itself may widen the share.
+    include_evidence: StrictBool = False
 
 
 # Config is a reproducibility file, not automatically a public document.  The review UI consumes

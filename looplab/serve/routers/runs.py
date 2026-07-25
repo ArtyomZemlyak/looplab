@@ -2109,15 +2109,21 @@ def build_router(srv) -> APIRouter:
         for o in iter_event_jsonl(candidate):
             if not (isinstance(o, dict) and o.get("seq", -1) > since):
                 continue
-            # CODEX AGENT: the byte check happens only AFTER retaining the row, so this is not a hard
-            # response ceiling: one imported/legacy envelope larger than 64 MiB is still returned whole
-            # (maximum is budget + one unbounded row). The current writer's event cap cannot prove an
-            # imported log obeys it. Serialize/measure before append and emit a bounded oversize marker
-            # plus a progressing continuation, or route legacy callers through EventLogPager's physical
-            # byte scanner; add a single-row-over-budget regression rather than only many 400-char rows.
+            # MEASURE BEFORE RETAINING. Charging the budget after the append made this a soft
+            # ceiling: the worst case was budget + one unbounded row, so a single imported/legacy
+            # envelope larger than the whole budget was still materialized and returned whole. The
+            # current writer's event cap bounds what WE write; it cannot prove an imported log obeys
+            # it. An oversize row is replaced by a bounded marker that keeps its `seq`, so a paging
+            # caller advancing `since` steps over it instead of stalling on it forever.
+            size = len(json.dumps(o, default=str))
+            if size > budget:
+                if not out:
+                    out.append({"seq": o.get("seq"), "type": o.get("type"), "ts": o.get("ts"),
+                                "data": {"omitted": "event_too_large", "bytes": size}})
+                break
             out.append(o)
-            budget -= len(json.dumps(o, default=str))
-            if len(out) >= _LEGACY_LOG_MAX_ROWS or budget <= 0:
+            budget -= size
+            if len(out) >= _LEGACY_LOG_MAX_ROWS:
                 break
         return out
 

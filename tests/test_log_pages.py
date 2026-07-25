@@ -466,3 +466,40 @@ def test_legacy_log_route_is_byte_bounded(tmp_path, monkeypatch):
     seqs = [event["seq"] for event in got.json()]
     assert seqs == list(range(len(seqs)))           # oldest-first, contiguous prefix
     assert 0 < len(seqs) < 20                        # byte budget stopped it before all 20 rows
+
+
+def test_legacy_log_byte_ceiling_is_hard_and_a_giant_row_still_progresses(tmp_path, monkeypatch):
+    """The byte budget must bound the response, not be discovered one row too late.
+
+    The check ran AFTER the append, so the worst case was `budget + one unbounded row`: a single
+    imported/legacy envelope larger than the entire budget was materialized and returned whole. The
+    current writer's event cap bounds what WE write; it cannot prove an imported log obeys it. An
+    oversize row is now replaced by a bounded marker that KEEPS its seq, so a caller paging forward
+    on `since` steps over it instead of stalling on it forever.
+    """
+    from looplab.serve.routers import runs as runs_module
+
+    monkeypatch.setattr(runs_module, "_LEGACY_LOG_MAX_BYTES", 4096)
+    _write_events(tmp_path / "demo" / "events.jsonl", [
+        _event(0),
+        _event(1, payload="x" * 20_000),          # single row far larger than the whole budget
+        _event(2),
+    ])
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+
+    first = client.get("/api/runs/demo/log", headers=OWNER)
+    assert first.status_code == 200
+    assert len(first.content) < 4096 * 4, "the oversize row was returned whole despite the ceiling"
+    assert [row["seq"] for row in first.json()] == [0]
+
+    # paging forward reaches the oversize row: it is DISCLOSED as a bounded marker, never silently
+    # dropped, and its seq lets the caller advance past it.
+    second = client.get("/api/runs/demo/log", headers=OWNER, params={"since": 0})
+    assert [row["seq"] for row in second.json()] == [1]
+    marker = second.json()[0]["data"]
+    assert marker["omitted"] == "event_too_large" and marker["bytes"] > 20_000
+    assert "x" * 100 not in second.text, "the oversize payload leaked into the marker response"
+
+    third = client.get("/api/runs/demo/log", headers=OWNER, params={"since": 1})
+    assert [row["seq"] for row in third.json()] == [2], "paging stalled on the oversize row"

@@ -675,3 +675,55 @@ def test_legacy_annotations_do_not_block_modern_comment_end_to_end(tmp_path):
     assert created.status_code == 200 and created.json()["status"] == "succeeded", created.text
     modern = [e for e in store.read_all() if e.type == EV_COMMENT_CREATED]
     assert len(modern) == 1 and modern[0].data["text"] == "modern despite 500 legacy notes"
+
+
+def test_include_evidence_requires_a_real_boolean(tmp_path, monkeypatch):
+    """`include_evidence` EXPANDS a public capability boundary — only a JSON boolean may widen it.
+
+    Pydantic's lax coercion accepted "yes"/"on"/"1"/"true" for this flag, so a client that never sent
+    JSON `true` still got the wider, evidence-scoped bearer minted for it. That is a share the
+    operator did not ask for, handed out on a typo or a form-encoded value. StrictBool closes it;
+    the two real booleans keep working.
+    """
+    _seed(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+
+    for coercible in ("yes", "true", "1", 1):
+        r = client.post("/api/runs/demo/reviews", headers=OWNER,
+                        json={"ttl_seconds": 3600, "include_evidence": coercible})
+        assert r.status_code == 422, (
+            f"{coercible!r} minted an evidence-scoped bearer without a JSON boolean")
+
+    for real in (True, False):
+        r = client.post("/api/runs/demo/reviews", headers=OWNER,
+                        json={"ttl_seconds": 3600, "include_evidence": real})
+        assert r.status_code == 200 and r.json()["token"]
+
+
+def test_boss_endpoints_reject_a_malformed_body_instead_of_500ing(tmp_path, monkeypatch):
+    """A PAID advisory endpoint must 400 a bad shape, never 500 on it.
+
+    Only the OUTER object was type-checked, so `{"instruction": 1}` reached `.strip()` and a scalar
+    message entry reached `.get()` — both surfacing as a 500. On an endpoint that spends money that
+    is the worst possible answer: the caller cannot distinguish a rejected request from one that
+    charged before failing, so retrying is ambiguous. The shared body parser now validates the three
+    fields every boss endpoint reads.
+    """
+    _seed(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+
+    for path, body in (
+        ("/api/runs/demo/suggest", {"instruction": 1}),
+        ("/api/runs/demo/chat", {"instruction": ["not", "a", "string"]}),
+        ("/api/runs/demo/chat-compact", {"messages": ["scalar entry"]}),
+        ("/api/runs/demo/chat", {"messages": {"role": "user"}}),
+        ("/api/runs/demo/suggest", {"node_id": "3"}),
+    ):
+        r = client.post(path, headers=OWNER, json=body)
+        assert r.status_code == 400, f"{path} {body} returned {r.status_code}, not a clean 400"
+
+    # a well-formed body still gets past the parser (whatever the endpoint then decides)
+    ok = client.post("/api/runs/demo/chat-compact", headers=OWNER, json={"messages": []})
+    assert ok.status_code != 400
