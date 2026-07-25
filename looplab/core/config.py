@@ -84,6 +84,17 @@ def canonicalize_parallelism_source(
         # flattened result, so the alias migration cannot invert CLI > file > env precedence.
         if canonical not in out and out.get(legacy) is not None:
             out[canonical] = out[legacy]
+    # PRECEDENCE REPAIR for the non-promoted pair. Skipping promotion above is right (a legacy-only
+    # layer must not flip on the shared broker), but it also let a LOWER-priority canonical value
+    # survive a HIGHER-priority legacy override: file `llm_parallel: 2` + CLI `-s parallel_build=8`
+    # flattened to BOTH keys, and the orchestrator prefers `llm_parallel`, so the operator's explicit
+    # CLI width was silently discarded — exactly the inversion `build_settings`' docstring says this
+    # per-layer canonicalization exists to prevent. Mask it with the LEGACY SENTINEL instead of
+    # promoting: `llm_parallel=None` is the durable "legacy mode — take the build width from
+    # parallel_build, no shared total", so the higher layer wins with the semantics it asked for.
+    if (not promote_build_to_llm_parallel and "llm_parallel" not in out
+            and out.get("parallel_build") is not None):
+        out["llm_parallel"] = None
     return out
 
 # Settings whose semantics are committed by ``run_started`` and restored from the folded event log

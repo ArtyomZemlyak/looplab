@@ -114,14 +114,30 @@ def test_canonicalize_parallelism_source_keeps_broker_optin_off_by_default():
     # True alias: always promoted (no broker semantics).
     assert canonicalize_parallelism_source({"max_parallel": 5}) == {
         "max_parallel": 5, "eval_parallel": 5}
-    # Legacy build width: NOT promoted at config/startup load (broker stays opt-in).
-    assert canonicalize_parallelism_source({"parallel_build": 3}) == {"parallel_build": 3}
+    # Legacy build width: NOT promoted at config/startup load (broker stays opt-in). It DOES stamp the
+    # legacy sentinel `llm_parallel: None` so this layer can MASK a lower-priority canonical value —
+    # without that, a file `llm_parallel: 2` silently beat a CLI `-s parallel_build=8` (the orchestrator
+    # prefers llm_parallel), inverting CLI > file precedence. None is the durable "legacy mode, no shared
+    # total", so the mask carries exactly the semantics the legacy spelling asked for.
+    assert canonicalize_parallelism_source({"parallel_build": 3}) == {
+        "parallel_build": 3, "llm_parallel": None}
     # Strategist opt-in DOES promote parallel_build -> llm_parallel (deliberate full alias).
     assert canonicalize_parallelism_source(
         {"parallel_build": 3}, promote_build_to_llm_parallel=True) == {
             "parallel_build": 3, "llm_parallel": 3}
     # An explicit canonical llm_parallel is always preserved verbatim.
     assert canonicalize_parallelism_source({"llm_parallel": 4}) == {"llm_parallel": 4}
+
+
+def test_a_higher_priority_legacy_parallel_build_is_not_shadowed_by_a_file_llm_parallel():
+    """CLI > file precedence must survive the alias split (the guarantee build_settings documents)."""
+    from looplab.core.appconfig import build_settings
+
+    settings = build_settings({"llm_parallel": 2}, {}, {"parallel_build": 8})
+    assert settings.parallel_build == 8
+    assert settings.llm_parallel is None            # legacy mode: no shared total...
+    width = settings.llm_parallel if settings.llm_parallel is not None else settings.parallel_build
+    assert width == 8                               # ...and the CLI's width is what actually runs
 
 
 def test_env_legacy_parallel_build_does_not_enable_the_shared_llm_broker(monkeypatch):

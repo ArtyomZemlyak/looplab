@@ -117,6 +117,15 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
 - Declaring the same mount name in **both** `data` and `dataset` is rejected at submit time (one path
   would silently shadow the other). A `kaggle` slug **overwrites** a legacy `competition` value riding
   along in the same dict.
+- A mount name that collides with a top-level entry of the **root editable** repo is rejected when the
+  workspace is seeded. The repo is materialized at the workspace root first, so the mount's destination
+  would already be occupied and the eval would silently read the repo's copy instead of your declared
+  source. Only a real collision fires: the check runs against what was actually seeded, so a
+  git-ignored directory (under the default `seed_mode: auto`, which copies tracked files only) and a
+  context-only `references` entry (`mount: false`) never trigger it. Rename the mount or the repo entry.
+- A metric/prediction source file above **256 MiB** is refused and reads as "no metric" (the node fails)
+  rather than being buffered whole into engine RAM. Emit a compact metric line or a summary file instead
+  of a giant `predictions.json` if you are near that bound.
 - For a **dataset**-kind task (no repo), permission objects are flattened to their `path` — the
   mount/edit machinery is repo-task infrastructure; the dataset kind reads data by absolute path.
 

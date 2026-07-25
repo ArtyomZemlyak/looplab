@@ -126,7 +126,7 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 |---|---|---|---|
 | `max_nodes` | `LOOPLAB_MAX_NODES` | `8` | Candidate (node) budget for the search |
 | `max_parallel` | `LOOPLAB_MAX_PARALLEL` | `1` | Legacy raw-config alias for `eval_parallel`. Retained for old files, CLI arguments, environment variables, and snapshots; prefer the canonical name in new configuration and governance. |
-| `parallel_build` | `LOOPLAB_PARALLEL_BUILD` | `1` | Legacy raw-config alias for `llm_parallel`. Retained for old files, CLI arguments, environment variables, and snapshots; prefer the canonical name in new configuration and governance. |
+| `parallel_build` | `LOOPLAB_PARALLEL_BUILD` | `1` | Legacy build width. NOT a full alias of `llm_parallel` from a file/CLI/env/snapshot: it sets the concurrent-build width but does **not** activate the shared LLM broker (broker opt-in stays tied to an explicitly-spelled positive canonical `llm_parallel`). A layer naming it masks a lower-priority `llm_parallel` with the legacy sentinel, so CLI > file precedence holds. Only the live Strategist path treats it as a full alias. Prefer the canonical name in new configuration. |
 | `eval_parallel` | `LOOPLAB_EVAL_PARALLEL` | _(unset)_ | **Canonical** concurrent EVALUATIONS width inside one Run (GPU/experiment consumer), independent from LLM concurrency. Unset (`None`) falls back to legacy `max_parallel`; launch-time `0` is AUTO (one experiment per detected GPU, at least one). A live Strategist/operator update of `0` settles to safe serial width `1` instead of re-reading mutable hardware. Separate local GPU-owning Runs in the same OS-user filesystem namespace serialize through a pool-wide lease; other users, containers, and hosts need external admission. |
 | `llm_parallel` | `LOOPLAB_LLM_PARALLEL` | _(unset)_ | **Canonical** total concurrent LLM-provider-call budget, independent from eval concurrency; its settled value also controls node-build fan-out. Unset (`None`) falls back to legacy `parallel_build` for build fan-out without enabling a shared total; launch-time `0` is AUTO (build fan-out follows resolved `eval_parallel`, while historical research overlap stays unbounded). A live Strategist/operator update of `0` settles both the total and build width to `1`. A positive canonical value activates the shared multi-lane broker. |
 | `train_monitor` | `LOOPLAB_TRAIN_MONITOR` | `true` | Per-eval background observer that tails the live training log while a (long) declared command stage runs. Its alert is fold-ignored and cannot directly change lifecycle, champion selection, or replay; when `watchdog_reflection` is on, the raw diagnostic can still advise a later Researcher prompt and thereby affect future proposals. No-ops without an LLM client or on the solution.py path |
@@ -145,13 +145,6 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
 | `max_eval_seconds` | `LOOPLAB_MAX_EVAL_SECONDS` | — | Hard ceiling on cumulative time *inside* evals (survives resume) |
 
-<!-- The runtime now honors the `llm_parallel` row for a legacy-only source: config/startup loads no
-longer promote `LOOPLAB_PARALLEL_BUILD` into canonical `llm_parallel` (broker opt-in stays tied to an
-explicitly-spelled canonical value; the orchestrator's own width fallback carries the legacy build
-width). Only the live Strategist path treats `parallel_build` as a full `llm_parallel` alias. See
-`core/config.py::canonicalize_parallelism_source` (`promote_build_to_llm_parallel`) and the tests
-`test_config.py::test_env_legacy_parallel_build_does_not_enable_the_shared_llm_broker` +
-`test_llm_broker.py::test_env_legacy_parallel_build_does_not_enable_shared_broker_end_to_end`. -->
 
 ## Backend & roles
 

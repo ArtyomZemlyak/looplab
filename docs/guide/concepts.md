@@ -27,7 +27,10 @@ The engine then chooses the next macro action through one explicit authority ord
 **Card queue** when `card_driven_selection` is enabled, otherwise the unified-agent **pilot** when
 `agent_drives_actions` is enabled, otherwise the configured search **policy**. The cycle repeats until
 a budget is hit. At the end, the top candidates can be **confirmed** under multiple seeds, and the best
-becomes the **champion**.
+becomes the **champion**. If confirmation cannot secure a pinned GPU it backs off (0.5s doubling to a
+5s cap) and, after **5 consecutive refusals**, appends a durable `pause` — a host that can never satisfy
+the pin (a CPU-only resume, a lost driver) stops the run for repair instead of spinning. Fix the runtime
+or re-pin the Card, then `looplab resume`.
 
 ```
 Researcher → Novelty gate → Developer → Sandbox → Evaluator → trust/confirm → Card | agent | policy → repeat → champion

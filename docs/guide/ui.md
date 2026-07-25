@@ -140,7 +140,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   attaches the driver automatically. Its exact `command_ack` means the engine accepted that reset
   intent; re-development/re-evaluation may still be running and remains visible as normal run work.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
-  action narrated in a durable feed (`chat.jsonl`).
+  action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
+  cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or
+  make every `GET /chat-log` re-read a huge file. The transcript stays fully readable — only appends
+  stop — and a run reset archives it and starts a fresh one.
 - **Reports** — an agent-authored, conclusion-first run report plus deterministic metric-improvement
   charts.
 - **Read-only review links** — with `LOOPLAB_UI_TOKEN` configured, **Lab → Collaboration** creates a

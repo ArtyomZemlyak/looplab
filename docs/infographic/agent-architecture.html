@@ -116,7 +116,7 @@ stack(1360,360,DY,[
  {id:"t_lk",h:74,t:"Leakage",tag:"off",c:C.trust,sub:["detector default OFF · train↔test / temporal","target |r|≥0.98 · fit-on-test / fit-before-split"]},
  {id:"t_cr",h:58,t:"Critic + CV",tag:"critic off",c:C.trust,sub:["broad critic warnings advisory · mean/std/SE","hardcoded flag can gate under gate/block"]},
  {id:"t_gate",h:86,t:"Trust gate",tag:"audit default",c:C.trust,sub:["audit = surface only","gate = can’t be best AND not bred/confirmed (feasible for diversity)","block = also feasible=False"]},
- {id:"t_conf",h:82,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","pick best confirmed mean; >1 SE is a significance flag"]},
+ {id:"t_conf",h:96,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","pick best confirmed mean; >1 SE is a significance flag","GPU refusal: 0.5s→5s backoff · 5 in a row → durable auto-pause"]},
  {id:"t_ho",h:64,t:"Holdout-select",tag:"host default",c:C.ev,sub:["host-graded: top-3 on reserved 25%; no retrain"]},
  {id:"t_verify",h:80,t:"Verifier tie-break",tag:"off",c:C.ev,sub:["atomic verifier_group_scored · complete final tie set","generation · evidence · samples validate all-or-none","never overrides the metric (§21.7)"]},
  {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible → gate/block trust exclusion","→ metric/tie → confirm → host holdout → approval"]},
