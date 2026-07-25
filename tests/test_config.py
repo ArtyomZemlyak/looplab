@@ -203,3 +203,41 @@ def test_remaining_enum_fields_rejected_when_out_of_set():
         assert getattr(Settings(**{field: good}), field) == good
         with pytest.raises(ValidationError):
             Settings(**{field: bad})
+
+
+def test_a_boolean_is_a_type_error_for_a_numeric_setting():
+    """`{"max_nodes": true}` must be a 422, not a budget of ONE node.
+
+    Pydantic validates Settings in lax mode and `isinstance(True, int)` is True, so a UI/API type slip
+    used to validate cleanly and silently collapse the run budget (or the eval width) to 1. The run
+    then looked configured and did almost nothing, with nothing in the snapshot to show why. The guard
+    covers EVERY numeric field, including the many with no `Field(ge=...)` bound of their own.
+    """
+    import pytest as _pytest
+    from looplab.core.config import Settings
+
+    for field in ("max_nodes", "n_seeds", "eval_parallel", "timeout", "sweep_timeout_mult"):
+        with _pytest.raises(Exception) as exc:
+            Settings(**{field: True})
+        assert "must be a number, not a boolean" in str(exc.value), field
+
+    Settings(max_nodes=5, n_seeds=2)                      # real numbers still validate
+    assert Settings(cross_run_curation=False).cross_run_curation is False   # bool fields untouched
+
+
+def test_an_unknown_backend_is_rejected_instead_of_downgrading_to_toy():
+    """A `backend` typo must fail loudly, not silently run offline toy roles.
+
+    Every consumer tests `settings.backend == "llm"` exactly (cli/__init__.py, adapters/tasks.py), so
+    an untyped `--set`/file/env value — including a mis-cased "LLM" — fell through to the OFFLINE toy
+    optimizer. The user got a complete run that never called the model and no diagnostic anywhere.
+    Same fail-loud contract the neighbouring enum-ish fields already have.
+    """
+    import pytest as _pytest
+    from looplab.core.config import Settings
+
+    for bad in ("typo", "LLM", "openai", ""):
+        with _pytest.raises(Exception) as exc:
+            Settings(backend=bad)
+        assert "backend must be toy|llm" in str(exc.value), bad
+    assert Settings(backend="llm").backend == "llm" and Settings().backend == "toy"

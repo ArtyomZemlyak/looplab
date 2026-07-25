@@ -7,6 +7,8 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 """
 from __future__ import annotations
 
+import types
+import typing
 from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -20,6 +22,24 @@ from looplab.core.llm import DEFAULT_HEADER_TIMEOUT_S
 # set the env var to "" to disable, or to a path to relocate. `~/.looplab/` keeps them out of any one
 # project + shared across projects.
 _LL_HOME = Path.home() / ".looplab"
+
+
+def _is_numeric_annotation(ann) -> bool:
+    """True when a field's annotation admits int/float but NOT bool.
+
+    Used by `Settings._reject_bool_for_numeric_fields`: pydantic resolves annotations at class build,
+    so `model_fields[...].annotation` is a real type object here even under
+    `from __future__ import annotations`. Optionals are numeric when every non-None member is
+    (`int | None` yes, `int | str` no), so a boolean can never slip in through a union arm."""
+    if ann is bool:
+        return False                                  # a bool field legitimately takes a bool
+    if ann is int or ann is float:
+        return True
+    args = [a for a in typing.get_args(ann) if a is not type(None)]
+    origin = typing.get_origin(ann)
+    if args and origin in (typing.Union, types.UnionType):
+        return all(_is_numeric_annotation(a) for a in args)
+    return False
 
 # Autonomous roles that may be granted per-setting write access (see Settings.agent_control).
 # strategist = A7 meta-controller (run-wide); boss = run-chat operator-proxy (run-wide);
@@ -294,9 +314,9 @@ class Settings(BaseSettings):
     # unbounded `eval_parallel` (or legacy `max_parallel`; e.g. 100000 from a crafted preflight) would
     # fan out that many sandboxes → resource exhaustion. Reject at config time, not mid-run. Ceilings
     # are generous; tests top out near 50.
-    # CODEX AGENT: Pydantic coerces JSON booleans into these numeric fields (`true` -> 1/1.0), so a UI
-    # type error can silently collapse run/eval budgets instead of returning 422. Apply shared
-    # before-validation that rejects bool at every numeric settings boundary.
+    # Pydantic's lax mode coerces a JSON boolean into any numeric field (`true` -> 1), so a UI/API type
+    # error used to silently collapse a run budget to ONE node instead of returning 422. Rejected for
+    # EVERY numeric field by `_reject_bool_for_numeric_fields` below, not just the ones bounded here.
     n_seeds: int = Field(default=3, ge=1, le=1024)
     max_nodes: int = Field(default=8, ge=1, le=1_000_000)
     # legacy evaluation-width input. `eval_parallel` below is canonical and wins when set;
@@ -801,10 +821,11 @@ class Settings(BaseSettings):
     # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
     cross_run_curation_auto: bool = False
-    # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
-    # CODEX AGENT: non-typed sources (`--set`, file, env) accept any string; a typo then falls through to
-    # toy roles instead of failing an intended LLM run. Validate this as Literal["toy", "llm"] across
-    # all construction paths.
+    # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model). Validated in
+    # `_check_trust_gate` alongside the other enum-ish strings — every consumer tests `== "llm"`
+    # exactly (cli/__init__.py, adapters/tasks.py), so an untyped `--set`/file/env typo (or a mis-cased
+    # "LLM") used to fall through to the OFFLINE toy roles and quietly produce a run that never called
+    # the model. Left as `str`, not `Literal`, so old snapshots still validate through the same path.
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
     # CLI coding agent: "opencode" | "aider" | "goose" | "continue".
@@ -1183,6 +1204,26 @@ class Settings(BaseSettings):
 
     @model_validator(mode="before")
     @classmethod
+    def _reject_bool_for_numeric_fields(cls, data):
+        """A JSON boolean is a TYPE ERROR for a numeric setting, not the number 1.
+
+        Pydantic runs in lax mode here (`model_config` sets no `strict`), and `isinstance(True, int)`
+        is True — so `{"max_nodes": true}` from a UI/API type slip validated cleanly as a budget of
+        ONE node, and `{"eval_parallel": true}` collapsed the width to one. The run then looked
+        configured and simply did almost nothing, with no 422 and nothing in the snapshot to show why.
+        Rejecting at the boundary covers every numeric field at once, including the many that carry no
+        `Field(ge=...)` bound of their own to trip over.
+        """
+        if not isinstance(data, dict):
+            return data
+        for key, val in data.items():
+            if type(val) is bool and _is_numeric_annotation(
+                    getattr(cls.model_fields.get(key), "annotation", None)):
+                raise ValueError(f"{key} must be a number, not a boolean (got {val!r})")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _apply_profile(cls, data):
         """Expand `profile` into a bundle of setting defaults BEFORE validation.
 
@@ -1233,6 +1274,8 @@ class Settings(BaseSettings):
                 f"got {self.eval_trust_mode!r}")
         if self.seed_mode not in ("auto", "tracked", "all"):
             raise ValueError(f"seed_mode must be auto|tracked|all, got {self.seed_mode!r}")
+        if self.backend not in ("toy", "llm"):
+            raise ValueError(f"backend must be toy|llm, got {self.backend!r}")
         return self
 
     def masked_snapshot(self) -> dict:
