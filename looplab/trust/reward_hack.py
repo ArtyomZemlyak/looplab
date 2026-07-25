@@ -35,8 +35,16 @@ _GRADER_PATTERNS = [
     # `test_labels.csv`/`.npy`/… — the actual held-out-label read), NOT any attribute access: a bare
     # `\.[A-Za-z]` also matched honest `test_labels.astype(...)`/`.reshape(...)`/`.shape`. `y_test` needs a
     # LEFT `\b` too, else honest `entropy_test`/`accuracy_test` + a `read` on the same line false-fired.
-    r"\banswer[_-]?key\b",
+    # A TRAILING `\b` was too tight in the other direction: `_` is a word char, so `\b` after `key`
+    # rejected `answer_key_path`, `ANSWER_KEY_FILE` and `answer_keys.csv` — the ordinary ways a real
+    # answer-key read is spelled all escaped the HARD gate. `keys?(?![a-z])` keeps the `answer_keyword`
+    # false positive out (a letter follows) while accepting a `_`/`.`/end continuation. Likewise a
+    # held-out label file is often EXTENSION-LESS inside a path (`open("/data/test_labels")`), which the
+    # extension list alone cannot see — hence the path-segment alternative below. Both keep the
+    # sibling `_ANSWER_FILE_RE` (AST pass) and this text pass agreeing about what an answer key is.
+    r"\banswer[_-]?keys?(?![a-z])",
     r"\btest[_-]?labels\.(?:csv|tsv|txt|npy|npz|parquet|json|jsonl|pkl|pickle|h5|hdf5|feather|arrow)\b",
+    r"[/\\]test[_-]?labels\b",
     r"\by[_-]?test\b.*read",
 ]
 # A READ of a solutions/solution CSV — a possible answer-key read. Matched POSITIVELY (the file as

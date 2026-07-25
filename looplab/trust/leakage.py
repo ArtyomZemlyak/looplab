@@ -79,12 +79,22 @@ _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
 #     GAP (precision-over-recall, on purpose): a PRE-BUILT splitter passed in and only used via
 #     `cv.split(X)`, with no instantiation in the scanned code, no longer anchors a boundary — far better
 #     than hard-gating every solution that calls `str.split()`.
+#     NARROWED GAP (review follow-up): "no instantiation in the scanned code" is not rare — a splitter
+#     passed in as a parameter, built by a factory, or an INTEGER cv (`cross_val_score(m, X, y, cv=5)`,
+#     an extremely common form with no splitter object at all) all left `split_at = None`, which
+#     silently disables the whole HARD `fit_before_split` branch for that file — a genuine full-data
+#     `scaler.fit(X)` before `cv.split(X, y)` scanned CLEAN. So anchor additionally on the CV-driver
+#     calls and on a `.split(` whose RECEIVER is a conventional splitter name. Neither can match the
+#     `str.split()` collision the class anchors were introduced to avoid: `"a,b".split(",")` has no
+#     cross_val*/check_cv token and its receiver is a string literal/arbitrary name, not `cv`/`skf`/….
 _SPLIT_RE = re.compile(
     r"train_test_split\s*\("
     r"|[A-Za-z]*KFold\s*\("
     r"|[A-Za-z]*ShuffleSplit\s*\("
     r"|TimeSeriesSplit\s*\(|PredefinedSplit\s*\("
     r"|Leave[A-Za-z]*Out\s*\("
+    r"|cross_val\w*\s*\(|check_cv\s*\("
+    r"|\b(?:cv|cvs|skf|skfold|kf|kfold|sss|gss|ss|splitter|folds?)\s*\.\s*split\s*\("
 )
 # The early-stopping monitor kwarg (split off from the fit ARGS so a benign eval_set on VALIDATION
 # isn't read as fit-on-validation) and the TEST-monitor tell. The monitor tell matches the substring

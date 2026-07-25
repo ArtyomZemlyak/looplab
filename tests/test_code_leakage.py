@@ -176,3 +176,26 @@ def test_pearson_ignores_nan_rows_and_still_flags_a_proxy():
     assert abs(_pearson(feat, tgt)) > 0.99
     v = target_leakage({"proxy": feat}, tgt)
     assert v["leak"] and "proxy" in v["flagged"]
+
+
+def test_fit_before_split_anchors_on_cv_drivers_not_only_instantiation():
+    """`split_at is None` silently disables the whole HARD fit_before_split branch for a file.
+
+    Anchoring only on splitter INSTANTIATION missed two very common shapes — a splitter passed in as
+    a parameter, and an INTEGER cv (`cross_val_score(m, X, y, cv=5)`, no splitter object at all) — so
+    a genuine full-data `scaler.fit(X)` before `cv.split(X, y)` scanned CLEAN and the node could win
+    selection under trust_gate=gate|block. The `str.split()` false positive the class anchors exist
+    for must stay clean.
+    """
+    from looplab.trust.leakage import code_leakage_scan
+
+    def flags(code):
+        return {f["signal"] for f in code_leakage_scan(code)["flags"]}
+
+    assert "fit_before_split" in flags(
+        "def run(cv, X, y):\n    scaler.fit(X)\n    for tr, va in cv.split(X, y):\n        pass")
+    assert "fit_before_split" in flags(
+        "scaler.fit(X)\nscores = cross_val_score(model, X, y, cv=5)")
+
+    assert flags('parts = "a,b".split(",")\nscaler.fit(X_train)') == set()
+    assert flags("name = line.split()\nmodel.fit(X_train, y_train)") == set()
