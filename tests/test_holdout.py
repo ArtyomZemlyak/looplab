@@ -302,3 +302,42 @@ def test_settings_defaults_and_validation():
     assert s.confirm_seed_base == 1
     with pytest.raises(ValueError):
         Settings(merge_mode="bogus")
+
+
+def test_candidate_output_refuses_a_symlink_to_the_answer_key(tmp_path):
+    """Host confused-deputy boundary: the grader must not follow a candidate-planted symlink.
+
+    Out-of-process grading exists precisely so an untrusted candidate has "no answer key to read or
+    self-report" (mlebench.py::host_grading). But `Path.resolve()` and `Path.is_file()` BOTH follow
+    symlinks, so a candidate that wrote `submission.csv -> .../private/test.csv` had the HOST grader
+    read the answer key as its own submission — a perfect score with no reward-hack tell firing.
+    """
+    from looplab.engine.holdout import _candidate_output
+
+    workdir = tmp_path / "nodes" / "node_0"
+    workdir.mkdir(parents=True)
+    answers = tmp_path / "prepared" / "private"
+    answers.mkdir(parents=True)
+    answer_key = answers / "test.csv"
+    answer_key.write_text("id,label\n1,42\n", encoding="utf-8")
+
+    # the attack: a symlink from inside the workdir out to the private answers
+    (workdir / "submission.csv").symlink_to(answer_key)
+    assert _candidate_output(workdir, "submission.csv", "submission.csv") is None
+
+    # an escape through a symlinked PARENT directory is refused too (resolve() follows the chain,
+    # so containment is checked on the resolved path)
+    (workdir / "out").symlink_to(answers)
+    assert _candidate_output(workdir, "out/test.csv", "submission.csv") is None
+
+    # a configured name that is absolute or climbs out is refused before any filesystem access
+    assert _candidate_output(workdir, str(answer_key), "submission.csv") is None
+    assert _candidate_output(workdir, "../../prepared/private/test.csv", "submission.csv") is None
+
+    # an honest, real file inside the workdir still grades normally
+    (workdir / "submission.csv").unlink()
+    (workdir / "submission.csv").write_text("id,label\n1,7\n", encoding="utf-8")
+    got = _candidate_output(workdir, "submission.csv", "submission.csv")
+    assert got == (workdir / "submission.csv").resolve()
+    # a missing file is simply "no submission", not an error
+    assert _candidate_output(workdir, "nope.csv", "submission.csv") is None

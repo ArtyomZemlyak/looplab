@@ -27,6 +27,35 @@ if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestr
     from looplab.engine.orchestrator import Engine
 
 
+def _candidate_output(workdir, name: str, default: str) -> Optional[Path]:
+    """Resolve a CANDIDATE-WRITTEN output file inside `workdir`, or None if it can't be trusted.
+
+    This is a host confused-deputy boundary: the file is named by the task config but WRITTEN by
+    untrusted candidate code, and both `Path.resolve()` and `Path.is_file()` follow symlinks. Without
+    this guard a candidate could plant `submission.csv -> <data_dir>/prepared/private/test.csv` and
+    have the HOST grader read the answer key as the submission — defeating the whole point of
+    out-of-process grading ("there is no answer key to read or self-report", see mlebench.py's
+    `host_grading`), or point the generic reader at arbitrary host JSON outside the workdir.
+
+    Refuses: an absolute or `..`-bearing configured name, a symlinked final component, a non-regular
+    file, and anything whose RESOLVED path escapes this exact attempt workdir (which also covers a
+    symlinked intermediate directory, since `resolve()` follows the whole chain before we compare).
+    """
+    rel = Path(str(name or default))
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    wd = Path(workdir).resolve()
+    raw = Path(workdir) / rel
+    if raw.is_symlink():                       # lstat — does NOT follow, unlike is_file() below
+        return None
+    resolved = raw.resolve()
+    if wd != resolved and wd not in resolved.parents:
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
 class HoldoutGrader:
     """The engine's host-grading + holdout cluster. See the module docstring for the
     `self._e` (engine handle) convention."""
@@ -62,15 +91,12 @@ class HoldoutGrader:
         # above-median report rides along in extra_metrics for the trust panel + final report.
         if g.get("kind") == "mlebench":
             from looplab.adapters.mlebench_grade import grade_in_subprocess
-            # CODEX AGENT: this is a host confused-deputy boundary. `resolve()` plus `is_file()` follows a
-            # candidate-created symlink, including one to the private answer CSV. Require a simple
-            # relative name, lstat a non-symlink regular file, and prove containment in this exact
-            # attempt workdir before any host-side grader reads it.
             # Resolve so the grader subprocess (run from the repo root) reads the submission from the
-            # node workdir regardless of whether run_dir was relative.
-            sub = (Path(workdir) / g.get("submission", "submission.csv")).resolve()
+            # node workdir regardless of whether run_dir was relative — but through the confused-deputy
+            # guard, so a candidate-planted symlink can't aim the HOST grader at the private answer CSV.
+            sub = _candidate_output(workdir, g.get("submission", ""), "submission.csv")
             metric, report = (None, None)
-            if sub.is_file():
+            if sub is not None:
                 metric, report = grade_in_subprocess(
                     g["competition"], sub, g.get("data_dir"),
                     timeout=float(g.get("timeout", 300.0)))
@@ -85,13 +111,13 @@ class HoldoutGrader:
                 except OSError:
                     pass
             return res
-        # CODEX AGENT: generic host grading has neither the MLE branch's planned no-symlink boundary
-        # nor the declarative reader's eval-start freshness fence. A candidate can point this at host
-        # JSON outside the workdir, or a clean no-op repair can promote predictions left by an abandoned
-        # attempt. Require a fresh non-symlink regular file contained in this physical attempt.
-        preds_path = Path(workdir) / g.get("predictions", "predictions.json")
+        # Same confused-deputy boundary as the MLE branch above: without the guard a candidate can
+        # symlink this at host JSON outside the workdir. (The separate FRESHNESS gap — a clean no-op
+        # repair promoting predictions left by an abandoned attempt — needs a per-attempt eval-start
+        # fence and is not addressed here.)
+        preds_path = _candidate_output(workdir, g.get("predictions", ""), "predictions.json")
         m = None
-        if preds_path.is_file():
+        if preds_path is not None:
             from looplab.runtime.sandbox import _to_float
             try:
                 preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
