@@ -130,12 +130,26 @@ def test_start_defaults_backend_llm_for_inline_generative_task(tmp_path, monkeyp
 
 def test_start_respects_explicit_backend(tmp_path, monkeypatch):
     """An explicit backend in the launch settings wins verbatim — the default only fills the gap,
-    mirroring cli.py's `backend_chosen` guard."""
+    mirroring cli.py's `backend_chosen` guard.
+
+    A NON-generative task is the counterfactual: the default never fires for one
+    (test_start_non_generative_task_gets_no_backend pins that it spawns with NO backend env), so an
+    explicit `llm` surviving into the environment can only have come from the operator. An UNKNOWN
+    backend is a 422 here — every consumer tests `== "llm"` exactly, so an accepted typo would leave
+    the run silently on the OFFLINE toy roles; external CLI agents use `developer_backend` instead.
+    """
     client, spawned = _start_env(tmp_path, monkeypatch)
-    r = client.post("/api/start", json={"run_id": "gen", "task": _repo_task(tmp_path),
-                                        "settings": {"backend": "cli_agent"}})
+    toy_task = {"benchmark": "quadratic", "goal": "min (x-3)^2", "direction": "min"}
+    r = client.post("/api/start", json={"run_id": "toy", "task": toy_task,
+                                        "settings": {"backend": "llm"}})
     assert r.status_code == 200
-    assert spawned["env"]["LOOPLAB_BACKEND"] == "cli_agent"
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+
+    bad = client.post("/api/start", json={"run_id": "gen2", "task": _repo_task(tmp_path),
+                                          "settings": {"backend": "cli_agent"}})
+    assert bad.status_code == 422, (
+        "an unknown backend must be rejected here — external CLI agents are configured through "
+        "`developer_backend`, and an unknown `backend` falls through to the OFFLINE toy roles")
 
 
 def test_start_non_generative_task_gets_no_backend(tmp_path, monkeypatch):

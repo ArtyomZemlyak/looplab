@@ -543,3 +543,53 @@ def test_finished_trace_same_phase_retries_stay_separate_bands():
     conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
     labels = [s["label"] for s in conv["stages"]]
     assert labels == ["stages", "implement", "stages"]     # two SEPARATE stages bands, chronological
+
+
+def test_generic_span_attributes_are_redacted_at_the_durable_boundary(tmp_path):
+    """`spans.jsonl` (and the OTLP exporter) is a DURABLE egress boundary — redact HERE.
+
+    Every purpose-built path sanitizes before writing (`generation`, `tool`, `output`, `thinking`),
+    but `SpanHandle.set`/`set_many`/`event` took arbitrary values verbatim. `traceview` only protects
+    the UI projection, so a credential passed to generic instrumentation landed in the on-disk span
+    and was shipped to any configured external collector in the clear.
+    """
+    exporter = JsonlSpanExporter(tmp_path / "s.jsonl")
+    with Tracer(exporter, run_id="r1").span("op", new_trace=True) as sp:
+        sp.set("api_key", "sk-live-SUPERSECRET")
+        sp.set_many(authorization="Bearer SUPERSECRET", node_id=3)
+        sp.event("call", password="SUPERSECRET", tool="grep")
+
+    raw = (tmp_path / "s.jsonl").read_text()
+    assert "SUPERSECRET" not in raw, "a secret-named attribute reached the durable span log verbatim"
+    rec = orjson.loads(raw.splitlines()[0])
+    # two independent layers, both required: a secret-NAMED key is masked outright, and any value
+    # that looks like credential material is redacted even under a key the name-matcher allows.
+    assert rec["attributes"]["api_key"] == "***"
+    assert "SUPERSECRET" not in str(rec["attributes"]["authorization"])
+    assert rec["attributes"]["node_id"] == 3               # benign values pass through
+    assert rec["events"][0]["password"] == "***" and rec["events"][0]["tool"] == "grep"
+
+
+def test_new_trace_span_is_a_real_root(tmp_path):
+    """A `new_trace` span must have NO parent_id, or its trace has no discoverable root.
+
+    `new_trace` already gives the span a fresh trace_id, but `parent_id` still pointed at the
+    enclosing span — ACROSS traces. `events/traceview.py` finds a trace's root by `parent_id is None`,
+    so the new trace had none and rendered orphaned under the outer one.
+    """
+    exporter = JsonlSpanExporter(tmp_path / "s.jsonl")
+    t = Tracer(exporter, run_id="r1")
+    with t.span("outer", new_trace=True):
+        with t.span("inner_same_trace") as child:        # ordinary nesting still links
+            pass
+        with t.span("isolated", new_trace=True):
+            pass
+
+    recs = {orjson.loads(line)["name"]: orjson.loads(line)
+            for line in (tmp_path / "s.jsonl").read_text().splitlines()}
+    assert recs["inner_same_trace"]["parent_id"] == recs["outer"]["span_id"]
+    assert recs["inner_same_trace"]["trace_id"] == recs["outer"]["trace_id"]
+    assert recs["isolated"]["trace_id"] != recs["outer"]["trace_id"]
+    assert recs["isolated"]["parent_id"] is None, (
+        "a new_trace span kept a cross-trace parent — traceview finds a root by parent_id is None, "
+        "so this trace has none")

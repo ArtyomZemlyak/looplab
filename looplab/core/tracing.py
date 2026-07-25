@@ -491,11 +491,18 @@ class SpanHandle:
         self._rec = rec
         self._otel = otel_span
 
-    # CODEX AGENT: generic attributes/events are a durable JSONL and OTLP egress boundary, but these
-    # methods persist arbitrary values before any redaction (traceview protects only the UI projection).
-    # Sanitize secret-named keys and recursively bound/redact values here so future instrumentation
-    # cannot write credentials/PII to disk or an external collector.
+    # `spans.jsonl` and the OTLP exporter are a DURABLE egress boundary, so redaction has to happen
+    # here rather than at the call site. Every purpose-built path already sanitizes before writing
+    # (`generation`, `tool`, `output`, `thinking`), but these generic methods took arbitrary values
+    # verbatim — and `traceview` only protects the UI projection, not the bytes on disk or the ones
+    # shipped to an external collector. Both helpers are idempotent over already-sanitized strings, so
+    # routing the specialized paths' output through them again costs nothing.
+    @staticmethod
+    def _safe(key: str, value):
+        return "***" if is_secret_key_name(key) else sanitize_trace_value(value)
+
     def set(self, key: str, value) -> "SpanHandle":
+        value = self._safe(key, value)
         self._rec["attributes"][key] = value
         if self._otel is not None:
             try:
@@ -510,6 +517,7 @@ class SpanHandle:
         return self
 
     def event(self, name: str, **fields) -> "SpanHandle":
+        fields = {k: self._safe(k, v) for k, v in fields.items()}
         self._rec["events"].append({"name": name, **fields})
         if self._otel is not None:
             try:
@@ -530,9 +538,6 @@ class Tracer:
         st = _stack.get()
         parent = st[-1] if st else None
         # Propagate node_id via a contextvar (see _node_ctx): a span that names an explicit node_id sets
-        # CODEX AGENT: `new_trace` resets only the JSONL id chain below; it still retains this parent and
-        # starts OTel from ambient context. Clear parent_id and supply an explicit root OTel context, or
-        # the promised isolated operation has a cross-trace parent / remains in the outer collector trace.
         # it for the block; a span that doesn't INHERITS the active one, so nested generation/tool spans
         # get attributed to the node even when they open in a trace of their own. Stamp onto attributes
         # so the on-disk span (and the trace view that reads it) carries it.
@@ -562,7 +567,18 @@ class Tracer:
         otel_cm = otel_span = None
         if _OTEL is not None:
             try:
-                otel_cm = _OTEL.start_as_current_span(name)
+                # `new_trace` must isolate BOTH id chains. Without an explicit empty context the OTel
+                # span inherits the ambient one and stays a child in the collector's trace, so the
+                # JSONL and OTLP views of the same operation disagree about where the trace starts.
+                _otel_ctx = None
+                if new_trace:
+                    try:
+                        from opentelemetry.context import Context as _OtelContext
+                        _otel_ctx = _OtelContext()
+                    except Exception:  # noqa: BLE001 - older/absent API: fall back to ambient context
+                        _otel_ctx = None
+                otel_cm = (_OTEL.start_as_current_span(name, context=_otel_ctx) if _otel_ctx is not None
+                           else _OTEL.start_as_current_span(name))
                 otel_span = otel_cm.__enter__()
             except Exception:  # noqa: BLE001
                 otel_cm = otel_span = None
@@ -584,7 +600,10 @@ class Tracer:
             span_id = _hex(8)
         if kind == "operation":        # ids are final only here — children stamp (name, THIS span's id)
             _tok_phase = _phase_ctx.set((name, span_id))
-        parent_id = parent["span_id"] if parent else None
+        # `new_trace` gives this span a fresh trace_id above; keeping the parent's span_id here left it
+        # pointing ACROSS traces, so `traceview` (which finds a trace's root by `parent_id is None`)
+        # found no root for the new trace and rendered it orphaned under the outer one.
+        parent_id = parent["span_id"] if (parent and not new_trace) else None
         # kind ∈ {operation, generation, tool, retrieval}: the Langfuse-style observation type, so the
         # UI can render generations (LLM calls) and tools distinctly from plain operation spans.
         rec = {"name": name, "kind": kind, "trace_id": trace_id, "span_id": span_id,
