@@ -711,21 +711,24 @@ class SiblingRunTools:
         return self._runs.state(run_id)
 
     def _sibling_ids(self) -> list[str]:
-        """Run ids under run_root, excluding self, restricted to the same task_id when we know ours."""
-        # CODEX AGENT: absence of an authoritative task id is UNKNOWN scope, not permission to widen.
-        # Today an empty/legacy/corrupt `self.task_id` makes this list include every task and also makes
-        # `_read`/`_code` skip their new equality guard, silently turning the default same-task tool into
-        # AllRunsTools. Fail closed until bind_state supplies a non-empty identity (or derive a bounded
-        # identity receipt from self_run_id), and cover list + both guessed-id reads in that state.
+        """Run ids under run_root, excluding self, restricted to our task_id.
+
+        FAIL CLOSED without one: absence of an authoritative task id is UNKNOWN scope, not permission
+        to widen. `self.task_id` starts empty and `bind_state` only fills it from a truthy
+        `state.task_id`, so a missing/failed bind or a legacy log with no `task_id` used to skip the
+        filter entirely and list EVERY task — silently turning the default same-task tool into
+        AllRunsTools (the deliberately-scoped cross-task reader) for an agent that never asked for it.
+        """
+        if not self.task_id:
+            return []
         cand = self._runs.run_ids()
         out = []
         for rid in cand:
             if rid == self.self_run_id:
                 continue
-            if self.task_id:
-                st = self._state(rid)
-                if st is None or st.task_id != self.task_id:
-                    continue
+            st = self._state(rid)
+            if st is None or st.task_id != self.task_id:
+                continue
             out.append(rid)
         return out
 
@@ -754,7 +757,10 @@ class SiblingRunTools:
         st = self._state(run_id)
         if st is None:
             return f"(no such sibling run: {run_id!r})"
-        if self.task_id and getattr(st, "task_id", "") != self.task_id:
+        # `not self.task_id` fails CLOSED for the same reason `_sibling_ids` does: with no authoritative
+        # task id there is no boundary to check the guessed run_id against, and `x and ...` skipped the
+        # guard entirely in exactly that state — the direct read is where a guessed id crosses tasks.
+        if not self.task_id or getattr(st, "task_id", "") != self.task_id:
             return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
         self._reader.bind_state(st, None)
         return f"run {run_id} · " + self._reader.execute(
@@ -764,7 +770,7 @@ class SiblingRunTools:
         st = self._state(run_id)
         if st is None:
             return f"(no such sibling run: {run_id!r})"
-        if self.task_id and getattr(st, "task_id", "") != self.task_id:   # same-task boundary (see `_read`)
+        if not self.task_id or getattr(st, "task_id", "") != self.task_id:  # same-task boundary (see `_read`)
             return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
         self._reader.bind_state(st, None)
         return f"# from run {run_id}\n" + self._reader.execute("read_code", {"node_id": nid})

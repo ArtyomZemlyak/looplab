@@ -239,3 +239,30 @@ def test_production_lessons_reach_a_bound_reader(tmp_path):
         assert same_live_direction(final.direction, row.get("direction")) is True
     # and the fence really is fail-closed, so the field is load-bearing rather than decorative
     assert same_live_direction(final.direction, None) is False
+
+
+def test_sibling_tools_fail_closed_without_an_authoritative_task_id(tmp_path):
+    """No task id means UNKNOWN scope, not permission to widen.
+
+    `SiblingRunTools.task_id` starts empty and `bind_state` only fills it from a truthy
+    `state.task_id`, so a missing/failed bind (or a legacy log with no `task_id`) left the same-task
+    filter and both direct-read guards as no-ops — the default same-task tool silently became
+    AllRunsTools, the deliberately-scoped cross-task reader, for an agent that never asked for it.
+    """
+    rdA = tmp_path / "runA"
+    anyio.run(_engine(rdA).run)
+    storeC = EventStore(tmp_path / "runC" / "events.jsonl")
+    storeC.append("run_started", {"run_id": "runC", "task_id": "other-task", "direction": "min"})
+    storeC.append("node_created", {"node_id": 0, "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}}, "code": "FOREIGN=1"})
+
+    # never bound (the `bind_state` hook is OPTIONAL for providers — see tools/_base.py), and bound
+    # to a state whose run_started carried no task_id: both leave `task_id` empty.
+    for tools in (SiblingRunTools(tmp_path, "runB"), SiblingRunTools(tmp_path, "runB")):
+        tools.bind_state(RunState(run_id="runB"))
+        assert tools.execute("list_sibling_runs", {}) == "(no sibling runs of this task)", \
+            "an unscoped SiblingRunTools listed runs of every task"
+        for fn in ("read_sibling_experiment", "read_sibling_code"):
+            out = tools.execute(fn, {"run_id": "runC", "node_id": 0})
+            assert "not a sibling of task" in out and "FOREIGN" not in out, \
+                f"{fn} served a foreign-task run because no task boundary was known"
