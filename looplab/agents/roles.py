@@ -222,11 +222,13 @@ RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
 
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
-    "_novelty_stance", "_hyp_order", "_steering_context")
+    "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
 `_novelty_hint` + `_novelty_stance` in proposal_cues.py `_stamp_novelty_hint`;
+`_cross_run_advisory_receipt` in proposal_cues.py's advisory stamp, read back off the researcher
+handle in orchestrator.py `_node_audit_extra` and speculation.py's per-build capture;
 `_novelty_feedback` in engine/novelty.py's gate) and the
 foresight panel (search/foresight.py `_prioritize_board` sets `_hyp_order` — the predicted
 best-first board order — on its wrapped researcher). Readers: `LLMResearcher.propose` (below)

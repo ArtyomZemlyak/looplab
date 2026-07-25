@@ -26,7 +26,8 @@ from looplab.core.models import (
 )
 from looplab.search.concept_projection import (
     canonical_recorded_concept, current_concept_projection)
-from looplab.search.policy import _ASHA_MAX_FAILED_PROMOTIONS, debug_action, rank_by_metric
+from looplab.search.policy import (_ASHA_MAX_FAILED_PROMOTIONS, META_RUNG, debug_action,
+                                   rank_by_metric)
 
 
 META_CARD_ID = "_card_id"
@@ -1729,7 +1730,10 @@ def _policy_metadata_for_card_action(
     asha_promotion = bool(
         _builtin_policy_name(policy) == "ASHAPolicy"
         and len(fallback) == 1
-        and fallback[0].get("_rung") is not None
+        # META_RUNG, not a bare "_rung": the meta-key constants live in search/policy.py, and a
+        # literal that drifts from the constant silently no-ops (the ASHA promotion metadata would
+        # just stop being stamped, with no test going red).
+        and fallback[0].get(META_RUNG) is not None
         and action_key is not None
         and action_key[0] == "improve"
     )

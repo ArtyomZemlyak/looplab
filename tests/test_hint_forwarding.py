@@ -28,7 +28,11 @@ from looplab.core.models import Card, Idea, RunState, hypothesis_id
 from looplab.search.foresight import ForesightPanelResearcher
 
 # The handles engine/foresight code uses for "the ACTIVE researcher" when stamping hints.
-_HINT_TARGETS = {"self.researcher", "self.base", "researcher"}
+# `_r` is load-bearing: proposal_cues.py binds the active researcher to that local before stamping,
+# so omitting it made this scanner return NOTHING for the very module the registry docstring names as
+# the primary hint writer — the guard was inert there, and `_cross_run_advisory_receipt` drifted in
+# unregistered because of it.
+_HINT_TARGETS = {"self.researcher", "self.base", "researcher", "_r"}
 
 
 def _unparse(node) -> str:
