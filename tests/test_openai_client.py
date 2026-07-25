@@ -1017,3 +1017,50 @@ def test_complete_text_stream_bounds_a_blackholed_create(monkeypatch):
     out = list(c.complete_text_stream([{"role": "user", "content": "hi"}]))
     assert _t.monotonic() - t0 < 20                       # bounded by header budget + cleanup, did not hang
     assert out == ["FALLBACK"]                            # aborted create -> APITimeoutError -> fallback
+
+
+def test_bounded_create_timeout_does_not_tear_down_the_pool_under_siblings():
+    """One stalled call must not abort healthy in-flight generations on the SAME shared client.
+
+    `_bounded_create`'s abort path is pool-WIDE (`_shutdown_pool_sockets` shuts every pooled
+    connection) and replaces `self._sdk`. That is right when the wedged call is alone, but ONE
+    client instance is shared by researcher+developer (adapters/tasks.py) and reused by the
+    train/ASHA monitors from worker threads — and streaming is the default — so with siblings in
+    flight the teardown ripped the socket out from under a healthy multi-minute generation and made
+    it re-spend. The caller must still unblock either way.
+    """
+    import threading
+    import time
+    import openai
+    import pytest
+    from looplab.core.llm import OpenAICompatibleClient
+
+    client = OpenAICompatibleClient(base_url="http://127.0.0.1:1", api_key="k", model="m")
+    client.header_timeout = 0.2
+    torn = {"n": 0}
+
+    class _Sdk:
+        _client = object()
+
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    time.sleep(5)          # wedged: never returns within the join
+
+    client._sdk = _Sdk()
+    client._new_sdk = lambda: (torn.__setitem__("n", torn["n"] + 1), _Sdk())[1]
+
+    # Simulate a sibling already in flight on the same client.
+    with client._inflight_lock:
+        client._inflight = 1
+    with pytest.raises(openai.APITimeoutError):
+        client._bounded_create({"model": "m", "messages": []}, 0.2)
+    assert torn["n"] == 0, "a sibling was in flight — the shared client must NOT be rebuilt"
+
+    # Alone: the teardown still runs, so a wedged worker thread is still reaped.
+    with client._inflight_lock:
+        client._inflight = 0
+    with pytest.raises(openai.APITimeoutError):
+        client._bounded_create({"model": "m", "messages": []}, 0.2)
+    assert torn["n"] == 1, "with no siblings the client is rebuilt as before"

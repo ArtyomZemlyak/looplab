@@ -279,6 +279,14 @@ class OpenAICompatibleClient:
         # `trust_env=False` (the internal endpoint needs a DIRECT connection — no proxy env). See
         # `llm_trust_env` if a proxy/custom-CA is required. max_retries=0: we own the retry loop.
         self._trust_env = trust_env
+        # In-flight `_bounded_create` count. The abort path below shuts down EVERY socket in the shared
+        # httpx pool and rebuilds `self._sdk`, which is correct when this call is the only user but
+        # catastrophic when it is not: ONE client instance is shared by researcher+developer
+        # (adapters/tasks.py) and reused by the train/ASHA monitors from worker threads, so a pool-wide
+        # teardown aborts healthy multi-minute generations belonging to other threads and makes them
+        # re-spend. Counting lets the teardown stay scoped to the safe case.
+        self._inflight_lock = threading.Lock()
+        self._inflight = 0
         self._sdk = self._new_sdk()
 
     def _new_sdk(self):
@@ -356,7 +364,12 @@ class OpenAICompatibleClient:
                 box["resp"] = self._sdk.chat.completions.create(**kwargs)
             except BaseException as e:  # noqa: BLE001 — ferry ANY error back to the caller thread
                 box["exc"] = e
+            finally:
+                with self._inflight_lock:
+                    self._inflight -= 1
 
+        with self._inflight_lock:
+            self._inflight += 1
         th = threading.Thread(target=_call, daemon=True)
         th.start()
         th.join(join_s)
@@ -367,17 +380,27 @@ class OpenAICompatibleClient:
             # getattr guard (D8b): an SDK shape WITHOUT `_client` (a mock in tests, a foreign SDK)
             # must still reach the intended APITimeoutError below — a bare `self._sdk._client` here
             # turned the timeout into an AttributeError (`_shutdown_pool_sockets` no-ops on None).
-            # CODEX AGENT: this client is shared by parallel lanes, but timeout recovery shuts every
-            # pooled socket and replaces `self._sdk` without synchronization. One stalled call can abort
-            # healthy siblings and make them retry/spend again; isolate transports per in-flight request
-            # or serialize generation-scoped teardown.
-            _shutdown_pool_sockets(getattr(self._sdk, "_client", None))
-            try:
-                self._sdk._client.close()
-            except Exception:  # noqa: BLE001
-                pass
-            th.join(5)     # after the shutdown the recv errors out, so the daemon is reaped here
-            self._sdk = self._new_sdk()
+            # ONLY when this wedged call is the sole user of the shared client. The teardown below is
+            # pool-WIDE (`_shutdown_pool_sockets` shuts every pooled connection) and replaces `self._sdk`,
+            # so running it with siblings in flight rips the socket out from under a healthy multi-minute
+            # generation on another thread — one client instance is shared by researcher+developer
+            # (adapters/tasks.py) and reused by the train/ASHA monitors, and streaming is the DEFAULT, so
+            # those siblings are the normal case, not a corner. With siblings present we accept ONE
+            # lingering daemon thread (it exits when its own read finally errors) rather than cause N
+            # spurious failures and re-spends; the caller still unblocks on the APITimeoutError below,
+            # which is the guarantee that actually matters.
+            with self._inflight_lock:
+                _alone = self._inflight <= 1
+            if _alone:
+                # Force the wedged recv() to return so the worker thread EXITS: shutdown before close() —
+                # close() cannot interrupt a kernel read, only socket.shutdown() can.
+                _shutdown_pool_sockets(getattr(self._sdk, "_client", None))
+                try:
+                    self._sdk._client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                th.join(5)   # after the shutdown the recv errors out, so the daemon is reaped here
+                self._sdk = self._new_sdk()
             raise openai.APITimeoutError(request=httpx.Request("POST", self.base_url))
         if "exc" in box:
             raise box["exc"]
@@ -750,22 +773,31 @@ class OpenAICompatibleClient:
                             # here until the long idle read timeout. Now it fails over near
                             # `header_timeout`; `_stream_with_idle_guard` then governs the body.
                             header_join = self.header_timeout + min(10.0, self.header_timeout)
-                            # CODEX AGENT: own and close the SDK Stream in a finally block. Consumer
-                            # cancellation currently releases the broker permit without guaranteeing
-                            # that the HTTP response/socket was closed.
-                            for ev in _stream_with_idle_guard(
-                                    self._bounded_create(kwargs, header_join),
-                                    self.timeout, self.header_timeout):
-                                observed = getattr(ev, "usage", None)
-                                if observed is not None:
-                                    usage_observed = True
-                                    usage = _normalize_usage(_stream_usage(observed))
-                                if not ev.choices:
-                                    continue
-                                piece = getattr(ev.choices[0].delta, "content", None) or ""
-                                if piece:
-                                    pieces.append(piece)
-                                    yield piece
+                            # OWN the SDK Stream so it is closed on EVERY exit, including a consumer
+                            # that closes/cancels this generator while suspended at the `yield` below.
+                            # Passing `create(...)` inline left the only reference on the C stack of a
+                            # dead frame: the broker permit was released but the HTTP response and its
+                            # socket stayed open until GC, so a UI reader that navigates away mid-answer
+                            # leaked a live connection out of the shared pool.
+                            _stream = self._bounded_create(kwargs, header_join)
+                            try:
+                                for ev in _stream_with_idle_guard(
+                                        _stream, self.timeout, self.header_timeout):
+                                    observed = getattr(ev, "usage", None)
+                                    if observed is not None:
+                                        usage_observed = True
+                                        usage = _normalize_usage(_stream_usage(observed))
+                                    if not ev.choices:
+                                        continue
+                                    piece = getattr(ev.choices[0].delta, "content", None) or ""
+                                    if piece:
+                                        pieces.append(piece)
+                                        yield piece
+                            finally:
+                                try:
+                                    _stream.close()
+                                except Exception:  # noqa: BLE001 - best-effort release, never mask
+                                    pass
                         # CODEX AGENT: a role-only/empty clean EOF is not a successful assistant answer.
                         # Mirror `_post`'s empty-envelope retry/fallback; otherwise callers persist a
                         # zero-content "success" and no recovery path runs.
