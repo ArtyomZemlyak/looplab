@@ -784,3 +784,35 @@ def test_scoped_error_finish_converges_and_does_not_loop(tmp_path):
     assert incomplete_finalize_scope(events) is None
     st = fold(events)
     assert st.finished and not st.finalization_pending()
+
+
+def test_a_never_converging_cost_refresh_degrades_instead_of_wedging(tmp_path, monkeypatch):
+    """A permanently-failing usage reconcile must not block completion forever.
+
+    `_drain_outbox` leaves `complete=False` FOREVER for an undecodable/foreign `.json` record (it is
+    never removed) and for a same-id event whose payload differs, so `emit_llm_cost` returns False on
+    every pass and the staleness boundary never advances. Gating `requirements_complete` on it then
+    means `finalization_finished` is NEVER written and the run re-runs the whole finalize body —
+    including the PAID stewards — on every resume, inverting emit_llm_cost's own contract
+    ("telemetry never aborts domain finalization"). Bounded retries then a DISCLOSED shortfall.
+    """
+    import looplab.engine.finalize as finalize_module
+    from looplab.engine.finalize import finalize_run
+
+    run_dir = tmp_path / "run"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", lambda engine, **kw: False)
+    monkeypatch.setattr(finalize_module, "_llm_cost_rollup_stale", lambda *a, **k: True)
+
+    for _ in range(finalize_module._COST_REFRESH_MAX_ATTEMPTS + 2):
+        finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    steps = [e.data for e in eng.store.read_all() if e.type == "finalize_step"]
+    failed = [d for d in steps if d.get("step") == "llm_cost_refresh_failed"]
+    assert failed, "each failed attempt must leave a durable receipt"
+    assert len(failed) <= finalize_module._COST_REFRESH_MAX_ATTEMPTS, "retries must be BOUNDED"
+    closed = [d for d in steps if d.get("step") == "llm_cost"]
+    assert closed, "after the bounded retries the step must close so the run can terminate"
+    assert any(d.get("degraded") for d in closed), "the shortfall must be DISCLOSED, not silent"

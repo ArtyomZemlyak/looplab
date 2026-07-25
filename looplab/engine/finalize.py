@@ -313,6 +313,13 @@ def _llm_cost_rollup_stale(events, scope: str, finish_seq: int) -> bool:
     return boundary >= 0 and latest_usage > boundary
 
 
+# How many finalize passes may block on a failing usage reconcile before the run is allowed to
+# terminate with a DISCLOSED cost shortfall. Some outbox failures never self-heal (a foreign or
+# undecodable record is never drained), and a run that can never publish completion is worse
+# than one whose roll-up says it is short.
+_COST_REFRESH_MAX_ATTEMPTS = 3
+
+
 def _mark_finalize_step(engine: "Engine", scope: str, step: str, **data) -> None:
     engine.store.append(EV_FINALIZE_STEP, {"scope": scope, "step": step, **data})
 
@@ -744,6 +751,30 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             )
             if cost_refresh_ok and not cost_step_done:
                 _mark_finalize_step(engine, scope, "llm_cost")
+            elif not cost_refresh_ok:
+                # BOUNDED, DISCLOSED degradation. Blocking completion on the refresh is right for a
+                # transient outbox/append conflict, but some failures never self-heal: `_drain_outbox`
+                # leaves `complete=False` forever for an undecodable/foreign `.json` record (it is never
+                # removed) and for a same-id event whose payload differs. `emit_llm_cost` then returns
+                # False on every pass, the staleness boundary never advances, and the run re-runs the
+                # whole finalize body — including the PAID stewards — on every resume while never
+                # publishing `finalization_finished`. That inverts emit_llm_cost's own contract
+                # ("telemetry never aborts domain finalization"). Retry a bounded number of times, then
+                # record WHY the roll-up is short and let the run terminate: an under-counted cost that
+                # says so beats a run that can never finish.
+                _attempts = 1 + sum(
+                    1 for event in events
+                    if event.type == EV_FINALIZE_STEP
+                    and event.data.get("scope") == scope
+                    and event.data.get("step") == "llm_cost_refresh_failed")
+                _mark_finalize_step(engine, scope, "llm_cost_refresh_failed", attempt=_attempts)
+                if _attempts >= _COST_REFRESH_MAX_ATTEMPTS:
+                    _mark_finalize_step(
+                        engine, scope, "llm_cost",
+                        degraded="usage reconcile did not converge; the roll-up may under-count "
+                                 "spend still stranded in .llm-usage-outbox",
+                        attempts=_attempts)
+                    cost_refresh_ok = True
 
         latest_events = engine.store.read_all()
         requirements = (
