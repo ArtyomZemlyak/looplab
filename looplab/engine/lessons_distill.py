@@ -212,6 +212,12 @@ class LessonDistillMixin:
                                    f"reached {best.metric:.4g}"),
                      "outcome": "supported", "claim_stance": "support",
                      "delta": None, "confidence": 0.7,
+                     # POLARITY PROVENANCE: a bound (agent-facing) CrossRunTools gates every row on
+                     # `same_live_direction(self._direction, row.get("direction"))`, which fails closed
+                     # on a missing value. Omitting it here made every production lesson invisible to
+                     # agent-facing cross-run memory (only `store_case` persisted it, which is why
+                     # cases worked and lessons did not). Same field, same meaning as lessons.py's case row.
+                     "direction": final.direction,
                      "run_id": final.run_id, "evidence": [best.id], "role": LESSON_ROLE_RESEARCHER,
                      "evidence_sig": self._evidence_sig_map(final, [best.id])}]
         client = self._e._reflect_client()
@@ -276,6 +282,10 @@ class LessonDistillMixin:
                 "kind": getattr(self._e.task, "kind", ""), "statement": stmt,
                 "outcome": outcome, "delta": None, "confidence": 0.6,
                 "claim_stance": distilled_claim_stance(outcome),
+                # Polarity provenance — see `_winner_lesson` above: a bound CrossRunTools fails closed
+                # on a missing `direction`, so without this the LLM-authored lessons (the ONLY lessons a
+                # real run writes) never reach agent-facing cross-run memory.
+                "direction": final.direction,
                 "run_id": final.run_id, "evidence": list(ev_ids), "evidence_sig": ev_sig,
                 "role": LESSON_ROLE_RESEARCHER}
                for _, stmt, outcome in parse_credit_lessons(out, 0, limit=8)]

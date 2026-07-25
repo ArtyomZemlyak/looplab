@@ -196,3 +196,46 @@ def test_import_action_maps_to_inject_with_source():
 def test_import_action_requires_source():
     assert _action_to_control(_Action(action="import"), None) is None          # no source -> no-op
     assert _action_to_control(_Action(action="import", source_run="runA"), None) is None
+
+
+def test_production_lessons_reach_a_bound_reader(tmp_path):
+    """Writer→bound-reader contract: a lesson the ENGINE actually writes must survive the polarity fence.
+
+    `CrossRunTools._in_scope` gates every row on `same_live_direction(self._direction, row["direction"])`,
+    which fails CLOSED on a missing value. `lessons_distill.py` never persisted `direction` — only
+    `store_case` did — so every production lesson was invisible to agent-facing cross-run memory while
+    hand-built test fixtures (which manufacture the field) passed. This pins the two ends together.
+    """
+    from looplab.engine.lessons_distill import LessonDistillMixin
+    from looplab.trust.cross_run import same_live_direction
+
+    class _Task:
+        kind = "quadratic"
+
+    class _E:
+        task = _Task()
+
+        def _reflect_client(self):
+            return None          # offline -> the `_winner_lesson` safety net writes the row
+
+    class _Writer(LessonDistillMixin):
+        _e = _E()
+
+        def _evidence_sig_map(self, final, ids):
+            return {}
+
+    rd = tmp_path / "runA"
+    final = anyio.run(_engine(rd).run)
+    best = final.best()
+    assert best is not None and final.direction
+
+    rows = _Writer().reflect_lessons(final, best, ["fp"])
+    assert rows, "the offline winner-lesson safety net must produce a row"
+    for row in rows:
+        assert row.get("direction") == final.direction, (
+            "every lesson writer must persist `direction`; without it a bound CrossRunTools "
+            "fails closed and agent-facing cross-run memory is silently empty")
+        # the exact predicate the bound reader applies
+        assert same_live_direction(final.direction, row.get("direction")) is True
+    # and the fence really is fail-closed, so the field is load-bearing rather than decorative
+    assert same_live_direction(final.direction, None) is False
