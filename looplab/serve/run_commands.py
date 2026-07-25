@@ -899,10 +899,13 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         data["code"] = snode.code or None
         data["files"] = dict(snode.files)
         data["deleted"] = list(snode.deleted)
-        # CODEX AGENT: run_id and node_id are both reused across resets, so this receipt and its UI
-        # link can later identify different source bytes. Bind the origin to source run generation,
-        # `snode.attempt`, and preferably a content digest before importing the snapshot.
-        data["origin"] = {"run_id": sr, "node_id": sn, "metric": snode.robust_metric}
+        # ATTEMPT-STAMPED: a node id survives `node_reset`, so `(run_id, node_id)` alone stops
+        # identifying the bytes that were actually imported the moment the source node is re-run —
+        # the receipt and its UI link then point at a different experiment than the one this snapshot
+        # came from. `attempt` is the source node's lifecycle generation at import time; it is
+        # additive, so older receipts simply carry no `source_attempt` and read exactly as before.
+        data["origin"] = {"run_id": sr, "node_id": sn, "metric": snode.robust_metric,
+                          "source_attempt": getattr(snode, "attempt", 0)}
 
     # The event fold is intentionally tolerant of historical hand-authored logs.  HTTP mutation is a
     # stronger trust boundary: reject payloads that would otherwise become permanent replay poison or

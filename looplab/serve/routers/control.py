@@ -199,10 +199,14 @@ def build_router(srv) -> APIRouter:
         return liveness
 
     # ------------------------------------------------------------------ control
-    # CODEX AGENT: this compatibility mutation endpoint has no durable request identity or mandatory
-    # run-generation fence. A lost-response retry can append a second additive/paid intent; restrict
-    # it to provably idempotent events or route mutations through `/commands` with Idempotency-Key and
-    # exact generation.
+    # KNOWN GAP (needs a deprecation, not a patch): this compatibility route has no durable request
+    # identity and no mandatory generation fence, so a lost-response retry re-appends an ADDITIVE
+    # intent — `budget_extend`'s `add_nodes` is a documented delta, and inject/fork/deep_research each
+    # queue another PAID unit of work. `/commands` is the fenced path and is what both first-party
+    # clients use (ui/src/api.js, tui_api.py). Requiring `expected_seq` for those types was tried and
+    # reverted: it is the correct end state but breaks the contract this route exists to preserve
+    # (41 call sites in the suite alone append here unfenced), so it needs a deprecation window with a
+    # warning header and a migration note — not a silent 409.
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request):
         rd = _run_dir(run_id)

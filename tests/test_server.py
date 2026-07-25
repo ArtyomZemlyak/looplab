@@ -3164,3 +3164,32 @@ def test_author_routes_are_bounded_and_name_restricted(tmp_path, monkeypatch):
     entry = next(f for f in listed["files"] if f["name"] == "big.md")
     assert len(entry["text"].encode()) <= _AUTHOR_MAX_BYTES
     assert entry["truncated"] is True
+
+
+def test_cross_run_import_origin_names_the_source_attempt(tmp_path):
+    """A cross-run import receipt must name the source ATTEMPT, not just `(run_id, node_id)`.
+
+    A node id SURVIVES `node_reset`, so `(run_id, node_id)` alone stops identifying the bytes that
+    were actually imported the moment the source node is re-run: the stored receipt — and the UI link
+    built from it — then point at a different experiment than the snapshot came from, silently
+    misattributing where a result originated. `source_attempt` is additive, so receipts written before
+    this simply lack the key and fold exactly as they always did.
+    """
+    _build_run(tmp_path, "source")
+    _build_run(tmp_path, "destination")
+    client = TestClient(make_app(tmp_path))
+    response = client.post("/api/runs/destination/control", json={
+        "type": "inject_node",
+        "data": {"source_run": "source", "source_node": 0},
+    })
+    assert response.status_code == 200, response.text
+
+    injected = next(event for event in EventStore(tmp_path / "destination" / "events.jsonl")
+                    .read_all() if event.type == "inject_node")
+    origin = injected.data["origin"]
+    assert origin["run_id"] == "source" and origin["node_id"] == 0
+    assert "source_attempt" in origin, (
+        "the import receipt does not name the source attempt, so a later reset of that node "
+        "silently repoints it at different bytes")
+    src_state = fold(EventStore(tmp_path / "source" / "events.jsonl").read_all())
+    assert origin["source_attempt"] == src_state.nodes[0].attempt
