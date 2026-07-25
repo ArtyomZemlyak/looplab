@@ -409,6 +409,17 @@ function ConceptTags({ n, state, runId, onToast }) {
   const save = async () => {
     if (busy) return
     const { concepts, dropped } = parseConceptTagsInput(text)
+    // "The operator cleared the tags" and "every token they typed was rejected" are NOT the same
+    // intent, and submitting `[]` for the second WIPES the node's concepts under `operator-edited`
+    // provenance the classifier re-tag cadence deliberately never clobbers — permanently orphaning the
+    // node from every lens/chip/DAG grouping, while the toast reports success. Paste a markdown bullet
+    // list and every token normalizes to `*-…`, which fails the concept-id segment gate. An explicit
+    // clear is blank input; a fully-rejected input is a typo to correct, so refuse and keep the editor.
+    if (concepts.length === 0 && dropped > 0) {
+      onToast?.(`No valid concept id in that input (${dropped} rejected) — `
+                + 'fix them, or clear the box to remove all tags.')
+      return
+    }
     setBusy(true)
     try {
       const feedback = commandFeedback(

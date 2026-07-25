@@ -199,9 +199,18 @@ class CachedAbstractor:
             # (`anchors: null` -> list(None); `anchors: 5` -> list(5)), contradicting this class's
             # "never raises / a corrupt cache starts empty" contract — the load path only rejects a
             # non-dict top level and JSON errors, not per-entry type drift. Coerce a non-list to [].
+            # Element types matter too, not just the container: `index_text()` does
+            # `" ".join([primary, *anchors])`, so a persisted `anchors: [1, 2]` still raised TypeError
+            # from the very next consumer — the same "never raises / a corrupt cache starts empty"
+            # contract this guard exists for. A null `primary` likewise became the literal essence
+            # phrase "None" (str(None)) and got embedded into the harmonic index. Mirror the fresh
+            # LLMAbstractor path: stringify + strip, drop empties, and keep the primary non-empty.
             _anchors = hit.get("anchors")
-            return Abstraction(str(hit.get("primary", "")),
-                               list(_anchors) if isinstance(_anchors, list) else [])
+            _anchors = _anchors if isinstance(_anchors, list) else []
+            anchors = [t for t in (str(a).strip().lower() for a in _anchors) if t]
+            _primary = hit.get("primary")
+            primary = str(_primary).strip() if isinstance(_primary, str) else ""
+            return Abstraction(primary or " ".join(anchors), anchors)
         ab = self.inner(text)
         self._cache[key] = {"primary": ab.primary, "anchors": list(ab.anchors)}
         self._persist()
