@@ -270,7 +270,7 @@ class AuditMixin:
         """B3: mask secrets in an output tail before it is persisted, when redaction is enabled."""
         if not self._redact_output or not text:
             return text
-        from looplab.trust.redact import redact_secrets
+        from looplab.core.redact import redact_secrets
         return redact_secrets(text)
 
     def _maybe_crash(self) -> None:

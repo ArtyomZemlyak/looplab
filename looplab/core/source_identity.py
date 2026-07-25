@@ -12,7 +12,7 @@ import unicodedata
 from typing import NamedTuple, Optional
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import is_secret_key_name, redact_persisted_text
 
 
 MAX_SOURCE_URL_INPUT = 8_192

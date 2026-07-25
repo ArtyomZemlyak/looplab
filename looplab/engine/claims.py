@@ -322,7 +322,7 @@ def _valid_research_node_refs(raw, node_ids) -> bool:
 def _valid_research_url_identities(raw, urls) -> bool:
     if raw is None:
         return True
-    from looplab.trust.source_identity import valid_source_identity
+    from looplab.core.source_identity import valid_source_identity
     return (isinstance(raw, list) and len(raw) <= 4 and len(raw) <= len(urls)
             and all(valid_source_identity(identity) for identity in raw))
 

@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 from looplab.tools._base import RESULT_CAP, fn_spec
-from looplab.trust.redact import redact_persisted_text
+from looplab.core.redact import redact_persisted_text
 
 _WORD = re.compile(r"[a-z0-9@._]+")
 _LOG = logging.getLogger(__name__)

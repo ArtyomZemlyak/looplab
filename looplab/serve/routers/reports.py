@@ -47,7 +47,7 @@ from looplab.serve.scope_sources import (
     probe_scope_log_sig,
     scope_event_size,
 )
-from looplab.trust.redact import redact_persisted_text
+from looplab.core.redact import redact_persisted_text
 
 
 _SCOPE_TYPES = frozenset({"project", "task", "supertask"})

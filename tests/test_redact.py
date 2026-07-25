@@ -1,7 +1,7 @@
 """B3 secret-leak redaction over persisted output tails."""
 from __future__ import annotations
 
-from looplab.trust.redact import redact_persisted_text, redact_secrets
+from looplab.core.redact import redact_persisted_text, redact_secrets
 
 
 def test_redacts_openai_style_key():

@@ -154,7 +154,7 @@ class GatedMcpTools:
                                    ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError):
             args_json = "<invalid arguments>"
-        from looplab.trust.redact import redact_secrets
+        from looplab.core.redact import redact_secrets
         args_digest = hashlib.sha256(args_json.encode("utf-8")).hexdigest()
         action = {"tool": name, "tool_kind": "mcp", "label": f"MCP tool {name}",
                   "verb": f"call MCP tool `{name}`",

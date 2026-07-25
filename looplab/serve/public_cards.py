@@ -207,7 +207,7 @@ def _clip_utf8(value: str, limit: int) -> str:
 def _text(value, limit: int, *, free_text: bool = False):
     if not isinstance(value, str):
         return _SKIP
-    from looplab.trust.redact import redact_secrets
+    from looplab.core.redact import redact_secrets
 
     # scan a bounded look-ahead so a credential crossing the display cut is redacted as one
     # token, while an attacker-sized prose field never costs O(raw size) on each SSE tick.

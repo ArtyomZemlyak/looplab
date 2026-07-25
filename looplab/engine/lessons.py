@@ -446,7 +446,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
     def _curation_provenance(self, *, input_digest: str, input_schema: str,
                              client) -> dict:
-        from looplab.trust.redact import redact_persisted_text
+        from looplab.core.redact import redact_persisted_text
 
         model = getattr(client, "model", None) if client is not None else None
         if not model:
@@ -606,7 +606,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         digest = claim["input_digest"]
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
             raise ValueError("invalid curation claim input_digest")
-        from looplab.trust.redact import redact_persisted_text
+        from looplab.core.redact import redact_persisted_text
         for field, maximum in (("input_schema", 200), ("model", 200), ("parser", 100)):
             value = claim[field]
             if redact_persisted_text(

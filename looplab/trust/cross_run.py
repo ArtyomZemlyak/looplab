@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from itertools import islice
 
-from looplab.trust.redact import (
+from looplab.core.redact import (
     is_secret_key_name,
     redact_persisted_identity,
     redact_persisted_text,

@@ -159,7 +159,7 @@ def test_source_identity_is_bounded_and_distinguishes_resource_parameters():
     long_url = "https://example.test/archive/" + "a" * 4_000
     long_ref = _source_ref(long_url)
     assert long_ref is not None and len(long_ref[1]) == 1_600 and "\n" not in long_ref[1]
-    from looplab.trust.source_identity import canonical_source_ref
+    from looplab.core.source_identity import canonical_source_ref
     replayed_ref = canonical_source_ref(long_ref[1], persisted_identity=long_ref[0])
     assert replayed_ref is not None and replayed_ref.identity == long_ref[0]
     assert replayed_ref.display_url == long_ref[1]

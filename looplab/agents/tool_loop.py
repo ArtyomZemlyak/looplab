@@ -24,7 +24,7 @@ from typing import Optional
 from looplab.core import tracing
 from looplab.core.llm import BudgetExceeded
 from looplab.tools._base import RESULT_CAP
-from looplab.trust.redact import redact_secrets
+from looplab.core.redact import redact_secrets
 
 
 class CompositeTools:

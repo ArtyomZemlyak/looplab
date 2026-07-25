@@ -25,8 +25,8 @@ from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_resear
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
 from looplab.core.prompts import PromptStore, render
-from looplab.trust.redact import redact_persisted_text
-from looplab.trust.source_identity import canonical_source_ref
+from looplab.core.redact import redact_persisted_text
+from looplab.core.source_identity import canonical_source_ref
 
 
 _MAX_SOURCES = MAX_RESEARCH_SOURCES

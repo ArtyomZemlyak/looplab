@@ -27,7 +27,7 @@ from looplab.serve.settings_store import (
 from looplab.serve.settings_ui_schema import (
     SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_ETAG, SETTINGS_UI_SCHEMA_VERSION,
 )
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import is_secret_key_name, redact_persisted_text
 
 
 _MEMORY_TIER_LIMIT = 200

@@ -12,7 +12,7 @@ import json
 
 from looplab.agents.deep_research import _SYSTEM, DeepResearcher, state_brief
 from looplab.core.models import RunState
-from looplab.trust.source_identity import canonical_source_ref
+from looplab.core.source_identity import canonical_source_ref
 
 
 class _FakeTools:

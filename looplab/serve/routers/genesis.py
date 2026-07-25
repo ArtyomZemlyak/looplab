@@ -22,7 +22,7 @@ from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 from looplab.serve.routers.control import _defaults_backend_llm
 from looplab.serve.routers.reports import _prior_learnings_index
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import is_secret_key_name, redact_persisted_text
 
 async def _json_object(request: Request) -> dict:
     """Parse a request body as a JSON object or fail with 400 (mirrors routers/boss + control), so a

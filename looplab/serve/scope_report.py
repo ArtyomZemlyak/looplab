@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import sanitize_report_payload
 from looplab.core.comparison import canonical_comparison_contract, finite_measurement
-from looplab.trust.redact import redact_persisted_text
+from looplab.core.redact import redact_persisted_text
 
 
 MAX_SCOPE_REPORT_RUNS = 64

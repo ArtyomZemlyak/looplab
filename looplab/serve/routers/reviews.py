@@ -16,7 +16,7 @@ from looplab.events.comment_projection import (
 from looplab.serve.reviews import (
     DEFAULT_TTL_SECONDS, REVIEW_HEADER, ReviewError, exact_review_generation)
 from looplab.serve.run_commands import run_generation_token
-from looplab.trust.redact import redact_secrets
+from looplab.core.redact import redact_secrets
 
 
 class ReviewCreate(BaseModel):

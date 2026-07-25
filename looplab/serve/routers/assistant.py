@@ -37,7 +37,7 @@ from looplab.serve.protocol import (
     SSE_DONE, SSE_ERROR, SSE_STEP, SSE_TEXT, SSE_TODOS, SSE_TOKEN)
 from looplab.tools.perm_modes import (
     GRANT_TTL_SECONDS, RememberedGrantStore, classify_action, normalize_mode)
-from looplab.trust.redact import redact_secrets
+from looplab.core.redact import redact_secrets
 
 
 async def _json_object(request: Request) -> dict:
@@ -54,7 +54,7 @@ async def _json_object(request: Request) -> dict:
 
 
 def _shared_text(value) -> str:
-    from looplab.trust.redact import redact_secrets
+    from looplab.core.redact import redact_secrets
     return redact_secrets(str(value or ""))
 
 

@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from looplab.trust.redact import redact_secrets
+from looplab.core.redact import redact_secrets
 
 # Directories never worth walking for assets (VCS/build/venv/cache) — pruned for speed and to avoid
 # reading a checkout's dependencies as if they were the task's own prior art.

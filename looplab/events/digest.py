@@ -89,13 +89,16 @@ def _folded_axes(state, node):
     rename = getattr(state, "concept_consolidation", None)
     rename = rename if isinstance(rename, dict) else {}   # read-time overlay: a merged concept may move axis
     axes: set = set()
-    from looplab.search.concept_graph import _canonical_with_rename
+    # `core.concepts.resolve_concept` directly, NOT `search.concept_graph._canonical_with_rename`:
+    # `events` may only import `core` (CLAUDE.md layering), and that helper is a two-line wrapper over
+    # exactly this call — reaching up into `search` bought nothing but the layering violation.
+    from looplab.core.concepts import resolve_concept
     for concept in (nc.get(nid) or []):
         try:
             # a rename is a bounded CHAIN, not a one-hop dictionary lookup. Resolve and
             # normalize through the same canonical helper as /concepts and run tools; cycles/malformed
             # ids are omitted instead of leaking a retired or case-sensitive parallel axis.
-            canonical = _canonical_with_rename(concept, rename)
+            canonical = resolve_concept(concept, rename)[0] or ""
         except (AttributeError, TypeError, ValueError):
             canonical = ""
         axis = canonical.split("/", 1)[0]

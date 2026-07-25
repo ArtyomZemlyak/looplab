@@ -31,7 +31,7 @@ from typing import Optional
 
 import orjson
 
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import is_secret_key_name, redact_persisted_text
 
 
 _TRACE_TEXT_CAP = 64_000

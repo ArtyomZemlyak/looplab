@@ -34,8 +34,8 @@ from looplab.core.advisory_payloads import (
 )
 from looplab.core.fitness import is_usable_metric
 from looplab.core.models import NodeStatus, RunState
-from looplab.trust.redact import redact_persisted_text
-from looplab.trust.source_identity import canonical_source_ref, valid_source_identity
+from looplab.core.redact import redact_persisted_text
+from looplab.core.source_identity import canonical_source_ref, valid_source_identity
 
 
 _MAX_CLAIMS = MAX_RESEARCH_CLAIMS

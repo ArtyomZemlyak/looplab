@@ -61,7 +61,7 @@ from looplab.serve.command_observation import CommandObservation, CommandObserva
 from looplab.serve.engine_proc import (
     _claim_and_spawn_resume, _engine_alive, _engine_liveness, _spawn_engine)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
-from looplab.trust.redact import redact_secrets
+from looplab.core.redact import redact_secrets
 
 
 class EnginePolicy(str, Enum):

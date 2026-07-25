@@ -49,7 +49,7 @@ _PUBLIC_STATE_RAW_KEYS = {
 
 
 def _public_state_value(value):
-    from looplab.trust.redact import redact_secrets
+    from looplab.core.redact import redact_secrets
 
     if isinstance(value, dict):
         return {k: _public_state_value(v) for k, v in value.items()
@@ -201,7 +201,7 @@ class AppState:
                 if isinstance((dto := _card_dtos.get(c.id)), dict)
             }
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
-        from looplab.trust.redact import redact_secrets
+        from looplab.core.redact import redact_secrets
         for n in d.get("nodes", {}).values():
             n.pop("code", None)
             n.pop("files", None)

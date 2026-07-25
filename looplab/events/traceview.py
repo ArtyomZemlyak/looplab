@@ -16,7 +16,7 @@ from itertools import islice
 from typing import Optional
 
 from looplab.core.models import RunState
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import is_secret_key_name, redact_persisted_text
 
 
 _MAX_SPAN_ID_CHARS = 256

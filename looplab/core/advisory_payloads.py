@@ -11,8 +11,8 @@ import itertools
 import json
 import math
 
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
-from looplab.trust.source_identity import canonical_source_ref, valid_source_identity
+from looplab.core.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.source_identity import canonical_source_ref, valid_source_identity
 
 
 MAX_RESEARCH_SOURCES = 64

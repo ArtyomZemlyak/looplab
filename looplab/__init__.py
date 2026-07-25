@@ -172,7 +172,7 @@ _LAYOUT = {
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
     "readmodel": "events",
-    "redact": "trust",
+    "redact": "core",
     "regression": "adapters",
     "replay": "events",
     "repo_developer": "adapters",
@@ -204,7 +204,7 @@ _LAYOUT = {
     "speculation": "engine",  # durable speculative Card build queue and worker contracts
     "speculation_calibration": "search",
     "speculation_quality": "search",
-    "source_identity": "trust",   # provenance/source-identity checks among the trust monitors
+    "source_identity": "core",    # provenance/source-identity primitives (stdlib-only, used by core)
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
     "stuck": "agents",

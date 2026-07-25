@@ -24,7 +24,7 @@ from pydantic import (
     model_validator,
 )
 
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.core.redact import is_secret_key_name, redact_persisted_text
 
 
 COMPARISON_CONTRACT_SCHEMA = 1
