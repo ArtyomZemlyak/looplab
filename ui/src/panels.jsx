@@ -1707,15 +1707,14 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
     }
     setOptim(current => {
       const entry = current[card.id] || {}
-      // # CODEX AGENT: `...entry` carries the PREVIOUS edit's editEventSeq into a chained edit's
-      // entry, so _cardControlReflected's seq shortcut (folded >= expected) marks the NEW edit
-      // reflected as soon as the OLD edit folds — the reconcile effect then clears this edit's
-      // override/pending early and the visible text reverts to the old edit until the second fold
-      // lands, bypassing the fence the sentEditRef/editBaseline machinery keeps on the prefix path.
-      // Reset editEventSeq here (for kind === 'edit') so only THIS submission's record seq can
-      // satisfy the fence.
+      // `...entry` carried the PREVIOUS edit's editEventSeq into a chained edit, so
+      // `_cardControlReflected`'s seq shortcut (folded >= expected) marked the NEW edit reflected as
+      // soon as the OLD one folded: the reconcile effect cleared this edit's override early and the
+      // visible text reverted until the second fold landed, bypassing the fence sentEditRef/
+      // editBaseline keep on the prefix path. Only THIS submission's record seq may satisfy it.
       return { ...current, [card.id]: {
         ...entry,
+        ...(kind === 'edit' ? { editEventSeq: null } : {}),
         updates: { ...(entry.updates || {}), [kind]: patch },
         ...(editBaseline !== undefined ? { editBaseline } : {}),
         pending: { kind, phase: 'submitting' },

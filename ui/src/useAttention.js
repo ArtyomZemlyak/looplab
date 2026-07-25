@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { assistantPermissions, attentionFeed } from './api.js'
+import { deadlineRequest } from './requestDeadline.js'
 import {
   normalizePermissionAttention, normalizeRunAttention, sortAttentionItems,
 } from './attentionModel.js'
@@ -42,6 +43,10 @@ function normalizePermissionPage(payload, now) {
 const sameIds = (left, right) => left.length === right.length
   && left.every((item, index) => item.id === right[index]?.id)
 
+// One hung endpoint must not be able to freeze the whole feed: past this, the request is
+// abandoned and the tick completes so the next one can run.
+const ATTENTION_REQUEST_DEADLINE_MS = 15000
+
 export function useAttention({ intervalMs = 4000 } = {}) {
   const [state, setState] = useState({
     runPages: [], permissions: [], initialized: false,
@@ -58,13 +63,15 @@ export function useAttention({ intervalMs = 4000 } = {}) {
       if (running) return
       running = true
       const now = Date.now()
-      // # CODEX AGENT: neither request has a deadline. If one never settles, `running` never clears and
-      // every later interval tick is skipped, freezing both sources without a stale marker. Give each
-      // source an abortable deadline and independent settlement so one hung endpoint cannot disable the
-      // entire Attention refresh loop.
+      // Both sources need a DEADLINE: `running` clears only in `finally`, so one request that never
+      // settles skips every later interval tick and freezes the whole Attention feed with no stale
+      // marker shown. `deadlineRequest` settles even when the transport ignores the abort signal.
       try {
         const [runResult, permissionResult] = await Promise.allSettled([
-          attentionFeed(200), assistantPermissions(),
+          deadlineRequest(signal => attentionFeed(200, null, { signal }),
+            ATTENTION_REQUEST_DEADLINE_MS).promise,
+          deadlineRequest(signal => assistantPermissions(null, { signal }),
+            ATTENTION_REQUEST_DEADLINE_MS).promise,
         ])
         if (!active) return
         const firstPage = runResult.status === 'fulfilled'

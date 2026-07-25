@@ -49,6 +49,18 @@ test('timeline narration stays renderable for malformed and forward-compatible e
       endpoint_underperforming: false, resource_underperforming: true,
       comparable_population: 3,
     } }), 'ASHA: #3 0.42 same-resource rank warning')
+    // asha_monitor publishes RECOVERY edges (`underperforming: false`) precisely so projections can
+    // clear the flag; ignoring the field rendered a recovery as yet another warning.
+    assert.equal(eventNarration({ type: 'asha_rank', data: {
+      node_id: 3, intermediate: 0.42, quantile: 0.5, population: 4, underperforming: false,
+    } }), 'ASHA: #3 0.42 rank recovered')
+    // `priority` is the 0-BASED wire value while every operator surface is 1-based (the board chip
+    // renders priority+1, the form says "1 is highest"), so pinning "1 (highest)" narrated as
+    // "pinned to 0" — the feed contradicted both the form the operator typed into and the board.
+    assert.equal(eventNarration({ type: 'card_reprioritized', data: { id: 'card-1', priority: 0 } }),
+      'Card card-1 priority pinned to 1')
+    assert.equal(eventNarration({ type: 'card_reprioritized',
+      data: { id: 'card-1', priority: 'x' } }), 'Card card-1 priority pinned to x')
     assert.equal(eventNarration({ type: 'future_event', data: {
       text: 'params.x was undefined at eval',
     } }), '{"text":"params.x was undefined at eval"}')

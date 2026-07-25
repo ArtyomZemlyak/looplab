@@ -224,10 +224,12 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   }
   // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
   // per-node detail payload has no `drifts` key, so filter the run state down to this node.
-  // # CODEX AGENT: spec_drift rows are attempt-stamped and survive node_reset, but this node-id-only
-  // filter assigns old-code alarms to the replacement attempt. Filter to n.attempt and label legacy
-  // history separately.
-  const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id)
+  // Attempt-scoped: drift rows ARE stamped with their generation (evaluate.py appends it) and
+  // `_on_node_reset` never prunes them, so a node-id-only filter lit the Trust tab's alarm on the
+  // REPLACEMENT attempt for a drift the old code caused. Legacy rows predate the stamp and have no
+  // generation, so they fall back to this attempt rather than disappearing.
+  const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id
+    && (Number.isInteger(d.generation) ? d.generation : (n.attempt ?? 0)) === (n.attempt ?? 0))
   // Sweep nodes get a Trials tab (right after Overview). `activeTab` guards against a stale tab
   // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
   const sweep = isSweep(n)

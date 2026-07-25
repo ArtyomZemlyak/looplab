@@ -108,6 +108,12 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     // Ramp 1.5s → ×2 → 30s cap; a live `state` frame proves the stream works and resets it.
     const MIN_BACKOFF = 1500, MAX_BACKOFF = 30000
     let backoff = MIN_BACKOFF
+    // Terminal probes ramp on their OWN counter: `terminal = true` bypasses the `backoff` ramp below,
+    // and a finished run's stream emits `done` immediately every time (runs.py yields SSE_DONE then
+    // breaks), so a fixed delay was permanent hot polling — each cycle re-authenticates and makes the
+    // server re-fold and serialize the whole state. Reset when a real `state` frame proves it reopened.
+    const MIN_TERMINAL_BACKOFF = 2500
+    let terminalBackoff = MIN_TERMINAL_BACKOFF
     const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
     function connect() {
       streamRef.current?.abort()
@@ -121,21 +127,19 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
           if (stopped || controller.signal.aborted) return
           if (event.lastEventId !== '') lastStreamEventId = event.lastEventId
           if (event.type === 'done') {
-            // # CODEX AGENT: a terminal stream immediately emits done again, so this fixed 2.5s
-            // reconnect becomes permanent hot polling; each cycle authenticates and makes the server
-            // fold/send full state. Back off terminal probes aggressively, pause while hidden, or poll
-            // a lightweight generation endpoint and reopen the stream only after it changes.
             // A terminal run can later be reopened. End this request and reconnect-poll just as the
             // former EventSource path did; seq/generation dedup keeps the idle refresh cheap.
             terminal = true
             controller.abort()
-            reconnect(2500)
+            reconnect(terminalBackoff)
+            terminalBackoff = Math.min(terminalBackoff * 2, MAX_BACKOFF)
             return
           }
           if (event.type !== 'state') return
           let p
           try { p = JSON.parse(event.data) } catch { return }
           backoff = MIN_BACKOFF
+          terminalBackoff = MIN_TERMINAL_BACKOFF   // a real state frame means the run reopened
           setConnected(true)
           // Re-render on a seq change OR an engine_running flip (a zombie's liveness changes with no
           // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.

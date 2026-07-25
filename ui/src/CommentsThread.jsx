@@ -476,7 +476,12 @@ export default function CommentsThread({
       <b>Read-only comments.</b> Comments are attributed to generic run actors; LoopLab does not identify individual people.
     </div>}
     {!immutable && !global && hasExactGeneration && Number.isSafeInteger(nodeGeneration)
-      && <CommentComposer runId={runId} nodeId={nodeId} nodeGeneration={nodeGeneration}
+      // KEYED so a node switch remounts it. Inspector swaps `nodeId` on this same element position,
+      // so without a key the composer's `retryIntent` survives into the new node — and `exactRetry`
+      // matches on draft TEXT alone, then replays the durable record.id. Node A's comment posted
+      // while the announcement named node B.
+      && <CommentComposer key={`${runId}:${nodeId}:${nodeGeneration}:${expectedGeneration}`}
+        runId={runId} nodeId={nodeId} nodeGeneration={nodeGeneration}
         expectedGeneration={expectedGeneration} onRefresh={feed.refresh} onAnnounce={setAnnouncement} />}
 
     <div className="comment-filter-bar" role="group" aria-label="Filter comments">
