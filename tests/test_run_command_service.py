@@ -117,6 +117,12 @@ def _terminal(client, record, timeout=1.0, run_id="demo"):
     return current
 
 
+# Wall-clock ceiling for "a background command worker got scheduled". The waits below poll every 5ms
+# and exit the instant the work appears, so this only bounds the FAILURE case — 1s was marginal under
+# a loaded full-suite run and flaked there while passing in isolation.
+_WORKER_START_TIMEOUT_S = 15.0
+
+
 def _types(rd):
     return [event.type for event in EventStore(rd / "events.jsonl").read_all()]
 
@@ -766,7 +772,7 @@ def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_pat
                             json={"type": "budget_extend", "data": {"add_nodes": 1},
                                   "expected_generation": _generation(client2, "other")})
     record = response.json()
-    deadline = time.time() + 1
+    deadline = time.time() + _WORKER_START_TIMEOUT_S
     while record.get("status") not in TERMINAL_STATUSES and time.time() < deadline:
         time.sleep(0.01)
         record = client2.get(f"/api/runs/other/commands/{record['id']}").json()
@@ -1481,7 +1487,7 @@ def test_reload_finalize_reattaches_existing_record_without_event_or_spawn_dupli
     driver.on_spawn = start_only
     client, srv = _client(tmp_path, driver, timeout=0.20)
     first = _post(client, "run_abort", {"reason": "finalized"}, key="browser-before-reload").json()
-    deadline = time.time() + 1
+    deadline = time.time() + _WORKER_START_TIMEOUT_S
     while not driver.calls and time.time() < deadline:
         time.sleep(0.005)
     assert driver.calls and srv.phase(srv.state(rd)) == PHASE_FINALIZING
@@ -1839,7 +1845,7 @@ def test_monitor_reensures_dead_preexisting_driver_and_heartbeats_long_pause(tmp
     pause = _post(client, "pause", key="long-pause").json()
     _wait_for_intent(rd, pause["id"])
     claim = rd / ".commands" / f".{pause['id']}.executing"
-    deadline = time.time() + 1
+    deadline = time.time() + _WORKER_START_TIMEOUT_S
     while not claim.exists() and time.time() < deadline:
         time.sleep(0.005)
     assert claim.exists()
