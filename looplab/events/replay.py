@@ -224,11 +224,17 @@ class _FoldCtx:
         self.run_base_seen = False
         self.event_index = -1
 
-# CODEX AGENT: `run_started` carries immutable run identity, direction, trust and selection authority,
-# but every duplicate currently overwrites the first start. A replay-spliced second row can reverse
-# champion ordering and command policy after nodes exist; accept only the first start or quarantine
-# conflicting duplicates before folding any of these fields.
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # FIRST START WINS. `run_started` is the one-time identity anchor and carries the run's immutable
+    # authority: `direction` (champion ordering for the whole run), `trust_gate`, `card_driven_selection`,
+    # `speculation_depth` and its gate receipts. Last-write-wins let a spliced/duplicated second row
+    # INVERT the objective or relax the trust gate after nodes already existed — silently rewriting how
+    # every prior result is ranked. This gate mirrors the producer exactly: the engine appends
+    # `run_started` only `if not state.run_id` (orchestrator.py:2307), so on any log it wrote this is a
+    # no-op. Keyed on `run_id` rather than "have I seen one" for the same reason: a row that never
+    # established identity is not an anchor and must not shadow the real start that follows it.
+    if st.run_id:
+        return
     # Read with defaults like every other fold handler (RunState already defaults these to ""): the
     # fold loop dispatches handlers with NO per-event try/except, so a bare d["run_id"] KeyError on a
     # malformed/hand-edited run_started would take down the WHOLE fold (every view/replay/resume of the
@@ -3254,11 +3260,26 @@ def _on_fork(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
           and _event_generation(d) is _MISSING):
         st.fork_requests.append(dict(d))  # legacy queued-before-create intent
 
-# CODEX AGENT: completion must advance only the current durable request whose identity/generation (or
-# explicit queue index) matches. Unconditional counting lets a duplicate/orphan `fork_done` consume a
-# later request; Card-build replay below already demonstrates the required head-validation pattern, and
-# inject completion has the same defect.
 def _on_fork_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Advance the fork queue cursor — but only for the request currently AT the head.
+
+    `forks_done` indexes `fork_requests`; every producer serves `fork_requests[forks_done]` and stamps
+    that head's `from_node_id` (orchestrator.py:2768/2827/2831). Counting unconditionally let a
+    duplicate or orphan receipt push the cursor PAST the queue, so a fork request appended afterwards
+    sat at an index the engine would never reach again — the operator's fork was silently never built.
+
+    Two binds, both no-ops on any log a sanctioned producer wrote:
+      * the cursor may never overrun the queue (this alone closes the duplicate case);
+      * a receipt naming a DIFFERENT parent than the head is not this head's receipt.
+    `generation` is deliberately NOT compared: the served branch stamps `current.attempt`, which for a
+    legacy unstamped request (`generation is None`) differs from the request record by design.
+    """
+    if st.forks_done >= len(st.fork_requests):
+        return                               # orphan/duplicate: nothing is at the head to complete
+    head = st.fork_requests[st.forks_done]
+    receipt_pid, head_pid = _coerce_node_id(d, "from_node_id"), _coerce_node_id(head, "from_node_id")
+    if receipt_pid is not None and head_pid is not None and receipt_pid != head_pid:
+        return                               # a receipt for some other fork cannot consume this head
     st.forks_done += 1   # one per processed fork request (gate for replay-safe fulfillment)
 
 
@@ -3340,10 +3361,14 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # old events predate D8 omission receipts. Preserve their replay shape (and unknown authority)
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
     st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
-    # CODEX AGENT: this counter advance is not bound to the current manual request. A duplicate or
-    # orphan completion can consume a future request; persist and compare request identity/generation
-    # instead of treating every `served_manual` row as one fungible acknowledgement.
-    if d.get("served_manual"):
+    # `research_served` indexes `research_requests`: the engine only sets `served_manual` while
+    # serving `research_requests[research_served]` (engine/research_cadence.py:60). Counting every
+    # such row unconditionally let a duplicate/orphan completion push the cursor PAST the queue, so a
+    # `deep_research` request appended afterwards sat at an index the manual trigger would never reach
+    # — the operator's "go think hard now" was silently dropped. Clamping to the queue is a no-op on
+    # any log a sanctioned producer wrote. There is no per-request identity to compare (the memo
+    # carries none), so the head clamp IS the bind here.
+    if d.get("served_manual") and st.research_served < len(st.research_requests):
         st.research_served += 1
 
 def _on_lessons_distilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

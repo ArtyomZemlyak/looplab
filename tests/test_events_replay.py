@@ -2296,3 +2296,98 @@ def test_malformed_run_concepts_replacement_poisons_the_base_receipt():
     assert receipt is not None and CONCEPT_INVALID_ID_REASON in receipt["reasons"], (
         "a malformed run_concepts replacement left the stale base certified as exact — the "
         "ConceptFrame would show taxonomy bytes the operator had already replaced, marked clean")
+
+
+def test_fork_receipt_binds_to_its_own_queue_head(tmp_path):
+    """A duplicate/orphan `fork_done` must not consume a LATER fork request.
+
+    `forks_done` indexes `fork_requests`: the engine serves `fork_requests[forks_done]` and stamps
+    that head's `from_node_id`. Counting every receipt unconditionally let a duplicate push the cursor
+    PAST the queue, so a fork appended afterwards sat at an index the engine would never reach again —
+    the operator's fork was silently never built, with no event recording the loss. Same defect class
+    as the inject queue above; the two gates are the engine's only operator-steering cursors.
+    """
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    s.append("fork", {"from_node_id": 0, "generation": 0})
+    s.append("fork_done", {"from_node_id": 0, "generation": 0})
+    s.append("fork_done", {"from_node_id": 0, "generation": 0})   # duplicate receipt, same request
+    s.append("fork", {"from_node_id": 0, "generation": 0})
+    st = fold(s.read_all())
+    assert len(st.fork_requests) == 2
+    assert st.forks_done == 1, (
+        "a duplicate fork receipt consumed the second request — the operator's fork is permanently "
+        "unserved with no event recording the loss")
+
+    # a receipt naming a DIFFERENT parent is not this head's receipt either
+    other = EventStore(tmp_path / "other.jsonl")
+    _seed(other)
+    other.append("node_created", {"node_id": 1, "parent_ids": [0], "operator": "improve",
+                                  "idea": {"operator": "improve", "params": {}}, "code": ""})
+    other.append("node_evaluated", {"node_id": 1, "metric": 0.4, "violations": []})
+    other.append("fork", {"from_node_id": 1, "generation": 0})
+    other.append("fork_done", {"from_node_id": 0, "generation": 0})
+    st2 = fold(other.read_all())
+    assert st2.forks_done == 0, "a fork receipt for another parent consumed an unrelated queue head"
+
+
+def test_manual_research_receipt_cannot_overrun_its_queue(tmp_path):
+    """A duplicate/orphan `served_manual` completion must not consume a LATER research request.
+
+    `research_served` indexes `research_requests`; the engine sets `served_manual` only while serving
+    `research_requests[research_served]`. Counting every such row pushed the cursor past the queue, so
+    a `deep_research` appended afterwards sat at an index the manual trigger never reaches — the
+    operator's "go think hard now" was silently dropped with no event recording it.
+    """
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    s.append("deep_research", {"note": "look at regularization"})
+    s.append("research_completed", {"memo": {}, "at_node": 1, "trigger": "manual",
+                                    "served_manual": True})
+    s.append("research_completed", {"memo": {}, "at_node": 1, "trigger": "manual",
+                                    "served_manual": True})     # duplicate receipt
+    s.append("deep_research", {"note": "now look at the data split"})
+    st = fold(s.read_all())
+    assert len(st.research_requests) == 2
+    assert st.research_served == 1, (
+        "a duplicate research receipt consumed the operator's second request — it is permanently "
+        "unserved with no event recording the loss")
+
+    # a non-manual (cadence/strategist) completion never touched the manual gate; keep it that way
+    auto = EventStore(tmp_path / "auto.jsonl")
+    _seed(auto)
+    auto.append("deep_research", {"note": "manual"})
+    auto.append("research_completed", {"memo": {}, "at_node": 1, "trigger": "cadence"})
+    assert fold(auto.read_all()).research_served == 0
+
+
+def test_a_second_run_started_cannot_rewrite_the_run_authority(tmp_path):
+    """FIRST START WINS: a spliced duplicate must not invert the objective or relax the trust gate.
+
+    `run_started` is the one-time identity anchor and carries the run's immutable authority —
+    `direction` (champion ordering for the WHOLE run), `trust_gate`, `card_driven_selection`. Under
+    last-write-wins a second row rewrote all of it after nodes already existed, so every prior result
+    was silently re-ranked against a different objective and the gate that admitted them no longer
+    matched the gate on record. The engine appends `run_started` only `if not state.run_id`, so this
+    gate is a no-op on every log it wrote.
+    """
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)                                          # run_started(direction=min) + an evaluated node
+    s.append("node_created", {"node_id": 1, "parent_ids": [0], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 1, "metric": 9.0, "violations": []})
+    before = fold(s.read_all()).best().id
+    s.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "max",
+                             "trust_gate": "audit"})
+    st = fold(s.read_all())
+    assert st.direction == "min", "a spliced run_started inverted the run's objective"
+    assert st.best().id == before, "a spliced run_started re-ranked already-evaluated nodes"
+
+    # keyed on run_id, not on "have I seen one": a row that never established identity is not an
+    # anchor and must not shadow the real start that follows it (the engine's own gate condition).
+    placeholder = EventStore(tmp_path / "placeholder.jsonl")
+    placeholder.append("run_started", {"task_id": "toy"})
+    placeholder.append("run_started", {"run_id": "real", "task_id": "toy", "goal": "g",
+                                       "direction": "max"})
+    st2 = fold(placeholder.read_all())
+    assert st2.run_id == "real" and st2.direction == "max"
