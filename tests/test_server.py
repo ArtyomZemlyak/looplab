@@ -3115,3 +3115,52 @@ def test_node_logs_rejects_manifest_traversal_and_bounds_aggregate_tail(tmp_path
     total = sum(len(value.encode()) for value in (
         bounded["eval"], bounded["setup"], bounded["run_setup"], *bounded["stages"].values()))
     assert total <= 40
+
+
+def test_agents_md_refuses_a_symlink_and_bounds_the_body(tmp_path):
+    # `run_dir` confines the DIRECTORY, but `exists()`/`read_text()` FOLLOW symlinks — so an AGENTS.md
+    # symlink (an imported run bundle, or the sandbox writing into the run dir) turned this route into
+    # an arbitrary host-file read. The sibling /log and /log-page routes already refuse a symlinked
+    # events.jsonl for exactly this reason; agents_md must match. The body is bounded too: an
+    # attacker-sized file would otherwise be read whole into the response.
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    secret = tmp_path / "outside_secret.txt"
+    secret.write_text("TOP-SECRET-HOST-FILE", encoding="utf-8")
+    if (rd / "AGENTS.md").exists():
+        (rd / "AGENTS.md").unlink()
+    (rd / "AGENTS.md").symlink_to(secret)
+    client = TestClient(make_app(tmp_path))
+    body = client.get("/api/runs/demo/agents_md").text
+    assert "TOP-SECRET-HOST-FILE" not in body
+    assert body == ""
+
+    # a real (non-symlink) AGENTS.md still serves normally
+    (rd / "AGENTS.md").unlink()
+    (rd / "AGENTS.md").write_text("# real agents md", encoding="utf-8")
+    assert "# real agents md" in client.get("/api/runs/demo/agents_md").text
+
+
+def test_author_routes_are_bounded_and_name_restricted(tmp_path, monkeypatch):
+    # `knowledge_dir` is AGENT-writable (the engine's own `remember` tool), so listing must not read an
+    # unbounded number of unbounded files into one response, and a PUT must not be able to drop a
+    # non-markdown file (`.env`, `x.py`) into a directory that is hot-reloaded into agent context —
+    # `list_author` globs only `*.md`, so such a file would be write-only-invisible.
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir()
+    monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(kdir))
+    client = TestClient(make_app(tmp_path))
+
+    # name allow-list (asserted first so it stands on its own behaviour, not on a constant import)
+    assert client.put("/api/knowledge/.env", content=b"SECRET=1").status_code == 400
+    assert client.put("/api/knowledge/evil.py", content=b"import os").status_code == 400
+    assert not (kdir / ".env").exists() and not (kdir / "evil.py").exists()
+    assert client.put("/api/knowledge/ok.md", content=b"# fine").status_code == 200
+
+    # per-file byte bound, with an explicit truncation receipt rather than a silent whole-file read
+    from looplab.serve.routers.misc import _AUTHOR_MAX_BYTES
+    (kdir / "big.md").write_text("x" * (_AUTHOR_MAX_BYTES + 5000), encoding="utf-8")
+    listed = client.get("/api/knowledge").json()
+    entry = next(f for f in listed["files"] if f["name"] == "big.md")
+    assert len(entry["text"].encode()) <= _AUTHOR_MAX_BYTES
+    assert entry["truncated"] is True

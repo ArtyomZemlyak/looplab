@@ -33,6 +33,12 @@ from looplab.trust.redact import is_secret_key_name, redact_persisted_text
 _MEMORY_TIER_LIMIT = 200
 _MEMORY_SOURCE_BYTES = 2 * 1024 * 1024
 _MEMORY_SOURCE_ROWS = 1000
+# Bounds for the files-as-truth authoring routes. `knowledge_dir` is agent-writable (the engine's own
+# `remember` tool), so `GET /api/{kind}` needs a hard ceiling or the loop can grow its own OOM; the
+# name pattern keeps `PUT /api/{kind}/{name}` to the authored-markdown surface `list_author` can show.
+_AUTHOR_MAX_FILES = 500
+_AUTHOR_MAX_BYTES = 256 * 1024
+_AUTHOR_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.md$")
 _ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
 _SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_ENV))})$"
 
@@ -665,9 +671,22 @@ def build_router(srv) -> APIRouter:
         d = _author_dir(kind)
         if d is None or not d.exists():
             return {"dir": (str(d) if d else None), "files": []}
-        files = [{"name": p.name, "text": p.read_text(encoding="utf-8", errors="replace")}
-                 for p in sorted(d.glob("*.md"))]
-        return {"dir": str(d), "files": files}
+        # Bounded: `knowledge_dir` is AGENT-WRITABLE (KnowledgeWriteTools.remember), so an unbounded
+        # "read every *.md whole into one response" is a self-inflicted OOM the engine itself can grow.
+        # Cap the file count and each file's bytes, and disclose truncation instead of silently lying
+        # about completeness. A symlinked entry is skipped for the same reason /log refuses one.
+        files = []
+        names = sorted(d.glob("*.md"))
+        for p in names[:_AUTHOR_MAX_FILES]:
+            if p.is_symlink() or not p.is_file():
+                continue
+            with open(p, "rb") as fh:
+                head = fh.read(_AUTHOR_MAX_BYTES + 1)
+            text = head[:_AUTHOR_MAX_BYTES].decode("utf-8", errors="replace")
+            files.append({"name": p.name, "text": text,
+                          "truncated": len(head) > _AUTHOR_MAX_BYTES})
+        return {"dir": str(d), "files": files,
+                "truncated_files": max(0, len(names) - _AUTHOR_MAX_FILES)}
 
     @router.put("/api/{kind}/{name}")
     async def write_author(kind: str, name: str, request: Request):
@@ -676,6 +695,12 @@ def build_router(srv) -> APIRouter:
         d = _author_dir(kind)
         if d is None:
             raise HTTPException(400, f"no {kind} dir configured (set LOOPLAB_{kind.upper()}_DIR)")
+        # Name allow-list BEFORE mkdir: the traversal guard below only confines the DIRECTORY, so a
+        # bare `.env` / `x.py` would land in prompt_dir/skills_dir/knowledge_dir — write-only-invisible,
+        # since `list_author` globs `*.md` and would never show it again. These dirs are hot-reloaded
+        # into agent context, so only the authored markdown surface belongs here.
+        if not _AUTHOR_NAME_RE.match(name):
+            raise HTTPException(400, "bad name (expected a plain <file>.md)")
         d.mkdir(parents=True, exist_ok=True)
         target = (d / name).resolve()
         if d.resolve() not in target.parents:    # path-traversal guard

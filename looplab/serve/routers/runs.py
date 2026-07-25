@@ -2525,6 +2525,20 @@ def build_router(srv) -> APIRouter:
     def agents_md(run_id: str):
         rd = _run_dir(run_id)
         f = rd / "AGENTS.md"
-        return PlainTextResponse(f.read_text(encoding="utf-8") if f.exists() else "")
+        # Same defence-in-depth the /log and /log-page routes above apply to events.jsonl: `run_dir`
+        # confines the DIRECTORY, but `exists()`/`read_text()` follow symlinks, so a crafted AGENTS.md
+        # symlink (an imported run bundle, or the sandbox writing into the run dir) would otherwise turn
+        # this route into an arbitrary host-file read. Refuse a symlink and anything resolving outside
+        # the run dir, and bound the body — an unbounded read of an attacker-sized file is an OOM.
+        if f.is_symlink() or not f.exists():
+            return PlainTextResponse("")
+        if rd.resolve() not in f.resolve().parents:
+            return PlainTextResponse("")
+        with open(f, "rb") as fh:
+            head = fh.read(_ART_MAX_BYTES + 1)
+        body = head[:_ART_MAX_BYTES].decode("utf-8", errors="replace")
+        if len(head) > _ART_MAX_BYTES:
+            body += f"\n\n[truncated at {_ART_MAX_BYTES} bytes]"
+        return PlainTextResponse(body)
 
     return router
