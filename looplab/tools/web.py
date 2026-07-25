@@ -34,6 +34,31 @@ def _ssrf_blocked(url: str) -> str | None:
         return None
     return None
 
+def _peer_blocked(response) -> str | None:
+    """Verify the address we ACTUALLY connected to, after the socket is open.
+
+    `_ssrf_blocked` resolves the host itself and the transport then resolves again, so the two can
+    disagree: a short-TTL DNS rebind returns a public address to the preflight and loopback /
+    RFC1918 / 169.254.169.254 to the connect — the classic SSRF TOCTOU, which a preflight
+    `getaddrinfo` can never close on its own. Checking `getpeername()` closes it for the case that
+    matters: the response body is refused before a single byte reaches the caller (and therefore the
+    model), on the initial request and on every redirect hop the opener follows.
+    """
+    try:
+        sock = response.fp.raw._sock            # CPython http.client stream -> the live socket
+        peer = sock.getpeername()[0]
+    except (AttributeError, OSError, IndexError, TypeError):
+        return None                             # unknown transport shape -> keep prior behaviour
+    try:
+        ip = ipaddress.ip_address(peer.split("%", 1)[0])
+    except ValueError:
+        return None
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        return f"refusing a connection that landed on internal address {ip}"
+    return None
+
+
 class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-run the SSRF check on every redirect target: urlopen follows redirects without re-checking,
     so a public URL could 302 into 169.254.169.254 / an internal host and exfiltrate it otherwise."""
@@ -117,11 +142,14 @@ class WebTools:
 
     def _get(self, url: str, data: bytes | None = None) -> str:
         req = urllib.request.Request(url, data=data, headers={"User-Agent": _UA})
-        # CODEX AGENT: the allow-check and socket connect perform independent DNS resolutions, so
-        # DNS rebinding can replace a validated public address with loopback/RFC1918/metadata here.
-        # Pin the validated address in the transport (preserving Host/SNI), or verify the connected
-        # peer for every redirect hop; preflight getaddrinfo is not an SSRF boundary.
         with _SSRF_OPENER.open(req, timeout=self.timeout) as r:   # re-checks SSRF on each redirect hop
+            # The preflight `_ssrf_blocked` and the transport resolve DNS INDEPENDENTLY, so a short-TTL
+            # rebind can hand the check a public address and the connect a loopback/RFC1918/metadata one.
+            # Verify the peer we actually reached before reading: no internal body ever reaches the
+            # caller (or the model). This runs on the final hop, after the opener followed any redirects.
+            landed = _peer_blocked(r)
+            if landed:
+                return f"(blocked: {landed})"
             # Bounded read (see _MAX_DOWNLOAD_BYTES): `read(n)` returns AT MOST n bytes, so a multi-GB /
             # endless response can't exhaust host memory; the unread tail is dropped when the stream closes.
             return r.read(_MAX_DOWNLOAD_BYTES).decode("utf-8", errors="replace")

@@ -67,6 +67,10 @@ from pydantic import BaseModel  # noqa: E402
 # event-sourced comment path is bounded the same way); an over-cap append is refused with 413 and the
 # operator compacts (chat-compact) or resets (which archives chat.jsonl independently).
 _CHAT_LOG_MAX_BYTES = 32 * 1024 * 1024   # 32 MiB
+# Extra headroom reserved for compaction `summary` turns ONLY, so the documented recovery path
+# (chat-compact -> append the recap) still works once the cap is reached. Bounded, so the escape
+# hatch cannot become the unbounded growth it guards against.
+_CHAT_SUMMARY_GRACE_BYTES = 1024 * 1024   # 1 MiB
 
 
 _DOMAIN_HTTP_FAILURES = {
@@ -508,10 +512,18 @@ def build_router(srv) -> APIRouter:
         turn = _sanitize_chat_turn(turn)
         path = rd / "chat.jsonl"
         # Bound the durable sidecar so unbounded turn appends can't exhaust disk / slow every re-read.
+        # The COMPACTION SUMMARY is exempt (within a small overshoot): `chat-compact` is read-only — it
+        # returns a recap the client appends as a `summary` turn — so refusing that one append made the
+        # 413's own advertised remedy impossible and left the transcript permanently wedged, with only a
+        # destructive run reset as an escape. The exemption is bounded by a fixed grace so it cannot
+        # itself become the unbounded-growth path it exists to stop.
+        _is_summary = str(turn.get("role") or turn.get("kind") or "").lower() == "summary"
+        _ceiling = _CHAT_LOG_MAX_BYTES + (_CHAT_SUMMARY_GRACE_BYTES if _is_summary else 0)
         try:
-            if path.stat().st_size >= _CHAT_LOG_MAX_BYTES:
-                raise HTTPException(413, "chat log is full for this run — compact it (chat-compact) "
-                                         "or reset the run to start a fresh transcript")
+            if path.stat().st_size >= _ceiling:
+                raise HTTPException(413, "chat log is full for this run — compact it (chat-compact, "
+                                         "then append the returned recap as a `summary` turn) or reset "
+                                         "the run to start a fresh transcript")
         except OSError:
             pass                                   # no file yet (or unstat-able) -> nothing to bound
         with srv.commands.run_activity(rd, "chat_append", generation=generation):
