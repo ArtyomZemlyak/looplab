@@ -248,16 +248,10 @@ Give the agentic Researcher extra context and tools:
 | `skills_dir` | A directory whose recursive `*/SKILL.md` packages and root-level `*.md` skills the Researcher can list and load. The shipped flat example works with `-s skills_dir=examples/skills` |
 | `prompt_dir` | Editable, hot-reloaded role-prompt `.md` files (override the built-in prompts) |
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |
-| `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root) |
+| `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root). Fails **closed**: with no authoritative task id — an unbound provider, or a legacy log whose `run_started` carried none — it lists and serves nothing, rather than widening to every task |
 | `all_runs_tools` | (on) Read-only tools over every run **under this run-root**, across ALL tasks — read any experiment's code + result to reuse it. Bound to the configured run-root, not the machine, so absence here is not machine-wide absence |
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
-
-<!-- CODEX AGENT: the same-task promise above is currently conditional rather than fail-closed.
-`SiblingRunTools._sibling_ids`, `_read`, and `_code` enforce equality only while the bound state has a
-truthy task_id; a legacy/corrupt/early state with an empty identity lists and directly reads every task
-under the run root. Treat missing identity as unknown scope and expose no siblings until an authoritative
-task receipt exists; `all_runs_tools` is the separate explicit capability for deliberate widening. -->
 
 ### Prompt override keys (`prompt_dir`)
 
