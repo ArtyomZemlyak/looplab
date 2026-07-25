@@ -553,11 +553,12 @@ class MachineRunsTools:
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_runs",
-                # CODEX AGENT: this provider scans only its configured run_root, not every run on the
-                # machine. The stronger wording makes absence look portfolio-wide and can cause repeated
-                # experiments; either discover/configure all roots or name this capability "all runs
-                # under this run root" consistently in schema and docs.
-                "List EVERY LoopLab run on this machine with its goal, phase, best metric, node count "
+                # Scoped to THIS run root, not the machine: `_run_ids()` iterates `self.run_root`
+                # only. The old "EVERY run on this machine" wording made an absent result read as
+                # portfolio-wide evidence that nobody had tried something, which is exactly the
+                # inference that causes a repeated experiment. Factual correction of a described
+                # scope, not a prompt rewrite.
+                "List every LoopLab run under this run root with its goal, phase, best metric, node count "
                 "and whether its engine is LIVE right now. Use to reference an existing run, see what "
                 "is running, or pick one to inspect/steer.",
                 {"only_live": {"type": "boolean",

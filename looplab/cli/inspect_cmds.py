@@ -977,14 +977,19 @@ def cross_run_index_cmd(
     )
     if incremental:
         cache = run_root / ".cross_run_index.json"
-        # CODEX AGENT: incremental update is an interprocess read-build-replace transaction, but no
-        # lock spans load through save. Concurrent indexers can let an older scan overwrite the newer
-        # cache (atomic replace prevents tearing, not lost updates), causing stale receipts and repeated
-        # folds. Hold a cache-specific lock or save with a source-generation CAS and retry.
-        res = build_index_incremental(run_root, prior=load_index(cache))
-        idx = res["index"]
-        if idx:
-            save_index(cache, res)
+        # load -> build -> save is one interprocess read-modify-write. `save_index` writes atomically,
+        # which prevents a TORN file but not a LOST UPDATE: two concurrent indexers both read the old
+        # cache and the slower one's replace discards the faster one's work, so the next run re-folds
+        # what was already indexed. The cache is explicitly never a source of truth, so the cost is
+        # wasted folds and stale receipts rather than wrong answers — a plain interprocess lock around
+        # the whole transaction is the proportionate fix (it degrades to a no-op where locking is
+        # unavailable, leaving today's behavior).
+        from looplab.events.eventstore import _interprocess_lock
+        with _interprocess_lock(run_root / ".cross_run_index.lock"):
+            res = build_index_incremental(run_root, prior=load_index(cache))
+            idx = res["index"]
+            if idx:
+                save_index(cache, res)
         rc = res["receipts"]
         if not as_json:
             skipped = f", {len(rc['skipped'])} skipped" if rc["skipped"] else ""

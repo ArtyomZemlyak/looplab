@@ -11,6 +11,7 @@ import os
 import re
 from pathlib import Path
 
+from looplab.core.redact import redact_persisted_text
 from looplab.core import _pathsafe
 from looplab.events.eventstore import read_jsonl_lenient
 from looplab.tools._base import fn_spec
@@ -252,16 +253,19 @@ class KnowledgeTools:
                     continue
                 goal = c.get("goal") if isinstance(c.get("goal"), str) else ""
                 rationale = c.get("rationale") if isinstance(c.get("rationale"), str) else ""
-                # CODEX AGENT: `params` are untrusted durable bytes, but stringifying them before any
-                # recursive size/redaction fence can send credentials and prompt injection to the
-                # embedding/abstractor provider and later return them to another run. Sanitize structured
-                # keys/values and preserve an explicit untrusted-data boundary before indexing.
-                # CODEX AGENT: retrieval also drops objective direction and metric identity. Identical
-                # goals with opposite min/max objectives or incomparable metrics become equal semantic
-                # hits; bind the provider to the live task and require a compatible direction+metric
-                # contract before model-facing reuse.
+                # `valid_case_record` requires `params` to be a dict but places no bound on its size
+                # or content, and this text is sent to the embedding/abstractor PROVIDER and returned
+                # verbatim by `kb_search` — to a different run than the one that wrote it. Stringifying
+                # it raw therefore shipped whatever a past solution happened to put in its params
+                # (credentials, injected instructions, unbounded blobs) across that boundary. Route it
+                # through the same always-on persisted-boundary sanitizer the memo/trace writers use.
+                # KNOWN GAP (deeper, tracked separately): retrieval still drops objective DIRECTION and
+                # metric identity, so identical goals with opposite min/max objectives rank as equal
+                # semantic hits. Closing that needs the provider bound to the live run, which this
+                # class has no `bind_state` for yet.
+                params = redact_persisted_text(c.get("params"), max_chars=2000, single_line=True)
                 text = (f"PAST CASE — task {c.get('task_id')}: {goal}\n"
-                        f"best params={c.get('params')} metric={c.get('metric')}\n"
+                        f"best params={params} metric={c.get('metric')}\n"
                         f"{rationale}")
                 recs.append((f"case:{i}", goal + " " + text,
                              {"path": f"case:{c.get('task_id')}", "text": text}))

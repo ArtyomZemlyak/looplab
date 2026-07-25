@@ -205,3 +205,37 @@ def test_tool_loop_survives_malformed_json_args():
     r = ToolUsingResearcher(client=_Client(), tools=_Tools(), bounds=None)
     idea = r.propose(RunState(goal="g", direction="max"), None)
     assert isinstance(idea, Idea) and idea.operator                # fell back, no crash
+
+
+def test_case_params_are_redacted_before_indexing_and_search(tmp_path):
+    """Past-case `params` cross a provider boundary AND a run boundary — sanitize them.
+
+    `valid_case_record` requires `params` to be a dict but bounds neither its size nor its content,
+    and this text is embedded (sent to the embedding/abstractor PROVIDER) and returned verbatim by
+    `kb_search` to a DIFFERENT run than the one that wrote it. Stringifying it raw shipped whatever a
+    past solution put in its params — credentials, injected instructions, unbounded blobs — across
+    both boundaries. It now goes through the same always-on persisted-boundary sanitizer the memo and
+    trace writers use.
+    """
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({
+        "task_id": "toy", "goal": "minimize loss", "direction": "min", "metric": 0.5,
+        "rationale": "worked well",
+        "params": {"lr": 0.01, "api_key": "sk-live-SUPERSECRET"},
+    }) + "\n", encoding="utf-8")
+
+    seen = []
+
+    def _embed(text):
+        seen.append(text)
+        return [0.0, 0.0]
+
+    kt = KnowledgeTools(str(tmp_path), cases_path=str(cases), embed=_embed)
+    recs = kt._records()
+    case_text = next(text for _rid, _src, pl in recs if (text := pl["text"]).startswith("PAST CASE"))
+    assert "SUPERSECRET" not in case_text, "a past case's params reached the index in the clear"
+    assert "lr" in case_text, "redaction must not destroy the useful params content"
+
+    kt._build_index()
+    assert not any("SUPERSECRET" in t for t in seen), \
+        "a past case's params were sent to the embedding provider in the clear"

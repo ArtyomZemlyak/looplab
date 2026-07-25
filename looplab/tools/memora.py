@@ -162,6 +162,14 @@ class LLMAbstractor:
         return Abstraction(primary=primary or " ".join(anchors), anchors=anchors)
 
 
+# The abstraction cache is loaded whole into RAM and re-serialized in full on every miss, so an
+# unbounded map costs unbounded memory AND quadratic cumulative I/O over a long-lived shared memory
+# corpus. Evicting oldest-first bounds both; an evicted key simply re-abstracts, which this class
+# already treats as an ordinary perf miss. (A compacted on-disk KV / append-log with concurrent-writer
+# coordination is the real fix and stays a separate, deeper change — this only stops the growth.)
+_MAX_ABSTRACTION_CACHE = 5000
+
+
 class CachedAbstractor:
     """Memoize an abstractor by content hash so a re-built index (roles are reconstructed often)
     doesn't re-abstract unchanged notes/cases — the fix that makes LLM abstraction affordable as a
@@ -181,6 +189,7 @@ class CachedAbstractor:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
                     self._cache = raw
+                    self._evict()
             except (OSError, ValueError, json.JSONDecodeError):
                 self._cache = {}
 
@@ -213,8 +222,14 @@ class CachedAbstractor:
             return Abstraction(primary or " ".join(anchors), anchors)
         ab = self.inner(text)
         self._cache[key] = {"primary": ab.primary, "anchors": list(ab.anchors)}
+        self._evict()
         self._persist()
         return ab
+
+    def _evict(self) -> None:
+        """Bound the cache oldest-first (dicts are insertion-ordered) — see _MAX_ABSTRACTION_CACHE."""
+        while len(self._cache) > _MAX_ABSTRACTION_CACHE:
+            self._cache.pop(next(iter(self._cache)))
 
     def _persist(self) -> None:
         if not self.path:
@@ -222,10 +237,6 @@ class CachedAbstractor:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             from looplab.core.atomicio import atomic_write_text
-            # CODEX AGENT: this cache is unbounded and every miss serializes/replaces the complete
-            # map. A shared long-lived memory corpus therefore consumes unbounded RAM and quadratic
-            # cumulative I/O; use a bounded/compacted on-disk KV or append-log index, enforce limits,
-            # and coordinate concurrent writers.
             atomic_write_text(self.path, json.dumps(self._cache))
         except Exception:  # noqa: BLE001 — a cache we can't persist is a perf miss, not an error
             pass

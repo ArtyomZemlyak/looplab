@@ -235,3 +235,25 @@ def test_case_library_retain_if_improved_still_works_harmonic():
     assert lib.retain_if_improved("c1", "time series forecast arima", {}, 0.2, "min")
     hit = lib.store.get("cases", "c1")
     assert hit.payload["metric"] == 0.2 and hit.payload["anchors"]  # harmonic keys present
+
+
+def test_abstraction_cache_is_bounded(tmp_path):
+    """The abstraction cache is loaded whole into RAM and re-serialized IN FULL on every miss.
+
+    Unbounded, that is unbounded memory plus quadratic cumulative I/O over a long-lived shared memory
+    corpus — each new note rewrites every entry that came before it. Evicting oldest-first bounds
+    both; an evicted key simply re-abstracts, which this class already treats as an ordinary perf
+    miss. (A compacted on-disk KV is the real fix and stays a separate change; this stops the growth.)
+    """
+    from looplab.tools.memora import _MAX_ABSTRACTION_CACHE, Abstraction, CachedAbstractor
+
+    c = CachedAbstractor(lambda t: Abstraction(t, []), path=str(tmp_path / "abs.json"))
+    for i in range(_MAX_ABSTRACTION_CACHE + 25):
+        c(f"note {i}")
+    assert len(c._cache) == _MAX_ABSTRACTION_CACHE
+    assert c._key(f"note {_MAX_ABSTRACTION_CACHE + 24}") in c._cache, "the newest entry was evicted"
+    assert c._key("note 0") not in c._cache, "eviction must drop the OLDEST entries first"
+
+    # an over-large cache persisted by an older build is trimmed on load, not carried forward
+    reloaded = CachedAbstractor(lambda t: Abstraction(t, []), path=str(tmp_path / "abs.json"))
+    assert len(reloaded._cache) <= _MAX_ABSTRACTION_CACHE
