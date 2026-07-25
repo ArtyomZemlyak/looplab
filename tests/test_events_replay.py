@@ -2265,3 +2265,34 @@ def test_concept_edge_confidence_ranking_is_order_tolerant_over_non_finites(bad)
     assert forward.concept_edges[key]["confidence"] == 0.5, (
         f"a non-finite confidence ({bad!r}) outranked a legitimate finite edge; ConceptFrame drops "
         "the same edge, so replay and the UI read could never converge")
+
+
+def test_malformed_run_concepts_replacement_poisons_the_base_receipt():
+    """A `run_concepts` replacement the fold cannot apply must not leave a CLEAN receipt behind.
+
+    `run_concepts` is last-write-wins over the run's BASE concept set. A non-list `concepts` was
+    dropped silently, so the PREVIOUS base stayed standing behind a clean integrity receipt and
+    `ConceptFrame` certified stale taxonomy bytes as the current exact base — the operator saw a base
+    they had already replaced, marked exact. The membership still cannot change (there is nothing
+    valid to replace it with), but the receipt must degrade.
+
+    Unreachable via the sanctioned writers (serve/run_commands.py rejects a non-list with 400, the
+    engine always appends a list) — this is the forged/hand-edited-log path the integrity receipts
+    exist for, so the events are built directly rather than round-tripped through a store.
+    """
+    from looplab.core.concepts import CONCEPT_INVALID_ID_REASON
+
+    head = Event(seq=0, ts=0.0, type="run_started",
+                 data={"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+    good = Event(seq=1, ts=1.0, type="run_concepts", data={"concepts": ["method/svm"]})
+    bad = Event(seq=2, ts=2.0, type="run_concepts", data={"concepts": "method/svm"})
+
+    clean = fold([head, good])
+    poisoned = fold([head, good, bad])
+    assert poisoned.run_base_concepts == clean.run_base_concepts, \
+        "a malformed replacement must not silently mutate the base membership"
+    assert clean.run_base_concept_receipt is None, "baseline receipt should be clean"
+    receipt = poisoned.run_base_concept_receipt
+    assert receipt is not None and CONCEPT_INVALID_ID_REASON in receipt["reasons"], (
+        "a malformed run_concepts replacement left the stale base certified as exact — the "
+        "ConceptFrame would show taxonomy bytes the operator had already replaced, marked clean")

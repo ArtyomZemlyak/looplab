@@ -1608,10 +1608,9 @@ def _clean_llm_totals(d: dict | None) -> dict:
 
 def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """PART V (B): set the RUN's BASE concept set (last-write-wins). Nodes may then author only deltas vs
-    this base; the fold post-pass materializes their node_concepts. Additive; malformed input -> ignored."""
-    # CODEX AGENT: a malformed later replacement is silently ignored while the previous base and
-    # clean integrity receipt remain authoritative. Record the invalid replacement as unavailable/
-    # incomplete; otherwise the ConceptFrame certifies stale taxonomy bytes as current.
+    this base; the fold post-pass materializes their node_concepts. Additive; a malformed replacement
+    keeps the previous membership but POISONS the integrity receipt (it is not silently ignored — that
+    would certify stale taxonomy bytes as the current exact base)."""
     concepts = d.get("concepts")
     if isinstance(concepts, list):
         base, overflow, invalid = bounded_raw_concept_values(concepts)
@@ -1621,6 +1620,17 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         ctx.run_base_capped = overflow
         ctx.run_base_invalid = invalid
         ctx.run_base_seen = True
+    elif concepts is not None:
+        # A non-list `concepts` is a REPLACEMENT the operator/agent intended and the fold cannot apply.
+        # Dropping it silently left the PREVIOUS base standing behind this event's clean receipt, so the
+        # ConceptFrame certified stale taxonomy bytes as the current exact base. Keep the old membership
+        # (there is nothing valid to replace it with) but poison the receipt, which is what
+        # CONCEPT_INVALID_ID_REASON already means downstream: "this base is not exact, don't trust it".
+        # `run_base_seen` is deliberately NOT set — a malformed row is not an inheritance source.
+        # Unreachable via the sanctioned writers (serve/run_commands.py:761 rejects a non-list with 400
+        # and engine/strategy.py:751 always appends a list); this is the forged/hand-edited-log path the
+        # rest of these integrity receipts exist for.
+        ctx.run_base_invalid = True
 
 
 def _materialize_concept_deltas(
