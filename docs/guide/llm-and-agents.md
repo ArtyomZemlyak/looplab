@@ -215,11 +215,12 @@ The engine computes rich, expensive signals — and each is only useful if it re
 human) that can act on it. The recurring failure mode is *"the signal is folded into the event log
 but nothing injects it into a prompt"* — the same class the hint registry
 (`roles.RESEARCHER_HINT_ATTRS`) already turned into a test-enforced invariant. LoopLab now routes
-**seven** such signals, each through exactly one documented injection site:
+**eight** such signals, each through exactly one documented injection site:
 
 | Signal | Folded into | Reaches | How |
 |---|---|---|---|
 | **Trust flags** (reward-hack / leakage) | `RunState.reward_hacks` | Researcher | a trust-reflection line in the proposal hint (`digest.trust_reflection`) — "a recent solution was flagged for X; avoid it if unintended" |
+| **Watchdog signals** (train-monitor / ASHA rank) | *not folded* — DIAGNOSTIC events read from `store.read_all()` | Researcher | a watchdog-reflection line in the proposal hint (`digest.watchdog_reflection`) |
 | **Crash-triage verdict** | `Node.triage_rationale` | Researcher | the failure line in the experiments digest + the failure-reflection hint carry the LLM's *why*, not just the error kind |
 | **Foresight calibration** | `RunState.foresight_selected` | the world model | a track-record line in `_memory_brief` — "of your last N predict-before-execute picks, K beat the parent" (closes the predict→outcome loop) |
 | **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand |
@@ -231,8 +232,9 @@ but nothing injects it into a prompt"* — the same class the hint registry
 → injection site → consumer), and `tests/test_signal_delivery.py` asserts each injection symbol
 resolves *and* that a synthetic input's content actually reaches the rendered output. A signal added
 to the registry without a delivery probe fails the suite — so *"the signal silently stopped being
-delivered"* is a red test, not the next review's finding. Two of the routes (trust flags, operator
-directives) are **push** (the engine injects them), one (deep-research memo) is **pull** (a tool the
+delivered"* is a red test, not the next review's finding. Three of the routes (trust flags, watchdog
+signals, operator directives) are **push** (the engine injects them), one (deep-research memo) is
+**pull** (a tool the
 agent may call for depth), and the rest ride the always-on folded-state briefs. The full rationale is
 in `docs/14-agent-framework-mega-review-2026-07-10.md` §1.
 
@@ -247,7 +249,7 @@ Give the agentic Researcher extra context and tools:
 | `prompt_dir` | Editable, hot-reloaded role-prompt `.md` files (override the built-in prompts) |
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |
 | `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root) |
-| `all_runs_tools` | (on) Read-only tools over EVERY run on the machine, across ALL tasks — read any experiment's code + result to reuse it |
+| `all_runs_tools` | (on) Read-only tools over every run **under this run-root**, across ALL tasks — read any experiment's code + result to reuse it. Bound to the configured run-root, not the machine, so absence here is not machine-wide absence |
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
 

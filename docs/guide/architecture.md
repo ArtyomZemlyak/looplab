@@ -55,14 +55,13 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
     applicable records. A model-authored meta-note is an explanatory hypothesis over recorded
     observations, not causal proof.
 
-    Parallel work has two independent canonical ceilings: `eval_parallel` admits experiments, while
-    `llm_parallel` governs provider calls and build fan-out. A run-local broker further divides the
-    LLM total among `build`, `deep_research`, `novelty_dedup`, `enrichment`, and the fail-safe `engine`
-    lane. The Strategist can durably reallocate both totals and that lane map; operator pins win.
-    <!-- CODEX AGENT: only a positive canonical `llm_parallel` activates the provider-call ceiling.
-    Unset, legacy-only, and launch-time `0` can bound build fan-out while historical research overlap
-    remains without a shared total. Calling both axes unconditional ceilings hides a real rate/cost
-    boundary. -->
+    Parallel work has two canonical axes: `eval_parallel` admits experiments, while a **positive
+    canonical** `llm_parallel` activates a shared provider-call total. Only that positive canonical
+    value turns the ceiling on — unset, legacy-only, or a launch-time `0` bounds build fan-out
+    *without* a shared provider-call total, so research overlap is not counted against one budget.
+    When active, a run-local broker divides the LLM total among `build`, `deep_research`,
+    `novelty_dedup`, `enrichment`, and the fail-safe `engine` lane. The Strategist can durably
+    reallocate both totals and that lane map; operator pins win.
 
     GPU packing is concurrent inside one Run. Separate local Engine processes that share an OS-user
     filesystem namespace conservatively serialize GPU ownership through one crash-released pool lease;

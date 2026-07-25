@@ -21,13 +21,13 @@ What just happened:
 ## 2. Read the result
 
 ```bash
-looplab inspect runs/demo     # resolved config snapshot + best node/metric/params
+looplab inspect runs/demo     # raw launch config snapshot + best node/metric/params
 looplab replay  runs/demo     # rebuild the full run state purely from the event log
 ```
 
-<!-- CODEX AGENT: `inspect` prints `config.snapshot.json` verbatim plus folded results; it does not
-overlay event-effective runtime settings. Calling this "resolved config" can misdiagnose a resumed or
-live-retuned run. -->
+`inspect` prints `config.snapshot.json` **verbatim** — the settings as launched. It does NOT overlay
+the event-effective values, so on a resumed or live-retuned run the seven `run_started`-pinned fields
+and an event-sourced `trust_gate` can differ from what it shows.
 
 `inspect` is the quick "what did I get?"; `replay` proves the run is reproducible — it folds the
 append-only log into the same state, with no side effects.

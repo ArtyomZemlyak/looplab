@@ -63,14 +63,18 @@ the event log, and are never read by `replay.fold`.
 runs/<name>/
 ├── events.jsonl          # append-only event log — replay authority for RunState
 ├── config.snapshot.json  # resolved settings at launch (secret-masked)
-├── task.snapshot.json    # verbatim task copy → the run is self-describing
+├── task.snapshot.json    # canonical RESOLVED task (file + CLI flags + comparison contract)
+│                         #   → the run is self-describing
 ├── engine.lock           # live-engine fence (one reducer per run dir; control appends serialize separately)
+├── AGENTS.md             # task/contract context file for coding-agent backends
 ├── .commands/            # durable command records plus execution/activity claims
 ├── .llm-usage-outbox/    # numeric same-ID usage awaiting/confirming its event append
 ├── nodes/node_<id>/      # per-node eval workdirs (also confirm/ and ablate/ scratch dirs)
 ├── tree.html             # static lineage view (regenerable)
 ├── trace.json            # derived event/trace projection for the UI
 ├── chat.jsonl            # run-scoped operator/boss transcript sidecar
+├── readmodel.sqlite      # derived SQLite read-model, rebuilt from events (+ -wal/-shm)
+├── engine.stderr.log     # bounded stderr of a server-spawned engine (startup diagnostics)
 ├── spans.jsonl           # recorded diagnostic telemetry; never read by replay
 └── spans.index.jsonl     # derived bounded/redacted span projection + offsets
                           #   (versioned, regenerable cache; never a raw trace surface)
@@ -591,12 +595,6 @@ which the classifier re-tag cadence **must not clobber** (order-tolerantly, inva
 is the **Edit tags** control in the Inspector → Overview (offered only on a live run with an authoritative
 concept projection; a partial/unavailable projection stays display-only so a fabricated set is never
 overwritten). Generic node resets
-<!-- CODEX AGENT: current UI does not yet uphold both promises in the preceding sentence. Its local
-editor state survives a run/node/attempt selection change and Save targets the newly rendered identity,
-so a draft can cross-write another node. The visibility predicate checks only projection completeness,
-not whether the node is still building. Scope/reset the editor by full node-generation identity, fence
-late completions, enforce the editable lifecycle, and add a mounted selection-change regression before
-treating this operator surface as authoritative. -->
 do not clear the override. Only a `propose` reset clears it together with the Idea;
 implement/eval resets preserve it while the Idea is unchanged. Operator edits are authoritative for the
 run's read models but are deliberately **not**

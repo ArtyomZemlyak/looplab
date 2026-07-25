@@ -225,7 +225,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `policy` | `LOOPLAB_POLICY` | `greedy` | `greedy` / `evolutionary` / `mcts` / `asha` |
+| `policy` | `LOOPLAB_POLICY` | `greedy` | `greedy` / `evolutionary` / `mcts` / `asha` / `bohb` (`bohb` is the ASHA schedule wired to the surrogate proposer — setting it turns `surrogate_proposer` on for you) |
 | `asha_eta` | `LOOPLAB_ASHA_ETA` | `3` | ASHA/BOHB reduction factor (keep top 1/η per rung) |
 | `asha_rung_nodes` | `LOOPLAB_ASHA_RUNG_NODES` | `0` | Rung-0 width (0 = use `n_seeds`) |
 | `surrogate_proposer` | `LOOPLAB_SURROGATE_PROPOSER` | `false` | BO-lite: propose by a k-NN surrogate over (params→metric) |
@@ -404,10 +404,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 | `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files — see the [override-key table](llm-and-agents.md#prompt-override-keys-prompt_dir) for every `<key>.md` and who consumes it |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |
 | `cross_run_tools` | `LOOPLAB_CROSS_RUN_TOOLS` | `true` | Read-only tools over sibling runs (same task, same run-root) |
-<!-- CODEX AGENT: implementation binds `all_runs_tools` to one configured run-root, so it cannot prove
-machine-wide absence and does not see runs under other projects/checkouts. Rename this documented scope
-to "all runs under the run-root" or implement/configure multi-root discovery before preserving EVERY/ALL. -->
-| `all_runs_tools` | `LOOPLAB_ALL_RUNS_TOOLS` | `true` | Read-only tools (`list_all_runs`, `read_run_code`, `read_run_experiment`) over EVERY run on the machine, across ALL tasks — read/reuse any past experiment's code + result |
+| `all_runs_tools` | `LOOPLAB_ALL_RUNS_TOOLS` | `true` | Read-only tools (`list_all_runs`, `read_run_code`, `read_run_experiment`) over every run **under this run-root**, across ALL tasks — read/reuse any past experiment's code + result. Scope is the configured run-root (`AllRunsTools(run_dir.parent, …)`), not the machine: runs under another project/checkout are invisible, so absence here is not proof of machine-wide absence |
 | `literature_search` | `LOOPLAB_LITERATURE_SEARCH` | `false` | arXiv search tool for the Researcher (network-optional) |
 | `web_search` | `LOOPLAB_WEB_SEARCH` | `false` | Web search/fetch for the DeepResearcher (network-optional) |
 | `research_verify` | `LOOPLAB_RESEARCH_VERIFY` | `true` | Verify a deep-research memo's claims against their cited evidence before it is recorded (synthesis is the documented weak link). Verdicts ride inside the memo and cannot change this run's nodes/champion; finalize uses an aligned `supported` verdict as the evidence gate for positive D8 cross-run claims, while unavailable, stale, or misaligned evidence remains unverified |

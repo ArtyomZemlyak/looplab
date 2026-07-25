@@ -80,7 +80,7 @@ Diagnostic and cross-run boxes also use their documented sidecars.
 
     ---
 
-    Requirements, install extras, and the optional backends. Core is small and pure-Python.
+    Requirements, install extras, and the optional backends. Core is small — eight direct dependencies.
 
 -   :material-rocket-launch: **[Quickstart](guide/quickstart.md)**
 
