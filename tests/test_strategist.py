@@ -1922,3 +1922,33 @@ def test_fmt_operator_yields_tolerates_a_none_gain():
     out = _fmt_operator_yields({"draft": {"gain": None, "n": 5}, "merge": {"gain": 0.3, "n": 2}})
     assert "draft: gain=0/s over 5" in out and "merge: gain=0.3/s over 2" in out
     assert _fmt_operator_yields({}) == "unavailable"
+
+
+def test_strategist_cross_run_tools_are_not_scoped_to_the_researcher_role(tmp_path, monkeypatch):
+    """The Strategist must see DEVELOPER-tagged production lessons, not just researcher ones.
+
+    `_shared_providers` is shared by the Researcher, the Strategist and the unified pilot, and it
+    hard-coded `CrossRunTools(role="researcher")`. `_role_lessons` then filtered every
+    developer-tagged lesson out of the Strategist's claims/Atlas/search — the meta-controller decided
+    with a strictly narrower evidence set than the code claimed, and nothing surfaced the gap. An
+    unknown role deliberately sees ALL roles (cross_run_tools.py), which is what a strategist wants.
+    """
+    from looplab.adapters.tasks import _shared_providers
+    from looplab.core.config import Settings
+    from looplab.tools.cross_run_tools import CrossRunTools
+
+    settings = Settings(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=True)
+    task = ToyTask.load(TASK_FILE)
+
+    def _roles(**kw):
+        return [p.role for p in _shared_providers(task, settings, tmp_path / "run", **kw)
+                if isinstance(p, CrossRunTools)]
+
+    assert _roles() == ["researcher"]                       # default consumer is unchanged
+    assert _roles(role="strategist") == ["strategist"]
+
+    # ...and `core_only` means "skip the heavy memory/KB providers", NOT "skip cross-run evidence":
+    # the unified pilot is named in the documented CrossRunTools audience, and folding the two
+    # together silently denied it the Part-V tools its own contract promises.
+    assert _roles(core_only=True) == ["researcher"]
+    assert _roles(cross_run=False) == []

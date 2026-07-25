@@ -375,9 +375,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # emit now so we always get a structured result; only if that's unsupported do we nudge
             # and retry (bounded, so an unlimited loop can't spin forever on a model that won't emit).
             messages.append({"role": "assistant", "content": msg.get("content") or ""})
-            # CODEX AGENT: re-check cancellation before every forced emit. Stop may arrive while chat or
-            # a tool is in flight; issuing this extra provider call after cancellation adds spend and
-            # delays completion instead of terminating the turn.
+            # Stop can arrive while `chat` above was in flight. `_force_emit` is another PAID provider
+            # call, so issuing it after cancellation only adds spend and delays the turn ending — the
+            # exhaustion path at the bottom of this loop already guards its forced emit this way.
+            if _cancelled():
+                break
             ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
             if ok:
                 return result
@@ -499,6 +501,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         if (emit_after or emit_force) and tools is not None:
             tool_turns += 1
             if emit_force and tool_turns >= emit_force:
+                if _cancelled():        # paid call — see the prose-reply force above
+                    break
                 ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
                 if ok:
                     return result
@@ -516,6 +520,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                              "content": (stuck_prompt.replace("{reason}", str(stuck_reason)) if stuck_prompt
                                          else f"Stop: you appear to be stuck ({stuck_reason}). "
                                               f"Call `{emit_name}` now with your best answer.")})
+            if _cancelled():            # paid call — see the prose-reply force above
+                break
             ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
             if ok:
                 return result

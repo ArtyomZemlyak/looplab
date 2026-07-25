@@ -229,3 +229,23 @@ def test_env_suggest_points_at_the_real_name():
     assert "pytest" in hint
     out = EnvInspectTools().execute("pkg_info", {"name": "pytes"})
     assert "not installed" in out and "pytest" in out
+
+
+def test_repo_write_refuses_a_drive_qualified_path():
+    """A drive-qualified Windows path must be REFUSED, not staged and silently discarded.
+
+    `_safe_rel`'s checks are POSIX-shaped: `C:/x.py` neither starts with `/` nor contains `..`, so it
+    passed, the write was staged, the agent was told it succeeded — and then `engine/workspace.py`'s
+    `if wd not in target.parents` fence dropped it on the floor. The agent had no way to learn its
+    edit never landed. Checked with PureWindowsPath on every platform: the string comes from the
+    model, not from this host's filesystem.
+    """
+    from looplab.adapters.repo_write_tools import RepoWriteTools
+    safe_rel = RepoWriteTools.__dict__["_safe_rel"].__func__
+
+    for bad in ("C:/x.py", "C:\\Windows\\x.py", "D:/repo/src/a.py"):
+        assert safe_rel(bad) is None, f"{bad!r} was accepted, then silently dropped downstream"
+    # ordinary repo-relative paths are untouched
+    assert safe_rel("src/a.py") == "src/a.py"
+    assert safe_rel("./src/b.py") == "src/b.py"
+    assert safe_rel("/tmp/x.py") is None and safe_rel("../x.py") is None

@@ -145,12 +145,15 @@ class BackgroundManager:
         outside it: `_enforce_deadline`/`_reap` operate on the handle directly and must not re-enter it."""
         with self._lock:
             tasks = list(self._tasks.values())
-        # CODEX AGENT: deadline_lock must cover every poll/reap, including this sweep and eviction. If
-        # enforcement skips an in-flight explicit kill, unlocked `_reap` can consume the parent while
-        # tree-kill still owns its PID, reopening the PID-reuse/orphan window that read/list/kill fence.
+        # `deadline_lock` must cover every poll/reap. read()/list()/kill() already fence theirs; this
+        # sweep did not, so an unlocked `_reap` here could consume the child WHILE an explicit
+        # `kill()` still held its pid for tree-kill — reopening exactly the PID-reuse/orphan window
+        # those three fence against. `kill()` holds the lock across a 10s `proc.wait`, but the sweep
+        # runs on the watcher thread with nothing waiting on it, so blocking here is harmless.
         for t in tasks:
             self._enforce_deadline(t)
-            self._reap(t)
+            with t["deadline_lock"]:
+                self._reap(t)
         self._evict_finished()
 
     def shutdown(self) -> None:
@@ -208,7 +211,19 @@ class BackgroundManager:
         if not self._max_finished:
             return
         with self._lock:
-            finished = [tid for tid, t in self._tasks.items() if t["proc"].poll() is not None]
+            # Same fence as the sweep above, but NON-blocking: eviction holds `self._lock`, and
+            # `kill()` keeps `deadline_lock` across a 10s `proc.wait` — blocking here would stall
+            # every read()/list() behind an unrelated kill. A task whose lock is held is simply left
+            # for the next pass; eviction is a retention bound, not a correctness gate.
+            finished = []
+            for tid, t in self._tasks.items():
+                if not t["deadline_lock"].acquire(blocking=False):
+                    continue
+                try:
+                    if t["proc"].poll() is not None:
+                        finished.append(tid)
+                finally:
+                    t["deadline_lock"].release()
             for tid in finished[:-self._max_finished] if len(finished) > self._max_finished else []:
                 t = self._tasks.pop(tid, None)
                 if t is None:

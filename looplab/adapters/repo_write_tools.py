@@ -158,10 +158,16 @@ class RepoWriteTools:
         the agent can only stage files inside the repo it edits — without this, an absolute path like
         `/tmp/x.py` slips past a `**/*.py` surface glob (fnmatch's `*` crosses `/`) and the write is
         silently dropped downstream (it's outside the node workdir)."""
-        # CODEX AGENT: drive-qualified Windows paths (`C:/...`) pass these POSIX-shaped checks, are
-        # reported as successful, then silently dropped by materialization. Reject
-        # `PureWindowsPath(p).drive` before surface checking.
         p = str(p or "").replace("\\", "/").strip()
+        # A DRIVE-qualified path (`C:/x.py`, or `C:\\Windows\\x.py` after the separator swap above)
+        # passes every POSIX-shaped check below — it neither starts with `/` nor contains `..` — so the
+        # write was staged, reported OK to the agent, and then silently discarded by
+        # engine/workspace.py's `if wd not in target.parents` fence. Reject it here so the agent gets
+        # a real refusal instead of a phantom success. (Checked with PureWindowsPath on every
+        # platform: the string came from the model, not from this host's filesystem.)
+        from pathlib import PureWindowsPath
+        if PureWindowsPath(p).drive:
+            return None
         while p.startswith("./"):
             p = p[2:]
         if not p or p.startswith("/") or p.startswith("~") or p == ".." \

@@ -419,7 +419,8 @@ def make_developer_factory(task: TaskAdapter, settings):
     return factory
 
 
-def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: bool = False):
+def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: bool = False,
+                      cross_run: bool = True, role: str = "researcher"):
     """The provider list shared by the Researcher, the agentic Strategist, and the unified agent's
     pilot stage (one assembly instead of three near-identical copies). Ordered exactly as the
     call sites historically built it; each site appends its own extras (RepoTools / WebTools) after.
@@ -441,9 +442,17 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if run_dir is not None and getattr(settings, "all_runs_tools", True):
         from looplab.tools.run_tools import AllRunsTools
         providers.append(AllRunsTools(Path(run_dir).parent, Path(run_dir).name))   # ANY run, any task
-    # CODEX AGENT: `core_only` is also the unified pilot path. Returning here drops enabled Part-V
-    # CrossRunTools despite the documented pilot contract; split "skip heavy memory" from "skip
-    # cross-run evidence" and pin the pilot's actual tool schema in a test.
+    if cross_run and getattr(settings, "memory_dir", None) \
+            and getattr(settings, "cross_run_read_tools", False):
+        from looplab.tools.cross_run_tools import CrossRunTools   # PART V §22 — read-only cross-run knowledge
+        # Built BEFORE the `core_only` return: `core_only` means "skip the heavy memory/KB providers",
+        # not "skip cross-run evidence", and the unified pilot (the only core_only caller) is named in
+        # the documented CrossRunTools audience. Folding them together silently denied the pilot the
+        # Part-V tools its own contract promises. `role` is a parameter for the same reason: this
+        # constructor also serves the STRATEGIST, and a hard-coded "researcher" made
+        # `_role_lessons` filter every developer-tagged production lesson out of its claims/Atlas/
+        # search (an unknown role deliberately sees all roles — cross_run_tools.py:324).
+        providers.append(CrossRunTools(settings.memory_dir, role=role))
     if core_only:
         return providers
     cases_path = (str(Path(settings.memory_dir) / "cases.jsonl")
@@ -459,12 +468,6 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
         from looplab.tools.memory_tools import MemoryTools
         providers.append(MemoryTools(settings.memory_dir))
-    if getattr(settings, "memory_dir", None) and getattr(settings, "cross_run_read_tools", False):
-        from looplab.tools.cross_run_tools import CrossRunTools   # PART V §22 — read-only cross-run knowledge
-        # CODEX AGENT: this shared constructor also serves the Strategist, so hard-coding `researcher`
-        # filters developer repair evidence out of Strategist claims/Atlas/search. Pass the consumer
-        # role explicitly and test mixed-role production lessons.
-        providers.append(CrossRunTools(settings.memory_dir, role="researcher"))
     # Skills: hand-written (skills_dir) + M4 auto-distilled (<memory_dir>/skills) in ONE SkillTools
     # over BOTH dirs — two separate providers would each register list_skills/use_skill and the second
     # shadows the first (the hand-written library becomes unreachable). Hand-written wins a name clash.
@@ -490,7 +493,7 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     cases (+ skills / literature / web when enabled). Mirrors the Researcher's providers so the
     Strategist can ground its meta-decision in what actually happened. Returns a CompositeTools (or a
     lone provider), or None when nothing is available."""
-    providers = _shared_providers(task, settings, run_dir)
+    providers = _shared_providers(task, settings, run_dir, role="strategist")
     if getattr(settings, "web_search", False):              # web search/fetch (network-optional)
         from looplab.tools.web import WebTools
         providers.append(WebTools(enabled=True))
@@ -644,16 +647,19 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # do NOT wire the editing agent even if a developer_backend preset was requested.
     if settings.developer_backend in PRESETS and not _param_search:
         from looplab.agents.cli_agent import CliAgentDeveloper, opencode_config
-        # CODEX AGENT: external coding developers route through `.model`/`.host`, not the role `.client`
-        # changed by stage overrides; `developer_model`/`developer_base_url` therefore fall back to the
-        # shared endpoint. Resolve the developer-stage model/base explicitly at this constructor.
-        agent_model = _agent_model(settings.developer_backend, settings.llm_model)
+        # An EXTERNAL coding agent carries its own `.model`/`.host` — it has no role `.client` for
+        # `_set_role_client` to rebind (that helper explicitly skips clientless objects, naming this
+        # very case). So the developer-stage overrides applied further down never reached it and the
+        # agent silently ran on the shared `llm_model`/`llm_base_url` while the operator saw
+        # `developer_model` accepted. Resolve them HERE, at the constructor that actually owns them.
+        dev_base_url = settings.developer_base_url or settings.llm_base_url
+        agent_model = _agent_model(settings.developer_backend,
+                                   settings.developer_model or settings.llm_model)
         # Drop a self-contained provider config in the agent's workdir so OpenCode talks
         # to the local Ollama endpoint and never fetches the external model registry.
         workdir_files = {}
         if settings.developer_backend == "opencode":
-            workdir_files["opencode.json"] = opencode_config(
-                settings.llm_base_url, agent_model)
+            workdir_files["opencode.json"] = opencode_config(dev_base_url, agent_model)
         # RepoTask: the agent edits an existing repo (seed_dir) within its edit-surface;
         # the validator runs in repo_mode and the fallback is the task's baseline developer.
         repo_spec_fn = getattr(task, "repo_spec", None)
@@ -665,7 +671,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         llm_developer = developer  # in-house Developer (LLM, or baseline for repo): fallback
         agent_developer = CliAgentDeveloper(
             model=agent_model,
-            base_url=settings.llm_base_url, brief=brief,
+            base_url=dev_base_url, brief=brief,
             spec=PRESETS[settings.developer_backend],
             cmd_override=([settings.agent_cmd] if settings.agent_cmd else None),
             workdir_files=workdir_files,

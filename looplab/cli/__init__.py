@@ -14,6 +14,7 @@ when this was one file.
 """
 from __future__ import annotations
 
+import errno
 import os
 import sys
 import copy
@@ -168,12 +169,25 @@ def _engine_singleton(run_dir: Path):
                 f.seek(0)
                 try:
                     msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-                # CODEX AGENT: not every Windows OSError means lock contention. Permission, invalid
-                # handle, network-filesystem and I/O failures become a phantom "already running"
-                # engine and silently no-op; distinguish the documented contention errno set and fail
-                # closed with an actionable infrastructure error for everything else.
-                except OSError:
-                    acquired = False    # byte held by a live engine (Windows local FS supports locking)
+                except OSError as exc:
+                    # Only the documented CONTENTION errnos mean "a live engine holds the byte".
+                    # Treating every OSError that way turned a permission error, an invalid handle or
+                    # an unsupported network filesystem into a phantom "already running" engine that
+                    # silently no-ops — the operator sees nothing happen and no reason why. The POSIX
+                    # branch below already draws exactly this distinction; mirror it, including the
+                    # LOOPLAB_ALLOW_UNLOCKED_WRITER escape hatch for a knowingly-degraded mount.
+                    if exc.errno in (getattr(errno, "EDEADLOCK", 36), errno.EACCES):
+                        acquired = False    # byte held by a live engine -> caller no-ops
+                    elif _truthy_env("LOOPLAB_ALLOW_UNLOCKED_WRITER"):
+                        pass   # explicit operator override -> single-writer assumption, run anyway
+                    else:
+                        acquired = False   # never acquired the lock -> skip the unlock in `finally`
+                        raise RuntimeError(
+                            f"Cannot enforce a single writer of the append-only event log: locking "
+                            f"{run_dir}/engine.lock failed ({type(exc).__name__}: {exc}). Two runs "
+                            f"here could corrupt events.jsonl. Move the run dir to a local disk (see "
+                            f"LOOPLAB_RUN_ROOT), or set LOOPLAB_ALLOW_UNLOCKED_WRITER=1 if you "
+                            f"guarantee only one engine writes this run dir.") from exc
             else:
                 import fcntl
                 try:
