@@ -55,7 +55,8 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # `looplab.core.llm._X` and the flat `looplab.llm._X` must keep resolving to the SAME objects.
 from looplab.core.llm_transient import (  # noqa: F401
     BACKOFF_CAP_S, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff, _err_body,
-    _is_reasoning_reject, _is_throttle_403, _retry_after_of, _retry_after_seconds, _sdk_transient)
+    _is_reasoning_reject, _is_stream_options_reject, _is_throttle_403, _retry_after_of,
+    _retry_after_seconds, _sdk_transient)
 from looplab.core.llm_streaming import (  # noqa: F401
     _SSETail, _chunk_has_content, _parse_chat_body, _raw_socket, _shutdown_pool_sockets,
     _socket_watchdog, _sse_chunks, _stream_raw_socket, _stream_with_idle_guard)
@@ -244,6 +245,11 @@ class OpenAICompatibleClient:
         # the request is retried without it and the model works. Deepseek keeps its reasoning; glm-5.1
         # silently drops it. Per-client (per-model), detected once and cached.
         self._reasoning_ok = True
+        # Same shape as `_reasoning_ok`, for the OPTIONAL `stream_options: {"include_usage": true}`
+        # capability: flips off permanently for this client the first time the endpoint 400s naming
+        # that field, so streaming keeps working (without provider-reported usage) instead of the
+        # client dying against that endpoint entirely. Per-client, detected once and cached.
+        self._stream_options_ok = True
         self._max_retries = 8               # 429/5xx/throttle-403 backoff retries before surfacing an
         #   LLMError. 8 (≈150s: 2+4+8+16+30+30+30+30) rides out the gateway's COLD-START throttle: after
         #   the engine sits idle (e.g. paused), the FIRST call-burst on resume gets a 403 "security
@@ -320,11 +326,14 @@ class OpenAICompatibleClient:
             kwargs["extra_body"] = extra
         if use_stream:
             kwargs["stream"] = True
-            # CODEX AGENT: `stream_options` is an optional OpenAI-compatible capability. A provider
-            # that rejects only this field is retried with the identical payload, including by the
-            # text fallback. Detect that rejection, retry streaming without usage options, then force
-            # a genuinely non-stream request if necessary.
-            kwargs["stream_options"] = {"include_usage": True}
+            # `stream_options` is an OPTIONAL OpenAI-compatible capability (it asks the endpoint to
+            # report token usage on the final SSE chunk). Sending it unconditionally meant a provider
+            # that rejects ONLY this field 400d identically on every retry — and the blocking text
+            # fallback re-entered this same builder — so the client was dead against that endpoint.
+            # `_stream_options_ok` degrades it exactly like `_reasoning_ok` does the reasoning toggle:
+            # once off, streaming keeps working, just without provider-reported usage.
+            if self._stream_options_ok:
+                kwargs["stream_options"] = {"include_usage": True}
             # Bound the header-WAIT. The static httpx.Timeout treats `header_timeout` as connect-only, so
             # an endpoint that completes TLS then never sends response HEADERS would block create() up to
             # the idle `timeout` (~180s) before failover — the "black-holed request" this design claims to
@@ -597,6 +606,17 @@ class OpenAICompatibleClient:
                 # A 400 that rejects our REASONING toggle — a litellm-proxied model like glm-5.1
                 # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
                 # drop reasoning for this client and retry (deepseek keeps it; glm-5.1 adapts).
+                # Checked BEFORE the reasoning branch: `_is_reasoning_reject`'s generic keys
+                # ("extra_forbidden", "unrecognized", …) also match a stream_options rejection, so
+                # letting it win would drop the reasoning toggle and retry with the ACTUAL offending
+                # field still attached — the identical 400, every attempt.
+                if use_stream and self._stream_options_ok and _is_stream_options_reject(_err_body(e)):
+                    self._stream_options_ok = False   # permanent for this client (see `_sdk_chat`)
+                    if attempt < self._max_retries:
+                        continue                      # re-issue without the optional usage field
+                    raise LLMError(f"LLM request to {self.base_url} rejected `stream_options` on the "
+                                   f"final attempt; it is now disabled for this client so a retry "
+                                   f"will succeed: {e}") from e
                 if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(e)):
                     self._reasoning_ok = False   # permanent for this client: the NEXT request drops the param
                     if attempt < self._max_retries:
@@ -686,16 +706,23 @@ class OpenAICompatibleClient:
                 empty_stream = (use_stream and parsed is not None and parsed.get("choices")
                                 and not m.get("content") and not m.get("tool_calls")
                                 and not m.get("reasoning") and not ch0.get("finish_reason"))
-                # CODEX AGENT: an empty stream may still carry provider-reported billable usage, but
-                # this retry path discards it before `accountant.add` below. Account every completed
-                # attempt before semantic retry/degrade so cost limits and the durable ledger include
-                # charges for empty/invalid responses too.
                 if parsed is not None and not empty_stream:
                     body = parsed
                     break
                 if empty_stream:                # keepalive-only stream = the same stall family
                     _stalled_prev = True
                     self._stream_stalls += 1
+                    # A keepalive-only stream is still a completed, BILLABLE provider call — the same
+                    # reasoning the accepted-body path states below ("a billable HTTP-200 envelope
+                    # with known usage but no choices is still a real call and may otherwise be
+                    # retried for free"). Only the accepted body was accounted, so up to
+                    # `_max_retries` empty attempts spent real money that never reached the cost
+                    # limits or the durable ledger; with a flapping endpoint the run's recorded spend
+                    # drifted arbitrarily far below the invoice.
+                    _empty_usage = _normalize_usage((parsed or {}).get("usage"))
+                    if _empty_usage["total_tokens"] or _empty_usage["cost"]:
+                        self.accountant.add(_empty_usage["cost"], usage=_empty_usage)
+                        self._last_usage = _empty_usage
                 if attempt < self._max_retries:
                     time.sleep(_backoff(attempt))
                     continue
@@ -755,8 +782,9 @@ class OpenAICompatibleClient:
                 # retries once without it instead of silently losing streaming forever.
                 for _attempt in range(2):
                     kwargs: dict = {"model": self.model, "messages": messages,
-                                    "temperature": self.temperature, "stream": True,
-                                    "stream_options": {"include_usage": True}}
+                                    "temperature": self.temperature, "stream": True}
+                    if self._stream_options_ok:      # optional capability — see `_sdk_chat`
+                        kwargs["stream_options"] = {"include_usage": True}
                     if self.reasoning and self._reasoning_ok:
                         kwargs["extra_body"] = dict(self.reasoning)
                     try:
@@ -798,12 +826,26 @@ class OpenAICompatibleClient:
                                     _stream.close()
                                 except Exception:  # noqa: BLE001 - best-effort release, never mask
                                     pass
-                        # CODEX AGENT: a role-only/empty clean EOF is not a successful assistant answer.
-                        # Mirror `_post`'s empty-envelope retry/fallback; otherwise callers persist a
-                        # zero-content "success" and no recovery path runs.
+                        # A role-only/empty clean EOF is NOT a successful assistant answer. Falling
+                        # through here returned a generator that yielded nothing, so the caller
+                        # persisted a zero-content "success" — and the docstring's promised
+                        # single-yield fallback never ran, because it hangs off the BadRequestError /
+                        # APIError handlers below, which a clean EOF does not raise. Delegate the same
+                        # way those do; `account_here` in the `finally` still charges this envelope
+                        # when the provider reported usage for it.
+                        if not pieces:
+                            delegated_to_fallback = True
+                            text = self.complete_text(messages)
+                            if text:
+                                yield text
+                            return
                         stream_completed = True
                         break                    # streamed (or cleanly ended) -> done
                     except openai.BadRequestError as e:
+                        if (self._stream_options_ok and not pieces and _attempt == 0
+                                and _is_stream_options_reject(_err_body(e))):
+                            self._stream_options_ok = False   # see `_sdk_chat`; checked before reasoning
+                            continue             # retry the stream once without the usage option
                         if (self.reasoning and self._reasoning_ok and not pieces and _attempt == 0
                                 and _is_reasoning_reject(_err_body(e))):
                             self._reasoning_ok = False
@@ -894,11 +936,19 @@ class OpenAICompatibleClient:
                 usage = body.get("usage")
                 gen.usage(usage).cost(_usage_cost(usage)).error("no tool_calls in response")
                 raise KeyError("no tool_calls in response")
-            # CODEX AGENT: a forced structured completion must prove there is exactly one call and
-            # its function name is `emit`. Any non-empty tool_calls list currently passes, so a backend
-            # that ignores tool_choice can have another tool's coincidentally-valid arguments accepted
-            # under the wrong semantic operation.
-            args = calls[0]["function"]["arguments"]
+            # This endpoint FORCES `tool_choice: emit`, so the result must actually be that call.
+            # Taking `calls[0]` blindly let a backend that ignores tool_choice have some OTHER tool's
+            # coincidentally schema-valid arguments accepted as the emit payload — a wrong answer under
+            # the right shape, which no downstream validation can catch. Select by name instead of
+            # position (also correct when a leaked native block recovered above lands beside a real
+            # call), and treat "no emit anywhere" exactly like the empty case: raise so parse.py falls
+            # back to the text path, which is the honest reading of an endpoint that ignored the force.
+            emit = next((c for c in calls if (c.get("function") or {}).get("name") == "emit"), None)
+            if emit is None:
+                usage = body.get("usage")
+                gen.usage(usage).cost(_usage_cost(usage)).error("forced emit not honored")
+                raise KeyError("no tool_calls in response")
+            args = emit["function"]["arguments"]
             # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
             # `content`) alongside the tool call; capture it (debug channel) instead of discarding it.
             # The completion stays the structured tool args — the clean conclusion the UI renders.

@@ -1064,3 +1064,82 @@ def test_bounded_create_timeout_does_not_tear_down_the_pool_under_siblings():
     with pytest.raises(openai.APITimeoutError):
         client._bounded_create({"model": "m", "messages": []}, 0.2)
     assert torn["n"] == 1, "with no siblings the client is rebuilt as before"
+
+
+def test_post_drops_stream_options_on_unsupported_param_400(monkeypatch):
+    """A provider that rejects ONLY `stream_options` must degrade, not kill the client.
+
+    `stream_options: {"include_usage": true}` is an OPTIONAL OpenAI-compatible capability that we
+    attach to every streaming call to get token usage back. Sending it unconditionally meant such an
+    endpoint 400d identically on every retry — and the blocking text fallback re-entered the same
+    builder — so every call failed. It now degrades exactly like the reasoning toggle: off for this
+    client, streaming still works, just without provider-reported usage.
+    """
+    import looplab.core.llm as llm
+    seen = []
+
+    def fake(payload, use_stream):
+        seen.append(dict(payload))
+        if len(seen) == 1:
+            raise _status_exc(_openai.BadRequestError, 400, {"error": {"message":
+                "Unrecognized request argument supplied: stream_options"}})
+        return dict(_OK_BODY)
+
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
+    assert c._stream_options_ok is True
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert c._stream_options_ok is False and len(seen) == 2
+
+    # ...and it is checked BEFORE the reasoning branch, whose generic keys ("unrecognized", …) match
+    # these bodies too — mis-attributing would retry with the ACTUAL offending field still attached.
+    assert c._reasoning_ok is True
+
+
+def test_empty_stream_attempts_are_still_billed(monkeypatch):
+    """A keepalive-only stream is a completed, BILLABLE provider call — account it before retrying.
+
+    Only the finally-accepted body was accounted, so up to `_max_retries` empty attempts spent real
+    money that never reached the cost limits or the durable ledger. Against a flapping endpoint the
+    run's recorded spend drifted arbitrarily far below the invoice. Same reasoning the accepted-body
+    path already states for a billable HTTP-200 envelope with usage but no choices.
+    """
+    import looplab.core.llm as llm
+    empty = {"choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": None}],
+             "usage": {"prompt_tokens": 700, "completion_tokens": 0, "cost": 0.25}}
+    seq = iter([empty, dict(_OK_BODY)])
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", lambda payload, use_stream: dict(next(seq)))
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert c.accountant.spent >= 0.25, (
+        "the discarded empty-stream attempt was billable but never reached the cost ledger")
+    assert c.accountant.prompt_tokens >= 700, "its tokens never reached the durable ledger either"
+
+
+def test_complete_tool_requires_the_forced_emit_call(monkeypatch):
+    """`complete_tool` FORCES `tool_choice: emit` — the result must actually be that call.
+
+    Taking `calls[0]` blindly let a backend that ignores tool_choice have some OTHER tool's
+    coincidentally schema-valid arguments accepted as the emit payload: a wrong answer under the
+    right shape, which no downstream validation can catch. "No emit anywhere" is now treated like the
+    empty case (KeyError -> parse.py's text fallback), and a real emit beside other calls is selected
+    by name rather than position.
+    """
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+
+    def _msg(*names):
+        return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"c{i}", "type": "function",
+             "function": {"name": n, "arguments": '{"x": %d}' % i}}
+            for i, n in enumerate(names)]}, "finish_reason": "tool_calls"}], "usage": {}}
+
+    monkeypatch.setattr(c, "_post", lambda payload: _msg("search_web"))
+    with pytest.raises(KeyError):
+        c.complete_tool([{"role": "user", "content": "go"}], {"type": "object"})
+
+    # a real emit is selected BY NAME even when another call is listed first
+    monkeypatch.setattr(c, "_post", lambda payload: _msg("search_web", "emit"))
+    assert c.complete_tool([{"role": "user", "content": "go"}], {"type": "object"}) == {"x": 1}

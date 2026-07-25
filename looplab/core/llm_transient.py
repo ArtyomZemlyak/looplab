@@ -50,6 +50,19 @@ def _is_reasoning_reject(err_body: str) -> bool:
     return any(k in err_body for k in _REASONING_REJECT_KEYS)
 
 
+def _is_stream_options_reject(err_body: str) -> bool:
+    """True when a 400 body names `stream_options` as the rejected field.
+
+    `stream_options: {"include_usage": true}` is an OPTIONAL OpenAI-compatible capability that we
+    send unconditionally on every streaming call to get token usage back. A provider that rejects
+    only this field 400s identically on every retry, and the blocking text fallback re-enters the
+    same builder — so the whole client was dead against such an endpoint. Checked BEFORE
+    `_is_reasoning_reject`, whose generic keys ("extra_forbidden", "unrecognized", …) also match
+    these bodies and would otherwise mis-attribute the rejection to the reasoning toggle and retry
+    with the offending field still attached."""
+    return "stream_options" in (err_body or "") or "stream options" in (err_body or "")
+
+
 def _is_throttle_403(err_body: str) -> bool:
     """True when a 403 body looks like a RATE-LIMIT / burst security throttle (retryable with backoff),
     NOT a hard 'forbidden' (bad key / plan / route, which must fail fast). A hosted gateway (OpenRouter)

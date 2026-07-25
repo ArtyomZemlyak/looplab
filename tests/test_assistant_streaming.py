@@ -135,3 +135,35 @@ def test_message_stream_endpoint(tmp_path, monkeypatch):
     # persisted
     msgs = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
     assert msgs[-1]["role"] == "assistant" and msgs[-1]["content"] == "Streamed answer."
+
+
+def test_complete_text_stream_falls_back_on_an_empty_clean_eof(monkeypatch):
+    """A role-only/empty clean EOF is NOT a successful assistant answer — take the fallback.
+
+    The docstring has always promised "falls back to a single yield of the whole text if the endpoint
+    doesn't stream", but that fallback hung off the BadRequestError/APIError handlers only. A stream
+    that opened fine and closed with no content raised neither, so the generator simply ended empty
+    and the caller persisted a zero-content "success" with no recovery path ever running.
+    """
+    def fake_create(**kwargs):
+        return iter(())                       # clean EOF, nothing yielded, no exception
+
+    c = OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c._sdk.chat.completions, "create", fake_create)
+    monkeypatch.setattr(c, "complete_text", lambda messages: "recovered answer")
+    assert list(c.complete_text_stream([{"role": "user", "content": "hi"}])) == ["recovered answer"]
+
+    # a stream that DID produce content is untouched — no second paid call on the happy path
+    import types
+    calls = {"fallback": 0}
+
+    def _chunk(text):
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(delta=types.SimpleNamespace(content=text),
+                                           finish_reason=None)], usage=None)
+
+    monkeypatch.setattr(c._sdk.chat.completions, "create", lambda **kw: iter([_chunk("hi")]))
+    monkeypatch.setattr(c, "complete_text",
+                        lambda messages: calls.__setitem__("fallback", calls["fallback"] + 1) or "x")
+    assert list(c.complete_text_stream([{"role": "user", "content": "hi"}])) == ["hi"]
+    assert calls["fallback"] == 0
