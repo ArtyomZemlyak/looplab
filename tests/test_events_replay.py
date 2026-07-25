@@ -2297,6 +2297,13 @@ def test_malformed_run_concepts_replacement_poisons_the_base_receipt():
         "a malformed run_concepts replacement left the stale base certified as exact — the "
         "ConceptFrame would show taxonomy bytes the operator had already replaced, marked clean")
 
+    # Narrowly scoped: with NO established base, a malformed row keeps the bare
+    # `delta_dependency_missing_run_base` receipt (already maximally degraded, and "invalid id" would
+    # misdescribe a payload that carried no ids at all) — see test_run_base_delta.py for that case.
+    lone = fold([head, bad])
+    assert lone.run_base_concept_receipt is None, \
+        "a malformed row with no base and no delta consumers must not manufacture a receipt"
+
 
 def test_fork_receipt_binds_to_its_own_queue_head(tmp_path):
     """A duplicate/orphan `fork_done` must not consume a LATER fork request.

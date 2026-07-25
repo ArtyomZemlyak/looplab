@@ -1626,16 +1626,19 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         ctx.run_base_capped = overflow
         ctx.run_base_invalid = invalid
         ctx.run_base_seen = True
-    elif concepts is not None:
+    elif concepts is not None and ctx.run_base_seen:
         # A non-list `concepts` is a REPLACEMENT the operator/agent intended and the fold cannot apply.
-        # Dropping it silently left the PREVIOUS base standing behind this event's clean receipt, so the
+        # Dropping it silently left the PREVIOUS base standing behind its clean receipt, so the
         # ConceptFrame certified stale taxonomy bytes as the current exact base. Keep the old membership
         # (there is nothing valid to replace it with) but poison the receipt, which is what
         # CONCEPT_INVALID_ID_REASON already means downstream: "this base is not exact, don't trust it".
-        # `run_base_seen` is deliberately NOT set — a malformed row is not an inheritance source.
-        # Unreachable via the sanctioned writers (serve/run_commands.py:761 rejects a non-list with 400
-        # and engine/strategy.py:751 always appends a list); this is the forged/hand-edited-log path the
-        # rest of these integrity receipts exist for.
+        # `run_base_seen` is deliberately NOT set here — a malformed row is not an inheritance source —
+        # and this branch requires it, so a malformed row with NO established base still produces the
+        # bare `delta_dependency_missing_run_base` receipt: already maximally degraded, and "invalid id"
+        # would misdescribe a payload that carried no ids at all.
+        # Unreachable via the sanctioned writers (serve/run_commands.py rejects a non-list with 400 and
+        # engine/strategy.py always appends a list); this is the forged/hand-edited-log path the rest of
+        # these integrity receipts exist for.
         ctx.run_base_invalid = True
 
 
