@@ -2167,3 +2167,39 @@ def test_l6_operator_card_controls_fold_and_resolve_through_merge(tmp_path):
     with _pytest.raises(Exception):
         normalize_control(None, tmp_path, "card_dropped",
                           {"id": cid, "dropped_by": "novelty"})
+
+
+def test_fork_receipt_precedes_the_paid_producer(tmp_path):
+    """At-most-once for a fork: the receipt must be durable BEFORE the paid child is produced.
+
+    `_create_node` runs the Researcher + Developer (real spend) and durably appends `node_created`.
+    With `fork_done` written AFTER it, a crash in that gap left the request at the queue head, so
+    resume re-served it and minted a SECOND paid child for the same fork. Writing the receipt first
+    makes the failure mode at-most-once — a crash loses one queued fork intent (re-requestable)
+    instead of silently duplicating an already-charged experiment. This mirrors
+    `_claim_paid_finalize_step`: "persist the at-most-once boundary before dispatching a paid effect".
+    """
+    import inspect
+    from looplab.engine import orchestrator
+
+    src = inspect.getsource(orchestrator.Engine._serve_control_requests) \
+        if hasattr(orchestrator.Engine, "_serve_control_requests") else \
+        inspect.getsource(orchestrator)
+    fork_block = src[src.index('"kind": "improve", "parent_id": pid') - 2000:
+                     src.index('"kind": "improve", "parent_id": pid')]
+    assert "EV_FORK_DONE" in fork_block, (
+        "the fork_done receipt must be appended BEFORE the _create_node call that spends money")
+
+    # and the two handlers stay order-tolerant, so the swap re-folds old logs identically
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    s.append("fork", {"from_node_id": 0, "generation": 0})
+    a = fold(s.read_all())
+    s2 = EventStore(tmp_path / "b.jsonl")
+    _seed(s2)
+    s2.append("fork", {"from_node_id": 0, "generation": 0})
+    s2.append("fork_done", {"from_node_id": 0, "generation": 0})
+    s2.append("node_created", {"node_id": 9, "parent_ids": [0], "operator": "improve",
+                               "idea": {"operator": "improve", "params": {}}, "code": ""})
+    b = fold(s2.read_all())
+    assert a.forks_done == 0 and b.forks_done == 1 and 9 in b.nodes

@@ -2813,15 +2813,24 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if await self._defer_for_node_budget(state):
                     return True
                 generation = current.attempt
-                # CODEX AGENT: `_create_node` performs paid work and durably creates the child before
-                # `fork_done` exists. A crash in that gap re-serves the queue head and duplicates the
-                # experiment/spend; claim the request durably by identity and recover an existing child
-                # before invoking the producer again.
+                # CLAIM THE REQUEST BEFORE THE PAID PRODUCER — the same at-most-once boundary
+                # `_claim_paid_finalize_step` states ("persist the boundary before dispatching a
+                # paid/external effect"). `_create_node` runs the Researcher + Developer (real spend) and
+                # durably appends `node_created`; with the receipt written AFTER it, a crash in that gap
+                # left the request still at the queue head, so resume re-served it and minted a SECOND
+                # paid child for the same fork. Ordering the receipt first makes the failure mode
+                # at-most-once: a crash in the gap loses ONE queued fork intent instead of duplicating an
+                # experiment and its spend — and an operator can simply re-request the fork, whereas a
+                # duplicate is silent, already charged, and pollutes the tree.
+                # Fold-safe: `_on_fork_done` (counter) and `_on_node_created` (node) touch disjoint state,
+                # so the swap is order-tolerant and re-folds existing logs byte-identically.
+                self.store.append(EV_FORK_DONE, {"from_node_id": pid, "generation": generation})
                 self._create_node({"kind": "improve", "parent_id": pid,
                                    "parent_generations": {str(pid): generation}})
-            self.store.append(EV_FORK_DONE, {
-                "from_node_id": pid, "generation": generation,
-                **({} if served else {"skipped": "stale_generation"})})  # always advance the gate
+            else:
+                self.store.append(EV_FORK_DONE, {
+                    "from_node_id": pid, "generation": generation,
+                    "skipped": "stale_generation"})        # advance the gate past an unservable head
             return True
         # Operator-authored experiment (manual tree edit): the human hand-adds a node (an idea
         # + optional parent + optional ready-made code). Materialize it into a real pending node;
