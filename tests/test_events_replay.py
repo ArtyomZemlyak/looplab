@@ -2203,3 +2203,34 @@ def test_fork_receipt_precedes_the_paid_producer(tmp_path):
                                "idea": {"operator": "improve", "params": {}}, "code": ""})
     b = fold(s2.read_all())
     assert a.forks_done == 0 and b.forks_done == 1 and 9 in b.nodes
+
+
+def test_inject_receipt_binds_to_its_own_queue_head(tmp_path):
+    """A duplicate/orphan `inject_done` must not consume a LATER inject request.
+
+    `injects_done` is a queue cursor: the engine serves `inject_requests[injects_done]` and appends a
+    receipt stamped `{"idx": request_idx}`. The fold ignored that `idx` and blindly incremented, so a
+    second receipt for the SAME request (a retried API call, a spliced-in duplicate row) advanced the
+    cursor past a freshly appended intent — the operator's second experiment was silently never built,
+    and no event recorded the loss. Binding the receipt to the head makes a mismatched `idx` a no-op.
+
+    A receipt with NO `idx` is legacy and still advances, so pre-`idx` logs fold byte-identically.
+    """
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    s.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 1}}, "parent_id": None})
+    s.append("inject_done", {"idx": 0})
+    s.append("inject_done", {"idx": 0})            # duplicate receipt for the SAME request
+    s.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 2}}, "parent_id": None})
+    st = fold(s.read_all())
+    assert len(st.inject_requests) == 2
+    assert st.injects_done == 1, (
+        "a duplicate inject receipt consumed the second request — the operator's experiment is "
+        "permanently unserved with no event recording the loss")
+
+    # legacy (no `idx`) rows keep the old blind-increment behaviour: old logs replay unchanged
+    legacy = EventStore(tmp_path / "legacy.jsonl")
+    _seed(legacy)
+    legacy.append("inject_node", {"idea": {"operator": "manual", "params": {}}, "parent_id": None})
+    legacy.append("inject_done", {})
+    assert fold(legacy.read_all()).injects_done == 1

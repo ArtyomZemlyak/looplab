@@ -3308,8 +3308,13 @@ def _on_inject_node(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.inject_requests.append(d)        # operator-authored experiment (manual tree edit)
 
 def _on_inject_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # CODEX AGENT: bind this receipt to the current request; a duplicate old done row must not advance
-    # past a newly appended inject intent and leave it permanently unserved.
+    # Bind to the queue index the producers ALREADY stamp (`{"idx": request_idx}`) — the fold simply
+    # ignored it, so a duplicate/orphan receipt advanced past a freshly appended inject intent and left
+    # it permanently unserved. A row with NO `idx` is legacy and still advances, so old logs fold
+    # byte-identically; a non-int or non-matching `idx` is not this head's receipt.
+    _idx = d.get("idx")
+    if _idx is not None and (type(_idx) is not int or _idx != st.injects_done):
+        return
     st.injects_done += 1                 # one per processed inject (replay-safe gate)
 
 def _on_deep_research(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
