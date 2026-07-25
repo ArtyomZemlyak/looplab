@@ -3193,3 +3193,34 @@ def test_cross_run_import_origin_names_the_source_attempt(tmp_path):
         "silently repoints it at different bytes")
     src_state = fold(EventStore(tmp_path / "source" / "events.jsonl").read_all())
     assert origin["source_attempt"] == src_state.nodes[0].attempt
+
+
+def test_put_run_config_honors_the_run_generation_fence(tmp_path):
+    """`expected_revision` fences the snapshot BYTES; only `expected_generation` fences the RUN.
+
+    `config.snapshot.json` is deliberately absent from reset's archive list, so it survives a reset
+    byte-identical — which means a revision observed against generation A STILL matches after the run
+    is reset into generation B, letting a delayed PUT silently rewrite the replacement run's settings.
+    The generation fence is checked inside the config lock, since a reset can land between the request
+    arriving and the write. Optional for now (the UI does not send it yet); when absent, behavior is
+    unchanged.
+    """
+    _build_run(tmp_path)
+    _write_snapshot(tmp_path / "demo", timeout=30.0)
+    client = TestClient(make_app(tmp_path))
+    meta = client.get("/api/runs/demo/config").json()["_looplab_config_meta"]
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    ok = client.put("/api/runs/demo/config", json={
+        "timeout": 51.0, "expected_revision": meta["config_revision"],
+        "expected_generation": generation})
+    assert ok.status_code == 200 and ok.json()["config"]["timeout"] == 51.0
+
+    stale = client.put("/api/runs/demo/config", json={
+        "timeout": 99.0,
+        "expected_revision": ok.json()["config"]["_looplab_config_meta"]["config_revision"],
+        "expected_generation": "0" * 64})
+    assert stale.status_code == 409, (
+        "a PUT naming a different run generation rewrote this run's settings")
+    assert stale.json()["detail"]["code"] == "run_generation_changed"
+    assert client.get("/api/runs/demo/config").json()["timeout"] == 51.0

@@ -57,7 +57,8 @@ from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
 from looplab.serve.protocol import (
-    PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD, SSE_DONE, SSE_STATE)
+    EXPECTED_RUN_GENERATION_FIELD, PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD,
+    SSE_DONE, SSE_STATE)
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.paid_work import (
     RunCostAccountingPending, metered_run_client, run_directory_identity)
@@ -2504,18 +2505,31 @@ def build_router(srv) -> APIRouter:
                 not isinstance(expected_revision, str)
                 or _SHA256_RE.fullmatch(expected_revision) is None):
             raise HTTPException(400, "expected_revision must be the 64-character config revision")
+        # `expected_revision` fences the snapshot BYTES, which is not the same as fencing the RUN.
+        # `config.snapshot.json` is deliberately absent from reset's archive list (control.py), so it
+        # survives a reset byte-identical — and a revision observed against generation A therefore
+        # still matches after the run has been reset into generation B, letting a delayed PUT rewrite
+        # the replacement run's settings. `expected_generation` is the fence that actually names the
+        # run; optional for now because the UI does not send it yet, mandatory once it does.
+        expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
+        if expected_generation is not None and not isinstance(expected_generation, str):
+            raise HTTPException(400, f"{EXPECTED_RUN_GENERATION_FIELD} must be a string")
         incoming = body.get("settings", body)
         if not isinstance(incoming, dict):
             raise HTTPException(400, "settings must be a JSON object")
         try:
-            # CODEX AGENT: expected_revision fences only snapshot bytes, not run generation. Reset keeps
-            # this file, so a delayed PUT from generation A can rewrite generation B or race reset's env
-            # read. Require expected_generation and serialize this transaction with the reset-visible
-            # run lifecycle/command lease in addition to the snapshot lock.
             # The required OS lock is the cross-process guarantee; the bounded stripe supplies the
             # same guarantee to multiple threads in this process on every supported platform.
             with (_run_config_thread_lock(snap),
                   _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
+                # Checked INSIDE the lock: reset can land between the request arriving and the write.
+                if (expected_generation is not None
+                        and srv.commands.run_generation(rd) != expected_generation):
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "message": "the run was reset while these settings were being edited",
+                        "remediation": "reload the run's configuration and re-apply your changes",
+                    })
                 return _put_run_config_locked(rd, snap, incoming, expected_revision)
         except EventStoreLockError as exc:
             raise HTTPException(503, {
