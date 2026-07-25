@@ -48,6 +48,13 @@ def test_resume_rejects_a_nonpositive_max_nodes_override(tmp_path):
         result = runner.invoke(app, ["resume", str(out), "--max-nodes", bad])
         assert result.exit_code != 0, result.output
         assert "max-nodes" in result.output.lower()
+    # `resume` is ALSO called as a plain function (test_finalization_recovery, test_stop_finalize_resume).
+    # There an omitted `max_nodes` is Typer's OptionInfo sentinel, not None, so the guard must key on
+    # "is a real int" — otherwise it either crashes on the comparison or assigns the sentinel as a budget.
+    from looplab.cli import run_cmds
+    import inspect
+    sentinel = inspect.signature(run_cmds.resume).parameters["max_nodes"].default
+    assert not isinstance(sentinel, int), "expected a Typer OptionInfo default, not a plain int"
 
 
 def test_run_refuses_a_different_task_in_an_existing_run_dir(tmp_path):

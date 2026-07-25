@@ -640,10 +640,14 @@ def resume(
         data = json.loads(snap.read_text(encoding="utf-8"))
         settings = settings_from_snapshot(data)
     # Settings.max_nodes carries ge=1, but assignment validation is disabled (flat-settings/snapshot
-    # design), so this direct override would silently accept 0/negative and then append resume/reopen
-    # work that can only finish immediately. Enforce the field's own floor here, before `_engine` and
-    # before any lifecycle event (`run` validates the same 1<= bound on the fresh path).
-    if max_nodes is not None:
+    # design), so a direct override would silently accept 0/negative and then append resume/reopen work
+    # that can only finish immediately. Enforce the field's own floor here, before `_engine` and before
+    # any lifecycle event (`run` validates the same 1<= bound on the fresh path).
+    # `resume` is ALSO called directly as a plain function (tests/test_finalization_recovery.py,
+    # tests/test_stop_finalize_resume.py), where an omitted `max_nodes` is Typer's `OptionInfo` sentinel
+    # rather than None — so gate on "is a real int", not on "is not None". That keeps the sentinel from
+    # being assigned as a bogus budget the way the previous `is not None` check did.
+    if isinstance(max_nodes, int) and not isinstance(max_nodes, bool):
         if max_nodes < 1:
             raise typer.BadParameter("--max-nodes must be >= 1")
         settings.max_nodes = max_nodes
