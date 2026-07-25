@@ -283,3 +283,36 @@ def test_repo_eval_protects_every_reader_path(tmp_path):
     # every file-based reader (primary + aux metric + constraint + cross-check) is now forge-proof
     for p in ("out/metric.json", "out/aux.json", "out/lat.json", "out/cross.json"):
         assert p in protected, f"{p} not protected: {protected}"
+
+
+def test_eval_spec_rejects_nonfinite_tolerance_and_non_numeric_constraint_bounds():
+    """Operator-authored EvalSpec must fail at ADMISSION, not mid-eval.
+
+    `check_constraints` compares a read float straight against `c["max"]`/`c["min"]`, and
+    `_evaluate` catches only `GpuPinUnenforceable` — so a string bound raised a TypeError that
+    escaped the eval worker, cancelled the whole eval batch with NO terminal event for the node,
+    and re-raised on every resume, wedging the run. A NaN `drift_tolerance` is the opposite
+    failure: every `<= tol` comparison is False, so the Phase-4 drift cross-check silently stops
+    corroborating — fail-OPEN on the exact trust boundary it exists to enforce.
+    """
+    import pytest
+    from pydantic import ValidationError
+    from looplab.adapters.repo_task import EvalSpec
+
+    base = {"command": ["python", "train.py"]}
+    for bad in (float("nan"), float("inf"), float("-inf"), -5.0):
+        with pytest.raises(ValidationError):
+            EvalSpec(**base, drift_tolerance=bad)
+    for bad in ("100", True, float("nan"), None if False else float("inf")):
+        with pytest.raises(ValidationError):
+            EvalSpec(**base, constraints=[
+                {"name": "lat", "kind": "stdout_json", "key": "l", "max": bad}])
+        with pytest.raises(ValidationError):
+            EvalSpec(**base, constraints=[
+                {"name": "lat", "kind": "stdout_json", "key": "l", "min": bad}])
+
+    # honest specs are untouched, including an absent bound and a zero tolerance
+    ok = EvalSpec(**base, drift_tolerance=0.0, constraints=[
+        {"name": "lat", "kind": "stdout_json", "key": "l", "max": 100},
+        {"name": "mem", "kind": "stdout_json", "key": "m"}])
+    assert ok.drift_tolerance == 0.0 and len(ok.constraints) == 2

@@ -123,9 +123,9 @@ class EvalSpec(BaseModel):
     # When it can't corroborate the frozen adapter within `drift_tolerance`, the metric is
     # discarded and a `spec_drift` event is recorded. None disables the check.
     cross_check: Optional[dict] = None
-    # CODEX AGENT: validate this and every constraint min/max as finite non-negative numbers at task
-    # admission. `NaN` makes drift/constraint comparisons false (fail-open), a negative tolerance
-    # rejects equal metrics, and string bounds escape later as a batch-cancelling TypeError.
+    # Validated below as a finite non-negative number: `NaN` makes every drift comparison False
+    # (fail-OPEN — the drift cross-check silently stops corroborating), and a negative tolerance
+    # rejects even identical metrics. See `_finite_non_negative_tolerance`.
     drift_tolerance: float = 1e-6
     # Multi-objective (#5). `metrics`: extra named readers reported alongside the primary
     # (audit/observability), e.g. {"latency_ms": {"kind": "stdout_json", "key": "latency"}}.
@@ -134,6 +134,41 @@ class EvalSpec(BaseModel):
     # "optimize the metric subject to latency_ms <= 100". Operator-owned (trust boundary).
     metrics: dict[str, dict] = Field(default_factory=dict)
     constraints: list[dict] = Field(default_factory=list)
+
+    @field_validator("drift_tolerance")
+    @classmethod
+    def _finite_non_negative_tolerance(cls, v):
+        # A NaN tolerance makes `abs(a - b) <= tol` False for EVERY pair, so the Phase-4 drift
+        # cross-check silently stops corroborating (fail-open on the exact trust boundary it exists
+        # to enforce); a negative one rejects even identical metrics. Reject at task admission —
+        # `EvalSpec` is operator-authored, so this is a clear config error, not untrusted input.
+        import math
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+            raise ValueError("drift_tolerance must be a finite number")
+        if float(v) < 0:
+            raise ValueError("drift_tolerance must be >= 0")
+        return float(v)
+
+    @field_validator("constraints")
+    @classmethod
+    def _finite_constraint_bounds(cls, v):
+        # `check_constraints` compares a read float against `c["max"]`/`c["min"]` directly, and
+        # `_evaluate` catches only GpuPinUnenforceable — so a string bound raises TypeError
+        # ("'>' not supported between 'float' and 'str'") that escapes the eval worker, cancels the
+        # whole eval batch with NO terminal event for the node, and re-raises on every resume,
+        # wedging the run permanently. A bool is an int in Python and would silently mean 0/1.
+        import math
+        for c in (v or []):
+            if not isinstance(c, dict):
+                raise ValueError("each constraint must be an object")
+            for bound in ("min", "max"):
+                b = c.get(bound)
+                if b is None:
+                    continue
+                if isinstance(b, bool) or not isinstance(b, (int, float)) or not math.isfinite(float(b)):
+                    raise ValueError(
+                        f"constraint {c.get('name', '?')!r} {bound} must be a finite number")
+        return v
 
     @field_validator("metric")
     @classmethod
