@@ -91,6 +91,11 @@ override per stage — recognized keys are `propose`, `implement`, `repair`, `st
 export LOOPLAB_AGENT_STAGE_MODELS='{"implement":"qwen3-coder:30b","repair":"qwen3-coder:30b"}'
 ```
 
+Each property resolves on its own, stage map first, then the per-role field, then the shared
+default — so a stage that overrides only the endpoint keeps its role's model and its role's
+temperature. `implement` and `repair` are genuinely independent stages: give them different models
+and the repair stage runs on its own Developer instead of sharing the implement one.
+
 ## External coding agents
 
 The Developer role can be delegated to an external terminal coding agent. LoopLab runs it headless

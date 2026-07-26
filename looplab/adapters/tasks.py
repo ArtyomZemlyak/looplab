@@ -520,24 +520,55 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     researcher, developer = make_roles(task, split, run_dir)   # H3 per-role models applied inside
 
     cache: dict = {}
-    def client_for(model, base):
-        key = (model or settings.llm_model, base or settings.llm_base_url)
-        if key not in cache:
-            cache[key] = make_llm_client(settings, model=model, base_url=base)
-        return cache[key]
+    def client_for(target):
+        # Keyed on the FULL resolved target, not just (model, base_url): two stages can share an
+        # endpoint and differ only in sampling temperature, and collapsing those into one client
+        # would silently hand one stage the other's temperature.
+        if target not in cache:
+            model, base, temp = target
+            cache[target] = make_llm_client(settings, model=model, base_url=base, temperature=temp)
+        return cache[target]
 
     stage_models = settings.agent_stage_models or {}
     stage_urls = settings.agent_stage_base_urls or {}
-    # CODEX AGENT: implement and repair share one mutable Developer object, so the second override
-    # replaces the first and both stages use the repair client. Give each stage an immutable role/client
-    # wrapper instead of mutating a shared instance during unified-agent construction.
-    def maybe_override(stage, role):
+
+    def stage_target(stage, role_model, role_url, role_temp):
+        """What rebinding `stage` would resolve to, or None when the operator asked for nothing and
+        the role keeps the client `make_roles` already gave it.
+
+        Precedence is stage map > per-role field > shared default, applied to each property on its
+        own: a stage that overrides only the endpoint keeps its ROLE's model (it used to fall all the
+        way back to `llm_model`, quietly discarding `developer_model`). Temperature has no stage map
+        because it follows the ROLE — but it has to be threaded through here, since rebinding a stage
+        rebuilds the client and the old rebuild dropped it, resetting the stage to `llm_temperature`
+        even though the operator had set `developer_temperature`."""
         m, u = stage_models.get(stage), stage_urls.get(stage)
-        if (m or u) and role is not None:
-            _set_role_client(role, client_for(m, u))
-    maybe_override("propose", researcher)
-    maybe_override("implement", developer)
-    maybe_override("repair", developer)   # repair shares the developer object
+        if not (m or u):
+            return None
+        return (m or role_model or settings.llm_model,
+                u or role_url or settings.llm_base_url,
+                role_temp if role_temp is not None else settings.llm_temperature)
+
+    t_propose = stage_target("propose", settings.researcher_model, settings.researcher_base_url,
+                             settings.researcher_temperature)
+    t_implement = stage_target("implement", settings.developer_model, settings.developer_base_url,
+                               settings.developer_temperature)
+    t_repair = stage_target("repair", settings.developer_model, settings.developer_base_url,
+                            settings.developer_temperature)
+    if t_propose is not None and researcher is not None:
+        _set_role_client(researcher, client_for(t_propose))
+    if t_implement is not None and developer is not None:
+        _set_role_client(developer, client_for(t_implement))
+    # The repair stage gets its OWN Developer exactly when it resolves somewhere else than implement.
+    # Both stages used to share one mutable object, so the second `_set_role_client` overwrote the
+    # first: setting both stages ran BOTH on the repair model, and setting only `repair` dragged the
+    # untouched implement stage along with it. A rebuild via `make_roles` (not `copy.copy`) is what
+    # keeps them independent — a shallow copy would share the mutable audit state the orchestrator
+    # reads after every call. Equal targets keep the historical single-object path byte for byte.
+    repair_developer = None
+    if t_repair is not None and t_repair != t_implement:
+        repair_developer = make_roles(task, split, run_dir)[1]
+        _set_role_client(repair_developer, client_for(t_repair))
 
     # Strategy stage: mirror cli._engine's strategist wiring exactly (off => None => no strategy
     # events => byte-parity with split mode when agent_drives_actions is also off) — INCLUDING
@@ -554,7 +585,10 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
 
     # Pilot stage: its own client + read-only run-introspection tools for self-driving the next
     # macro action (only consulted when agent_drives_actions is on, gated by legal_actions).
-    pilot_client = client_for(stage_models.get("pilot"), stage_urls.get("pilot"))
+    # The pilot is not a per-role field's stage, so its target is just stage map > shared default.
+    pilot_client = client_for((stage_models.get("pilot") or settings.llm_model,
+                               stage_urls.get("pilot") or settings.llm_base_url,
+                               settings.llm_temperature))
     pilot_tools = None
     if getattr(settings, "researcher_tools", True):
         # The pilot self-drives the next action AND triages crashes; give it BOTH run-introspection
@@ -568,6 +602,7 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
     from looplab.agents.agent import loop_opts_from_settings
     return UnifiedAgent(researcher=researcher, developer=developer, strategist=strategist,
+                        repair_developer=repair_developer,
                         pilot_client=pilot_client, pilot_tools=pilot_tools,
                         stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None),
                         agent_max_turns=getattr(settings, "agent_max_turns", 0),

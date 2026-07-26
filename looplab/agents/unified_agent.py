@@ -29,10 +29,12 @@ from looplab.core.prompts import render
 class UnifiedAgent(WrapsDeveloper):
     """Facade composing per-stage role backends behind one identity.
 
-    `researcher` drives `propose` (an Idea), `developer` drives `implement`/`repair` (code),
-    `strategist` drives `decide` (a Strategy at meta-cadence). `pilot_client`/`pilot_tools`
-    drive `choose_action` (the next macro action). Each backend is already bound to its own
-    per-stage client (H3), so `propose` and `implement` can run on different models.
+    `researcher` drives `propose` (an Idea), `developer` drives `implement` (and `repair`, unless
+    `repair_developer` is given), `strategist` drives `decide` (a Strategy at meta-cadence).
+    `pilot_client`/`pilot_tools` drive `choose_action` (the next macro action). Each backend is
+    already bound to its own per-stage client (H3), so `propose` and `implement` can run on
+    different models — and `repair` gets its own Developer object rather than sharing (and
+    overwriting) the implement one when the two stages are pointed at different models.
 
     Developer-facing forwarding (brief/is_code_generating/client/last_report/audit_extra and
     per-call files/deletions/footprint)
@@ -44,21 +46,29 @@ class UnifiedAgent(WrapsDeveloper):
     # binds on the instance instead of pushing into the internal developer.
     prompts = None
 
-    # Delegation target for the WrapsDeveloper forwarders: the (possibly wrapped) internal
-    # developer — while `inner` (set in __init__) exposes the fully-unwrapped probe developer.
+    # Delegation target for the WrapsDeveloper forwarders: the (possibly wrapped) internal developer
+    # the most recent code-producing call actually ran on — while `inner` (set in __init__) exposes
+    # the fully-unwrapped probe developer. It is `self.developer` throughout unless the operator gave
+    # implement and repair DIFFERENT stage models, in which case repair runs on its own object and
+    # every forwarder (last_files via _sync_audit, last_report, audit_extra, client) has to describe
+    # the call that happened — otherwise the orchestrator writes the other stage's files to the node.
     @property
     def _wrapped(self):
-        return self.developer
+        return self._active_developer
 
     def __init__(self, *, researcher, developer, strategist=None,
                  pilot_client=None, pilot_tools=None, stage_clients=None, prompts=None,
                  agent_max_turns: int = 0, agent_time_budget_s: float = 0.0,
-                 loop_opts: Optional[dict] = None):
+                 loop_opts: Optional[dict] = None, repair_developer=None):
         # Internal per-stage backends. Named `researcher`/`developer`/`strategist` (not _-prefixed)
         # so the engine's cost roll-up walk (_emit_llm_cost) descends into them and finds every
         # per-stage CostAccountant.
         self.researcher = researcher
         self.developer = developer
+        # Same rule for the repair stage's own Developer: PUBLIC so the roll-up walk finds its
+        # accountant (`costs._CHILD_ATTRS` names it). None = repair shares `developer`, the default.
+        self.repair_developer = repair_developer
+        self._active_developer = developer
         self.strategist = strategist
         self._pilot_client = pilot_client
         self._pilot_tools = pilot_tools
@@ -100,29 +110,40 @@ class UnifiedAgent(WrapsDeveloper):
         return self.researcher.propose(state, parent)
 
     # ----------------------------------------------------------- Developer
+    def _for_stage(self, stage: str):
+        """The Developer object a code stage runs on, and the delegate the forwarders describe until
+        the next call. `repair_developer` is None in the default posture, so both stages resolve to
+        the same object and this is exactly the historical single-developer path."""
+        dev = (self.repair_developer or self.developer) if stage == "repair" else self.developer
+        self._active_developer = dev
+        return dev
+
     def implement(self, idea: Idea) -> str:
-        code = self.developer.implement(idea)
+        code = self._for_stage("implement").implement(idea)
         self._sync_audit()
         return code
 
     def implement_from(self, idea: Idea, parent) -> str:
         """Parent-aware implement: delegate when the inner developer supports it (repo tasks), so an
         improve patches the parent's solution instead of regenerating from the baseline."""
-        impl = getattr(self.developer, "implement_from", None)
-        code = impl(idea, parent) if callable(impl) else self.developer.implement(idea)
+        dev = self._for_stage("implement")
+        impl = getattr(dev, "implement_from", None)
+        code = impl(idea, parent) if callable(impl) else dev.implement(idea)
         self._sync_audit()
         return code
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
-        rep = getattr(self.developer, "repair", None)
-        out = rep(idea, code, error) if callable(rep) else self.developer.implement(idea)
+        dev = self._for_stage("repair")
+        rep = getattr(dev, "repair", None)
+        out = rep(idea, code, error) if callable(rep) else dev.implement(idea)
         self._sync_audit()
         return out
 
     def repair_from(self, idea: Idea, node, error: str) -> str:
         """Node-aware repair: delegate to the inner developer's repair_from (seeds the failing node's
         OWN files) when available, else the plain repair(idea, node.code, error)."""
-        rf = getattr(self.developer, "repair_from", None)
+        dev = self._for_stage("repair")
+        rf = getattr(dev, "repair_from", None)
         out = (rf(idea, node, error) if callable(rf)
                else self.repair(idea, getattr(node, "code", ""), error))
         self._sync_audit()

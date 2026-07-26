@@ -36,8 +36,12 @@ _OUTBOX_VERSION = 1
 _ROOT_ATTRS = ("researcher", "developer", "strategist", "deep_researcher",
                "report_writer", "onboarder", "_role_pool")
 _CHILD_ATTRS = (
-    "client", "inner", "fallback", "researcher", "developer", "strategist", "tools",
-    "_pilot_client", "summary_client", "loop_opts", "_loop_opts", "stage_clients", "providers",
+    # `repair_developer`: the repair stage gets its OWN Developer when the operator points it at a
+    # different model than implement — a second CostAccountant the walk would otherwise never reach,
+    # so every repair call would be spent but unbilled.
+    "client", "inner", "fallback", "researcher", "developer", "repair_developer", "strategist",
+    "tools", "_pilot_client", "summary_client", "loop_opts", "_loop_opts", "stage_clients",
+    "providers",
 )
 
 

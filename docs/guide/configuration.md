@@ -209,8 +209,8 @@ Developer, a fast model for breadth). Blank values fall back to the shared `llm_
 | `researcher_model` / `developer_model` | `LOOPLAB_RESEARCHER_MODEL` / `LOOPLAB_DEVELOPER_MODEL` | — / — | Per-role model id (blank = shared `llm_model`) |
 | `researcher_base_url` / `developer_base_url` | `LOOPLAB_RESEARCHER_BASE_URL` / `LOOPLAB_DEVELOPER_BASE_URL` | — / — | Per-role endpoint (blank = shared `llm_base_url`) |
 | `researcher_temperature` / `developer_temperature` / `strategist_temperature` | `LOOPLAB_RESEARCHER_TEMPERATURE` / `LOOPLAB_DEVELOPER_TEMPERATURE` / `LOOPLAB_STRATEGIST_TEMPERATURE` | — | Per-role sampling temperature (blank = shared `llm_temperature`). Raise the Researcher for idea breadth, lower the Developer for code determinism. Deep-Research follows the Researcher's value |
-| `agent_stage_models` | `LOOPLAB_AGENT_STAGE_MODELS` | `{}` | Unified-agent per-stage model map (`propose`/`implement`/`repair`/`strategy`/`pilot`) |
-| `agent_stage_base_urls` | `LOOPLAB_AGENT_STAGE_BASE_URLS` | `{}` | Unified-agent per-stage endpoint map |
+| `agent_stage_models` | `LOOPLAB_AGENT_STAGE_MODELS` | `{}` | Unified-agent per-stage model map (`propose`/`implement`/`repair`/`strategy`/`pilot`). Only takes effect when `unified_agent` is on. `implement` and `repair` are independent: pointing them at different models gives the repair stage its own Developer |
+| `agent_stage_base_urls` | `LOOPLAB_AGENT_STAGE_BASE_URLS` | `{}` | Unified-agent per-stage endpoint map. Same precedence rule: stage map > per-role field > shared default, per property — so a stage that overrides only the endpoint keeps its role's model and temperature |
 
 See [LLM & coding agents](llm-and-agents.md) for full guidance.
 
