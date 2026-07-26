@@ -153,6 +153,7 @@ _LAYOUT = {
     "models": "core",
     "notebook": "runtime",
     "node_build": "engine",
+    "node_evidence": "core",
     "novelty": "engine",
     "operators": "search",
     "options": "engine",
