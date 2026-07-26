@@ -724,12 +724,15 @@ def loop_opts_from_settings(settings) -> dict:
     # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP
     # summarizer for history compression, instead of paying the main model for it. Blank = the
     # loop's own client (byte-identical legacy behavior).
-    if g(settings, "compressor_model", None):
-        from looplab.core.llm import make_llm_client_for
+    from looplab.core.llm import make_llm_client_for, role_profile
+    # Gated on a compressor model being configured AT ALL — by the legacy field or by a profile bound
+    # to the role. Gating on the field alone meant `role_profiles={"compressor": ...}` naming a
+    # complete connection validated, passed the startup credential check, and then never built a
+    # client: every compression kept paying the main model.
+    if g(settings, "compressor_model", None) or role_profile(settings, "compressor").get("model"):
         try:
-            # Role-resolved, so the compressor can sit on its own provider WITH its own credential
-            # (role_profiles["compressor"]); its own fields still win, so this is the same client as
-            # before for anyone not using profiles.
+            # Role-resolved, so the compressor can sit on its own provider WITH its own credential;
+            # its own fields still win, so this is the same client as before without profiles.
             opts["summary_client"] = make_llm_client_for(settings, role="compressor")
         except Exception:  # noqa: BLE001 — a bad compressor config degrades to the main client
             pass

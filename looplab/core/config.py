@@ -27,12 +27,12 @@ _LL_HOME = Path.home() / ".looplab"
 # What one `llm_profiles` entry may contain. Deliberately closed: an unrecognized field is a typo the
 # operator would otherwise never see fail, and the map is a public artifact (config.snapshot.json,
 # HTTP, LOOPLAB_*), so it must never accrete free-form keys.
-_PROFILE_FIELDS = frozenset({"model", "base_url", "temperature", "api_key_env", "provider"})
+_PROFILE_FIELDS = frozenset({"model", "base_url", "temperature", "api_key_env"})
 # A variable name that `runtime/sandbox.py::SECRET_ENV` will recognize as holding a secret and strip
 # from generated code's environment. Duplicated here, not imported: layering forbids `core` from
 # importing `runtime`. `tests/test_secret_env_pattern.py` holds the two in agreement.
 _SECRET_ENV_NAME = re.compile(
-    r"^(?=[A-Z][A-Z0-9_]{0,63}$)(?=.*(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)).*$")
+    r"\A(?=[A-Z][A-Z0-9_]{0,63}\Z)(?=.*(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)).*\Z")
 
 
 def _is_numeric_annotation(ann) -> bool:
@@ -1333,17 +1333,19 @@ class Settings(BaseSettings):
         for name, entry in self.llm_profiles.items():
             if not isinstance(entry, dict):
                 raise ValueError(f"llm_profiles[{name!r}] must be an object")
-            unknown = set(entry) - _PROFILE_FIELDS
-            if unknown:
-                raise ValueError(
-                    f"llm_profiles[{name!r}] has unknown field(s) {sorted(unknown)}; "
-                    f"known: {sorted(_PROFILE_FIELDS)}")
+            # BEFORE the unknown-field check: none of these is a known field, so checking them
+            # afterwards could never fire and someone who pasted a live key was told it was a typo.
             for banned in ("api_key", "key", "token", "secret"):
                 if banned in entry:
                     raise ValueError(
                         f"llm_profiles[{name!r}] must not contain {banned!r}: a profile stores "
                         "api_key_env (the NAME of an environment variable), never a key value — "
                         "the whole map is written to config.snapshot.json and served over HTTP")
+            unknown = set(entry) - _PROFILE_FIELDS
+            if unknown:
+                raise ValueError(
+                    f"llm_profiles[{name!r}] has unknown field(s) {sorted(unknown)}; "
+                    f"known: {sorted(_PROFILE_FIELDS)}")
             env = entry.get("api_key_env")
             if env is not None and not _SECRET_ENV_NAME.match(str(env)):
                 raise ValueError(

@@ -197,3 +197,53 @@ def test_a_role_bound_to_a_profile_gets_that_profiles_client():
     _researcher, developer = make_roles(task, s)
     assert _client_model(developer) == "big-coder"
     assert developer.client.base_url == "https://coder.tld/v1"
+
+
+# --------------------------------------------------------------------------- unified mode IS the default
+# The first cut of connection profiles converted the split-role path and left `build_unified_agent`
+# resolving by hand. Since `unified_agent` is ON by default, that made the documented example — and
+# the new strategist fields — validate, pass the startup credential check, and then do nothing.
+
+def test_a_stage_bound_to_a_profile_reaches_it_in_unified_mode():
+    agent = _unified(llm_model="shared", llm_base_url="http://shared/v1",
+                     llm_profiles={"coder": {"base_url": "https://coder.tld/v1",
+                                             "model": "big-coder"}},
+                     role_profiles={"implement": "coder", "repair": "coder"})
+    assert _client_model(agent.developer) == "big-coder"
+    assert agent.developer.client.base_url == "https://coder.tld/v1"
+
+
+def test_the_strategist_fields_work_in_unified_mode_too():
+    agent = _unified(llm_model="shared", llm_base_url="http://shared/v1",
+                     strategist_backend="llm", strategist_model="planner-70b",
+                     strategist_base_url="http://planner/v1", strategist_temperature=0.15)
+    assert agent.strategist.client.model == "planner-70b"
+    assert agent.strategist.client.base_url == "http://planner/v1"
+    assert agent.strategist.client.temperature == 0.15
+
+
+def test_llm_profile_moves_the_split_mode_roles(monkeypatch):
+    """`llm_profile` is documented as a one-line move of the whole run. The rebuild test used a
+    baseline that ALREADY had the default profile folded in, so it compared equal and moved nothing —
+    for the two roles that make nearly every call."""
+    task = load_task(ROOT / "examples" / "code_regression_task.json")
+    s = Settings(backend="llm", llm_model="shared", llm_base_url="http://shared/v1",
+                 unified_agent=False,
+                 llm_profiles={"local": {"model": "small", "base_url": "http://local/v1"}},
+                 llm_profile="local")
+    researcher, developer = make_roles(task, s)
+    assert _client_model(researcher) == "small" and _client_model(developer) == "small"
+    assert developer.client.base_url == "http://local/v1"
+
+
+def test_the_stage_client_cache_does_not_merge_two_credentials(monkeypatch):
+    """Same endpoint and model, different keys: one client would mean one role silently spending on
+    the other's account."""
+    monkeypatch.setenv("TEAM_A_API_KEY", "sk-a")
+    monkeypatch.setenv("TEAM_B_API_KEY", "sk-b")
+    agent = _unified(llm_model="m", llm_base_url="https://p/v1",
+                     llm_profiles={"a": {"api_key_env": "TEAM_A_API_KEY"},
+                                   "b": {"api_key_env": "TEAM_B_API_KEY"}},
+                     role_profiles={"implement": "a", "repair": "b"})
+    assert agent.repair_developer is not None
+    assert agent.developer.client.api_key != agent.repair_developer.client.api_key

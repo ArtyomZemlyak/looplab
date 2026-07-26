@@ -104,7 +104,8 @@ existed it always ran on the shared `llm_model` however the other roles were poi
 Per-role *models* alone cannot express per-role *credentials* — two roles on the same provider may
 need different keys or budgets — so a role can instead point at a named **connection profile**
 carrying a model, an endpoint, a temperature and the NAME of the environment variable holding its
-key. Skip this entirely if you run one model; see
+key. The key travels only with the endpoint the profile named — overriding a role's endpoint
+drops it rather than sending one provider's secret to another host. Skip this entirely if you run one model; see
 [Configuration → Connection profiles](configuration.md#connection-profiles-only-needed-with-more-than-one-provider)
 for the fields, the full precedence table and the safety rules.
 

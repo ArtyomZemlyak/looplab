@@ -364,7 +364,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # `llm_model` no matter how the other roles were pointed. Blank fields resolve back to the
         # shared values, so a run that sets neither is unchanged.
         from looplab.core.llm import make_llm_client_for
-        strat_client = (make_llm_client_for(settings, role="strategist")
+        # `factory=make_llm_client` is this MODULE's name, which tests and operator tooling
+        # monkeypatch; building through core's own binding instead would route past that seam.
+        strat_client = (make_llm_client_for(settings, role="strategist",
+                                            factory=make_llm_client)
                         if settings.backend == "llm" and settings.strategist_backend in ("llm", "agent")
                         else None)
         from looplab.adapters.tasks import build_strategist_tools

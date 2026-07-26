@@ -29,7 +29,7 @@ _PROFILES = {
 def test_bare_settings_resolve_every_role_to_the_shared_values():
     """The one-model operator must not be able to tell that profiles exist."""
     s = Settings(llm_model="shared", llm_base_url="http://shared/v1", llm_temperature=0.6)
-    shared = LlmTarget("shared", "http://shared/v1", 0.6, None, None)
+    shared = LlmTarget("shared", "http://shared/v1", 0.6, None)
     assert resolve_llm_target(s) == shared
     for role in LLM_ROLE_KEYS:
         assert resolve_llm_target(s, role=role) == shared, role
@@ -90,8 +90,8 @@ def test_llm_profile_moves_every_unbound_role_at_once():
 
 def test_two_roles_on_one_endpoint_with_different_keys_are_different_targets():
     """The reason the credential belongs to the PROFILE and not to the endpoint: a key map keyed by
-    URL could not express this at all. LlmTarget doubles as the client cache key, so these must not
-    compare equal — collapsing them would hand one role the other's credential."""
+    URL could not express this at all. LlmTarget IS the client cache key, so these must not compare
+    equal — collapsing them would hand one role the other's credential."""
     profiles = {
         "a": {"base_url": "https://p/v1", "model": "m", "api_key_env": "TEAM_A_API_KEY"},
         "b": {"base_url": "https://p/v1", "model": "m", "api_key_env": "TEAM_B_API_KEY"},
@@ -187,18 +187,92 @@ def test_an_old_snapshot_without_the_new_fields_still_loads():
     assert restored.llm_profile is None and restored.strategist_model is None
 
 
+# --------------------------------------------------------------------------- the endpoint owns the key
+def test_a_credential_never_follows_an_endpoint_the_profile_did_not_name():
+    """SECURITY. Resolving the key independently of the endpoint meant a `<role>_base_url` or a stage
+    map could redirect the request while keeping the profile's key — putting a live secret in an
+    Authorization header to a host it was never issued for."""
+    s = Settings(llm_base_url="https://shared.tld/v1", developer_base_url="https://internal.local/v1",
+                 llm_profiles={"paid": {"base_url": "https://paid.tld/v1", "model": "big",
+                                        "api_key_env": "PAID_API_KEY"}},
+                 llm_profile="paid")
+    redirected = resolve_llm_target(s, role="developer")
+    assert redirected.base_url == "https://internal.local/v1"
+    assert redirected.api_key_env is None                  # was PAID_API_KEY
+    # A role left on the profile's own endpoint still gets its key.
+    assert resolve_llm_target(s, role="researcher").api_key_env == "PAID_API_KEY"
+
+
+def test_a_profile_without_an_endpoint_keeps_its_key_on_the_shared_one():
+    """The two-roles-one-provider-two-keys case: the profile names no endpoint, so the shared one IS
+    the endpoint it stands for and the key must still apply."""
+    s = Settings(llm_base_url="https://shared.tld/v1",
+                 llm_profiles={"team_a": {"api_key_env": "TEAM_A_API_KEY"}},
+                 role_profiles={"researcher": "team_a"})
+    t = resolve_llm_target(s, role="researcher")
+    assert t.base_url == "https://shared.tld/v1" and t.api_key_env == "TEAM_A_API_KEY"
+
+
+def test_the_preflight_demands_exactly_the_keys_the_clients_will_ask_for(monkeypatch):
+    """Reading `role_profiles` raw made it abort a run over a credential no client resolves to."""
+    monkeypatch.delenv("PAID_API_KEY", raising=False)
+    s = Settings(backend="llm", llm_base_url="https://shared.tld/v1",
+                 developer_base_url="https://internal.local/v1",
+                 llm_profiles={"paid": {"base_url": "https://paid.tld/v1",
+                                        "api_key_env": "PAID_API_KEY"}},
+                 role_profiles={"developer": "paid"})
+    validate_bound_profiles(s)                             # the key is never used -> not demanded
+
+
 # --------------------------------------------------------------------------- the registry
-def test_every_role_key_has_a_reader_and_every_reader_is_registered():
-    """Two-way source scan, the discipline this project already applies to its other duck-typed
-    seams: a name in the registry with nothing reading it is a setting that silently does nothing,
-    and a `role=` string nobody registered is rejected at config time for no reason."""
-    sources = [p.read_text(encoding="utf-8") for p in (ROOT / "looplab").rglob("*.py")]
-    blob = "\n".join(sources)
-    used = set(re.findall(r'role=["\']([a-z_]+)["\']', blob))
-    unread = {k for k in LLM_ROLE_KEYS if k not in used}
-    # The five unified-agent STAGE names are read through `stage=`/the stage maps, not `role=`.
-    assert unread <= {"propose", "implement", "repair", "strategy", "pilot"}, unread
-    unregistered = {r for r in used if r in {"researcher", "developer", "strategist", "compressor",
-                                             "embed", "propose", "implement", "repair", "strategy",
-                                             "pilot"}} - set(LLM_ROLE_KEYS)
-    assert not unregistered, unregistered
+def _role_literals() -> set[str]:
+    return set(re.findall(r'role=["\']([a-z_]+)["\']',
+                          "\n".join(p.read_text(encoding="utf-8")
+                                    for p in (ROOT / "looplab").rglob("*.py"))))
+
+
+def test_every_role_key_has_a_reader():
+    """Two-way source scan, the discipline this project applies to its other duck-typed seams. It
+    has NO exemptions: the first version excused the five stage names as "read through `stage=`",
+    which was not true of any line in the tree — so the registry certified as wired exactly the names
+    that did nothing, and the bug shipped green."""
+    unread = {k for k in LLM_ROLE_KEYS if k not in _role_literals()}
+    assert not unread, f"role keys nothing resolves: {sorted(unread)}"
+
+
+def test_no_reader_resolves_a_role_the_registry_does_not_know():
+    """The reverse half. It must compare against the SOURCE, not against a hand-copied duplicate of
+    the registry — the first version filtered candidates through a literal set identical to
+    LLM_ROLE_KEYS, so the subtraction was empty by construction and a new unregistered reader could
+    never trip it."""
+    known_settings_roles = {"researcher", "developer", "strategist", "compressor", "embed",
+                            "propose", "implement", "repair", "strategy", "pilot"}
+    assert known_settings_roles == set(LLM_ROLE_KEYS)      # the doc'd list and the registry agree
+    # Any `role=` literal that names a Settings-ish role must be registered. Unrelated `role=` kwargs
+    # elsewhere in the tree (tool providers, ARIA attributes) are excluded by the field-name test.
+    for name in _role_literals():
+        if any(hasattr(Settings, f"{name}_model") for _ in (0,)) and name not in LLM_ROLE_KEYS:
+            raise AssertionError(f"{name!r} is resolved as a role but is not in LLM_ROLE_KEYS")
+
+
+def test_every_role_field_name_exists_on_settings():
+    """`_ROLE_FIELDS` is read with a DEFAULTED getattr, so a renamed Settings field would not raise —
+    the role would just quietly fall back to the shared values."""
+    from looplab.core.llm import _ROLE_FIELDS
+    for role, fields in _ROLE_FIELDS.items():
+        for field in fields:
+            if field is not None:
+                assert field in Settings.model_fields, f"{role} -> {field}"
+
+
+def test_every_profile_field_is_read_by_the_resolver():
+    """A validated field with no reader is the same silent no-op the closed allow-list exists to
+    prevent — `provider` was accepted, documented and snapshotted while nothing ever looked at it."""
+    from looplab.core.config import _PROFILE_FIELDS
+    profile = {"model": "m", "base_url": "http://b/v1", "temperature": 0.25,
+               "api_key_env": "X_API_KEY"}
+    assert set(profile) == set(_PROFILE_FIELDS)
+    s = Settings(llm_profiles={"p": profile}, role_profiles={"researcher": "p"})
+    t = resolve_llm_target(s, role="researcher")
+    assert (t.model, t.base_url, t.temperature, t.api_key_env) == (
+        "m", "http://b/v1", 0.25, "X_API_KEY")

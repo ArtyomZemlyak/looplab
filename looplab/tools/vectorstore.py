@@ -9,6 +9,7 @@ tests; production embeddings go through LiteLLM (`ollama/nomic-embed-text`).
 """
 from __future__ import annotations
 
+import os
 import hashlib
 import http.client
 import json
@@ -135,28 +136,36 @@ def make_embedder(settings) -> Callable[[str], Vector]:
     `embed_model` is set — byte-identical to prior behavior — else an `LLMEmbedder` over the
     configured endpoint (falling back to `embed_base_url` or the shared `llm_base_url`). Never raises:
     a misconfigured/offline endpoint degrades to `hash_embed` at call time (see `LLMEmbedder`)."""
-    model = getattr(settings, "embed_model", None)
+    # An embeddings endpoint is very often a DIFFERENT provider from the chat model, which is why the
+    # whole connection is resolved as one: taking only the profile's KEY while keeping the endpoint
+    # from `embed_base_url`/`llm_base_url` put one provider's live secret in an Authorization header
+    # to another provider's host. `resolve_llm_target` binds the credential to the endpoint it came
+    # with, so reading model/base_url/key off a single target cannot re-open that.
+    try:
+        from looplab.core.llm import resolve_llm_target, role_profile
+        target = resolve_llm_target(settings, role="embed")
+        profile_model = role_profile(settings, "embed").get("model")
+    except Exception:  # noqa: BLE001 — embedding must never crash a run; fall back to the raw fields
+        target, profile_model = None, None
+    # The gate stays "is an embedding model configured at all" — the resolved model can't serve as
+    # one, since it falls back to the shared chat model. A profile bound to `embed` counts, so a
+    # complete connection expressed only as a profile no longer silently leaves retrieval on
+    # `hash_embed`; blank everywhere still means the zero-dependency lexical default.
+    model = getattr(settings, "embed_model", None) or profile_model
     if not model:
         return hash_embed
-    base = getattr(settings, "embed_base_url", None) or getattr(settings, "llm_base_url", "") or ""
+    if target is not None:
+        base = target.base_url
+    else:
+        base = getattr(settings, "embed_base_url", None) or getattr(settings, "llm_base_url", "") or ""
     key = getattr(settings, "llm_api_key", None)
     try:
         key = key.get_secret_value() if key is not None and hasattr(key, "get_secret_value") else (key or "x")
     except Exception:
         key = "x"
-    # An embeddings endpoint is very often a DIFFERENT provider from the chat model, so the shared
-    # `llm_api_key` was the wrong credential to hardcode here. A profile bound to the `embed` role
-    # supplies its own (model/base_url still come from the fields above, which win over a profile).
-    # Best-effort like the rest of this function: embedding must never crash a run, and an
-    # unresolvable key just leaves the shared one in place for the endpoint to reject or ignore.
-    try:
-        import os
-
-        from looplab.core.llm import resolve_llm_target
-        env = resolve_llm_target(settings, role="embed").api_key_env
-        key = os.environ.get(env) or key if env else key
-    except Exception:  # noqa: BLE001
-        pass
+    env = target.api_key_env if target is not None else None
+    if env:
+        key = os.environ.get(env) or key
     return LLMEmbedder(model, base_url=base, api_key=key)
 
 

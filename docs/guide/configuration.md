@@ -63,7 +63,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
 server-owned curated catalogue with **158 of the 192 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 156 catalogued keys.
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 158 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
 
@@ -220,7 +220,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 Skip this section if you run one model: keep setting `llm_model`, `llm_base_url` and the single
 `LOOPLAB_LLM_API_KEY`, and nothing below changes anything.
 
-A **profile** is a named connection — `{model, base_url, temperature, api_key_env, provider}` —
+A **profile** is a named connection — `{model, base_url, temperature, api_key_env}` —
 that roles point at by name. It exists because per-role *models* alone cannot express per-role
 *credentials*: two roles on the same provider may need different keys, budgets or subscriptions.
 
@@ -242,7 +242,7 @@ export LOOPLAB_LLM_API_KEY_CODER=sk-...
 
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `llm_profiles` | `LOOPLAB_LLM_PROFILES` | `{}` | Named connections: `name -> {model, base_url, temperature, api_key_env, provider}`. `api_key_env` is a variable NAME, never a key. Empty = no profiles, everything as before |
+| `llm_profiles` | `LOOPLAB_LLM_PROFILES` | `{}` | Named connections: `name -> {model, base_url, temperature, api_key_env}`. `api_key_env` is a variable NAME, never a key. Empty = no profiles, everything as before |
 | `role_profiles` | `LOOPLAB_ROLE_PROFILES` | `{}` | `role -> profile name`. Valid roles are `propose`, `implement`, `repair`, `strategy`, `pilot`, `researcher`, `developer`, `strategist`, `compressor`, `embed`; an unknown role or a missing profile fails loudly at startup |
 | `llm_profile` | `LOOPLAB_LLM_PROFILE` | — | The profile every unbound role uses — a one-line move of the whole run to another provider |
 
@@ -253,7 +253,7 @@ export LOOPLAB_LLM_API_KEY_CODER=sk-...
 | model | `agent_stage_models[stage]` → `<role>_model` → profile `model` → `llm_model` |
 | endpoint | `agent_stage_base_urls[stage]` → `<role>_base_url` → profile `base_url` → `llm_base_url` |
 | temperature | `<role>_temperature` → profile `temperature` → `llm_temperature` |
-| credential | profile `api_key_env` (read from the environment) → `llm_api_key` |
+| credential | profile `api_key_env` (read from the environment) → `llm_api_key`. **Not** independent: the profile's key travels only while the endpoint is still the one that profile would have used, so a `<role>_base_url` or stage-map override drops it rather than sending one provider's secret to another host |
 
 The stage maps apply only when `unified_agent` is on. A role bound to a profile whose `api_key_env`
 is unset fails **before the run's first paid call**, naming the variable and the role but never its

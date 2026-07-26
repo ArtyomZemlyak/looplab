@@ -354,7 +354,8 @@ def _agent_model(backend: str, model: str) -> str:
 # Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed
 # core symbols). Kept importable here because dozens of call sites + tests spell
 # `from looplab.adapters.tasks import make_llm_client`.
-from looplab.core.llm import make_llm_client  # noqa: E402,F401
+from looplab.core.llm import (  # noqa: E402,F401
+    LlmTarget, client_kwargs_for, make_llm_client, resolve_llm_target)
 
 
 def _memora_cache_path(settings):
@@ -519,46 +520,36 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     split = settings.model_copy(update={"unified_agent": False})
     researcher, developer = make_roles(task, split, run_dir)   # H3 per-role models applied inside
 
+    from looplab.core.llm import resolve_llm_target
+
     cache: dict = {}
-    def client_for(target):
-        # Keyed on the FULL resolved target, not just (model, base_url): two stages can share an
-        # endpoint and differ only in sampling temperature, and collapsing those into one client
-        # would silently hand one stage the other's temperature.
+    def client_for(*, role):
+        """The client for one stage, deduped on its RESOLVED target.
+
+        `LlmTarget` is the cache key rather than a locally-built (model, base_url) pair: two stages
+        can share an endpoint and differ only in temperature or in their profile's CREDENTIAL, and
+        collapsing those would hand one stage the other's key and mis-attribute its spend.
+
+        Resolution goes through `resolve_llm_target`, not a second copy of the precedence ladder. The
+        hand-rolled one this replaces never consulted `role_profiles`, so a profile bound to a stage
+        name validated, passed the startup credential check, and was then never read — in the DEFAULT
+        configuration, since `unified_agent` is on."""
+        target = resolve_llm_target(settings, role=role)
         if target not in cache:
-            model, base, temp = target
-            cache[target] = make_llm_client(settings, model=model, base_url=base, temperature=temp)
+            # Through THIS module's `make_llm_client` name: it is a documented monkeypatch seam.
+            cache[target] = make_llm_client(
+                settings, **client_kwargs_for(target, role=role))
         return cache[target]
 
-    stage_models = settings.agent_stage_models or {}
-    stage_urls = settings.agent_stage_base_urls or {}
-
-    def stage_target(stage, role_model, role_url, role_temp):
-        """What rebinding `stage` would resolve to, or None when the operator asked for nothing and
-        the role keeps the client `make_roles` already gave it.
-
-        Precedence is stage map > per-role field > shared default, applied to each property on its
-        own: a stage that overrides only the endpoint keeps its ROLE's model (it used to fall all the
-        way back to `llm_model`, quietly discarding `developer_model`). Temperature has no stage map
-        because it follows the ROLE — but it has to be threaded through here, since rebinding a stage
-        rebuilds the client and the old rebuild dropped it, resetting the stage to `llm_temperature`
-        even though the operator had set `developer_temperature`."""
-        m, u = stage_models.get(stage), stage_urls.get(stage)
-        if not (m or u):
-            return None
-        return (m or role_model or settings.llm_model,
-                u or role_url or settings.llm_base_url,
-                role_temp if role_temp is not None else settings.llm_temperature)
-
-    t_propose = stage_target("propose", settings.researcher_model, settings.researcher_base_url,
-                             settings.researcher_temperature)
-    t_implement = stage_target("implement", settings.developer_model, settings.developer_base_url,
-                               settings.developer_temperature)
-    t_repair = stage_target("repair", settings.developer_model, settings.developer_base_url,
-                            settings.developer_temperature)
-    if t_propose is not None and researcher is not None:
-        _set_role_client(researcher, client_for(t_propose))
-    if t_implement is not None and developer is not None:
-        _set_role_client(developer, client_for(t_implement))
+    # A stage keeps the client `make_roles` already gave its role unless it resolves somewhere else.
+    shared = resolve_llm_target(settings)
+    t_propose = resolve_llm_target(settings, role="propose")
+    t_implement = resolve_llm_target(settings, role="implement")
+    t_repair = resolve_llm_target(settings, role="repair")
+    if researcher is not None and t_propose != resolve_llm_target(settings, role="researcher"):
+        _set_role_client(researcher, client_for(role="propose"))
+    if developer is not None and t_implement != resolve_llm_target(settings, role="developer"):
+        _set_role_client(developer, client_for(role="implement"))
     # The repair stage gets its OWN Developer exactly when it resolves somewhere else than implement.
     # Both stages used to share one mutable object, so the second `_set_role_client` overwrote the
     # first: setting both stages ran BOTH on the repair model, and setting only `repair` dragged the
@@ -566,18 +557,16 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     # keeps them independent — a shallow copy would share the mutable audit state the orchestrator
     # reads after every call. Equal targets keep the historical single-object path byte for byte.
     repair_developer = None
-    if t_repair is not None and t_repair != t_implement:
+    if t_repair != t_implement:
         repair_developer = make_roles(task, split, run_dir)[1]
-        _set_role_client(repair_developer, client_for(t_repair))
+        _set_role_client(repair_developer, client_for(role="repair"))
 
     # Strategy stage: mirror cli._engine's strategist wiring exactly (off => None => no strategy
     # events => byte-parity with split mode when agent_drives_actions is also off) — INCLUDING
-    # strategist_temperature (built directly, not via client_for, so the per-role temp isn't a silent
-    # no-op in the default unified mode; the strategy stage rarely overrides model/url, so skipping the
-    # (model,url) cache costs at most one extra client).
-    strat_client = (make_llm_client(settings, model=stage_models.get("strategy"),
-                                    base_url=stage_urls.get("strategy"),
-                                    temperature=settings.strategist_temperature)
+    # strategist_temperature, and now `strategist_model`/`strategist_base_url` and a strategy profile,
+    # which the hand-built call here used to ignore. Since unified mode is the DEFAULT, that made
+    # those settings no-ops for almost everyone while the split-mode path honoured them.
+    strat_client = (client_for(role="strategy")
                     if settings.strategist_backend in ("llm", "agent") else None)
     strat_tools = (build_strategist_tools(task, split, run_dir)
                    if strat_client is not None and settings.strategist_backend == "agent" else None)
@@ -585,10 +574,8 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
 
     # Pilot stage: its own client + read-only run-introspection tools for self-driving the next
     # macro action (only consulted when agent_drives_actions is on, gated by legal_actions).
-    # The pilot is not a per-role field's stage, so its target is just stage map > shared default.
-    pilot_client = client_for((stage_models.get("pilot") or settings.llm_model,
-                               stage_urls.get("pilot") or settings.llm_base_url,
-                               settings.llm_temperature))
+    # The pilot has no per-role fields of its own, so it resolves stage map > profile > shared.
+    pilot_client = client_for(role="pilot")
     pilot_tools = None
     if getattr(settings, "researcher_tools", True):
         # The pilot self-drives the next action AND triages crashes; give it BOTH run-introspection
@@ -789,13 +776,19 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # own model/endpoint AND/OR sampling temperature when configured (e.g. Developer on a strong coding
     # model at a low temp, Researcher on a fast breadth model at a higher temp). A temperature-only
     # override still rebuilds the client (else it would silently no-op); model/base_url stay shared.
-    # The test is now simply "does this role resolve anywhere other than the shared client?" — one
-    # comparison that covers the per-role fields, a temperature-only override (which used to need its
-    # own clause to avoid being a silent no-op), and a connection PROFILE with its own endpoint and
-    # credential. A role that resolves to the shared target keeps the client built above, untouched.
-    from looplab.core.llm import make_llm_client_for, resolve_llm_target
-    shared = resolve_llm_target(settings)
+    # The test is "does this role resolve anywhere other than the client built above?" — one
+    # comparison covering the per-role fields, a temperature-only override (which used to need its own
+    # clause to avoid being a silent no-op), and a connection PROFILE with its own endpoint and
+    # credential. The baseline is what `make_llm_client(settings)` actually produced, i.e. the RAW
+    # shared values: resolving the baseline instead folded `llm_profile` into both sides, so the
+    # default profile could never make a role differ and "move the whole run to another provider"
+    # moved neither of the two roles that make almost every call.
+    base = LlmTarget(settings.llm_model, settings.llm_base_url, settings.llm_temperature, None)
     for _role, _obj in (("researcher", researcher), ("developer", developer)):
-        if resolve_llm_target(settings, role=_role) != shared:
-            _set_role_client(_obj, make_llm_client_for(settings, role=_role))
+        _target = resolve_llm_target(settings, role=_role)
+        if _target != base:
+            # Built through THIS module's `make_llm_client` — a documented monkeypatch seam that a
+            # helper calling core's own binding would route straight past.
+            _set_role_client(_obj, make_llm_client(
+                settings, **client_kwargs_for(_target, role=_role)))
     return researcher, developer

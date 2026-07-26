@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -1190,22 +1191,25 @@ class LiteLLMClient:
 class LlmTarget(NamedTuple):
     """Everything that decides WHICH model a role talks to, resolved and immutable.
 
-    Immutable and hashable on purpose: this doubles as the client cache key, so two roles that
-    resolve to the same endpoint share one client while two that differ in ANY property (including
-    the credential) stay separate. Keying a cache on (model, base_url) alone would silently hand one
-    role another's key and mis-attribute its spend."""
+    Immutable and hashable on purpose: this IS the client cache key (`adapters/tasks.py`), so two
+    roles resolving to the same place share one client while two that differ in ANY property —
+    including the credential — stay separate. Keying a cache on (model, base_url) alone would
+    silently hand one role another's key and mis-attribute its spend."""
     model: str
     base_url: str
     temperature: float | None
     api_key_env: str | None
-    provider: str | None
 
 
-# The role/stage names `Settings.role_profiles` accepts. REGISTRY-GUARDED, like the project's other
+# The role names `Settings.role_profiles` accepts. REGISTRY-GUARDED, like the project's other
 # duck-typed seams: `tests/test_llm_targets.py` scans the source both ways, so a name here without a
 # reader (or a reader without a name here) is a red test rather than a setting that silently does
 # nothing. `agent_stage_models`' own keys are deliberately NOT validated against this — an old run
 # resuming with a stage name we later renamed must still resume.
+#
+# The first five double as the unified agent's stage names, which is why they are resolved with
+# `role=` rather than a separate `stage=` argument: a stage IS a role here, and giving them their own
+# parameter is what let `role_profiles` bindings on them validate and then never be read.
 LLM_ROLE_KEYS = frozenset({
     # unified-agent stages
     "propose", "implement", "repair", "strategy", "pilot",
@@ -1214,7 +1218,9 @@ LLM_ROLE_KEYS = frozenset({
 })
 
 # Where a role reads its per-role model/endpoint/temperature fields from, when it has them. Absent =
-# the role has no fields of its own and resolves profile -> shared.
+# the role has no fields of its own (`pilot`) and resolves profile -> shared. Every name here is
+# checked against `Settings.model_fields` by the registry test: these are read with a defaulted
+# `getattr`, so a rename would otherwise silently degrade the role to the shared values.
 _ROLE_FIELDS: dict[str, tuple[str, str, str | None]] = {
     "propose": ("researcher_model", "researcher_base_url", "researcher_temperature"),
     "researcher": ("researcher_model", "researcher_base_url", "researcher_temperature"),
@@ -1228,34 +1234,47 @@ _ROLE_FIELDS: dict[str, tuple[str, str, str | None]] = {
 }
 
 
-def resolve_llm_target(settings, *, role: str | None = None,
-                       stage: str | None = None) -> LlmTarget:
+def role_profile(settings, role: str | None) -> dict:
+    """The connection profile a role resolves to (`role_profiles[role]`, else `llm_profile`), or {}.
+
+    Public because a caller sometimes has to ask "did the PROFILE supply this?" rather than "what did
+    it resolve to" — `make_embedder` and the history compressor are switched on by a model being
+    configured at all, and `resolve_llm_target` always returns a model (it falls back to the shared
+    one), so they cannot use the resolved value as their gate."""
+    profiles = getattr(settings, "llm_profiles", None) or {}
+    if not profiles:
+        return {}
+    name = (getattr(settings, "role_profiles", None) or {}).get(role or "")
+    if name is None:
+        name = getattr(settings, "llm_profile", None)
+    entry = profiles.get(name) if name else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def resolve_llm_target(settings, *, role: str | None = None) -> LlmTarget:
     """The ONE place that answers "which model, endpoint, temperature and key does this role use?".
 
-    Each property resolves INDEPENDENTLY, first non-empty of:
-        model        stage map > <role>_model      > profile.model       > llm_model
-        base_url     stage map > <role>_base_url   > profile.base_url    > llm_base_url
-        temperature              <role>_temperature > profile.temperature > llm_temperature
-        key                                          profile.api_key_env  > llm_api_key
+    Model, endpoint and temperature resolve INDEPENDENTLY, first non-empty of:
+        model        agent_stage_models[role] > <role>_model      > profile.model       > llm_model
+        base_url     agent_stage_base_urls[role] > <role>_base_url > profile.base_url   > llm_base_url
+        temperature                            <role>_temperature > profile.temperature > llm_temperature
 
-    "Stage beats role" is exactly the order that already worked: the unified agent lays its stage
-    rebinding over the per-role fields. Independence per property is what makes a profile that
-    changes only the endpoint keep the role's model.
+    The CREDENTIAL is deliberately not independent. A key is only meaningful for the endpoint it was
+    issued for, so the profile's `api_key_env` travels only while the resolved endpoint is still the
+    one that profile would have used. Resolving it independently meant a `<role>_base_url` or a stage
+    map could redirect the request while keeping the key — putting one provider's live secret in an
+    Authorization header to a different host. Without a profile key the shared `llm_api_key` applies,
+    exactly as before.
 
     With no profiles configured and no role asked for, this short-circuits to the shared values —
     the single-model operator's path, unchanged."""
     profiles = getattr(settings, "llm_profiles", None) or {}
-    if not profiles and role is None and stage is None:
+    if not profiles and role is None:
         return LlmTarget(settings.llm_model, settings.llm_base_url,
-                         getattr(settings, "llm_temperature", None), None, None)
+                         getattr(settings, "llm_temperature", None), None)
     stage_models = getattr(settings, "agent_stage_models", None) or {}
     stage_urls = getattr(settings, "agent_stage_base_urls", None) or {}
-    key = stage or role
-    profile_name = (getattr(settings, "role_profiles", None) or {}).get(role or "")
-    if profile_name is None:
-        profile_name = getattr(settings, "llm_profile", None)
-    profile = profiles.get(profile_name) if profile_name else None
-    profile = profile if isinstance(profile, dict) else {}
+    profile = role_profile(settings, role)
 
     role_model = role_url = role_temp = None
     fields = _ROLE_FIELDS.get(role or "")
@@ -1265,47 +1284,60 @@ def resolve_llm_target(settings, *, role: str | None = None,
         role_url = getattr(settings, u_field, None)
         role_temp = getattr(settings, t_field, None) if t_field else None
 
+    # The endpoint this profile stands for; anything that overrides it also drops its credential.
+    profile_url = profile.get("base_url") or settings.llm_base_url
+    base_url = stage_urls.get(role or "") or role_url or profile_url
+
     temperature = role_temp
     if temperature is None:
         temperature = profile.get("temperature")
     if temperature is None:
         temperature = getattr(settings, "llm_temperature", None)
     return LlmTarget(
-        model=(stage_models.get(key) or role_model or profile.get("model")
+        model=(stage_models.get(role or "") or role_model or profile.get("model")
                or settings.llm_model),
-        base_url=(stage_urls.get(key) or role_url or profile.get("base_url")
-                  or settings.llm_base_url),
+        base_url=base_url,
         temperature=temperature,
-        api_key_env=profile.get("api_key_env") or None,
-        provider=profile.get("provider") or None,
+        api_key_env=(profile.get("api_key_env") or None) if base_url == profile_url else None,
     )
 
 
-def make_llm_client_for(settings, *, role: str | None = None, stage: str | None = None,
-                        timeout: float | None = None) -> OpenAICompatibleClient:
-    """Resolve a role's target and build its client — the profile-aware front door to the factory.
+def client_kwargs_for(target: LlmTarget, *, role: str | None = None,
+                      timeout: float | None = None) -> dict:
+    """The `make_llm_client` arguments a resolved target implies.
 
-    The `api_key` argument is passed ONLY when the profile named an environment variable. With no
-    profiles that never happens, so the call is argument-for-argument the historical
-    `make_llm_client(settings, ...)` and every monkeypatch of it keeps intercepting. The MODULE-level
-    factory is called (not a captured reference) for the same reason.
+    Split out from `make_llm_client_for` so a caller that must go through its OWN module's
+    `make_llm_client` name can still share the resolution. That matters because the re-exports in
+    `adapters.tasks`, `cli` and `serve.server` are documented monkeypatch seams: a helper here that
+    always called this module's binding would quietly route per-role construction past all of them.
 
-    A profile that names a variable which is not set fails LOUDLY here, naming the variable and the
-    role — never its value. Discovering a missing credential at the first paid call, halfway into a
-    run, is strictly worse than discovering it now."""
-    target = resolve_llm_target(settings, role=role, stage=stage)
+    `api_key` appears ONLY when the resolved profile supplied one, so with no profiles the arguments
+    are what the historical `make_llm_client(settings, ...)` call passed. A profile naming a variable
+    that is not set fails LOUDLY, quoting the variable and the role — never its value; discovering a
+    missing credential at the first paid call, halfway into a run, is strictly worse."""
     kwargs: dict = {"model": target.model, "base_url": target.base_url,
                     "temperature": target.temperature, "timeout": timeout}
     if target.api_key_env:
-        import os
         value = os.environ.get(target.api_key_env)
         if not value:
             raise LLMError(
-                f"role {role or stage!r} is bound to a connection profile whose api_key_env "
+                f"role {role!r} is bound to a connection profile whose api_key_env "
                 f"{target.api_key_env} is unset or empty (endpoint {target.base_url}). Set that "
                 "environment variable, or drop the binding.")
         kwargs["api_key"] = value
-    return make_llm_client(settings, **kwargs)
+    return kwargs
+
+
+def make_llm_client_for(settings, *, role: str | None = None, timeout: float | None = None,
+                        factory=None) -> OpenAICompatibleClient:
+    """Resolve a role's target and build its client — the profile-aware front door to the factory.
+
+    `factory` lets a caller name the `make_llm_client` binding to build through, so a module whose
+    re-export is a monkeypatch seam (`adapters.tasks`, `cli`, `serve.server`) keeps that seam alive;
+    omitted, this module's own binding is used."""
+    target = resolve_llm_target(settings, role=role)
+    build = factory if factory is not None else make_llm_client
+    return build(settings, **client_kwargs_for(target, role=role, timeout=timeout))
 
 
 def validate_bound_profiles(settings) -> None:
@@ -1319,19 +1351,18 @@ def validate_bound_profiles(settings) -> None:
     profiles = getattr(settings, "llm_profiles", None) or {}
     if not profiles:
         return
-    import os
-    bound = dict(getattr(settings, "role_profiles", None) or {})
-    default_profile = getattr(settings, "llm_profile", None)
-    if default_profile:
-        bound.setdefault("(default)", default_profile)
+    # RESOLVED, not read straight off `role_profiles`: the preflight must demand exactly the
+    # credentials the clients will actually ask for. Reading the bindings raw made it fail a run over
+    # a key no client resolves to (a role whose endpoint is overridden elsewhere drops the profile's
+    # key), and it would silently stop matching the moment resolution grew another rule.
+    checked = [None, *sorted(getattr(settings, "role_profiles", None) or {})]
     missing = []
-    for role, name in sorted(bound.items()):
-        entry = profiles.get(name)
-        env = (entry or {}).get("api_key_env") if isinstance(entry, dict) else None
+    for role in checked:
+        env = resolve_llm_target(settings, role=role).api_key_env
         if env and not os.environ.get(env):
-            missing.append(f"{role} -> profile {name!r} needs {env}")
+            missing.append(f"{role or 'the default profile'} needs {env}")
     if missing:
-        raise LLMError("connection profile credentials are missing: " + "; ".join(missing))
+        raise LLMError("connection profile credentials are missing: " + "; ".join(dict.fromkeys(missing)))
 
 
 def make_llm_client(settings, *, model: str | None = None,
