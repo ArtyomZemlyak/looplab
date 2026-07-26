@@ -523,31 +523,40 @@ def repair_log(path: str | os.PathLike) -> dict:
     to `events.jsonl.corrupt-<ts>.bak` (never destroy evidence — the dropped tail may be salvageable by
     hand), (2) atomically truncates the log to its last valid boundary — exactly the recoverable prefix
     `iter_jsonl`/`fold` already consume — and (3) records the repair provenance as a `log_repaired`
-    diagnostic event (unfolded) appended to the now-clean log. Returns the repair record."""
-    # CODEX AGENT: repair is one read/derive/replace transaction, but it holds neither the run lifecycle
-    # guard nor the event-log lock. A concurrent repair/resume can append after this stale boundary and
-    # then have authoritative events replaced away; hold both fences across detection, backup, truncate,
-    # and repair-marker publication, and require the run to be offline.
+    diagnostic event (unfolded) appended to the now-clean log. Returns the repair record.
+
+    Detection, backup and truncation happen under the event log's OWN lock — the one every appender
+    takes — and the divergence is re-derived INSIDE it. Deriving the boundary from a pre-lock read
+    and then writing the file back is a read/derive/replace with a window in it: an append that lands
+    in that window is authoritative and durable, and the replace would erase it. (Requiring the run
+    to be offline is the CLI's job — `repair-log` refuses while the engine holds engine.lock; this
+    lock is the last-resort fence for anything that repairs a log another writer can still reach.)"""
     p = Path(path)
-    div = log_divergence(p)
-    if div is None:
-        return {}
-    raw = p.read_bytes()
-    ts_ns = time.time_ns()
-    ts = ts_ns // 1_000_000_000
-    # Nanosecond suffix: two repairs in the same second must never overwrite forensic evidence.
-    backup = p.with_name(p.name + f".corrupt-{ts_ns}.bak")
-    backup.write_bytes(raw)  # full original preserved before we truncate
-    # Truncate to the last valid boundary: keep every COMPLETE line before the first corrupt one. Those
-    # lines are newline-terminated, so re-joining reproduces the exact bytes iter_jsonl would have read.
-    lines = raw.split(b"\n")
-    keep = lines[: div["corrupt_line"] - 1]
-    truncated = (b"\n".join(keep) + b"\n") if keep else b""
     from looplab.core.atomicio import atomic_write_bytes
-    atomic_write_bytes(p, truncated)
+    with _interprocess_lock(Path(str(p) + ".lock"), required=True):
+        # Authoritative INSIDE the lock. A caller's earlier peek proves nothing: the log may have been
+        # repaired, extended past the divergence, or replaced entirely while we waited for the lock.
+        div = log_divergence(p)
+        if div is None:
+            return {}
+        raw = p.read_bytes()
+        ts_ns = time.time_ns()
+        ts = ts_ns // 1_000_000_000
+        # Nanosecond suffix: two repairs in the same second must never overwrite forensic evidence.
+        backup = p.with_name(p.name + f".corrupt-{ts_ns}.bak")
+        backup.write_bytes(raw)  # full original preserved before we truncate
+        # Truncate to the last valid boundary: keep every COMPLETE line before the first corrupt one.
+        # Those lines are newline-terminated, so re-joining reproduces the exact bytes iter_jsonl
+        # would have read.
+        lines = raw.split(b"\n")
+        keep = lines[: div["corrupt_line"] - 1]
+        truncated = (b"\n".join(keep) + b"\n") if keep else b""
+        atomic_write_bytes(p, truncated)
     record = {"backup": backup.name, "corrupt_line": div["corrupt_line"],
               "dropped_lines": div["dropped_lines"], "good_records": div["good_records"], "ts": ts}
     # The log is clean now, so a fresh store folds/appends without tripping the fail-closed guard.
+    # OUTSIDE the block above because `append` takes the very same lock — and it is safe there: the
+    # file is already valid, so a writer that slips in first simply appends ahead of the marker.
     from looplab.events.types import EV_LOG_REPAIRED
     EventStore(p).append(EV_LOG_REPAIRED, record, trace_id=None, span_id=None)
     return record

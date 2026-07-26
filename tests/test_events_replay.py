@@ -1040,6 +1040,83 @@ def test_repair_log_truncates_backs_up_and_reopens(tmp_path):
     assert repair_log(p) == {}                                       # idempotent no-op on a clean log
 
 
+def test_repair_log_holds_the_event_log_lock_across_backup_and_truncate(tmp_path, monkeypatch):
+    """Repair replaces the log with a PREFIX of itself. Deriving that prefix from an unlocked read
+    and writing it back leaves a window: an append that lands in it is an authoritative, durable
+    event the replace then deletes. The whole detect/backup/truncate must sit inside the same lock
+    every appender takes."""
+    import fcntl
+    from looplab.core import atomicio
+    from looplab.events.eventstore import repair_log
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{corrupt\n{"seq":1,"type":"b"}\n')
+
+    def _lock_is_free() -> bool:
+        # flock is per open-file description, so a second open() here faithfully stands in for the
+        # live engine's appender.
+        with open(str(p) + ".lock", "a+") as f:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            return True
+
+    observed = []
+    original = atomicio.atomic_write_bytes
+    monkeypatch.setattr(atomicio, "atomic_write_bytes",
+                        lambda path, data, **kw: (observed.append(_lock_is_free()),
+                                                  original(path, data, **kw))[1])
+    rec = repair_log(p)
+    assert observed == [False]                    # the truncate ran with the log lock held
+    assert rec["corrupt_line"] == 2
+
+
+def test_repair_log_derives_the_boundary_inside_the_lock(tmp_path, monkeypatch):
+    """A boundary derived BEFORE the lock is a stale snapshot: by the time repair wins the lock the
+    log may have been repaired by someone else, or extended past the divergence. It has to be
+    re-derived under the same lock that fences the truncate, or the two disagree."""
+    import fcntl
+    from looplab.events import eventstore
+    from looplab.events.eventstore import repair_log
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{corrupt\n{"seq":1,"type":"b"}\n')
+    observed = []
+    real = eventstore.log_divergence
+
+    def _probe(path):
+        with open(str(p) + ".lock", "a+") as f:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                observed.append(False)
+            else:
+                observed.append(True)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return real(path)
+
+    monkeypatch.setattr(eventstore, "log_divergence", _probe)
+    assert repair_log(p)["corrupt_line"] == 2
+    # The boundary repair acts on is derived with the lock held. (A later unlocked derivation is the
+    # fresh EventStore re-checking a log that is already clean before it appends the marker.)
+    assert observed[0] is False
+
+
+def test_repair_log_cli_refuses_while_an_engine_is_live(tmp_path):
+    """The event-log lock stops a torn replace, but it cannot stop a live engine from appending the
+    instant repair releases it. A run with an engine on it is simply not repairable."""
+    from typer.testing import CliRunner
+    from looplab.cli import _engine_singleton, app
+    (tmp_path / "events.jsonl").write_bytes(
+        b'{"seq":0,"type":"a"}\n{corrupt\n{"seq":1,"type":"b"}\n')
+    with _engine_singleton(tmp_path) as held:     # stand in for the running engine
+        assert held
+        result = CliRunner().invoke(app, ["repair-log", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "engine is still running" in result.stdout
+    assert not list(tmp_path.glob("*.bak"))       # nothing was touched
+
+
 def test_eventstore_heals_torn_final_line(tmp_path):
     p = tmp_path / "events.jsonl"
     es = EventStore(p)

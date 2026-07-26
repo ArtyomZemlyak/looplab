@@ -127,8 +127,10 @@ def test_lesson_consolidate_and_compact_preserve_quarantine_bytes(tmp_path):
     valid = [_lesson("duplicate", "r1"), _lesson("duplicate", "r2")]
     path.write_bytes(b"\n".join([malformed, future, *(orjson.dumps(row) for row in valid)]) + b"\n")
 
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-        LessonMemory.consolidate_lessons_file(path)
+    # Called with NO lock held — hygiene takes `lessons.jsonl.lock` itself now, because the
+    # paraphrase pass inside it is a provider call and must not run under a lock every concurrent
+    # run's lesson writes queue behind. Holding it here would self-deadlock.
+    LessonMemory.consolidate_lessons_file(path)
     after_consolidate = path.read_bytes().splitlines()
     assert after_consolidate[:2] == [malformed, future]
     understood = read_jsonl_lenient(path)
@@ -137,8 +139,7 @@ def test_lesson_consolidate_and_compact_preserve_quarantine_bytes(tmp_path):
     with path.open("ab") as f:
         for index in range(5):
             f.write(orjson.dumps(_lesson(f"retained-{index}", f"run-{index}")) + b"\n")
-    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-        LessonMemory.compact_lessons(path, max_lines=3, keep=2)
+    LessonMemory.compact_lessons(path, max_lines=3, keep=2)      # ditto: takes the lock itself
     after_compact = path.read_bytes().splitlines()
     assert after_compact[:2] == [malformed, future]
     current = [row for row in read_jsonl_lenient(path) if "v" not in row]
@@ -246,3 +247,89 @@ def test_claim_decision_evidence_lock_failure_appends_nothing(tmp_path, monkeypa
         )
     decision_path = tmp_path / "claim_decisions.jsonl"
     assert not decision_path.exists() or not decision_path.read_bytes()
+
+
+# --------------------------------------------------------------------------- #
+# Hygiene must not hold the shared store's lock across a provider call
+# --------------------------------------------------------------------------- #
+# `lessons.jsonl.lock` gates a file every concurrent run appends to. The paraphrase-merge pass
+# inside consolidation is a paid model call, and it used to run with that lock held: one slow — or
+# hung — provider froze every other run's lesson writes, and the governed readers behind them, for
+# the model's whole latency. The pass now snapshots under the lock, pays for the merge unlocked, and
+# re-acquires to compare-and-swap before the rewrite.
+
+def _lock_is_free(path: Path) -> bool:
+    """Can an INDEPENDENT holder take lessons.jsonl.lock right now? flock is per open-file
+    description, so a second open() in this process is a faithful stand-in for another run."""
+    import fcntl
+    with open(str(path) + ".lock", "a+") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return True
+
+
+def test_paid_paraphrase_merge_does_not_run_under_the_shared_store_lock(tmp_path, monkeypatch):
+    """Exercised through the real writer, `append_lessons(hygiene=True)` — that is the caller that
+    used to hold the lock for the whole append-plus-hygiene block."""
+    class _Engine:
+        memory_dir = str(tmp_path)
+        researcher = developer = None
+        _embedder = None
+        _reflect_client = staticmethod(lambda: object())
+        _consolidate_lessons_file = staticmethod(LessonMemory.consolidate_lessons_file)
+        _compact_lessons = staticmethod(LessonMemory.compact_lessons)
+
+    path = tmp_path / "lessons.jsonl"
+    path.write_bytes(orjson.dumps(_lesson("dup", "r1")) + b"\n")
+    observed = []
+
+    def _merge(rows, **kw):
+        observed.append(_lock_is_free(path))     # this stands in for the provider call
+        return rows[:1]                          # fewer rows -> a rewrite is attempted
+
+    monkeypatch.setattr("looplab.engine.memory.consolidate_lessons", _merge)
+    LessonMemory(_Engine()).append_lessons([_lesson("dup", "r2")], hygiene=True)
+    assert observed == [True]                    # was False: the lock was held across the call
+    assert len(read_jsonl_lenient(path)) == 1    # ...and the merge still landed
+
+
+def test_a_concurrent_append_during_the_merge_is_never_clobbered(tmp_path, monkeypatch):
+    """Paying for the merge unlocked opens a window another run can append into. The rewrite then
+    compare-and-swaps: a moved store means the merged snapshot is stale and must be DROPPED, or the
+    whole-file replace erases the append — the exact loss the lock exists to prevent."""
+    path = tmp_path / "lessons.jsonl"
+    path.write_bytes(b"\n".join(orjson.dumps(_lesson("dup", r)) for r in ("r1", "r2")) + b"\n")
+
+    def _merge(rows, **kw):
+        with path.open("ab") as f:               # another run appends while the model is thinking
+            f.write(orjson.dumps(_lesson("from a concurrent run", "r3")) + b"\n")
+        return rows[:1]
+
+    monkeypatch.setattr("looplab.engine.memory.consolidate_lessons", _merge)
+    LessonMemory.consolidate_lessons_file(path, client=object())
+    statements = [row["statement"] for row in read_jsonl_lenient(path)]
+    assert "from a concurrent run" in statements     # survived: the stale rewrite was declined
+    assert len(statements) == 3
+
+
+def test_compaction_takes_the_lock_itself(tmp_path, monkeypatch):
+    """It is a read-modify-write of a shared file and used to inherit its caller's lock. Now that
+    the caller releases before hygiene, compaction has to hold the lock on its own or a concurrent
+    append lands in its read->write window and is replaced away."""
+    path = tmp_path / "lessons.jsonl"
+    path.write_bytes(b"\n".join(orjson.dumps(_lesson(f"s{i}", f"r{i}")) for i in range(5)) + b"\n")
+    held = []
+    from looplab.events import eventstore
+    original = eventstore.replace_jsonl_rows_atomic_preserving_quarantine
+
+    def _probe(p, rows, **kw):
+        held.append(_lock_is_free(path))
+        return original(p, rows, **kw)
+
+    monkeypatch.setattr(eventstore, "replace_jsonl_rows_atomic_preserving_quarantine", _probe)
+    LessonMemory.compact_lessons(path, max_lines=3, keep=2)
+    assert held == [False]                        # the rewrite ran with the lock held
+    assert len(read_jsonl_lenient(path)) == 2

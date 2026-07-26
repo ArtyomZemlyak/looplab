@@ -145,21 +145,22 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         payload = b"\n".join(orjson.dumps(lz) for lz in lessons)
         with _interprocess_lock(Path(str(path) + ".lock"), required=True):
             append_jsonl_bytes_locked(path, payload)
-            if hygiene:
-                # D2 hygiene: consolidate the store after appending — merge duplicate claims into
-                # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size. The
-                # Researcher client + embedder enable the hybrid+agent paraphrase-merge pass (run end
-                # only — hygiene=False mid-run skips it, so the shared file isn't rewritten every node).
-                # prompts/parser travel WITH the client so a merge_system.md override and the run's
-                # configured structured-output parser reach the merge's adjudication call (I18/ADR-8).
-                prompts, parser = self._merge_prompt_opts()
-                # CODEX AGENT: This can run remote paraphrase adjudication while ``lessons.jsonl.lock``
-                # is held, so one slow provider blocks every concurrent lesson writer and governed reader
-                # needing this source. Snapshot under the lock, release it for paid inference, then reacquire
-                # and CAS/reconcile before the rewrite instead of holding a global I/O lock across the call.
-                self._e._consolidate_lessons_file(path, self._e._reflect_client(), self._e._embedder,
-                                                  parser=parser, prompts=prompts)
-                self._e._compact_lessons(path)
+        if hygiene:
+            # D2 hygiene: consolidate the store after appending — merge duplicate claims into
+            # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size. The
+            # Researcher client + embedder enable the hybrid+agent paraphrase-merge pass (run end
+            # only — hygiene=False mid-run skips it, so the shared file isn't rewritten every node).
+            # prompts/parser travel WITH the client so a merge_system.md override and the run's
+            # configured structured-output parser reach the merge's adjudication call (I18/ADR-8).
+            # OUTSIDE the append lock, and each hygiene pass takes the lock itself: the paraphrase
+            # merge is a PROVIDER call, and running it under the shared store's lock froze every
+            # concurrent run's lesson writes for as long as the model took. Our append above is
+            # already committed and durable, so a hygiene pass that finds the file moved and declines
+            # to rewrite loses nothing.
+            prompts, parser = self._merge_prompt_opts()
+            self._e._consolidate_lessons_file(path, self._e._reflect_client(), self._e._embedder,
+                                              parser=parser, prompts=prompts)
+            self._e._compact_lessons(path)
 
     def maybe_distill_lessons(self, state: RunState) -> RunState:
         """M6 write side (doc 13 §7 items 2+5): every `lessons_every` NEW nodes, distill
@@ -250,22 +251,55 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         return None
 
     @staticmethod
+    def lessons_file_token(path: Path):
+        """Content identity of the shared store, or None when it cannot be read.
+
+        This is the compare-and-swap token an UNLOCKED hygiene pass swaps against before it rewrites
+        the file. A content hash rather than (size, mtime_ns): unlike `lessons_store_stamp`, which
+        only has to notice growth to invalidate a cache, this token guards a DESTRUCTIVE whole-file
+        replace, and a concurrent consolidation can land on the same size inside one mtime tick. The
+        store is line-capped by `compact_lessons`, so hashing it costs nothing worth saving.
+        """
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None                 # unreadable -> no proof of "unchanged" -> no rewrite
+
+    @staticmethod
     def consolidate_lessons_file(path: Path, client=None, embed=None,
                                  parser: str = "tool_call", prompts=None) -> None:
         """D2: rewrite lessons.jsonl through `consolidate_lessons` — duplicate claims merge into
         an evidence_count and a contradicted verdict is retired (the newest observation wins). When a
         `client` is wired, a hybrid-retrieval + agent pass ALSO merges paraphrase-level duplicates the
         exact key misses (`parser`/`prompts` configure that pass's structured-output parser and
-        merge_system override). Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
+        merge_system override). Atomic rewrite; best-effort (a hygiene failure must never fail the run).
+
+        LOCKING — this method takes `lessons.jsonl.lock` ITSELF, so callers must NOT hold it. The
+        paid paraphrase pass runs with the lock RELEASED: that lock gates a file every concurrent run
+        appends to, so holding it across a provider call let one slow (or hung) model block every
+        other run's lesson writes, and the governed readers queued behind them, for as long as the
+        provider took. The shape is: snapshot under the lock, pay for the merge unlocked, then
+        re-acquire and compare-and-swap. If any writer touched the store while we were waiting on the
+        model, the rewrite is DROPPED — applying a stale snapshot would erase their append, which is
+        exactly the loss the lock exists to prevent. Hygiene is best-effort and cadence-driven, so a
+        skipped round costs nothing: the next one merges the combined file."""
         try:
             from looplab.engine.claims import (_load_claim_source_path,
                                                _valid_claim_source_row)
             from looplab.engine.memory import consolidate_lessons
-            from looplab.events.eventstore import replace_jsonl_rows_atomic_preserving_quarantine
-            rows = _load_claim_source_path(path, research=False)
-            merged = consolidate_lessons(rows, client=client, embed=embed,
+            from looplab.events.eventstore import (_interprocess_lock,
+                                                   replace_jsonl_rows_atomic_preserving_quarantine)
+            lock_path = Path(str(path) + ".lock")
+            with _interprocess_lock(lock_path, required=True):
+                before = LessonMemory.lessons_file_token(path)
+                rows = _load_claim_source_path(path, research=False)
+            merged = consolidate_lessons(rows, client=client, embed=embed,   # unlocked: may be paid
                                          parser=parser, prompts=prompts)
-            if len(merged) < len(rows):
+            if len(merged) >= len(rows):
+                return
+            with _interprocess_lock(lock_path, required=True):
+                if before is None or LessonMemory.lessons_file_token(path) != before:
+                    return              # a concurrent writer moved the store under the merge
                 # hygiene owns only understood lesson rows. Raw malformed/future records stay
                 # byte-preserved quarantine until an explicit repair/migration acknowledges them.
                 replace_jsonl_rows_atomic_preserving_quarantine(
@@ -279,19 +313,27 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
     def compact_lessons(path: Path, max_lines: int = 4000, keep: int = 2000) -> None:
         """Bound the shared lessons store: it is re-read and scored at every run start, and grows by
         a few lines per finished run forever. Past `max_lines`, keep the most recent `keep` (recency
-        also wins ties at retrieval, so the dropped prefix is the least useful part)."""
+        also wins ties at retrieval, so the dropped prefix is the least useful part).
+
+        Takes `lessons.jsonl.lock` itself (callers must not hold it) — this is a read-modify-write of
+        a file other runs append to, and it used to inherit the lock from a caller that held it
+        across the paid consolidation pass. There is no unlocked window to swap against here: no
+        provider call sits between the read and the write."""
         try:
             from looplab.engine.claims import (_load_claim_source_path,
                                                _valid_claim_source_row)
-            from looplab.events.eventstore import replace_jsonl_rows_atomic_preserving_quarantine
-            rows = _load_claim_source_path(path, research=False)
-            if len(rows) > max_lines:
-                # Retention applies to interpreted lessons, never to quarantine bytes. A damaged/future
-                # row may exceed the soft file cap but cannot be silently laundered by unrelated hygiene.
-                replace_jsonl_rows_atomic_preserving_quarantine(
-                    path, rows[-keep:],
-                    replace_if=lambda row: _valid_claim_source_row(row, research=False),
-                )
+            from looplab.events.eventstore import (_interprocess_lock,
+                                                   replace_jsonl_rows_atomic_preserving_quarantine)
+            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+                rows = _load_claim_source_path(path, research=False)
+                if len(rows) > max_lines:
+                    # Retention applies to interpreted lessons, never to quarantine bytes. A damaged/
+                    # future row may exceed the soft file cap but cannot be silently laundered by
+                    # unrelated hygiene.
+                    replace_jsonl_rows_atomic_preserving_quarantine(
+                        path, rows[-keep:],
+                        replace_if=lambda row: _valid_claim_source_row(row, research=False),
+                    )
         except Exception:  # noqa: BLE001 — compaction is best-effort; never fail the run for it
             pass
 

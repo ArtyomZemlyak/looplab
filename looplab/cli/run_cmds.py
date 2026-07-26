@@ -874,13 +874,23 @@ def repair_log_cmd(run_dir: Path = typer.Argument(..., help="Run dir whose event
     Backs up the original bytes to `events.jsonl.corrupt-<ts>.bak`, atomically truncates the log to
     its last valid boundary (the recoverable prefix replay already folds), and records the repair as a
     `log_repaired` event. The dropped tail is preserved in the backup for manual salvage. A torn final
-    line (the normal crash-mid-append case) is not a corruption and needs no repair."""
+    line (the normal crash-mid-append case) is not a corruption and needs no repair.
+
+    Refuses while an engine is live on the run: repair replaces the log with a prefix of itself, and
+    a running engine's appends are authoritative events that a replace would silently delete. Holding
+    engine.lock for the repair also stops one from starting halfway through it."""
+    from looplab.cli import _engine_singleton
     from looplab.events.eventstore import repair_log
     log = run_dir / "events.jsonl"
     if not log.exists():
         typer.echo(f"no run found at {run_dir} (no events.jsonl)")
         raise typer.Exit(2)
-    rec = repair_log(log)
+    with _engine_singleton(run_dir) as offline:
+        if not offline:
+            typer.echo(f"refusing to repair {log}: an engine is still running on this run "
+                       "(engine.lock is held). Stop it, then repair.")
+            raise typer.Exit(2)
+        rec = repair_log(log)
     if not rec:
         typer.echo(f"{log} has no mid-file corruption — nothing to repair "
                    "(a torn final line is tolerated on read).")

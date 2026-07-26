@@ -346,21 +346,26 @@ class LessonReconcileMixin:
                     path, kept + committed_fresh,
                     replace_if=lambda row: _valid_claim_source_row(row, research=False),
                 )
-                # The write above COMMITTED the fresh comparative lessons to disk. Consolidate/compact
-                # merely merge near-dups + cap the file AFTER that; they call the LLM merge agent /
-                # embedder and can raise (transient error). Swallow that LOCALLY so a post-write failure
-                # cannot skip the spend-ledger append below: the pairs are already on disk, and without
-                # the `lessons_distilled(reconcile)` record run-end reflection re-derives them (a double
-                # count). The write itself failing still falls to the outer guard (nothing committed →
-                # nothing to spend) — code-review.
-                try:
-                    prompts, parser = self._merge_prompt_opts()
-                    if client is not None and committed_fresh:
-                        self._e._consolidate_lessons_file(path, client, self._e._embedder,
-                                                          parser=parser, prompts=prompts)
-                        self._e._compact_lessons(path)
-                except Exception:  # noqa: BLE001 — best-effort post-processing; ledger recorded below
-                    pass
+            # The write above COMMITTED the fresh comparative lessons to disk. Consolidate/compact
+            # merely merge near-dups + cap the file AFTER that; they call the LLM merge agent /
+            # embedder and can raise (transient error). Swallow that LOCALLY so a post-write failure
+            # cannot skip the spend-ledger append below: the pairs are already on disk, and without
+            # the `lessons_distilled(reconcile)` record run-end reflection re-derives them (a double
+            # count). The write itself failing still falls to the outer guard (nothing committed →
+            # nothing to spend) — code-review.
+            # OUTSIDE the lock, which the block above has now released: the paraphrase merge is a
+            # PROVIDER call, and holding the shared store's lock across it froze every concurrent
+            # run's lesson writes for the model's whole latency. Each pass re-takes the lock itself
+            # and compare-and-swaps, so a concurrent append during the merge makes it decline to
+            # rewrite rather than clobber — our own rows are already committed either way.
+            try:
+                prompts, parser = self._merge_prompt_opts()
+                if client is not None and committed_fresh:
+                    self._e._consolidate_lessons_file(path, client, self._e._embedder,
+                                                      parser=parser, prompts=prompts)
+                    self._e._compact_lessons(path)
+            except Exception:  # noqa: BLE001 — best-effort post-processing; ledger recorded below
+                pass
         except Exception:  # noqa: BLE001 — reconciliation is best-effort; never fail the run for it
             # Nothing was actually reconciled (a transient LLM/network/write error), so RESET the
             # change-gate hash — mirroring the client-None branch above — else the next same-signature

@@ -208,6 +208,11 @@ recoverable prefix), and records the repair as a `log_repaired` event. The dropp
 in the backup for manual salvage. A torn *final* line (the normal crash-mid-append case) is tolerated
 on read and needs no repair.
 
+The run must be **offline**: repair replaces the log with a prefix of itself, and a live engine's
+appends are authoritative events a replace would silently delete. The command refuses while
+`engine.lock` is held (and holds it for the repair, so one cannot start halfway through); detection,
+backup and truncation all happen under the event log's own lock.
+
 ```bash
 looplab repair-log RUN_DIR
 # then: looplab resume RUN_DIR
