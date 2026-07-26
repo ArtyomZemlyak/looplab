@@ -13,7 +13,7 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   assert.equal(schema.groups.length, RAW_SETTINGS_SCHEMA.groups.length)
   assert.equal(Object.keys(schema.fieldByKey).length,
     RAW_SETTINGS_SCHEMA.groups.reduce((total, group) => total + group.fields.length, 0))
-  assert.equal(Object.keys(schema.fieldByKey).length, 156)
+  assert.equal(Object.keys(schema.fieldByKey).length, 158)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)
