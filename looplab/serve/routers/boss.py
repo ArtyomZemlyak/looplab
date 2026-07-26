@@ -802,12 +802,23 @@ def build_router(srv) -> APIRouter:
                     return {"ok": False, **_safe_boss_failure(e)}
             finally:
                 context.__exit__(None, None, None)
-        # CODEX AGENT: the job registry provides transport polling, not logical idempotency. A worker
-        # restart or lost POST response discards the only outcome handle, and retry repeats the paid
-        # tool/model route. Reserve a durable generation-scoped request key and rejoin its result as
-        # report_refresh already does.
-
-        return await srv.jobs.run_as_job(_compute)
+        # One click must not become two paid tool/model routes. A lost POST response is the normal
+        # case here — the UI retries, and without an identity the retry starts the whole thing again
+        # and bills for it. With an `Idempotency-Key` the retry REJOINS the in-flight job instead.
+        # The key is scoped by run generation as well, so a reset (which replaces the run) can never
+        # rejoin the previous generation's answer.
+        # KNOWN LIMIT, deliberately not papered over: the job registry lives in this PROCESS. A
+        # worker restart still loses the handle and a retry after it does pay twice. Closing that
+        # needs a durable ledger the way `report_refresh` below has one — it can afford it because
+        # its outcome IS a domain event on the run's log; this route deliberately appends nothing,
+        # so it has no such receipt to replay and would need a store of its own.
+        # No key -> exactly the historical behaviour, so no client is broken by requiring one.
+        idem = request.headers.get("Idempotency-Key", "")
+        job_identity = (hashlib.sha256(
+            ("boss_command\0" + str(rd) + "\0" + str(generation or "") + "\0" + idem)
+            .encode("utf-8")).hexdigest()
+            if idem and len(idem) <= 512 else None)
+        return await srv.jobs.run_as_job(_compute, idempotency_key=job_identity)
 
     @router.post("/api/runs/{run_id}/report_refresh")
     async def report_refresh(run_id: str, request: Request, response: Response):

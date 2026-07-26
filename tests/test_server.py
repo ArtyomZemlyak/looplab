@@ -3224,3 +3224,64 @@ def test_put_run_config_honors_the_run_generation_fence(tmp_path):
         "a PUT naming a different run generation rewrote this run's settings")
     assert stale.json()["detail"]["code"] == "run_generation_changed"
     assert client.get("/api/runs/demo/config").json()["timeout"] == 51.0
+
+
+def test_boss_command_retry_with_the_same_key_does_not_pay_twice(tmp_path, monkeypatch):
+    """A lost POST response is the normal case: the UI retries. Without a request identity the retry
+    starts the whole paid tool/model route again and bills for it — one click, two charges."""
+    sr = tmp_path / "z"
+    sr.mkdir()
+    (sr / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"z","task_id":"t","goal":"g","direction":"max"}}\n',
+        encoding="utf-8")
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Slow:
+        model = "m"
+        def chat(self, messages, tools=None, tool_choice=None):
+            calls.append(1)
+            started.set()
+            release.wait(10)                      # still in flight when the retry arrives
+            return {"tool_calls": [{"id": "e", "function": {
+                "name": "emit", "arguments": {"reply": "ok", "actions": []}}}]}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Slow())
+    client = TestClient(make_app(tmp_path))
+    head = {"Idempotency-Key": "one-click"}
+    out: dict = {}
+    first = threading.Thread(
+        target=lambda: out.update(first=client.post("/api/runs/z/command",
+                                                    json={"instruction": "go"}, headers=head).json()))
+    first.start()
+    assert started.wait(10)
+    retry = client.post("/api/runs/z/command", json={"instruction": "go"}, headers=head).json()
+    release.set()
+    first.join(15)
+    assert len(calls) == 1                        # the retry rejoined; it did not start a 2nd route
+    assert retry.get("job_id") == out["first"].get("job_id") or retry.get("ok") is True
+
+
+def test_boss_command_without_a_key_keeps_the_historical_behaviour(tmp_path, monkeypatch):
+    """The key is opt-in: a client that sends none must behave exactly as before (two independent
+    calls), so requiring it breaks nobody."""
+    sr = tmp_path / "z"
+    sr.mkdir()
+    (sr / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"z","task_id":"t","goal":"g","direction":"max"}}\n',
+        encoding="utf-8")
+    calls = []
+
+    class _C:
+        model = "m"
+        def chat(self, messages, tools=None, tool_choice=None):
+            calls.append(1)
+            return {"tool_calls": [{"id": "e", "function": {
+                "name": "emit", "arguments": {"reply": "ok", "actions": []}}}]}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _C())
+    client = TestClient(make_app(tmp_path))
+    assert client.post("/api/runs/z/command", json={"instruction": "go"}).json()["ok"] is True
+    assert client.post("/api/runs/z/command", json={"instruction": "go"}).json()["ok"] is True
+    assert len(calls) == 2

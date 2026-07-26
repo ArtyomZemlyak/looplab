@@ -292,6 +292,16 @@ claim before starting provider work and fences each scope to one unresolved acti
 race the first publication. Clients reconcile through `GET /api/scope-report-actions/{action-id}` with the
 expected `scope_type` and `scope_id` query values; status reconciliation never starts paid work.
 
+The two other paid one-click routes — `POST /api/runs/{run_id}/command` (the boss action router) and
+`POST /api/genesis` (the run planner) — accept an **optional** `Idempotency-Key`. When one is sent, a
+retry of the same user action rejoins the in-flight job instead of starting a second paid provider
+loop; the boss key is additionally scoped by run generation, so a reset can never rejoin the previous
+generation's answer. Sending no key preserves the historical behaviour exactly. This is a
+**process-local** guarantee: it covers the ordinary lost-response retry, not a server restart. Neither
+route appends a domain event, so unlike `report_refresh` (whose outcome *is* an event on the run's
+log, and which therefore requires a key and replays a durable terminal) they have no receipt to
+replay across processes; closing that would need a store of their own.
+
 ```mermaid
 stateDiagram-v2
     [*] --> unknown: no durable action evidence

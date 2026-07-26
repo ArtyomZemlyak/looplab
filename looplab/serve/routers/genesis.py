@@ -4,6 +4,7 @@ store is now the app-wide `JobRegistry` (shared with /api/jobs) — the poll end
 byte-identical response shape, including the `progress` field the scout loop streams."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -406,11 +407,20 @@ def build_router(srv) -> APIRouter:
         # returned in THIS request (no polling round-trips, no added latency for a normal environment);
         # a slow one returns a job_id the UI polls (no 504). `with_progress` threads the scout-step
         # annotations into the job record the /api/genesis/{job_id} poll surfaces.
-        # CODEX AGENT: this paid, potentially unbounded job has no durable logical request identity.
-        # If the POST response/job registry is lost, the instructed retry starts the full provider
-        # loop again and bills twice. Reserve/rejoin a generation-scoped idempotency key and persist
-        # the logical outcome outside the process-local registry.
-        return await srv.jobs.run_as_job(_compute, inline_wait=_GENESIS_INLINE_WAIT, with_progress=True)
+        # One click must not become two paid provider loops. A lost POST response is the normal case
+        # (the UI is told to retry), and without an identity the retry restarts the whole agentic
+        # scout and bills for it. With an `Idempotency-Key` the retry REJOINS the in-flight job.
+        # KNOWN LIMIT, deliberately not papered over: the job registry is PROCESS-local, so a worker
+        # restart still loses the handle and a retry after it pays twice. Genesis has no run and no
+        # event log yet — there is nothing to replay a durable terminal from — so closing that gap
+        # means a store of its own, not a receipt on some existing log.
+        # No key -> exactly the historical behaviour, so no client is broken by requiring one.
+        idem = request.headers.get("Idempotency-Key", "")
+        job_identity = (hashlib.sha256(
+            ("genesis_plan\0" + idem).encode("utf-8")).hexdigest()
+            if idem and len(idem) <= 512 else None)
+        return await srv.jobs.run_as_job(_compute, inline_wait=_GENESIS_INLINE_WAIT,
+                                         with_progress=True, idempotency_key=job_identity)
 
     @router.get("/api/genesis/{job_id}")
     def genesis_job(job_id: str):
