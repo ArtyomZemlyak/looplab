@@ -25,6 +25,7 @@ import { safeExternalHref } from './urlSafety.js'
 import { normalizeResearchMemos } from './researchMemoModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
+import { cardControlSubmission, cardEditReflected } from './cardControlModel.js'
 
 export { default as Panel } from './PanelShell.jsx'
 
@@ -1264,30 +1265,12 @@ function _sameCardResourceValues(left, right) {
   ))
 }
 
-function _cardControlReflected(card, kind, patch, baseline, expectedEventSeq) {
+function cardControlReflected(card, kind, patch, baseline, expectedEventSeq) {
   if (!card || !isRecord(patch)) return false
   if (kind === 'edit') {
     // Modern folds publish the exact durable event that owns the display overlay. This remains
     // reliable when public-state secret redaction transforms the text into a non-prefix value.
-    const foldedEventSeq = _cardInt(card.statement_edit_seq)
-    const expected = _cardInt(expectedEventSeq)
-    if (expected != null && foldedEventSeq != null && foldedEventSeq >= expected) return true
-    // The server clips the display statement (fold cap) and may redact secrets, so the folded value is
-    // not always byte-equal to what the operator typed. Treat an exact match OR a non-empty clipped
-    // prefix of the submitted text as reflected for pre-receipt logs.
-    if (typeof card.statement !== 'string' || typeof patch.statement !== 'string') return false
-    if (card.statement === patch.statement) return true
-    // A clipped/redacted fold is a PROPER prefix of the submitted text — but so is the PRE-EDIT value for
-    // an extend edit ("foo" -> "foobar"), AND so is a still-in-flight EARLIER chained edit whose landed
-    // value is a prefix of this submission. Matching the prefix alone would clear the override before the
-    // write folds, dropping the waiting-for-fold fence against stale UI truth. So a clipped prefix counts
-    // as THIS write landing only when the card has moved PAST the baseline (the value it showed just
-    // before this edit — the prior in-flight submission for chained edits, see cardControl): `card` must
-    // be a prefix of the submission but NOT itself a prefix of that baseline. Without a baseline (legacy
-    // entry) only an exact match reflects.
-    return typeof baseline === 'string'
-      && card.statement.length > 0 && patch.statement.startsWith(card.statement)
-      && !baseline.startsWith(card.statement)
+    return cardEditReflected(card, patch, baseline, expectedEventSeq)
   }
   if (kind === 'priority') return card.priority === patch.priority && card.pinned === true
   if (kind === 'resources') return _sameCardResourceValues(card.resource_pin, patch.resource_pin)
@@ -1463,21 +1446,11 @@ function _CardKanbanCard({
     const reason = dropReason.trim() || 'operator dropped'
     control('drop', { reason }, { status: 'dropped', dropped_reason: reason })
   }
-  // # CODEX AGENT: this control is labelled belief-wide but submits only one Card id. Multiple native
-  // Cards may share the same seed statement, so sibling work items remain open/selectable after the
-  // apparent belief abandonment. Either make the command durably seed-digest-wide or relabel it
-  // "Abandon this Card" and expose the remaining siblings.
-  // Abandon the research BELIEF (verdict → abandoned via hypothesis_updated) — distinct from dropping
-  // the work item: the Card stays visible in its lane, its research direction is marked concluded. The
-  // control submits `card.id`; the fold's abandoned override keys on the card's control-id SET
-  // (`control_ids.get(c.id, {c.id})` — c.id itself, plus hypothesis_id(seed)), so passing card.id
-  // matches whether or not it equals the seed hash (a native card_added id like `card-5` does not).
-  const abandonBelief = () => control('abandon', {}, { verdict: 'abandoned' })
-  // # CODEX AGENT: each lane is named, but an individual Card is an unnamed article: the statement is
-  // a plain span and the article has no aria-label/aria-labelledby. Screen-reader article navigation
-  // therefore announces several indistinguishable "article" landmarks. Give the statement a stable
-  // id/heading and bind the article to it without exposing the long internal Card id as its name.
-  return <article className="card-kanban-card" data-card-id={card.id} aria-busy={ownPending ? 'true' : undefined}>
+  // This is deliberately Card-scoped: the backend receives one Card id, so siblings that happen to
+  // share a seed remain unchanged. The control changes the Card's research verdict, not its work lane.
+  const abandonCard = () => control('abandon', {}, { verdict: 'abandoned' })
+  return <article className="card-kanban-card" data-card-id={card.id} aria-label={statement}
+    aria-busy={ownPending ? 'true' : undefined}>
     <div className="card-kanban-stmt">
       <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
         <OpIcon name={_CARD_ICON[source] || 'dot'} size={12} />
@@ -1592,9 +1565,9 @@ function _CardKanbanCard({
         </fieldset>
       </form>
       <div className="card-control-form">
-        <button type="button" className="btn xs" disabled={busy} onClick={abandonBelief}
-          title="Mark this research belief abandoned (verdict) — the Card stays visible in its lane; distinct from dropping the work item">
-          Abandon belief
+        <button type="button" className="btn xs" disabled={busy} onClick={abandonCard}
+          title="Mark only this Card’s research verdict abandoned; sibling Cards stay unchanged and this Card remains visible">
+          Abandon this Card
         </button>
       </div>
       <details className="card-control-danger">
@@ -1650,7 +1623,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         const updates = { ...(entry.updates || {}) }
         for (const kind of _CARD_CONTROL_KINDS) {
           if (updates[kind]
-              && _cardControlReflected(
+              && cardControlReflected(
                 card, kind, updates[kind], entry.editBaseline, entry.editEventSeq)) {
             delete updates[kind]
             changed = true
@@ -1684,7 +1657,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
       priority: { saving: 'Pinning Card priority…', success: 'Card priority pinned', failure: 'Could not pin Card priority' },
       resources: { saving: 'Pinning Card resources…', success: 'Card resources pinned', failure: 'Could not pin Card resources' },
       drop: { saving: 'Dropping Card…', success: 'Card dropped', failure: 'Could not drop Card' },
-      abandon: { saving: 'Abandoning belief…', success: 'Belief abandoned', failure: 'Could not abandon belief' },
+      abandon: { saving: 'Abandoning this Card…', success: 'Card abandoned', failure: 'Could not abandon Card' },
     }[kind]
     if (!labels || inFlight.current.size > 0) {
       const message = 'Another Card command is still being submitted for this run.'
@@ -1697,7 +1670,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
     // stale (one step behind). Use the prior SUBMITTED statement when the current card is a proper prefix
     // of it (we are still catching up to that earlier edit); otherwise the card has already moved on, so
     // the current statement is right. This self-cleans: once the fold reaches the prior submission the
-    // prefix test fails and we fall back to the fold. (See `_cardControlReflected`.)
+    // prefix test fails and we fall back to the fold. (See `cardControlReflected`.)
     let editBaseline
     if (kind === 'edit' && typeof card.statement === 'string') {
       const prior = sentEditRef.current[card.id]
@@ -1705,22 +1678,9 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         && prior.startsWith(card.statement)) ? prior : card.statement
       if (typeof patch.statement === 'string') sentEditRef.current[card.id] = patch.statement
     }
-    setOptim(current => {
-      const entry = current[card.id] || {}
-      // `...entry` carried the PREVIOUS edit's editEventSeq into a chained edit, so
-      // `_cardControlReflected`'s seq shortcut (folded >= expected) marked the NEW edit reflected as
-      // soon as the OLD one folded: the reconcile effect cleared this edit's override early and the
-      // visible text reverted until the second fold landed, bypassing the fence sentEditRef/
-      // editBaseline keep on the prefix path. Only THIS submission's record seq may satisfy it.
-      return { ...current, [card.id]: {
-        ...entry,
-        ...(kind === 'edit' ? { editEventSeq: null } : {}),
-        updates: { ...(entry.updates || {}), [kind]: patch },
-        ...(editBaseline !== undefined ? { editBaseline } : {}),
-        pending: { kind, phase: 'submitting' },
-        notice: { tone: 'pending', text: labels.saving },
-      } }
-    })
+    // Only this submission's receipt may satisfy the edit fence; a chained edit resets the previous seq.
+    setOptim(current => cardControlSubmission(
+      current, card.id, kind, patch, editBaseline, labels.saving))
     try {
       const record = kind === 'edit'
         ? await CONTROL.editCard(runId, card.id, data.statement)
@@ -1749,7 +1709,7 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
         // byte-equal fold would leave the card stuck showing operator text with its controls disabled.
         // Only a 'pending' (accepted, engine will apply later) settle keeps the override until the fold.
         const settled = ['error', 'success', 'noop'].includes(feedback.kind)
-        if (settled || _cardControlReflected(
+        if (settled || cardControlReflected(
           rawCard, kind, patch, entry.editBaseline, editEventSeq)) {
           delete updates[kind]
         }
@@ -1964,7 +1924,7 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
   // hypothesis add/abandon workflow for older logs and for a run before its first Card is minted.
   // Both operator affordances now live on the authoritative Card board too: `+ Add` (below) and
-  // `Abandon belief` (the per-card `abandon` control emitting hypothesis_updated(status=abandoned)),
+  // `Abandon this Card` (the per-card `abandon` control emitting hypothesis_updated(status=abandoned)),
   // so an ordinary cards-only run — where this fallback is unmounted after the first Card — still
   // exposes them; this fallback remains only for the pre-first-Card / legacy-hypotheses shape.
   const hasAuthoritativeCards = cards.length > 0 || (_cardInt(projection?.total) ?? 0) > 0

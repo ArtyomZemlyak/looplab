@@ -165,6 +165,10 @@ function ExpNode({ data }) {
     conceptStatus === 'unavailable' ? []
       : nodeCanonicalConcepts(state.node_concepts, node.id, state.concept_consolidation || {}),
     [conceptStatus, node.id, state.node_concepts, state.concept_consolidation])
+  const conceptPreview = <>
+    {conceptStatus === 'partial' && <span className="nc-tag more" title="Incomplete concept materialization">PARTIAL</span>}
+    {conceptTags.slice(0, 2).map(c => <span key={c} className="nc-tag" title={c}>{c.split('/').pop()}</span>)}
+  </>
   const confirmed = node.confirmed_mean != null
   const cardCls = nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
   // FX "heat" (0..1) for the reactor-core glow — only read under [data-fx]; harmless when FX is off.
@@ -172,8 +176,7 @@ function ExpNode({ data }) {
   const coreI = node.id === state.best_node_id ? 1 : (d && d.improved) ? 0.85
     : node.status === 'evaluated' ? 0.55 : node.status === 'failed' ? 0.45 : 0.3
   const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
-  // the tag strip is pointer-transparent and visually caps at two leaves. Put the
-  // complete canonical set on the card itself so the +N overflow has a reachable mouse tooltip.
+  // The compact strip caps at two leaves; the full set also names the Card and opens from +N.
   const conceptTruth = conceptStatus === 'unavailable' ? 'concepts unavailable, not empty'
     : conceptStatus === 'partial' ? `PARTIAL concepts (display-only): ${conceptTags.join(', ') || 'none retained'}`
       : conceptTags.length ? `concepts: ${conceptTags.join(', ')}` : ''
@@ -258,15 +261,15 @@ function ExpNode({ data }) {
             : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
-    {/* View 2: on-node concept tags, drawn only at the full-card zoom (glyph LOD skips them). Absolutely
-        positioned just below the fixed-height card so it never perturbs the layout geometry (NODE_H);
-        capped at two leaves + an overflow count, the full set is in the card title + the a11y label. */}
-    {(conceptStatus === 'partial' || conceptTags.length > 0) && <div className="node-concepts" aria-hidden="true">
-      {conceptStatus === 'partial' && <span className="nc-tag more" title="Incomplete concept materialization">PARTIAL</span>}
-      {conceptTags.slice(0, 2).map(c => <span key={c} className="nc-tag" title={c}>{c.split('/').pop()}</span>)}
-      {conceptTags.length > 2 &&
-        <span className="nc-tag more" title={conceptTags.join(', ')}>+{conceptTags.length - 2}</span>}
-    </div>}
+    {(conceptStatus === 'partial' || conceptTags.length > 0) && (conceptTags.length > 2
+      ? <details className="node-concepts expandable nodrag nopan"
+          onClick={event => event.stopPropagation()}>
+        <summary aria-label={`Show all ${conceptTags.length} concepts for experiment ${node.id}`}>
+          {conceptPreview}<span className="nc-tag more">+{conceptTags.length - 2}</span>
+        </summary>
+        <div className="node-concepts-all">{conceptTags.join(' · ')}</div>
+      </details>
+      : <div className="node-concepts" aria-hidden="true">{conceptPreview}</div>)}
     {onOpenActions && <NodeActionTrigger nodeId={node.id} expanded={actionsOpen} onOpen={onOpenActions} />}
     </div>
   )

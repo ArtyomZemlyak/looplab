@@ -64,21 +64,18 @@ const boundedRead = (request, ms = 12000) => {
 }
 
 // Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
+const FREEZE = { success: '⏸ run stopped (not finalized)',
+  noop: '⏸ run already stopped', executing: 'Stop requested — waiting for freeze' }
+const FINALIZE = { success: '⏹ run finalized',
+  noop: '⏹ run already finalized', executing: 'Finalize requested — waiting for wrap-up' }
 const DIRECT = {
-  stop:     { success: '⏸ run stopped (frozen — not finalized)',
-    noop: '⏸ run was already stopped', executing: 'Stop requested — waiting for the run to freeze' },
-  finalize: { success: '⏹ run finalized (wrap-up complete)',
-    noop: '⏹ run was already finalized', executing: 'Finalize requested — waiting for report and wrap-up' },
+  stop: FREEZE, pause: FREEZE, finalize: FINALIZE, abort: FINALIZE,
   resume:   { success: '▶ run resumed',
-    noop: '▶ run was already running', executing: 'Resume requested — waiting for the engine' },
-  pause:    { success: '⏸ run stopped (frozen)',
-    noop: '⏸ run was already stopped', executing: 'Pause requested — waiting for the run to freeze' },
-  abort:    { success: '⏹ run finalized',
-    noop: '⏹ run was already finalized', executing: 'Finalize requested — waiting for wrap-up' },
+    noop: '▶ run already running', executing: 'Resume requested — waiting for engine' },
   ratify:   { success: '✓ eval spec ratified',
-    noop: '✓ eval spec was already ratified', executing: 'Ratification requested — waiting for confirmation' },
+    noop: '✓ eval spec already ratified', executing: 'Ratification requested — awaiting confirmation' },
   approve:  { arg: true, success: (id) => `✓ approved #${id}`,
-    noop: (id) => `✓ #${id} was already approved`, executing: (id) => `Approval of #${id} requested — waiting for confirmation` },
+    noop: (id) => `✓ #${id} already approved`, executing: (id) => `Approval #${id} requested — awaiting confirmation` },
 }
 const UNKNOWN_DIRECT_SPEC = {
   success: 'Run command completed', noop: 'Run command was already satisfied',
@@ -132,13 +129,20 @@ function preRoute(t) {
 // `#N` must start a token (not follow a word/# char) and end at a boundary — so `#3498db` (hex color),
 // URL fragments (`page#12`), and `x#5` don't fabricate an experiment reference.
 const refNodes = (t) => [...new Set([...(t || '').matchAll(/(?<![\w#])#(?:node-)?(\d+)\b/gi)].map(m => Number(m[1])))]
+const uiRunContext = (runId, refs) => {
+  if (!runId) return ''
+  const safe = String(runId).replace(/[\]"\r\n]/g, ' ').slice(0, 200)
+  const nodes = refs.length
+    ? ` The user refers to ${refs.map(id => '#' + id).join(', ')}; read them with run tools.` : ''
+  return `\n\n[UI context: run "${safe}" is open.${nodes} Use run tools if relevant.]`
+}
 
 // Popular one-tap prompts surfaced in the full view (and side view when empty). Keep short + generic.
 const HINTS = [
-  { label: 'Summarize my runs', text: 'Summarize the state of my runs — best results, what’s running, what failed.' },
+  { label: 'Summarize my runs', text: 'Summarize my runs: best results, active work, and failures.' },
   { label: 'Start a new run', text: '/new ' },
-  { label: 'Explain the best result', text: 'Explain the current best experiment and why it works.' },
-  { label: "What's next?", text: 'Given my runs so far, propose the next experiment worth trying and why.' },
+  { label: 'Explain the best result', text: 'Explain the best experiment and why it works.' },
+  { label: "What's next?", text: 'Propose the highest-value next experiment and why.' },
 ]
 
 // Attach only text-ish files we can read as plain text (no special parsing). Cap each file so a huge
@@ -773,7 +777,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (!bound.expectedGeneration) {
       const error = new Error('The displayed run generation is unavailable.')
       error.code = 'run_generation_unavailable'
-      error.remediation = 'Refresh the run and wait for its current state before submitting another action.'
+      error.remediation = 'Refresh the run before submitting another action.'
       failDirectObservation(bound, error)
       return
     }
@@ -799,7 +803,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       if (error?.commandUnknown || error?.submissionMayHaveSucceeded
           || (record?.id && ['transport', 'access', 'protocol'].includes(kind))) {
         unavailableDirect(bound, error, record)
-        flashDirect(bound, `/${bound.name}: command status unavailable — the same intent was preserved`)
+        flashDirect(bound, `/${bound.name}: status unavailable; intent preserved`)
       } else if (error?.code === 'run_generation_changed'
           || error?.code === 'invalid_run_generation'
           || error?.code === 'run_generation_unavailable') {
@@ -826,7 +830,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     // Read synchronously as well as using React state: two rapid clicks in one batch must not create
     // competing intents before the lock event has caused a render.
     if (directCaptureRef.current || loadRunCommandLock(runId) || (loadAssistantRunTransport(runId) && !directFailure)) {
-      flash('A stored run command must be recovered before starting another action'); return
+      flash('Recover the stored run command before starting another'); return
     }
     if (directFailure) clearAssistantRunTransport(directFailure.runId, undefined, {
       idempotencyKey: directFailure.idempotencyKey,
@@ -838,12 +842,12 @@ export default function AssistantBar({ runId, hidden = false }) {
       if (d.name === 'approve') {
         const payload = await get(`/api/runs/${encodeURIComponent(runId)}/state`)
         const target = pendingApprovalTarget(payload?.state)
-        if (!target) throw new Error('The pending approval target is missing or changed; inspect Events before acting')
+        if (!target) throw new Error('Approval target changed; inspect Events')
         if (target.nodeId !== d.arg) {
           throw new Error(`The active approval is for experiment #${target.nodeId}, not #${d.arg}`)
         }
         expectedGeneration = normalizeRunGeneration(payload?.generation)
-        if (!expectedGeneration) throw new Error('The run generation could not be verified; refresh before approving')
+        if (!expectedGeneration) throw new Error('Run generation unverified; refresh before approving')
         nodeGeneration = target.nodeGeneration
       }
       const entry = { ...d, runId, nodeGeneration,
@@ -854,7 +858,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       setDirectPending(entry)
       await executeDirect(entry)
     } catch {
-      flash(`/${d.name} could not start; refresh the run and try again`)
+      flash(`/${d.name} could not start; refresh and retry`)
     } finally { directCaptureRef.current = false }
   }
   const checkDirect = async () => {
@@ -868,7 +872,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       if (entry.canResubmit === false || entry.protocolInvalid) {
         const next = { ...entry, checking: false, statusUnavailable: true, observationKind: 'protocol' }
         setDirectPending(next)
-        flashDirect(entry, 'Stored command identity is invalid and cannot be safely replayed; dismiss it to continue')
+        flashDirect(entry, 'Stored command identity is invalid; dismiss it')
         return
       }
       // The POST response was lost. Re-submit only the stored key + allow-listed deterministic intent;
@@ -892,12 +896,12 @@ export default function AssistantBar({ runId, hidden = false }) {
     const failure = directFailure
     if (!failure || directPending || !commandCanRetry(failure.record)) return
     if (loadRunCommandLock(failure.runId)) {
-      flashDirect(failure, 'Another run command is pending; wait before retrying this command')
+      flashDirect(failure, 'Another run command is pending; retry later')
       return
     }
     const retrying = { ...failure, retrying: true, checking: false, statusUnavailable: false }
     if (!persistDirect(retrying)) {
-      flashDirect(failure, 'Retry not sent — durable recovery storage is unavailable')
+      flashDirect(failure, 'Retry not sent; recovery storage unavailable')
       return
     }
     commandFocusRequestedRef.current = true
@@ -934,7 +938,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (!failure) return
     if (failure.record?.error?.code === 'command_storage_unavailable') {
       if (!clearUnsentDirectRecovery(failure)) {
-        flashDirect(failure, 'Recovery storage is still unavailable; the unsent command remains quarantined')
+        flashDirect(failure, 'Recovery storage unavailable; unsent command remains quarantined')
         return
       }
     } else {
@@ -1290,10 +1294,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (!userText) { flash('The original message is empty'); return }
     const contextRun = prior.context?.run || null
     const refs = Array.isArray(prior.context?.refs) ? prior.context.refs : []
-    const safeRun = String(contextRun || '').replace(/[\]"\r\n]/g, ' ').slice(0, 200)
-    const ctx = contextRun
-      ? `\n\n[UI context: run "${safeRun}" is open.${refs.length ? ` The user is referring to experiment(s) ${refs.map(i => '#' + i).join(', ')} — read them with the run tools.` : ''} Use the run tools if this is about it.]`
-      : ''
+    const ctx = uiRunContext(contextRun, refs)
     runLLM(userText + ctx, { userText, ensureVisible: true, context: prior.context || null })
   }
 
@@ -1323,10 +1324,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     const pr = runId ? preRoute(t) : null
     if (pr) { setInput(''); runDirect(pr); return }
     const refs = runId ? refNodes(t) : []
-    const safeRun = String(runId).replace(/[\]"\r\n]/g, ' ').slice(0, 200)   // can't break the preamble/stripCtx or inject
-    const ctx = runId
-      ? `\n\n[UI context: run "${safeRun}" is open.${refs.length ? ` The user is referring to experiment(s) ${refs.map(i => '#' + i).join(', ')} — read them with the run tools.` : ''} Use the run tools if this is about it.]`
-      : ''
+    const ctx = uiRunContext(runId, refs)
     runLLM((t || 'See the attached file(s).') + ctx, { userText: t || '(attached files)',
       context: { run: runId || null, refs }, clearComposer: true })
   }
@@ -1367,6 +1365,9 @@ export default function AssistantBar({ runId, hidden = false }) {
   }, [historical])
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
+  const changeInput = e => {
+    setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0)
+  }
   const pendingCommandText = directPending
     ? assistantDirectStatus(directPending)
     : externalCommandPending ? `/${externalCommandPending.action} is pending in the run timeline` : ''
@@ -1573,7 +1574,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
         aria-label="Assistant message" {...comboAria}
-        disabled={historical || commandBusy} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
+        disabled={historical || commandBusy} onChange={changeInput} onKeyDown={onKey}
         placeholder={historical ? readOnlyShort : placeholder} />
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
@@ -1587,6 +1588,9 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   return <>
     {hiddenFileInput}
+    <output className="sr-only">
+      {busy ? 'Assistant is responding.' : preview ? 'Assistant response ready.' : ''}
+    </output>
 
     {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
     {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
@@ -1604,7 +1608,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}
           aria-controls="assistant-command-listbox"
           aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
-          disabled={historical || commandBusy} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
+          disabled={historical || commandBusy} onChange={changeInput} onKeyDown={onKey}
           placeholder={historical ? readOnlyShort : runId
             ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
             : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
@@ -1650,13 +1654,10 @@ export default function AssistantBar({ runId, hidden = false }) {
     {view === 'side' && <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
       role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
       tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
-      {/* hide this separator at the compact breakpoint where CSS forces 100vw.
-          It remains keyboard-focusable and announces changing values although the rendered panel
-          cannot resize, so its accessible operation is false. */}
-      <div className="asst-resize" role="separator" aria-label="Resize Assistant panel"
+      {!compactAssistant && <div className="asst-resize" role="separator" aria-label="Resize Assistant panel"
         aria-orientation="vertical" aria-valuemin={320} aria-valuemax={maxSideWidth()}
         aria-valuenow={Math.round(sideW)} tabIndex={0} onPointerDown={startResize}
-        onKeyDown={resizeWithKeys} title="Drag or use arrow keys to resize" />
+        onKeyDown={resizeWithKeys} title="Drag or use arrow keys to resize" />}
       <div className="asst-drawer-h">
         <b className="asst-drawer-ttl">Assistant</b>
         {ctxChip}
@@ -1666,12 +1667,8 @@ export default function AssistantBar({ runId, hidden = false }) {
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         <button className="btn sm ghost" title="collapse to the bar" onClick={collapseToBar}>▾ bar</button>
       </div>
-      {/* # CODEX AGENT: busy turns disable the only live transcript region, while the thinking
-          indicator has no status role and completion has no atomic announcement. Keep token prose
-          quiet if needed, but expose persistent "Assistant responding" / "response ready" status
-          transitions for nonvisual users in both side and full views. */}
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
-        aria-live={busy ? 'off' : 'polite'} aria-busy={busy} aria-relevant="additions" tabIndex={0}
+        aria-live="off" aria-busy={busy} tabIndex={0}
         onScroll={onFeedScroll}>{renderThread()}</div>
       {composer('Message the assistant…  (/ for commands · Enter to send)')}
       {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
@@ -1730,7 +1727,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>
         <div className="asst-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
-          aria-live={busy ? 'off' : 'polite'} aria-busy={busy} aria-relevant="additions" tabIndex={0}
+          aria-live="off" aria-busy={busy} tabIndex={0}
           onScroll={onFeedScroll}>{renderThread()}</div>
         {composer('Message the assistant…  (/ for commands · Enter to send)')}
         {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}

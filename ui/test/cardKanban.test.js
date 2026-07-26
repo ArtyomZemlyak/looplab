@@ -11,6 +11,8 @@ const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 let vite
 let HypothesisBoard
+let cardEditReflected
+let cardControlSubmission
 
 test.before(async () => {
   vite = await createServer({
@@ -18,6 +20,8 @@ test.before(async () => {
     server: { middlewareMode: true },
   })
   ;({ HypothesisBoard } = await vite.ssrLoadModule('/src/panels.jsx'))
+  ;({ cardEditReflected, cardControlSubmission } =
+    await vite.ssrLoadModule('/src/cardControlModel.js'))
 })
 
 test.after(async () => {
@@ -95,8 +99,12 @@ test('HypothesisBoard renders the bounded Card DTO as lifecycle lanes in priorit
   assert.match(markup, /scored vs #3 · attempt 4/)
   assert.match(markup, /aria-label="Open evidence node #7"/)
   assert.match(markup, /Operator controls/)
-  for (const label of ['Save text', 'Pin priority', 'Pin resources', 'Confirm drop', 'Abandon belief']) {
+  for (const label of ['Save text', 'Pin priority', 'Pin resources', 'Confirm drop', 'Abandon this Card']) {
     assert.match(markup, new RegExp(`>${label}<`))
+  }
+  assert.doesNotMatch(markup, />Abandon belief</)
+  for (const [cardId, statement] of [['card-first', 'First priority'], ['card-later', 'Later priority']]) {
+    assert.match(markup, new RegExp(`<article[^>]+data-card-id="${cardId}"[^>]+aria-label="${statement}"`))
   }
   for (const label of [
     'Display statement for card-first', 'Priority for card-first', 'GPU count for card-first',
@@ -209,18 +217,15 @@ test('An uncertain (confirmation-unknown) command does not freeze controls on th
 })
 
 test('Edit reflection prefers the durable event receipt and safely falls back for legacy folds', async () => {
-  // CODEX AGENT: this is a source-text regex test, so it never submits two edits or delivers the two
-  // SSE folds in the problematic order; an equivalent-looking but incorrect predicate (or even dead
-  // code) can satisfy it. Render the board with a mocked CONTROL transport and assert the optimistic
-  // value/pending fence after each response+fold transition, including clipping/redaction at baseline.
   const source = await readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8')
   const reflected = source.slice(
-    source.indexOf('function _cardControlReflected'), source.indexOf('function _cardWithOptimisticControls'))
-  assert.match(reflected, /statement_edit_seq[\s\S]*foldedEventSeq >= expected/)
+    source.indexOf('function cardControlReflected'), source.indexOf('function _cardWithOptimisticControls'))
+  assert.match(reflected, /cardEditReflected\(card, patch, baseline, expectedEventSeq\)/)
   // The clipped-prefix branch counts as landed only when the card is a prefix of the submission but NOT
   // a prefix of the baseline — so an extend edit's pre-value (and a still-in-flight earlier chained edit
   // whose value is a prefix of this submission) cannot read as already-landed.
-  assert.match(reflected, /patch\.statement\.startsWith\(card\.statement\)[\s\S]*!baseline\.startsWith\(card\.statement\)/)
+  const model = await readFile(new URL('../src/cardControlModel.js', import.meta.url), 'utf8')
+  assert.match(model, /patch\.statement\.startsWith\(card\.statement\)[\s\S]*!baseline\.startsWith\(card\.statement\)/)
   // The submit path baselines against the prior in-flight submission (via sentEditRef), not the stale
   // fold, so a chained extend edit is not falsely reflected by the earlier edit's landing.
   const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
@@ -229,6 +234,28 @@ test('Edit reflection prefers the durable event receipt and safely falls back fo
   assert.match(board, /prior\.startsWith\(card\.statement\)\) \? prior : card\.statement/)
   assert.match(board, /record\?\.event_seq/)
   assert.match(board, /commandRecord\?\.event_seq/)
+})
+
+test('Two chained Card edits reset the first receipt fence until the second edit folds', () => {
+  const firstPatch = { statement: 'baseline plus first' }
+  let state = cardControlSubmission(
+    {}, 'card-1', 'edit', firstPatch, 'baseline', 'Saving Card display text…')
+  state['card-1'].editEventSeq = 41
+  const secondPatch = { statement: 'baseline plus first plus second' }
+  state = cardControlSubmission(
+    state, 'card-1', 'edit', secondPatch, firstPatch.statement, 'Saving Card display text…')
+
+  assert.equal(state['card-1'].editEventSeq, null,
+    'the second submission must not inherit the first command receipt')
+  assert.equal(state['card-1'].updates.edit.statement, secondPatch.statement)
+  assert.equal(cardEditReflected(
+    { statement: firstPatch.statement, statement_edit_seq: 41 },
+    secondPatch, firstPatch.statement, state['card-1'].editEventSeq,
+  ), false, 'the first edit fold must not clear the second optimistic statement')
+  assert.equal(cardEditReflected(
+    { statement: secondPatch.statement, statement_edit_seq: 42 },
+    secondPatch, firstPatch.statement, 42,
+  ), true)
 })
 
 test('Card optimistic state is scoped to run generation and ignores late unmounted completions', async () => {

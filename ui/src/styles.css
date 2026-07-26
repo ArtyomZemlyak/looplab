@@ -329,13 +329,22 @@ button { font: inherit; }
 .node-card-shell > .node-card { width: 100%; }
 .node-card-shell > .node-card:not(.lod) > .row:first-of-type { padding-right: 27px; }
 /* View 2: on-node concept tags — an absolute strip just below the fixed-height card, so it never
-   changes the layout geometry. pointer-events:none keeps the card fully clickable through it. */
+   changes the layout geometry. A truncated strip becomes a native keyboard/touch disclosure. */
 .node-concepts { position: absolute; top: 100%; left: 0; margin-top: 2px; display: flex; gap: 3px;
   max-width: 188px; overflow: hidden; pointer-events: none; z-index: 2; }
+.node-concepts.expandable { overflow: visible; pointer-events: auto; }
+.node-concepts summary { display: flex; gap: 3px; list-style: none; cursor: pointer; }
+.node-concepts summary::-webkit-details-marker { display: none; }
+.node-concepts summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 5px; }
+.node-concepts-all { position: absolute; top: calc(100% + 3px); left: 0; display: flex; width: 188px;
+  max-height: 120px; box-sizing: border-box; flex-wrap: wrap; gap: 3px; overflow: auto; padding: 5px;
+  margin: 0; border: 1px solid var(--line-2); border-radius: 6px; font-size: 10px; line-height: 1.5;
+  background: var(--bg-1); box-shadow: var(--shadow); }
 .node-concepts .nc-tag { font-size: 9px; line-height: 1.4; padding: 0 5px; border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-1)); color: var(--fg-mut);
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); white-space: nowrap;
   max-width: 84px; overflow: hidden; text-overflow: ellipsis; }
+.node-concepts-all .nc-tag { max-width: 100%; }
 .node-concepts .nc-tag.more { background: var(--bg-1); }
 .node-card-shell > .node-card.dim ~ .node-concepts { opacity: .35; }
 .node-select-trigger { position: absolute; z-index: 3; inset: 0; width: 100%; height: 100%; padding: 0;

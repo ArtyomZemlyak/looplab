@@ -145,6 +145,16 @@ test('compact drawers and nested popups expose only the active modal layer', asy
   assert.match(dialogFocus, /if \(event\.defaultPrevented\) return/)
 })
 
+test('lazy overlay fallback preserves close, focus-trap, Escape, and focus-return contracts', async () => {
+  const [lazy, runList] = await Promise.all([source('LazyBoundary.jsx'), source('RunList.jsx')])
+  assert.match(lazy, /useDialogFocus\(surfaceRef, onClose, mode === 'overlay'\)/)
+  assert.match(lazy, /role=\{failed \? 'alertdialog' : 'dialog'\} aria-modal="true"/)
+  assert.match(lazy, /onClick=\{onClose\}>Close<\/button>/)
+  assert.match(lazy, /<LoadErrorBoundary[\s\S]*?onClose=\{onClose\}/)
+  assert.match(lazy, /<Suspense fallback=\{<LoadSurface[\s\S]*?onClose=\{onClose\}/)
+  assert.match(runList, /<LazyBoundary label="scope report" mode="overlay"[\s\S]*?onClose=\{\(\) => setShowReport\(false\)\}/)
+})
+
 test('route changes update title and move focus to a named main landmark', async () => {
   const [app, auth, list, runView, settings, shared, css] = await Promise.all([
     source('App.jsx'), source('OwnerAuth.jsx'), source('RunList.jsx'),
@@ -170,12 +180,24 @@ test('compact Assistant blocks background pointers and traps focus in the side d
   assert.match(assistant, /useDialogFocus\(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden\)/)
   assert.match(assistant, /className="asst-side-backdrop" aria-hidden="true"[\s\S]*?onPointerDown=\{collapseToBar\}/)
   assert.match(assistant, /role=\{compactAssistant \? 'dialog' : undefined\} aria-modal=\{compactAssistant \? 'true' : undefined\}/)
+  assert.match(assistant, /\{!compactAssistant && <div className="asst-resize" role="separator"/,
+    'the non-functional compact resize handle must not exist in the accessibility tree')
+  assert.match(assistant, /\{busy \? 'Assistant is responding\.' : preview \? 'Assistant response ready\.' : ''\}/)
+  assert.match(assistant, /<output className="sr-only">/)
   assert.match(assistant, /if \(next === 'side'\) requestAnimationFrame\(\(\) => inputRef\.current\?\.focus/)
   assert.match(css, /\.asst-side-backdrop \{ position: fixed; inset: 0; z-index: 190;/)
   assert.match(css, /\.asst-side-panel \{[^}]*z-index: 191;/)
   assert.match(css, /\.overlay \{[^}]*z-index: 190;/,
     'modal layers must block the fixed Attention trigger below z-index 180')
   assert.match(css, /@media \(max-width: 1439px\)[\s\S]*?body\.asst-side-open \.app-shell-main \{ margin-right: 0; \}/)
+})
+
+test('DAG concept overflow is a keyboard and touch disclosure with the complete canonical set', async () => {
+  const [dag, css] = await Promise.all([source('Dag.jsx'), source('styles.css')])
+  assert.match(dag, /<details className="node-concepts expandable nodrag nopan"/)
+  assert.match(dag, /<summary aria-label=\{`Show all \$\{conceptTags\.length\} concepts for experiment \$\{node\.id\}`\}/)
+  assert.match(dag, /<div className="node-concepts-all">\{conceptTags\.join\(' · '\)\}<\/div>/)
+  assert.match(css, /\.node-concepts summary:focus-visible \{ outline: 2px solid var\(--accent\);/)
 })
 
 test('temporary create and delete workflows retain a connected focus destination', async () => {

@@ -797,7 +797,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
         onReconcile={reconcileAll} onClose={closeSuperTasks} />}
 
-      {showReport && scope && <LazyBoundary label="scope report" mode="overlay" resetKey={scope.label}>
+      {showReport && scope && <LazyBoundary label="scope report" mode="overlay" resetKey={scope.label}
+        onClose={() => setShowReport(false)}>
         <ScopeReport scope={scope}
           onOpen={(id) => { setShowReport(false); onOpen(id) }} onClose={() => setShowReport(false)} />
       </LazyBoundary>}

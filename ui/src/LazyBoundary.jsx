@@ -1,12 +1,14 @@
 import React, { Suspense, useEffect, useRef } from 'react'
+import { useDialogFocus } from './useDialogFocus.js'
 
 const reloadPage = () => window.location.reload()
 
-function LoadSurface({ label, mode, failed = false, onReload = reloadPage }) {
+function LoadSurface({ label, mode, failed = false, onReload = reloadPage, onClose }) {
   const surfaceRef = useRef(null)
   const reloadRef = useRef(null)
+  useDialogFocus(surfaceRef, onClose, mode === 'overlay')
   useEffect(() => {
-    if (mode === 'inline' && !failed) return undefined
+    if (mode === 'overlay' || (mode === 'inline' && !failed)) return undefined
     const frame = requestAnimationFrame(() => {
       const target = failed ? reloadRef.current : surfaceRef.current
       target?.focus({ preventScroll: true })
@@ -27,14 +29,11 @@ function LoadSurface({ label, mode, failed = false, onReload = reloadPage }) {
     data-route-main tabIndex={-1} role={failed ? 'alert' : 'status'} aria-live={failed ? 'assertive' : 'polite'}>
     <div className="auth-card">{body}</div>
   </main>
-  // # CODEX AGENT: when the scope-report overlay suspends/fails, this replaces ScopeReport and loses
-  // its close control and dialog focus handling. Add an onClose prop to LazyBoundary/LoadSurface,
-  // pass the caller's close action, render Close alongside Reload, handle Escape, trap focus while
-  // mounted, and restore focus to the invoking Report control after unmount.
   if (mode === 'overlay') return <div className="overlay lazy-overlay-state">
     <div ref={surfaceRef} className="panel" role={failed ? 'alertdialog' : 'dialog'} aria-modal="true"
       aria-label={`${failed ? 'Load failure' : 'Loading'}: ${label}`} tabIndex={-1}>
-      <div className="panel-b lazy-load-state">{body}</div>
+      <div className="panel-b lazy-load-state"><button className="btn sm ghost"
+        onClick={onClose}>Close</button>{body}</div>
     </div>
   </div>
   return <div ref={surfaceRef} className={`notice lazy-load-state${failed ? ' resource-error' : ''}`}
@@ -68,16 +67,17 @@ class LoadErrorBoundary extends React.Component {
 
   render() {
     if (this.state.error) return <LoadSurface label={this.props.label} mode={this.props.mode}
-      failed onReload={this.props.onReload} />
+      failed onReload={this.props.onReload} onClose={this.props.onClose} />
     return this.props.children
   }
 }
 
 /** A local Suspense + error boundary. A failed chunk never blanks the surrounding route. */
 export default function LazyBoundary({ label, children, mode = 'inline', focusOnReady = false,
-  resetKey = label, onReload = reloadPage }) {
-  return <LoadErrorBoundary label={label} mode={mode} resetKey={resetKey} onReload={onReload}>
-    <Suspense fallback={<LoadSurface label={label} mode={mode} onReload={onReload} />}>
+    resetKey = label, onReload = reloadPage, onClose }) {
+  return <LoadErrorBoundary label={label} mode={mode} resetKey={resetKey} onReload={onReload}
+    onClose={onClose}>
+    <Suspense fallback={<LoadSurface label={label} mode={mode} onReload={onReload} onClose={onClose} />}>
       <LoadedFocus focusOnReady={focusOnReady}>{children}</LoadedFocus>
     </Suspense>
   </LoadErrorBoundary>

@@ -374,6 +374,59 @@ test('a nonterminal command with a failed status read remains an unknown outcome
   } finally { await harness.close() }
 })
 
+test('a cross-node composer switch cannot retry the prior node command even with identical text', async () => {
+  const calls = []
+  let commandNumber = 0
+  const fetchStub = async (input, options = {}) => {
+    const url = String(input)
+    const method = String(options.method || 'GET').toUpperCase()
+    calls.push({ url, method, body: options.body })
+    if (method === 'POST' && /\/commands$/.test(url)) {
+      commandNumber += 1
+      return response({
+        id: `cmd_${String(commandNumber).padStart(32, '0')}`,
+        status: 'failed',
+        error: { code: 'event_lock_unavailable', retryable: true },
+      })
+    }
+    return response({ comments: [], next_cursor: null, has_more: false, run_generation: GEN })
+  }
+  const harness = await mountHarness({
+    url: 'https://looplab.test/', fetchStub,
+    load: vite => vite.ssrLoadModule('/src/CommentsThread.jsx'),
+  })
+  const renderNode = nodeId => harness.render(React.createElement(harness.component.default, {
+    runId: 'demo', nodeId, nodeGeneration: 2, expectedGeneration: GEN,
+  }))
+  const type = async value => {
+    const textarea = document.querySelector('.comment-composer textarea')
+    const setter = Object.getOwnPropertyDescriptor(
+      harness.dom.window.HTMLTextAreaElement.prototype, 'value').set
+    await React.act(async () => {
+      setter.call(textarea, value)
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+  try {
+    await renderNode(7); await harness.flush()
+    await type('Same visible text')
+    await React.act(async () => { buttonByText('Post comment').click() })
+    await harness.flush()
+    assert.ok(buttonByText('Retry same command'))
+
+    await renderNode(8); await harness.flush()
+    await type('Same visible text')
+    assert.ok(buttonByText('Post comment'),
+      'a full mutation-scope change must clear the prior retry affordance')
+    await React.act(async () => { buttonByText('Post comment').click() })
+    await harness.flush()
+
+    const posts = calls.filter(call => call.method === 'POST' && /\/commands$/.test(call.url))
+    assert.deepEqual(posts.map(call => JSON.parse(call.body).data.node_id), [7, 8])
+    assert.equal(calls.some(call => /\/retry$/.test(call.url)), false)
+  } finally { await harness.close() }
+})
+
 test('retryable create, edit, resolve, and reopen failures re-arm only their exact durable command', async () => {
   const calls = []
   const commandIds = []
