@@ -28,7 +28,8 @@ from looplab.events.types import (
     EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
     EV_SPEC_APPROVED)
 from looplab.serve.assistant import safe_provider_failure
-from looplab.serve.llm_context import _boss_context, _client_tokens, _node_context
+from looplab.serve.llm_context import (
+    BOSS_EVIDENCE_GUARD, _client_tokens, _node_context, boss_prompt_parts)
 from looplab.serve.paid_work import (
     RunCostAccountingPending as _RunCostAccountingPending,
     flush_durable_run_costs as _flush_durable_run_costs,
@@ -591,13 +592,18 @@ def build_router(srv) -> APIRouter:
         st = srv.state(rd)
         # advisory=True: /chat has no actions channel, so the RUN STATUS block must recommend,
         # not command ("you MUST act: resume") — else the model claims actions it can't take.
-        sys_prompt = CHAT_SYSTEM + _boss_context(st, nid, rd, advisory=True)
+        # The run's own experiments ride as a separate labelled user message, NOT inside the system
+        # prompt: node code and model-authored text are untrusted, and this is the role that can
+        # raise budgets and route commands (see llm_context.boss_prompt_parts).
+        sys_suffix, evidence = boss_prompt_parts(st, nid, rd, advisory=True)
+        sys_prompt = CHAT_SYSTEM + sys_suffix + (BOSS_EVIDENCE_GUARD if evidence else "")
         try:
             with _metered_run_client(srv, _llm_settings(rd), rd, generation) as client:
                 # Offload to a thread — an `async def` handler must not run the blocking completion on
                 # the event loop (it would freeze other clients/SSE for up to the client timeout).
                 text = await anyio.to_thread.run_sync(
-                    lambda: client.complete_text([{"role": "system", "content": sys_prompt}, *msgs]))
+                    lambda: client.complete_text(
+                        [{"role": "system", "content": sys_prompt}, *evidence, *msgs]))
                 model = getattr(client, "model", None)
                 tokens = _client_tokens(client)
         except HTTPException as exc:
@@ -682,7 +688,8 @@ def build_router(srv) -> APIRouter:
         instruction = (body.get("instruction") or "").strip()
         st = srv.state(rd)
         s = _llm_settings(rd)
-        sys_prompt = COMMAND_SYSTEM + _boss_context(st, nid, rd)
+        sys_suffix, evidence = boss_prompt_parts(st, nid, rd)
+        sys_prompt = COMMAND_SYSTEM + sys_suffix + (BOSS_EVIDENCE_GUARD if evidence else "")
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
         from looplab.core.parse import parse_structured
@@ -729,6 +736,7 @@ def build_router(srv) -> APIRouter:
             # returns {status:running} to the UI rather than 504ing behind a proxy. Set a positive cap
             # in settings only if you also want to hard-stop the loop itself.
             drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
+                                            *evidence,
                                             {"role": "user", "content": user}],
                             emit_spec, max_turns=getattr(s, "agent_max_turns", 0),
                             time_budget_s=getattr(s, "agent_time_budget_s", 0.0),
@@ -762,7 +770,7 @@ def build_router(srv) -> APIRouter:
                 if plan is None:
                     try:
                         plan = parse_structured(
-                            client, [{"role": "system", "content": sys_prompt},
+                            client, [{"role": "system", "content": sys_prompt}, *evidence,
                                      {"role": "user", "content": user}], _Plan, s.llm_parser)
                     except Exception:  # parse fumble -> fall through to advisory reply
                         plan = None
@@ -774,13 +782,14 @@ def build_router(srv) -> APIRouter:
                     if plan.reply:
                         return {"ok": True, "reply": plan.reply, "tokens": tok}
                 try:
+                    advise_suffix, advise_ev = boss_prompt_parts(st, nid, rd, advisory=True)
                     advise_sys = ("You are an ML research collaborator embedded in an experiment "
                                   "loop. Answer concisely, grounded on the run.\n"
-                                  + _boss_context(st, nid, rd, advisory=True))
+                                  + advise_suffix + (BOSS_EVIDENCE_GUARD if advise_ev else ""))
                     advise_msgs = msgs + ([{"role": "user", "content": instruction}]
                                           if instruction else [])
                     text = client.complete_text(
-                        [{"role": "system", "content": advise_sys}, *advise_msgs])
+                        [{"role": "system", "content": advise_sys}, *advise_ev, *advise_msgs])
                     user_msg = instruction or next(
                         (m.get("content", "") for m in reversed(msgs)
                          if m.get("role") == "user"), "")

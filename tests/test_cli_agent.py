@@ -214,3 +214,33 @@ def test_opencode_config_trailing_slash():
     assert "ollama" in cfg["provider"]
     models = cfg["provider"]["ollama"]["models"]
     assert "ollama/" not in models                     # not the broken empty-name id
+
+
+def test_batch_shim_never_carries_the_prompt_on_its_command_line(tmp_path):
+    """A `.cmd`/`.bat` launcher must not receive model-authored text in argv.
+
+    cmd.exe re-parses the command line it is handed even though Popen gets an argv LIST with
+    shell=False — CPython's list2cmdline implements MS-C-runtime quoting only, so `%VAR%`, `&`, `^`
+    or a closing quote inside the prompt reaches the host shell. The launcher stays supported (it is
+    how several agents ship on Windows); what changes is that the untrusted text moves into a file in
+    the agent's own worktree and argv carries only a fixed ASCII sentence plus our own constant name.
+    """
+    from looplab.agents.cli_agent import PRESETS, CliAgentDeveloper, _PROMPT_FILE
+
+    hostile = 'fix it & echo %PATH% ^ "; del *.*'
+    dev = CliAgentDeveloper(model="m", spec=PRESETS["opencode"],
+                            cmd_override=["C:\\\\npm\\\\opencode.cmd"])
+    base = dev._launch_base()
+    argv_message, via_file = dev._prompt_delivery(hostile, base)
+    assert via_file is True
+    assert hostile not in argv_message and "&" not in argv_message and "%" not in argv_message
+    assert _PROMPT_FILE in argv_message
+    assert hostile not in " ".join(dev._argv(argv_message, "solution.py", base))
+
+    # an ordinary launcher is byte-identical to before: argv IS a safe channel with shell=False,
+    # so the preset's contract must not change for everyone to fix a Windows-only path.
+    plain = CliAgentDeveloper(model="m", spec=PRESETS["opencode"], cmd_override=["/usr/bin/opencode"])
+    pbase = plain._launch_base()
+    pmsg, pvia = plain._prompt_delivery(hostile, pbase)
+    assert pvia is False and pmsg == hostile
+    assert hostile in plain._argv(pmsg, "solution.py", pbase)

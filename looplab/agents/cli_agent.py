@@ -83,14 +83,22 @@ def _resolve_launcher(name: str) -> list[str]:
             if exes:
                 return [str(exes[0])]  # real binary -> no cmd.exe arg mangling
         if p.lower().endswith((".cmd", ".bat")):
-            # CODEX AGENT: Windows batch launchers are reparsed by cmd.exe even though Popen receives
-            # an argv list and shell=False; the model-generated prompt contains metacharacters that
-            # can become host commands. Never pass untrusted prompt text through a batch command line:
-            # require a native executable or deliver the prompt via stdin/a protected response file.
+            # A batch shim is re-parsed by cmd.exe even though Popen gets an argv LIST with
+            # shell=False — CPython's list2cmdline implements MS-C-runtime quoting only, and cmd.exe
+            # applies its own pass on top. So `%VAR%`, `&`, `^` or a closing quote inside the
+            # model-authored prompt would reach the host shell. We keep this launcher working (it is
+            # how several agents ship on Windows) and instead take the untrusted text OUT of its
+            # command line entirely — see `_prompt_delivery`.
             return [p]             # subprocess can run a .cmd/.bat shim directly
         # .ps1 with no bundled .exe: cmd.exe can't run it -> invoke PowerShell.
         return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", p]
     return [p]
+
+
+# Where the prompt goes when argv is not a safe channel (see `_prompt_delivery`). Our own constant,
+# never model-authored, so it carries no shell metacharacters. Lives in the agent's temp worktree
+# beside the seeded code, so it is discarded with the worktree.
+_PROMPT_FILE = "LOOPLAB_TASK.md"
 
 
 # --- presets ------------------------------------------------------------------
@@ -169,13 +177,36 @@ class CliAgentDeveloper:
         self.last_footprint: dict | None = None    # finalized resources for the shipped patch
         self.last_patch: Optional[dict] = None    # surface-gate verdict {ok,paths,rejected}
 
-    def _argv(self, message: str, file: str) -> list[str]:
-        subst = {"{message}": message, "{model}": self.model, "{file}": file}
+    def _launch_base(self) -> list[str]:
+        """The resolved argv template — launcher path first, preset tokens after."""
         base = list(self.spec.argv)
         if self.cmd_override:                      # explicit launcher path: use as-is
             base = list(self.cmd_override) + base[1:]
         else:                                      # bare preset name -> resolve on PATH
             base = _resolve_launcher(base[0]) + base[1:]
+        return base
+
+    def _prompt_delivery(self, prompt: str, base: list[str]) -> tuple[str, bool]:
+        """`(what goes in argv, whether to write the prompt file)`.
+
+        On every ordinary launcher the prompt travels in argv exactly as before: `Popen(argv,
+        shell=False)` hands it to the process as one element with no shell in the path, so there is
+        nothing to inject into and the preset's contract is unchanged.
+
+        A `.cmd`/`.bat` shim is the exception — cmd.exe re-parses the command line it is given, so
+        model-authored text there can become host commands. Rather than dropping that launcher (it
+        is how several agents ship on Windows), the untrusted text moves to a file in the agent's own
+        workdir and argv carries only a fixed ASCII sentence plus our own constant filename. A coding
+        agent reading a task file from its working directory is its native mode, so this costs
+        nothing in capability."""
+        if base and str(base[0]).lower().endswith((".cmd", ".bat")):
+            return (f"Read your full task from the file {_PROMPT_FILE} in the current directory, "
+                    "then carry it out."), True
+        return prompt, False
+
+    def _argv(self, message: str, file: str, base: list[str] | None = None) -> list[str]:
+        subst = {"{message}": message, "{model}": self.model, "{file}": file}
+        base = list(base) if base is not None else self._launch_base()
         return [subst.get(tok, tok) for tok in base]
 
     def _run(self, message: str, seed_code: str) -> str:
@@ -202,7 +233,12 @@ class CliAgentDeveloper:
                         if (self.patch_gate or self.seed_dirs or self.spec.needs_git)
                         else None)
             env = {**os.environ, **self.spec.env(self.host)}
-            argv = self._argv((self.brief + "\n\n" + message).strip(), "solution.py")
+            prompt = (self.brief + "\n\n" + message).strip()
+            base = self._launch_base()
+            argv_message, via_file = self._prompt_delivery(prompt, base)
+            if via_file:                          # batch shim: keep untrusted text out of cmd.exe
+                (wd / _PROMPT_FILE).write_text(prompt, encoding="utf-8")
+            argv = self._argv(argv_message, "solution.py", base)
             # OWN process group (not the plain subprocess.run timeout): a CLI coding agent spawns its
             # OWN children — a language server, git, a nested training/eval subprocess. subprocess's
             # built-in timeout kill signals only the DIRECT child, orphaning those grandchildren to keep

@@ -1707,8 +1707,13 @@ def test_boss_grounds_on_digest_and_uses_run_tools_then_acts(tmp_path, monkeypat
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: fake)
     r = client.post("/api/runs/demo/command", json={"instruction": "focus on feature engineering"}).json()
     assert r["ok"] and r["actions"][0]["type"] == "hint" and "log1p" in r["actions"][0]["data"]["text"]
-    # the boss's prompt was grounded on the digest (the working set), not just the single best node
-    assert "Search so far" in fake.seen[0][0]["content"]
+    # the boss's prompt was grounded on the digest (the working set), not just the single best node —
+    # now carried as a labelled UNTRUSTED user message rather than glued into the system prompt, since
+    # the digest is built from model-authored rationales and this role can raise budgets and act.
+    first_turn = "\n".join(m["content"] for m in fake.seen[0])
+    assert "Search so far" in first_turn
+    assert "UNTRUSTED_RUN_EVIDENCE" in first_turn
+    assert "Search so far" not in fake.seen[0][0]["content"]
     # and it actually consulted a tool first — a tool result was fed back before the emit
     assert any(any(m.get("role") == "tool" for m in msgs) for msgs in fake.seen)
 
@@ -1729,13 +1734,18 @@ def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
         def __init__(self, s): self.model = s.llm_model
         def complete_text(self, msgs):
             captured["sys"] = msgs[0]["content"]
+            captured["all"] = "\n".join(m["content"] for m in msgs)
             return "ok"
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
-    assert "Latest run report" in captured["sys"]
-    assert "Quadratic solved near-optimally" in captured["sys"]       # the headline reached the boss
-    assert "try a finer sweep around the optimum" in captured["sys"]  # a next_directions item too
+    assert "Latest run report" in captured["all"]
+    assert "Quadratic solved near-optimally" in captured["all"]       # the headline reached the boss
+    assert "try a finer sweep around the optimum" in captured["all"]  # a next_directions item too
+    # ...but at DATA authority, not system authority: the report is agent-authored, and this is the
+    # role that can raise budgets and route commands, so it travels as a labelled user message.
+    assert "Quadratic solved near-optimally" not in captured["sys"]
+    assert "UNTRUSTED_RUN_EVIDENCE" in captured["all"]
 
 
 def test_chat_compact_summarizes_and_reports_tokens(tmp_path, monkeypatch):
