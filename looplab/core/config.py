@@ -7,6 +7,7 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 """
 from __future__ import annotations
 
+import re
 import types
 import typing
 from pathlib import Path
@@ -22,6 +23,16 @@ from looplab.core.llm import DEFAULT_HEADER_TIMEOUT_S
 # set the env var to "" to disable, or to a path to relocate. `~/.looplab/` keeps them out of any one
 # project + shared across projects.
 _LL_HOME = Path.home() / ".looplab"
+
+# What one `llm_profiles` entry may contain. Deliberately closed: an unrecognized field is a typo the
+# operator would otherwise never see fail, and the map is a public artifact (config.snapshot.json,
+# HTTP, LOOPLAB_*), so it must never accrete free-form keys.
+_PROFILE_FIELDS = frozenset({"model", "base_url", "temperature", "api_key_env", "provider"})
+# A variable name that `runtime/sandbox.py::SECRET_ENV` will recognize as holding a secret and strip
+# from generated code's environment. Duplicated here, not imported: layering forbids `core` from
+# importing `runtime`. `tests/test_secret_env_pattern.py` holds the two in agreement.
+_SECRET_ENV_NAME = re.compile(
+    r"^(?=[A-Z][A-Z0-9_]{0,63}$)(?=.*(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)).*$")
 
 
 def _is_numeric_annotation(ann) -> bool:
@@ -941,6 +952,27 @@ class Settings(BaseSettings):
     researcher_temperature: float | None = None
     developer_temperature: float | None = None
     strategist_temperature: float | None = None
+    # The Strategist had per-role TEMPERATURE but no model/endpoint of its own, so in split mode it
+    # always ran on the shared llm_model however the other roles were pointed. These close that gap
+    # with the same names/shape as the pair above; blank = its profile, else the shared value.
+    strategist_model: str | None = None
+    strategist_base_url: str | None = None
+    # === Connection profiles (multi-provider) =============================================
+    # A "profile" is a NAMED connection: {model, base_url, temperature, api_key_env, provider}. Roles
+    # point at one by name through `role_profiles`; `llm_profile` is the default for every role that
+    # doesn't. All three are EMPTY by default and the resolver short-circuits to the shared
+    # llm_model/llm_base_url/llm_api_key path when they are — an operator running one model never
+    # needs to know the word "profile".
+    #
+    # A profile stores `api_key_env`, the NAME of an environment variable, never the key itself. That
+    # is ADR-11's "a secret is a reference, not a value" turned from a convention into a data type:
+    # the whole profile map is then safe to write into config.snapshot.json, hand back over HTTP and
+    # render into LOOPLAB_* — there is nothing in it to mask. It is also what makes per-role
+    # CREDENTIALS expressible at all: two roles on one provider can carry different keys, which a
+    # key-per-endpoint map could not say.
+    llm_profiles: dict[str, dict] = Field(default_factory=dict)
+    llm_profile: str | None = None
+    role_profiles: dict[str, str] = Field(default_factory=dict)
     # Unified self-driving agent: one LLM identity that plays Researcher + Developer (+ Strategist)
     # across pipeline stages, choosing its own model/toolset per stage. ON by default — the agent
     # drives the loop (incl. crash triage: repair/abandon/reject_idea) and, via
@@ -1276,7 +1308,63 @@ class Settings(BaseSettings):
             raise ValueError(f"seed_mode must be auto|tracked|all, got {self.seed_mode!r}")
         if self.backend not in ("toy", "llm"):
             raise ValueError(f"backend must be toy|llm, got {self.backend!r}")
+        self._check_llm_profiles()
         return self
+
+    def _check_llm_profiles(self) -> None:
+        """Validate the connection-profile maps LOUDLY, at construction.
+
+        Assignment is not validated anywhere in this project, and these two maps are the kind of
+        thing a typo makes into a silent no-op: an unknown role name would simply never be read, and
+        a reference to a missing profile would fall back to the shared model while the operator
+        believed a second provider was in play. Both are errors here instead.
+
+        The `api_key_env` rules exist for a specific reason. It must LOOK like a secret to
+        `runtime/sandbox.py::SECRET_ENV`, because that is the filter that strips the operator's keys
+        out of the environment handed to generated candidate code — a key parked in a variable named
+        `MY_AUTH` would be invisible to it and ride straight into the sandbox. (The pattern is
+        duplicated below rather than imported: layering forbids `core` from importing `runtime`.
+        `tests/test_secret_env_pattern.py` pins the two together.) And a literal key inside a profile
+        is refused outright: the profile map is written verbatim into config.snapshot.json and served
+        over HTTP precisely because it is supposed to contain no secrets."""
+        from looplab.core.llm import LLM_ROLE_KEYS
+        if not isinstance(self.llm_profiles, dict):
+            raise ValueError("llm_profiles must be a map of profile name -> profile")
+        for name, entry in self.llm_profiles.items():
+            if not isinstance(entry, dict):
+                raise ValueError(f"llm_profiles[{name!r}] must be an object")
+            unknown = set(entry) - _PROFILE_FIELDS
+            if unknown:
+                raise ValueError(
+                    f"llm_profiles[{name!r}] has unknown field(s) {sorted(unknown)}; "
+                    f"known: {sorted(_PROFILE_FIELDS)}")
+            for banned in ("api_key", "key", "token", "secret"):
+                if banned in entry:
+                    raise ValueError(
+                        f"llm_profiles[{name!r}] must not contain {banned!r}: a profile stores "
+                        "api_key_env (the NAME of an environment variable), never a key value — "
+                        "the whole map is written to config.snapshot.json and served over HTTP")
+            env = entry.get("api_key_env")
+            if env is not None and not _SECRET_ENV_NAME.match(str(env)):
+                raise ValueError(
+                    f"llm_profiles[{name!r}].api_key_env={env!r} is not a usable variable name: it "
+                    "must be UPPER_SNAKE and contain KEY/SECRET/TOKEN/PASSWORD/PASSWD/CREDENTIAL, so "
+                    "the sandbox's secret-name filter strips it from generated code's environment")
+            temp = entry.get("temperature")
+            if temp is not None and (isinstance(temp, bool) or not isinstance(temp, (int, float))):
+                raise ValueError(f"llm_profiles[{name!r}].temperature must be a number")
+        if not isinstance(self.role_profiles, dict):
+            raise ValueError("role_profiles must be a map of role name -> profile name")
+        for role, profile in self.role_profiles.items():
+            if role not in LLM_ROLE_KEYS:
+                raise ValueError(
+                    f"role_profiles has unknown role {role!r}; known: {sorted(LLM_ROLE_KEYS)}")
+            if profile not in self.llm_profiles:
+                raise ValueError(
+                    f"role_profiles[{role!r}] names profile {profile!r}, which is not in llm_profiles")
+        if self.llm_profile is not None and self.llm_profile not in self.llm_profiles:
+            raise ValueError(
+                f"llm_profile={self.llm_profile!r} is not in llm_profiles")
 
     def masked_snapshot(self) -> dict:
         # Snapshots are a JSON contract (they are written verbatim to config.snapshot.json), not a

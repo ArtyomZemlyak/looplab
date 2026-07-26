@@ -789,14 +789,13 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # own model/endpoint AND/OR sampling temperature when configured (e.g. Developer on a strong coding
     # model at a low temp, Researcher on a fast breadth model at a higher temp). A temperature-only
     # override still rebuilds the client (else it would silently no-op); model/base_url stay shared.
-    if (settings.researcher_model or settings.researcher_base_url
-            or settings.researcher_temperature is not None):
-        _set_role_client(researcher, make_llm_client(
-            settings, model=settings.researcher_model, base_url=settings.researcher_base_url,
-            temperature=settings.researcher_temperature))
-    if (settings.developer_model or settings.developer_base_url
-            or settings.developer_temperature is not None):
-        _set_role_client(developer, make_llm_client(
-            settings, model=settings.developer_model, base_url=settings.developer_base_url,
-            temperature=settings.developer_temperature))
+    # The test is now simply "does this role resolve anywhere other than the shared client?" — one
+    # comparison that covers the per-role fields, a temperature-only override (which used to need its
+    # own clause to avoid being a silent no-op), and a connection PROFILE with its own endpoint and
+    # credential. A role that resolves to the shared target keeps the client built above, untouched.
+    from looplab.core.llm import make_llm_client_for, resolve_llm_target
+    shared = resolve_llm_target(settings)
+    for _role, _obj in (("researcher", researcher), ("developer", developer)):
+        if resolve_llm_target(settings, role=_role) != shared:
+            _set_role_client(_obj, make_llm_client_for(settings, role=_role))
     return researcher, developer

@@ -96,6 +96,30 @@ default — so a stage that overrides only the endpoint keeps its role's model a
 temperature. `implement` and `repair` are genuinely independent stages: give them different models
 and the repair stage runs on its own Developer instead of sharing the implement one.
 
+The Strategist has `strategist_model` / `strategist_base_url` alongside its temperature; before they
+existed it always ran on the shared `llm_model` however the other roles were pointed.
+
+## Several providers at once
+
+Per-role *models* alone cannot express per-role *credentials* — two roles on the same provider may
+need different keys or budgets — so a role can instead point at a named **connection profile**
+carrying a model, an endpoint, a temperature and the NAME of the environment variable holding its
+key. Skip this entirely if you run one model; see
+[Configuration → Connection profiles](configuration.md#connection-profiles-only-needed-with-more-than-one-provider)
+for the fields, the full precedence table and the safety rules.
+
+```bash
+export LOOPLAB_LLM_PROFILES='{"coder": {"base_url": "https://api.provider.tld/v1",
+  "model": "big-coder", "api_key_env": "LOOPLAB_LLM_API_KEY_CODER"}}'
+export LOOPLAB_ROLE_PROFILES='{"implement": "coder", "repair": "coder"}'
+export LOOPLAB_LLM_API_KEY_CODER=sk-...
+```
+
+Roles you can bind: `propose`, `implement`, `repair`, `strategy`, `pilot`, `researcher`,
+`developer`, `strategist`, `compressor`, `embed`. An unknown role name, a missing profile, or a
+literal key inside a profile is refused at startup rather than silently ignored, and a bound profile
+whose variable is unset stops the run **before its first paid call**.
+
 ## External coding agents
 
 The Developer role can be delegated to an external terminal coding agent. LoopLab runs it headless

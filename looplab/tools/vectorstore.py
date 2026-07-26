@@ -144,6 +144,19 @@ def make_embedder(settings) -> Callable[[str], Vector]:
         key = key.get_secret_value() if key is not None and hasattr(key, "get_secret_value") else (key or "x")
     except Exception:
         key = "x"
+    # An embeddings endpoint is very often a DIFFERENT provider from the chat model, so the shared
+    # `llm_api_key` was the wrong credential to hardcode here. A profile bound to the `embed` role
+    # supplies its own (model/base_url still come from the fields above, which win over a profile).
+    # Best-effort like the rest of this function: embedding must never crash a run, and an
+    # unresolvable key just leaves the shared one in place for the endpoint to reject or ignore.
+    try:
+        import os
+
+        from looplab.core.llm import resolve_llm_target
+        env = resolve_llm_target(settings, role="embed").api_key_env
+        key = os.environ.get(env) or key if env else key
+    except Exception:  # noqa: BLE001
+        pass
     return LLMEmbedder(model, base_url=base, api_key=key)
 
 

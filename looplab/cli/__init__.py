@@ -251,7 +251,14 @@ def _make_calibration_roles(task: TaskAdapter, settings: Settings, run_dir: Path
 
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             crash_after: Optional[int], *, speculation_gate_calibration: bool = False) -> Engine:
+    from looplab.core.llm import validate_bound_profiles
     from looplab.core.tracing import set_llm_capture
+    # Fail here, before any role is built, when a role is bound to a connection profile whose
+    # credential variable is unset. Every CLI path (run/resume, and the UI, which spawns them)
+    # funnels through this constructor, so this is the one gate that catches it — and catching it at
+    # the first paid call instead would mean discovering the missing key partway into a run. A no-op
+    # without profiles and for the offline backend, which builds no clients at all.
+    validate_bound_profiles(settings)
     narrow_speculation_runtime = bool(
         speculation_gate_calibration or settings.speculation_gate_receipt)
     if narrow_speculation_runtime:
@@ -352,7 +359,12 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # path unchanged (the engine still records/replays `strategy_decision`).
         strategist = researcher
     else:
-        strat_client = (make_llm_client(settings, temperature=settings.strategist_temperature)
+        # Resolved for the `strategist` role: until `strategist_model`/`strategist_base_url`
+        # existed this call passed only a temperature, so the Strategist was pinned to the shared
+        # `llm_model` no matter how the other roles were pointed. Blank fields resolve back to the
+        # shared values, so a run that sets neither is unchanged.
+        from looplab.core.llm import make_llm_client_for
+        strat_client = (make_llm_client_for(settings, role="strategist")
                         if settings.backend == "llm" and settings.strategist_backend in ("llm", "agent")
                         else None)
         from looplab.adapters.tasks import build_strategist_tools

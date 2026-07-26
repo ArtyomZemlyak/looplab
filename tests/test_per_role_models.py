@@ -165,3 +165,35 @@ def test_repair_stage_client_is_billed():
     agent = _unified(llm_model="shared",
                      agent_stage_models={"implement": "coder-A", "repair": "fixer-B"})
     assert getattr(agent.repair_developer.client, "accountant", None) is not None
+
+
+def test_the_strategist_can_finally_be_pointed_at_its_own_model():
+    """`strategist_temperature` existed but there was no strategist model/endpoint, so in split mode
+    the Strategist always ran on the shared llm_model however the other roles were pointed."""
+    from unittest.mock import patch
+    from looplab import cli
+    task = load_task(ROOT / "examples" / "code_regression_task.json")
+    s = Settings(backend="llm", llm_model="shared", unified_agent=False,
+                 strategist_backend="llm", strategist_model="planner-70b",
+                 strategist_base_url="http://planner/v1", strategist_temperature=0.15)
+    with patch.object(cli, "make_roles", side_effect=lambda t, st, rd=None: make_roles(t, st, rd)):
+        from looplab.core.llm import resolve_llm_target
+        target = resolve_llm_target(s, role="strategist")
+    assert target.model == "planner-70b" and target.base_url == "http://planner/v1"
+    assert target.temperature == 0.15
+    # Blank strategist fields still resolve back to the shared model (nothing changes for anyone).
+    bare = Settings(backend="llm", llm_model="shared", strategist_temperature=0.15)
+    assert resolve_llm_target(bare, role="strategist").model == "shared"
+
+
+def test_a_role_bound_to_a_profile_gets_that_profiles_client():
+    """The whole point of profiles: a role reaches a different PROVIDER, credential included, not
+    just a different model name on the shared endpoint."""
+    task = load_task(ROOT / "examples" / "code_regression_task.json")
+    s = Settings(backend="llm", llm_model="shared", llm_base_url="http://shared/v1",
+                 unified_agent=False,
+                 llm_profiles={"coder": {"base_url": "https://coder.tld/v1", "model": "big-coder"}},
+                 role_profiles={"developer": "coder"})
+    _researcher, developer = make_roles(task, s)
+    assert _client_model(developer) == "big-coder"
+    assert developer.client.base_url == "https://coder.tld/v1"

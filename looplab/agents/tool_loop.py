@@ -725,11 +725,12 @@ def loop_opts_from_settings(settings) -> dict:
     # summarizer for history compression, instead of paying the main model for it. Blank = the
     # loop's own client (byte-identical legacy behavior).
     if g(settings, "compressor_model", None):
-        from looplab.core.llm import make_llm_client
+        from looplab.core.llm import make_llm_client_for
         try:
-            opts["summary_client"] = make_llm_client(
-                settings, model=settings.compressor_model,
-                base_url=g(settings, "compressor_base_url", None) or None)
+            # Role-resolved, so the compressor can sit on its own provider WITH its own credential
+            # (role_profiles["compressor"]); its own fields still win, so this is the same client as
+            # before for anyone not using profiles.
+            opts["summary_client"] = make_llm_client_for(settings, role="compressor")
         except Exception:  # noqa: BLE001 — a bad compressor config degrades to the main client
             pass
     return opts

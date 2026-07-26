@@ -62,7 +62,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **156 of the 187 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **158 of the 192 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 18 high-frequency keys; search spans all 156 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes.
@@ -208,11 +208,58 @@ Developer, a fast model for breadth). Blank values fall back to the shared `llm_
 |---|---|---|---|
 | `researcher_model` / `developer_model` | `LOOPLAB_RESEARCHER_MODEL` / `LOOPLAB_DEVELOPER_MODEL` | — / — | Per-role model id (blank = shared `llm_model`) |
 | `researcher_base_url` / `developer_base_url` | `LOOPLAB_RESEARCHER_BASE_URL` / `LOOPLAB_DEVELOPER_BASE_URL` | — / — | Per-role endpoint (blank = shared `llm_base_url`) |
+| `strategist_model` / `strategist_base_url` | `LOOPLAB_STRATEGIST_MODEL` / `LOOPLAB_STRATEGIST_BASE_URL` | — / — | The Strategist's own model and endpoint (blank = shared). Before these existed it had a per-role *temperature* but no model of its own, so it always ran on `llm_model` however the other roles were pointed |
 | `researcher_temperature` / `developer_temperature` / `strategist_temperature` | `LOOPLAB_RESEARCHER_TEMPERATURE` / `LOOPLAB_DEVELOPER_TEMPERATURE` / `LOOPLAB_STRATEGIST_TEMPERATURE` | — | Per-role sampling temperature (blank = shared `llm_temperature`). Raise the Researcher for idea breadth, lower the Developer for code determinism. Deep-Research follows the Researcher's value |
 | `agent_stage_models` | `LOOPLAB_AGENT_STAGE_MODELS` | `{}` | Unified-agent per-stage model map (`propose`/`implement`/`repair`/`strategy`/`pilot`). Only takes effect when `unified_agent` is on. `implement` and `repair` are independent: pointing them at different models gives the repair stage its own Developer |
 | `agent_stage_base_urls` | `LOOPLAB_AGENT_STAGE_BASE_URLS` | `{}` | Unified-agent per-stage endpoint map. Same precedence rule: stage map > per-role field > shared default, per property — so a stage that overrides only the endpoint keeps its role's model and temperature |
 
 See [LLM & coding agents](llm-and-agents.md) for full guidance.
+
+### Connection profiles (only needed with more than one provider)
+
+Skip this section if you run one model: keep setting `llm_model`, `llm_base_url` and the single
+`LOOPLAB_LLM_API_KEY`, and nothing below changes anything.
+
+A **profile** is a named connection — `{model, base_url, temperature, api_key_env, provider}` —
+that roles point at by name. It exists because per-role *models* alone cannot express per-role
+*credentials*: two roles on the same provider may need different keys, budgets or subscriptions.
+
+A profile stores `api_key_env`, the **name** of an environment variable, never a key value. That is
+what makes the whole map safe to write into `config.snapshot.json`, serve over HTTP and render into
+`LOOPLAB_*` — there is nothing in it to mask. A literal key inside a profile is rejected at startup,
+and the variable name must look like a secret (`UPPER_SNAKE` containing `KEY`/`SECRET`/`TOKEN`/
+`PASSWORD`/`PASSWD`/`CREDENTIAL`) so the sandbox's secret-name filter strips it from the environment
+handed to generated candidate code.
+
+```bash
+export LOOPLAB_LLM_PROFILES='{
+  "local": {"base_url": "http://localhost:11434/v1", "model": "qwen3:8b"},
+  "coder": {"base_url": "https://api.provider.tld/v1", "model": "big-coder",
+            "api_key_env": "LOOPLAB_LLM_API_KEY_CODER", "temperature": 0.1}}'
+export LOOPLAB_ROLE_PROFILES='{"implement": "coder", "repair": "coder", "propose": "local"}'
+export LOOPLAB_LLM_API_KEY_CODER=sk-...
+```
+
+| Setting | Env | Default | Description |
+|---|---|---|---|
+| `llm_profiles` | `LOOPLAB_LLM_PROFILES` | `{}` | Named connections: `name -> {model, base_url, temperature, api_key_env, provider}`. `api_key_env` is a variable NAME, never a key. Empty = no profiles, everything as before |
+| `role_profiles` | `LOOPLAB_ROLE_PROFILES` | `{}` | `role -> profile name`. Valid roles are `propose`, `implement`, `repair`, `strategy`, `pilot`, `researcher`, `developer`, `strategist`, `compressor`, `embed`; an unknown role or a missing profile fails loudly at startup |
+| `llm_profile` | `LOOPLAB_LLM_PROFILE` | — | The profile every unbound role uses — a one-line move of the whole run to another provider |
+
+**Precedence** — each property resolves on its own, first non-empty wins:
+
+| Property | Order |
+|---|---|
+| model | `agent_stage_models[stage]` → `<role>_model` → profile `model` → `llm_model` |
+| endpoint | `agent_stage_base_urls[stage]` → `<role>_base_url` → profile `base_url` → `llm_base_url` |
+| temperature | `<role>_temperature` → profile `temperature` → `llm_temperature` |
+| credential | profile `api_key_env` (read from the environment) → `llm_api_key` |
+
+The stage maps apply only when `unified_agent` is on. A role bound to a profile whose `api_key_env`
+is unset fails **before the run's first paid call**, naming the variable and the role but never its
+value; unbound profiles are not checked, since one machine-wide map may describe providers this run
+never touches.
+
 
 ## Search policy & allocation
 
