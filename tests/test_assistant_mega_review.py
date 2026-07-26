@@ -72,8 +72,8 @@ def test_message_stream_persists_raw_and_share_strips_it(tmp_path, monkeypatch):
     msgs = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
     assert msgs[0]["content"] == "question"                      # clean bubble for the UI
     assert msgs[0]["raw"] == "question\n[FILE dump]"             # full text kept for later turns
-    client.post(f"/api/assistant/sessions/{sid}/share")
-    shared = client.get(f"/api/assistant/shared/{sid}").json()["messages"]
+    token = client.post(f"/api/assistant/sessions/{sid}/share").json()["url"].rsplit("/", 1)[1]
+    shared = client.get(f"/api/assistant/shared/{token}").json()["messages"]
     assert all("raw" not in m for m in shared)                   # a share link shows bubbles only
 
 
@@ -94,9 +94,9 @@ def test_shared_assistant_allowlists_applied_action_fields(tmp_path, monkeypatch
     sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
     assert client.post(f"/api/assistant/sessions/{sid}/message",
                        json={"instruction": "do it", "mode": "auto"}).status_code == 200
-    client.post(f"/api/assistant/sessions/{sid}/share")
+    token = client.post(f"/api/assistant/sessions/{sid}/share").json()["url"].rsplit("/", 1)[1]
 
-    messages = client.get(f"/api/assistant/shared/{sid}").json()["messages"]
+    messages = client.get(f"/api/assistant/shared/{token}").json()["messages"]
     payload = str(messages)
     assert "abs_path" not in payload and "preview" not in payload and "proposals" not in payload
     assert "C:/Users/me" not in payload and secret not in payload

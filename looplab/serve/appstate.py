@@ -29,7 +29,8 @@ from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
     PHASE_SEARCH, PHASE_SPEC_APPROVAL, RUN_GENERATION_FIELD)
-from looplab.serve.public_cards import INTERNAL_CARD_STATE_FIELDS, public_cards_projection
+from looplab.serve.public_cards import (INTERNAL_CARD_STATE_FIELDS,
+                                        REVIEW_OMITTED_CARD_FIELDS, public_cards_projection)
 from looplab.serve.reviews import ReviewStore
 from looplab.serve.run_commands import RunCommandService, run_generation_token
 from looplab.serve.settings_store import SettingsStore
@@ -131,7 +132,14 @@ class AppState:
         requests."""
         return fold(self.events(rd))
 
-    def state_payload(self, rd: Path, upto_seq: Optional[int] = None) -> dict:
+    def state_payload(self, rd: Path, upto_seq: Optional[int] = None,
+                      *, audience: str = "owner") -> dict:
+        """`audience="review"` builds the same payload for a ONE-RUN review capability: the Card
+        projection is narrowed so nothing describing sibling runs rides along (see
+        `REVIEW_OMITTED_CARD_FIELDS`). Narrowing happens at projection time so the completeness
+        receipt describes what the response actually carries — a scrub applied to a finished DTO
+        would leave the receipt certifying data that is no longer there."""
+        omit_fields = REVIEW_OMITTED_CARD_FIELDS if audience == "review" else frozenset()
         # Cache the expensive fold+dump+trim by (events.jsonl size, mtime, upto_seq): unchanged log ->
         # reuse the trimmed payload, only re-stamping the live `engine_running` (a lock probe, not the
         # log). Bounds the SSE hot path from O(events) per tick to a stat() + a dict copy.
@@ -140,7 +148,10 @@ class AppState:
             # Include file identity/creation time, not only mutable content metadata. Reset archives
             # events.jsonl and creates a replacement that can reuse seq numbers and even the same
             # size/mtime; it must never hit generation A's cached payload for generation B.
-            ckey = (str(rd), stt.st_ino, stt.st_ctime_ns, stt.st_size, stt.st_mtime_ns, upto_seq)
+            # `audience` is part of the key: the review payload is a DIFFERENT projection of the same
+            # log, and serving it from the owner entry (or vice versa) would leak across the boundary.
+            ckey = (str(rd), stt.st_ino, stt.st_ctime_ns, stt.st_size, stt.st_mtime_ns, upto_seq,
+                    audience)
         except OSError:
             ckey = None
         if ckey is not None:
@@ -177,7 +188,7 @@ class AppState:
         # `cards` and its completeness receipt must come from one projection invocation.
         # Re-projecting the two halves separately would let mutable caller input or a later selector
         # change publish counts that do not describe the actual mapping in this SSE/state frame.
-        card_fragment = public_cards_projection(st.cards).model_dump(mode="json")
+        card_fragment = public_cards_projection(st.cards, omit_fields=omit_fields).model_dump(mode="json")
         d.update(card_fragment)
         # DEPRECATED read-only `hypotheses` compat projection (peer review): the derived hypothesis board
         # was removed from RunState (1 card = 1 hypothesis), but docs/23 deferred the /state CONTRACT

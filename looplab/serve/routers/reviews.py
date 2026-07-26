@@ -296,11 +296,13 @@ def build_router(srv) -> APIRouter:
             # ``cards_projection``, so the review response could claim exact/complete coverage of data
             # it silently redacted. Preserve the canonical Cards fragment verbatim through the scrub —
             # owner/SSE never re-scrub it either — so the completeness receipt stays truthful.
-            # CODEX AGENT: this still returns owner state wholesale, including cross_run_priors and Card
-            # cross_run_prior metadata that names/metrics sibling runs. A one-run review capability needs
-            # a dedicated DTO that removes or safely aggregates foreign portfolio records; preserving
-            # Card completeness cannot expand authorization.
-            payload = srv.state_payload(rd)
+            # `audience="review"` is where "one run" becomes structural rather than a promise: the
+            # Card projection is built WITHOUT the members that name sibling runs, so the receipt
+            # preserved below describes exactly what this bearer receives. (Its top-level twin,
+            # `RunState.cross_run_priors`, is dropped by `_SUMMARY_OMIT_KEYS` — same disclosure, two
+            # carriers.) Narrowing at projection time is what keeps the receipt honest: scrubbing the
+            # finished DTO would leave it certifying data the response no longer contains.
+            payload = srv.state_payload(rd, audience="review")
             inner = payload.get("state")
             preserved = ({key: inner[key] for key in ("cards", "cards_projection") if key in inner}
                          if isinstance(inner, dict) else {})

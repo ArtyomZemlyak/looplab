@@ -27,7 +27,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from looplab.serve.assistant import (
-    REPO_ROOT as _ASSISTANT_REPO_ROOT, SessionStore, run_turn as _assistant_run_turn,
+    REPO_ROOT as _ASSISTANT_REPO_ROOT, SHARE_DEFAULT_TTL_SECONDS, SessionStore, ShareError,
+    ShareStore, run_turn as _assistant_run_turn,
     safe_assistant_failure as _safe_assistant_failure,
     sanitize_assistant_message as _sanitize_assistant_message)
 from looplab.serve.engine_proc import _engine_alive
@@ -51,6 +52,14 @@ async def _json_object(request: Request) -> dict:
     if not isinstance(body, dict):
         raise HTTPException(400, "request body must be a JSON object")
     return body
+
+
+async def _json_options(request: Request) -> dict:
+    """Like `_json_object`, but an ABSENT body means "no options" rather than a 400 — for routes
+    whose every field has a default and whose callers may legitimately send nothing at all."""
+    if not await request.body():
+        return {}
+    return await _json_object(request)
 
 
 def _shared_text(value) -> str:
@@ -109,6 +118,7 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ assistant (general chat agent)
     _asst = SessionStore(root)
+    _shares = ShareStore(root)
 
     # --- pause-resume human-in-the-loop permission registry -------------------------------------
     # A mutating tool in a confirm mode calls the injected approver, which registers a request here
@@ -428,32 +438,89 @@ def build_router(srv) -> APIRouter:
         return {"ok": True}
 
     @router.post("/api/assistant/sessions/{sid}/share")
-    def assistant_share(sid: str):
-        # CODEX AGENT: sharing reuses the live session id as an indefinite public capability. It exposes
-        # future turns, has no expiry, and cannot be revoked without deleting the owner chat. Mint a
-        # separate high-entropy digest-stored grant with expiry/revocation and explicitly choose snapshot
-        # versus live-transcript semantics.
-        meta = _asst.update_meta(sid, shared=True)
-        if meta is None:
-            raise HTTPException(404, "no such session")
-        return {"ok": True, "url": f"#/assistant/shared/{sid}", "session": sid}
+    async def assistant_share(sid: str, request: Request):
+        """Mint a read-only share link.
 
-    @router.get("/api/assistant/shared/{sid}")
-    def assistant_shared(sid: str):
+        The link is its own capability — a high-entropy secret kept only as a digest, with an expiry
+        and a revoke — never the session id. Sharing used to flip `shared: true` and publish the id
+        itself, which made the chat readable forever by anyone who saw the URL, kept publishing every
+        turn the owner wrote afterwards, and could only be taken back by deleting the chat.
+
+        Body: `ttl_seconds` (default one week) and `live`. `live` is the explicit answer to "does the
+        link follow the conversation?": the default false FREEZES it at the turns that exist now, so
+        continuing to talk cannot retroactively publish what comes next."""
+        body = await _json_options(request)
         try:
             sess = _asst.get(sid)
         except ValueError:
             raise HTTPException(404, "no such session")
-        if sess is None or not sess["meta"].get("shared"):
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        live = bool(body.get("live", False))
+        try:
+            token, record = _shares.create(
+                sid, message_count=len(sess["messages"]), live=live,
+                ttl_seconds=body.get("ttl_seconds", SHARE_DEFAULT_TTL_SECONDS))
+        except ShareError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        # `shared` stays on the meta purely so the owner's session list can show that a link exists
+        # (and offer to revoke it). It is no longer what authorizes a read.
+        _asst.update_meta(sid, shared=True)
+        return {"ok": True, "url": f"#/assistant/shared/{token}", "session": sid,
+                "expires_at": record["expires_at"], "live": record["live"]}
+
+    @router.delete("/api/assistant/sessions/{sid}/share")
+    def assistant_unshare(sid: str):
+        """Revoke every link for this chat. Revocation exists so taking a share back does not mean
+        deleting the conversation; a revoked record is kept (not removed) so replaying the old token
+        keeps resolving to nothing instead of hitting a fresh link that reused its id."""
+        try:
+            _asst._sdir(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        revoked = _shares.revoke_session(sid)
+        _asst.update_meta(sid, shared=False)
+        return {"ok": True, "revoked": revoked}
+
+    @router.get("/api/assistant/sessions/{sid}/shares")
+    def assistant_shares(sid: str):
+        """The owner's view of this chat's live links — never the tokens, only their terms."""
+        try:
+            _asst._sdir(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        return {"shares": _shares.active_for_session(sid)}
+
+    @router.get("/api/assistant/shared/{token}")
+    def assistant_shared(token: str):
+        record = _shares.resolve(token)
+        if record is None:
+            # One indistinguishable answer for unknown, expired, revoked and wrong-secret. Anything
+            # more specific turns this public route into an oracle for which chats exist.
             raise HTTPException(404, "not shared")
-        # The shared route is intentionally untokened. Return only what the read-only transcript
-        # renders; never expose raw prompts, diff previews, absolute paths, refs, or launch proposals.
-        # Sanitize FIRST (like the owner GET at assistant_get): a legacy raw failure bubble embeds the
-        # provider request URL / routed model / account id, which redact_secrets does NOT strip — so
-        # without this the PUBLIC share leaks provider metadata the authenticated route already hides.
-        meta = {"shared": True, "title": _shared_text(sess["meta"].get("title") or "Shared chat")}
+        try:
+            sess = _asst.get(record["session"])
+        except ValueError:
+            raise HTTPException(404, "not shared")
+        if sess is None:
+            raise HTTPException(404, "not shared")
+        messages = sess["messages"]
+        upto = record.get("upto")
+        if upto is not None:
+            # A snapshot share is frozen at mint time: later turns are simply not part of what the
+            # owner published, so they never reach the wire.
+            messages = messages[:int(upto)]
+        # The shared route is intentionally untokened beyond the capability itself. Return only what
+        # the read-only transcript renders; never expose raw prompts, diff previews, absolute paths,
+        # refs, or launch proposals. Sanitize FIRST (like the owner GET at assistant_get): a legacy
+        # raw failure bubble embeds the provider request URL / routed model / account id, which
+        # redact_secrets does NOT strip — so without this the PUBLIC share leaks provider metadata
+        # the authenticated route already hides.
+        meta = {"shared": True, "live": bool(record.get("live")),
+                "expires_at": record.get("expires_at"),
+                "title": _shared_text(sess["meta"].get("title") or "Shared chat")}
         return {"meta": meta,
-                "messages": [_shared_message(_sanitize_assistant_message(m)) for m in sess["messages"]]}
+                "messages": [_shared_message(_sanitize_assistant_message(m)) for m in messages]}
 
     @router.post("/api/assistant/sessions/{sid}/fork")
     def assistant_fork(sid: str):

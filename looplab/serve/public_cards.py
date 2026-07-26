@@ -43,6 +43,15 @@ _FIELDS = (
     "footprint", "resource_pin", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
     "claim_refs", "steering_context", "provenance_tier",
 )
+# Fields a ONE-RUN capability must not carry. `cross_run_prior` names sibling run_ids and their
+# metrics — other runs' identities, which a review-link bearer was never granted (the top-level
+# `RunState.cross_run_priors` is already dropped by the review router's omit set; this is the same
+# disclosure riding on a Card). Omitting at PROJECTION time rather than scrubbing the finished DTO is
+# what keeps the completeness receipt truthful: the field is then simply absent from the DTO, so
+# `_card_projection_receipt` records it as a full omission and the Card reports complete=False,
+# instead of certifying data the response no longer contains.
+REVIEW_OMITTED_CARD_FIELDS = frozenset({"cross_run_prior"})
+
 _TEXT_LIMITS = {
     "statement": _MAX_TEXT_BYTES,
     "seed_statement": _MAX_TEXT_BYTES,
@@ -1072,12 +1081,14 @@ def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
     )
 
 
-def _dto(card, authoritative_id: str) -> dict:
+def _dto(card, authoritative_id: str, omit_fields=frozenset()) -> dict:
     # fixed admission order keeps identity/lifecycle available; rich optional fields enter
     # only while the complete UTF-8 JSON representation remains inside the per-card SSE envelope.
     out: dict = {"id": authoritative_id}
     concept_source_claimed_complete = False
     for name in _FIELDS[1:]:
+        if name in omit_fields:      # audience-scoped: never admitted, so never certified either
+            continue
         value = _field_value(card, name)
         if value is _SKIP:
             continue
@@ -1209,8 +1220,12 @@ def _projection_metadata(source_valid: bool, total: int,
     )
 
 
-def public_cards_projection(cards) -> PublicCardsEnvelope:
-    """Return the one canonical, bounded Card wire fragment plus exact coverage metadata."""
+def public_cards_projection(cards, *, omit_fields=frozenset()) -> PublicCardsEnvelope:
+    """Return the one canonical, bounded Card wire fragment plus exact coverage metadata.
+
+    `omit_fields` narrows the projection for a lower-authority audience (see
+    `REVIEW_OMITTED_CARD_FIELDS`). Omitted fields never enter the DTO, so the receipt computed from
+    that DTO reports them as omissions — narrowing authorization cannot inflate the coverage claim."""
     source_valid = isinstance(cards, dict)
     if not source_valid:
         metadata = _projection_metadata(False, 0, [])
@@ -1228,7 +1243,7 @@ def public_cards_projection(cards) -> PublicCardsEnvelope:
     board_bytes = 2
     metadata_items_bytes = 2
     for card_id in selected:
-        dto = _dto(cards[card_id], card_id)
+        dto = _dto(cards[card_id], card_id, omit_fields)
         receipt = _card_projection_receipt(cards[card_id], dto)
         key_bytes = json.dumps(card_id, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         dto_bytes = json.dumps(dto, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

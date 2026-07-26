@@ -86,7 +86,7 @@ def _seed_run(root):
     return rd
 
 
-def _assert_public_card_payload(payload: dict) -> None:
+def _assert_public_card_payload(payload: dict, *, cross_run: bool = True) -> None:
     state = payload["state"]
     assert not (INTERNAL_CARD_STATE_FIELDS & state.keys())
     assert set(state["cards"]) == {"card-safe"}
@@ -114,15 +114,22 @@ def _assert_public_card_payload(payload: dict) -> None:
         "grade": "ALLOW", "level": 4, "near_generation": 3, "recommendation": "run",
     }
     assert card["steering_context"] == []
-    prior = card["cross_run_prior"]
-    assert prior["v"] == 2
-    assert prior["prior_runs_total"] == 2
-    assert prior["prior_runs_omitted"] == 1
-    assert prior["prior_runs_complete"] is False
-    assert prior["concept_source"] == {"partial_capsules": 1, "source_complete": False}
-    assert prior["prior_runs"][0]["source_receipt"] == {
-        "concepts_complete": True, "concepts_total": 1,
-    }
+    if cross_run:
+        prior = card["cross_run_prior"]
+        assert prior["v"] == 2
+        assert prior["prior_runs_total"] == 2
+        assert prior["prior_runs_omitted"] == 1
+        assert prior["prior_runs_complete"] is False
+        assert prior["concept_source"] == {"partial_capsules": 1, "source_complete": False}
+        assert prior["prior_runs"][0]["source_receipt"] == {
+            "concepts_complete": True, "concepts_total": 1,
+        }
+    else:
+        # A one-run capability never carries the members that name sibling runs, and the receipt
+        # says so rather than certifying a field the response omitted.
+        assert "cross_run_prior" not in card
+        assert "cross_run_prior" in card_projection["omissions"]
+        assert card_projection["omissions"]["cross_run_prior"]["returned"] == 0
     encoded = json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     assert len(encoded) <= PUBLIC_CARD_MAX_BYTES
     assert {"code", "files", "stdout", "stderr", "stdout_tail", "raw", "preview"}.isdisjoint(card)
@@ -172,9 +179,17 @@ def test_owner_state_sse_and_review_share_the_bounded_card_projection(tmp_path, 
         "/api/review/state", headers={"X-LoopLab-Review": created.json()["token"]})
     assert review.status_code == 200
     review_payload = review.json()
-    _assert_public_card_payload(review_payload)
-    assert review_payload["state"]["cards"] == owner_payload["state"]["cards"]
-    assert review_payload["state"]["cards_projection"] == owner_payload["state"]["cards_projection"]
+    # The review link shares the bounded projection, MINUS the one-run narrowing: a Card must not
+    # carry `cross_run_prior`, which names sibling run_ids and their metrics (its top-level twin,
+    # `cross_run_priors`, is dropped by the router's omit set). Everything else is byte-identical to
+    # the owner's, and the receipt is recomputed against what review actually gets.
+    _assert_public_card_payload(review_payload, cross_run=False)
+    review_card = review_payload["state"]["cards"]["card-safe"]
+    owner_card = owner_payload["state"]["cards"]["card-safe"]
+    assert "cross_run_prior" in owner_card
+    assert review_card == {k: v for k, v in owner_card.items() if k != "cross_run_prior"}
+    assert "cross_run_priors" not in review_payload["state"]
+    assert "sibling" not in json.dumps(review_payload, ensure_ascii=False)
 
 
 def test_public_cards_are_count_size_total_and_deterministic():

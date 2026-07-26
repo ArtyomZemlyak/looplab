@@ -22,10 +22,11 @@ import {
 } from './assistantRecovery.js'
 import './assistant-polish.css'
 import {
-  get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
+  get, fmtAgo, fmtDate, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
   assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
-  assistantFork, assistantShare, commandActionForEvent, commandCanRetry, commandErrorMessage,
+  assistantFork, assistantShare, assistantUnshare,
+  commandActionForEvent, commandCanRetry, commandErrorMessage,
   commandEventForAction,
   commandFailureRecord, commandFeedback, commandRecordMatchesAction, getRunCommand, retryRunCommand,
   getObservedRunGeneration, normalizeRunGeneration,
@@ -1706,14 +1707,25 @@ export default function AssistantBar({ runId, hidden = false }) {
           {sid && <button className="btn sm ghost" title="fork this chat into a new session" onClick={async () => {
             try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch { flash('Could not fork this Assistant chat') }
           }}>⑂ fork</button>}
-          {sid && <button className="btn sm ghost" title="share a read-only link to this chat" onClick={async () => {
+          {/* A share link is a separate secret with an expiry — not this chat's id — and it is frozen
+              at the turns that exist right now, so anything said afterwards stays private. "unshare"
+              revokes every link for the chat without deleting the conversation. */}
+          {sid && <button className="btn sm ghost" title="copy a read-only link to this chat (expires; does not include later messages)" onClick={async () => {
             try {
               const r = await assistantShare(sid)
               const url = location.origin + location.pathname + r.url
               try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
+              flash(`Share link copied. It expires ${fmtDate(r.expires_at)} and shows only the messages up to now.`)
               location.hash = r.url.replace(/^#/, '')   // navigate AFTER copying (the bar hides on the shared page)
             } catch { flash('Could not create a share link for this Assistant chat') }
           }}>⤴ share</button>}
+          {sid && sessions.find(s => s.id === sid)?.shared && <button className="btn sm ghost" title="revoke every share link for this chat (the chat itself is kept)" onClick={async () => {
+            try {
+              const r = await assistantUnshare(sid)
+              await refreshSessions()
+              flash(r.revoked ? `Revoked ${r.revoked} share link${r.revoked === 1 ? '' : 's'}.` : 'No active share links.')
+            } catch { flash('Could not revoke the share links for this Assistant chat') }
+          }}>⤫ unshare</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>

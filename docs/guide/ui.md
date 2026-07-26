@@ -149,7 +149,16 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
 - **Read-only review links** — with `LOOPLAB_UI_TOKEN` configured, **Lab → Collaboration** creates a
   revocable, expiring capability for one run. Summary links expose the DAG/report and derived metrics;
   an explicit evidence option adds redacted node source/results. Assistant, actions, raw
-  logs/prompts/traces, artifacts, and owner settings are never available to the recipient.
+  logs/prompts/traces, artifacts, and owner settings are never available to the recipient. A review
+  link is a capability over **one** run, so nothing describing sibling runs travels with it: both the
+  run's `cross_run_priors` and the per-Card `cross_run_prior` (which name other runs and their
+  metrics) are dropped, and the Card completeness receipt reports them as omitted rather than
+  certifying data the response no longer carries.
+- **Read-only chat share links** — the Assistant's **⤴ share** mints a link with its own secret (not
+  the chat's id), an expiry, and a **⤫ unshare** that revokes every link for that chat while keeping
+  the conversation. A link is **frozen** at the messages that existed when it was created, so
+  continuing the chat never retroactively publishes what you say next; pass `live: true` to the share
+  API for a link that follows the conversation instead.
 - **Comment threads** — event-sourced operator discussion pinned to a run or a specific node, with an
   edit history and a resolve/reopen state. The view is served as authenticated current + history
   projections (`GET /api/runs/{run_id}/comments`, `…/comments/{id}/history`); the operator writes the

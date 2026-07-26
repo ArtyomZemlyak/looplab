@@ -190,12 +190,15 @@ def test_assistant_commands_endpoint(tmp_path):
 def test_session_share_roundtrip(tmp_path):
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
-    # not shared yet -> 404
+    # The session id is NOT a capability: presenting it as one reads nothing.
     assert client.get(f"/api/assistant/shared/{sid}").status_code == 404
     r = client.post(f"/api/assistant/sessions/{sid}/share").json()
-    assert r["ok"] and r["url"].endswith(sid)
-    shared = client.get(f"/api/assistant/shared/{sid}").json()
+    assert r["ok"] and r["live"] is False and r["expires_at"] > 0
+    token = r["url"].rsplit("/", 1)[1]
+    assert sid not in token                       # the link is its own secret, not the chat's id
+    shared = client.get(f"/api/assistant/shared/{token}").json()
     assert shared["meta"]["shared"] is True
+    assert client.get(f"/api/assistant/shared/{sid}").status_code == 404
 
 
 def test_background_closes_handle_after_exit(tmp_path):
@@ -464,3 +467,77 @@ def test_kill_reaps_the_whole_tree(tmp_path):
         except OSError:
             gone = True; break
     assert gone, f"child {child_pid} survived the parent kill (tree not reaped)"
+
+
+# --------------------------------------------------------------------------- share = a capability
+# Sharing used to flip `shared: true` and publish the session's OWN id: readable forever by anyone
+# who saw the URL, still publishing every turn the owner wrote afterwards, and revocable only by
+# deleting the chat. A share link is now its own secret, with an expiry, a revoke, and an explicit
+# answer to whether it follows the conversation.
+
+def _share(client, sid, **body):
+    r = client.post(f"/api/assistant/sessions/{sid}/share", json=body).json()
+    return r, r["url"].rsplit("/", 1)[1]
+
+
+def test_a_snapshot_share_never_publishes_later_turns(tmp_path):
+    from looplab.serve.assistant import SessionStore
+    store = SessionStore(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    store.append(sid, {"role": "user", "content": "published"})
+    _r, token = _share(client, sid)                       # default: snapshot
+    store.append(sid, {"role": "user", "content": "written after sharing"})
+    body = client.get(f"/api/assistant/shared/{token}").json()
+    contents = [m["content"] for m in body["messages"]]
+    assert contents == ["published"]                      # the later turn is simply not shared
+    assert body["meta"]["live"] is False
+
+
+def test_an_explicitly_live_share_does_follow_the_conversation(tmp_path):
+    from looplab.serve.assistant import SessionStore
+    store = SessionStore(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    store.append(sid, {"role": "user", "content": "first"})
+    _r, token = _share(client, sid, live=True)            # the opt-in, never the default
+    store.append(sid, {"role": "user", "content": "second"})
+    body = client.get(f"/api/assistant/shared/{token}").json()
+    assert [m["content"] for m in body["messages"]] == ["first", "second"]
+    assert body["meta"]["live"] is True
+
+
+def test_a_share_can_be_revoked_without_deleting_the_chat(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    _r, token = _share(client, sid)
+    assert client.get(f"/api/assistant/shared/{token}").status_code == 200
+    assert client.delete(f"/api/assistant/sessions/{sid}/share").json()["revoked"] == 1
+    assert client.get(f"/api/assistant/shared/{token}").status_code == 404
+    assert client.get(f"/api/assistant/sessions/{sid}").status_code == 200   # the chat is intact
+    assert client.get(f"/api/assistant/sessions/{sid}/shares").json()["shares"] == []
+
+
+def test_a_share_expires(tmp_path):
+    from looplab.serve.assistant import ShareStore
+    shares = ShareStore(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    token, record = shares.create(sid, message_count=0, ttl_seconds=60)
+    assert shares.resolve(token) is not None
+    assert shares.resolve(token, now=record["expires_at"] + 1) is None
+    assert client.post(f"/api/assistant/sessions/{sid}/share",
+                       json={"ttl_seconds": 0}).status_code == 400   # no unbounded links
+
+
+def test_the_share_secret_is_stored_only_as_a_digest(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    _r, token = _share(client, sid)
+    stored = "".join(p.read_text(encoding="utf-8")
+                     for p in (tmp_path / "assistant" / ".shares").glob("*.json"))
+    assert token not in stored                            # a leaked store cannot be replayed
+    assert token.split(".", 1)[1] not in stored
+    # A guessed id with the wrong secret opens nothing.
+    assert client.get(
+        f"/api/assistant/shared/{token.split('.')[0]}.wrong").status_code == 404

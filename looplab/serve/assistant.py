@@ -266,6 +266,146 @@ class SessionStore:
         return self.update_meta(child["id"], updated=child["updated"]) or child
 
 
+# --------------------------------------------------------------------------- share capabilities
+# Sharing a chat used to mean flipping `shared: true` on the session and handing out its OWN id. That
+# made the session id a public capability: anyone with the URL could read the chat forever, saw every
+# turn the owner added AFTERWARDS, and the only way to take it back was deleting the chat. A share is
+# a capability, so it gets what capabilities get — its own high-entropy secret (stored only as a
+# digest, like the review links in `serve/reviews.py`), an expiry, a revoke, and an explicit answer to
+# "does this follow the conversation or freeze it?".
+SHARE_DEFAULT_TTL_SECONDS = 7 * 24 * 3600
+SHARE_MIN_TTL_SECONDS = 60
+SHARE_MAX_TTL_SECONDS = 90 * 24 * 3600
+
+
+class ShareError(ValueError):
+    """A share link could not be minted (bad expiry, unknown session)."""
+
+
+class ShareStore:
+    """One-file-per-capability share links under `<run_root>/assistant/.shares/`.
+
+    A record is `{id, session, token_hash, created_at, expires_at, revoked_at, live, upto}`. The
+    token itself is never stored: `resolve` hashes the presented one and compares, so a leaked store
+    cannot be replayed as a link. `.shares` sits under the assistant dir, which the server already
+    reserves as a non-run id, and its name starts with a dot so it can never collide with a session
+    id (`create` mints those from `token_hex`)."""
+
+    def __init__(self, run_root):
+        self.dir = Path(run_root) / "assistant" / ".shares"
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _digest(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def _path(self, link_id: str) -> Optional[Path]:
+        # Validate the SHAPE before touching the filesystem: the id arrives inside an attacker-chosen
+        # URL, and only a fixed-width hex string may become a pathname here.
+        if not (len(link_id) == 32 and all(c in "0123456789abcdef" for c in link_id)):
+            return None
+        return self.dir / f"{link_id}.json"
+
+    @staticmethod
+    def _read(path: Path) -> Optional[dict]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def create(self, sid: str, *, message_count: int, ttl_seconds: int = SHARE_DEFAULT_TTL_SECONDS,
+               live: bool = False, now: Optional[float] = None) -> tuple[str, dict]:
+        """Mint a link for `sid` and return `(token, public_record)`.
+
+        `live=False` (the default) FREEZES the share at the turns that exist right now: `upto` is the
+        transcript length at mint time and the reader never returns past it, so continuing the
+        conversation cannot retroactively publish what the owner says next. `live=True` is the
+        opt-in that keeps the link following the chat."""
+        try:
+            ttl = int(ttl_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ShareError("expiry must be a whole number of seconds") from exc
+        if not SHARE_MIN_TTL_SECONDS <= ttl <= SHARE_MAX_TTL_SECONDS:
+            raise ShareError(
+                f"expiry must be between {SHARE_MIN_TTL_SECONDS} and {SHARE_MAX_TTL_SECONDS} seconds")
+        ts = time.time() if now is None else now
+        self.dir.mkdir(parents=True, exist_ok=True)
+        link_id = secrets.token_hex(16)
+        # The secret is the whole capability; the id is only where the record lives.
+        token = f"{link_id}.{secrets.token_urlsafe(32)}"
+        record = {"id": link_id, "session": str(sid), "token_hash": self._digest(token),
+                  "created_at": ts, "expires_at": ts + ttl, "revoked_at": None,
+                  "live": bool(live), "upto": None if live else max(0, int(message_count))}
+        path = self._path(link_id)
+        assert path is not None                       # token_hex(16) is 32 hex chars by construction
+        with self._lock:
+            atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
+        return token, self.public(record)
+
+    @staticmethod
+    def public(record: dict) -> dict:
+        """The owner-facing view: everything except the token digest."""
+        return {k: v for k, v in record.items() if k != "token_hash"}
+
+    def resolve(self, token: str, *, now: Optional[float] = None) -> Optional[dict]:
+        """The record this token grants, or None for unknown / expired / revoked / mismatched.
+
+        One indistinguishable None for every failure: a reader must not be able to tell a revoked
+        link from a never-existing one, which would turn this into a session-existence oracle."""
+        link_id, _, _secret = str(token or "").partition(".")
+        path = self._path(link_id)
+        if path is None:
+            return None
+        record = self._read(path)
+        if record is None or not secrets.compare_digest(
+                str(record.get("token_hash") or ""), self._digest(token)):
+            return None
+        if record.get("revoked_at") is not None:
+            return None
+        ts = time.time() if now is None else now
+        try:
+            if ts >= float(record.get("expires_at")):
+                return None
+        except (TypeError, ValueError):
+            return None                               # an unreadable expiry is an expired link
+        return record
+
+    def revoke_session(self, sid: str, *, now: Optional[float] = None) -> int:
+        """Revoke EVERY link for `sid` and return how many were live. Revoking is a write, not a
+        delete: the record stays so a later presentation of the token still resolves to None rather
+        than to a fresh reservation of the same id."""
+        ts = time.time() if now is None else now
+        revoked = 0
+        with self._lock:
+            for path in sorted(self.dir.glob("*.json")) if self.dir.exists() else []:
+                record = self._read(path)
+                if (record is None or record.get("session") != str(sid)
+                        or record.get("revoked_at") is not None):
+                    continue
+                record["revoked_at"] = ts
+                atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
+                revoked += 1
+        return revoked
+
+    def active_for_session(self, sid: str, *, now: Optional[float] = None) -> list[dict]:
+        ts = time.time() if now is None else now
+        out = []
+        for path in sorted(self.dir.glob("*.json")) if self.dir.exists() else []:
+            record = self._read(path)
+            if record is None or record.get("session") != str(sid):
+                continue
+            if record.get("revoked_at") is not None:
+                continue
+            try:
+                if ts >= float(record.get("expires_at")):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            out.append(self.public(record))
+        return out
+
+
 # --------------------------------------------------------------------------- system prompt + toolset
 def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
                   cross_run_tools: bool = False, taxonomy_tools: bool = False) -> str:

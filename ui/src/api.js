@@ -2139,7 +2139,13 @@ export const assistantProgress = (sid) => get(`/api/assistant/progress?session=$
 
 export const assistantCommands = () => get('/api/assistant/commands')
 export const assistantRevert = (path) => post('/api/assistant/revert', { path })
-export const assistantShare = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, {})
+// A share link is its own capability: the response carries the token-bearing URL, when it expires,
+// and whether it follows the chat (`live`) or is frozen at the turns that existed when it was minted.
+// The session id is NOT a share link — unshare revokes every link without touching the conversation.
+export const assistantShare = (sid, opts = {}) =>
+  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, { live: !!opts.live, ...opts })
+export const assistantUnshare = (sid) =>
+  send(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, 'DELETE')
 // Pending human-in-the-loop confirm requests for a session, and resolving one.
 export const assistantPermissions = (sid = null, options = {}) => get(sid == null
   ? '/api/assistant/permissions'
