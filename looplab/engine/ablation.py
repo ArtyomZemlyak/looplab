@@ -105,7 +105,8 @@ class AblationMixin:
         impacts: dict[str, float] = {}
         abl_seconds = 0.0                       # P1-2: sum the probe wall-clock so it's budgeted
         superseded = False
-        with self.tracer.span("ablate", new_trace=True, node_id=parent_id):
+        with self.tracer.span(
+                "ablate", new_trace=True, node_id=parent_id, generation=generation):
             for p in sorted(parent.idea.params):
                 if not self._ablation_parent_current(parent_id, generation):
                     superseded = True
@@ -248,7 +249,9 @@ class AblationMixin:
         impacts: dict[str, Optional[float]] = {}
         abl_seconds = 0.0                       # P1-2: budget the code-block probes too
         superseded = False
-        with self.tracer.span("ablate_code", new_trace=True, node_id=parent_id, blocks=len(blocks)):
+        with self.tracer.span(
+                "ablate_code", new_trace=True, node_id=parent_id, generation=generation,
+                blocks=len(blocks)):
             for idx, blk in enumerate(blocks):
                 if not self._ablation_parent_current(parent_id, generation):
                     superseded = True

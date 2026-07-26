@@ -38,7 +38,7 @@ from looplab.events.traceview import _normalize_span, _strip_span_io
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
-_SCHEMA = 5
+_SCHEMA = 6
 _INDEX_NAME = "spans.index.jsonl"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
 # span bytes have grown by this factor since the last write. Bounds a live run's total index-write
@@ -264,23 +264,60 @@ class SpanIndex:
         with self._rlock:
             return len(self.by_tid.get(tid, ()))
 
-    def light_spans_for_node(self, node_id, limit: Optional[int] = None) -> list[dict]:
+    def _rows_for_node(self, node_id, generation: Optional[int] = None) -> list[int]:
+        """Return file-order rows for one node, optionally fenced to one lifecycle generation.
+
+        The generation is a TRACE-root property: descendants inherit the root's lifecycle even when
+        their own attributes contain an unrelated retry ``attempt`` or no generation field at all.
+        Legacy unstamped traces predate resets and therefore belong only to generation zero.
+        Caller holds ``_rlock``.
+        """
+        tids = self.node_tids.get(str(node_id), ())
+        if generation is None:
+            return sorted(r for tid in tids for r in self.by_tid.get(tid, ()))
+        rows: list[int] = []
+        for tid in tids:
+            trace_rows = list(self.by_tid.get(tid, ()))
+            if not trace_rows:
+                continue
+            span_ids = {self.light[row].get("span_id") for row in trace_rows}
+            root_row = next(
+                (row for row in trace_rows
+                 if self.light[row].get("parent_id") not in span_ids),
+                trace_rows[0],
+            )
+            attributes = self.light[root_row].get("attributes")
+            raw_generation = (
+                attributes.get("generation") if isinstance(attributes, dict) else None
+            )
+            trace_generation = (
+                raw_generation
+                if type(raw_generation) is int and raw_generation >= 0
+                else 0
+            )
+            if trace_generation == generation:
+                rows.extend(trace_rows)
+        return sorted(rows)
+
+    def light_spans_for_node(self, node_id, limit: Optional[int] = None, *,
+                             generation: Optional[int] = None) -> list[dict]:
         """The LIGHT spans of the traces attributed to this node — IN-MEMORY, no disk read (unlike
         `full_spans_for_node`, which seeks each span's full I/O). Lets the node-detail timeline build
         O(node) instead of O(whole run): `build_trace_view(light=True)` over just these yields the SAME
         `nodes[nid]`/`rollup` as over ALL spans, because a span's effective node (its own node_id, else
-        its trace root's) is N iff it lives in one of N's traces — exactly what `node_tids` collects."""
+        its trace root's) is N iff it lives in one of N's traces — exactly what `node_tids` collects.
+        A generation fence is applied BEFORE the row limit, so abandoned attempts cannot consume the
+        current attempt's response window."""
         with self._rlock:
-            rows = sorted(r for tid in self.node_tids.get(str(node_id), ())
-                          for r in self.by_tid.get(tid, ()))
+            rows = self._rows_for_node(node_id, generation)
             if limit is not None:
                 cap = max(0, int(limit))
                 rows = rows[-cap:] if cap else []
             return [self.light[row] for row in rows]
 
-    def node_span_count(self, node_id) -> int:
+    def node_span_count(self, node_id, *, generation: Optional[int] = None) -> int:
         with self._rlock:
-            return sum(len(self.by_tid.get(tid, ())) for tid in self.node_tids.get(str(node_id), ()))
+            return len(self._rows_for_node(node_id, generation))
 
     def full_spans_for_node(self, node_id, limit: Optional[int] = None) -> list[dict]:
         """Every FULL span in the traces attributed to this node (a node's create_node + evaluate +

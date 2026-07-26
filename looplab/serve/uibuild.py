@@ -8,12 +8,13 @@ on PATH, it builds it once. Missing Node degrades to a clear message + placehold
 
 Path resolution is the single source of truth for both this builder and `server._ui_dist`:
   - source tree : LOOPLAB_UI_SRC  or  <repo>/ui
-  - built bundle: LOOPLAB_UI_DIST or  <source>/dist
+  - built bundle: LOOPLAB_UI_DIST, <source>/dist, or the wheel's packaged ``serve/ui_dist``
 """
 from __future__ import annotations
 
 import errno
 import hashlib
+from importlib.resources import files
 import os
 import shutil
 import subprocess
@@ -39,12 +40,26 @@ def ui_source_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "ui"
 
 
+def packaged_ui_dist_dir() -> Path:
+    """The immutable production bundle embedded in a binary wheel."""
+    resource = files("looplab.serve").joinpath("ui_dist")
+    try:
+        return Path(os.fspath(resource))
+    except TypeError:
+        # Standard wheel installs are unpacked and return a Path. Keep a deterministic filesystem
+        # fallback for unusual import loaders; the static server itself also requires real paths.
+        return Path(__file__).resolve().parent / "ui_dist"
+
+
 def ui_dist_dir() -> Path:
-    """Built React assets. Override with LOOPLAB_UI_DIST; default <ui-source>/dist."""
+    """Built React assets, preferring an editable checkout and falling back to wheel data."""
     env = os.environ.get("LOOPLAB_UI_DIST")
     if env:
         return Path(env)
-    return ui_source_dir() / "dist"
+    source = ui_source_dir()
+    if (source / "package.json").is_file():
+        return source / "dist"
+    return packaged_ui_dist_dir()
 
 
 def is_built(dist: Path | None = None) -> bool:
@@ -341,6 +356,10 @@ def ensure_ui_built(*, force: bool = False, log: Callable[[str], None] = print) 
         return is_built(dist)
 
     src = ui_source_dir()
+    # A binary wheel carries immutable, already-minified assets. There is intentionally nothing to
+    # install or rebuild at runtime, even for `--rebuild`; producing a new wheel is the build step.
+    if not (src / "package.json").is_file() and is_built(dist):
+        return True
     if not (src / "package.json").is_file():
         log(f"[ui] no React sources at {src} — cannot build "
             "(install from a source checkout, or set LOOPLAB_UI_DIST to a prebuilt bundle).")

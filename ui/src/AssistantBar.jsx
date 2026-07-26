@@ -1710,21 +1710,21 @@ export default function AssistantBar({ runId, hidden = false }) {
           {/* A share link is a separate secret with an expiry — not this chat's id — and it is frozen
               at the turns that exist right now, so anything said afterwards stays private. "unshare"
               revokes every link for the chat without deleting the conversation. */}
-          {sid && <button className="btn sm ghost" title="copy a read-only link to this chat (expires; does not include later messages)" onClick={async () => {
+          {sid && <button className="btn sm ghost" title="Copy read-only snapshot" onClick={async () => {
             try {
               const r = await assistantShare(sid)
               const url = location.origin + location.pathname + r.url
               try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
-              flash(`Share link copied. It expires ${fmtDate(r.expires_at)} and shows only the messages up to now.`)
+              flash(`Snapshot link copied · expires ${fmtDate(r.expires_at)}.`)
               location.hash = r.url.replace(/^#/, '')   // navigate AFTER copying (the bar hides on the shared page)
-            } catch { flash('Could not create a share link for this Assistant chat') }
+            } catch { flash('Share failed') }
           }}>⤴ share</button>}
-          {sid && sessions.find(s => s.id === sid)?.shared && <button className="btn sm ghost" title="revoke every share link for this chat (the chat itself is kept)" onClick={async () => {
+          {sid && sessions.find(s => s.id === sid)?.shared && <button className="btn sm ghost" title="Revoke every share link" onClick={async () => {
             try {
               const r = await assistantUnshare(sid)
               await refreshSessions()
-              flash(r.revoked ? `Revoked ${r.revoked} share link${r.revoked === 1 ? '' : 's'}.` : 'No active share links.')
-            } catch { flash('Could not revoke the share links for this Assistant chat') }
+              flash(r.revoked ? `Revoked ${r.revoked} link${r.revoked === 1 ? '' : 's'}.` : 'No active links.')
+            } catch { flash('Revoke failed') }
           }}>⤫ unshare</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>

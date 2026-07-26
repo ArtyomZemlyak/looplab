@@ -37,6 +37,10 @@ test('semantic text and filled-control inks retain AA contrast in every selectab
   ]
   for (const theme of themes) {
     const foreground = hex(theme.vars.fg)
+    for (const surface of ['bg', 'bg-1', 'bg-2', 'bg-3']) {
+      const ratio = contrast(hex(theme.vars['fg-mut']), hex(theme.vars[surface]))
+      assert.ok(ratio >= 4.5, `${theme.name} fg-mut on ${surface}: ${ratio.toFixed(2)}:1`)
+    }
     for (const [semantic, weight] of textMixes) {
       const ink = mix(hex(theme.vars[semantic]), weight, foreground)
       for (const surface of ['bg', 'bg-1', 'bg-2', 'bg-3']) {

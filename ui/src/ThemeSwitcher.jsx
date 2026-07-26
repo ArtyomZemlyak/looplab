@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { nextRovingIndex } from './accessibility.jsx'
+import React, { useEffect, useState } from 'react'
+import { useRovingRadioMenu } from './accessibility.jsx'
 
 // Selectable design themes — each is a CSS-variable re-skin applied via <html data-theme>.
 export const THEMES = [
@@ -35,8 +35,7 @@ export function initTheme() {
 
 export default function ThemeSwitcher() {
   const [open, setOpen] = useState(false)
-  const triggerRef = useRef(null)
-  const menuRef = useRef(null)
+  const { triggerRef, menuRef, close, onKeyDown } = useRovingRadioMenu(open, setOpen)
   const [active, setActive] = useState(() => {
     try { return localStorage.getItem(KEY) || 'current' } catch { return 'current' }
   })
@@ -52,24 +51,7 @@ export default function ThemeSwitcher() {
   }, [])
 
   const cur = THEMES.find(t => t.id === active) || THEMES[0]
-  const close = (restore = false) => {
-    setOpen(false)
-    if (restore) requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
-  }
   const pick = (id) => { setActive(id); close(true) }
-  useEffect(() => {
-    if (!open) return
-    requestAnimationFrame(() => (menuRef.current?.querySelector('[aria-checked="true"]')
-      || menuRef.current?.querySelector('[role="menuitemradio"]'))?.focus())
-  }, [open])
-  const onMenuKeyDown = event => {
-    const items = [...(menuRef.current?.querySelectorAll('[role="menuitemradio"]') || [])]
-    if (event.key === 'Escape') { event.preventDefault(); close(true); return }
-    const current = Math.max(0, items.indexOf(document.activeElement))
-    const next = nextRovingIndex(event.key, current, items.length)
-    if (next == null) return
-    event.preventDefault(); items[next]?.focus()
-  }
 
   return <div className="theme-switch">
     <button type="button" ref={triggerRef} className="btn sm ghost" title="UI theme" aria-haspopup="menu"
@@ -80,7 +62,7 @@ export default function ThemeSwitcher() {
     {open && <>
       <div className="th-backdrop" aria-hidden="true" onClick={() => close(true)} />
       <div ref={menuRef} id="theme-switcher-menu" className="th-menu" role="menu" aria-label="UI theme"
-        onKeyDown={onMenuKeyDown} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
+        onKeyDown={onKeyDown} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
         <div className="th-menu-h">Design</div>
         {THEMES.map(t => <button type="button" key={t.id} role="menuitemradio" aria-checked={t.id === active} tabIndex={-1}
           className={'th-opt' + (t.id === active ? ' on' : '')}

@@ -21,6 +21,7 @@ import anyio
 
 from looplab.core.models import (NodeStatus, developer_artifact_footprint,
                                  normalize_extra_metrics)
+from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import snapshot_training_logs
@@ -102,6 +103,10 @@ class EvaluateMixin:
                     or state.paused or state.finished or state.stop_requested):
                 return
             generation = node.attempt       # immutable identity of THIS worker's node lifecycle
+            # The trace is opened before the fold above so pre-start exits remain observable. Once
+            # this worker has an exact lifecycle, stamp the root; the span index uses that root receipt
+            # to keep reset attempts disjoint while every nested generation/tool stays in this trace.
+            sp.set("generation", generation)
             start_seq = events_at_start[-1].seq if events_at_start else -1
             sp.set("operator", node.operator)
             # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
@@ -180,6 +185,13 @@ class EvaluateMixin:
                 # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
                 if node.rerun_stage:
                     node.rerun_stage = None
+            # Bind mutable TensorBoard/metric sidecars to this exact lifecycle before launching any
+            # user code.  A reset can reuse the node directory (stage restart), so the serving layer
+            # also filters points by this start time instead of relabelling an older curve.
+            try:
+                begin_metrics_attempt(workdir, generation)
+            except Exception:  # noqa: BLE001 - telemetry must never block the evaluation itself
+                pass
             # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
             # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
             # within this one node (no new tree node, no max_nodes spent). At most

@@ -343,6 +343,68 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
         assert resp.status_code == 200
 
 
+def test_node_metrics_are_receipt_bound_to_current_attempt(tmp_path, monkeypatch):
+    from looplab.core.node_evidence import begin_metrics_attempt
+    from looplab.events.eventstore import EventStore
+    from looplab.serve import metrics_adapters
+
+    rd = tmp_path / "demo"
+    node_dir = rd / "nodes" / "node_0"
+    node_dir.mkdir(parents=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {
+        "node_id": 0, "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 1.0})
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    begin_metrics_attempt(node_dir, 1, started_at=123.0)
+    calls = []
+
+    def read_metrics(path, *, since_wall_time=None):
+        calls.append((path, since_wall_time))
+        return {"loss": [{"step": 1, "value": 0.25, "wall_time": 124.0}]}
+
+    monkeypatch.setattr(metrics_adapters, "read_node_metrics", read_metrics)
+    client = TestClient(make_app(tmp_path))
+
+    stale = client.get("/api/runs/demo/nodes/0/metrics", params={"attempt": 0})
+    assert stale.status_code == 409
+    current = client.get("/api/runs/demo/nodes/0/metrics", params={"attempt": 1})
+    assert current.status_code == 200
+    assert current.json() == {
+        "node_id": 0, "attempt": 1,
+        "metrics": {"loss": [{"step": 1, "value": 0.25, "wall_time": 124.0}]},
+    }
+    assert calls == [(str(node_dir), 123.0)]
+
+
+def test_terminal_lifecycle_probe_matches_state_without_shipping_folded_payload(tmp_path):
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / "demo"
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("run_finished", {"reason": "complete"})
+    client = TestClient(make_app(tmp_path))
+
+    state = client.get("/api/runs/demo/state").json()
+    probe = client.get("/api/runs/demo/lifecycle")
+
+    assert probe.status_code == 200
+    assert probe.json() == {
+        "schema": 1,
+        "seq": state["seq"],
+        "event_count": state["event_count"],
+        "generation": state["generation"],
+        "engine_running": state["state"]["engine_running"],
+    }
+    assert "state" not in probe.json()
+
+
 def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
     """An assistant session transcript returns `raw` (the full model-facing instruction incl. attached
     file contents), so it must be gated like a raw-file read when LOOPLAB_UI_TOKEN is set."""

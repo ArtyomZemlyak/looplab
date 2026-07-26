@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { FX_LEVELS, readFx, applyFx } from './fx.js'
 import { OpIcon } from './icons.jsx'
-import { nextRovingIndex } from './accessibility.jsx'
+import { useRovingRadioMenu } from './accessibility.jsx'
 
 // Topbar control for the Energy / Reactor FX mode (Off / Subtle / Full). Mirrors ThemeSwitcher's
 // popover so it reads as a sibling of the theme picker. Mounted in both the run-view and run-list
@@ -9,8 +9,7 @@ import { nextRovingIndex } from './accessibility.jsx'
 export default function EnergyToggle() {
   const [open, setOpen] = useState(false)
   const [level, setLevel] = useState(readFx)
-  const triggerRef = useRef(null)
-  const menuRef = useRef(null)
+  const { triggerRef, menuRef, close, onKeyDown } = useRovingRadioMenu(open, setOpen)
   useEffect(() => { applyFx(level) }, [level])
   // stay in sync if some other surface flips the level (e.g. the other topbar, another tab)
   useEffect(() => {
@@ -22,24 +21,7 @@ export default function EnergyToggle() {
 
   const on = !!level
   const cur = FX_LEVELS.find(l => l.id === level) || FX_LEVELS[0]
-  const close = (restore = false) => {
-    setOpen(false)
-    if (restore) requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
-  }
   const pick = (id) => { setLevel(id); close(true) }
-  useEffect(() => {
-    if (!open) return
-    requestAnimationFrame(() => (menuRef.current?.querySelector('[aria-checked="true"]')
-      || menuRef.current?.querySelector('[role="menuitemradio"]'))?.focus())
-  }, [open])
-  const onMenuKeyDown = event => {
-    const items = [...(menuRef.current?.querySelectorAll('[role="menuitemradio"]') || [])]
-    if (event.key === 'Escape') { event.preventDefault(); close(true); return }
-    const current = Math.max(0, items.indexOf(document.activeElement))
-    const next = nextRovingIndex(event.key, current, items.length)
-    if (next == null) return
-    event.preventDefault(); items[next]?.focus()
-  }
 
   return <div className="fx-switch">
     <button type="button" ref={triggerRef} className={'btn sm ghost' + (on ? ' primary' : '')}
@@ -49,7 +31,7 @@ export default function EnergyToggle() {
     {open && <>
       <div className="th-backdrop" aria-hidden="true" onClick={() => close(true)} />
       <div ref={menuRef} id="energy-switcher-menu" className="th-menu fx-menu" role="menu" aria-label="Energy effects"
-        onKeyDown={onMenuKeyDown} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
+        onKeyDown={onKeyDown} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
         <div className="th-menu-h">Energy FX</div>
         {FX_LEVELS.map(l => <button type="button" key={l.id || 'off'} role="menuitemradio" aria-checked={l.id === level}
           tabIndex={-1} className={'th-opt' + (l.id === level ? ' on' : '')}

@@ -51,6 +51,18 @@ def test_paths_honor_env_overrides(tmp_path, monkeypatch):
     assert uibuild.ui_dist_dir() == tmp_path / "elsewhere"
 
 
+def test_installed_package_falls_back_to_immutable_packaged_bundle(tmp_path, monkeypatch):
+    source = tmp_path / "missing-source"
+    packaged = tmp_path / "site-packages" / "looplab" / "serve" / "ui_dist"
+    _mark_built(packaged)
+    monkeypatch.setenv("LOOPLAB_UI_SRC", str(source))
+    monkeypatch.setattr(uibuild, "packaged_ui_dist_dir", lambda: packaged)
+    monkeypatch.setattr(uibuild, "_has_npm", lambda: False)
+
+    assert uibuild.ui_dist_dir() == packaged
+    assert uibuild.ensure_ui_built(force=True, log=lambda *_: None) is True
+
+
 def test_is_built_tracks_index_html(tmp_path):
     dist = tmp_path / "dist"
     assert uibuild.is_built(dist) is False

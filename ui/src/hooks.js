@@ -3,6 +3,7 @@ import {
   fetchEventStream, get, normalizeRunGeneration, observeRunGeneration, runApiPath,
 } from './api.js'
 import { withBuilding } from './buildingModel.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -28,10 +29,11 @@ export function useMediaQuery(query) {
 
 // The ONE shared poll hook (mega-refactor P5.2), replacing the hand-rolled setInterval effects that
 // were copy-pasted across AssistantBar/Dock/Inspector/RunList/panels. Calls `fn` once immediately and
-// then every `ms` milliseconds until unmount or a `deps` change — the exact clearInterval-on-cleanup
-// semantics of the effects it replaces. `fn` receives an `alive()` predicate (true until THIS effect
-// instance is cleaned up) so async callers can guard their setState exactly like the old
-// `let alive = true` closure flag.
+// then every `ms` milliseconds until unmount or a `deps` change. Ticks are serialized: while one
+// request is unsettled, any number of timer/visibility ticks collapse into one catch-up read. This
+// prevents an older slow response from landing after a newer response and rolling a resource back.
+// `fn` receives an `alive()` predicate (true until THIS effect instance is cleaned up) so a request
+// from an old dependency scope also cannot commit after the new scope starts.
 //   ms == null        → no interval (the immediate call still fires) — "poll only while working" sites.
 //   enabled: false    → do nothing at all (the old `if (!cond) return` early-out; cond goes in deps).
 //   immediate: false  → skip the immediate call (interval ticks only).
@@ -42,17 +44,38 @@ export function usePoll(fn, ms, deps = [], { pauseHidden = false, immediate = tr
   useEffect(() => {
     if (!enabled) return
     let on = true
+    let running = false
+    let queued = false
+    let request = null
     const alive = () => on
-    // # CODEX AGENT: interval ticks may overlap; `alive()` fences only effect lifetime, not request order.
-    // Serialize ticks or expose an epoch so a delayed older success/failure cannot overwrite a newer
-    // live trace/detail/conversation snapshot.
-    const tick = () => fn(alive)
+    const tick = async () => {
+      if (!on) return
+      if (running) {
+        queued = true
+        return
+      }
+      running = true
+      try {
+        const result = fn(alive)
+        request = result?.promise && result?.controller ? result : null
+        // Adopt native promises, thenables, and synchronous callbacks. Rejections are a
+        // caller-owned resource outcome; consuming them here only keeps the scheduler alive.
+        await (request?.promise ?? result)
+      } catch { /* caller renders the resource failure */ }
+      request = null
+      running = false
+      if (!on || !queued) return
+      queued = false
+      if (!pauseHidden || !document.hidden) tick()
+    }
     if (immediate) tick()
     const t = (ms != null) ? setInterval(() => { if (!pauseHidden || !document.hidden) tick() }, ms) : null
     const onVis = pauseHidden ? () => { if (!document.hidden) tick() } : null
     if (onVis) document.addEventListener('visibilitychange', onVis)
     return () => {
       on = false
+      queued = false
+      request?.controller.abort()
       if (t != null) clearInterval(t)
       if (onVis) document.removeEventListener('visibilitychange', onVis)
     }
@@ -71,7 +94,9 @@ const normalizeEventCount = value => {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
-export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
+export function useRunState(runId, {
+  pollOnly = false, pollMs = 4000,
+} = {}) {
   const [live, setLive] = useState(null)
   const [seq, setSeq] = useState(-1)
   const [generationState, setGenerationState] = useState({ runId, value: null })
@@ -96,6 +121,13 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     let pollTimer = null
     let lastSeq = -2, lastAlive, lastGeneration = null, lastEventCount = null
     let lastStreamEventId = ''
+    let terminalMode = false
+    let terminalDelay = 60000
+    let terminalRequest = null
+    let reviewTerminal = false
+    let reviewPoll = null
+    let reviewPollRunning = false
+    let reviewEnded = false
     setLive(null)
     setSeq(-1)
     setGenerationState({ runId, value: null })
@@ -107,15 +139,82 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     // would otherwise retry on a fixed 1.5s tick forever — a GET storm that re-folds the run each time.
     // Ramp 1.5s → ×2 → 30s cap; a live `state` frame proves the stream works and resets it.
     const MIN_BACKOFF = 1500, MAX_BACKOFF = 30000
+    const TERMINAL_PROBE_MS = 60000, TERMINAL_PROBE_MAX_MS = 300000
     let backoff = MIN_BACKOFF
-    // Terminal probes ramp on their OWN counter: `terminal = true` bypasses the `backoff` ramp below,
-    // and a finished run's stream emits `done` immediately every time (runs.py yields SSE_DONE then
-    // breaks), so a fixed delay was permanent hot polling — each cycle re-authenticates and makes the
-    // server re-fold and serialize the whole state. Reset when a real `state` frame proves it reopened.
-    const MIN_TERMINAL_BACKOFF = 2500
-    let terminalBackoff = MIN_TERMINAL_BACKOFF
+    const hidden = () => typeof document !== 'undefined' && document.hidden
+    const identity = (payload, probe = false) => {
+      if (probe && payload?.schema !== 1) throw new Error('Invalid lifecycle probe.')
+      const alive = probe ? payload?.engine_running : payload?.state?.engine_running
+      const nextGeneration = normalizeRunGeneration(payload?.generation)
+      const nextEventCount = normalizeEventCount(payload?.event_count)
+      if (payload?.generation != null && !nextGeneration) {
+        throw new Error('Invalid run generation.')
+      }
+      if (nextEventCount === undefined) {
+        throw new Error('Invalid event count.')
+      }
+      return [payload?.seq, alive, nextGeneration, nextEventCount]
+    }
+    const identityChanged = next => next[0] !== lastSeq || next[1] !== lastAlive
+      || next[2] !== lastGeneration || next[3] !== lastEventCount
+    const commitSnapshot = payload => {
+      const next = identity(payload)
+      if (!identityChanged(next)) return next
+      ;[lastSeq, lastAlive, lastGeneration, lastEventCount] = next
+      setGenerationState({ runId, value: next[2] })
+      setEventCountState({ runId, value: next[3] })
+      setLive(withBuilding(payload.state))
+      setSeq(next[0])
+      return next
+    }
+    const terminalSnapshot = payload => payload?.state?.finished === true
+      && payload.state.engine_running === false && payload.state.phase !== 'finalizing'
     const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
+
+    const scheduleTerminalProbe = (delay = terminalDelay) => {
+      if (stopped || !terminalMode || hidden()) return
+      clearTimeout(timer)
+      timer = setTimeout(probeTerminal, delay)
+    }
+    function probeTerminal() {
+      if (stopped || !terminalMode || hidden() || terminalRequest) return
+      const request = deadlineRequest(
+        signal => get(runApiPath(runId, '/lifecycle'), { signal, cache: 'no-store' }), 8000)
+      terminalRequest = request
+      const failed = () => {
+        if (stopped || !terminalMode || terminalRequest !== request) return
+        terminalRequest = null
+        setConnected(false)
+        terminalDelay = Math.min(terminalDelay * 2, TERMINAL_PROBE_MAX_MS)
+        scheduleTerminalProbe()
+      }
+      request.promise.then(payload => {
+        if (stopped || !terminalMode || terminalRequest !== request) return
+        let next
+        try { next = identity(payload, true) } catch { failed(); return }
+        terminalRequest = null
+        setConnected(true)
+        if (identityChanged(next)) {
+          terminalMode = false
+          connect()
+          return
+        }
+        terminalDelay = TERMINAL_PROBE_MS
+        scheduleTerminalProbe()
+      }, failed)
+    }
+    const enterTerminalMode = () => {
+      terminalMode = true
+      terminalDelay = TERMINAL_PROBE_MS
+      setConnected(true)
+      scheduleTerminalProbe()
+    }
+
     function connect() {
+      terminalMode = false
+      terminalRequest?.controller.abort()
+      terminalRequest = null
+      clearTimeout(timer)
       streamRef.current?.abort()
       const controller = new AbortController()
       streamRef.current = controller
@@ -127,33 +226,21 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
           if (stopped || controller.signal.aborted) return
           if (event.lastEventId !== '') lastStreamEventId = event.lastEventId
           if (event.type === 'done') {
-            // A terminal run can later be reopened. End this request and reconnect-poll just as the
-            // former EventSource path did; seq/generation dedup keeps the idle refresh cheap.
+            // A finished run can be reopened later, but immediately reopening this terminal stream
+            // would just receive `done` again forever. Switch to the small minute-scale identity probe.
             terminal = true
             controller.abort()
-            reconnect(terminalBackoff)
-            terminalBackoff = Math.min(terminalBackoff * 2, MAX_BACKOFF)
+            enterTerminalMode()
             return
           }
           if (event.type !== 'state') return
           let p
           try { p = JSON.parse(event.data) } catch { return }
+          try { commitSnapshot(p) } catch { return }
           backoff = MIN_BACKOFF
-          terminalBackoff = MIN_TERMINAL_BACKOFF   // a real state frame means the run reopened
           setConnected(true)
-          // Re-render on a seq change OR an engine_running flip (a zombie's liveness changes with no
-          // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
-          const alive = p.state && p.state.engine_running
-          const nextGeneration = normalizeRunGeneration(p.generation)
-          const nextEventCount = normalizeEventCount(p.event_count)
-          if (p.generation != null && !nextGeneration) return
-          if (nextEventCount === undefined) return
-          if (p.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration
-              && nextEventCount === lastEventCount) return
-          lastSeq = p.seq; lastAlive = alive; lastGeneration = nextGeneration; lastEventCount = nextEventCount
-          setGenerationState({ runId, value: nextGeneration })
-          setEventCountState({ runId, value: nextEventCount })
-          setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
+          setStatus('ready')
+          setError(null)
         },
       }).then(({ retry }) => {
         if (stopped || terminal || controller.signal.aborted) return
@@ -167,61 +254,80 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         backoff = Math.min(backoff * 2, MAX_BACKOFF)
       })
     }
+
+    const scheduleReviewPoll = () => {
+      if (stopped || reviewEnded || !reviewPoll || (reviewTerminal && hidden())) return
+      clearTimeout(pollTimer)
+      pollTimer = setTimeout(reviewPoll, reviewTerminal ? TERMINAL_PROBE_MS : pollMs)
+    }
+    const onVisibility = () => {
+      if (hidden()) {
+        if (terminalMode) {
+          clearTimeout(timer)
+          terminalRequest?.controller.abort()
+        }
+        if (reviewTerminal) clearTimeout(pollTimer)
+        return
+      }
+      if (terminalMode) {
+        clearTimeout(timer)
+        probeTerminal()
+      } else if (pollOnly && reviewTerminal && reviewPoll && !reviewPollRunning) {
+        clearTimeout(pollTimer)
+        reviewPoll()
+      }
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibility)
+    }
+
     // Probe once before opening a self-reconnecting authenticated fetch stream. This turns a mistyped/deleted run
     // URL into an explicit 404 state instead of an endless "Connecting…" loop.
     get(runApiPath(runId, '/state'))
       .then(p => {
         if (stopped) return
-        lastSeq = p.seq
-        lastAlive = p.state && p.state.engine_running
-        lastGeneration = normalizeRunGeneration(p.generation)
-        lastEventCount = normalizeEventCount(p.event_count)
-        if (p.generation != null && !lastGeneration) {
-          throw new Error('The server returned an invalid run generation.')
-        }
-        if (lastEventCount === undefined) throw new Error('The server returned an invalid event count.')
-        setGenerationState({ runId, value: lastGeneration })
-        setEventCountState({ runId, value: lastEventCount })
-        setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
+        commitSnapshot(p)
+        setStatus('ready')
+        setError(null)
         reviewRetryRef.current = 1500   // a good probe resets the review re-probe backoff
-        if (!pollOnly) connect()
+        if (!pollOnly) {
+          if (terminalSnapshot(p)) enterTerminalMode()
+          else connect()
+        }
         else {
           setConnected(true)
-          const poll = () => {
+          reviewTerminal = terminalSnapshot(p)
+          reviewPoll = () => {
+            if (stopped || reviewEnded || reviewPollRunning || (reviewTerminal && hidden())) return
+            reviewPollRunning = true
             get(runApiPath(runId, '/state'))
               .then(next => {
                 if (stopped) return
-                setConnected(true); setStatus('ready'); setError(null)
-                const alive = next.state && next.state.engine_running
-                const nextGeneration = normalizeRunGeneration(next.generation)
-                const nextEventCount = normalizeEventCount(next.event_count)
-                if (next.generation != null && !nextGeneration) {
-                  throw new Error('The server returned an invalid run generation.')
-                }
-                if (nextEventCount === undefined) throw new Error('The server returned an invalid event count.')
-                if (next.seq !== lastSeq || alive !== lastAlive || nextGeneration !== lastGeneration
-                    || nextEventCount !== lastEventCount) {
-                  lastSeq = next.seq; lastAlive = alive; lastGeneration = nextGeneration; lastEventCount = nextEventCount
-                  setGenerationState({ runId, value: nextGeneration })
-                  setEventCountState({ runId, value: nextEventCount })
-                  setLive(withBuilding(next.state)); setSeq(next.seq)
-                }
-                pollTimer = setTimeout(poll, pollMs)
+                commitSnapshot(next)
+                reviewTerminal = terminalSnapshot(next)
+                setConnected(true)
+                setStatus('ready')
+                setError(null)
               })
               .catch(error => {
                 if (stopped) return
                 const ended = error?.status === 401 || error?.status === 404 || error?.status === 410
                 setConnected(false)
                 if (ended) {
+                  reviewEnded = true
                   setError('This review link expired, was revoked, or is invalid.')
                   setLive(null); setStatus('gone')
                   return
                 }
+                reviewTerminal = false
                 setError(error?.message || 'Review refresh failed')
-                pollTimer = setTimeout(poll, pollMs)
+              })
+              .finally(() => {
+                reviewPollRunning = false
+                scheduleReviewPoll()
               })
           }
-          pollTimer = setTimeout(poll, pollMs)
+          scheduleReviewPoll()
         }
       })
       .catch(e => {
@@ -249,7 +355,11 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
       })
     return () => {
       stopped = true; clearTimeout(timer); clearTimeout(pollTimer)
+      terminalRequest?.controller.abort()
       streamRef.current?.abort()
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibility)
+      }
     }
   }, [runId, retryToken, pollOnly, pollMs])
 

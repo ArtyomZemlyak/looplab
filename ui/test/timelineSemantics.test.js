@@ -44,7 +44,8 @@ test('generation-scoped event counts flow from run state into exact timeline lag
     source('hooks.js'), source('RunView.jsx'), source('useTimeline.js'),
   ])
   assert.match(hooks, /const eventCount = eventCountState\.runId === runId/)
-  assert.match(hooks, /nextEventCount === lastEventCount/)
+  assert.match(hooks, /const identityChanged = next =>[\s\S]*?next\[3\] !== lastEventCount/)
+  assert.match(hooks, /\[lastSeq, lastAlive, lastGeneration, lastEventCount\] = next[\s\S]*?setEventCountState/)
   assert.match(hooks, /return \{ live, seq, generation, eventCount, connected/)
   assert.match(runView, /eventCount: liveEventCount/)
   assert.match(runView, /liveSeq: seq, liveEventCount, expectedGeneration: generation/)
@@ -70,13 +71,14 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
 
 test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
   const dock = await source('Dock.jsx')
-  assert.match(dock, /get\(runNodeApiPath\(runId, traceNid, `\/trace\?limit=\$\{nodeTraceLimit\}`\)\)/)
+  assert.match(dock, /`\/trace\?attempt=\$\{traceGeneration\}&limit=\$\{nodeTraceLimit\}`/)
+  assert.match(dock, /d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration/)
   // liveBuilding maps nodeId to generation for EVERY concurrent build (parallel_build>1), so each
   // in-flight build's row polls its own exact lifecycle — not just the singular last-appended one.
   assert.match(dock, /timeline\.generation !== expectedGeneration[\s\S]*?buildingGenerations\(live\)/)
   assert.match(dock, /const exactBuilding =[\s\S]*?liveBuilding\[traceNid\] === traceGeneration/)
-  assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
-  assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| exactBuilding\) return undefined[\s\S]*?\[open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce, nodeTraceLimit\]/)
+  assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null[\s\S]*?traceGeneration != null && exactBuilding/)
+  assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| traceGeneration == null \|\| exactBuilding\)[\s\S]*?\[open, readOnly, runId, traceNid, traceGeneration, exactBuilding,[\s\S]*?nodeTraceNonce, nodeTraceLimit\]/)
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/)
   assert.match(dock, /const scope = `\$\{runId\}:\$\{generation \|\| 'pending'\}`[\s\S]*?tailState\.scope === scope/,
     'live trace rows must disappear immediately when the run generation changes')

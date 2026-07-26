@@ -13,6 +13,7 @@ import {
   isValidAtlasSourceEnvelope,
   mergeCurationLogs,
   mergeResearchAtlasPayload,
+  projectResearchAtlasSource,
   reconcileAtlasSourceStatuses,
   researchAtlasPayloadPortfolioId,
 } from '../src/researchAtlasModel.js'
@@ -655,6 +656,45 @@ test('Atlas source-revision touches only the bounded visible slice of a huge raw
   assert.ok(indexedReads <= ATLAS_RENDER_LIMITS.curation)
 })
 
+test('Atlas source is projected to a bounded allowlist before React state', () => {
+  let evidenceReads = 0
+  const support = new Proxy(new Array(200000), {
+    has(target, property) {
+      if (/^\d+$/u.test(String(property))) return true
+      return Reflect.has(target, property)
+    },
+    get(target, property, receiver) {
+      if (/^\d+$/u.test(String(property))) {
+        evidenceReads += 1
+        return `run-1:node-${property}\n${'x'.repeat(1000)}`
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const raw = {
+    portfolio_id: PORTFOLIO_ID,
+    claims: [{ ...claim(1), statement: 's'.repeat(5000), support,
+      debug_blob: { payload: 'x'.repeat(2_000_000) } }],
+    n: 1, revision: 4,
+    debug_blob: { payload: 'x'.repeat(2_000_000) },
+  }
+  assert.equal(isValidAtlasSourceEnvelope('claims', raw), true)
+  const projected = projectResearchAtlasSource('claims', raw)
+
+  assert.equal(projected.claims.length, 1)
+  assert.equal(projected.claims[0].support.length, ATLAS_RENDER_LIMITS.evidence)
+  assert.ok(projected.claims[0].support.every(value => value.length <= 500 && !value.includes('\n')))
+  assert.equal(projected.claims[0].statement.length, 500)
+  assert.equal(Object.hasOwn(projected, 'debug_blob'), false)
+  assert.equal(Object.hasOwn(projected.claims[0], 'debug_blob'), false)
+  assert.ok(evidenceReads <= ATLAS_RENDER_LIMITS.evidence)
+
+  assert.equal(isValidAtlasSourceEnvelope('claims', {
+    portfolio_id: PORTFOLIO_ID,
+    claims: new Array(ATLAS_RENDER_LIMITS.claims + 1).fill({}),
+  }), false, 'an oversized top-level page is rejected before projection/state')
+})
+
 test('concept and claim steward preview keeps each ledger newest-first without inventing cross-ledger order', () => {
   const merged = mergeCurationLogs({ n: 3, entries: [
     { run_id: 'concept-new', at: '2026-07-16T01:00:00Z', revision: 1, outcome: 'proposed',
@@ -853,10 +893,10 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
     source('ResearchAtlas.jsx'), source('requestDeadline.js'),
   ])
 
-  assert.match(atlas, /const id = \+\+requestId\.current[\s\S]*requestedSources\.forEach[\s\S]*settle\(source/)
+  assert.match(atlas, /const id = \+\+requestId\.current[\s\S]*requestedSources\.forEach[\s\S]*settle\(key/)
   assert.match(atlas, /!active \|\| id !== requestId\.current/,
     'late results must be fenced to the mounted request')
-  assert.match(atlas, /deadlineRequest\(source\.read, SOURCE_TIMEOUT_MS\)/)
+  assert.match(atlas, /deadlineRequest\(read, SOURCE_TIMEOUT_MS\)/)
   assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/,
     'each source needs a bounded liveness escape')
   assert.match(atlas, /loaded \? value : 'not loaded'/,
@@ -1132,7 +1172,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   for (const state of [/Loading Atlas/, /Atlas unavailable/,
     /No cross-run evidence/, /Some sources unavailable\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
-  assert.match(atlas, /D8 receipts cover only explicitly[\s\S]*processed durable rows, not every portfolio run/)
+  assert.match(atlas, /D8 receipts cover processed rows,[\s\S]*not every run/)
   assert.match(atlas, /<EvidenceSourceNotice concept=\{view\.conceptSource\} claims=\{view\.claimSource\}/)
   assert.match(atlas, /Referenced runs/)
   assert.match(atlas, /Atlas source readiness/)

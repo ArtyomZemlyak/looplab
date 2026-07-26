@@ -5,13 +5,9 @@ import { searchConcepts } from './conceptSearch.js'
 import { Marked } from './Highlight.jsx'
 import { canonicalId } from './conceptId.js'
 import { activeNodeConcepts, conceptMaterializationStatus } from './nodeProjection.js'
+import { OpIcon } from './icons.jsx'
 
 const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this trims the visible list
-
-const SearchIcon = ({ small }) => (
-  <svg width={small ? 13 : 15} height={small ? 13 : 15} viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
-    <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>)
 
 // View 2 — the concept chip bar riding OVER the lineage graph. Breadcrumb-navigable (drill into a
 // concept to reveal its next level) and multi-selectable (OR): selecting concepts highlights every
@@ -157,14 +153,14 @@ export default function ConceptChipBar({ state, onHighlight }) {
               aria-current={i === crumbs.length - 1 ? 'true' : undefined}>{c.label}</button>
           </React.Fragment>)}
         </nav>
-        <span className="spacer" style={{ flex: 1 }} />
+        <span className="spacer" />
         <div className="cs">
           {!searchOpen
-            ? <button type="button" className="cs-icon" aria-label="Search concepts" title="Search concepts"
-                onClick={openSearch}><SearchIcon /></button>
+            ? <button type="button" className="cs-icon" aria-label="Search concepts"
+                onClick={openSearch}><OpIcon name="search" size={15} /></button>
             : <div className={'cs-box' + (searching ? ' focus' : '')}>
-                <SearchIcon small />
-                <input ref={inputRef} className="cs-input" style={{ width: 150 }} value={query}
+                <OpIcon name="search" size={13} />
+                <input ref={inputRef} className="cs-input" value={query}
                   placeholder="find a concept…" aria-label="Search concepts" autoComplete="off"
                   role="combobox" aria-autocomplete="list" aria-expanded={searching}
                   aria-controls={searching ? listboxId : undefined}

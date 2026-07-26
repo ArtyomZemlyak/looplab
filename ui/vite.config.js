@@ -12,6 +12,23 @@ export default defineConfig({
   base: './',
   plugins: [react()],
   build: {
+    // Rolldown/Oxc performs graph-aware compression first (configured below); Terser then gives the
+    // emitted chunks one final cross-statement pass. This is measurably smaller over gzip than either
+    // minifier alone and keeps the production budget green without weakening any route boundary.
+    minify: 'terser',
+    terserOptions: {
+      ecma: 2022,
+      module: true,
+      toplevel: true,
+      safari10: false,
+      compress: {
+        passes: 4, pure_getters: true, keep_fargs: false,
+        unsafe: true, unsafe_arrows: true,
+        builtins_ecma: 2022, booleans_as_integers: true,
+      },
+      mangle: true,
+      format: { comments: false },
+    },
     outDir: 'dist',
     emptyOutDir: true,
     // The build target is Vite's 2026 Baseline set. Browsers outside that set may ignore the
@@ -24,6 +41,11 @@ export default defineConfig({
     manifest: true,
     chunkSizeWarningLimit: 500,
     rollupOptions: {
+      treeshake: {
+        // Production modules do not use bare getter reads as actions. Let Rolldown discard such
+        // unused reads while preserving every property value that feeds rendering or control flow.
+        propertyReadSideEffects: false,
+      },
       experimental: {
         // # CODEX AGENT: `module-id` exposed a Rolldown ordering bug and produced a load-time crash.
         // Keep its native topological/cycle-aware order instead: unlike the global execution shim,
@@ -34,11 +56,18 @@ export default defineConfig({
       // more shipped code for startup speed; the UI's measured bundle budget favors transfer size.
       optimization: {
         pifeForModuleWrappers: false,
-        inlineConst: { mode: 'all', pass: 3 },
+        inlineConst: false,
       },
       output: {
+        // Import specifiers are shipped in every split chunk. Content hashes already provide cache
+        // identity, so repeating long facade names in those runtime URLs only spends transfer bytes.
+        entryFileNames: 'assets/[hash:6].js',
+        chunkFileNames: 'assets/[hash:6].js',
         minify: {
-          compress: { maxIterations: 10 },
+          compress: {
+            maxIterations: 10,
+            treeshake: { propertyReadSideEffects: false },
+          },
           mangle: true,
           codegen: true,
         },
@@ -63,30 +92,22 @@ export default defineConfig({
               // The app adapter and these private graph dependencies are an exact @xyflow
               // co-closure; no non-graph source imports them. One stream shares a gzip dictionary
               // without moving graph code onto any non-graph route.
-              test: /(?:[/\\]node_modules[/\\](?:@xyflow|classcat|d3-[^/\\]+|use-sync-external-store|zustand)[/\\]|[/\\]src[/\\]groupnodes\.jsx$)/,
+              test: /(?:[/\\]node_modules[/\\](?:@xyflow|classcat|d3-[^/\\]+|use-sync-external-store|zustand)[/\\]|[/\\]src[/\\](?:groupnodes|MapView)\.jsx$)/,
               includeDependenciesRecursively: false,
             },
             {
               name: 'analysis-support',
-              // Charts, report projections and code-diff views share the same run analysis
-              // consumers. Keeping the code viewer here prevents Markdown-only Assistant surfaces
-              // from downloading it while preserving one dictionary for the analysis workspace.
+              // Reports, charts and their evidence semantics form one lazy analysis workspace.
+              // Keep it separate from the run shell so concepts and report routes stay bounded.
               test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics|charts|CodeViewer|lineDiff)\.(js|jsx)$/,
               includeDependenciesRecursively: false,
             },
             {
-              name: 'text-support',
-              // Markdown is shared by owner and public Assistant/report prose; keep its stream free
-              // of the heavier code/diff renderer used only by run-analysis surfaces.
-              test: /[/\\]src[/\\]markdown\.jsx$/,
-              includeDependenciesRecursively: false,
-            },
-            {
-              name: 'run-visual-support',
-              // Run workspaces consume both semantic grouping/canvas policy and the virtual event
-              // window. The optional portfolio map reaches only the same pure grouping subset: no
-              // React Flow, owner controls or route component crosses into this support stream.
-              test: /[/\\]src[/\\](dagViewport|grouping|timelineModel|timelineWindow)\.js$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
+              name: 'run-support',
+              // These pure API/live/text/timeline helpers are jointly present on every run workspace.
+              // One stream gives repeated node/run/evidence vocabulary one gzip dictionary while
+              // keeping charts, graph libraries, settings and owner controls independently lazy.
+              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|crossRunPrior)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {
@@ -99,25 +120,9 @@ export default defineConfig({
             },
             {
               name: 'ui-primitives',
-              // accessibility.jsx is an app-shell dependency and also the only dependency of this
-              // small, widely shared primitive group. One chunk avoids paying two gzip wrappers;
-              // no route-only surface is captured here.
-              test: /[/\\]src[/\\](EnergyToggle|PanelShell|accessibility|fx|icons|runMapModel|useDialogFocus)\.(js|jsx)$/,
-              includeDependenciesRecursively: false,
-            },
-            {
-              name: 'domain-support',
-              // util re-exports format, and their route consumers substantially overlap. Keep the
-              // pure domain helpers together while API/layout remain independently tree-shaken.
-              test: /[/\\]src[/\\](format|urlSafety|util)\.js$/,
-              includeDependenciesRecursively: false,
-            },
-            {
-              name: 'live-support',
-              // Polling/run-index consumers already import concept identity and receipt gates on
-              // every production list/run/Concepts closure. One pure support stream removes the
-              // dependency wrapper without making any route component or graph library eager.
-              test: /[/\\]src[/\\](hooks|runIndex|buildingModel|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight)\.(js|jsx)$/,
+              // App-shell controls and their shared accessibility/icon implementation are always
+              // co-loaded; the raw sprite is kept in the same request instead of a tiny side chunk.
+              test: /[/\\]src[/\\](?:EnergyToggle|PanelShell|ThemeSwitcher|accessibility|fx|icons|runMapModel|useDialogFocus)\.(?:js|jsx)$|[/\\]src[/\\]looplab-icons-v1\.svg/,
               includeDependenciesRecursively: false,
             },
           ],

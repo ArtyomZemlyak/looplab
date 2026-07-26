@@ -284,6 +284,30 @@ export function validatePaidDerivedPayload(value, expected = {}) {
   return frame
 }
 
+const validatePaidLensTerminal = (response, expected) => {
+  const spec = response?.spec
+  const derived = response?.ok === true && record(spec) && conceptId(spec.name)
+    && validDerivedLensLabel(spec.label) && Array.isArray(spec.rels)
+    && spec.rels.length && spec.rels.every(conceptId)
+  if (derived) {
+    return {
+      spec,
+      frame: validatePaidDerivedPayload(response, {
+        ...expected, requestedLens: spec.name, derived: true, rels: spec.rels,
+      }),
+    }
+  }
+  const terminalReason = response?.code === 'concept_lens_abandoned'
+    || ['declined', 'invalid_spec', 'no_model', 'accounting_pending',
+      'concept_frame_partial'].includes(response?.reason)
+    || (response?.code === 'job_capacity' && response?.reason === 'capacity')
+  if (response?.ok !== false || !terminalReason) invalidPayload()
+  validateConceptPayload(response, {
+    ...expected, requestedLens: 'is_a', derived: false,
+  })
+  return { spec: null, frame: null }
+}
+
 const entries = value => record(value) ? Object.keys(value).sort().map(key => [key, value[key]]) : []
 const receiptKey = value => record(value) ? entries(value) : (value ?? null)
 const emptyLensForm = scope => ({ scope, prompt: '', busy: false, error: '' })
@@ -735,37 +759,21 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     if (currentRecovery.status !== 'ready' || receipt?.state !== 'terminal') return
     const response = receipt.terminal
     try {
-      const spec = response?.spec
-      const derived = response?.ok === true && record(spec) && conceptId(spec.name)
-        && validDerivedLensLabel(spec.label) && Array.isArray(spec.rels)
-        && spec.rels.length && spec.rels.every(conceptId)
-      if (derived) {
-        const recoveredFrame = validatePaidDerivedPayload(response, {
-          runId, generation, requestedSeq: null, requestedLens: spec.name,
+      const { spec, frame } = validatePaidLensTerminal(response, {
+          runId, generation, requestedSeq: null,
           direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
-          derived: true, rels: spec.rels,
-        })
+      })
+      if (spec) {
         const recovered = { scope: lensScope, name: spec.name,
           label: spec.label || spec.name, rels: [...spec.rels],
-          kind: recoveredFrame.requested_lens_spec.kind }
+          kind: frame.requested_lens_spec.kind }
         setDerivedLenses(list => [...list.filter(item => item.scope !== lensScope
           || item.name !== recovered.name), recovered])
         setExpanded(new Set())
         setEvidenceExpanded(new Set())
         setLens(recovered.name, recovered)
-      } else {
-        const terminalReason = response?.code === 'concept_lens_abandoned'
-          || ['declined', 'invalid_spec', 'no_model', 'accounting_pending',
-            'concept_frame_partial'].includes(response?.reason)
-          || (response?.code === 'job_capacity' && response?.reason === 'capacity')
-        if (response?.ok !== false || !terminalReason) invalidPayload()
-        validateConceptPayload(response, {
-          runId, generation, requestedSeq: null, requestedLens: 'is_a',
-          direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
-          derived: false,
-        })
       }
-      const notice = derived
+      const notice = spec
         ? 'Recovered a validated paid lens from the durable server terminal. No provider request was replayed.'
         : response.code === 'concept_lens_abandoned'
           ? 'The durable claim is abandoned. Provider completion, billing, and usage remain unknown; no provider retry was sent.'
@@ -878,25 +886,19 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         }
         return
       }
-      const spec = response?.spec
-      if (response?.ok === true && record(spec) && conceptId(spec.name)
-          && validDerivedLensLabel(spec.label) && Array.isArray(spec.rels)
-          && spec.rels.length && spec.rels.every(conceptId)) {
-        const createdFrame = validatePaidDerivedPayload(response, {
+      const { spec, frame } = validatePaidLensTerminal(response, {
           runId,
           ...(generation === undefined ? {} : { generation }),
           requestedSeq: null,
-          requestedLens: spec.name,
           direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
-          derived: true,
-          rels: spec.rels,
-        })
+      })
+      if (spec) {
         let cleared = true
         try { cleared = clearConceptLensIntent(runId, owner.intent.idempotencyKey) }
         catch { cleared = false }
         const derived = { scope: lensScope, name: spec.name,
           label: spec.label || spec.name, rels: [...spec.rels],
-          kind: createdFrame.requested_lens_spec.kind }
+          kind: frame.requested_lens_spec.kind }
         setDerivedLenses(list => [...list.filter(item => item.scope !== lensScope
           || item.name !== derived.name), derived])
         setExpanded(new Set())
@@ -906,16 +908,6 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         setCurrentLensForm(form => ({ ...form, prompt: '', error: cleared ? ''
           : 'Lens created, but its saved identity could not be cleared. Reload before another paid request.' }))
       } else {
-        const terminalReason = response?.code === 'concept_lens_abandoned'
-          || ['declined', 'invalid_spec', 'no_model', 'accounting_pending',
-          'concept_frame_partial'].includes(response?.reason)
-          || (response?.code === 'job_capacity' && response?.reason === 'capacity')
-        if (response?.ok !== false || !terminalReason) invalidPayload()
-        validateConceptPayload(response, {
-          runId, generation, requestedSeq: null, requestedLens: 'is_a',
-          direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
-          derived: false,
-        })
         let cleared = true
         try { cleared = clearConceptLensIntent(runId, owner.intent.idempotencyKey) }
         catch { cleared = false }

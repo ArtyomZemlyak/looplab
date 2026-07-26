@@ -162,9 +162,9 @@ const NARR = {
   train_monitor_alert: (d) => `training monitor: #${d.node_id} looks ${d.status}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
   // asha_rank carries RECOVERY edges too — asha_monitor publishes both precisely so projections can
   // CLEAR the flag — so ignoring `d.underperforming` rendered a recovery as another warning.
-  asha_rank: (d) => (d.underperforming === false
-    ? `ASHA: #${d.node_id} ${fmt(d.intermediate)} rank recovered`
-    : `ASHA: #${d.node_id} ${fmt(d.intermediate)} ${d.endpoint_underperforming === false ? 'same-resource' : 'endpoint'} rank warning`),
+  asha_rank: (d) => `ASHA: #${d.node_id} ${fmt(d.intermediate)} ${d.underperforming === false
+    ? 'rank recovered'
+    : `${d.endpoint_underperforming === false ? 'same-resource' : 'endpoint'} rank warning`}`,
   restart: () => 'run restart requested (pause-and-resume handoff)',
 }
 
@@ -718,13 +718,13 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   // only when it IS one of those exact building lifecycles (right node AND right generation).
   const exactBuilding = liveBuilding != null && traceNid != null && traceGeneration != null
     && liveBuilding[traceNid] === traceGeneration
-  // Clear the error flag only on a SUCCESSFUL load (not eagerly at the start of every poll tick):
-  // clearing then re-setting each 4s tick made the error/Retry banner flicker on a persistent failure.
-  // # CODEX AGENT: traceGeneration is derived above but never sent to the route. A reset/repaired node
-  // therefore mixes spans from other attempts while this row claims to explain one exact lifecycle
-  // event. Thread a validated generation fence through the endpoint and filter before projection.
-  const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid, `/trace?limit=${nodeTraceLimit}`))
-    .then(d => { if (alive()) { setNodeTrace(d); setNodeTraceError(false) } })
+  // Clear the error flag only on a SUCCESSFUL exact-attempt load (not eagerly at each poll tick).
+  const loadNodeTrace = (alive) => get(runNodeApiPath(
+    runId, traceNid, `/trace?attempt=${traceGeneration}&limit=${nodeTraceLimit}`))
+    .then(d => {
+      if (d?.node_id !== traceNid || d?.attempt !== traceGeneration) throw 0
+      if (alive()) { setNodeTrace(d); setNodeTraceError(false) }
+    })
     .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
   const retryNodeTrace = () => {
     setNodeTrace(null)
@@ -732,16 +732,21 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
     setNodeTraceNonce(value => value + 1)
   }
   usePoll((alive) => loadNodeTrace(alive), 4000,
-    [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce, nodeTraceLimit],
-    { enabled: open && !readOnly && traceNid != null && exactBuilding })
+    [open, readOnly, runId, traceNid, traceGeneration, exactBuilding,
+      nodeTraceNonce, nodeTraceLimit],
+    { enabled: open && !readOnly && traceNid != null
+      && traceGeneration != null && exactBuilding })
   useEffect(() => {
-    if (!open || readOnly || traceNid == null || exactBuilding) return undefined
+    if (!open || readOnly || traceNid == null || traceGeneration == null || exactBuilding) {
+      return undefined
+    }
     let alive = true
     loadNodeTrace(() => alive)
     return () => { alive = false }
-  }, [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce, nodeTraceLimit])
+  }, [open, readOnly, runId, traceNid, traceGeneration, exactBuilding,
+    nodeTraceNonce, nodeTraceLimit])
   const nodeSpans = Array.isArray(nodeTrace?.nodes) ? nodeTrace.nodes : []
-  const hasTrace = !readOnly && traceNid != null
+  const hasTrace = !readOnly && traceNid != null && traceGeneration != null
   // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
   // merged) carries a trace_id — expand to ONLY that operation's trace (lazily fetched by trace_id),
   // never the node's whole Researcher+Developer trace. Old events (no trace_id) fall through to detail.

@@ -1,0 +1,7 @@
+include ui/package.json
+include ui/package-lock.json
+include ui/index.html
+include ui/vite.config.js
+recursive-include ui/src *
+recursive-include ui/public *
+recursive-include ui/scripts *

@@ -259,6 +259,24 @@ class AppState:
                 "event_count": event_count,
                 RUN_GENERATION_FIELD: generation or None}
 
+    def state_probe(self, rd: Path) -> dict:
+        """Small current-lifecycle envelope for idle terminal clients.
+
+        Reuse the size/mtime-keyed public-state cache so an unchanged run costs a stat + liveness
+        probe, then transfer only identity fields. A client reopens the full SSE stream when any
+        field changes; it never needs to download the complete folded state just to discover that a
+        finished run is still finished.
+        """
+        payload = self.state_payload(rd)
+        state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+        return {
+            "schema": 1,
+            "seq": payload.get("seq", -1),
+            "event_count": payload.get("event_count"),
+            RUN_GENERATION_FIELD: payload.get(RUN_GENERATION_FIELD),
+            "engine_running": state.get("engine_running"),
+        }
+
     def trace_scalars(self, rd: Path):
         """A lightweight state carrying ONLY the three fields the trace projections read
         (`build_trace_view` → run_id/task_id/total_eval_seconds; `build_conversation` → run_id/task_id).
@@ -350,7 +368,8 @@ class AppState:
         with self._trace_view_lock:
             self._trace_view_cache.pop(str(rd), None)
 
-    def node_trace_view(self, rd: Path, nid, cap: Optional[int] = None) -> dict:
+    def node_trace_view(self, rd: Path, nid, cap: Optional[int] = None,
+                        generation: Optional[int] = None) -> dict:
         """The LIGHT trace view built over ONLY one node's spans (via `light_spans_for_node`, in-memory)
         — so expanding a node's trace is O(node), not O(whole run) indexed down. `build_trace_view` over
         just that node's traces preserves its bounded tree/rollup projection without scanning unrelated
@@ -360,7 +379,8 @@ class AppState:
         `cap` (the UI's "load more spans" control) raises the per-node span ceiling on explicit demand;
         the default stays TRACE_NODE_SPAN_CAP, and it is clamped to TRACE_NODE_SPAN_CAP_MAX so a single
         huge node can never materialize an unbounded tree. Still O(node) — a bigger cap only surfaces
-        more of THAT node's already-scoped spans."""
+        more of THAT node's already-scoped spans. ``generation`` fences a reset-surviving node id to
+        one lifecycle before either count or cap is applied."""
         from looplab.events.span_index import get_index
         from looplab.events.traceview import (TRACE_NODE_SPAN_CAP, TRACE_NODE_SPAN_CAP_MAX,
                                               build_trace_view)
@@ -368,10 +388,14 @@ class AppState:
                     else max(TRACE_NODE_SPAN_CAP, min(int(cap), TRACE_NODE_SPAN_CAP_MAX)))
         idx = get_index(rd / "spans.jsonl")
         if idx is None:
-            return self.trace_view(rd)
+            return build_trace_view(
+                self.trace_scalars(rd), [], light=True, total_spans=0, span_cap=span_cap)
         return build_trace_view(
-            self.trace_scalars(rd), idx.light_spans_for_node(nid, span_cap), light=True,
-            total_spans=idx.node_span_count(nid), span_cap=span_cap)
+            self.trace_scalars(rd),
+            idx.light_spans_for_node(nid, span_cap, generation=generation),
+            light=True,
+            total_spans=idx.node_span_count(nid, generation=generation),
+            span_cap=span_cap)
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write

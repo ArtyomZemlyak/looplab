@@ -227,7 +227,8 @@ test('Dock exposes accepted command records immediately instead of waiting in su
 
 test('displayed run generation participates in state dedupe and is published only after commit', async () => {
   const hooks = await source('hooks.js')
-  assert.match(hooks, /p\.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration/)
+  assert.match(hooks, /const identityChanged = next => next\[0\] !== lastSeq \|\| next\[1\] !== lastAlive\s*\|\| next\[2\] !== lastGeneration \|\| next\[3\] !== lastEventCount/)
+  assert.match(hooks, /if \(!identityChanged\(next\)\) return next[\s\S]*?\[lastSeq, lastAlive, lastGeneration, lastEventCount\] = next[\s\S]*?setGenerationState/)
   assert.match(hooks, /useLayoutEffect\(\(\) => \{ observeRunGeneration\(runId, generation\) \}/)
 })
 
@@ -320,8 +321,8 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a
   // persistent failure does not flicker the error/Retry banner every 4s.
-  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(runNodeApiPath\(runId, traceNid,[\s\S]*?\/trace[\s\S]*?\.then\(d => \{ if \(alive\(\)\) \{ setNodeTrace\(d\); setNodeTraceError\(false\) \} \}\)/)
-  assert.match(dock, /usePoll\(\(alive\) => loadNodeTrace\(alive\)[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
+  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(runNodeApiPath\([\s\S]*?\/trace[\s\S]*?d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration[\s\S]*?if \(alive\(\)\) \{ setNodeTrace\(d\); setNodeTraceError\(false\) \}/)
+  assert.match(dock, /usePoll\(\(alive\) => loadNodeTrace\(alive\)[\s\S]*?enabled: open && !readOnly && traceNid != null[\s\S]*?traceGeneration != null && exactBuilding/)
   assert.doesNotMatch(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\)/,
     'the trace error flag must clear only on a successful load, not eagerly each poll tick (no banner flicker)')
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/,

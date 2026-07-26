@@ -70,7 +70,7 @@ _SPAN_FIELDS = {
 }
 _ATTRIBUTE_FIELDS = {
     # topology / conversation reconstruction
-    "node_id", "phase", "phase_span", "input_from", "input_carry", "input_partial",
+    "node_id", "generation", "phase", "phase_span", "input_from", "input_carry", "input_partial",
     # generation / tool observation
     "model", "op", "model_parameters", "tool", "tool_calls", "input", "output",
     "thinking", "usage", "cost", "level",
@@ -90,7 +90,8 @@ _ATTR_BOOL_FIELDS = {
     "feasible",
 }
 _ATTR_INT_FIELDS = {
-    "input_carry", "exit_code", "seed", "blocks", "attempt", "repair_attempts", "violations",
+    "generation", "input_carry", "exit_code", "seed", "blocks", "attempt",
+    "repair_attempts", "violations",
 }
 _ATTR_FLOAT_FIELDS = {"proxy_score", "eval_seconds", "metric", "robust_metric"}
 _EVENT_FIELDS = {"error", "type", "message", "n", "count", "status", "stage", "step", "reason"}

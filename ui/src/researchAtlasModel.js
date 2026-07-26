@@ -1,3 +1,7 @@
+import { boundedAtlasText, projectResearchAtlasSource } from './api.js'
+
+export { boundedAtlasText, projectResearchAtlasSource }
+
 // Portfolio stores contain untrusted model-authored text and may be very large. Normalize
 // every shape and enforce hard render caps before React sees it; make every truncation explicit in the view.
 export const ATLAS_RENDER_LIMITS = Object.freeze({
@@ -13,6 +17,11 @@ export const ATLAS_SOURCE_KEYS = Object.freeze([
   'atlas', 'claims', 'conceptCuration', 'claimCuration',
 ])
 const PORTFOLIO_ID_RE = /^portfolio-sha256:[0-9a-f]{64}$/
+const ATLAS_TRANSPORT_LIMITS = Object.freeze({
+  atlas: ATLAS_RENDER_LIMITS.concepts,
+  claims: ATLAS_RENDER_LIMITS.claims,
+  curation: ATLAS_RENDER_LIMITS.curation,
+})
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 const list = value => Array.isArray(value) ? value : []
@@ -163,18 +172,21 @@ export function isValidAtlasSourceEnvelope(key, value) {
   // All four independently fetched slices must name the same configured portfolio. Without this opaque
   // replacement fence, equal ledger revisions can make a settings switch look like one coherent preview.
   if (!atlasPortfolioId(value)) return false
-  // # CODEX AGENT: Atlas/claims validation accepts arbitrarily large arrays and later retains the raw
-  // envelope in React state before `take()` applies render caps. Enforce route maxima + receipt equations
-  // here, or immediately project to a bounded allowlist, so a malformed 200 cannot turn the advertised
-  // bounded UI into an O(response) browser-heap sink.
   if (key === 'atlas') {
     return Array.isArray(value.explored)
       && Array.isArray(value.thin_coverage)
       && Array.isArray(value.contradictions)
+      && value.explored.length <= ATLAS_TRANSPORT_LIMITS.atlas
+      && value.thin_coverage.length <= ATLAS_TRANSPORT_LIMITS.atlas
+      && value.contradictions.length <= ATLAS_TRANSPORT_LIMITS.atlas
   }
-  if (key === 'claims') return Array.isArray(value.claims)
+  if (key === 'claims') {
+    return Array.isArray(value.claims)
+      && value.claims.length <= ATLAS_TRANSPORT_LIMITS.claims
+  }
   if (key === 'conceptCuration' || key === 'claimCuration') {
     if (!Array.isArray(value.entries)
+      || value.entries.length > ATLAS_TRANSPORT_LIMITS.curation
       || !value.entries.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry))) {
       return false
     }
@@ -216,17 +228,6 @@ export function reconcileAtlasSourceStatuses(previousValue, successfulValue, loa
       : failed
   }
   return statuses
-}
-
-export function boundedAtlasText(value, max = 360) {
-  if (!['string', 'number', 'boolean'].includes(typeof value)) return ''
-  const limit = Number.isSafeInteger(max) ? Math.max(0, Math.min(2000, max)) : 360
-  // Slice before normalization so one model-authored field cannot force an unbounded regex pass.
-  const text = String(value).slice(0, limit)
-  // Directional formatting controls can visually reorder an otherwise escaped task/scope and move a
-  // disclosure away from its value. Remove them together with ASCII controls before rendering.
-  return text.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ')
-    .replace(/\s+/gu, ' ').trim().slice(0, limit)
 }
 
 const take = (value, max) => list(value).slice(0, max)

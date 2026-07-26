@@ -45,13 +45,14 @@ test('metric curves distinguish loading, empty, failed, stale, and superseded re
       import('react-dom/client'), vite.ssrLoadModule('/src/Inspector.jsx'),
     ])
     root = createRoot(document.getElementById('root'))
-    const view = (nodeId) => React.createElement(MetricCurves, {
-      key: `demo:${nodeId}`, runId: 'demo', nodeId, status: 'pending',
+    const view = (nodeId, attempt = 0) => React.createElement(MetricCurves, {
+      key: `demo:${nodeId}:${attempt}`, runId: 'demo', nodeId, attempt, status: 'pending',
     })
 
     await act(async () => root.render(view(1)))
     assert.match(document.querySelector('[role="status"]')?.textContent || '', /Loading metric curves/)
     assert.equal(requests.length, 1)
+    assert.match(requests[0].url, /\/nodes\/1\/metrics\?attempt=0$/)
 
     await reply(requests[0], { detail: 'offline' }, 503)
     assert.match(document.querySelector('[role="alert"]')?.textContent || '', /Metric curves unavailable.*Retry/)
@@ -60,16 +61,22 @@ test('metric curves distinguish loading, empty, failed, stale, and superseded re
     await act(async () => document.querySelector('[role="alert"] button')
       .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
     assert.match(document.querySelector('[role="status"]')?.textContent || '', /Loading metric curves/)
-    await reply(requests[1], { metrics: {} })
+    await reply(requests[1], { node_id: 1, attempt: 0, metrics: {} })
     assert.match(document.body.textContent, /no metric curves logged yet/)
 
     await poll()
-    await reply(requests[2], { metrics: { 'train/loss': [{ step: 1, value: 0.4 }] } })
+    await reply(requests[2], {
+      node_id: 1, attempt: 0, metrics: { 'train/loss': [{ step: 1, value: 0.4 }] },
+    })
     assert.match(document.body.textContent, /train.*1 metric/)
 
     await poll(); await poll()
-    await reply(requests[4], { metrics: { 'eval/score': [{ step: 2, value: 0.8 }] } })
-    await reply(requests[3], { metrics: { 'old/loss': [{ step: 1, value: 9 }] } })
+    await reply(requests[4], {
+      node_id: 1, attempt: 0, metrics: { 'eval/score': [{ step: 2, value: 0.8 }] },
+    })
+    await reply(requests[3], {
+      node_id: 1, attempt: 0, metrics: { 'old/loss': [{ step: 1, value: 9 }] },
+    })
     assert.match(document.body.textContent, /eval.*1 metric/)
     assert.doesNotMatch(document.body.textContent, /old.*1 metric/)
 
@@ -83,11 +90,29 @@ test('metric curves distinguish loading, empty, failed, stale, and superseded re
     await act(async () => root.render(view(2)))
     assert.match(document.querySelector('[role="status"]')?.textContent || '', /Loading metric curves/)
     assert.doesNotMatch(document.body.textContent, /eval.*1 metric/)
-    await reply(requests[6], { metrics: { 'late/old-node': [{ step: 1, value: 3 }] } })
+    await reply(requests[6], {
+      node_id: 1, attempt: 0, metrics: { 'late/old-node': [{ step: 1, value: 3 }] },
+    })
     assert.match(document.querySelector('[role="status"]')?.textContent || '', /Loading metric curves/)
-    await reply(requests[7], { metrics: {} })
+    assert.match(requests[7].url, /\/nodes\/2\/metrics\?attempt=0$/)
+    await reply(requests[7], { node_id: 2, attempt: 0, metrics: {} })
     assert.match(document.body.textContent, /no metric curves logged yet/)
     assert.doesNotMatch(document.body.textContent, /late.*1 metric/)
+
+    // Same node id, new lifecycle: the key resets all visible evidence and the attempt receipt is
+    // required. A late response from the superseded attempt cannot repopulate the replacement node.
+    await poll()
+    await act(async () => root.render(view(2, 1)))
+    assert.match(document.querySelector('[role="status"]')?.textContent || '', /Loading metric curves/)
+    assert.match(requests[9].url, /\/nodes\/2\/metrics\?attempt=1$/)
+    await reply(requests[8], {
+      node_id: 2, attempt: 0, metrics: { 'stale/reset': [{ step: 1, value: 7 }] },
+    })
+    assert.doesNotMatch(document.body.textContent, /stale.*1 metric/)
+    await reply(requests[9], {
+      node_id: 2, attempt: 1, metrics: { 'fresh/reset': [{ step: 1, value: 0.2 }] },
+    })
+    assert.match(document.body.textContent, /fresh.*1 metric/)
   } finally {
     if (root) await act(async () => root.unmount())
     if (vite) await vite.close()

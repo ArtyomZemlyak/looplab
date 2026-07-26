@@ -83,14 +83,25 @@ class TensorBoardAdapter:
 _ADAPTERS: list[MetricsAdapter] = [TensorBoardAdapter()]
 
 
-def read_node_metrics(node_dir: str) -> dict[str, list[dict]]:
+def read_node_metrics(node_dir: str, *, since_wall_time: float | None = None) -> dict[str, list[dict]]:
     """Merge every adapter's scalar series for one node. Returns {tag: [{step, value, wall_time}, …]},
-    each series sorted by step. Empty dict when nothing is logged yet (or on any error)."""
+    each series sorted by step. When ``since_wall_time`` is supplied, points without a trustworthy
+    current-attempt wall-time are excluded rather than letting a reset relabel old evidence. Empty
+    dict when nothing is logged yet (or on any error)."""
     merged: dict[str, list[dict]] = {}
     for a in _ADAPTERS:
         try:
             for tag, series in a.read(node_dir).items():
-                merged.setdefault(tag, []).extend(series)
+                if since_wall_time is not None:
+                    series = [
+                        point for point in series
+                        if isinstance(point, dict)
+                        and isinstance(point.get("wall_time"), (int, float))
+                        and not isinstance(point.get("wall_time"), bool)
+                        and float(point["wall_time"]) >= since_wall_time
+                    ]
+                if series:
+                    merged.setdefault(tag, []).extend(series)
         except Exception:  # noqa: BLE001 - one adapter must never break the others / the request
             continue
     for tag in merged:

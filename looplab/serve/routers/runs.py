@@ -23,6 +23,7 @@ from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, migrate_config_snapshot,
     run_start_pinned_settings, settings_from_snapshot)
+from looplab.core.node_evidence import metrics_attempt_receipt
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
@@ -843,6 +844,11 @@ def build_router(srv) -> APIRouter:
         projection as the live state, SSE, and review surfaces.
         """
         return _state_payload(_run_dir(run_id), seq)
+
+    @router.get("/api/runs/{run_id}/lifecycle")
+    def get_lifecycle(run_id: str):
+        """Bounded identity/liveness probe used after a terminal SSE stream closes."""
+        return srv.state_probe(_run_dir(run_id))
 
     @router.get("/api/runs/{run_id}/concepts")
     def get_concepts(run_id: str, response: Response, lens: str = "is_a",
@@ -1722,6 +1728,18 @@ def build_router(srv) -> APIRouter:
                                           "X-Accel-Buffering": "no"})
 
     # ------------------------------------------------------------------ node detail
+    def _node_attempt(st, nid: int) -> Optional[int]:
+        """Current lifecycle for a folded node or its pre-create building marker."""
+        node = st.nodes.get(nid)
+        if node is not None:
+            attempt = getattr(node, "attempt", 0)
+            return attempt if type(attempt) is int and attempt >= 0 else 0
+        marker = st.buildings.get(nid)
+        if marker is None and st.building and st.building.get("node_id") == nid:
+            marker = st.building
+        raw = marker.get("generation") if isinstance(marker, dict) else None
+        return raw if type(raw) is int and raw >= 0 else (0 if marker is not None else None)
+
     @router.get("/api/runs/{run_id}/nodes/{nid}")
     def node_detail(run_id: str, nid: int, seq: Optional[int] = None,
                     expected_generation: Optional[str] = None):
@@ -1744,17 +1762,19 @@ def build_router(srv) -> APIRouter:
             # (the exact "nothing, then everything at once" the operator hit).
             if seq is not None:
                 raise HTTPException(404, "no such node at requested sequence")
-            trace = _node_trace(rd, nid)
             # Prefer THIS node's own build marker from the multi-build collection; under parallel_build>1
             # the singular `st.building` holds only the last-appended build, so keying off it would return
             # a sibling build's operator/parent_ids. Fall back to the singular for a serial-build log.
             b = st.buildings.get(nid)
             if b is None and st.building and st.building.get("node_id") == nid:
                 b = st.building
+            attempt = _node_attempt(st, nid)
+            trace = _node_trace(rd, nid, attempt=attempt or 0)
             building = bool(b)
             if building or trace.get("nodes"):
                 b = b or {}
                 return {"id": nid, "status": "building",
+                        "attempt": attempt or 0,
                         "operator": b.get("operator"), "parent_ids": b.get("parent_ids", []),
                         "idea": None, "code": "", "annotations": [], "trace": trace}
             raise HTTPException(404, "no such node")
@@ -1769,7 +1789,8 @@ def build_router(srv) -> APIRouter:
                 out["parent_id_diffed"] = p.id
         # spans.jsonl is a current sidecar rather than an event-versioned projection. Never label its
         # future contents as historical; the UI explains that trace is unavailable in History.
-        out["trace"] = _node_trace(rd, nid) if seq is None else {"nodes": []}
+        out["trace"] = (_node_trace(rd, nid, attempt=n.attempt)
+                        if seq is None else {"nodes": []})
         if seq is not None:
             out["historical_seq"] = seq
             out["historical_generation"] = historical_generation
@@ -1854,43 +1875,85 @@ def build_router(srv) -> APIRouter:
                 "run_setup": _tail("run_setup.log", rd)}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/metrics")
-    def node_metrics(run_id: str, nid: int):
+    def node_metrics(run_id: str, nid: int,
+                     attempt: Optional[int] = Query(default=None, ge=0)):
         """Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad
         norms, lr, …), not just the objective — read via the pluggable metrics adapters (TensorBoard
-        today). Shape: {"metrics": {tag: [{step, value, wall_time}, …]}}. Empty until logs appear."""
+        today). The response is fenced to ``node_id`` + lifecycle ``attempt``; reset-era points are
+        excluded by the engine's attempt receipt. Empty until current-attempt logs appear."""
         from looplab.serve.metrics_adapters import read_node_metrics
+        rd = _run_dir(run_id)
+        current_attempt = _node_attempt(srv.state(rd), nid)
+        if current_attempt is None:
+            raise HTTPException(404, "no such node")
+        if attempt is not None and attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": attempt,
+                "current_attempt": current_attempt,
+                "message": "The node was reset before its metric evidence was read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        node_dir = _node_dir(rd, nid)
+        receipt = metrics_attempt_receipt(node_dir)
         try:
-            m = read_node_metrics(str(_node_dir(_run_dir(run_id), nid)))
+            # Legacy attempt-zero runs predate receipts and remain readable. A later attempt without
+            # its exact marker is known-stale/unknown and therefore returns no series, never old data.
+            if receipt is None:
+                m = read_node_metrics(str(node_dir)) if current_attempt == 0 else {}
+            elif receipt[0] == current_attempt:
+                m = read_node_metrics(str(node_dir), since_wall_time=receipt[1])
+            else:
+                m = {}
         except Exception:  # noqa: BLE001 - observability must never 500
             m = {}
-        return {"metrics": m}
+        after_attempt = _node_attempt(srv.state(rd), nid)
+        if after_attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": current_attempt,
+                "current_attempt": after_attempt,
+                "message": "The node was reset while its metric evidence was being read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        return {"node_id": nid, "attempt": current_attempt, "metrics": m}
 
-    def _node_trace(rd: Path, nid: int, cap: Optional[int] = None) -> dict:
+    def _node_trace(rd: Path, nid: int, cap: Optional[int] = None, *,
+                    attempt: int = 0) -> dict:
         try:
             # light=True: the tree carries structure + tokens + timing but NOT prompts/outputs. The UI
             # fetches a bounded/redacted observation projection lazily via /spans/{sid} when expanded,
             # so a heavily-repaired node's trace stays small and its omission receipt remains explicit.
             # `srv.node_trace_view` builds over ONLY this node's spans via the light span INDEX (in-
             # memory, O(node) — not the whole-run tree), so a 1 GB, 4000-node run's node trace is ~ms.
-            tv = srv.node_trace_view(rd, nid, cap=cap)
-            return {"schema": tv.get("schema"),
+            tv = srv.node_trace_view(rd, nid, cap=cap, generation=attempt)
+            return {"node_id": nid, "attempt": attempt, "schema": tv.get("schema"),
                     "nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {}),
                     "projection": tv.get("projection", {})}
         except Exception:  # noqa: BLE001
-            return _trace_unavailable(nodes=[], rollup={}, summary={})
+            return {"node_id": nid, "attempt": attempt,
+                    **_trace_unavailable(nodes=[], rollup={}, summary={})}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
-    def node_trace(run_id: str, nid: int, limit: int = 0):
+    def node_trace(run_id: str, nid: int, limit: int = 0,
+                   attempt: Optional[int] = Query(default=None, ge=0)):
         """The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads
         only that node's spans via the index (O(node)), so the UI can fetch a node's trace lazily on
         expand instead of loading (and re-rendering) the whole-run timeline for a 4000-node run.
 
         `limit` (>0) is the UI's "load more spans" control: it raises this node's span ceiling on demand
         (default 512, clamped to TRACE_NODE_SPAN_CAP_MAX in node_trace_view); 0/absent keeps the default."""
+        rd = _run_dir(run_id)
+        if attempt is None:
+            attempt = _node_attempt(srv.state(rd), nid)
+            if attempt is None:
+                attempt = 0  # setup/legacy traces have no folded Node row
         cap = int(limit) if limit and int(limit) > 0 else None
-        return _node_trace(_run_dir(run_id), nid, cap=cap)
+        return _node_trace(rd, nid, cap=cap, attempt=attempt)
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str):

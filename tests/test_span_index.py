@@ -294,6 +294,29 @@ def test_node_trace_view_is_o_node_and_identical(run):
         assert set(per_node["nodes"].keys()) == {str(nid)}
 
 
+def test_node_trace_generation_fence_precedes_limit(tmp_path):
+    """A reset reuses node_id, but each lifecycle keeps an exact, independently capped trace."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    spans = [
+        {"name": "old-attempt", "kind": "operation", "trace_id": "old", "span_id": "old-root",
+         "parent_id": None, "run_id": "demo", "attributes": {"node_id": 0},
+         "events": [], "status": "OK", "start": 0.0, "duration_s": 1.0},
+        {"name": "current-attempt", "kind": "operation", "trace_id": "current",
+         "span_id": "current-root", "parent_id": None, "run_id": "demo",
+         "attributes": {"node_id": 0, "generation": 1},
+         "events": [], "status": "OK", "start": 2.0, "duration_s": 1.0},
+    ]
+    idx = get_index(_write_spans(rd, spans))
+
+    assert [row["name"] for row in idx.light_spans_for_node(
+        0, 1, generation=0)] == ["old-attempt"]
+    assert [row["name"] for row in idx.light_spans_for_node(
+        0, 1, generation=1)] == ["current-attempt"]
+    assert idx.node_span_count(0, generation=0) == 1
+    assert idx.node_span_count(0, generation=1) == 1
+
+
 def test_persist_rewrites_are_geometric(run, monkeypatch):
     """The persisted index is re-written only when coverage grows ~1.5x — so a live run's total index-
     write volume is O(n), not an ~O(n^2) full rewrite every few MB (each a full-object PUT on S3/geesefs).
@@ -543,6 +566,7 @@ def test_endpoints_serve_through_the_index(tmp_path):
 
     # /nodes/{nid}/trace: the O(node) per-node timeline (hot path for lazy trace-card expand).
     nt = client.get("/api/runs/demo/nodes/0/trace").json()
+    assert nt["node_id"] == 0 and nt["attempt"] == 0
     assert isinstance(nt["nodes"], list) and len(nt["nodes"]) >= 1   # node 0's tree (its create_node root)
     assert nt["rollup"].get("generations") == 3                      # node 0's 3 generations, not the run's 6
 
@@ -552,6 +576,42 @@ def test_endpoints_serve_through_the_index(tmp_path):
     tv2 = client.get("/api/runs/demo/trace").json()
     assert set(tv2["nodes"].keys()) == {"1"}
     assert client.get("/api/runs/demo/spans/g0_1").json()["attributes"] == {}   # node 0's span is gone
+
+
+def test_node_trace_endpoint_can_read_each_reset_attempt_exactly(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {
+        "node_id": 0, "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 1.0})
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    _write_spans(rd, [
+        {"name": "old-attempt", "kind": "operation", "trace_id": "old", "span_id": "old-root",
+         "parent_id": None, "run_id": "demo", "attributes": {"node_id": 0},
+         "events": [], "status": "OK", "start": 0.0, "duration_s": 1.0},
+        {"name": "current-attempt", "kind": "operation", "trace_id": "current",
+         "span_id": "current-root", "parent_id": None, "run_id": "demo",
+         "attributes": {"node_id": 0, "generation": 1},
+         "events": [], "status": "OK", "start": 2.0, "duration_s": 1.0},
+    ])
+    client = TestClient(make_app(tmp_path))
+
+    old = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 0}).json()
+    current = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 1}).json()
+    assert old["node_id"] == 0 and old["attempt"] == 0
+    assert current["node_id"] == 0 and current["attempt"] == 1
+    assert "old-attempt" in json.dumps(old) and "current-attempt" not in json.dumps(old)
+    assert "current-attempt" in json.dumps(current) and "old-attempt" not in json.dumps(current)
 
 
 def test_trace_cache_rejects_same_size_same_mtime_file_replacement(tmp_path):

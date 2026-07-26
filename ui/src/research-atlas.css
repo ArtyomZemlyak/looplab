@@ -1,10 +1,8 @@
 .research-atlas-page { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
 .atlas-content { width: min(1240px, calc(100% - 32px)); margin: 0 auto; padding: 26px 0 48px; }
-.atlas-intro { display: flex; align-items: start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+.atlas-intro { margin-bottom: 18px; }
 .atlas-intro h1 { margin: 2px 0 7px; font-size: clamp(24px, 4vw, 34px); line-height: 1.15; }
 .atlas-intro p:last-child { max-width: 72ch; margin: 0; color: var(--fg-dim); }
-.atlas-eyebrow { margin: 0; color: var(--accent-text); font-size: 10px; font-weight: 750;
-  letter-spacing: .09em; text-transform: uppercase; }
 .atlas-degraded { margin-bottom: 14px; }
 .atlas-degraded span { overflow-wrap: anywhere; }
 .atlas-source-provenance { display: grid; gap: 8px; margin-bottom: 14px; }

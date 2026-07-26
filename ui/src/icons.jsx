@@ -1,30 +1,44 @@
-// Monochrome dev/git glyph geometry lives in a versioned SVG sprite. It is bundled once (as raw markup)
-// and injected a single time into the document, so OpIcon stays a tiny `<use>` (paths out of the per-icon
-// render path, currentColor preserved) — but the `<use>` now references an IN-DOCUMENT symbol.
+// Monochrome dev/git glyph geometry lives in a versioned SVG sprite. Vite emits it as a hashed local
+// asset; the client fetches and injects it once, so OpIcon stays a tiny `<use>` while the XML remains
+// cacheable and out of the executable JS parse path.
 //
 // WebKit/Safari does NOT resolve an EXTERNAL-document `<use href="sprite.svg#id">` (a long-standing
 // security restriction), so the previous external reference rendered every icon BLANK on Safari/iOS.
-// Injecting the sprite into the page and referencing `<use href="#id">` (same-document) works in every
-// engine, including WebKit.
-import spriteMarkup from './looplab-icons-v1.svg?raw'
+// Fetching and injecting the symbols before referencing `<use href="#id">` keeps the final reference
+// same-document and works in every engine, including WebKit.
+import spriteUrl from './looplab-icons-v1.svg?url&no-inline'
 
 const OP_ICON_NAMES = new Set(
   'flag trending bug confluence gitbranch target dot search doc alert gear user bot bolt star pause play stop replay sliders chevron-up chevron-down chat bell folder clip map compass bulb check cross pencil link download printer crown list'.split(' '),
 )
 const SPRITE_DOM_ID = 'looplab-icon-sprite'
+let spriteLoad = null
 
-// Inject the symbol defs exactly once. Guarded for SSR/tests (no document) and idempotent against a
-// hot-reload or a second import. The host is visually hidden but must stay in the accessibility tree's
-// blind spot (aria-hidden) and out of layout.
+// Inject the trusted bundled symbol defs exactly once. SSR never starts a browser request; production
+// failures remain contained (buttons retain their accessible names) and a later call can retry.
 function ensureSprite() {
-  if (typeof document === 'undefined' || !document.body) return
-  if (document.getElementById(SPRITE_DOM_ID)) return
-  const host = document.createElement('div')
-  host.id = SPRITE_DOM_ID
-  host.setAttribute('aria-hidden', 'true')
-  host.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden'
-  host.innerHTML = spriteMarkup   // trusted, bundled, same-origin asset — our own sprite, never user input
-  document.body.prepend(host)
+  if (import.meta.env.SSR || typeof document === 'undefined' || !document.body
+      || document.getElementById(SPRITE_DOM_ID) || spriteLoad) return
+  if (typeof fetch !== 'function') return
+  spriteLoad = fetch(spriteUrl, { credentials: 'same-origin' })
+    .then(response => {
+      if (!response.ok) throw new Error('icon sprite unavailable')
+      return response.text()
+    })
+    .then(markup => {
+      if (!/^<svg[\s>]/.test(markup)
+          || /<(?:script|foreignObject|image|use)\b/i.test(markup)) {
+        throw new Error('invalid icon sprite')
+      }
+      if (document.getElementById(SPRITE_DOM_ID)) return
+      const host = document.createElement('div')
+      host.id = SPRITE_DOM_ID
+      host.setAttribute('aria-hidden', 'true')
+      host.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden'
+      host.innerHTML = markup
+      document.body.prepend(host)
+    })
+    .catch(() => { spriteLoad = null })
 }
 
 if (typeof document !== 'undefined') {

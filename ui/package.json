@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "test": "node --test --test-timeout=30000 test/*.test.js",
+    "prebuild": "node scripts/clean-dist.mjs",
     "build": "vite build",
     "check:bundle": "node scripts/check-bundle.mjs",
     "preview": "vite preview"
@@ -22,6 +23,7 @@
     "@vitejs/plugin-react": "^6.0.3",
     "axe-core": "4.12.1",
     "jsdom": "29.1.1",
+    "terser": "^5.49.0",
     "vite": "^8.1.4"
   }
 }

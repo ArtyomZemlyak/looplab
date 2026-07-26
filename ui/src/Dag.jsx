@@ -8,14 +8,15 @@ import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts } from './conceptChips.js'
-import { activeNodeMap, conceptMaterializationStatus } from './nodeProjection.js'
+import { conceptMaterializationStatus } from './nodeProjection.js'
+import { dagCollapsedKey, dagLayoutProjection } from './dagProjection.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
 import { GroupRegion, SuperShell } from './groupnodes.jsx'
 import EnergyEdge from './EnergyEdge.jsx'
 import { useFx } from './fx.js'
 import {
-  computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
+  regionGeometry, rerouteForCollapse, groupColor,
   themeFilteredGroupAggregate, superId, GROUP_MODES, isMergeEntryEdge,
 } from './grouping.js'
 import {
@@ -431,21 +432,26 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   }
   const toggleMap = () => setShowMap(v => { storageSet('ll.minimap', v ? '0' : '1'); return !v })
 
-  // # CODEX AGENT: this layout-heavy memo depends on the entire folded state object. Every SSE frame,
-  // including report/log/liveness-only changes, creates a new state and relayouts/rebuilds every
-  // ReactFlow node and edge. Derive a stable graph projection key and keep volatile state out of the
-  // layout dependency so active large runs do not freeze the browser.
+  // Every folded-state revision refreshes card data, but layout geometry changes only with active
+  // topology/group membership/collapse. This keeps report/log/liveness SSE frames out of the
+  // O(nodes·depth·sweeps) layout path while still rendering their latest node state immediately.
+  const projection = useMemo(() => dagLayoutProjection(state, groupMode), [state, groupMode])
+  const collapseKey = dagCollapsedKey(collapsed)
+  const geometry = useMemo(() => {
+    const { nodes, nodeGroup } = projection
+    const layout = layoutWithGroups(nodes, { collapsed, nodeGroup, groupMode })
+    const routed = rerouteForCollapse(nodes, collapsed, nodeGroup)
+    return { ...layout, hidden: routed.hidden, reEdges: routed.edges }
+    // projection.key deliberately replaces projection identity: volatile revisions retain geometry.
+  }, [projection.key, collapseKey, groupMode])
   const base = useMemo(() => {
-    const ns = activeNodeMap(state?.nodes || {}, state)
-    const groups = groupMode === 'none' ? new Map() : computeGroups(ns, groupMode, state)
+    const { nodes: ns, groups, nodeGroup: ng } = projection
+    const { pos, cells, hidden, reEdges } = geometry
     // Group ORDER → a curated tint per group, so adjacent groups stay visually distinct (vs a hash
     // that can collide two neighbours). One muted hue per group is the primary "same family" cue.
     const groupOrder = new Map([...groups.keys()].map((k, i) => [k, i]))
     const tintOf = (k) => groupColor(k, groupOrder.get(k))
-    const ng = nodeGroupMap(groups)
     const banded = groupMode === 'theme' || groupMode === 'niche'
-    const { pos, cells } = layoutWithGroups(ns, { collapsed, nodeGroup: ng, groupMode })
-    const { hidden, edges: reEdges } = rerouteForCollapse(ns, collapsed, ng)
 
     // Focus+context (Prefect-style): the transitive ancestor+descendant set of the SELECTED node — the
     // rest of the forest dims so "how did we get to this experiment / where did it lead" reads on a
@@ -572,7 +578,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       }
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
-  }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
+  }, [projection, geometry, state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
       themeFilter, highlightIds, fx, onNodeAction, openActions])
   const { edges, groupKeys } = base
   // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on

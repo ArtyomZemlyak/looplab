@@ -224,12 +224,10 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   }
   // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
   // per-node detail payload has no `drifts` key, so filter the run state down to this node.
-  // Attempt-scoped: drift rows ARE stamped with their generation (evaluate.py appends it) and
-  // `_on_node_reset` never prunes them, so a node-id-only filter lit the Trust tab's alarm on the
-  // REPLACEMENT attempt for a drift the old code caused. Legacy rows predate the stamp and have no
-  // generation, so they fall back to this attempt rather than disappearing.
+  // Reset keeps historical audit rows, so only the exact lifecycle may alarm the current Trust tab.
+  // Legacy rows had no generation stamp and can only belong to the original (attempt-zero) node.
   const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id
-    && (Number.isInteger(d.generation) ? d.generation : (n.attempt ?? 0)) === (n.attempt ?? 0))
+    && (Object.hasOwn(d, 'generation') ? d.generation === n.attempt : n.attempt === 0))
   // Sweep nodes get a Trials tab (right after Overview). `activeTab` guards against a stale tab
   // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
   const sweep = isSweep(n)
@@ -418,8 +416,7 @@ function ConceptTags({ n, state, runId, onToast }) {
     // list and every token normalizes to `*-…`, which fails the concept-id segment gate. An explicit
     // clear is blank input; a fully-rejected input is a typo to correct, so refuse and keep the editor.
     if (concepts.length === 0 && dropped > 0) {
-      onToast?.(`No valid concept id in that input (${dropped} rejected) — `
-                + 'fix them, or clear the box to remove all tags.')
+      onToast?.('No valid concept IDs — fix the input, or clear it to remove every tag.')
       return
     }
     setBusy(true)
@@ -1132,11 +1129,9 @@ function Code({ n }) {
 // Live online metric curves (loss, recall@k, lr, grad norms, …) read from the node's TensorBoard
 // events via the metrics adapters. Polls while the node is still running so the curves fill in as
 // training progresses; keyed on n.status so a repair-retrain (pending→failed→pending) re-arms the poll.
-// # CODEX AGENT: node ids survive reset. Scope/reset curve state by `attempt` and require an
-// attempt-bound server receipt; the stale fallback must never present a prior implementation's
-// training curves as current.
-export function MetricCurves({ runId, nodeId, status }) {
+export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
   const done = ['evaluated', 'failed', 'confirmed'].includes(status)
+  const metricAttempt = Number.isInteger(attempt) && attempt >= 0 ? attempt : 0
   const [resource, setResource] = useState(null)
   const [retryNonce, setRetryNonce] = useState(0)
   const requestRef = useRef(0)
@@ -1145,14 +1140,16 @@ export function MetricCurves({ runId, nodeId, status }) {
   // re-arms the effect, so a repair-retrain (pending→failed→pending) resumes live polling.
   usePoll((alive) => {
     const request = ++requestRef.current
-    get(runNodeApiPath(runId, nodeId, '/metrics')).then(d => {
+    get(runNodeApiPath(runId, nodeId, `/metrics?attempt=${metricAttempt}`)).then(d => {
       if (!d?.metrics || Array.isArray(d.metrics)) throw 0
+      if (d.node_id !== nodeId || d.attempt !== metricAttempt) throw 0
       if (alive() && request === requestRef.current) setResource(d.metrics)
     }).catch(() => {
       if (alive() && request === requestRef.current) setResource(r => r
         ? Array.isArray(r) ? r : [r] : false)
     })
-  }, done ? null : 3000, [runId, nodeId, done, retryNonce], { enabled: nodeId != null })
+  }, done ? null : 3000, [runId, nodeId, metricAttempt, done, retryNonce],
+  { enabled: nodeId != null })
   const retry = () => {
     if (resource === false) setResource(null)
     setRetryNonce(n => n + 1)
@@ -1199,7 +1196,8 @@ function Metrics({ n, detail, state, runId }) {
     </>}
     <div className="section-h metric-curves-heading">Metric curves
       <span className="muted metric-curves-note">· live logged scalars · grouped</span></div>
-    <MetricCurves key={`${runId}:${n.id}`} runId={runId} nodeId={n.id} status={n.status} />
+    <MetricCurves key={`${runId}:${n.id}:${n.attempt ?? 0}`} runId={runId} nodeId={n.id}
+      attempt={n.attempt ?? 0} status={n.status} />
   </>
 }
 

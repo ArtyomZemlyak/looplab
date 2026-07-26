@@ -9,6 +9,7 @@ import anyio
 
 from looplab.adapters.toytask import ToyTask
 from looplab.core.models import Event, NodeStatus
+from looplab.core.node_evidence import metrics_attempt_receipt
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -93,3 +94,5 @@ def test_engine_reruns_reset_node_in_place(tmp_path):
                  if e.type in ("node_evaluated", "node_failed") and e.data.get("node_id") == target]
     assert terminals[-1].data["generation"] == 1
     assert st1.nodes[target].attempt == 1
+    receipt = metrics_attempt_receipt(run_dir / "nodes" / f"node_{target}")
+    assert receipt is not None and receipt[0] == 1

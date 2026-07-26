@@ -133,7 +133,8 @@ class ConfirmPhaseMixin:
         # the billed eval clock; only admitted setup/execution enters immutable ``eval_seconds``.
         # Keep the per-seed events INSIDE the span so they carry its trace/span id
         # (events<->spans UI join), consistent with the _evaluate path.
-        with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
+        with self.tracer.span(
+                "confirm_seed", new_trace=True, node_id=nd.id, generation=generation, seed=s):
             cancel = threading.Event()
 
             async def _watch_lifecycle() -> None:

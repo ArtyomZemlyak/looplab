@@ -1,4 +1,4 @@
-import React, { useId, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 
 const textValue = value => {
   if (value == null) return ''
@@ -149,4 +149,29 @@ export function nextRovingIndex(key, index, length) {
   if (key === 'Home') return 0
   if (key === 'End') return length - 1
   return null
+}
+
+// Shared keyboard/focus contract for the compact theme and energy radio menus.
+export function useRovingRadioMenu(open, setOpen) {
+  const triggerRef = useRef(null)
+  const menuRef = useRef(null)
+  const close = (restore = false) => {
+    setOpen(false)
+    if (restore) requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
+  }
+  useEffect(() => {
+    if (!open) return
+    requestAnimationFrame(() => (menuRef.current?.querySelector('[aria-checked="true"]')
+      || menuRef.current?.querySelector('[role="menuitemradio"]'))?.focus())
+  }, [open])
+  const onKeyDown = event => {
+    const items = [...(menuRef.current?.querySelectorAll('[role="menuitemradio"]') || [])]
+    if (event.key === 'Escape') { event.preventDefault(); close(true); return }
+    const next = nextRovingIndex(event.key,
+      Math.max(0, items.indexOf(document.activeElement)), items.length)
+    if (next == null) return
+    event.preventDefault()
+    items[next]?.focus()
+  }
+  return { triggerRef, menuRef, close, onKeyDown }
 }

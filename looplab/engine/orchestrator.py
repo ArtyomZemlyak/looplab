@@ -4846,7 +4846,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             trace_node_id = self._node_id_ceiling(trace_events, trace_state)
         with self.tracer.span(
                 "create_node", new_trace=True, node_id=trace_node_id,
-                operator=action.get("kind")), handoff_scope(enabled=self._phase_handoff_summary):
+                generation=0, operator=action.get("kind")), \
+                handoff_scope(enabled=self._phase_handoff_summary):
             if precoded is not None:
                 # Layer 5: the isolated producer already completed every slow role call.  Keep the
                 # ordinary path below literally unchanged; this main-task branch only commits the
@@ -5160,7 +5161,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 "eval_seconds": 0.0})
             return
         replacement_card = stage == "propose" and node.operator != "merge"
-        with self.tracer.span("create_node", new_trace=True, node_id=node.id, operator=node.operator):
+        with self.tracer.span(
+                "create_node", new_trace=True, node_id=node.id, generation=generation,
+                operator=node.operator):
             if replacement_card:
                 # Re-proposal changes immutable work-item meaning. Finish the Idea first, then replace
                 # the old Card with one exact native receipt while keeping the operator-requested node id.
@@ -5399,7 +5402,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         parent_generations = reservation.parent_generations
         idea = reservation.idea.model_copy(deep=True)
         with self.tracer.span("create_node", new_trace=True, node_id=node_id,
-                              operator=idea.operator, source="manual"):
+                              generation=0, operator=idea.operator, source="manual"):
             developer_called = not bool(code)
             footprint_finalized = False
             if developer_called:
@@ -5696,4 +5699,3 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_emit_foresight_selected` / `_audit_workdir_writes` / `_redact` / `_maybe_crash` /
     # `_leakage_blocks` live in looplab/engine/audit.py (AuditMixin — inherited, zero
     # call-site churn).
-

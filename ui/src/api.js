@@ -96,37 +96,19 @@ const STORED_ERROR_CODES = new Set([
   'ratification_not_requested', 'invalid_transition',
   'invalid_run_generation', 'run_generation_changed', 'run_generation_unavailable',
 ])
-const STORED_ERROR_COPY = Object.freeze({
-  command_failed: ['Command failed', 'Refresh run state before acting again.'],
-  command_request_failed: ['The command request failed', 'Refresh run state before acting again.'],
-  command_request_timeout: ['The command request timed out', 'Check the same durable command before acting again.'],
-  owner_access_required: ['Owner access is required', 'Restore owner access, then check the same command.'],
-  command_protocol_error: ['The server returned an invalid command response', 'Check the same durable command; do not submit a new intent.'],
-  command_record_missing: ['The durable command record is missing', 'Refresh run state before acting again.'],
-  command_storage_unavailable: ['Durable tab storage is unavailable', 'Enable session storage or free browser storage, then try again.'],
-  command_timeout: ['The command timed out', 'Retry this same command only when the interface offers it.'],
-  postcondition_timeout: ['The command did not reach its expected state in time', 'Check or retry this same command.'],
-  invalid_command: ['The command was rejected as invalid', 'Correct the action and submit a new intent.'],
-  command_target_not_found: ['The command target no longer exists', 'Refresh run state before acting again.'],
-  command_intent_missing: ['The durable command intent is missing or changed', 'Inspect the run before acting again.'],
-  command_not_retryable: ['This command cannot be retried', 'Refresh run state before choosing another action.'],
-  command_in_progress: ['Another run command is already in progress', 'Wait for the active command to finish.'],
-  retry_existing_command: ['An identical command already exists', 'Observe the existing command.'],
-  finalize_payload_conflict: ['A different finalization is already pending', 'Observe the existing finalization.'],
-  finalize_in_progress: ['Finalization is still in progress', 'Wait for finalization to finish.'],
-  engine_finishing: ['The engine is finishing terminal write-out', 'Wait until the engine stops, then check again.'],
-  engine_start_uncertain: ['Engine startup could not be confirmed', 'Check this same command; do not launch another driver.'],
-  spawn_claim_confirmation_required: ['Engine startup needs confirmation', 'Resolve the startup state before acting again.'],
-  engine_failed: ['The run engine reported a failure', 'Correct the run error, then retry this same command if offered.'],
-  spawn_failed: ['The run engine could not be started', 'Correct the startup problem, then retry this same command if offered.'],
-  command_worker_failed: ['The command worker failed', 'Correct the cause, then retry this same command if offered.'],
-  approval_not_requested: ['The run is not awaiting approval', 'Approve only while approval is requested.'],
-  ratification_not_requested: ['The run is not awaiting ratification', 'Ratify only while specification approval is requested.'],
-  invalid_transition: ['The run cannot perform that transition now', 'Refresh run state and choose an available action.'],
-  invalid_run_generation: ['The run generation could not be verified', 'Refresh the run before submitting another action.'],
-  run_generation_changed: ['This run was reset or replaced before the command arrived', 'Refresh the run, review its current state, then submit a new command.'],
-  run_generation_unavailable: ['The current run generation is temporarily unavailable', 'Refresh the run and wait for its initial event before submitting another action.'],
-})
+// Restored command records intentionally contain only a stable code, never server-authored text.
+// Generate their copy from that code instead of eagerly shipping a large near-duplicate dictionary.
+const storedErrorCopy = code => {
+  const title = code === 'engine_failed' ? 'The run engine reported a failure'
+    : code.replaceAll('_', ' ')
+  let remediation = 'Refresh state before acting again.'
+  if (code.includes('storage')) remediation = 'Enable session storage or free browser space, then try again.'
+  else if (code.includes('access')) remediation = 'Restore owner access, then check this command.'
+  else if (/timeout|protocol|uncertain|retry_existing/.test(code)) {
+    remediation = 'Check this command; do not submit a new intent.'
+  }
+  return [title, remediation]
+}
 const STORED_RECORD_KEYS = new Set(['id', 'status', 'event_type', 'error'])
 const RUN_ENVELOPE_KEYS = new Set([
   'runId', 'action', 'expectedGeneration', 'idempotencyKey', 'commandId', 'record', 'statusUnavailable',
@@ -462,13 +444,21 @@ export function subscribeRunCommandLock(runId, callback) {
   return () => window.removeEventListener(RUN_COMMAND_LOCK_EVENT, listener)
 }
 
-// A command key is written before POST. Consequently a reload can re-submit the SAME intent even if
-// every response was lost before the browser learned the server's command id. Records contain no
-// owner/review credential and stay tab-scoped in sessionStorage.
-export function saveRunTransport(runId, state, storage = undefined) {
+const commandTransportActions = source =>
+  source === 'dock' ? TRANSPORT_ACTIONS : ASSISTANT_TRANSPORT_ACTIONS
+const commandTransportKey = (source, runId) =>
+  source === 'dock' ? transportStorageKey(runId) : assistantTransportStorageKey(runId)
+const commandEnvelopeKeys = source =>
+  source === 'dock' ? RUN_ENVELOPE_KEYS : ASSISTANT_ENVELOPE_KEYS
+
+// Dock and Assistant share one durable command envelope implementation. A key is committed before
+// POST, so reload can recover the SAME intent even when every response was lost; the Assistant's
+// optional node identity is the only source-specific payload and remains strictly allow-listed.
+function saveCommandTransport(source, runId, state, storage) {
   const target = transportStorage(storage)
-  if (!target || !runId || !TRANSPORT_ACTIONS.has(state?.action) || !state?.idempotencyKey) return false
-  const record = storedRecord(state.record, state.action, 'dock')
+  if (!target || !runId || !commandTransportActions(source).has(state?.action)
+      || !state?.idempotencyKey) return false
+  const record = storedRecord(state.record, state.action, source)
   if (!record) return false
   const explicitId = String(state.commandId || '')
   if ((explicitId && !COMMAND_ID_RE.test(explicitId))
@@ -476,28 +466,39 @@ export function saveRunTransport(runId, state, storage = undefined) {
   const commandId = explicitId || record.id || ''
   const expectedGeneration = state.expectedGeneration
   if (!validRunGeneration(expectedGeneration)) return false
+  let arg = null
+  let nodeGeneration = null
+  if (source === 'assistant' && state.action === 'approve') {
+    arg = state.arg == null ? null : Number(state.arg)
+    nodeGeneration = state.nodeGeneration == null ? null : Number(state.nodeGeneration)
+    if ((arg != null && (!Number.isSafeInteger(arg) || arg < 0))
+        || (nodeGeneration != null
+          && (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0))) return false
+    // Before the server returns a durable command id, recovery must retain the exact node lifecycle
+    // inspected by the user. Re-fetching a later attempt would turn recovery into a new action.
+    if (!commandId && (arg == null || nodeGeneration == null)) return false
+  } else if (source === 'assistant' && state.nodeGeneration != null) return false
   const payload = {
-    runId: String(runId), action: state.action, expectedGeneration,
-    idempotencyKey: String(state.idempotencyKey),
-    commandId, record,
+    runId: String(runId), action: state.action,
+    ...(source === 'assistant' ? { arg, nodeGeneration } : {}),
+    expectedGeneration, idempotencyKey: String(state.idempotencyKey), commandId, record,
     statusUnavailable: !!state.statusUnavailable,
     observationKind: OBSERVATION_KINDS.has(state.observationKind || null) ? state.observationKind || null : 'protocol',
-    retrying: !!state.retrying,
-    checking: !!state.checking,
+    retrying: !!state.retrying, checking: !!state.checking,
     updatedAt: Date.now(),
     committed: true,
   }
   const pending = commandStatePending(payload)
-  const lockState = { ...payload, source: 'dock' }
+  const lockState = { ...payload, source }
   const currentLock = loadRunCommandLock(runId, target)
   const prospectiveLock = {
-    source: 'dock', action: payload.action, idempotencyKey: payload.idempotencyKey,
+    source, action: payload.action, idempotencyKey: payload.idempotencyKey,
     expectedGeneration, commandId, status: record.status,
   }
   if (pending && !compatibleCommandLock(currentLock, prospectiveLock)) return false
   if (pending && currentLock?.commandId && !commandId) return false
   try {
-    const key = transportStorageKey(runId)
+    const key = commandTransportKey(source, runId)
     const previous = target.getItem(key)
     if (pending) {
       // Two-phase storage commit. If the lock write or rollback fails, `committed:false` survives as
@@ -510,181 +511,103 @@ export function saveRunTransport(runId, state, storage = undefined) {
     }
     target.setItem(key, JSON.stringify(payload))
     if (!pending) clearRunCommandLock(runId, {
-      source: 'dock', idempotencyKey: payload.idempotencyKey, action: payload.action,
+      source, idempotencyKey: payload.idempotencyKey, action: payload.action,
       expectedGeneration, commandId,
     }, storage)
     return true
   } catch { return false }
+}
+
+function loadCommandTransport(source, runId, storage) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return null
+  try {
+    const raw = target.getItem(commandTransportKey(source, runId))
+    if (raw == null) return null
+    let payload
+    try { payload = JSON.parse(raw) } catch { return protocolTransport(runId, source) }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || !hasOnlyKeys(payload, commandEnvelopeKeys(source))
+        || payload.runId !== String(runId) || !commandTransportActions(source).has(payload.action)
+        || !validRunGeneration(payload.expectedGeneration)
+        || !safeIdentityText(payload.idempotencyKey)
+        || typeof payload.commandId !== 'string'
+        || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
+        || typeof payload.statusUnavailable !== 'boolean'
+        || !OBSERVATION_KINDS.has(payload.observationKind)
+        || typeof payload.retrying !== 'boolean' || typeof payload.checking !== 'boolean'
+        || payload.committed !== true
+        || !Number.isFinite(payload.updatedAt)) return protocolTransport(runId, source, payload)
+    const record = storedRecord(payload.record, payload.action, source, { strict: true })
+    if (!record || (payload.commandId && record.id && payload.commandId !== record.id)
+        || (!!payload.commandId !== !!record.id)) return protocolTransport(runId, source, payload)
+    let assistantFields = {}
+    if (source === 'assistant') {
+      const arg = payload.action === 'approve' && payload.arg != null ? Number(payload.arg) : null
+      const nodeGeneration = payload.action === 'approve' && payload.nodeGeneration != null
+        ? Number(payload.nodeGeneration) : null
+      if ((payload.action === 'approve' && ((arg != null
+          && (!Number.isSafeInteger(arg) || arg < 0))
+        || (nodeGeneration != null
+          && (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0))
+        || (!payload.commandId && (arg == null || nodeGeneration == null))))
+        || (payload.action !== 'approve'
+          && (payload.arg !== null || payload.nodeGeneration != null))) {
+        return protocolTransport(runId, source, payload)
+      }
+      assistantFields = { arg, nodeGeneration }
+    }
+    const { committed: _committed, ...restored } = payload
+    return { ...restored, ...assistantFields, commandId: payload.commandId,
+      record, lastError: '' }
+  } catch { return protocolTransport(runId, source) }
+}
+
+function clearCommandTransport(source, runId, storage, expected = {}) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return false
+  try {
+    const saved = loadCommandTransport(source, runId, target)
+    if (source === 'assistant' && saved && expected.idempotencyKey
+        && saved.idempotencyKey !== expected.idempotencyKey) return false
+    target.removeItem(commandTransportKey(source, runId))
+    clearRunCommandLock(runId, {
+      source, idempotencyKey: saved?.idempotencyKey,
+      action: saved?.action, expectedGeneration: saved?.expectedGeneration,
+      commandId: saved?.commandId,
+    }, storage)
+    return true
+  } catch { return false }
+}
+
+export function saveRunTransport(runId, state, storage = undefined) {
+  return saveCommandTransport('dock', runId, state, storage)
 }
 
 export function loadRunTransport(runId, storage = undefined) {
-  const target = transportStorage(storage)
-  if (!target || !runId) return null
-  try {
-    const raw = target.getItem(transportStorageKey(runId))
-    if (raw == null) return null
-    let payload
-    try { payload = JSON.parse(raw) } catch { return protocolTransport(runId, 'dock') }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
-        || !hasOnlyKeys(payload, RUN_ENVELOPE_KEYS)
-        || payload.runId !== String(runId) || !TRANSPORT_ACTIONS.has(payload.action)
-        || !validRunGeneration(payload.expectedGeneration)
-        || !safeIdentityText(payload.idempotencyKey)
-        || typeof payload.commandId !== 'string'
-        || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
-        || typeof payload.statusUnavailable !== 'boolean'
-        || !OBSERVATION_KINDS.has(payload.observationKind)
-        || typeof payload.retrying !== 'boolean' || typeof payload.checking !== 'boolean'
-        || payload.committed !== true
-        || !Number.isFinite(payload.updatedAt)) return protocolTransport(runId, 'dock', payload)
-    const record = storedRecord(payload.record, payload.action, 'dock', { strict: true })
-    if (!record || (payload.commandId && record.id && payload.commandId !== record.id)
-        || (!!payload.commandId !== !!record.id)) return protocolTransport(runId, 'dock', payload)
-    const { committed: _committed, ...restored } = payload
-    return { ...restored, commandId: payload.commandId, record, lastError: '' }
-  } catch { return protocolTransport(runId, 'dock') }
+  return loadCommandTransport('dock', runId, storage)
 }
 
 export function clearRunTransport(runId, storage = undefined) {
-  const target = transportStorage(storage)
-  if (!target || !runId) return false
-  try {
-    const saved = loadRunTransport(runId, target)
-    target.removeItem(transportStorageKey(runId))
-    clearRunCommandLock(runId, {
-      source: 'dock', idempotencyKey: saved?.idempotencyKey,
-      action: saved?.action, expectedGeneration: saved?.expectedGeneration,
-      commandId: saved?.commandId,
-    }, storage)
-    return true
-  } catch { return false }
+  return clearCommandTransport('dock', runId, storage)
 }
 
-// Assistant slash commands use the same durable envelope as Dock but a separate key. Only the
-// allow-listed action, optional numeric node id, and that node's exact lifecycle generation are
-// persisted; arbitrary command data is not.
 export function saveAssistantRunTransport(runId, state, storage = undefined) {
-  const target = transportStorage(storage)
-  if (!target || !runId || !ASSISTANT_TRANSPORT_ACTIONS.has(state?.action) || !state?.idempotencyKey) return false
-  const record = storedRecord(state.record, state.action, 'assistant')
-  if (!record) return false
-  const explicitId = String(state.commandId || '')
-  if ((explicitId && !COMMAND_ID_RE.test(explicitId))
-      || (explicitId && record.id && explicitId !== record.id)) return false
-  const commandId = explicitId || record.id || ''
-  const expectedGeneration = state.expectedGeneration
-  if (!validRunGeneration(expectedGeneration)) return false
-  const numericArg = state.arg == null ? null : Number(state.arg)
-  const nodeGeneration = state.nodeGeneration == null ? null : Number(state.nodeGeneration)
-  if (state.action === 'approve') {
-    if (numericArg != null && (!Number.isSafeInteger(numericArg) || numericArg < 0)) return false
-    if (nodeGeneration != null
-        && (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0)) return false
-    // Before the server returns a durable command id, recovery must retain the exact node lifecycle
-    // inspected by the user. Re-fetching a later attempt would turn recovery into a new action.
-    if (!commandId && (numericArg == null || nodeGeneration == null)) return false
-  } else if (state.nodeGeneration != null) return false
-  const payload = {
-    runId: String(runId), action: state.action, arg: state.action === 'approve' ? numericArg : null,
-    nodeGeneration: state.action === 'approve' ? nodeGeneration : null,
-    expectedGeneration,
-    idempotencyKey: String(state.idempotencyKey), commandId, record,
-    statusUnavailable: !!state.statusUnavailable,
-    observationKind: OBSERVATION_KINDS.has(state.observationKind || null) ? state.observationKind || null : 'protocol',
-    retrying: !!state.retrying, checking: !!state.checking,
-    updatedAt: Date.now(),
-    committed: true,
-  }
-  const pending = commandStatePending(payload)
-  const lockState = { ...payload, source: 'assistant' }
-  const currentLock = loadRunCommandLock(runId, target)
-  const prospectiveLock = {
-    source: 'assistant', action: payload.action, idempotencyKey: payload.idempotencyKey,
-    expectedGeneration, commandId, status: record.status,
-  }
-  if (pending && !compatibleCommandLock(currentLock, prospectiveLock)) return false
-  if (pending && currentLock?.commandId && !commandId) return false
-  try {
-    const key = assistantTransportStorageKey(runId)
-    const previous = target.getItem(key)
-    if (pending) {
-      target.setItem(key, JSON.stringify({ ...payload, committed: false }))
-      if (!saveRunCommandLock(runId, lockState, storage)) {
-        try { if (previous == null) target.removeItem(key); else target.setItem(key, previous) } catch { /* quarantine remains */ }
-        return false
-      }
-    }
-    target.setItem(key, JSON.stringify(payload))
-    if (!pending) clearRunCommandLock(runId, {
-      source: 'assistant', idempotencyKey: payload.idempotencyKey, action: payload.action,
-      expectedGeneration, commandId,
-    }, storage)
-    return true
-  } catch { return false }
+  return saveCommandTransport('assistant', runId, state, storage)
 }
 
 export function loadAssistantRunTransport(runId, storage = undefined) {
-  const target = transportStorage(storage)
-  if (!target || !runId) return null
-  try {
-    const raw = target.getItem(assistantTransportStorageKey(runId))
-    if (raw == null) return null
-    let payload
-    try { payload = JSON.parse(raw) } catch { return protocolTransport(runId, 'assistant') }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
-        || !hasOnlyKeys(payload, ASSISTANT_ENVELOPE_KEYS)
-        || payload.runId !== String(runId) || !ASSISTANT_TRANSPORT_ACTIONS.has(payload.action)
-        || !validRunGeneration(payload.expectedGeneration)
-        || !safeIdentityText(payload.idempotencyKey)
-        || typeof payload.commandId !== 'string'
-        || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
-        || typeof payload.statusUnavailable !== 'boolean'
-        || !OBSERVATION_KINDS.has(payload.observationKind)
-        || typeof payload.retrying !== 'boolean' || typeof payload.checking !== 'boolean'
-        || payload.committed !== true
-        || !Number.isFinite(payload.updatedAt)) return protocolTransport(runId, 'assistant', payload)
-    const record = storedRecord(payload.record, payload.action, 'assistant', { strict: true })
-    if (!record || (payload.commandId && record.id && payload.commandId !== record.id)
-        || (!!payload.commandId !== !!record.id)) return protocolTransport(runId, 'assistant', payload)
-    const arg = payload.action === 'approve' && payload.arg != null ? Number(payload.arg) : null
-    const nodeGeneration = payload.action === 'approve' && payload.nodeGeneration != null
-      ? Number(payload.nodeGeneration) : null
-    if (payload.action === 'approve' && ((arg != null && (!Number.isSafeInteger(arg) || arg < 0))
-        || (nodeGeneration != null
-          && (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0))
-        || (!payload.commandId && (arg == null || nodeGeneration == null)))) {
-      return protocolTransport(runId, 'assistant', payload)
-    }
-    if (payload.action !== 'approve'
-        && (payload.arg !== null || (payload.nodeGeneration != null))) {
-      return protocolTransport(runId, 'assistant', payload)
-    }
-    const { committed: _committed, ...restored } = payload
-    return { ...restored, arg, nodeGeneration, commandId: payload.commandId,
-      record, lastError: '' }
-  } catch { return protocolTransport(runId, 'assistant') }
+  return loadCommandTransport('assistant', runId, storage)
 }
 
 export function clearAssistantRunTransport(runId, storage = undefined, expected = {}) {
-  const target = transportStorage(storage)
-  if (!target || !runId) return false
-  try {
-    const saved = loadAssistantRunTransport(runId, target)
-    if (saved && expected.idempotencyKey && saved.idempotencyKey !== expected.idempotencyKey) return false
-    target.removeItem(assistantTransportStorageKey(runId))
-    clearRunCommandLock(runId, {
-      source: 'assistant', idempotencyKey: saved?.idempotencyKey,
-      action: saved?.action, expectedGeneration: saved?.expectedGeneration,
-      commandId: saved?.commandId,
-    }, storage)
-    return true
-  } catch { return false }
+  return clearCommandTransport('assistant', runId, storage, expected)
 }
 
 export function commandErrorMessage(record) {
   const error = record?.error
   if (error && typeof error === 'object') {
-    const canonical = STORED_ERROR_COPY[error.code] || STORED_ERROR_COPY.command_failed
+    const canonical = storedErrorCopy(STORED_ERROR_CODES.has(error.code) ? error.code : 'command_failed')
     // Live responses may include a server-redacted explanation. A restored record contains no free
     // text, so it deterministically falls back to client-owned copy instead of persisted server data.
     const message = String(error.message || error.detail || canonical[0]).slice(0, 500)
@@ -850,6 +773,18 @@ async function commandFetch(path, options = {}, timeoutMs = COMMAND_REQUEST_TIME
   }
 }
 
+const commandJson = (path, options, timeoutMs, { errorPath = path, submission = false } = {}) =>
+  commandFetch(path, options, timeoutMs, async response => {
+    if (!response.ok) await _throw(response, errorPath)
+    return commandResponseJson(response, errorPath, { submission })
+  })
+
+const commandRead = (path, {
+  errorPath = path, signal, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+} = {}) => commandJson(path, {
+  headers: _authHeaders({}), cache: 'no-store', signal,
+}, requestTimeoutMs, { errorPath })
+
 const notifyCommandRecord = (callback, record) => {
   if (!callback) return
   try { callback(record) } catch { /* persistence/presentation must not break command execution */ }
@@ -870,14 +805,12 @@ export async function submitRunCommand(runId, type, data = {}, {
     )
   }
   try {
-    return await commandFetch(path, {
+    const record = await commandJson(path, {
       method: 'POST',
       headers: _authHeaders({ 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }),
       body: JSON.stringify({ type, data: data || {}, expected_generation: expectedGeneration }),
-    }, requestTimeoutMs, async response => {
-      if (!response.ok) await _throw(response, path)
-      return validatedCommandRecord(await commandResponseJson(response, path, { submission: true }), path)
-    })
+    }, requestTimeoutMs, { submission: true })
+    return validatedCommandRecord(record, path)
   }
   catch (error) {
     if (error?.code === 'COMMAND_PROTOCOL_ERROR' || error?.code === 'COMMAND_REQUEST_TIMEOUT') {
@@ -889,11 +822,7 @@ export async function submitRunCommand(runId, type, data = {}, {
 
 export async function getRunCommand(runId, commandId, { requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS } = {}) {
   const path = `/api/runs/${encodeURIComponent(runId)}/commands/${encodeURIComponent(commandId)}`
-  return commandFetch(path, { headers: _authHeaders({}), cache: 'no-store' }, requestTimeoutMs,
-    async response => {
-      if (!response.ok) await _throw(response, path)
-      return validatedCommandRecord(await commandResponseJson(response, path), path, commandId)
-    })
+  return validatedCommandRecord(await commandRead(path, { requestTimeoutMs }), path, commandId)
 }
 
 async function awaitRunCommand(runId, record, {
@@ -938,11 +867,9 @@ export async function retryRunCommand(runId, commandId, {
   assertRunMutationAllowed(path)
   let record
   try {
-    record = await commandFetch(path, { method: 'POST', headers: _authHeaders({}) }, requestTimeoutMs,
-      async response => {
-        if (!response.ok) await _throw(response, path)
-        return commandResponseJson(response, path, { submission: true })
-      })
+    record = await commandJson(path, {
+      method: 'POST', headers: _authHeaders({}),
+    }, requestTimeoutMs, { submission: true })
   } catch (error) {
     // A different active command is not evidence that retrying this failed id succeeded. Propagate
     // the conflict with its separate existingCommandId; observing the old failed record here would
@@ -1093,16 +1020,13 @@ async function paidConceptLensPost(runId, suffix, body, {
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
   try {
-    return await commandFetch(path, {
+    return await commandJson(path, {
       method: 'POST', signal,
       headers: _authHeaders({
         'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey,
       }),
       body: JSON.stringify(body),
-    }, requestTimeoutMs, async response => {
-      if (!response.ok) await _throw(response, path)
-      return commandResponseJson(response, path, { submission: true })
-    })
+    }, requestTimeoutMs, { submission: true })
   } catch (error) {
     if (error?.status == null || error?.code === 'COMMAND_REQUEST_TIMEOUT'
         || error?.code === 'COMMAND_PROTOCOL_ERROR') error.submissionMayHaveSucceeded = true
@@ -1134,12 +1058,7 @@ export async function getConceptLensRecovery(runId, expectedGeneration, {
   const basePath = runApiPath(runId, '/concepts/lens/recovery')
   assertNotReviewMutation(basePath)
   const path = `${basePath}?expected_generation=${encodeURIComponent(expectedGeneration)}`
-  return commandFetch(path, {
-    signal, cache: 'no-store', headers: _authHeaders({}),
-  }, requestTimeoutMs, async response => {
-    if (!response.ok) await _throw(response, basePath)
-    return commandResponseJson(response, basePath)
-  })
+  return commandRead(path, { errorPath: basePath, signal, requestTimeoutMs })
 }
 
 export function awaitConceptLensRecoveryJob(jobId, options = {}) {
@@ -1174,7 +1093,7 @@ export async function abandonRecoveredConceptLens(
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
   try {
-    return await commandFetch(path, {
+    return await commandJson(path, {
       method: 'POST', signal,
       headers: _authHeaders({
         'Content-Type': 'application/json',
@@ -1185,10 +1104,7 @@ export async function abandonRecoveredConceptLens(
         request_id: requestId,
         expected_started_seq: expectedStartedSeq,
       }),
-    }, requestTimeoutMs, async response => {
-      if (!response.ok) await _throw(response, path)
-      return commandResponseJson(response, path, { submission: true })
-    })
+    }, requestTimeoutMs, { submission: true })
   } catch (error) {
     if (error?.status == null || error?.code === 'COMMAND_REQUEST_TIMEOUT'
         || error?.code === 'COMMAND_PROTOCOL_ERROR') error.submissionMayHaveSucceeded = true
@@ -1311,17 +1227,14 @@ export const CONTROL = {
     const path = runApiPath(rid, '/report_refresh')
     assertNotReviewMutation(path)
     assertRunMutationAllowed(path)
-    const response = await commandFetch(path, {
+    const response = await commandJson(path, {
       method: 'POST',
       headers: _authHeaders({
         'Content-Type': 'application/json', 'Idempotency-Key': String(idempotencyKey),
       }),
       body: JSON.stringify({ expected_generation: expectedGeneration }),
       signal,
-    }, requestTimeoutMs, async reply => {
-      if (!reply.ok) await _throw(reply, path)
-      return commandResponseJson(reply, path, { submission: true })
-    })
+    }, requestTimeoutMs, { submission: true })
     const result = await jobAwait(response, { maxTransientErrors: 3, signal })
     if (result?.ambiguous !== true
         && (!validRunGeneration(result?.generation) || result.generation !== expectedGeneration)) {
@@ -1679,6 +1592,58 @@ export const saveRunConfig = (rid, settings, { expectedRevision, ...options } = 
 // Experimental Research Atlas: owner-only, read-only projections over the shared memory portfolio.
 // Bypass browser caches so Refresh observes newly finalized runs/governance without a stale intermediary.
 const crossRunRead = (path, options = {}) => get(path, { ...options, cache: 'no-store' })
+export function boundedAtlasText(value, max = 360) {
+  if (!['string', 'number', 'boolean'].includes(typeof value)) return ''
+  const limit = Number.isSafeInteger(max) ? Math.max(0, Math.min(2000, max)) : 360
+  const text = String(value).slice(0, limit)
+  return text.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/gu, ' ').trim().slice(0, limit)
+}
+const CROSS_RUN_STATE_FIELDS = `portfolio_id n_runs n_concepts n_contested concept_source
+  claim_source explored thin_coverage thin_coverage_total thin_coverage_omitted contradictions
+  revisions claims n revision v status complete entries limit source_complete partial_capsules
+  source_unknown_capsules source_concepts_omitted source_outcomes_omitted source_store_complete
+  source_rows_total source_rows_quarantined source_malformed_rows source_invalid_capsule_rows
+  source_duplicate_run_rows concept runs run_id task_id task scope task_scope metric direction
+  claim_uid statement epistemic maturity decision_fresh n_support n_oppose n_unverified
+  n_contradicts support oppose unverified contradicts scopes receipt_known read_complete
+  research_source_complete lessons research snapshot_digest rows_total rows_retained
+  rows_quarantined malformed_rows invalid_rows outcome proposals receipt merges splits purges
+  decisions applied concept_governance`.split(/\s+/)
+const CROSS_RUN_STATE_CAPS = {
+  explored: 24, thin_coverage: 24, contradictions: 12, claims: 40, entries: 20,
+  runs: 6, support: 6, oppose: 6, unverified: 6, contradicts: 6, scopes: 6,
+}
+const CROSS_RUN_COUNT_ARRAYS = new Set(['merges', 'splits', 'purges', 'decisions', 'applied'])
+function projectCrossRunValue(value, key = '', depth = 0) {
+  if (typeof value === 'string') return boundedAtlasText(value, 500)
+  if (typeof value === 'number' || typeof value === 'boolean' || value == null) return value
+  if (Array.isArray(value)) {
+    if (CROSS_RUN_COUNT_ARRAYS.has(key)) return value.length
+    return value.slice(0, CROSS_RUN_STATE_CAPS[key] || 6)
+      .map(item => projectCrossRunValue(item, key, depth + 1))
+  }
+  if (typeof value !== 'object' || depth >= 7) return null
+  const out = {}
+  for (const field of CROSS_RUN_STATE_FIELDS) {
+    if (Object.hasOwn(value, field)) {
+      out[field] = projectCrossRunValue(value[field], field, depth + 1)
+    }
+  }
+  return out
+}
+export function projectResearchAtlasSource(key, value) {
+  const projected = projectCrossRunValue(value)
+  if (key === 'atlas') {
+    const contested = Array.isArray(value?.contradictions) ? value.contradictions.length : 0
+    projected.n_contested = Math.max(
+      Number.isSafeInteger(projected.n_contested) && projected.n_contested >= 0
+        ? projected.n_contested : 0,
+      contested,
+    )
+  }
+  return projected
+}
 const boundedCrossRunInt = (value, fallback, maximum, minimum = 0) => {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.trunc(parsed))) : fallback
@@ -1725,11 +1690,9 @@ export const getStartStatus = (runId, idempotencyKey) => get(
 const _scopeUrl = (type, id) => `/api/scope-report/${encodeURIComponent(type)}/${encodeURIComponent(id)}`
 export const getScopeReport = (type, id, options = {}) => {
   const path = _scopeUrl(type, id)
-  return commandFetch(reviewReadPath(path), {
-    headers: _authHeaders({}), cache: 'no-store', signal: options.signal,
-  }, options.requestTimeoutMs ?? COMMAND_REQUEST_TIMEOUT_MS, async response => {
-    if (!response.ok) await _throw(response, path)
-    return commandResponseJson(response, path)
+  return commandRead(reviewReadPath(path), {
+    errorPath: path, signal: options.signal,
+    requestTimeoutMs: options.requestTimeoutMs ?? COMMAND_REQUEST_TIMEOUT_MS,
   })
 }
 // durable action reads use a separate route namespace. Appending `/actions/...` to
@@ -1820,12 +1783,7 @@ export async function getScopeReportAction(type, id, actionId, {
   if (!actionId) throw new Error('A valid scope report action id is required.')
   const path = _scopeActionUrl(type, id, actionId)
   try {
-    const value = await commandFetch(path, {
-      headers: _authHeaders({}), cache: 'no-store', signal,
-    }, requestTimeoutMs, async response => {
-      if (!response.ok) await _throw(response, path)
-      return commandResponseJson(response, path)
-    })
+    const value = await commandRead(path, { signal, requestTimeoutMs })
     if (!scopeGenerationRecord(value) || value.action_id !== actionId
         || !['running', 'done', 'unknown', 'indeterminate', 'abandoned'].includes(value.status)) {
       throw scopeIdentityMismatch(actionId, scopeJobId(value?.job_id))
@@ -1844,13 +1802,10 @@ export async function abandonScopeReportAction(type, id, actionId, {
   const path = `/api/scope-report-actions/${encodeURIComponent(actionId)}/abandon`
     + `?scope_type=${encodeURIComponent(type)}&scope_id=${encodeURIComponent(id)}`
   try {
-    const value = await commandFetch(path, {
+    const value = await commandJson(path, {
       method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
       body: '{}', cache: 'no-store', signal,
-    }, requestTimeoutMs, async response => {
-      if (!response.ok) await _throw(response, path)
-      return commandResponseJson(response, path)
-    })
+    }, requestTimeoutMs)
     const explicitlyAbandoned = value?.status === 'abandoned'
       && value?.ok === false && value?.code === 'scope_report_action_abandoned'
     const concurrentlySettled = value?.status === 'done' && typeof value?.ok === 'boolean'
@@ -1871,13 +1826,7 @@ export async function abandonScopeReportAction(type, id, actionId, {
 // poll errors. `resp` that's already a result (fast inline path) is returned unchanged.
 const _job = (jobId, { requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, signal } = {}) => {
   const path = `/api/jobs/${encodeURIComponent(jobId)}`
-  const requestPath = reviewReadPath(path)
-  return commandFetch(requestPath, {
-    headers: _authHeaders({}), cache: 'no-store', signal,
-  }, requestTimeoutMs, async response => {
-    if (!response.ok) await _throw(response, path)
-    return commandResponseJson(response, path)
-  })
+  return commandRead(reviewReadPath(path), { errorPath: path, requestTimeoutMs, signal })
 }
 export async function jobAwait(resp, {
   intervalMs = 1500, timeoutMs = 600000, signal,
@@ -2028,16 +1977,13 @@ export async function genScopeReport(type, id, {
   const path = `${_scopeUrl(type, id)}/generate`
   let response
   try {
-    response = await commandFetch(path, {
+    response = await commandJson(path, {
       method: 'POST', signal,
       headers: _authHeaders({
         'Content-Type': 'application/json', 'Idempotency-Key': actionId,
       }),
       body: '{}',
-    }, requestTimeoutMs, async reply => {
-      if (!reply.ok) await _throw(reply, path)
-      return commandResponseJson(reply, path, { submission: true })
-    })
+    }, requestTimeoutMs, { submission: true })
   } catch (error) {
     const activeActionId = error?.code === 'scope_report_action_in_progress'
       ? scopeActionId(error?.detail?.action_id) : null
@@ -2142,8 +2088,8 @@ export const assistantRevert = (path) => post('/api/assistant/revert', { path })
 // A share link is its own capability: the response carries the token-bearing URL, when it expires,
 // and whether it follows the chat (`live`) or is frozen at the turns that existed when it was minted.
 // The session id is NOT a share link — unshare revokes every link without touching the conversation.
-export const assistantShare = (sid, opts = {}) =>
-  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, { live: !!opts.live, ...opts })
+export const assistantShare = (sid, live = false) =>
+  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, { live })
 export const assistantUnshare = (sid) =>
   send(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, 'DELETE')
 // Pending human-in-the-loop confirm requests for a session, and resolving one.
