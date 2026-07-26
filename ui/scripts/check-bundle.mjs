@@ -22,10 +22,11 @@ const collaboration = named('collaboration-support')
 // measured target. Keep them calibrated downward — do not raise them to make eager code green.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    // # CODEX AGENT: The measured Part IV/V build is 348,567 B after adding independently lazy
-    // ConceptView + ConceptChipBar chunks. A 342 KiB ceiling leaves 1,641 B of total headroom; the
-    // unchanged shell and tight per-route closures below prove this is not a waiver for eager growth.
-    js: { gzip: 342 * KIB },
+    // Phase 3 adds the independently lazy, generation-fenced RunCompare workspace. Its measured
+    // production baseline is 355,455 B gzip; 348 KiB leaves 897 B while the unchanged route
+    // ceilings and the dedicated interaction ceiling below prevent this feature from hiding eager
+    // growth. Phase 0 restored the previous 342 KiB target before this intentional product addition.
+    js: { gzip: 348 * KIB },
     css: { gzip: 45 * KIB },
   },
   individual: {
@@ -44,6 +45,14 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // intentionally omits `src` on that facade, while preserving the stable Rollup chunk name.
       roots: [entry, named('RunList'), ownerChrome],
       limits: { js: { gzip: 210 * KIB }, css: { gzip: 35 * KIB } },
+    },
+    {
+      name: 'Run compare increment',
+      roots: [source('src/RunCompare.jsx')],
+      baselineRoots: [entry, named('RunList'), ownerChrome],
+      // Measured 2,209 B gzip after the list/model dependencies already present in the portfolio
+      // route. Keep the on-demand comparison workspace below 3 KiB incremental transfer.
+      limits: { js: { gzip: 3 * KIB } },
     },
     {
       name: 'owner Atlas preview route',

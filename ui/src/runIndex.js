@@ -238,9 +238,10 @@ export function filterRuns(runs = [], {
 }
 
 export function metricComparable(runs = []) {
-  const tasks = new Set(runs.map(run => run.task_id).filter(Boolean))
-  const directions = new Set(runs.map(run => run.direction).filter(Boolean))
-  return tasks.size === 1 && directions.size <= 1
+  const tasks = new Set(runs.map(run => run.task_id))
+  const directions = new Set(runs.map(run => run.direction))
+  return runs.length > 0 && tasks.size === 1 && !!runs[0].task_id
+    && directions.size === 1 && ['min', 'max'].includes(runs[0].direction)
 }
 
 export function sortRuns(runs = [], key = 'time', order = 'desc') {

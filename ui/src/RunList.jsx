@@ -1,10 +1,12 @@
 import React, { lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
-  listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask } from './util.js'
+  listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask,
+  storageGet, storageSet } from './util.js'
 import { useMediaQuery, usePoll } from './hooks.js'
 import LazyBoundary from './LazyBoundary.jsx'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
+import DensityToggle from './DensityToggle.jsx'
 import { OpIcon } from './icons.jsx'
 import {
   ALL_RUNS as ALL, UNASSIGNED_RUNS as UNASSIGNED, filterRuns, indexProjects,
@@ -13,9 +15,15 @@ import {
 import { defaultCollapsedClusters } from './runMapModel.js'
 import { useDialogFocus } from './useDialogFocus.js'
 import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
+import {
+  decodePortfolioViews, normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
+} from './portfolioModel.js'
 
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
+const RunCompare = lazy(() => import('./RunCompare.jsx'))
+const SAVED_VIEWS_KEY = 'll.portfolioViews'
+const COMPARE_COLUMNS_KEY = 'll.compareColumns'
 
 export function useResource(read, initial) {
   const [data, setData] = useState(initial)
@@ -51,6 +59,10 @@ function ResourceNotice({ state, label, retry }) {
 
 const mutationMessage = (error, timedOut = false) => timedOut
   ? 'Save timed out; its outcome is unknown.'
+  : error?.viewName
+    ? 'Use a view name of 1–48 characters without control characters.'
+  : error?.storage
+    ? 'Browser storage is blocked or full; this view was not saved.'
   : error?.status === 409
     ? 'Conflict; current input or selection kept.'
     : error?.status === 503
@@ -72,6 +84,9 @@ function useMutation() {
       const settlement = await settleWithin(action, LIST_WRITE_TIMEOUT_MS)
       if (!settlement.ok) {
         let message = mutationMessage(settlement.error, settlement.timeout)
+        if (settlement.error?.storage || settlement.error?.viewName) {
+          setState(message); return false
+        }
         if (typeof reconcile === 'function') {
           const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
           message += check.ok
@@ -92,6 +107,9 @@ function useMutation() {
     }
     catch (error) {
       let message = mutationMessage(error)
+      if (error?.storage || error?.viewName) {
+        setState(message); return false
+      }
       if (typeof reconcile === 'function') {
         const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
         message += check.ok
@@ -239,6 +257,7 @@ function Modal({ title, onClose, children, busy = false }) {
 }
 
 function PromptModal({ title, label, placeholder, initial = '', confirm = 'Create', allowEmpty = false,
+  maxLength,
   onSubmit, onReconcile, onClose }) {
   const [v, setV] = useState(initial)
   const [busy, error, mutate] = useMutation()
@@ -248,7 +267,8 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
   }
   return <Modal title={title} onClose={onClose} busy={busy}>
     {label && <div className="muted" style={{ marginBottom: 8 }}>{label}</div>}
-    <input className="text" autoFocus readOnly={busy} aria-label={label || title} placeholder={placeholder} value={v} onChange={e => setV(e.target.value)}
+    <input className="text" autoFocus readOnly={busy} aria-label={label || title}
+           placeholder={placeholder} maxLength={maxLength} value={v} onChange={e => setV(e.target.value)}
            onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape' && !busy) onClose() }} />
     {error && <div className="flag" role="alert">{error}</div>}
     <div className="modal-actions">
@@ -376,7 +396,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const runsMainRef = useRef(null)
   const projectsAllRef = useRef(null)
   const [dragRun, setDragRun] = useState(null)
-  const [view, setView] = useState('list')         // 'list' | 'map' (semantic-zoom cross-run map)
+  const [view, setView] = useState('list')         // list | map | compare
   const [mapCollapseOverrides, setMapCollapseOverrides] = useState(() => new Map())
   const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
   const projectModalReturnRef = useRef(null)
@@ -394,6 +414,15 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const [superdata, superState, loadSupers] = useResource(listSupertasks, { supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
+  const [compareIds, setCompareIds] = useState(() => new Set())
+  const [compareColumns, setCompareColumns] = useState(
+    () => normalizeCompareColumns(storageGet(COMPARE_COLUMNS_KEY)))
+  const [savedViews, setSavedViews] = useState(
+    () => decodePortfolioViews(storageGet(SAVED_VIEWS_KEY, '[]')))
+  const [activeSavedView, setActiveSavedView] = useState('')
+  const [viewModal, setViewModal] = useState(false)
+  const [viewMessage, setViewMessage] = useState('')
+  const savedViewReturnRef = useRef(null)
   const [projectsOpen, setProjectsOpen] = useState(false)   // compact-screen Projects drawer
   const projectsToggleRef = useRef(null)
   const projectsCloseRef = useRef(null)
@@ -452,6 +481,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     supertask: stFilter, status: statusFilter,
   }), [runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
   const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
+  const compareRuns = useMemo(() => {
+    const byId = new Map((runs || []).map(run => [run.run_id, run]))
+    return [...compareIds].map(id => byId.get(id)).filter(Boolean)
+  }, [runs, compareIds])
   const metricSortAvailable = taskFilter !== ALL && metricComparable(filtered)
   const hasActiveFilters = !!query.trim() || taskFilter !== ALL || statusFilter !== 'all' || stFilter !== ALL
   const clearFilters = () => {
@@ -460,6 +493,68 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   useEffect(() => {
     if (sortKey === 'metric' && !metricSortAvailable) setSortKey('time')
   }, [sortKey, metricSortAvailable])
+  useEffect(() => { storageSet(COMPARE_COLUMNS_KEY, JSON.stringify(compareColumns)) }, [compareColumns])
+  useEffect(() => {
+    if (!runs) return
+    const liveIds = new Set(runs.map(run => run.run_id))
+    setCompareIds(current => {
+      const next = new Set([...current].filter(id => liveIds.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [runs])
+  useEffect(() => {
+    if (view === 'compare' && compareRuns.length < 2) setView('list')
+  }, [view, compareRuns.length])
+
+  const portfolioState = {
+    project: sel, query, task: taskFilter, status: statusFilter, supertask: stFilter,
+    sort: sortKey, direction: sortDir, view, compare: [...compareIds], columns: compareColumns,
+  }
+  const activeView = savedViews.find(item => item.name === activeSavedView)
+  const activeViewDirty = !!activeView
+    && portfolioViewSignature(activeView) !== portfolioViewSignature(portfolioState)
+  const applySavedView = name => {
+    const saved = savedViews.find(item => item.name === name)
+    if (!saved) { setActiveSavedView(''); return }
+    setSel(saved.project); setQuery(saved.query); setTaskFilter(saved.task)
+    setStatusFilter(saved.status); setStFilter(saved.supertask)
+    setSortKey(saved.sort); setSortDir(saved.direction); setView(saved.view)
+    setCompareIds(new Set(saved.compare)); setCompareColumns(saved.columns)
+    setActiveSavedView(saved.name); setViewMessage('')
+  }
+  const savePortfolioView = async name => {
+    const next = upsertPortfolioView(savedViews, name, portfolioState)
+    if (!next.some(item => item.name === name)) {
+      throw Object.assign(new Error('invalid portfolio view name'), { viewName: true })
+    }
+    if (!storageSet(SAVED_VIEWS_KEY, JSON.stringify(next))) {
+      throw Object.assign(new Error('portfolio storage unavailable'), { storage: true })
+    }
+    setSavedViews(next); setActiveSavedView(name); setViewMessage(''); return true
+  }
+  const closeViewModal = () => {
+    setViewModal(false); focusSoon(savedViewReturnRef.current)
+  }
+  const deleteSavedView = () => {
+    if (!activeView || !confirm(`Delete saved view "${activeView.name}"?`)) return
+    const next = savedViews.filter(item => item.name !== activeView.name)
+    if (!storageSet(SAVED_VIEWS_KEY, JSON.stringify(next))) {
+      setViewMessage('This browser could not delete the saved view. Storage may be blocked or full.')
+      return
+    }
+    setSavedViews(next); setActiveSavedView(''); setViewMessage('')
+  }
+  const toggleCompare = runId => {
+    const next = new Set(compareIds)
+    if (next.delete(runId)) {
+      setCompareIds(next); return
+    }
+    if (next.size >= 8) {
+      setViewMessage('Compare is limited to 8 runs. Remove one before adding another.')
+      return
+    }
+    next.add(runId); setViewMessage(''); setCompareIds(next)
+  }
 
   const autoMapCollapsed = useMemo(
     () => defaultCollapsedClusters(proj.projects, visible, subtree),
@@ -605,11 +700,16 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
         <div className="seg">
           <button aria-pressed={view === 'list'} className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" /> List</button>
           <button aria-pressed={view === 'map'} className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
+          <button aria-pressed={view === 'compare'} className={view === 'compare' ? 'on' : ''}
+            disabled={compareRuns.length < 2}
+            title={compareRuns.length < 2 ? 'Select at least two runs from List' : 'Compare selected runs'}
+            onClick={() => setView('compare')}>Compare · {compareRuns.length}</button>
         </div>
         {/* Slash remains a power-user shortcut; New run above is the first-use primary action. */}
         <span className="muted home-new-hint" style={{ fontSize: 11 }}>type <code className="cmd-hint">/new</code> in the bar below to start a run</span>
         <span className="spacer" style={{ flex: 1 }} />
         <div className="home-actions">
+          <DensityToggle />
           <ThemeSwitcher />
           <EnergyToggle />
           <button type="button" className="btn sm ghost" disabled={navigationBusy} title="Read the experimental bounded portfolio preview"
@@ -666,6 +766,26 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                 onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} /> Report<span className="vt-scope"> · {scope.label}</span></button>
             </div>}
           </div>
+          {runs && !!runsOf(sel).length && <div className="portfolio-viewbar">
+            <label>Saved view
+              <select className="sel" aria-label="Saved portfolio view" value={activeSavedView}
+                onChange={event => event.target.value
+                  ? applySavedView(event.target.value) : setActiveSavedView('')}>
+                <option value="">Custom / unsaved</option>
+                {savedViews.map(saved => <option key={saved.name} value={saved.name}>
+                  {saved.name}{saved.name === activeSavedView && activeViewDirty ? ' · modified' : ''}
+                </option>)}
+              </select>
+            </label>
+            <button className="btn sm" onClick={event => {
+              savedViewReturnRef.current = event.currentTarget; setViewModal(true)
+            }}>Save current view</button>
+            <button className="btn sm ghost" disabled={!activeView} onClick={deleteSavedView}>Delete</button>
+            {activeViewDirty && <span className="muted" role="status">Modified</span>}
+          </div>}
+          {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
+            {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>Dismiss</button>
+          </div>}
           {runs && !!runsOf(sel).length && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
             <input className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
@@ -711,6 +831,14 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               {sortKey === 'metric' ? (sortDir === 'asc' ? 'best' : 'worst') : (sortDir === 'asc' ? '↑' : '↓')}
             </button>
           </div>}
+          {compareIds.size > 0 && view !== 'compare' && <div className="compare-selection" role="status">
+            <b>{compareRuns.length}/8 selected</b>
+            <span className="muted">{compareRuns.length < 2
+              ? 'Select one more run to compare.' : 'Ready to compare generation-fenced details.'}</span>
+            <button className="btn sm primary" disabled={compareRuns.length < 2}
+              onClick={() => setView('compare')}>Compare runs</button>
+            <button className="btn sm ghost" onClick={() => setCompareIds(new Set())}>Clear</button>
+          </div>}
           <ResourceNotice state={runsState} label="Runs" retry={loadRuns} />
           <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
           {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
@@ -730,9 +858,20 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                 scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
             </LazyBoundary>
           </div>}
+          {view === 'compare' && compareRuns.length > 1 && <LazyBoundary label="run comparison"
+            resetKey={compareRuns.map(run => run.run_id).join(':')}>
+            <RunCompare runs={compareRuns} columns={compareColumns}
+              names={{ projects: projName, supertasks: stName }}
+              onColumns={setCompareColumns} onRemove={toggleCompare} />
+          </LazyBoundary>}
           {view === 'list' && runs && visible.map(r => (
-            <div className="run-card" key={r.run_id} draggable={!navigationBusy}
+            <div className={'run-card' + (compareIds.has(r.run_id) ? ' compare-selected' : '')}
+                 key={r.run_id} draggable={!navigationBusy}
                  onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
+              <input type="checkbox" className="compare-check" draggable={false}
+                checked={compareIds.has(r.run_id)}
+                aria-label={`Select ${r.label || r.run_id} for comparison`}
+                onChange={() => toggleCompare(r.run_id)} />
               {(() => {
                 // A zombie (not finished, but no engine holds the lock) reads as "search" from phase
                 // alone — surface it as "stalled" so the list matches the run header's badge.
@@ -792,6 +931,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
         title="Rename run" label={`Display name for ${runRename.run_id} (clear it to fall back to the id).`}
         placeholder={runRename.run_id} initial={runRename.label || ''} confirm="Save" allowEmpty
         onSubmit={submitRunRename} onReconcile={loadRuns} onClose={closeRunRename} />}
+
+      {viewModal && <PromptModal title="Save portfolio view"
+        label="Name this scope, filter, sort, layout, and comparison selection."
+        placeholder="e.g. active baselines" initial={activeView?.name || ''} confirm="Save view" maxLength={48}
+        onSubmit={savePortfolioView} onClose={closeViewModal} />}
 
       {stModal && <SuperTaskModal supertasks={superdata.supertasks} state={superState} onRetry={loadSupers}
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}

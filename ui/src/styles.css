@@ -971,7 +971,10 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .run-card { display: flex; align-items: center; gap: 14px; padding: 12px 14px; background: var(--bg-1);
   border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; }
 .run-card:hover { border-color: var(--accent-dim); }
+.run-card.compare-selected { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
 .run-card[draggable] { cursor: grab; }
+.compare-check { flex: none; width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.compare-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .run-card-main { flex: 1; min-width: 0; color: inherit; cursor: pointer; border-radius: 6px; }
 .run-card-main:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .run-card .move-sel { width: auto; max-width: 150px; }
@@ -984,6 +987,36 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .runbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .runbar .text.runbar-q { width: auto; flex: 1 1 180px; min-width: 140px; }
 .runbar-count { font-size: 12px; font-variant-numeric: tabular-nums; }
+.portfolio-viewbar, .compare-selection { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-1) 92%, var(--accent) 8%); }
+.portfolio-viewbar label { display: flex; align-items: center; gap: 7px; color: var(--fg-dim); }
+.portfolio-message { margin-bottom: 10px; }
+.compare-selection .muted { flex: 1; min-width: 180px; }
+.run-compare { min-width: 0; }
+.compare-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.compare-head > div:first-child { flex: 1; min-width: 220px; }
+.compare-head h2 { margin: 0; font-size: 18px; }
+.compare-head p, .compare-config > p { margin: 2px 0 0; color: var(--fg-mut); }
+.compare-columns { position: relative; }
+.compare-columns > summary, .compare-config > summary { color: var(--fg-dim); cursor: pointer; }
+.compare-columns fieldset { position: absolute; z-index: 25; right: 0; width: 230px; max-height: min(420px, 65vh);
+  overflow: auto; display: grid; gap: 7px; margin: 5px 0 0; padding: 10px;
+  border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); box-shadow: var(--shadow); }
+.compare-columns label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.compare-receipt { min-height: 22px; color: var(--fg-mut); font-size: 12px; }
+.compare-table { min-width: 760px; }
+.compare-table .compare-pinned { position: sticky; left: 0; z-index: 2; min-width: 180px;
+  background: var(--bg-1); box-shadow: 1px 0 var(--line); }
+.compare-table thead .compare-pinned { z-index: 3; }
+.compare-table small { display: block; max-width: 210px; overflow: hidden; color: var(--fg-mut);
+  text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+.compare-best { margin-left: 7px; color: var(--best-text); font-size: 10px; }
+.compare-config { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--bg-1); }
+.compare-config[open] > summary { margin-bottom: 8px; }
+.compare-config-table { min-width: 760px; }
+.compare-config-table td { max-width: 260px; overflow-wrap: anywhere; vertical-align: top; }
 .sel { background: var(--bg); color: var(--fg); border: 1px solid var(--line-2); border-radius: 7px;
   padding: 5px 8px; font: inherit; font-size: 12px; cursor: pointer; }
 .sel:hover { border-color: #44506a; }
@@ -2332,12 +2365,17 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .runbar { gap: 6px; }
   .runbar .sel { min-width: 0; max-width: 100%; }
   .runbar .text.runbar-q { flex-basis: calc(100% - 22px); }
-  .run-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start;
+  .run-card { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: start;
     gap: 8px 10px; padding: 11px; }
-  .run-card-main { min-width: 0; }
-  .run-card-metrics { grid-column: 2; text-align: left !important; }
+  .compare-check { grid-column: 1; grid-row: 1; margin-top: 3px; }
+  .run-card > .phase { grid-column: 2; grid-row: 1; }
+  .run-card-main { min-width: 0; grid-column: 3; }
+  .run-card-metrics { grid-column: 3; text-align: left !important; }
   .run-card .goal { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .run-actions { grid-column: 3; grid-row: 1; }
+  .run-actions { grid-column: 4; grid-row: 1; }
+  .portfolio-viewbar label, .portfolio-viewbar .sel { width: 100%; }
+  .compare-head > .btn, .compare-columns { flex: 1; }
+  .compare-columns fieldset { position: fixed; inset: auto 10px 72px; width: auto; }
 
   .side.compact-drawer { width: 100% !important; max-width: none; border-left: 0; }
   .workspace-scrim { display: none; }
@@ -2381,6 +2419,27 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go, .cmdbar-drawer-btn, .asst-sess-x { min-width: 44px; }
   .metric-group-grid { grid-template-columns: minmax(0, 1fr) !important; }
   .react-flow__controls button { width: 44px; height: 44px; }
+}
+
+/* Optional reading-first density. Compact remains the default for power users; this mode raises
+   critical metadata/help to 12px and gives repeated controls/rows more breathing room. */
+:root[data-comfortable] body { font-size: 14px; line-height: 1.55; }
+:root[data-comfortable] .topbar { min-height: 50px; padding-block: 9px; }
+:root[data-comfortable] .btn.sm, :root[data-comfortable] .sel { min-height: 32px; }
+:root[data-comfortable] .runlist { padding-block: 28px; }
+:root[data-comfortable] .run-card { gap: 18px; padding: 17px 18px; margin-bottom: 12px; }
+:root[data-comfortable] .ptree-row { gap: 8px; padding-block: 8px; }
+:root[data-comfortable] .runbar, :root[data-comfortable] .portfolio-viewbar { gap: 10px; }
+:root[data-comfortable] .feed .ev, :root[data-comfortable] .feed-msg,
+:root[data-comfortable] .llm-line, :root[data-comfortable] .span-row { padding-block: 6px; }
+:root[data-comfortable] .run-when, :root[data-comfortable] .map-summary > span,
+:root[data-comfortable] .ptree-row .pcount, :root[data-comfortable] .stat .l,
+:root[data-comfortable] .sf-help, :root[data-comfortable] .card-resource-request,
+:root[data-comfortable] .card-kanban-terminal, :root[data-comfortable] .card-kanban-unknown,
+:root[data-comfortable] .card-kanban-evidence .muted, :root[data-comfortable] .card-empty,
+:root[data-comfortable] .card-control-help, :root[data-comfortable] .card-control-feedback,
+:root[data-comfortable] .card-control-form .text, :root[data-comfortable] .card-control-resource .text {
+  font-size: 12px;
 }
 
 .merge-destination-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 44px;

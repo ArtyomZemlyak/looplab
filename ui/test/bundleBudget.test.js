@@ -108,7 +108,7 @@ test('an incremental budget fails closed when its baseline selector disappears',
 
 test('the default policy is satisfiable by a fully split route and interaction graph', () => {
   const sources = [
-    'RunList.jsx', 'OwnerChrome.jsx', 'RunView.jsx', 'Dag.jsx',
+    'RunList.jsx', 'RunCompare.jsx', 'OwnerChrome.jsx', 'RunView.jsx', 'Dag.jsx',
     'Dock.jsx', 'Inspector.jsx', 'ConceptChipBar.jsx', 'ConceptView.jsx', 'panels.jsx',
     'SharedAssistant.jsx', 'Report.jsx', 'ResearchAtlas.jsx',
   ]
