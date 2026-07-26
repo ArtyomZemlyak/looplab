@@ -596,6 +596,11 @@ def _drift(primary: Optional[float], cross: Optional[float], tol: float) -> bool
     return abs(primary - cross) > tol * (1.0 + abs(cross))
 
 
+# Where `eval.setup`'s Python packages land inside the container so they survive to the eval. Under
+# the /work bind (= the node's own workdir on the host), so it is per-node and disappears with it.
+_DOCKER_DEPS_DIR = "/work/.looplab-deps"
+
+
 def make_docker_wrap(mount_root: str, image: str, network: str = "none",
                      mem: Optional[str] = None, cpus: Optional[str] = None,
                      runtime: Optional[str] = None, binds: Optional[list] = None,
@@ -672,6 +677,20 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         envs: list[str] = []
         for k, v in docker_gpu_env(env, gpu_args=gpu_args).items():
             envs += ["-e", f"{k}={v}"]
+        # MAKE `setup` STICK. Every call here is its own `docker run --rm`, so a dependency the
+        # task's `eval.setup` installs used to die with that container and the eval ran in a pristine
+        # one — "installs dependencies before each eval" silently installed nothing, and every node
+        # failed on `ModuleNotFoundError` while the operator paid for the repair loop. The mount root
+        # is the NODE's workdir (eval_dispatch passes it), so a directory inside it is per-node,
+        # already writable by that node's own container, and carries nothing between nodes.
+        # `PYTHONUSERBASE` + `PIP_USER` is the mechanism rather than PIP_TARGET/PYTHONPATH because
+        # Python adds the user site directory to sys.path natively — no version-dependent path for us
+        # to reconstruct and get wrong. Deliberately NOT also overriding PATH: the value would have to
+        # be spelled out in full from out here, which would clobber an image that puts its interpreter
+        # somewhere non-standard (conda images — the MLE-bench tier — are exactly that), so persisting
+        # console scripts is not worth breaking those. KNOWN LIMITS: importable Python packages
+        # persist; a setup-installed console script and anything `apt-get` installs do not.
+        envs += ["-e", f"PYTHONUSERBASE={_DOCKER_DEPS_DIR}", "-e", "PIP_USER=1"]
         base = ["docker", "run", "--rm", "--network", network, *rt, *gpu_args,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
                 *caps, *envs,
@@ -769,10 +788,9 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         return (["timeout", "-k", "5", str(max(1, int(secs)))] + argv) if is_docker else argv
 
     grace = 15.0 if is_docker else 0.0
-    # CODEX AGENT: a Docker wrap creates a fresh `docker run --rm` for every call. Setup-installed
-    # dependencies live only in this disposable container, while eval/stages/readers run in pristine
-    # containers. Persist setup state under /work or retain one per-eval container, and test a real
-    # setup install followed by an import.
+    # A Docker wrap creates a fresh `docker run --rm` for every call below, so setup and eval do NOT
+    # share a container: what makes the setup-installed packages reach the eval is the shared
+    # `PYTHONUSERBASE` under the /work bind that `make_docker_wrap` exports (see _DOCKER_DEPS_DIR).
     if setup:
         swd = Path(setup_cwd).resolve() if setup_cwd else wd
         swd.mkdir(parents=True, exist_ok=True)

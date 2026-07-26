@@ -295,10 +295,15 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # ASHA racing + the surrogate, so `policy=bohb` auto-enables it.
         if settings.surrogate_proposer or settings.policy == "bohb":
             from looplab.search.surrogate import SurrogateResearcher
-            _bounds = getattr(researcher, "bounds", None)
-            if _bounds:
-                researcher = SurrogateResearcher(_bounds, fallback=researcher,
-                                                 explore=settings.surrogate_explore)
+            # Constructed whether or not the TASK declares bounds. Only the built-in benchmarks
+            # declare them, so the old `if _bounds:` gate meant this setting silently did nothing on
+            # repo and dataset tasks — the ones real operators run — while the settings table said it
+            # was on. The wrapper self-gates: with no bounds and no usable history it delegates to the
+            # wrapped Researcher exactly as before, and once the run has enough evaluated numeric
+            # params it learns the ranges from them.
+            researcher = SurrogateResearcher(getattr(researcher, "bounds", None) or {},
+                                             fallback=researcher,
+                                             explore=settings.surrogate_explore)
         # FOREAGENT predict-before-execute for HYPOTHESES: rank K candidate ideas with the LLM world
         # model primed with the data profile + experiment memory — it compares the structural / text
         # ideas the numeric surrogate can't. ON by default for the LLM backend. Needs a client (a bare

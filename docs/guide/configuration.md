@@ -221,7 +221,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `policy` | `LOOPLAB_POLICY` | `greedy` | `greedy` / `evolutionary` / `mcts` / `asha` / `bohb` (`bohb` is the ASHA schedule wired to the surrogate proposer — setting it turns `surrogate_proposer` on for you) |
 | `asha_eta` | `LOOPLAB_ASHA_ETA` | `3` | ASHA/BOHB reduction factor (keep top 1/η per rung) |
 | `asha_rung_nodes` | `LOOPLAB_ASHA_RUNG_NODES` | `0` | Rung-0 width (0 = use `n_seeds`) |
-| `surrogate_proposer` | `LOOPLAB_SURROGATE_PROPOSER` | `false` | BO-lite: propose by a k-NN surrogate over (params→metric) |
+| `surrogate_proposer` | `LOOPLAB_SURROGATE_PROPOSER` | `false` | BO-lite: propose by a k-NN surrogate over (params→metric). Works on any task: it uses the numeric ranges the task declares if it declares any (the built-in benchmarks do), otherwise it learns them from the run's own evaluated params once ~4 experiments share a numeric key. Until then it just delegates to the normal Researcher |
 | `surrogate_explore` | `LOOPLAB_SURROGATE_EXPLORE` | `0.1` | UCB-style exploration weight |
 | `researcher_panel` | `LOOPLAB_RESEARCHER_PANEL` | `1` | Generate K ideas, keep the best by an empirical surrogate (1 = off) |
 | `foresight` | `LOOPLAB_FORESIGHT` | `true` | FOREAGENT predict-before-execute: LLM world model ranks candidates/ideas before an eval, primed with a data report + memory (master switch) |

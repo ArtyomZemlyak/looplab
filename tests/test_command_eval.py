@@ -399,6 +399,31 @@ def test_docker_wrap_preserves_posix_absolute_bind_path(monkeypatch, tmp_path):
     assert f"type=bind,src={native},dst={native}" in argv
 
 
+def test_docker_setup_installed_packages_survive_into_the_eval_container(monkeypatch, tmp_path):
+    """`eval.setup` and the eval each get their OWN `docker run --rm`, so a package setup pip-installs
+    into the container's system site-packages is gone by the time the eval imports it — the task's
+    "install dependencies before each eval" installed nothing and every node died on
+    ModuleNotFoundError. The fix is a pip user-base pointed INSIDE the /work bind, which is host
+    storage: assert both invocations export the same one and that it really is under the bind."""
+    import shutil
+    from looplab.runtime import command_eval as ce
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    (tmp_path / "sub").mkdir()
+    wrap = ce.make_docker_wrap(str(tmp_path), "img", env={"LOOPLAB_EVAL_SEED": "7"})
+
+    def env_of(argv):
+        return dict(argv[i + 1].split("=", 1) for i, tok in enumerate(argv) if tok == "-e")
+
+    setup_env = env_of(wrap(["pip", "install", "numpy"], str(tmp_path)))
+    # The eval may run from a subdir (eval.cwd) — the deps dir must not move with the cwd.
+    eval_env = env_of(wrap(["python", "solution.py"], str(tmp_path / "sub")))
+    assert setup_env["PIP_USER"] == "1"                        # pip installs into the user base...
+    assert setup_env["PYTHONUSERBASE"] == eval_env["PYTHONUSERBASE"]   # ...the same one both times
+    # Under /work (the bind of the node's own workdir) — NOT container-local storage that --rm eats.
+    assert setup_env["PYTHONUSERBASE"].startswith("/work/")
+    assert eval_env["LOOPLAB_EVAL_SEED"] == "7"                # forwarding is untouched
+
+
 # ---------------------------------------------------- path-boundary + timeout hardening (P0-7 / P1-5)
 def test_stage_name_must_be_a_safe_slug():
     from looplab.runtime.command_eval import validate_stages, safe_stage_name

@@ -95,3 +95,58 @@ def test_strategy_switch_to_bohb_wires_surrogate(tmp_path):
     eng._apply_strategy({"policy": "bohb", "policy_params": {"n_seeds": 4}})  # collision must not crash
     assert isinstance(eng.researcher, SurrogateResearcher)   # surrogate now wired
     assert eng._policy_name == "bohb"
+
+
+def _evaluated(nid, params, metric):
+    n = Node(id=nid, operator="draft", status=NodeStatus.evaluated, metric=metric,
+             idea=Idea(operator="draft", params=params))
+    return n
+
+
+def test_surrogate_works_on_a_task_that_declares_no_bounds():
+    """`surrogate_proposer` must mean the same thing on every task, not just the built-in benchmarks.
+
+    Only the bundled benchmark adapters declare numeric bounds; repo and dataset tasks — the ones
+    real operators run — declare none, so the CLI's `if _bounds:` gate constructed nothing and the
+    setting silently did nothing at all while the settings table advertised it. The wrapper now
+    learns the ranges from the run's OWN evaluated params: it still delegates while there is too
+    little history, then starts proposing inside the observed region.
+    """
+    fb = _Fallback()
+    fb.bounds = None                                  # a task with no declared search space
+    sur = SurrogateResearcher({}, fallback=fb, warmup=3)
+    st = RunState(goal="g", direction="min")
+
+    # too little history -> delegate, exactly as before
+    before = fb.calls
+    sur.propose(st, None)
+    assert fb.calls == before + 1
+
+    for i, (lr, wd, m) in enumerate([(0.1, 0.0, 5.0), (0.2, 0.1, 3.0),
+                                     (0.3, 0.2, 1.0), (0.4, 0.3, 4.0)]):
+        st.nodes[i] = _evaluated(i, {"lr": lr, "weight_decay": wd}, m)
+
+    bounds = sur._effective_bounds(st)
+    assert set(bounds) == {"lr", "weight_decay"}, "ranges were not learned from the run's own params"
+    assert bounds["lr"][0] < 0.1 and bounds["lr"][1] > 0.4, "the range must allow stepping outside"
+
+    before = fb.calls
+    idea = sur.propose(st, None)
+    assert fb.calls == before, "with enough history the surrogate must propose, not delegate"
+    assert set(idea.params) == {"lr", "weight_decay"}
+    assert "surrogate-guided" in idea.rationale
+
+    # a key that never varied defines no interval and is dropped rather than padded into a fake one
+    flat = RunState(goal="g", direction="min")
+    for i, m in enumerate([5.0, 3.0, 1.0, 4.0]):
+        flat.nodes[i] = _evaluated(i, {"lr": 0.1 + i / 100, "seed": 7}, m)
+    assert set(sur._effective_bounds(flat)) == {"lr"}
+
+
+def test_declared_bounds_still_win_verbatim():
+    """A task that DOES declare bounds keeps using them — inference is only the fallback."""
+    sur = SurrogateResearcher(BOUNDS, fallback=_Fallback(), warmup=2)
+    st = RunState(goal="g", direction="min")
+    for i, m in enumerate([5.0, 3.0, 1.0]):
+        st.nodes[i] = _evaluated(i, {"x": float(i), "y": float(i)}, m)
+    assert sur._effective_bounds(st) == BOUNDS

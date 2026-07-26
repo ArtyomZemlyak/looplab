@@ -38,8 +38,15 @@ def _fallback_telemetry(name: str) -> property:
 
 class SurrogateResearcher:
     def __init__(self, bounds: dict, fallback=None, *, seed: int = 0,
-                 n_candidates: int = 96, explore: float = 0.1, warmup: int = 4, k: int = 3):
+                 n_candidates: int = 96, explore: float = 0.1, warmup: int = 4, k: int = 3,
+                 infer_bounds: bool = True):
         self.bounds = bounds or {}
+        # A task that DECLARES numeric bounds (the built-in benchmarks) keeps using them verbatim.
+        # Everything else — repo and dataset tasks, i.e. the ones real operators run — declared none,
+        # so `surrogate_proposer` / `policy=bohb` constructed nothing and the setting silently did
+        # nothing at all. With this on, the ranges are learned from the run's OWN evaluated params
+        # once there is enough history, so the setting means the same thing on every task.
+        self.infer_bounds = infer_bounds
         self.fallback = fallback
         self.rng = random.Random(seed)
         self.n_candidates = max(8, n_candidates)
@@ -58,27 +65,65 @@ class SurrogateResearcher:
     last_foresight = _fallback_telemetry("last_foresight")
     last_foresight_pick = _fallback_telemetry("last_foresight_pick")
 
-    def _history(self, state: RunState) -> list[tuple[dict, float]]:
+    def _observed_bounds(self, state: RunState) -> dict:
+        """Numeric ranges learned from this run's own evaluated experiments.
+
+        Only keys present with a numeric value in EVERY usable point are kept — a key that appears
+        in half the experiments would otherwise define a dimension most history cannot fill, and
+        `_history` drops any point that is not full-dimensional, starving the predictor. Ranges are
+        padded by 10% of their own width so the optimizer can step just outside what was tried; a key
+        whose observed values never varied is dropped rather than padded into a fake interval.
+        """
+        from looplab.events.digest import numeric_params
+
+        points = [numeric_params(n.idea.params, keys=None) for n in state.breedable_nodes()
+                  if n.metric is not None]
+        points = [p for p in points if p]
+        if len(points) < self.warmup:
+            return {}
+        keys = set(points[0])
+        for p in points[1:]:
+            keys &= set(p)
+        out = {}
+        for key in sorted(keys):
+            vals = [p[key] for p in points]
+            lo, hi = min(vals), max(vals)
+            if not (hi > lo):                  # never varied -> no interval to search
+                continue
+            pad = (hi - lo) * 0.1
+            out[key] = (lo - pad, hi + pad)
+        return out
+
+    def _effective_bounds(self, state: RunState) -> dict:
+        """Declared bounds when the task has them, else ranges inferred from the run so far."""
+        if self.bounds:
+            return self.bounds
+        return self._observed_bounds(state) if self.infer_bounds else {}
+
+    def _history(self, state: RunState, bounds: dict | None = None) -> list[tuple[dict, float]]:
         # Never fit the surrogate on a CHEATED metric: `breedable_nodes()` drops the gate-flagged set
         # (a hard-flagged node keeps its inflated metric — e.g. 0.99 from reading the answer key — AND
         # stays feasible under gate), so the predictor can't learn to propose near the cheated params.
         # audit / no flags -> identical to feasible_nodes(), a no-op in the default posture.
         from looplab.events.digest import numeric_params   # local: search stays digest-free at import time
+        bounds = self.bounds if bounds is None else bounds
         hist = []
         for n in state.breedable_nodes():
             if n.metric is None:
                 continue
-            p = numeric_params(n.idea.params, keys=self.bounds)
-            if len(p) == len(self.bounds):     # only FULL-dimensional points are usable history
+            p = numeric_params(n.idea.params, keys=bounds)
+            if len(p) == len(bounds):          # only FULL-dimensional points are usable history
                 hist.append((p, n.metric))
         return hist
 
-    def _predict(self, x: dict, hist: list[tuple[dict, float]]) -> tuple[float, float]:
+    def _predict(self, x: dict, hist: list[tuple[dict, float]],
+                 bounds: dict | None = None) -> tuple[float, float]:
         """Inverse-distance-weighted k-NN prediction + distance to the nearest sample (the
         exploration signal). Returns (predicted_metric, nearest_distance). Eligibility here is
         "full bounds dimensionality" (enforced by _history); the IDW core is the shared knn_idw."""
         from looplab.events.digest import knn_idw          # local: search stays digest-free at import time
-        pairs = [(math.sqrt(sum((x[k] - p[k]) ** 2 for k in self.bounds)), m) for p, m in hist]
+        keys = self.bounds if bounds is None else bounds
+        pairs = [(math.sqrt(sum((x[k] - p[k]) ** 2 for k in keys)), m) for p, m in hist]
         pred, nearest = knn_idw(pairs, self.k)    # hist is non-empty (propose() gates on warmup)
         return pred, nearest
 
@@ -88,19 +133,20 @@ class SurrogateResearcher:
         # delegation (roles.forward_hints owns the registry + `track_hypotheses` rule).
         if self.fallback is not None:
             forward_hints(self, self.fallback)
-        hist = self._history(state)
-        if not self.bounds or len(hist) < self.warmup:
+        bounds = self._effective_bounds(state)
+        hist = self._history(state, bounds)
+        if not bounds or len(hist) < self.warmup:
             if self.fallback is not None:                 # bootstrap / non-numeric -> delegate
                 return self.fallback.propose(state, parent)
-            params = {k: round(self.rng.uniform(lo, hi), 4) for k, (lo, hi) in self.bounds.items()}
+            params = {k: round(self.rng.uniform(lo, hi), 4) for k, (lo, hi) in bounds.items()}
             return Idea(operator="draft", params=params, rationale="surrogate bootstrap (random)")
         # Sample candidates over the bounds; score each by the acquisition (predicted metric adjusted
         # by an exploration bonus toward sparsely-sampled regions), and pick the optimum for the
         # objective direction. A simple, dependency-free EI/UCB surrogate.
         best_acq, best_params = None, None
         for _ in range(self.n_candidates):
-            x = {k: self.rng.uniform(lo, hi) for k, (lo, hi) in self.bounds.items()}
-            pred, nearest = self._predict(x, hist)
+            x = {k: self.rng.uniform(lo, hi) for k, (lo, hi) in bounds.items()}
+            pred, nearest = self._predict(x, hist, bounds)
             # exploration: reward distance from known points (UCB-style); sign by direction.
             acq = pred - self.explore * nearest if state.direction == "min" else pred + self.explore * nearest
             if best_acq is None or state.is_better(acq, best_acq):
