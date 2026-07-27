@@ -15,6 +15,7 @@ from looplab.search.speculation_calibration import (
     SPECULATION_RUNTIME_ROLES_DESCRIPTOR,
     SPECULATION_RUNTIME_SANDBOX_DESCRIPTOR,
     SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS,
+    SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS,
     SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS,
     SPECULATION_RUNTIME_SCOPE_SCHEMA,
     SPECULATION_RUNTIME_SCOPE_VARIANT_FIELDS,
@@ -59,9 +60,13 @@ def test_scope_vocabulary_and_exclusion_sets_are_exact_and_source_owned():
         "speculation_depth", "speculation_gate_receipt"}
     assert SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS == {
         "out", "output", "output_dir", "run_dir", "run_root", "work_dir", "workdir"}
+    # The snapshot's own document-format marker: it says how the FILE is written, never how the run
+    # behaves, so letting it into the digest would invalidate every receipt earned before it existed.
+    assert SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS == {"config_snapshot_schema"}
     assert SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS == (
         SPECULATION_RUNTIME_SCOPE_VARIANT_FIELDS
         | SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS
+        | SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS
     )
     assert SPECULATION_RUNTIME_POLICY_DESCRIPTOR["implementation"].endswith(".GreedyTree")
     assert SPECULATION_RUNTIME_POLICY_DESCRIPTOR["n_seeds"] == 3

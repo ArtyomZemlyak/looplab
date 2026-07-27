@@ -43,6 +43,11 @@ controls, approvals, terminal scopes, and numeric LLM usage. The engine writes d
 server writes serialized control intents; and the durable accountant may append `llm_usage` from a
 background callback. `EventStore` serializes these writers across processes.
 
+Every row carries an envelope version `v` (ADR-1). A row declaring a version this build does not
+support is **undecodable**, not "folded as v1" — reads stop there and the store fails closed, so a
+tail written by a newer LoopLab can never acquire today's run or command authority. Upgrade, or use
+`looplab repair-log` if the row is genuinely corrupt.
+
 Not every artifact is an event. Bounded diagnostic trace representations (`spans.jsonl`), Assistant/run chat, logs, and node
 workspaces are independent sidecars. They are useful evidence, but replay does not reconstruct them
 and their absence does not change the folded research state.

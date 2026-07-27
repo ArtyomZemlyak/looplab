@@ -60,6 +60,20 @@ def is_event_batch_record(obj: object) -> bool:
     return marker == _EVENT_BATCH_TYPE or marker == list(_EVENT_BATCH_GUARD_TYPE)
 
 
+# Event-envelope FORMAT versions this build understands (`Event.v`, ADR-1). A migration that changes
+# what a row MEANS bumps this set and adds an explicit upgrade path; until then a row declaring
+# anything else is undecodable here rather than folded under v1 semantics.
+SUPPORTED_EVENT_ENVELOPE_VERSIONS = frozenset({1})
+
+
+class UnsupportedEventVersionError(ValueError):
+    """A row declares an envelope version this build does not understand.
+
+    A ValueError subclass so every existing tolerant reader (which stops the log at any decode
+    failure) is unchanged, while a caller that wants to say WHICH kind of unreadable this is —
+    "written by a newer LoopLab" rather than "corrupt" — can catch it specifically."""
+
+
 def _decode_batch_envelope(obj: dict) -> list[Event]:
     """Strictly validate and expand one internal crash-atomic batch envelope."""
 
@@ -120,13 +134,19 @@ def decode_event_record(obj: dict, *, strict: bool = False) -> list[Event]:
     the same ``type`` string without being an event envelope.
     """
 
-    # CODEX AGENT: ordinary envelopes accept unsupported `v` values and are then folded with today's
-    # semantics, so a future/corrupt v2 row can acquire v1 run and command authority. Validate the
-    # supported envelope-version set here (with an explicit migration path) instead of treating `v`
-    # as inert metadata.
     if is_event_batch_record(obj):
         return _decode_batch_envelope(obj)
     event = Event.model_validate(obj, strict=True) if strict else Event(**obj)
+    # `v` is the envelope's FORMAT version (ADR-1), and an unsupported value means this build cannot
+    # know what the row means. Accepting it and folding with today's semantics is the dangerous
+    # reading: a future v2 row would silently acquire v1 run and command authority. The batch
+    # protocol already refused a non-1 version; ordinary rows treated `v` as inert metadata.
+    # Raising is what every caller already handles — an undecodable row is where the log STOPS, so a
+    # newer tail fails closed (`repair-log`/upgrade) instead of being half-understood. The raw check
+    # additionally rejects `true`, which lax Pydantic would coerce to 1 (mirrors _decode_batch_envelope).
+    raw_v = obj.get("v", 1)
+    if isinstance(raw_v, bool) or event.v not in SUPPORTED_EVENT_ENVELOPE_VERSIONS:
+        raise UnsupportedEventVersionError(f"unsupported event envelope version {raw_v!r}")
     return [event]
 
 

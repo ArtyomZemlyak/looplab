@@ -20,7 +20,8 @@ from typing import Callable, TypeVar
 import orjson
 
 from looplab.core.models import Event
-from looplab.events.eventstore import MAX_EVENT_BATCH_BYTES, decode_event_record
+from looplab.events.eventstore import (MAX_EVENT_BATCH_BYTES, decode_event_record,
+                                       UnsupportedEventVersionError)
 from looplab.serve.run_commands import run_generation_token
 
 MAX_SCOPE_EVENT_BYTES = 32 * 1024 * 1024
@@ -457,6 +458,11 @@ def _events_from_line(raw: bytes, *, line_number: int) -> tuple[Event, ...]:
         )
     try:
         events = tuple(decode_event_record(value, strict=True))
+    except UnsupportedEventVersionError as exc:
+        # Keep the SPECIFIC diagnostic: "written by a newer LoopLab" and "corrupt" call for different
+        # operator actions, and this boundary distinguished them before the decoder learned to.
+        raise ScopeSourceCorruptError(
+            f"event log line {line_number} has unsupported version") from exc
     except Exception as exc:  # noqa: BLE001 - Pydantic exposes several validation failure types
         raise ScopeSourceCorruptError(
             f"event log has an invalid event at complete line {line_number}"

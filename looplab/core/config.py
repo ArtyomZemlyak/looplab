@@ -1379,7 +1379,27 @@ class Settings(BaseSettings):
             d["llm_api_key"] = "***"
         else:
             d["llm_api_key"] = None
+        # The snapshot's own FORMAT version — not a Settings field (it is never settable by env or
+        # file, and it describes the document, not the run). `settings_from_snapshot` fails closed on
+        # a version it does not understand; see CONFIG_SNAPSHOT_SCHEMA.
+        d[CONFIG_SNAPSHOT_SCHEMA_KEY] = CONFIG_SNAPSHOT_SCHEMA
         return d
+
+
+# The config snapshot's document-format version, written by `masked_snapshot` and enforced by
+# `settings_from_snapshot`. Bump it when a snapshot written by this binary would be MISREAD by an
+# older one — i.e. when a new field changes paid, concurrency or selection behaviour and silently
+# defaulting it would resume the same event history under different semantics. `Settings` is
+# `extra="ignore"`, so without this an older binary drops what it does not recognize and resumes
+# anyway, with no diagnostic; a version it does not know is now a loud refusal instead.
+# Version 1 is the first VERSIONED format. An absent key means a pre-versioning snapshot, which stays
+# readable through `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` — that historical contract is unchanged.
+CONFIG_SNAPSHOT_SCHEMA = 1
+CONFIG_SNAPSHOT_SCHEMA_KEY = "config_snapshot_schema"
+
+
+class ConfigSnapshotVersionError(ValueError):
+    """A config snapshot was written by a NEWER binary than the one reading it."""
 
 
 # Pre-versioned snapshots are full Settings dumps, so absence is a reliable per-field version marker.
@@ -1421,12 +1441,33 @@ def migrate_config_snapshot(data: dict) -> dict:
     return migrated
 
 
+def config_snapshot_schema(data: dict) -> int:
+    """The snapshot's declared format version. 0 = pre-versioning (the key did not exist yet).
+
+    A malformed value is treated as UNREADABLE rather than as 0: a snapshot whose own version marker
+    is corrupt cannot be assumed to be the oldest format."""
+    raw = data.get(CONFIG_SNAPSHOT_SCHEMA_KEY, 0) if isinstance(data, dict) else 0
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ConfigSnapshotVersionError(
+            f"config snapshot has a malformed {CONFIG_SNAPSHOT_SCHEMA_KEY}: {raw!r}")
+    return raw
+
+
 def settings_from_snapshot(data: dict) -> Settings:
-    # CODEX AGENT: snapshots have no schema/runtime version and Settings ignores unknown fields.
-    # An older binary can silently drop newer behavior-affecting controls and resume the same event
-    # history with different paid/concurrency/selection semantics. Version snapshots and fail closed
-    # on an unsupported downgrade before migration/default filling.
-    """Build re-entry Settings from a masked snapshot under its historical missing-field contract."""
+    """Build re-entry Settings from a masked snapshot under its historical missing-field contract.
+
+    Fails closed on a snapshot written by a NEWER binary. `Settings` is `extra="ignore"`, so such a
+    snapshot would otherwise load with every unrecognized control silently dropped — the run would
+    resume on the same event history under different paid/concurrency/selection semantics, with
+    nothing to show why. Refusing is the only honest answer: this binary cannot know what it is
+    dropping. Older and pre-versioning snapshots keep loading exactly as before."""
+    found = config_snapshot_schema(data)
+    if found > CONFIG_SNAPSHOT_SCHEMA:
+        raise ConfigSnapshotVersionError(
+            f"this run's config.snapshot.json declares format v{found}, but this build understands "
+            f"at most v{CONFIG_SNAPSHOT_SCHEMA}. It was written by a newer LoopLab; resuming here "
+            "would silently drop settings this build does not know. Upgrade LoopLab to resume it.")
     migrated = migrate_config_snapshot(data)
     migrated.pop("llm_api_key", None)
+    migrated.pop(CONFIG_SNAPSHOT_SCHEMA_KEY, None)   # a document marker, never a Settings field
     return Settings(**migrated)

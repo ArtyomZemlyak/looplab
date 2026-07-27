@@ -2475,3 +2475,32 @@ def test_a_second_run_started_cannot_rewrite_the_run_authority(tmp_path):
                                        "direction": "max"})
     st2 = fold(placeholder.read_all())
     assert st2.run_id == "real" and st2.direction == "max"
+# --------------------------------------------------------------------------- format versioning
+# A durable artifact that carries no version number can be misread by a build that predates it,
+# silently and with no diagnostic. Both of LoopLab's durable formats now say what they are.
+
+def test_an_event_row_from_a_newer_format_is_not_folded_under_todays_semantics():
+    """`Event.v` was inert metadata on the ordinary row path (the batch protocol already refused a
+    non-1 version). A future v2 row would have been accepted and folded as v1 — acquiring v1 run and
+    command authority while meaning something this build cannot know."""
+    from looplab.events.eventstore import SUPPORTED_EVENT_ENVELOPE_VERSIONS, decode_event_record
+    row = {"seq": 0, "type": "run_started", "data": {}, "v": 1}
+    assert len(decode_event_record(row)) == 1
+    assert SUPPORTED_EVENT_ENVELOPE_VERSIONS == frozenset({1})
+    for bad in (2, 0, True):                     # `True` is what lax Pydantic would coerce to 1
+        with pytest.raises(ValueError, match="unsupported event envelope version"):
+            decode_event_record({**row, "v": bad})
+    # An absent `v` is a pre-ADR-1 row and still means v1 — the historical contract.
+    assert len(decode_event_record({k: v for k, v in row.items() if k != "v"})) == 1
+
+
+def test_a_newer_format_row_stops_the_log_instead_of_being_half_read(tmp_path):
+    """An undecodable row is where the log stops, so a tail written by a newer binary fails closed
+    rather than being partly folded."""
+    from looplab.events.eventstore import EventStore
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(
+        b'{"v":1,"seq":0,"type":"a","data":{}}\n'
+        b'{"v":1,"seq":1,"type":"b","data":{}}\n'
+        b'{"v":2,"seq":2,"type":"from_the_future","data":{}}\n')
+    assert [e.type for e in EventStore(p).read_all()] == ["a", "b"]

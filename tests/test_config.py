@@ -241,3 +241,47 @@ def test_an_unknown_backend_is_rejected_instead_of_downgrading_to_toy():
             Settings(backend=bad)
         assert "backend must be toy|llm" in str(exc.value), bad
     assert Settings(backend="llm").backend == "llm" and Settings().backend == "toy"
+# --------------------------------------------------------------------------- snapshot format version
+def test_a_snapshot_from_a_newer_build_is_refused_rather_than_silently_downgraded():
+    """`Settings` is extra="ignore", so a snapshot written by a newer LoopLab used to load with every
+    unrecognized control dropped — the run resumed on the same event history under different paid,
+    concurrency and selection semantics, with nothing to show why. This build cannot know what it
+    would be dropping, so refusing is the only honest answer."""
+    from looplab.core.config import (CONFIG_SNAPSHOT_SCHEMA, CONFIG_SNAPSHOT_SCHEMA_KEY,
+                                     ConfigSnapshotVersionError, Settings, settings_from_snapshot)
+    snap = Settings(llm_model="pinned", max_nodes=7).masked_snapshot()
+    assert snap[CONFIG_SNAPSHOT_SCHEMA_KEY] == CONFIG_SNAPSHOT_SCHEMA
+    restored = settings_from_snapshot(snap)
+    assert restored.llm_model == "pinned" and restored.max_nodes == 7
+
+    with pytest.raises(ConfigSnapshotVersionError, match="newer LoopLab"):
+        settings_from_snapshot({**snap, CONFIG_SNAPSHOT_SCHEMA_KEY: CONFIG_SNAPSHOT_SCHEMA + 1})
+    # A corrupt marker is unreadable, never "assume the oldest format".
+    for bad in ("1", -1, True, 1.5):
+        with pytest.raises(ConfigSnapshotVersionError, match="malformed"):
+            settings_from_snapshot({**snap, CONFIG_SNAPSHOT_SCHEMA_KEY: bad})
+
+
+def test_a_pre_versioning_snapshot_still_resumes_unchanged():
+    """Absence means a snapshot written before the marker existed; that historical contract — legacy
+    defaults, not today's product defaults — must be untouched."""
+    from looplab.core.config import (CONFIG_SNAPSHOT_SCHEMA_KEY, LEGACY_CONFIG_SNAPSHOT_DEFAULTS,
+                                     Settings, settings_from_snapshot)
+    snap = Settings(llm_model="old-run").masked_snapshot()
+    legacy = {k: v for k, v in snap.items() if k != CONFIG_SNAPSHOT_SCHEMA_KEY}
+    for field in LEGACY_CONFIG_SNAPSHOT_DEFAULTS:
+        legacy.pop(field, None)
+    restored = settings_from_snapshot(legacy)
+    assert restored.llm_model == "old-run"
+    for field, historical in LEGACY_CONFIG_SNAPSHOT_DEFAULTS.items():
+        assert getattr(restored, field) == historical, field
+
+
+def test_the_document_marker_does_not_move_the_speculation_runtime_scope():
+    """The marker describes the FILE, not the run. Letting it into the digest would invalidate every
+    calibration receipt earned before it existed."""
+    from looplab.core.config import CONFIG_SNAPSHOT_SCHEMA_KEY, Settings
+    from looplab.search.speculation_calibration import speculation_runtime_scope_digest
+    snap = Settings(max_nodes=8).masked_snapshot()
+    without = {k: v for k, v in snap.items() if k != CONFIG_SNAPSHOT_SCHEMA_KEY}
+    assert speculation_runtime_scope_digest(snap) == speculation_runtime_scope_digest(without)

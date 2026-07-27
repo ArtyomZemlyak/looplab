@@ -103,7 +103,9 @@ def test_no_inverted_divergence():
 
 def test_part_iv_v_default_rationale_discloses_behavior_and_cost():
     source = (Path(__file__).parents[1] / "looplab" / "core" / "config.py").read_text(encoding="utf-8")
-    assert "# CODEX AGENT:" in source
+    # (This used to also require a `# CODEX AGENT:` review annotation somewhere in the file. That is
+    # bookkeeping about an OPEN finding, not about the rationale this test is named for, and it goes
+    # stale the moment the finding is fixed — as the snapshot-versioning one now is.)
     assert "explicit experimental product choice" in source
     assert "change graded-novelty admission" in source
     assert "paid LLM work" in source

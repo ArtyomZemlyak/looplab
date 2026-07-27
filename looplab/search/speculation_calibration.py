@@ -52,9 +52,15 @@ SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS = frozenset({
     "work_dir",
     "workdir",
 })
+# The snapshot's own DOCUMENT-format marker (`config.CONFIG_SNAPSHOT_SCHEMA_KEY`). It describes how
+# the file is written, never how the run behaves, so it must not vary the runtime scope — otherwise
+# stamping it would invalidate every receipt earned before it existed. Spelled literally rather than
+# imported: `search` importing `core.config` here would be a new dependency for one string.
+SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS = frozenset({"config_snapshot_schema"})
 SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS = frozenset(
     SPECULATION_RUNTIME_SCOPE_VARIANT_FIELDS
     | SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS
+    | SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS
 )
 
 # These descriptors bind behavior that is constructed outside Settings.  They
@@ -249,6 +255,7 @@ __all__ = [
     "SPECULATION_RUNTIME_POLICY_DESCRIPTOR",
     "SPECULATION_RUNTIME_ROLES_DESCRIPTOR",
     "SPECULATION_RUNTIME_SANDBOX_DESCRIPTOR",
+    "SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS",
     "SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS",
     "SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS",
     "SPECULATION_RUNTIME_SCOPE_SCHEMA",

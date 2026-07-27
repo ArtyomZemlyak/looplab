@@ -13,7 +13,13 @@ be set four ways, in increasing priority:
    **any** setting by its exact field name.
 
 The resolved, **secret-masked launch settings** are written to `config.snapshot.json` in every run
-dir. `resume` loads that snapshot, but it is not the sole authority for every effective field:
+dir. The file carries its own format version in `config_snapshot_schema`; a snapshot written by a
+**newer** LoopLab is refused rather than loaded, because `Settings` ignores fields it does not
+recognize and resuming would otherwise continue the same event history under different paid,
+concurrency or selection semantics with no diagnostic. Upgrade LoopLab to resume such a run. A
+snapshot with no version key predates the marker and still loads under its historical contract.
+
+`resume` loads that snapshot, but it is not the sole authority for every effective field:
 `card_driven_selection`, `speculation_depth`, `holdout_fraction`, `holdout_select`, `select_verifier`,
 `select_verifier_samples`, and `verifier_ci_tie` are committed by `run_started` and restored from
 the folded event log. A later
