@@ -69,7 +69,7 @@ const LY=150,LH=76;
 box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft Idea + hypothesis + explicit concept_mode","full = exact set · delta = base/parent union − removed + added"]);
 box("novelty",410,LY,210,LH,"NOVELTY STAGE","llm",C.r,["shipped mode: LLM if client","no client: pass; algo opt-in"]);
 box("implement",660,LY,300,LH,"DEVELOPER","D",C.d,["stages → plan → implement (fresh repo node)","repair = 1 session · every edit auto-compiled"]);
-box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run one isolated search evaluation","repair a mechanical crash in place"]);
+box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["first-fit admission · head ages after 3 bypasses","repair a mechanical crash in place"]);
 box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → host-graded holdout when available","then the configured rigor layer (below)"]);
 box("refine",1760,LY,300,LH,"REFINE","R",C.r,["Card → agent → policy selects next move","improve · merge · ablate · debug"]);
 
@@ -102,7 +102,7 @@ stack(660,300,DY,[
 ]);
 // EVALUATE
 stack(1000,320,DY,[
- {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","hostile = Docker + gVisor runsc; data mounts bound :ro"]},
+ {id:"e_box",h:94,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","hostile = Docker + gVisor runsc; data mounts bound :ro","rlimit caps: exec'd launcher, never preexec_fn","clean exit still sweeps the process group"]},
  {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["stages phase / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
  {id:"e_mon",h:118,t:"Live-eval watchdogs",tag:"mixed",c:C.ev,sub:["sandbox (built-in): non-finite loss/grad divergence · stall (silent-while-alive > eval_stall_timeout_s, default 1800s; 0=off) → tree-kill early","train monitor: LLM tails the live log · verdict healthy|watch|broken · cadence ≈10% of budget, self-paced","train_monitor_kill: broken ≥0.8 conf → early kill (reason=monitor_broken) · else advisory","ASHA live-curve: intermediate metric (eval's own reader) · advisory rank vs siblings' finals; kill vs same-resource points of siblings' persisted per-resource curve","asha_live_kill: comparable intermediate below the quantile bar past grace → early kill (reason=asha_underperforming) · else advisory"]},
  {id:"e_seed",h:60,t:"Drafts · confirm · holdout",tag:"mixed",c:C.ev,sub:["n_seeds=3 initial drafts; search eval seed=0","confirm: disjoint seeds; host holdout: 25%"]},

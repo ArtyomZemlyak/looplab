@@ -114,3 +114,98 @@ def test_refill_rechecks_budget_after_waiting_for_a_slot(monkeypatch):
     )
     assert sorted(stub.ran) == [0, 1]
     assert stub.peak == 2
+
+
+class _GpuDispatchStub(_DispatchStub):
+    """Adds the resource seam so the scan actually has to fit a footprint.
+
+    Node 0 is WIDE (wants the whole pool); every other node wants one GPU. That is exactly the shape
+    work-conserving first-fit starves: each small job consumes a partial release, so all four GPUs are
+    never free at the same instant and the wide head keeps losing its turn.
+    """
+
+    def __init__(self, *, max_parallel, durations, gpus, wide_node=0,
+                 held_elsewhere=0, released_after=0):
+        super().__init__(max_parallel=max_parallel, durations=durations)
+        self._total = gpus
+        # `held_elsewhere` models the realistic case: this batch is dispatched while evals from the
+        # PREVIOUS one still own GPUs. Without it the pool is empty at t=0 and even the widest head
+        # fits on the first scan, which is precisely the case that never starves.
+        self._free = gpus - held_elsewhere
+        self._held = held_elsewhere
+        self._released_after = released_after
+        self._attempts = 0
+        self._wide = wide_node
+        self._epoch = 0
+
+    def _want(self, node_id: int) -> int:
+        return self._total if node_id == self._wide else 1
+
+    def _gpu_pool_epoch(self):
+        return self._epoch
+
+    def _wait_for_gpu_change(self, epoch):
+        return None
+
+    def _card_resource_pin_for_node(self, state, node):
+        return None
+
+    def _try_reserve_node_resources(self, node, resource_pin=None):
+        self._attempts += 1
+        if self._held and self._attempts > self._released_after:
+            self._free += self._held          # the previous batch finally gave its GPUs back
+            self._held = 0
+            self._epoch += 1
+        want = self._want(node.id)
+        if want > self._free:
+            return None
+        self._free -= want
+        self._epoch += 1
+        return {"gpu_ids": list(range(want)), "node_id": node.id}
+
+    def _node_resource_reservation_is_current(self, state, node, reservation):
+        return True
+
+    def _register_eval_resource_reservation(self, node_id, generation, reservation):
+        return None
+
+    def _clear_eval_resource_reservation(self, node_id, generation):
+        return None
+
+    def _release_gpus(self, gpu_ids):
+        self._free = min(self._total, self._free + len(gpu_ids or ()))
+        self._epoch += 1
+
+
+def test_a_wide_head_is_not_starved_by_a_stream_of_small_jobs(monkeypatch):
+    """Bounded aging: after a few bypasses the head gets exclusive claim on releases.
+
+    Work-conserving first-fit alone lets every partial release be consumed by the one-GPU jobs behind
+    the head, so the wide node only starts once the queue is otherwise EMPTY — it is served last no
+    matter how long it has waited.
+    """
+    from looplab.core.models import NodeStatus
+    from looplab.engine.orchestrator import Engine
+
+    smalls = list(range(1, 21))
+    # STAGGERED on purpose. With identical durations the four running siblings finish together and
+    # the pool is momentarily empty, which hands the head its GPUs by accident. Staggering means a
+    # small is always running, so all four GPUs are never free at the same instant — the exact shape
+    # first-fit starves.
+    durations = {0: 0.02, **{n: 0.02 + 0.004 * n for n in smalls}}
+    stub = _GpuDispatchStub(max_parallel=4, durations=durations, gpus=4,
+                            held_elsewhere=2, released_after=2)
+    nodes = {
+        n: types.SimpleNamespace(id=n, attempt=0, status=NodeStatus.pending, tombstoned=False)
+        for n in [0, *smalls]
+    }
+    monkeypatch.setattr(
+        "looplab.engine.orchestrator.fold",
+        lambda events: types.SimpleNamespace(
+            total_eval_seconds=0.0, aborted_nodes=set(), nodes=nodes,
+            paused=False, finished=False, stop_requested=None))
+    anyio.run(Engine._dispatch_evals, stub, [{"node_id": n} for n in [0, *smalls]], None, None)
+
+    assert sorted(stub.ran) == [0, *smalls], "every eval must still run"
+    assert stub.ran.index(0) < len(smalls), (
+        "the wide head was served last — every partial release went to the small jobs behind it")

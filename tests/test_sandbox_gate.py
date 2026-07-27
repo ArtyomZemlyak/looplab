@@ -455,3 +455,71 @@ def test_kill_tree_never_signals_an_already_reaped_process():
         assert fired == [], "must not signal a reaped PID's group"
         sb._kill_tree(_Live())
         assert fired == [(4322, 9)], "a live process is still group-killed"
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX process groups / rlimits")
+def test_a_clean_exit_does_not_leave_the_child_s_descendants_running(tmp_path):
+    """Exit 0 from the direct child is not proof its process group is empty.
+
+    A metric-producing parent can leave a redirected descendant behind — and that descendant keeps
+    holding the GPU the scheduler is about to hand to the next node. The sweep runs while the child
+    is still an un-reaped zombie, so its process group id cannot have been recycled onto a stranger.
+    """
+    import sys
+    import time
+
+    from looplab.runtime.sandbox import run_argv
+
+    evidence = tmp_path / "the-orphan-was-still-running"
+    # The descendant proves it survived by writing AFTER the parent is long gone. Checking liveness
+    # with `kill(pid, 0)` would NOT work: a killed orphan whose reaper never collects it stays a
+    # zombie, and signal 0 succeeds against a zombie.
+    child = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c',"
+        f" \"import time; time.sleep(2.0); open({str(evidence)!r}, 'w').write('survived')\"],"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "print('{\"metric\": 1.0}')\n"
+    )
+    rc, out, _err, timed_out = run_argv([sys.executable, "-c", child], str(tmp_path), 60.0)
+    assert rc == 0 and not timed_out and '"metric"' in out
+
+    time.sleep(3.5)
+    assert not evidence.exists(), "a descendant outlived the eval whose resources were released"
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX rlimits")
+def test_rlimit_caps_are_applied_without_preexec_fn(tmp_path):
+    """The caps still bite, and they arrive through an exec'd launcher rather than `preexec_fn`.
+
+    `preexec_fn` runs between fork and exec in a process forked from a MULTI-THREADED parent (every
+    eval runs on a worker thread), where it can inherit a held interpreter/import/allocator lock and
+    deadlock before `Popen` returns — with no timeout or cancel machinery reachable to break it.
+    """
+    import inspect
+    import sys
+
+    from looplab.runtime import sandbox as sandbox_module
+    from looplab.runtime.sandbox import run_argv
+
+    # The explanatory comment mentions the name; what must never come back is the kwarg itself.
+    source = inspect.getsource(sandbox_module.run_argv)
+    assert "preexec_fn" not in "".join(
+        line.split("#", 1)[0] for line in source.splitlines(keepends=True))
+
+    hog = f"{sys.executable}"
+    rc, _out, err, timed_out = run_argv(
+        [hog, "-c", "b = bytearray(400 * 1024 * 1024); print('allocated', len(b))"],
+        str(tmp_path), 60.0, mem_bytes=64 * 1024 * 1024)
+    assert rc != 0 and not timed_out, "RLIMIT_AS must still stop a runaway allocation"
+    assert "MemoryError" in err
+
+    rc_ok, out_ok, _err_ok, _ = run_argv(
+        [hog, "-c", "print('under the cap')"], str(tmp_path), 60.0,
+        mem_bytes=512 * 1024 * 1024)
+    assert rc_ok == 0 and "under the cap" in out_ok
+
+    # A launch failure must still be a controlled non-zero result, not a hang or a raw traceback.
+    rc_missing, _o, err_missing, _t = run_argv(
+        ["looplab-no-such-binary-exists"], str(tmp_path), 30.0, mem_bytes=64 * 1024 * 1024)
+    assert rc_missing != 0 and "failed to launch" in err_missing

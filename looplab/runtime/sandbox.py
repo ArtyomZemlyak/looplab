@@ -328,6 +328,36 @@ def parse_mem_bytes(spec) -> Optional[int]:
     return n if n > 0 else None
 
 
+# Fresh single-threaded launcher for the POSIX rlimit caps — see the call site in `run_argv` for why
+# `preexec_fn` is not an option under threaded evaluators. Passed as `-c` source (not `-m`) so it
+# needs nothing importable in the child; limits arrive as argv so there is no serialization step.
+# `execvp` keeps the pid, cwd, env, session and inherited pipes, so everything downstream — the pgid
+# `_kill_tree` targets, `proc.pid`, the drain threads — sees exactly the process it would have before.
+_RLIMIT_LAUNCHER = """import os, sys
+try:
+    import resource
+except ImportError:                       # no rlimits here — run uncapped rather than not at all
+    resource = None
+_a = sys.argv[1:]
+_argv = _a[3:]
+if resource is not None:
+    for _res, _val in ((resource.RLIMIT_AS, int(_a[0])), (resource.RLIMIT_FSIZE, int(_a[1]))):
+        if _val <= 0:
+            continue
+        try:
+            _soft, _hard = resource.getrlimit(_res)
+            _nh = _val if (_hard == resource.RLIM_INFINITY or _val < _hard) else _hard
+            resource.setrlimit(_res, (_val, _nh))
+        except (ValueError, OSError):
+            pass                          # unprivileged / already lower -> run uncapped
+try:
+    os.execvp(_argv[0], _argv)
+except OSError as exc:
+    sys.stderr.write("failed to launch: %s\\n" % (exc,))
+    sys.exit(127)
+"""
+
+
 def run_argv(argv: list[str], workdir: str, timeout: float,
              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
              log_path: Optional[str] = None, mem_bytes: Optional[int] = None,
@@ -381,30 +411,25 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
         _mem = int(mem_bytes) if (mem_bytes and mem_bytes > 0) else None
         _fsize = int(fsize_bytes) if (fsize_bytes and fsize_bytes > 0) else None
         if _mem is not None or _fsize is not None:
-            # CODEX AGENT: threaded evaluators must not use Python `preexec_fn`: fork can inherit an
-            # interpreter/import/allocator lock and deadlock before `Popen` returns, so no timeout or
-            # cancellation machinery exists. Use a fresh single-threaded launcher that applies setrlimit
-            # and then execs argv.
             # Best-effort resource caps for the trusted_local tier (#5 / doc 17 §7.6, P1-5). RLIMIT_AS
             # bounds the child's VIRTUAL address space so a runaway trainer hits MemoryError instead of
             # OOM-killing the whole host (+ the engine); RLIMIT_FSIZE bounds the size of any single file
-            # it writes so a runaway can't fill the disk (SIGXFSZ past the cap). preexec_fn runs in the
-            # child AFTER fork, BEFORE exec — keep it tiny and swallow errors (an exception there aborts
-            # the spawn). POSIX only; Windows has no rlimit (Job Objects would be the analog). Both cap
-            # aggressively (AS is virtual, FSIZE is per-file), so each defaults OFF and the caller opts
-            # in only where it fits (CUDA/torch reserve huge virtual; large checkpoints need big files).
-            def _apply_rlimits(_m=_mem, _f=_fsize):
-                import resource
-                for _res, _val in ((resource.RLIMIT_AS, _m), (resource.RLIMIT_FSIZE, _f)):
-                    if _val is None:
-                        continue
-                    try:
-                        _soft, _hard = resource.getrlimit(_res)
-                        _nh = _val if (_hard == resource.RLIM_INFINITY or _val < _hard) else _hard
-                        resource.setrlimit(_res, (_val, _nh))
-                    except (ValueError, OSError):
-                        pass   # can't lower that limit (unprivileged / already lower) -> run uncapped
-            kwargs["preexec_fn"] = _apply_rlimits
+            # it writes so a runaway can't fill the disk (SIGXFSZ past the cap). POSIX only; Windows has
+            # no rlimit (Job Objects would be the analog). Both cap aggressively (AS is virtual, FSIZE is
+            # per-file), so each defaults OFF and the caller opts in only where it fits (CUDA/torch
+            # reserve huge virtual; large checkpoints need big files).
+            #
+            # Applied by an exec'd LAUNCHER, never by `preexec_fn`. Every eval runs on an
+            # `anyio.to_thread` worker, and `preexec_fn` executes between fork and exec in a process
+            # that has just forked from a MULTI-THREADED parent: it can inherit an interpreter,
+            # import, or allocator lock held by another thread at the instant of the fork and deadlock
+            # there — before `Popen` even returns, so the timeout, stall and cancel machinery below
+            # never gets a chance to run and the run wedges with no diagnosis. The launcher instead
+            # runs in a FRESH single-threaded interpreter where no such lock can be inherited, applies
+            # the same caps, and `execvp`s the real argv (same pid, so `_kill_tree`/pgid are
+            # unaffected). It is passed as `-c` source rather than `-m` so it needs nothing importable.
+            argv = [sys.executable, "-c", _RLIMIT_LAUNCHER,
+                    str(_mem or 0), str(_fsize or 0), "--", *argv]
     # Don't hand the child code the host's secrets (review C2): a `print(os.environ)` or a stack
     # trace would otherwise exfiltrate LLM_API_KEY / cloud creds into the durable stdout tail. Drop
     # env vars whose NAME looks secret, but keep everything a process needs (PATH, SYSTEMROOT, …)
@@ -686,7 +711,13 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     deadline = _time.monotonic() + timeout
     while True:
         try:
-            proc.wait(timeout=0.25)
+            _wait_without_reaping(proc, 0.25)
+            # The child is finished but still UN-REAPED, so its pid — and therefore the process
+            # GROUP id — is still reserved. Sweep now: a clean exit 0 is not proof the group is
+            # empty, and a descendant that outlives it keeps the GPU the scheduler is about to hand
+            # to the next node (and holds our pipe write ends open, stalling the drain below).
+            _reap_process_group(proc)
+            proc.wait()
             break
         except subprocess.TimeoutExpired:
             if diverged.is_set():
@@ -720,11 +751,9 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                     pass
                 timed_out = True
                 break
-    # Let the final lines flush before we read the buffers.
-    # CODEX AGENT: clean exit of the direct child is not proof its process group/job is gone. A
-    # metric-producing parent can leave a redirected long-lived descendant, yet this path accepts the
-    # result and releases resources. Preserve the group/job handle and reap residual descendants on
-    # every terminal path, not only timeout/stall/cancel.
+    # Let the final lines flush before we read the buffers. Every terminal path above has already
+    # swept the group — the kill branches through `_kill_tree`, the ordinary-exit branch through
+    # `_reap_process_group` — so nothing the child left behind is still writing into these pipes.
     t_out.join(timeout=5)
     t_err.join(timeout=5)
     marker = (f"\n‼ {DIVERGED_SENTINEL} — non-finite loss/grad_norm "
@@ -767,6 +796,80 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
         if rc == 0:
             rc = -1
     return rc, out, err, timed_out
+
+
+def _wait_without_reaping(proc: "subprocess.Popen", timeout: float) -> None:
+    """Block up to `timeout` for the child to EXIT, deliberately leaving it un-reaped.
+
+    `Popen.wait` collects the child, which frees its pid — and with it the process GROUP id that
+    `_reap_process_group` still needs in order to signal descendants. `waitid(..., WNOWAIT)` reports
+    the exit and leaves the zombie in place, so the group id cannot be recycled underneath us and the
+    sweep can never land on a stranger's group. Raises `TimeoutExpired` exactly like `Popen.wait`, so
+    the caller's loop is unchanged. Falls back to `Popen.wait` where WNOWAIT does not exist
+    (Windows), which simply keeps today's behaviour there.
+    """
+    import time as _time
+
+    if getattr(proc, "returncode", None) is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    # A Popen-shaped test fake (or a handle without a real pid) has no process group to preserve, so
+    # there is nothing WNOWAIT would buy — take the ordinary wait.
+    if (os.name == "nt" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+            or not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT")):
+        proc.wait(timeout=timeout)
+        return
+    deadline = _time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            done = os.waitid(os.P_PID, pid,
+                             os.WEXITED | os.WNOHANG | os.WNOWAIT)   # type: ignore[attr-defined]
+        except (ChildProcessError, OSError, ValueError):
+            # Already collected elsewhere, or an unusable handle — fall back to the normal wait so
+            # the caller still sees an exit rather than spinning to its deadline.
+            proc.wait(timeout=max(0.0, deadline - _time.monotonic()))
+            return
+        if done is not None:
+            return
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(getattr(proc, "args", None), timeout)
+        # WNOWAIT has no blocking-with-timeout form, so this polls. 50 ms bounds the extra exit
+        # latency well under the 0.25 s cadence the caller's stall/cancel checks already run at,
+        # while keeping the idle cost of a multi-hour eval to a handful of syscalls per second.
+        _time.sleep(min(0.05, remaining))
+
+
+def _reap_process_group(proc: "subprocess.Popen") -> None:
+    """SIGKILL whatever is still alive in the exited child's process group.
+
+    A metric-producing parent can exit 0 while a descendant it redirected keeps running — a
+    DataLoader worker, a background trainer, a `nohup`-ed helper — and that descendant keeps holding
+    the GPU the scheduler is about to hand to the next node. Correct ONLY while the leader is still a
+    zombie: its pid, and therefore the group id, cannot be recycled until it is collected, which is
+    exactly what `_wait_without_reaping` guarantees at the one call site.
+    """
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return
+    if getattr(proc, "returncode", None) is not None:
+        # Same fence `_kill_tree` documents: once the child has been COLLECTED its pid is free for
+        # the OS to reuse, so `getpgid(pid)` can name a stranger's group. The one caller reaches here
+        # while the child is still a zombie; anything else must not signal on a guess.
+        return
+    try:
+        pgid = os.getpgid(pid)
+        own = os.getpgid(0)
+    except (OSError, ValueError):
+        return
+    if pgid == own:
+        # `start_new_session=True` did not take effect (or this is a Popen the caller built itself),
+        # so the child shares the ENGINE's group — signalling it would kill the engine.
+        return
+    try:
+        os.killpg(pgid, 9)
+    except (OSError, ValueError):
+        pass
 
 
 def _kill_tree(proc: "subprocess.Popen") -> None:

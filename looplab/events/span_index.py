@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import threading
 from collections import OrderedDict, defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +72,24 @@ def _read_exact(stream, size: int, *, label: str) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+@contextmanager
+def _reading(path: Path, handle, offset: int):
+    """Read from `handle` when the caller owns one, else open `path` for this read alone.
+
+    `get_index` opens spans.jsonl ONCE and derives identity/size from `fstat` on that descriptor, so
+    passing it down keeps the validation and the bytes on the same inode — a rewrite mid-scan cannot
+    splice two generations of the file into one index. The `handle is None` branch preserves the old
+    self-contained behaviour for any caller that has no descriptor to lend.
+    """
+    if handle is None:
+        with open(path, "rb") as opened:
+            opened.seek(offset)
+            yield opened
+        return
+    handle.seek(offset)
+    yield handle
 
 
 def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int]], int]:
@@ -156,12 +175,14 @@ class SpanIndex:
         for light, off, length in records:
             self._append(light, off, length)
 
-    def _rebuild(self, size: int) -> None:
+    def _rebuild(self, size: int, handle=None) -> None:
         # unavailable trace bytes must propagate as unavailable; publishing an empty
         # index here would turn an ACL/read failure into false evidence that the run had no spans.
         # A readable empty source and an unreadable source are different facts. Let I/O failures
         # reach the HTTP projection boundary instead of publishing a complete-looking empty index.
-        with open(self.path, "rb") as f:
+        # `handle` is the descriptor `get_index` already validated by `fstat`; reading through it
+        # keeps identity, size and content on ONE inode instead of resolving the pathname again.
+        with _reading(self.path, handle, 0) as f:
             # CODEX AGENT: a cold rebuild materializes the entire spans.jsonl before parsing, so a
             # multi-GB trace can OOM the server even though the resulting index is lightweight. Scan
             # bounded chunks/lines incrementally and publish only after a complete validated pass.
@@ -176,12 +197,12 @@ class SpanIndex:
             self._extend(records)
             self.covers = consumed
 
-    def _topup(self, size: int) -> None:
-        """Parse only the bytes appended since `self.covers` (spans.jsonl is append-only)."""
+    def _topup(self, size: int, handle=None) -> None:
+        """Parse only the bytes appended since `self.covers` (spans.jsonl is append-only). `handle`
+        is `get_index`'s already-validated descriptor — see `_rebuild`."""
         if size <= self.covers:
             return
-        with open(self.path, "rb") as f:
-            f.seek(self.covers)
+        with _reading(self.path, handle, self.covers) as f:
             expected = size - self.covers
             buf = _read_exact(f, expected, label="trace tail")
         records, consumed = _scan_light(buf, self.covers)   # parse OUTSIDE the lock
@@ -439,57 +460,71 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
     the file does not exist. Cached in-process; tops up from the appended tail on a hit, loads the
     persisted index or rebuilds on a cold miss. Thread-safe."""
     p = Path(spans_path)
+    key = str(p)
     with _LOCK:
+        # OPEN FIRST, then `fstat` that same descriptor. `stat(path)` followed by `open(path)`
+        # resolves the pathname twice: a rewrite in between would cache-key and validate inode A
+        # while the probe — and every later read — observed inode B, i.e. a trace view stitched from
+        # two generations of the file. One descriptor makes the identity, the size and the readability
+        # proof all describe the same inode, and it folds the separate readability probe into the same
+        # syscall: cached indexes are accelerators, not authority once the source is unreadable, so a
+        # permission loss must never turn a previously indexed source into exact zero.
         try:
-            # CODEX AGENT: stat and open resolve the pathname independently. A replace between them
-            # validates/cache-keys inode A while the probe and later reads observe inode B, producing
-            # a cross-generation trace view. Open first and derive identity/size from `fstat` on that
-            # same descriptor (and keep/revalidate it through the scan).
-            stt = p.stat()
+            handle = open(p, "rb")
         except FileNotFoundError:
+            if key in _CACHE:
+                # This run has been OBSERVED to have spans. A source that has since disappeared is an
+                # availability failure, not "the run produced no trace" — publishing empty would turn
+                # a vanished/renamed file into false evidence. Let it reach the projection boundary,
+                # which reports `unavailable`. (Every other OSError propagates unconditionally.)
+                raise
             return None  # no spans.jsonl (tracing off / pre-tracing run) — caller degrades
-        # cached indexes are accelerators, not authority once the source is unreadable.
-        # `stat()` may succeed while opening the source is denied. Probe on every lookup, including
-        # cache hits, so a permission loss cannot turn a previously indexed source into exact zero.
-        # A disappearance *after* the successful stat is an availability race, not known-empty truth.
-        with open(p, "rb"):
-            pass
-        size, mtime_ns = stt.st_size, stt.st_mtime_ns
-        identity = (stt.st_dev, stt.st_ino)
-        key = str(p)
-        idx = _CACHE.get(key)
-        if idx is not None:
-            # Reuse the cached index only when spans.jsonl is the SAME file grown by pure appends —
-            # mirrors EventStore.read_all's guard so a network/FUSE mount can't feed the trace view a
-            # stale prefix: `replaced` = a new inode (atomic rewrite/reset), `same_size_rewrite` = an
-            # in-place rewrite that kept the byte count (detected by a moved mtime), `shrank` = a
-            # truncate/compaction. Any of these invalidates the byte offsets → fall through to reload.
-            replaced = idx.identity != identity
-            same_size_rewrite = (size == idx.covers and idx.mtime_ns is not None
-                                 and mtime_ns != idx.mtime_ns)
-            shrank = size < idx.covers
-            if not (replaced or same_size_rewrite or shrank):
-                if idx.covers < size:
-                    idx._topup(size)            # parse only the appended tail
-                idx.mtime_ns = mtime_ns
-                _CACHE.move_to_end(key)
-                idx._persist()
-                return idx
-        # Cold miss (not cached, replaced, or shrank): load the persisted index if valid, else rebuild.
-        idx = _load_persisted(p, identity, size)
-        if idx is None:
-            idx = SpanIndex(p)
-            idx.identity = identity
-            idx._rebuild(size)
-        elif idx.covers < size:
-            idx._topup(size)
-        idx.mtime_ns = mtime_ns
-        _CACHE[key] = idx
-        _CACHE.move_to_end(key)
-        while len(_CACHE) > _CACHE_MAX:
-            _CACHE.popitem(last=False)
-        idx._persist()
-        return idx
+        with handle:
+            return _index_from_handle(p, key, handle)
+
+
+def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
+    """Build/refresh the index for `p` reading exclusively through the caller's open descriptor.
+
+    Split out only so the descriptor's lifetime is a plain `with` in `get_index`; the module `_LOCK`
+    is held by that caller for the whole call.
+    """
+    stt = os.fstat(handle.fileno())
+    size, mtime_ns = stt.st_size, stt.st_mtime_ns
+    identity = (stt.st_dev, stt.st_ino)
+    idx = _CACHE.get(key)
+    if idx is not None:
+        # Reuse the cached index only when spans.jsonl is the SAME file grown by pure appends —
+        # mirrors EventStore.read_all's guard so a network/FUSE mount can't feed the trace view a
+        # stale prefix: `replaced` = a new inode (atomic rewrite/reset), `same_size_rewrite` = an
+        # in-place rewrite that kept the byte count (detected by a moved mtime), `shrank` = a
+        # truncate/compaction. Any of these invalidates the byte offsets → fall through to reload.
+        replaced = idx.identity != identity
+        same_size_rewrite = (size == idx.covers and idx.mtime_ns is not None
+                             and mtime_ns != idx.mtime_ns)
+        shrank = size < idx.covers
+        if not (replaced or same_size_rewrite or shrank):
+            if idx.covers < size:
+                idx._topup(size, handle)    # parse only the appended tail
+            idx.mtime_ns = mtime_ns
+            _CACHE.move_to_end(key)
+            idx._persist()
+            return idx
+    # Cold miss (not cached, replaced, or shrank): load the persisted index if valid, else rebuild.
+    idx = _load_persisted(p, identity, size)
+    if idx is None:
+        idx = SpanIndex(p)
+        idx.identity = identity
+        idx._rebuild(size, handle)
+    elif idx.covers < size:
+        idx._topup(size, handle)
+    idx.mtime_ns = mtime_ns
+    _CACHE[key] = idx
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > _CACHE_MAX:
+        _CACHE.popitem(last=False)
+    idx._persist()
+    return idx
 
 
 def invalidate(spans_path: str | os.PathLike) -> None:

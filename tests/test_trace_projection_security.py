@@ -486,3 +486,52 @@ def test_span_scan_fallback_does_not_invent_trace_cardinality(tmp_path, monkeypa
     assert projection["trace_cardinality_unavailable"] is True
     assert projection["truncated"] is True
     assert {"trace_total_spans", "trace_visible_spans", "omitted_trace_spans"}.isdisjoint(projection)
+
+
+def test_span_index_reads_one_inode_from_open_to_scan(tmp_path, monkeypatch):
+    """`stat(path)` then `open(path)` resolves the pathname twice.
+
+    A rewrite in between would cache-key and validate inode A while every later read observed inode
+    B — a trace view stitched from two generations of the file. The index derives identity, size and
+    content from ONE descriptor, so a replace can only be seen as a whole, never spliced.
+    """
+    import os
+    from pathlib import Path
+
+    from looplab.events import span_index
+
+    span_index._CACHE.clear()
+    source = tmp_path / "spans.jsonl"
+    first = json.dumps(_span(0, trace_id="generation-one")) + "\n"
+    source.write_text(first, encoding="utf-8")
+
+    replacement = json.dumps(_span(1, trace_id="generation-two")) + "\n"
+    real_open = span_index.open if hasattr(span_index, "open") else open
+    swapped = {"n": 0}
+
+    def replacing_open(file, *args, **kwargs):
+        # Swap the file the instant the index opens it: the OLD code stat()'d before this point, so
+        # it keyed on the pre-swap inode and then read the post-swap bytes.
+        handle = real_open(file, *args, **kwargs)
+        if Path(str(file)) == source and swapped["n"] == 0:
+            swapped["n"] = 1
+            other = tmp_path / "replacement.jsonl"
+            other.write_text(replacement, encoding="utf-8")
+            os.replace(other, source)
+        return handle
+
+    monkeypatch.setattr("builtins.open", replacing_open)
+    idx = span_index.get_index(source)
+    monkeypatch.undo()
+    assert idx is not None
+
+    # Whatever generation was indexed, the identity recorded for it must be the identity of the
+    # bytes that were actually parsed — never the other inode's.
+    traces = {span.get("trace_id") for span in idx.light_spans()}
+    on_disk = os.stat(source)
+    if idx.identity == (on_disk.st_dev, on_disk.st_ino):
+        assert traces == {"generation-two"}
+    else:
+        assert traces == {"generation-one"}, (
+            "identity was keyed on the pre-swap inode while the content came from the post-swap one")
+    span_index._CACHE.clear()

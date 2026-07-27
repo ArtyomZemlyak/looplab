@@ -293,6 +293,12 @@ except (TypeError, ValueError, orjson.JSONEncodeError) as exc:
     raise RuntimeError("calibration Settings profile must remain JSON-safe") from exc
 if _profile_json != SPECULATION_CALIBRATION_PROFILE_SETTINGS:
     raise RuntimeError("calibration Settings profile is not canonical snapshot JSON")
+# Bounded aging for continuous eval dispatch (`_dispatch_evals`). After this many consecutive
+# bypasses the queue head gets exclusive claim on GPU releases, so a wide request stops losing every
+# partial release to the small jobs behind it. The claim ends the moment the head is admitted, or —
+# see the scan — when the pool has fully drained and the head STILL does not fit, which proves it
+# wants more than the box physically has and must not be allowed to wedge the batch.
+_HEAD_BYPASS_LIMIT = 3
 _SPECULATION_CALIBRATION_PROFILE_SCHEMA = "looplab.speculation-calibration-profile/v1"
 SPECULATION_CALIBRATION_PROFILE_DIGEST = "sha256:" + hashlib.sha256(orjson.dumps(
     {
@@ -3307,6 +3313,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
                     async with anyio.create_task_group() as tg:
                         pending = list(evals)
+                        # Bounded aging state for the scan below (see _HEAD_BYPASS_LIMIT).
+                        head_id: Optional[int] = None
+                        head_bypasses = 0
+                        head_unsatisfiable = False
                         while pending:
                             # Fresh fold PER ADMISSION (like the serial branch, unlike the old fold-once):
                             # continuous dispatch means earlier evals in THIS batch complete mid-loop, so
@@ -3344,11 +3354,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     continue
                                 kept.append(a)
                             pending = kept
-                            # CODEX AGENT: work-conserving first-fit can starve a multi-GPU head behind
-                            # a continuing stream of smaller jobs: every partial release is consumed before
-                            # all requested GPUs become free together. Add bounded bypass/aging or reserve
-                            # capacity once a large request has waited.
-                            for pos, a in enumerate(pending):
+                            # BOUNDED AGING. First-fit is work-conserving and right almost always — an
+                            # explicit CPU node behind a GPU-heavy head should start — but a steady
+                            # stream of small jobs consumes every PARTIAL release, so a wide head can
+                            # wait forever for all of its GPUs to be free at the same instant. Once the
+                            # head has been passed over `_HEAD_BYPASS_LIMIT` times in a row, scan ONLY
+                            # the head: releases then accumulate toward it instead of being eaten. The
+                            # claim is dropped below if the pool drains completely and it still does not
+                            # fit, so an impossible request waits its turn instead of wedging the batch.
+                            current_head = pending[0]["node_id"] if pending else None
+                            if current_head != head_id:
+                                head_id, head_bypasses, head_unsatisfiable = current_head, 0, False
+                            scan = pending
+                            if head_bypasses >= _HEAD_BYPASS_LIMIT and not head_unsatisfiable:
+                                scan = pending[:1]
+                            for pos, a in enumerate(scan):
                                 node = cur.nodes.get(a["node_id"])
                                 if node is None or not hasattr(self, "_try_reserve_node_resources"):
                                     chosen_index = pos
@@ -3363,6 +3383,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                     chosen_node = node
                                     chosen_reservation = candidate
                                     break
+                            # A bypass is what ages the head; picking the head itself clears the debt.
+                            if chosen_index is not None:
+                                head_bypasses = head_bypasses + 1 if chosen_index > 0 else 0
+                            elif scan is not pending and slots.value >= self._eval_parallel - 1:
+                                # The pool was reserved for the head and drained to empty (this task
+                                # holds the only taken slot) and it STILL does not fit: it wants more
+                                # than the box has. Release the claim so the queue behind it can move.
+                                head_unsatisfiable = True
                             if chosen_index is None:
                                 slots.release()
                                 if not pending:

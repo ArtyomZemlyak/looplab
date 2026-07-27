@@ -68,6 +68,19 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
     this avoids treating ordinal, GPU-UUID, and MIG aliases as different hardware. Different OS users,
     containers, or hosts do not share that lease and require an external scheduler.
 
+    Admission scans the queue for the first experiment whose complete footprint fits *now*, so an
+    explicit CPU-only node behind a GPU-heavy one still starts. That is work-conserving but not fair
+    on its own: a steady stream of one-GPU jobs consumes every partial release, and a wide request can
+    wait for all of its GPUs to be free at the same instant forever. After **3** consecutive bypasses
+    the queue head therefore takes exclusive claim on releases until it is admitted — or until the
+    pool has drained completely and it still does not fit, which proves it wants more than the box
+    has and hands the queue back to the jobs behind it rather than wedging the batch.
+
+    An evaluation's resources are released when its process group is empty, not merely when the
+    command exited: a metric-producing parent that leaves a descendant running would otherwise keep
+    the GPU while the scheduler hands it to the next node. The sweep runs while the child is still an
+    un-reaped zombie, so its process group id cannot have been recycled onto an unrelated process.
+
 ## Where each piece lives in the code
 
 | Concept | Module |
