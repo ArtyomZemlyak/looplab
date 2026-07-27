@@ -12,6 +12,7 @@ import json
 import math
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -59,6 +60,23 @@ if os.name == "nt":
     _get_file_information_by_handle_ex.restype = wintypes.BOOL
 else:
     _get_file_information_by_handle_ex = None
+
+
+if os.name != "nt" and sys.platform.startswith("linux"):
+    import ctypes
+
+    _libc = ctypes.CDLL(None, use_errno=True)
+    _inotify_init1 = getattr(_libc, "inotify_init1", None)
+    _inotify_add_watch = getattr(_libc, "inotify_add_watch", None)
+    if _inotify_init1 is not None:
+        _inotify_init1.argtypes = (ctypes.c_int,)
+        _inotify_init1.restype = ctypes.c_int
+    if _inotify_add_watch is not None:
+        _inotify_add_watch.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32)
+        _inotify_add_watch.restype = ctypes.c_int
+else:
+    _inotify_init1 = None
+    _inotify_add_watch = None
 
 
 class ScopeSourceError(RuntimeError):
@@ -154,6 +172,46 @@ def _descriptor_change_time(descriptor: int) -> int | None:
     return int(info.ChangeTime)
 
 
+def _start_descriptor_change_watch(descriptor: int) -> int | None:
+    """Watch a Linux file descriptor for writes that metadata timestamps can miss."""
+    if _inotify_init1 is None or _inotify_add_watch is None:
+        return None
+    watch = _inotify_init1(
+        getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    if watch < 0:
+        return None
+    # Follow /proc/self/fd/<n> to the already-validated inode.  IN_MODIFY and
+    # IN_ATTRIB catch a same-size A/B/A rewrite even when it restores mtime and
+    # completes inside one filesystem ctime tick.
+    mask = 0x00000002 | 0x00000004 | 0x00000008 | 0x00000400 | 0x00000800
+    watched = _inotify_add_watch(
+        watch, os.fsencode(f"/proc/self/fd/{descriptor}"), mask
+    )
+    if watched < 0:
+        os.close(watch)
+        return None
+    return watch
+
+
+def _descriptor_change_watch_triggered(watch: int | None) -> bool:
+    if watch is None:
+        return False
+    try:
+        while True:
+            try:
+                event = os.read(watch, 4096)
+            except BlockingIOError:
+                return False
+            if event:
+                return True
+            return False
+    except OSError:
+        # A watcher that was successfully installed but cannot be observed is
+        # not trustworthy enough for an authoritative report capture.
+        return True
+
+
 def _directory_identity(status: os.stat_result) -> tuple[int, ...]:
     return (
         int(status.st_dev),
@@ -243,6 +301,7 @@ def _read_from_stable_file(
     problem: Exception | None = None
     opened_change_time: int | None = None
     opened_change_time_valid = False
+    change_watch: int | None = None
     try:
         try:
             opened = os.fstat(descriptor)
@@ -253,6 +312,7 @@ def _read_from_stable_file(
                 )
             opened_change_time = _descriptor_change_time(descriptor)
             opened_change_time_valid = True
+            change_watch = _start_descriptor_change_watch(descriptor)
             result = reader(descriptor, int(before.st_size))
         except Exception as exc:  # noqa: BLE001 - revalidate identity before propagating
             problem = exc
@@ -265,9 +325,12 @@ def _read_from_stable_file(
             ) from exc
         if (_file_observation(after_read) != _file_observation(opened)
                 or (opened_change_time_valid
-                    and after_change_time != opened_change_time)):
+                    and after_change_time != opened_change_time)
+                or _descriptor_change_watch_triggered(change_watch)):
             raise ScopeSourceChangedError(f"scope source changed while reading: {path.name}")
     finally:
+        if change_watch is not None:
+            os.close(change_watch)
         os.close(descriptor)
 
     try:
@@ -356,6 +419,24 @@ def _revalidate_file(captured: _CapturedFile) -> None:
                 f"scope source could not be revalidated: {captured.path.name}"
             ) from exc
         if current_change_time != captured.change_time:
+            raise ScopeSourceChangedError(
+                f"scope source changed during capture: {captured.path.name}"
+            )
+    elif captured.raw is not None:
+        # POSIX has no portable descriptor generation counter. Re-reading
+        # closes the post-read validation gap when content changes but coarse
+        # ctime/mtime observations remain numerically identical.
+        try:
+            current_raw, _, _ = _read_from_stable_file(
+                captured.path, current, _read_exact
+            )
+        except ScopeSourceChangedError:
+            raise
+        except ScopeSourceError as exc:
+            raise ScopeSourceChangedError(
+                f"scope source could not be revalidated: {captured.path.name}"
+            ) from exc
+        if current_raw != captured.raw:
             raise ScopeSourceChangedError(
                 f"scope source changed during capture: {captured.path.name}"
             )

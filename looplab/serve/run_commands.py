@@ -3805,29 +3805,50 @@ class RunCommandService:
                                 time.sleep(self.poll_interval)
 
                 time.sleep(self.poll_interval)
-            uncertain_start = False
-            if (record.get("spawned_by_command")
-                    and not record.get("spawn_claim_released")):
-                if self._engine_state(rd) is True:
+            # Serialize the final observation and terminal write with GET/retry.
+            # Without this last check, a completion arriving at the deadline
+            # could be promoted to succeeded by GET and then overwritten by
+            # this worker's stale timed_out write.
+            with self.sequence(rd):
+                current = self._load(path)
+                if current is not None:
+                    record = current
+                if record.get("status") in TERMINAL_STATUSES:
+                    return
+                final_observation = self._observe(rd)
+                if self._postcondition(rd, record, final_observation):
+                    self._succeeded(rd, path, record)
+                    return
+                domain_error = (self._domain_failure(rd, record, final_observation)
+                                if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
+                if domain_error is not None:
                     self._clear_spawn_claim(rd, command_id)
-                    record["spawn_claim_released"] = True
+                    self._terminal(path, record, "failed", error=domain_error)
+                    return
+
+                uncertain_start = False
+                if (record.get("spawned_by_command")
+                        and not record.get("spawn_claim_released")):
+                    if self._engine_state(rd) is True:
+                        self._clear_spawn_claim(rd, command_id)
+                        record["spawn_claim_released"] = True
+                    else:
+                        uncertain_start = self._quarantine_spawn_claim(
+                            rd, command_id, record.get("engine_pid"))
                 else:
-                    uncertain_start = self._quarantine_spawn_claim(
-                        rd, command_id, record.get("engine_pid"))
-            else:
-                self._clear_spawn_claim(rd, command_id)
-            if uncertain_start:
-                self._terminal(path, record, "timed_out", error=_error(
-                    "engine_start_uncertain",
-                    "the detached engine has not exposed engine.lock and is not known to have exited",
-                    "wait and GET this command; do not retry or launch another driver while quarantined",
-                    retryable=False))
-            else:
-                self._terminal(path, record, "timed_out", error=_error(
-                    "postcondition_timeout",
-                    f"command intent was recorded but {record.get('postcondition')} was not observed in time",
-                    "GET may reconcile late completion; otherwise POST this command id's /retry endpoint",
-                    retryable=True))
+                    self._clear_spawn_claim(rd, command_id)
+                if uncertain_start:
+                    self._terminal(path, record, "timed_out", error=_error(
+                        "engine_start_uncertain",
+                        "the detached engine has not exposed engine.lock and is not known to have exited",
+                        "wait and GET this command; do not retry or launch another driver while quarantined",
+                        retryable=False))
+                else:
+                    self._terminal(path, record, "timed_out", error=_error(
+                        "postcondition_timeout",
+                        f"command intent was recorded but {record.get('postcondition')} was not observed in time",
+                        "GET may reconcile late completion; otherwise POST this command id's /retry endpoint",
+                        retryable=True))
         except Exception as exc:  # noqa: BLE001 - worker failures must become observable records
             try:
                 self._terminal(path, record, "failed", error=_error(

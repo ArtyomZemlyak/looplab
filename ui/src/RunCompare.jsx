@@ -1,16 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { get, fmt, fmtAgo, fmtElapsedSeconds } from './util.js'
+import { get, fmt, fmtAgo, fmtElapsedSeconds, normalizeRunGeneration } from './util.js'
 import { effectiveRunStatus, metricComparable } from './runIndex.js'
 import { bestComparableRun, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
+import { deadlineRequest } from './requestDeadline.js'
+import { hashWithRunRouteState } from './runRouteState.js'
 
 const path = (id, suffix) => `/api/runs/${encodeURIComponent(id)}${suffix}`
+const COMPARE_DETAIL_TIMEOUT_MS = 8000
 
-async function loadDetail(run, signal) {
-  try {
-    const snapshot = await get(path(run.run_id, '/state'), { signal, cache: 'no-store' })
-    let config = null, probe = null, configReady = false
+export async function loadDetail(run, signal, timeoutMs = COMPARE_DETAIL_TIMEOUT_MS) {
+  let snapshot = null, config = null, probe = null, configReady = false
+  const timed = deadlineRequest(async requestSignal => {
+    snapshot = await get(path(run.run_id, '/state'), { signal: requestSignal, cache: 'no-store' })
     try {
-      config = await get(path(run.run_id, '/config'), { signal, cache: 'no-store' })
+      config = await get(path(run.run_id, '/config'), { signal: requestSignal, cache: 'no-store' })
       configReady = true
     } catch (error) {
       if (error?.name === 'AbortError') throw error
@@ -18,10 +21,16 @@ async function loadDetail(run, signal) {
     try {
       // This is deliberately AFTER config: a reset during either read makes the compound snapshot
       // unverifiable, so config is withheld instead of being joined to another run generation.
-      probe = await get(path(run.run_id, '/lifecycle'), { signal, cache: 'no-store' })
+      probe = await get(path(run.run_id, '/lifecycle'), { signal: requestSignal, cache: 'no-store' })
     } catch (error) {
       if (error?.name === 'AbortError') throw error
     }
+  }, timeoutMs)
+  const abort = () => timed.controller.abort()
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  try {
+    await timed.promise
     const stable = snapshot?.generation && probe?.generation === snapshot.generation
     return {
       runId: run.run_id,
@@ -32,8 +41,24 @@ async function loadDetail(run, signal) {
     }
   } catch (error) {
     if (error?.name === 'AbortError') throw error
-    return { runId: run.run_id, state: null, config: null, partial: true }
+    return {
+      runId: run.run_id,
+      generation: snapshot?.generation || null,
+      state: snapshot?.state || null,
+      config: null,
+      partial: true,
+    }
+  } finally {
+    signal?.removeEventListener('abort', abort)
   }
+}
+
+export function championRunHref(run, detail) {
+  const generation = normalizeRunGeneration(detail?.generation)
+  const nodeId = detail?.state?.best_node_id
+  if (!generation || !Number.isSafeInteger(nodeId) || nodeId < 0) return null
+  return hashWithRunRouteState(
+    `#/run/${encodeURIComponent(run.run_id)}`, { generation, nodeId })
 }
 
 const valueFor = (id, run, detail, names) => {
@@ -113,6 +138,7 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove }
             const label = run.label || run.run_id
             const detail = detailById[run.run_id]
             const isBest = comparable && run.run_id === best
+            const championHref = championRunHref(run, detail)
             return <tr key={run.run_id} className={isBest ? 'best-row' : ''}>
               <th scope="row" className="compare-pinned">
                 <a href={`#/run/${encodeURIComponent(run.run_id)}`}>{label}</a>
@@ -120,8 +146,8 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove }
                 {run.label && <small>{run.run_id}</small>}
                 {detail?.partial && <small>partial detail</small>}
               </th>
-              {columns.map(id => <td key={id}>{id === 'champion' && detail?.state?.best_node_id != null
-                ? <a href={`#/run/${encodeURIComponent(run.run_id)}?node=${detail.state.best_node_id}`}
+              {columns.map(id => <td key={id}>{id === 'champion' && championHref
+                ? <a href={championHref}
                     aria-label={`Open champion experiment ${detail.state.best_node_id} in ${label}`}>
                     #{detail.state.best_node_id}</a>
                 : valueFor(id, run, detail, names)}</td>)}

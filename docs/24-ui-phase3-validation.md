@@ -22,7 +22,7 @@ acceptance.
 - Configuration differences are owner-only, bounded to 160 rendered rows, and disclose truncation.
   Champion cells deep-link to the exact experiment.
 - The compare implementation is an on-demand chunk with a 3 KiB incremental gzip ceiling. The
-  measured whole-product baseline is 355,455 B gzip under a 348 KiB ceiling; existing route budgets
+  measured whole-product baseline is 355,610 B gzip under a 348 KiB ceiling; existing route budgets
   remain unchanged.
 
 ## Automated acceptance

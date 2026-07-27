@@ -1,11 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { createServer } from 'vite'
 
 import {
   bestComparableRun, configDifferences, decodePortfolioViews, DEFAULT_COMPARE_COLUMNS,
   normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
 } from '../src/portfolioModel.js'
+import { parseRunRouteState } from '../src/runRouteState.js'
+
+const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const state = {
   project: 'project-a',
@@ -72,6 +77,37 @@ test('configuration differences are bounded and preserve unavailable evidence', 
   assert.equal(result.rows[0].values[2], 'unavailable')
 })
 
+test('compare detail is deadline-bounded and champion links keep their generation fence', async () => {
+  let vite
+  const originalFetch = globalThis.fetch
+  try {
+    vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    const { championRunHref, loadDetail } = await vite.ssrLoadModule('/src/RunCompare.jsx')
+    globalThis.fetch = () => new Promise(() => {})
+    const started = Date.now()
+    const detail = await loadDetail({ run_id: 'hung-run' }, new AbortController().signal, 15)
+    assert.equal(detail.partial, true)
+    assert.equal(detail.state, null)
+    assert.ok(Date.now() - started < 500, 'a transport that ignores AbortSignal must still settle')
+
+    const generation = 'a'.repeat(64)
+    const href = championRunHref({ run_id: 'run/one' }, {
+      generation, state: { best_node_id: 7 },
+    })
+    assert.equal(href, `#/run/run%2Fone?gen=${generation}&node=7`)
+    const parsed = parseRunRouteState(href)
+    assert.equal(parsed.state.generation, generation)
+    assert.equal(parsed.state.nodeId, 7)
+    assert.deepEqual(parsed.issues, [])
+  } finally {
+    globalThis.fetch = originalFetch
+    await vite?.close()
+  }
+})
+
 test('portfolio UI exposes saved views, bounded selection, fenced detail, and comfortable density', async () => {
   const [list, compare, density, app, css] = await Promise.all([
     readFile(new URL('../src/RunList.jsx', import.meta.url), 'utf8'),
@@ -84,6 +120,8 @@ test('portfolio UI exposes saved views, bounded selection, fenced detail, and co
   assert.match(list, /next\.size >= 8/)
   assert.match(list, /Save current view/)
   assert.match(compare, /probe\?\.generation === snapshot\.generation/)
+  assert.match(compare, /deadlineRequest/)
+  assert.match(compare, /hashWithRunRouteState/)
   assert.match(compare, /role="region" aria-label="Selected run comparison" tabIndex=\{0\}/)
   assert.match(compare, /do not share one task and objective/)
   assert.match(density, /data-comfortable/)

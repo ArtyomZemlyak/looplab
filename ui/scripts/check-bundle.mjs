@@ -23,7 +23,7 @@ const collaboration = named('collaboration-support')
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
     // Phase 3 adds the independently lazy, generation-fenced RunCompare workspace. Its measured
-    // production baseline is 355,455 B gzip; 348 KiB leaves 897 B while the unchanged route
+    // production baseline is 355,610 B gzip; 348 KiB leaves 742 B while the unchanged route
     // ceilings and the dedicated interaction ceiling below prevent this feature from hiding eager
     // growth. Phase 0 restored the previous 342 KiB target before this intentional product addition.
     js: { gzip: 348 * KIB },
@@ -50,7 +50,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Run compare increment',
       roots: [source('src/RunCompare.jsx')],
       baselineRoots: [entry, named('RunList'), ownerChrome],
-      // Measured 2,209 B gzip after the list/model dependencies already present in the portfolio
+      // Measured 2,374 B gzip after the list/model dependencies already present in the portfolio
       // route. Keep the on-demand comparison workspace below 3 KiB incremental transfer.
       limits: { js: { gzip: 3 * KIB } },
     },
