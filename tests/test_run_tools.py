@@ -958,3 +958,46 @@ def test_make_roles_flag_off_is_plain_researcher():
     researcher, _ = make_roles(ToyTask(), Settings(backend="llm", unified_agent=False,
                                                    researcher_tools=False))
     assert isinstance(researcher, LLMResearcher)
+
+
+# --------------------------------------------------------------------------- partial cross-run reads
+def _truncated_run(root, run_id="sib", task_id="t"):
+    """A sibling run whose log is unreadable past a corrupt record — the surviving prefix folds into
+    a RunState that is indistinguishable from a complete one."""
+    rd = root / run_id
+    rd.mkdir(parents=True)
+    (rd / "events.jsonl").write_bytes(
+        b'{"v":1,"seq":0,"type":"run_started","data":{"run_id":"' + run_id.encode()
+        + b'","task_id":"' + task_id.encode() + b'","goal":"g","direction":"max"}}\n'
+        b'{corrupt\n'
+        b'{"v":1,"seq":1,"type":"node_created","data":{"id":9}}\n')
+    return rd
+
+
+def test_a_truncated_sibling_log_is_labelled_instead_of_read_as_a_whole_run(tmp_path):
+    """`iter_event_jsonl` stops at the first unreadable record, and the prefix folds into a state that
+    looks complete. Reporting `best` and a node count off that prefix told an in-loop agent that later
+    experiments do not exist, when the truth is that the log could not be read that far."""
+    from types import SimpleNamespace
+
+    from looplab.tools.run_tools import SiblingRunTools
+    _truncated_run(tmp_path)
+    tools = SiblingRunTools(tmp_path, "self")
+    tools.bind_state(SimpleNamespace(task_id="t", goal="g", direction="max"), None)
+    listing = tools.execute("list_sibling_runs", {})
+    assert "PARTIAL SOURCE" in listing, listing
+    assert "later results unknown" in listing
+
+
+def test_a_complete_sibling_log_carries_no_partial_label(tmp_path):
+    from types import SimpleNamespace
+
+    from looplab.tools.run_tools import SiblingRunTools
+    rd = tmp_path / "sib"
+    rd.mkdir()
+    (rd / "events.jsonl").write_bytes(
+        b'{"v":1,"seq":0,"type":"run_started","data":{"run_id":"sib","task_id":"t","goal":"g",'
+        b'"direction":"max"}}\n')
+    tools = SiblingRunTools(tmp_path, "self")
+    tools.bind_state(SimpleNamespace(task_id="t", goal="g", direction="max"), None)
+    assert "PARTIAL SOURCE" not in tools.execute("list_sibling_runs", {})

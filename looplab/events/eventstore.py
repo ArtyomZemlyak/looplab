@@ -9,6 +9,7 @@ locking and durability at their call sites.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -582,6 +583,60 @@ def repair_log(path: str | os.PathLike) -> dict:
     return record
 
 
+# How much of the cached prefix the continuity anchor covers at each end. Bounded so the check costs
+# a fixed two reads no matter how large the log grows, and only when the file actually changed.
+_CACHE_ANCHOR_BYTES = 64 * 1024
+
+
+def _prefix_anchor(path: Path, consumed: int) -> Optional[tuple[bytes, bytes]]:
+    """A bounded fingerprint of the first and last `_CACHE_ANCHOR_BYTES` of a consumed prefix.
+
+    WHAT THIS PROVES, exactly: that the head and the tail of the bytes we already parsed are still the
+    bytes we parsed. It is a detector, not a proof of whole-prefix continuity — a surgical edit that
+    changes only the middle, preserves both windows AND preserves dense seq numbering would still pass.
+    Digesting the entire prefix would be a proof, but it is O(log size) on every read and this cache
+    exists precisely to keep reads O(new bytes).
+
+    The two windows are chosen for the failure this closes: a prefix REWRITE, whether the file was
+    rebuilt from the start (head moves) or edited up to the append point (tail moves). Growth alone
+    proved neither, so a rewrite-then-append landed a fresh tail on stale cached Events and the
+    process silently diverged from disk.
+    """
+    if consumed <= 0:
+        return None
+    try:
+        with open(path, "rb") as f:
+            return prefix_anchor_from_handle(f, consumed)
+    except OSError:
+        return None
+
+
+def prefix_anchor_from_handle(handle, consumed: int) -> Optional[tuple[bytes, bytes]]:
+    """`_prefix_anchor` for a caller that already holds an open handle (the UI's log pager).
+
+    Restores the handle's position so it composes with an in-progress scan."""
+    if consumed <= 0:
+        return None
+    where = handle.tell()
+    try:
+        window = min(_CACHE_ANCHOR_BYTES, consumed)
+        handle.seek(0)
+        head = handle.read(window)
+        handle.seek(consumed - window)
+        tail = handle.read(window)
+    except OSError:
+        return None
+    finally:
+        try:
+            handle.seek(where)
+        except OSError:
+            pass
+    if len(head) < window or len(tail) < window:
+        return None                       # the file no longer holds the prefix we claim to have read
+    return (hashlib.sha256(head).digest(), hashlib.sha256(tail).digest())
+
+
+
 def _parse_jsonl_region(buf: bytes) -> tuple[list[tuple[dict, int]], int]:
     """Parse complete records from a byte buffer, applying `iter_jsonl`'s EXACT durability rules
     (stop at the first torn/blank-then-nonterminated/corrupt line), and report how many bytes were
@@ -630,6 +685,9 @@ class EventStore:
         self._cache_bytes: int = 0
         self._cache_mtime_ns: Optional[int] = None
         self._cache_identity: Optional[tuple[int, int]] = None
+        # Bounded fingerprint of the cached prefix (see `_prefix_anchor`), re-verified whenever the
+        # file changed, so a rewrite-then-append cannot top a fresh tail onto stale Events.
+        self._cache_anchor: Optional[tuple[bytes, bytes]] = None
         # The abort watcher (and, under eval_parallel fan-out, several concurrent watchers) call read_all()
         # from worker THREADS while the main loop may also read — guard the cache top-up so a
         # concurrent extend/offset update can't race into a corrupt cache.
@@ -751,6 +809,7 @@ class EventStore:
             self._cache_bytes = 0
             self._cache_mtime_ns = None
             self._cache_identity = None
+            self._cache_anchor = None
             self._divergence = None
 
     def append(self, type: str, data: dict[str, Any], *,
@@ -933,14 +992,21 @@ class EventStore:
                 size = 0
                 mtime_ns = None
                 identity = None
+            anchored_bytes = self._cache_bytes
             replaced = (self._cache_identity is not None and identity != self._cache_identity)
-            # CODEX AGENT: growth does not prove append-only continuity. A cached prefix can be rewritten
-            # and then extended before this read, top-upping a new tail onto stale Events. Validate a
-            # prefix fingerprint (or invalidate on any intervening mtime change) before extending the
-            # cache, and cover rewrite-plus-growth.
             same_size_rewrite = (size == self._cache_bytes and self._cache_mtime_ns is not None
                                  and mtime_ns != self._cache_mtime_ns)
-            cache_invalidated = size < self._cache_bytes or replaced or same_size_rewrite
+            # Growth is not continuity. A prefix rewritten AND then extended arrives here bigger, with
+            # the same inode — every check above passes — and the top-up would land a fresh tail on
+            # stale Events. So whenever the file changed at all, re-verify the bounded anchor over the
+            # prefix we already parsed. Gating on "changed" is what keeps the SSE hot path free: an
+            # unchanged file costs one stat and reads nothing.
+            touched = (self._cache_mtime_ns is not None and mtime_ns != self._cache_mtime_ns)
+            rewritten = False
+            if touched and self._cache_bytes and not (replaced or size < self._cache_bytes):
+                rewritten = _prefix_anchor(self.path, self._cache_bytes) != self._cache_anchor
+            cache_invalidated = (size < self._cache_bytes or replaced or same_size_rewrite
+                                 or rewritten)
             if cache_invalidated:
                 # File shrank, was replaced, or was rewritten in place without changing length. The
                 # last case matters on network/FUSE mounts: returning the old cached Events would split
@@ -988,6 +1054,11 @@ class EventStore:
                     }
             self._cache_mtime_ns = mtime_ns
             self._cache_identity = identity
+            if self._cache_bytes != anchored_bytes or self._cache_anchor is None:
+                # Re-fingerprint only when the consumed prefix actually moved. Refreshing it on every
+                # call would re-read the log's head and tail on each SSE tick — exactly the O(new
+                # bytes) property this cache exists to preserve.
+                self._cache_anchor = _prefix_anchor(self.path, self._cache_bytes)
             if cache_invalidated and hasattr(self, "_seq"):
                 # `_seq` is part of the compare-and-set truth, not merely a next-id optimization.
                 # Keeping the pre-replacement high-water mark would let a caller holding that OLD

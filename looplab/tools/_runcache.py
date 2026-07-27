@@ -19,7 +19,7 @@ class RunStateCache:
 
     def __init__(self, run_root):
         self.run_root = Path(run_root)
-        self._cache: dict[str, tuple] = {}     # run_id -> (sig, RunState)
+        self._cache: dict[str, tuple] = {}     # run_id -> (sig, RunState, divergence|None)
 
     def safe_dir(self, run_id: Optional[str]) -> Optional[Path]:
         """Resolve <run_root>/<run_id>, with the same path-traversal guard as server._run_dir: the
@@ -56,21 +56,48 @@ class RunStateCache:
         hit = self._cache.get(str(run_id))
         if hit and hit[0] == sig:
             return hit[1]
-        from looplab.events.eventstore import iter_event_jsonl
+        from looplab.events.eventstore import iter_event_jsonl, log_divergence
         from looplab.core.models import Event
         from looplab.events.replay import fold
         try:
-            # CODEX AGENT: iter_event_jsonl deliberately STOPS at the first corrupt/non-dense record,
-            # but this cache exposes the surviving prefix as an ordinary complete RunState and records
-            # no divergence/health receipt. SiblingRunTools and MachineRunsTools can therefore tell an
-            # in-loop role that missing later experiments/evidence do not exist. Read through an
-            # EventStore health boundary (or return state + completeness) and make every consumer
-            # abstain from absence/best claims when the source is partial.
             st = fold(Event(**o) for o in iter_event_jsonl(rd / "events.jsonl"))
         except (OSError, ValueError, TypeError):
             return None
-        self._cache[str(run_id)] = (sig, st)
+        # `iter_event_jsonl` deliberately STOPS at the first corrupt/non-dense record, and the
+        # surviving prefix folds into a RunState that looks exactly like a complete one. Reading it
+        # without asking whether it was complete is what let these tools tell an in-loop agent that
+        # later experiments and evidence "do not exist" when the truth is that the log could not be
+        # read that far. Record the divergence alongside the fold so consumers can abstain; the scan
+        # only runs on a cache MISS, where the fold is already O(log size).
+        try:
+            divergence = log_divergence(rd / "events.jsonl")
+        except (OSError, ValueError, TypeError):
+            divergence = {"unreadable": True}
+        self._cache[str(run_id)] = (sig, st, divergence)
         return st
+
+    def partial(self, run_id: Optional[str]) -> Optional[dict]:
+        """The divergence receipt for a run whose log could not be read to the end, else None.
+
+        `state()` must be called first (it is, at every consumer: this answers "was what I just read
+        the whole run?"). None also covers a run that was never read, which is honest — nothing was
+        claimed about it either."""
+        hit = self._cache.get(str(run_id))
+        return hit[2] if hit and len(hit) > 2 and hit[2] else None
+
+    def source_note(self, run_id: Optional[str]) -> str:
+        """A bounded line for tool output when the source log is incomplete, else "".
+
+        Phrased so the reading agent does not convert a truncated read into an absence claim — the
+        specific failure this guards is "no later experiment beat this one" derived from a prefix."""
+        d = self.partial(run_id)
+        if not d:
+            return ""
+        good = d.get("good_records")
+        where = f" after {good} record(s)" if isinstance(good, int) else ""
+        return (f"[PARTIAL SOURCE] run {run_id}'s event log could not be read to the end{where}; "
+                "anything later is UNKNOWN, not absent — do not conclude a result is best or missing "
+                "from this run.")
 
     def run_ids(self) -> list[str]:
         """Every run id under run_root (a directory carrying an events.jsonl), sorted."""

@@ -503,3 +503,32 @@ def test_legacy_log_byte_ceiling_is_hard_and_a_giant_row_still_progresses(tmp_pa
 
     third = client.get("/api/runs/demo/log", headers=OWNER, params={"since": 1})
     assert [row["seq"] for row in third.json()] == [2], "paging stalled on the oversize row"
+
+
+def test_a_rewritten_prefix_rotates_the_revision_instead_of_extending_it(tmp_path):
+    """Identity, first-event generation and growth all survive an in-place prefix rewrite, so an old
+    cursor kept resolving and stitched replacement rows into a timeline the operator had already
+    read as continuous. A moved prefix must mint a new revision, which fails those cursors closed."""
+    import time
+    from looplab.serve.log_pages import EventLogPager
+    p = tmp_path / "events.jsonl"
+    head = b'{"v":1,"seq":0,"ts":1.0,"type":"run_started","data":{"run_id":"r"}}\n'
+    p.write_bytes(head + b'{"v":1,"seq":1,"ts":2.0,"type":"a","data":{}}\n')
+    pager = EventLogPager()
+    first = pager.page(p, limit=10)
+    stale_cursor = first["cursors"]["newer"]
+
+    # Rewrite a later row IN PLACE (first event, and therefore the generation, untouched) and append.
+    time.sleep(0.01)
+    p.write_bytes(head
+                  + b'{"v":1,"seq":1,"ts":2.0,"type":"REWRITTEN","data":{}}\n'
+                  + b'{"v":1,"seq":2,"ts":3.0,"type":"b","data":{}}\n')
+    after = pager.page(p, limit=10)
+    assert any(e.get("type") == "REWRITTEN" for e in after["events"])
+    assert after["cursors"]["newer"] != stale_cursor      # the revision rotated
+
+    # The cursor issued BEFORE the rewrite must now fail closed rather than resolve into the
+    # replacement bytes and hand back one seamless-looking timeline.
+    with pytest.raises(HTTPException) as exc:
+        pager.page(p, direction="newer", cursor=stale_cursor, limit=10)
+    assert exc.value.status_code in (409, 410, 400)

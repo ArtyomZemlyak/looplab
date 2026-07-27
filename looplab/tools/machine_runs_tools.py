@@ -663,13 +663,18 @@ class MachineRunsTools:
             live = " · LIVE" if r["engine_running"] else ""
             best = digest.fmt_num(r["best_metric"]) if r["best_metric"] is not None else "—"
             lines.append(f"{r['run_id']}: {str(r['goal'])[:70]} · best={best} ({r['direction']}) · "
-                         f"{r['nodes']} nodes · {r['phase']}{live}")
+                         f"{r['nodes']} nodes · {r['phase']}{live}"
+                         # A truncated log folds into a state that looks complete, so `best` and the
+                         # node count would silently describe a PREFIX of the run.
+                         + (" · PARTIAL SOURCE (read incomplete; later results unknown)"
+                            if self._runs.partial(r["run_id"]) else ""))
         return f"{len(lines)} run(s):\n" + "\n".join(lines)
 
     def _read_run(self, run_id, sort, limit) -> str:
         st = self._state(run_id)
         if st is None:
             return f"(no such run: {run_id!r})"
+        note = self._runs.source_note(run_id)
         best = st.best()
         live = self._alive(str(run_id))
         head = (f"run {run_id} · goal: {st.goal or st.task_id} · direction={st.direction} · "
@@ -679,14 +684,15 @@ class MachineRunsTools:
         self._reader.bind_state(st, None)
         listing = self._reader.execute("list_experiments",
                                        {"sort": sort or "best", "limit": int(limit or 8)})
-        return head + "\n" + listing
+        return (f"{note}\n" if note else "") + head + "\n" + listing
 
     def _read_experiment(self, run_id, nid: int, trials_arg=None) -> str:
         st = self._state(run_id)
         if st is None:
             return f"(no such run: {run_id!r})"
+        note = self._runs.source_note(run_id)
         self._reader.bind_state(st, None)
-        return f"run {run_id} · " + self._reader.execute(
+        return (f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
             "read_experiment", {"node_id": nid, "trials": trials_arg})
 
     def _read_logs(self, run_id, nid: int) -> str:

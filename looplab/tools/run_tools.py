@@ -745,7 +745,11 @@ class SiblingRunTools:
             phase = "finished" if st.finished else "running"
             lines.append(f"{rid}: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
-                         + (f" · best=#{best.id}" if best else ""))
+                         + (f" · best=#{best.id}" if best else "")
+                         # A truncated log folds into a state that looks complete, so "best" and the
+                         # node count would silently describe a PREFIX of the run.
+                         + (" · PARTIAL SOURCE (read incomplete; later results unknown)"
+                            if self._runs.partial(rid) else ""))
         head = f"{len(lines)} sibling run(s) of task {self.task_id or '?'}:"
         return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
 
@@ -763,7 +767,8 @@ class SiblingRunTools:
         if not self.task_id or getattr(st, "task_id", "") != self.task_id:
             return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
         self._reader.bind_state(st, None)
-        return f"run {run_id} · " + self._reader.execute(
+        note = self._runs.source_note(run_id)
+        return (f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
             "read_experiment", {"node_id": nid, "trials": trials_arg})
 
     def _code(self, run_id, nid: int) -> str:
@@ -878,7 +883,9 @@ class AllRunsTools:
             phase = "finished" if st.finished else "running"
             lines.append(f"{rid} [{st.task_id or '?'}]: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
-                         + (f" · best=#{best.id}" if best else ""))
+                         + (f" · best=#{best.id}" if best else "")
+                         + (" · PARTIAL SOURCE (read incomplete; later results unknown)"
+                            if self._runs.partial(rid) else ""))
         return (f"{len(lines)} run(s) on this machine (across all tasks):\n" + "\n".join(lines)
                 ) if lines else "(no other runs on this machine)"
 

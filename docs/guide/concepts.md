@@ -48,6 +48,13 @@ support is **undecodable**, not "folded as v1" — reads stop there and the stor
 tail written by a newer LoopLab can never acquire today's run or command authority. Upgrade, or use
 `looplab repair-log` if the row is genuinely corrupt.
 
+Readers that cache a parsed prefix (the event store, the UI log pager) verify a bounded fingerprint
+of the bytes they already read whenever the file changed, so a prefix rewritten **and then appended
+to** cannot top a fresh tail onto stale state — growth alone never proved that. Cross-run tools go
+further and say so out loud: a sibling run whose log could not be read to the end is labelled
+`PARTIAL SOURCE`, because a truncated log folds into a state that looks complete and would otherwise
+let an agent read "no later experiment exists" out of "the log stopped here".
+
 Not every artifact is an event. Bounded diagnostic trace representations (`spans.jsonl`), Assistant/run chat, logs, and node
 workspaces are independent sidecars. They are useful evidence, but replay does not reconstruct them
 and their absence does not change the folded research state.

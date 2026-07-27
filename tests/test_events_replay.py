@@ -2504,3 +2504,39 @@ def test_a_newer_format_row_stops_the_log_instead_of_being_half_read(tmp_path):
         b'{"v":1,"seq":1,"type":"b","data":{}}\n'
         b'{"v":2,"seq":2,"type":"from_the_future","data":{}}\n')
     assert [e.type for e in EventStore(p).read_all()] == ["a", "b"]
+
+
+def test_a_rewritten_prefix_plus_append_is_not_topped_up_onto_stale_events(tmp_path):
+    """Growth is not continuity. A prefix rewritten AND then extended arrives bigger, with the same
+    inode, so every size/identity check passed and the top-up landed a fresh tail on cached Events
+    that no longer matched disk — the process silently diverged from the file it claims to read."""
+    import time
+    from looplab.events.eventstore import EventStore
+    p = tmp_path / "events.jsonl"
+    store = EventStore(p)
+    store.append("a", {})
+    store.append("b", {})
+    assert [e.type for e in store.read_all()] == ["a", "b"]
+
+    rewritten = p.read_bytes().replace(b'"type":"a"', b'"type":"rewritten"')
+    time.sleep(0.01)                                  # a distinct mtime, as any real writer produces
+    p.write_bytes(rewritten + b'{"v":1,"seq":2,"type":"c","data":{}}\n')
+
+    assert [e.type for e in store.read_all()] == ["rewritten", "b", "c"], (
+        "the cache served the stale prefix it had parsed earlier and appended the new tail to it")
+
+
+def test_an_unchanged_log_costs_no_reads_so_the_sse_hot_path_stays_cheap(tmp_path, monkeypatch):
+    """The anchor check is gated on the file having changed. Without that gate every SSE tick would
+    re-read the log's head and tail — the O(new bytes) property this cache exists for."""
+    from looplab.events import eventstore as es
+    p = tmp_path / "events.jsonl"
+    store = es.EventStore(p)
+    store.append("a", {})
+    store.read_all()
+    calls = []
+    monkeypatch.setattr(es, "_prefix_anchor",
+                        lambda path, consumed: calls.append(consumed) or None)
+    store.read_all()
+    store.read_all()
+    assert calls == [], "an unchanged log must not be re-read"

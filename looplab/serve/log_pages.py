@@ -26,7 +26,8 @@ import orjson
 from fastapi import HTTPException
 
 from looplab.events.eventstore import (
-    MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record)
+    MAX_EVENT_BATCH_BYTES, decode_event_record, is_event_batch_record,
+    prefix_anchor_from_handle)
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -83,6 +84,10 @@ class _Index:
     # Cached separately from rows so an 11fps scrubber jump is O(log n), not an O(n) list rebuild.
     seq_values: list[int] = field(default_factory=list)
     seq_row_indexes: list[int] = field(default_factory=list)
+    # Bounded fingerprint of the indexed prefix. Growth alone proved nothing about the bytes already
+    # indexed, so a prefix rewritten in place and then appended to kept this revision alive and an old
+    # cursor materialized replacement bytes into what the operator read as one continuous timeline.
+    anchor: Optional[tuple[bytes, bytes]] = None
 
 
 def _generation_for(first: object) -> Optional[str]:
@@ -375,11 +380,17 @@ class EventLogPager:
         key = str(path)
         generation = _first_generation(handle, snapshot_size)
         index = self._indexes.get(key)
-        # CODEX AGENT: growth is not proof of append-only continuity. An in-place prefix rewrite plus
-        # append retains this index revision, so an old cursor materializes replacement bytes and creates
-        # a hybrid audit timeline. Verify the cached prefix or rotate/rebuild the revision before extending.
+        # A rewritten prefix must ROTATE the revision, not extend it. Identity, first-event generation
+        # and growth all survive an in-place rewrite (an atomic repair may deliberately keep the first
+        # event while replacing every later row), so without checking the indexed bytes themselves an
+        # old cursor kept resolving and stitched replacement rows into the timeline it had already
+        # shown. Building a fresh `_Index` mints a new `revision`, which fails those cursors closed —
+        # the client then recovers through its exact-generation tail read, as `_Index` documents.
+        # Checked only when the file's metadata moved: an idle poll still costs one stat.
+        rewritten = (index is not None and index.valid_end > 0 and index.metadata != metadata
+                     and prefix_anchor_from_handle(handle, index.valid_end) != index.anchor)
         if (index is None or index.identity != identity or index.generation != generation
-                or snapshot_size < index.observed_size
+                or snapshot_size < index.observed_size or rewritten
                 or (snapshot_size == index.observed_size and index.metadata != metadata)):
             index = _Index(identity=identity, generation=generation, metadata=metadata)
             self._indexes[key] = index
@@ -390,6 +401,7 @@ class EventLogPager:
         # reserved bytes in place. For a normal append this extends only from the old valid boundary.
         if snapshot_size != index.observed_size or index.torn_tail or not index.rows:
             _scan(handle, index, snapshot_size)
+            index.anchor = prefix_anchor_from_handle(handle, index.valid_end)
         index.metadata = metadata
         return index
 
