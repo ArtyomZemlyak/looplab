@@ -27,6 +27,7 @@ from looplab.events.eventstore import EventStoreConcurrencyError
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_CARD_ADDED,
+    EV_CARD_BUILD_ATTEMPTED,
     EV_CARD_BUILD_DONE,
     EV_CARD_BUILD_REQUESTED,
     EV_LLM_COST,
@@ -707,6 +708,49 @@ class SpeculationMixin:
                 continue
         return False
 
+    def _record_card_build_attempt(self, state: RunState,
+                                   request: Mapping[str, Any]) -> None:
+        """Receipt ONE physical producer start against the current head, before it can call a provider.
+
+        The durable request identifies LOGICAL work ("build this Card at this epoch") and is what
+        survives a kill — but it says nothing about whether a provider call for that work was already
+        accepted and billed. Recovery therefore used to start a second producer for the same head with
+        no evidence that the first had spent anything. This row is that evidence; `_serve_card_builds`
+        quarantines a head that carries one from a dead process.
+
+        Best-effort and unlocked: an attempt row is bookkeeping, never a gate the fold advances, so a
+        refused append must not block the build. Its absence simply restores the pre-receipt behavior.
+        """
+        key = self._request_key(request)
+        if key is None:
+            return
+        try:
+            self.store.append(EV_CARD_BUILD_ATTEMPTED, {
+                "card_id": key[0], "generation": key[1],
+                # The queue position this head occupies — see `_on_card_build_attempted`.
+                "index": int(state.card_builds_done)})
+        except Exception:  # noqa: BLE001 — see the docstring: never block a build on its receipt
+            pass
+
+    @staticmethod
+    def _head_has_unreconciled_attempt(state: RunState,
+                                       key: tuple[str, int]) -> bool:
+        """Does the CURRENT open head already carry a producer attempt from a dead process?
+
+        Position-exact on purpose: the same (card_id, generation) can legitimately be re-elected after
+        an earlier request for it was closed, and that older — fully reconciled — attempt must not
+        quarantine the new head. Callers must first rule out an attempt this process itself started
+        (`_spec_build_inflight` / a present `_spec_builds` result).
+        """
+        index = int(state.card_builds_done)
+        return any(
+            isinstance(attempt, dict)
+            and attempt.get("index") == index
+            and attempt.get("card_id") == key[0]
+            and attempt.get("generation") == key[1]
+            for attempt in state.card_build_attempts
+        )
+
     def _matching_created_speculation(
         self, state: RunState, request: Mapping[str, Any],
     ):
@@ -1004,6 +1048,20 @@ class SpeculationMixin:
             return self._append_card_build_done(request, skipped="stale")
         result = self._spec_builds.get(key)
         if result is None:
+            # Quarantine before recovery even asks whether the Card is still alive: this head carries a
+            # producer attempt that no live in-process producer owns, so a provider call for it may
+            # already have been accepted and billed by the process that died. Restarting a producer
+            # here would buy the identical Developer/Researcher work a second time with nothing in the
+            # log to show for the first. `producer_failed` is the exact disposition wanted — it closes
+            # the head, keeps the Card buildable on the SERIAL path, and permanently bars this Card
+            # from being speculatively re-elected — and reusing it means the replay vocabulary and the
+            # quality denominator stay unchanged. The `card_build_attempted` row is what says WHY.
+            if (key not in self._spec_build_inflight
+                    and self._head_has_unreconciled_attempt(state, key)):
+                closed = self._append_card_build_done(request, skipped="producer_failed")
+                if closed:
+                    self._spec_force_outer = True
+                return closed
             # Crash-recovery wedge: a kill between node_building and node_created leaves the
             # interrupted build's Node id permanently spent (it still counts against the physical ceiling
             # via `_node_id_ceiling`) AND recovery drops its Card, yet the durable request survives at head
@@ -1096,10 +1154,9 @@ class SpeculationMixin:
                 # provider can make an operator stop take the full transport timeout. Use a genuinely
                 # cancellable producer or quarantine/abandon this isolated role pair after cancellation.
                 result = await anyio.to_thread.run_sync(
-                    # CODEX AGENT: the Card request identifies logical work, not a provider attempt. A
-                    # kill after provider acceptance but before this process-local result makes resume
-                    # reissue possibly charged work; persist attempt receipts plus an idempotency key and
-                    # quarantine ambiguous attempts until reconciled.
+                    # `_start_head_producer` already appended this attempt's `card_build_attempted`
+                    # receipt, so a kill anywhere below leaves the head quarantined on resume instead
+                    # of silently re-issuing possibly-charged work (see `_serve_card_builds`).
                     functools.partial(self._build_requested_card, dict(request), roles),
                     abandon_on_cancel=False,
                 )
@@ -1510,6 +1567,10 @@ class SpeculationMixin:
                                 return True
                             return False
                         self._spec_build_inflight.add(key)
+                        # Receipt BEFORE the producer can reach a provider, and after the inflight
+                        # marker so a main-task service turn in between cannot mistake this process's
+                        # own fresh attempt for a dead process's unreconciled one.
+                        self._record_card_build_attempt(current, head)
                         try:
                             task_group.start_soon(
                                 self._produce_card_build,

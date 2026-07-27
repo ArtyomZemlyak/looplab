@@ -51,7 +51,8 @@ from looplab.events.types import (
     EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
-    EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
+    EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_BUILD_ATTEMPTED, EV_CARD_BUILD_DONE,
+    EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED,
     EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED, EV_CARD_RANKED,
     EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_FORESIGHT_SELECTED, EV_FORK,
@@ -64,9 +65,11 @@ from looplab.events.types import (
     EV_CROSS_RUN_PRIOR,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
-    EV_RESEARCH_COMPLETED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
+    EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
+    EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
-    EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
+    EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED,
+    EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
     EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED, EV_WORKSPACE_CHANGED)
@@ -1459,13 +1462,27 @@ def _on_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if d.get("manifest"):
         st.setup_manifest = str(d.get("manifest"))
 
+def _on_run_setup_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # The command is ABOUT to run its arbitrary side effects. Until its finish lands, a resume cannot
+    # tell "never started" from "died halfway through the install", so record the open attempt; the
+    # finish below closes it. Old logs whose started row carried no `command` simply add nothing —
+    # they fold exactly as before.
+    if d.get("command"):
+        st.run_setup_open.add(run_setup_key(d.get("command")))
+
 def _on_run_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # arch-review §5 P2: a SUCCESSFUL run-level `run_setup` (dep install) is folded (keyed by its
     # command) so a resume skips it instead of re-installing every time — crash-safe exactly-once. A
     # failed/timed-out setup is NOT recorded (the command must actually re-run). Old logs whose
     # run_setup_finished carried no `command` just don't populate the set (setup runs as before).
-    if d.get("exit_code") == 0 and not d.get("timed_out") and d.get("command"):
-        st.run_setup_done.add(run_setup_key(d.get("command")))
+    if not d.get("command"):
+        return
+    key = run_setup_key(d.get("command"))
+    # ANY finish closes the open attempt — a failed/timed-out command reported its outcome, so the
+    # next process is not resuming through an unknown one. Only exit 0 marks it done.
+    st.run_setup_open.discard(key)
+    if d.get("exit_code") == 0 and not d.get("timed_out"):
+        st.run_setup_done.add(key)
 
 def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.leakage = d
@@ -3302,6 +3319,32 @@ def _on_card_build_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -
     st.card_build_requests.append({"card_id": card_id, "generation": generation})
 
 
+def _on_card_build_attempted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Fold one PHYSICAL producer attempt against a request head.
+
+    Selection-neutral by construction: nothing here touches nodes, cards or the request queue — the
+    row exists so a resume can see that a provider call for this exact request identity may already
+    have been paid for. Unlike the request above it is NOT epoch-filtered: an attempt from a since-
+    superseded epoch is still an attempt that may have been billed, and dropping it would erase the
+    very evidence this record exists to keep.
+
+    `index` is the queue POSITION the attempt was made against, the same discipline `card_build_done`
+    uses. Without it a card that was closed and later re-elected at the same epoch would carry the
+    identical (card_id, generation) key, and the old — already reconciled — attempt would quarantine
+    a brand-new head forever. The fold stays dumb: it records the position, the engine decides whether
+    an attempt still belongs to the open head.
+    """
+    card_id = _card_replay_id(d.get("card_id"))
+    generation = d.get("generation")
+    index = d.get("index")
+    if (card_id is None or type(generation) is not int
+            or not 0 <= generation <= _CARD_REPLAY_NODE_ID_MAX
+            or type(index) is not int or index < 0):
+        return
+    st.card_build_attempts.append(
+        {"card_id": card_id, "generation": generation, "index": index})
+
+
 def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """Advance exactly one positional Card-build request and retain its successful node link.
 
@@ -3357,6 +3400,21 @@ def _on_inject_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_deep_research(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.research_requests.append(d)       # manual "go think hard" request (control event)
 
+def _on_research_attempted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Paid-attempt receipt appended BEFORE the Deep-Research provider call. Selection-neutral: only
+    # the research trigger gates read it, exactly like the memo row below. Ignore a row without a
+    # usable identity — an attempt nothing can ever reconcile would strand the manual queue.
+    attempt_id = d.get("attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        return
+    at_node = d.get("at_node")
+    st.research_attempts.append({
+        "attempt_id": attempt_id,
+        "trigger": str(d.get("trigger") or ""),
+        "at_node": at_node if type(at_node) is int and at_node >= 0 else None,
+        "manual": bool(d.get("manual")),
+    })
+
 def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Deep-Research memo: never re-ranks current nodes/best; later proposal context and cross-run
     # evidence may read it. `served_manual` also prevents replay from re-serving the request.
@@ -3373,6 +3431,12 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # carries none), so the head clamp IS the bind here.
     if d.get("served_manual") and st.research_served < len(st.research_requests):
         st.research_served += 1
+    # Close this memo's paid attempt so the trigger gates stop counting it as still outstanding.
+    # Order-tolerant: the attempt row may be folded before or after this one — the engine only ever
+    # asks "which attempt ids are completed", never "in what order".
+    attempt_id = d.get("attempt_id")
+    if isinstance(attempt_id, str) and attempt_id:
+        st.research_attempts_completed.add(attempt_id)
 
 def _on_lessons_distilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # M6 does not re-rank current nodes/best; at_node + pair ids are behavioral replay gates that
@@ -3474,6 +3538,7 @@ _HANDLERS = {
     EV_DATA_PROVENANCE: _on_data_provenance,
     EV_HOST_GRADING: _on_host_grading,
     EV_SETUP_FINISHED: _on_setup_finished,
+    EV_RUN_SETUP_STARTED: _on_run_setup_started,
     EV_RUN_SETUP_FINISHED: _on_run_setup_finished,
     EV_DATA_LEAKAGE: _on_data_leakage,
     EV_APPROVAL_REQUESTED: _on_approval_requested,
@@ -3513,6 +3578,7 @@ _HANDLERS = {
     EV_HYPOTHESIS_UPDATED: _on_hypothesis_updated,
     EV_CARD_ADDED: _on_card_added,
     EV_CARD_BUILD_REQUESTED: _on_card_build_requested,
+    EV_CARD_BUILD_ATTEMPTED: _on_card_build_attempted,
     EV_CARD_BUILD_DONE: _on_card_build_done,
     EV_CARD_MERGED: _on_card_merged,
     EV_CARD_AUTO_DROPPED: _on_card_dropped,
@@ -3541,6 +3607,7 @@ _HANDLERS = {
     EV_INJECT_NODE: _on_inject_node,
     EV_INJECT_DONE: _on_inject_done,
     EV_DEEP_RESEARCH: _on_deep_research,
+    EV_RESEARCH_ATTEMPTED: _on_research_attempted,
     EV_RESEARCH_COMPLETED: _on_research_completed,
     EV_LESSONS_DISTILLED: _on_lessons_distilled,
     EV_LESSONS_REFRESHED: _on_lessons_refreshed,

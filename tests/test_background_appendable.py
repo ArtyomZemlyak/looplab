@@ -21,7 +21,7 @@ from looplab.events.replay import fold
 from looplab.events.types import (ALL_EVENT_TYPES, BACKGROUND_APPENDABLE,
                                    EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED, EV_HINT,
                                    EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_LLM_USAGE,
-                                   EV_RESEARCH_COMPLETED,
+                                   EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED,
                                    NON_CARD_SELECTION_BACKGROUND_APPENDABLE)
 
 
@@ -48,6 +48,8 @@ def _payload(etype: str) -> dict:
         return {"statement": "explore larger x", "source": "deep_research", "at_node": 0}
     if etype == EV_HYPOTHESIS_MERGED:
         return {"canonical": "h1", "aliases": ["h2"], "statement": "explore larger x", "at_node": 0}
+    if etype == EV_RESEARCH_ATTEMPTED:
+        return {"attempt_id": "a" * 32, "trigger": "cadence", "manual": False, "at_node": 0}
     if etype == EV_LLM_USAGE:
         return {"cost": 0.001, "calls": 1, "prompt_tokens": 10,
                 "completion_tokens": 2, "total_tokens": 12}
@@ -60,7 +62,7 @@ def test_registry_sane():
     # Growing this set is a DECISION, not a drive-by: a new member needs a payload builder above
     # and must pass the splice test below. This assertion forces that edit to happen here.
     assert BACKGROUND_APPENDABLE == frozenset({
-        EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
+        EV_RESEARCH_COMPLETED, EV_RESEARCH_ATTEMPTED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
     })
     assert NON_CARD_SELECTION_BACKGROUND_APPENDABLE == frozenset({EV_HYPOTHESIS_MERGED})
     assert NON_CARD_SELECTION_BACKGROUND_APPENDABLE <= ALL_EVENT_TYPES

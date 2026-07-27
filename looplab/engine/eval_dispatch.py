@@ -9,6 +9,7 @@ Runtime deps (`command_eval`, `_run_argv`, `_to_float`) stay method-local so mon
 through their source modules keeps working."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,8 @@ from looplab.events.types import EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED
 # THE engine sentinel (engine/options.py): `_evaluate` passes it into `_run_eval` positionally
 # (as `next_start`), so the identity check here MUST see the same object the orchestrator uses.
 from looplab.engine.options import _UNSET
+
+_LOG = logging.getLogger(__name__)
 
 
 class EvalDispatchMixin:
@@ -51,7 +54,15 @@ class EvalDispatchMixin:
         Only in trusted_local (an untrusted/docker eval is a fresh container — use per-node `setup`).
         No-op when `run_setup` is unset. The in-process guard is set only AFTER a successful install, so
         a concurrent worker on the lock-free fast path blocks on the lock rather than racing ahead to
-        evaluate against a half-installed interpreter."""
+        evaluate against a half-installed interpreter.
+
+        Honest delivery contract: EXACTLY-once for a command that reported success, AT-LEAST-once
+        across a kill that lands between `run_setup_started` and `run_setup_finished`. LoopLab cannot
+        make an arbitrary operator command transactional, and refusing to re-run would leave the
+        interpreter permanently half-installed with no way forward, so the repeat happens — but it is
+        stamped `after_interrupted_attempt` in the log instead of being indistinguishable from a first
+        attempt. Give `run_setup` an idempotent command (a plain `pip install` is) whenever the repeat
+        would otherwise cost money or mutate shared state."""
         if self._run_setup_done:
             return
         # Serialize the check-then-set: parallel eval worker threads would otherwise all see
@@ -81,15 +92,23 @@ class EvalDispatchMixin:
             self._run_setup_done = True
 
     def _do_run_setup(self, cmd: list) -> None:
+        from looplab.core.models import run_setup_key
         from looplab.runtime.sandbox import _run_argv
         eds = (self._repo_spec or {}).get("editables", [])
         cwd = eds[0]["path"] if eds else str(self.run_dir)
         to = float((self._eval_spec or {}).get("run_setup_timeout", 1800.0))
-        self.store.append(EV_RUN_SETUP_STARTED, {"command": cmd, "cwd": cwd})
+        # A prior process appended this command's `run_setup_started` and never appended its finish:
+        # its side effects may be complete, partial, or absent and no receipt can say which. The
+        # attempt receipt is what makes that ambiguity SURVIVE the crash — see the delivery contract
+        # in `_ensure_run_setup`. Stamping the repeat keeps `run_setup.log` and the event log honest
+        # about how many times an arbitrary command actually ran.
+        interrupted = run_setup_key(cmd) in fold(self.store.read_all()).run_setup_open
+        if interrupted:
+            _LOG.warning("run_setup %r is being re-executed after an interrupted attempt: its side "
+                         "effects may be applied twice", cmd)
+        self.store.append(EV_RUN_SETUP_STARTED,
+                          {"command": cmd, "cwd": cwd, "after_interrupted_attempt": interrupted})
         log = str(Path(self.run_dir) / "run_setup.log")
-        # CODEX AGENT: arbitrary setup side effects happen before their success receipt. A crash
-        # here makes resume execute the command again, so this is at-least-once rather than the
-        # documented exactly-once contract; require an idempotent/transactional external receipt.
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
         # Carry the command so the fold can key the exactly-once record on it (arch-review §5 P2).
         self.store.append(EV_RUN_SETUP_FINISHED,

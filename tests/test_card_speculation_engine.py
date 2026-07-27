@@ -748,6 +748,42 @@ def test_recovery_dropped_head_with_no_result_closes_stale_instead_of_wedging(tm
     assert final.card_builds_done == 1 and engine._head_request(final) is None  # outstanding cleared
 
 
+def test_recovery_head_with_an_unreconciled_attempt_is_quarantined_not_reissued(tmp_path):
+    """The durable request identifies LOGICAL work; it cannot say whether a provider already accepted
+    and billed a call for it. A head carrying an attempt receipt that no live producer owns is
+    therefore ambiguous: restarting a producer would buy the same Developer/Researcher work twice with
+    nothing in the log to show for the first purchase."""
+    from looplab.events.types import EV_CARD_BUILD_ATTEMPTED
+
+    engine, producer = _engine(tmp_path / "attempt-quarantine")
+    _start(engine)
+    _add_ready_draft(engine)
+    request = _request(engine)
+    key = engine._request_key(request)
+    engine._ensure_speculation_state()
+
+    # Without an attempt the ALIVE head stays open — a producer may still be started for it.
+    assert engine._serve_card_builds() is False
+    assert fold(engine.store.read_all()).card_builds_done == 0
+
+    # The dead process got as far as starting a producer: its receipt is at this head's position.
+    state = fold(engine.store.read_all())
+    engine.store.append(EV_CARD_BUILD_ATTEMPTED, {
+        "card_id": key[0], "generation": key[1], "index": state.card_builds_done,
+    })
+
+    assert engine._serve_card_builds() is True
+    events = engine.store.read_all()
+    done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
+    assert len(done) == 1 and done[0].data.get("skipped") == "producer_failed"
+    assert producer.calls == 0, "quarantine must never re-issue the possibly-charged provider work"
+    assert not [event for event in events if event.type == EV_NODE_BUILDING]
+    final = fold(events)
+    assert final.card_builds_done == 1 and engine._head_request(final) is None
+    # Serial-fallback-only from here: the Card is still buildable, just never speculatively re-elected.
+    assert engine._card_requires_serial_fallback(key[0]) is True
+
+
 def test_recovery_merged_head_with_no_result_closes_stale_instead_of_wedging(tmp_path):
     # Sibling of the dropped-head wedge: a durable card_build_requested survives at head with no in-memory
     # result, but its Card was MERGED away (folded into a canonical) rather than dropped. A merged Card is

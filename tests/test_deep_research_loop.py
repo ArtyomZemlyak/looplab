@@ -321,13 +321,21 @@ def test_spawn_research_records_immediately_via_its_own_task():
     eng._due_research_trigger = lambda state: "cadence"
     eng._compute_deep_research = lambda snap, trig, trace=False: {"memo": "M"}
     recorded = []
-    eng._record_deep_research = lambda memo, *, trigger, manual: recorded.append((memo, trigger, manual))
+    attempts = []
+    # The paid-attempt receipt is appended before the compute; stub it so this test stays about the
+    # RECORD path and needs no event store.
+    eng._record_research_attempt = lambda snap, *, trigger, manual: (
+        attempts.append((trigger, manual)) or "attempt-1")
+    eng._record_deep_research = (
+        lambda memo, *, trigger, manual, attempt_id=None:
+        recorded.append((memo, trigger, manual, attempt_id)))
 
     async def run():
         async with anyio.create_task_group() as tg:
             eng._spawn_research(tg, state=object())      # no eval at all — research still records
     anyio.run(run)
-    assert recorded == [({"memo": "M"}, "cadence", False)]
+    assert attempts == [("cadence", False)]      # receipted BEFORE the provider call
+    assert recorded == [({"memo": "M"}, "cadence", False, "attempt-1")]
 
 
 def test_spawn_research_noop_when_disabled_or_not_due():

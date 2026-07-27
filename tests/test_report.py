@@ -2607,17 +2607,92 @@ def test_scope_report_action_strictly_publishes_claim_report_and_terminal(
         f"/api/scope-report/task/{task_id}", action_id=action_id).json()
 
     assert result["ok"] is True
+    # lock, lock, running receipt, active fence, PAID-ATTEMPT receipt, OBSERVED-USAGE receipt,
+    # canonical report, done receipt, clear fence. The two usage rows bracket the provider call: the
+    # ledger states that a paid attempt began BEFORE it could be billed, and what it actually spent
+    # before anything may be published or claimed as done.
     assert [name.endswith(".receipt") for name, _text in writes] == [
-        False, False, True, False, False, True, False,
+        False, False, True, False, True, True, False, True, False,
     ]
     assert writes[0][0].endswith(".live.lock")
     assert writes[1][0].endswith(".live.lock")
     assert writes[3][0].endswith(".fence")
     assert writes[-1][0].endswith(".fence")
     assert '"status":"running"' in writes[2][1]
+    assert '"state":"attempted"' in writes[4][1]
+    assert '"state":"observed"' in writes[5][1]
     assert '"status":"done"' in writes[-2][1]
     assert len(writes[-2][1].encode("utf-8")) < reports._SCOPE_ACTION_RECORD_MAX_BYTES
     assert '"content"' not in writes[-2][1]
+
+
+def test_scope_report_action_ledger_records_what_the_paid_call_actually_spent(
+        tmp_path, monkeypatch):
+    """A cross-run report is paid work over a SET of runs, so no single run's usage ledger owns it.
+    Its spend belongs to the action receipt: an attempt row goes down before the provider can be
+    billed, and the observed delta before anything may be published or claimed done."""
+    import json as _json
+
+    task_id = "paid-usage-ledger"
+    action_id = "adadadad-adad-4dad-8dad-adadadadadad"
+    _seed_scope_run(tmp_path, "paid-usage-run", task_id)
+
+    class _Accountant:
+        spent = 0.25
+        calls = 3
+        prompt_tokens = 120
+        completion_tokens = 40
+        total_tokens = 160
+
+    class _Client:
+        accountant = _Accountant()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: _Client())
+    result = _generate_scope_report(
+        TestClient(make_app(tmp_path)),
+        f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+
+    assert result["ok"] is True
+    receipt = _json.loads(next(tmp_path.glob(".scope-action-*.receipt")).read_text(
+        encoding="utf-8"))
+    assert receipt["status"] == "done"
+    assert receipt["usage"] == {
+        "state": "observed", "model": receipt["usage"]["model"], "cost": 0.25,
+        "calls": 3, "prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160,
+    }, "the terminal must carry the exact spend of the call it settles"
+
+
+def test_scope_report_refuses_to_pay_when_its_attempt_row_cannot_be_written(
+        tmp_path, monkeypatch):
+    """No provider call without a durable pre-call row. If the ledger cannot record that a paid
+    attempt is starting, the honest move is to spend nothing at all."""
+    from looplab.serve.routers import reports
+
+    task_id = "unwritable-attempt"
+    action_id = "aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae"
+    _seed_scope_run(tmp_path, "unwritable-attempt-run", task_id)
+    provider_calls = 0
+    real_write = reports.strict_atomic_write_text
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    def fail_the_attempt_stamp(path, text):
+        if path.name.endswith(".receipt") and '"state":"attempted"' in text:
+            raise OSError("attempt row sync unavailable")
+        return real_write(path, text)
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_the_attempt_stamp)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    result = _generate_scope_report(
+        TestClient(make_app(tmp_path)),
+        f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+
+    assert result["ok"] is False
+    assert result["code"] == reports._SCOPE_STORAGE_ERROR["code"]
+    assert provider_calls == 0
 
 
 def test_scope_report_action_claim_sync_failure_never_starts_provider(
@@ -2705,7 +2780,12 @@ def test_scope_report_action_terminal_sync_failure_persists_indeterminate_and_re
 
     def fail_one_terminal(path, text):
         nonlocal receipt_writes
-        if path.name.endswith(".receipt"):
+        # The two paid-usage stamps are receipt writes too, but these injectors target the
+        # CLAIM / TERMINAL / TOMBSTONE sequence. A usage stamp is the only receipt that is
+        # BOTH still running AND already carrying spend — skip exactly those so the ordinals
+        # keep meaning what they meant before the ledger started recording cost.
+        _usage_stamp = '"status":"running"' in text and '"usage":' in text
+        if path.name.endswith(".receipt") and not _usage_stamp:
             receipt_writes += 1
             if receipt_writes == 2:
                 raise OSError("terminal sync unavailable")
@@ -2746,7 +2826,12 @@ def test_scope_report_action_double_terminal_failure_releases_retained_leases_on
     def publish_then_fail_terminal_and_fallback(path, text):
         nonlocal receipt_writes
         result = real_write(path, text)
-        if path.name.endswith(".receipt"):
+        # The two paid-usage stamps are receipt writes too, but these injectors target the
+        # CLAIM / TERMINAL / TOMBSTONE sequence. A usage stamp is the only receipt that is
+        # BOTH still running AND already carrying spend — skip exactly those so the ordinals
+        # keep meaning what they meant before the ledger started recording cost.
+        _usage_stamp = '"status":"running"' in text and '"usage":' in text
+        if path.name.endswith(".receipt") and not _usage_stamp:
             receipt_writes += 1
             if receipt_writes in {2, 3}:
                 raise OSError("parent sync confirmation unavailable")
@@ -2876,7 +2961,12 @@ def test_scope_report_retained_recovery_survives_deleted_action_marker(
 
     def fail_both_terminal_confirmations(path, text):
         nonlocal receipt_writes
-        if path.name.endswith(".receipt"):
+        # The two paid-usage stamps are receipt writes too, but these injectors target the
+        # CLAIM / TERMINAL / TOMBSTONE sequence. A usage stamp is the only receipt that is
+        # BOTH still running AND already carrying spend — skip exactly those so the ordinals
+        # keep meaning what they meant before the ledger started recording cost.
+        _usage_stamp = '"status":"running"' in text and '"usage":' in text
+        if path.name.endswith(".receipt") and not _usage_stamp:
             receipt_writes += 1
             if receipt_writes == 2:
                 if visible_terminal:
@@ -2936,7 +3026,12 @@ def test_scope_report_retained_missing_receipt_can_be_directly_abandoned(
 
     def fail_terminal_before_visibility(path, text):
         nonlocal receipt_writes
-        if path.name.endswith(".receipt"):
+        # The two paid-usage stamps are receipt writes too, but these injectors target the
+        # CLAIM / TERMINAL / TOMBSTONE sequence. A usage stamp is the only receipt that is
+        # BOTH still running AND already carrying spend — skip exactly those so the ordinals
+        # keep meaning what they meant before the ledger started recording cost.
+        _usage_stamp = '"status":"running"' in text and '"usage":' in text
+        if path.name.endswith(".receipt") and not _usage_stamp:
             receipt_writes += 1
             if receipt_writes in {2, 3}:
                 raise OSError("terminal storage unavailable")
@@ -3140,7 +3235,12 @@ def test_scope_report_action_visible_unconfirmed_terminal_is_quarantined_by_tomb
     def publish_then_fail_once(path, text):
         nonlocal receipt_writes
         result = real_write(path, text)
-        if path.name.endswith(".receipt"):
+        # The two paid-usage stamps are receipt writes too, but these injectors target the
+        # CLAIM / TERMINAL / TOMBSTONE sequence. A usage stamp is the only receipt that is
+        # BOTH still running AND already carrying spend — skip exactly those so the ordinals
+        # keep meaning what they meant before the ledger started recording cost.
+        _usage_stamp = '"status":"running"' in text and '"usage":' in text
+        if path.name.endswith(".receipt") and not _usage_stamp:
             receipt_writes += 1
             if receipt_writes == 2:
                 raise OSError("parent sync result was lost")

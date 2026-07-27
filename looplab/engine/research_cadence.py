@@ -16,11 +16,15 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events and stdlib (the trust/search deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import uuid
+from typing import Optional
+
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.events.replay import fold
 from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
-                                  EV_REPORT_GENERATED, EV_RESEARCH_COMPLETED,
+                                  EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,
+                                  EV_RESEARCH_COMPLETED,
                                   BACKGROUND_APPENDABLE,
                                   NON_CARD_SELECTION_BACKGROUND_APPENDABLE)
 
@@ -58,7 +62,11 @@ class ResearchCadenceMixin:
         directions back as standing hints that can steer later proposals."""
         n = len(state.nodes)
         # Manual: serve outstanding requests first, regardless of node-count (operator asked now).
-        if len(state.research_requests) > state.research_served:
+        # Requests whose paid attempt is still unreconciled count as served here: their think was
+        # already bought, and a resume must not charge for it a second time (see
+        # `_outstanding_manual_research`).
+        if (len(state.research_requests)
+                > state.research_served + self._outstanding_manual_research(state)):
             return self._run_deep_research(state, trigger="manual", manual=True)
         # Auto triggers only at a creation decision point (no pending evals), never re-firing at a
         # node-count already researched (the at_node gate makes resume a no-op).
@@ -70,8 +78,7 @@ class ResearchCadenceMixin:
         # `default=0` (no prior research → baseline at the run start, node 0): the first deep-research
         # fires a full `every` nodes in (n >= every), so the opening window is the SAME width as every
         # later one. (`default=-1` would fire it one node early — a narrower first window.)
-        _last_research_n = max((int(m.get("at_node", -1)) for m in self._cadence_research_memos(state)
-                                if m.get("at_node") is not None), default=0)
+        _last_research_n = max(self._cadence_research_marks(state), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):
             return self._run_deep_research(state, trigger="cadence", manual=False)
         hist = state.strategy_history
@@ -79,6 +86,55 @@ class ResearchCadenceMixin:
                 and (hist[-1].get("strategy") or {}).get("request_research")):
             return self._run_deep_research(state, trigger="strategist", manual=False)
         return state
+
+    @classmethod
+    def _cadence_research_marks(cls, state: RunState) -> set[int]:
+        """Node-counts at which the serial (node-count) cadence has already been SPENT.
+
+        Two sources, deliberately unioned. A recorded memo is the obvious one. A paid ATTEMPT is the
+        other: `research_attempted` is appended before the provider call, so a kill between "the model
+        answered" and "the memo is durable" leaves an attempt with no memo — and without counting it
+        here the very next decision point would pay for the identical think again. Repeat passes are
+        excluded for the same reason their memos are excluded from `_cadence_research_memos` (they
+        ride a TIME cadence, not this one) — and they never record an attempt at all.
+
+        MANUAL attempts count here exactly as manual MEMOS already do: `_cadence_research_memos`
+        never filtered by trigger except for `repeat`, so treating an interrupted manual think
+        differently from a completed one would make the node-count gate depend on whether the process
+        happened to survive.
+        """
+        def _mark(value) -> Optional[int]:
+            # Tolerant on purpose: this replaced a bare `int(m.get("at_node", -1))`, and a legacy or
+            # hostile row whose at_node is unusable must be SKIPPED rather than raise — but a value
+            # that coerces (an old float-serialized count) must still spend its window, because
+            # dropping it would let the cadence fire again and pay for the same think twice.
+            if value is None or isinstance(value, bool):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        marks = {mark for mark in (_mark(m.get("at_node"))
+                                   for m in cls._cadence_research_memos(state))
+                 if mark is not None}
+        marks |= {mark for mark in (_mark(a.get("at_node")) for a in state.research_attempts
+                                    if isinstance(a, dict) and a.get("trigger") != "repeat")
+                  if mark is not None}
+        return marks
+
+    @staticmethod
+    def _outstanding_manual_research(state: RunState) -> int:
+        """Manual `deep_research` requests whose paid attempt was made but whose memo never landed.
+
+        `research_served` only advances on a recorded memo, so without this the manual queue would
+        re-serve — and re-pay for — a request whose think was already bought by a dead process. The
+        operator can always ask again; what they must not get is a silent second charge for the
+        request they already made.
+        """
+        return sum(1 for a in state.research_attempts
+                   if isinstance(a, dict) and a.get("manual")
+                   and a.get("attempt_id") not in state.research_attempts_completed)
 
     @staticmethod
     def _cadence_research_memos(state: RunState) -> list:
@@ -92,7 +148,7 @@ class ResearchCadenceMixin:
 
     @classmethod
     def _already_researched_at(cls, state: RunState, n: int) -> bool:
-        return any((m or {}).get("at_node") == n for m in cls._cadence_research_memos(state))
+        return n in cls._cadence_research_marks(state)
 
     def _run_deep_research(self, state: RunState, *, trigger: str, manual: bool) -> RunState:
         """Execute one Deep-Research step (serial path) and record it, then re-fold. Always records a
@@ -102,13 +158,41 @@ class ResearchCadenceMixin:
         # research LLM spans + the research_completed append both live in THIS op-trace → the event is
         # stamped with it (UI scopes the event's trace to just the research, not a node).
         with self._op_span("deep_research", trigger=trigger):
-            # CODEX AGENT: the paid/provider result is not durable until `_record_deep_research`.
-            # A crash after the model returns but before that append leaves the trigger outstanding,
-            # so resume repeats the spend. Give each trigger a durable request/result identity or
-            # an outbox receipt that can be reconciled without calling the provider again.
+            # The receipt goes down BEFORE the provider call: the memo only becomes durable at
+            # `_record_deep_research`, and a kill in that window used to leave every trigger gate
+            # outstanding, so resume bought the same think again.
+            attempt_id = self._record_research_attempt(state, trigger=trigger, manual=manual)
             memo = self._compute_deep_research(state, trigger, trace=False)
-            self._record_deep_research(memo, trigger=trigger, manual=manual)
+            self._record_deep_research(memo, trigger=trigger, manual=manual,
+                                       attempt_id=attempt_id)
         return fold(self.store.read_all())
+
+    def _record_research_attempt(self, state: RunState, *, trigger: str,
+                                 manual: bool) -> Optional[str]:
+        """Append the paid-attempt receipt for ONE Deep-Research step and return its identity.
+
+        Called from BOTH the main-task cadence AND the concurrent research task, so — like every
+        other write on this path — the type must stay in BACKGROUND_APPENDABLE (the assertion below
+        makes a future non-neutral type fail fast). `repeat` passes are deliberately unreceipted:
+        they ride an in-process TIME cadence with no durable gate to protect, so an attempt row would
+        be pure log growth. Best-effort by design — a store that refuses the append leaves
+        `attempt_id=None` and the caller behaves exactly as it did before this receipt existed.
+        """
+        if trigger == "repeat":
+            return None
+        attempt_id = uuid.uuid4().hex
+        assert EV_RESEARCH_ATTEMPTED in BACKGROUND_APPENDABLE   # see the note on _record_deep_research
+        try:
+            self.store.append(EV_RESEARCH_ATTEMPTED, {
+                "attempt_id": attempt_id, "trigger": trigger, "manual": bool(manual),
+                # The gate that this receipt spends is keyed on the node-count the trigger fired at,
+                # which is the same snapshot `_compute_deep_research` stamps into a stub memo.
+                "at_node": len(state.nodes)})
+        except Exception:  # noqa: BLE001 — research is advisory; refusing to think because the
+            # bookkeeping append failed would stall the run for no safety gain. Degrade to the
+            # pre-receipt behavior (the gate then advances only on the recorded memo).
+            return None
+        return attempt_id
 
     @in_llm_lane("deep_research")
     def _compute_deep_research(self, state: RunState, trigger: str, *, trace: bool = True):
@@ -134,10 +218,15 @@ class ResearchCadenceMixin:
     # exception to engine invariant #1 ("only the main task appends"). The assertions make a
     # future selection-affecting append here fail fast instead of racing the event order.
     @in_llm_lane("deep_research")
-    def _record_deep_research(self, memo, *, trigger: str, manual: bool) -> None:
+    def _record_deep_research(self, memo, *, trigger: str, manual: bool,
+                              attempt_id: Optional[str] = None) -> None:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
-        BACKGROUND_APPENDABLE."""
+        BACKGROUND_APPENDABLE.
+
+        `attempt_id` closes this think's paid-attempt receipt (`_record_research_attempt`). Absent
+        for `repeat` passes and for any caller that predates the receipt, in which case the trigger
+        gates fall back to counting recorded memos alone — exactly the old behavior."""
         from looplab.core.advisory_payloads import (
             research_claim_ref,
             research_memo_ref,
@@ -186,7 +275,8 @@ class ResearchCadenceMixin:
         self.store.append(EV_RESEARCH_COMPLETED, {
             "memo": memo_d,
             **({"memo_id": memo_id} if memo_id is not None else {}),
-            "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
+            "at_node": memo.at_node, "trigger": trigger, "served_manual": manual,
+            **({"attempt_id": attempt_id} if attempt_id else {})})
         # Steer the next proposals: surface the memo's directions as a standing operator hint (the
         # same channel the Researcher already reads), so deep research actually informs planning.
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
@@ -393,8 +483,7 @@ class ResearchCadenceMixin:
         n = len(state.nodes)
         if n == 0 or self._already_researched_at(state, n):
             return None
-        _last_research_n = max((int(m.get("at_node", -1)) for m in self._cadence_research_memos(state)
-                                if m.get("at_node") is not None), default=0)
+        _last_research_n = max(self._cadence_research_marks(state), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):   # since-last, gap-safe
             return "cadence"
         hist = state.strategy_history

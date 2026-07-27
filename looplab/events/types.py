@@ -170,6 +170,12 @@ EV_FINALIZATION_FINISHED = "finalization_finished"
 EV_FORK_DONE = "fork_done"               # fulfillment gate for `fork` requests
 EV_INJECT_DONE = "inject_done"           # fulfillment gate for `inject_node` requests
 EV_RESEARCH_COMPLETED = "research_completed"   # memo sidecar + gate for `deep_research`
+# Paid-attempt receipt for ONE Deep-Research step, appended BEFORE the provider call. The memo only
+# becomes durable at `research_completed`, so a kill in between used to leave every trigger gate
+# (manual counter / at_node cadence / strategist) still outstanding and resume paid for the same
+# think twice. This receipt advances those gates on the ATTEMPT; `research_completed` carries the
+# same `attempt_id` back so a completed attempt is not counted as still outstanding.
+EV_RESEARCH_ATTEMPTED = "research_attempted"
 EV_LESSONS_DISTILLED = "lessons_distilled"
 EV_LESSONS_REFRESHED = "lessons_refreshed"
 EV_REPORT_GENERATED = "report_generated"
@@ -241,6 +247,13 @@ EV_CARD_DROPPED = "card_dropped"                # explicit operator stop intent 
 # durable selection+compute gate; done advances it after commit or an explicit producer-failure give-up.
 EV_CARD_BUILD_REQUESTED = "card_build_requested"
 EV_CARD_BUILD_DONE = "card_build_done"
+# Paid-attempt receipt for ONE producer run against a request head. The request identifies LOGICAL
+# work (this Card, this generation) and survives a kill, but a kill after the provider accepted the
+# call and before the process-local result existed left the head open with no evidence that anything
+# was already paid for — recovery just started another producer. This receipt is appended before the
+# producer starts, so an unreconciled prior attempt is visible on resume and its head is quarantined
+# instead of silently re-issued.
+EV_CARD_BUILD_ATTEMPTED = "card_build_attempted"
 EV_RUN_REOPENED = "run_reopened"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
@@ -272,6 +285,10 @@ EV_BUDGET = "budget"
 EV_READMODEL_SKIPPED = "readmodel_skipped"
 EV_DEPS_INSTALLED = "deps_installed"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
+# FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
+# the only evidence that its side effects may have been applied. Without folding it, a kill between
+# start and finish was indistinguishable from "never ran" and resume re-executed the command while
+# still calling itself exactly-once. `RunState.run_setup_open` now carries that ambiguity forward.
 EV_RUN_SETUP_STARTED = "run_setup_started"
 EV_RUN_SETUP_FINISHED = "run_setup_finished"
 # Training-log monitor (engine/train_monitor.py): a NON-healthy verdict (watch|broken) from the per-eval
@@ -306,7 +323,7 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 # role is calling its client. The splice test proves every member remains selection-neutral regardless
 # of thread-dependent position.
 BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
-    EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
+    EV_RESEARCH_COMPLETED, EV_RESEARCH_ATTEMPTED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
 })
 
 # Conditional extension for legacy Hypothesis/Policy selection only. ``hypothesis_merged`` became a
@@ -326,7 +343,7 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
-    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED, EV_RUN_SETUP_STARTED,
+    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,

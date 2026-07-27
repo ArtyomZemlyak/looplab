@@ -3022,11 +3022,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # Best-effort: an error in the advisory research MUST NOT propagate — it shares the eval's
             # task group, so an uncaught raise here would CANCEL the in-flight eval. Swallow everything.
             try:
+                # Receipt first: the trigger gate must be spent BEFORE the provider call, or a kill
+                # between the model answering and the memo landing buys the same think twice.
+                attempt = await anyio.to_thread.run_sync(
+                    functools.partial(self._record_research_attempt, snap,
+                                      trigger=trig, manual=False))
                 memo = await anyio.to_thread.run_sync(
                     functools.partial(self._compute_deep_research, snap, trig, trace=False))
                 if memo is not None:
                     await anyio.to_thread.run_sync(
-                        functools.partial(self._record_deep_research, memo, trigger=trig, manual=False))
+                        functools.partial(self._record_deep_research, memo, trigger=trig,
+                                          manual=False, attempt_id=attempt))
             except Exception:  # noqa: BLE001 — never let deep research disturb the eval
                 pass
         tg.start_soon(_bg)
@@ -3101,6 +3107,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         functools.partial(self._maybe_merge_hypotheses, snap))
                 if cap > 0 and calls >= cap:
                     return                   # research LLM budget spent; the health monitor still runs
+                # Only the FIRST pass carries the initially-due cadence/strategist trigger and thus a
+                # durable gate worth receipting; `_record_research_attempt` no-ops for the `repeat`
+                # passes that follow (their cadence is an in-process timer, not a folded marker).
+                attempt = await anyio.to_thread.run_sync(
+                    functools.partial(self._record_research_attempt, snap,
+                                      trigger=trig, manual=False))
                 # DeepResearcher owns a paid client and mutable run-bound tools. Its worker
                 # must be joined before the eval window closes; abandoning it permits post-finalization
                 # usage events and lets the next research pass rebind the same tools under a live call.
@@ -3130,7 +3142,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly past
                 # finalize. Waiting for the append (bounded, far shorter than the compute path) is safer.
                 await anyio.to_thread.run_sync(
-                    functools.partial(self._record_deep_research, memo, trigger=trig, manual=False))
+                    functools.partial(self._record_deep_research, memo, trigger=trig,
+                                      manual=False, attempt_id=attempt))
                 trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation (evals joined) — must propagate

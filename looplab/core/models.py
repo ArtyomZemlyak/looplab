@@ -1559,6 +1559,13 @@ class RunState(BaseModel):
     # crash mid-setup can't be told from a completed one. Folding the successful command here makes it
     # crash-safe exactly-once across resume. Absent in old logs -> empty set -> setup runs as before.
     run_setup_done: set[str] = Field(default_factory=set)
+    # Commands whose `run_setup_started` was folded with no `run_setup_finished` after it — a prior
+    # process died mid-install. Their side effects are neither known-applied nor known-absent, and an
+    # arbitrary operator command cannot be made transactional from here, so the honest contract is
+    # "exactly-once on success, at-least-once across a kill" and the repeat is STAMPED
+    # (`after_interrupted_attempt`) instead of masquerading as a first attempt. Hidden from the public
+    # RunState dump: this is recovery bookkeeping, and old logs keep their exact serialized shape.
+    run_setup_open: set[str] = Field(default_factory=set, exclude=True)
     # T2 trust enforcement (folded from run_started; "audit" for old logs). "gate"/"block" make
     # best-selection exclude nodes flagged for a reward-hack / data-leakage signal (not critic).
     trust_gate: str = "audit"
@@ -1843,6 +1850,11 @@ class RunState(BaseModel):
     # not a public board payload; old logs therefore keep the exact serialized RunState shape.
     card_build_requests: list[dict] = Field(default_factory=list, exclude=True)
     card_builds_done: int = Field(default=0, exclude=True)
+    # Paid-attempt receipts (`card_build_attempted`) per request identity, as `{card_id, generation}`
+    # rows in append order. The request above is the LOGICAL gate ("build this Card"); this is the
+    # PHYSICAL one ("a producer was started, so a provider call may already be paid for"). A head that
+    # carries an attempt from a dead process is quarantined rather than silently re-issued.
+    card_build_attempts: list[dict] = Field(default_factory=list, exclude=True)
     # One normalized outcome for every replay-accepted positional Card-build completion.  The
     # quality gate needs the complete denominator: looking only at ``speculative_nodes`` would hide
     # pre-commit stale/producer failures and could turn 99 misses + 1 hit into a reported 100% hit
@@ -1927,6 +1939,14 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
+    # Paid-attempt receipts for the Deep-Research stage (`research_attempted`), each
+    # `{attempt_id, trigger, at_node, manual}`. The gates read attempts as well as memos, so a kill
+    # between "the provider answered" and "the memo is durable" does NOT re-spend on resume; the
+    # trigger is simply spent. `research_attempts_completed` holds the ids whose memo DID land, so an
+    # attempt is only counted as outstanding while it really is. Hidden: recovery bookkeeping, and
+    # keeping them out of the dump preserves the public state contract for old and new logs alike.
+    research_attempts: list[dict] = Field(default_factory=list, exclude=True)
+    research_attempts_completed: set[str] = Field(default_factory=set, exclude=True)
     # removing this field is a breaking public-state migration, not a derived-view cleanup:
     # `/api/runs/{id}/state` no longer contains ``hypotheses`` and external clients cannot distinguish
     # "known empty" from "schema removed". docs/23 explicitly deferred retirement to a post-L6

@@ -322,3 +322,37 @@ def test_completed_legacy_run_without_setup_finished_is_not_re_setup(tmp_path):
     # the setup gate is `if not (setup_done or nodes or finished)` — with a node present it is False,
     # so _setup_phase does NOT re-run preflight for a legacy completed run.
     assert bool(st.setup_done or st.nodes or st.finished) is True
+
+
+def test_run_setup_repeat_after_an_interrupted_attempt_is_stamped(tmp_path, monkeypatch):
+    """`run_setup` is exactly-once for a command that REPORTED, at-least-once across a kill in
+    between. LoopLab cannot make an arbitrary operator command transactional and refusing to re-run
+    would strand a half-installed interpreter — so the repeat happens, but the log says so."""
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime import sandbox as sandbox_module
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "direction": "min"})
+    eng = Engine.__new__(Engine)
+    eng.store = store
+    eng.run_dir = tmp_path
+    eng._repo_spec = {}
+    eng._eval_spec = {"run_setup": ["pip", "install", "-e", "."]}
+    monkeypatch.setattr(sandbox_module, "_run_argv",
+                        lambda *_a, **_k: (0, "", "", False))
+
+    cmd = list(eng._eval_spec["run_setup"])
+    eng._do_run_setup(cmd)
+    first = [e for e in store.read_all() if e.type == "run_setup_started"]
+    assert len(first) == 1 and first[0].data["after_interrupted_attempt"] is False
+
+    # Simulate a kill between start and finish, exactly what the fold now carries across processes.
+    store.append("run_setup_started", {"command": cmd, "cwd": str(tmp_path)})
+    assert fold(store.read_all()).run_setup_open
+
+    eng._do_run_setup(cmd)
+    repeats = [e for e in store.read_all() if e.type == "run_setup_started"]
+    assert len(repeats) == 3
+    assert repeats[-1].data["after_interrupted_attempt"] is True, (
+        "a repeat after an interrupted attempt must be distinguishable from a first attempt")
+    assert fold(store.read_all()).run_setup_open == set()

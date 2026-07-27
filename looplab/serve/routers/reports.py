@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import errno
 import json
+import math
 import os
 import re
 import stat
@@ -17,6 +18,7 @@ import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
@@ -913,17 +915,87 @@ def _valid_scope_action_result(
     return result == _scope_action_failure(result, action_id)
 
 
+_SCOPE_ACTION_RECEIPT_KEYS = frozenset({
+    "schema", "scope_identity", "action_id", "generation_identity", "job_id",
+    "status", "updated_at", "result",
+})
+_SCOPE_USAGE_COUNTER_KEYS = ("calls", "prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _valid_scope_action_usage(value: object) -> bool:
+    """Shape gate for the paid-call receipt carried by an action ledger row.
+
+    Kept as an OPTIONAL key rather than a schema bump on purpose: a receipt written by an older
+    binary stays valid, so an upgrade cannot strand an in-flight action behind a permanent 409. Only
+    server-derived numbers cross — never prompts, model URLs, or provider prose.
+    """
+    if not isinstance(value, dict):
+        return False
+    model = value.get("model")
+    if (value.get("state") not in {"attempted", "observed"}
+            or not isinstance(model, str) or len(model) > 200):
+        return False
+    if value["state"] == "attempted":
+        # No provider answer was observed, so there is deliberately nothing to report but the
+        # intent: this row exists so a crash mid-call is not mistaken for "never spent anything".
+        return set(value) == {"state", "model"}
+    if set(value) != {"state", "model", "cost", *_SCOPE_USAGE_COUNTER_KEYS}:
+        return False
+    cost = value.get("cost")
+    if type(cost) is not float or not math.isfinite(cost) or cost < 0.0:
+        return False
+    return all(type(value[key]) is int and value[key] >= 0
+               for key in _SCOPE_USAGE_COUNTER_KEYS)
+
+
+def _scope_usage_model(model: object) -> str:
+    # Bounded at the same length the receipt validator accepts: an operator can configure an
+    # arbitrarily long model id, and letting it fail the shape gate would refuse the whole paid
+    # action over a label.
+    return str(model or "")[:200]
+
+
+def _attempted_scope_usage(model: object) -> dict[str, Any]:
+    return {"state": "attempted", "model": _scope_usage_model(model)}
+
+
+def _zero_scope_usage(model: object) -> dict[str, Any]:
+    return {"state": "observed", "model": _scope_usage_model(model), "cost": 0.0,
+            **{key: 0 for key in _SCOPE_USAGE_COUNTER_KEYS}}
+
+
+def _observed_scope_usage(client: object, model: object) -> dict[str, Any]:
+    """Read what this one leased client actually spent, in the ledger's sanitized vocabulary.
+
+    The client is minted fresh per generation, so its accountant total IS this action's delta — no
+    before/after subtraction to get wrong. A client that reports nothing (offline fallback, a
+    provider with no usage telemetry) yields an honest all-zero observation rather than silence.
+    """
+    from looplab.engine.costs import in_memory_cost_total, sanitize_usage_delta
+    total = None
+    if client is not None:
+        try:
+            total = in_memory_cost_total(SimpleNamespace(researcher=client))
+        except Exception:  # noqa: BLE001 - hostile/partial client telemetry degrades to zero
+            total = None
+    if total is None:
+        return _zero_scope_usage(model)
+    clean = sanitize_usage_delta(total)
+    return {"state": "observed", "model": _scope_usage_model(model),
+            "cost": float(clean["cost"]),
+            **{key: int(clean[key]) for key in _SCOPE_USAGE_COUNTER_KEYS}}
+
+
 def _valid_scope_action_receipt(
         rec: object, scope_type: str, scope_id: str, action_id: str) -> bool:
     if not isinstance(rec, dict):
         return False
     status = rec.get("status")
     generation_identity = rec.get("generation_identity")
+    if "usage" in rec and not _valid_scope_action_usage(rec["usage"]):
+        return False
     return (
-        set(rec) == {
-            "schema", "scope_identity", "action_id", "generation_identity", "job_id",
-            "status", "updated_at", "result",
-        }
+        set(rec) - {"usage"} == _SCOPE_ACTION_RECEIPT_KEYS
         and rec.get("schema") == _SCOPE_ACTION_SCHEMA
         and rec.get("scope_identity") == _scope_identity(scope_type, scope_id)
         and rec.get("action_id") == action_id
@@ -2555,7 +2627,42 @@ def build_router(srv) -> APIRouter:
             # Never enqueue paid work that cannot safely publish its result afterward.
             raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
 
+        def _stamp_scope_action_usage(usage: dict[str, Any]) -> bool:
+            """Fold one paid-call observation into this worker's durable action receipt, in place.
+
+            Returns False when the ledger row is no longer exactly the running claim this worker
+            wrote — another process reconciled it, or durable storage went away. The caller must then
+            refuse to publish and refuse to claim success: an action that cannot record what it spent
+            must never reach an authoritative terminal.
+            """
+            nonlocal running_receipt
+            if not _valid_scope_action_usage(usage):
+                return False
+            updated = {**running_receipt, "usage": usage,
+                       "updated_at": int(time.time() * 1000)}
+            try:
+                with _scope_store_lock(_reports_dir):
+                    current = _read_scope_action_receipt(
+                        _reports_dir, scope_type, scope_id, action_id)
+                    # Same exact-identity rule `_persist_terminal` uses: a worker may only edit the
+                    # running claim it wrote itself, never a row someone else has since moved.
+                    if current is None or current != running_receipt:
+                        return False
+                    _write_scope_action_receipt(
+                        _reports_dir, scope_type, scope_id, updated)
+            except (_ScopeReportActionConflict, _ScopeReportStorageConflict):
+                return False
+            # Only after the strict write survived: `_persist_terminal` derives its terminal from this
+            # exact dict, so the local copy and the durable row must never diverge.
+            running_receipt = updated
+            return True
+
+        # False once a provider call happened whose spend could NOT be written to the ledger. Read by
+        # `_persist_terminal`, which then withholds the authoritative terminal.
+        usage_recorded = True
+
         def _compute() -> dict:
+            nonlocal usage_recorded
             frozen_scope_ids = requested_scope_ids
             current_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
             if (current_ids != frozen_scope_ids
@@ -2669,10 +2776,12 @@ def build_router(srv) -> APIRouter:
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             from looplab.serve.scope_report import generate_scope_report as _gen
             s = srv.llm_settings(None)
-            # CODEX AGENT: this paid client bypasses the durable usage/cost ledger. Success and
-            # provider-accepted-then-crashed attempts can reach an at-most-once action receipt with no
-            # reconstructible spend. Bind usage to the action outbox and withhold authoritative `done`
-            # until its receipt is reconciled.
+            # No provider call without a durable "a paid attempt starts here" row: a kill between
+            # acceptance and this process's next write would otherwise leave an action ledger that
+            # cannot say whether anything was ever billed for this scope.
+            if not _stamp_scope_action_usage(_attempted_scope_usage(s.llm_model)):
+                return {"ok": False, **_SCOPE_STORAGE_ERROR}
+            client = None
             try:
                 client = srv.make_llm_client(s)
                 # Paid cross-run synthesis is an interactive bounded operation. Global agent settings
@@ -2687,6 +2796,17 @@ def build_router(srv) -> APIRouter:
                                               or DEFAULT_SCOPE_REPORT_TIME_S))
             except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
                 content = _gen(scope, briefs, None)
+            finally:
+                # A tool loop that failed HALFWAY still spent every call it made before raising, so
+                # the observation belongs in the `finally`, not the success path.
+                usage = _observed_scope_usage(client, s.llm_model)
+            # Spend joins the ledger BEFORE the report may be published. Unlike the pre-call stamp
+            # this must NOT abandon the run: the model has already been paid for, and throwing the
+            # generated report away would waste that spend on top of failing to record it. Instead
+            # the failure is remembered, and `_persist_terminal` refuses to turn an unrecorded paid
+            # call into an authoritative `done`.
+            if not _stamp_scope_action_usage(usage):
+                usage_recorded = False
             if not _inputs_unchanged():
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             rec = {"scope_identity": _scope_identity(scope_type, scope_id), "scope": scope,
@@ -2866,6 +2986,14 @@ def build_router(srv) -> APIRouter:
                     if current["status"] != "running":
                         if current["status"] in {"indeterminate", "abandoned"}:
                             srv.jobs.mark_consumable(running_receipt["job_id"])
+                        return _indeterminate_response()
+                    if not usage_recorded:
+                        # A provider call was made and its cost could not be attributed to this
+                        # action. Publishing any exact terminal here — success OR a clean failure —
+                        # would assert a settled outcome for paid work whose spend is not
+                        # reconstructible. The honest state is "unknown"; the operator reviews the
+                        # ambiguous attempt instead of reading a terminal that hides a charge.
+                        _persist_indeterminate_or_retain()
                         return _indeterminate_response()
                     # The durable terminal is committed before JobRegistry may expose a consumable
                     # terminal. Lost inline bodies and one-shot job polls replay from this ledger.

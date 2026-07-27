@@ -364,9 +364,11 @@ def test_run_setup_finished_folds_splice_neutrally(tmp_path):
     # byte-position relative to sibling `node_evaluated` events is thread-schedule-dependent. Its fold is
     # a commutative, idempotent, success-only set-add (`run_setup_done.add(run_setup_key(command))`), so
     # two logs that differ ONLY in that splice position MUST fold to an identical RunState. This guards
-    # the property the off-thread append relies on (its `run_setup_started` sibling is already
-    # fold-ignored via DIAGNOSTIC_EVENTS); if the fold ever became order-sensitive, resume determinism
-    # would silently break and this test would catch it.
+    # the property the off-thread append relies on. Its `run_setup_started` sibling is now FOLDED too
+    # (into `run_setup_open`, so an interrupted install survives the crash), and it stays splice-neutral
+    # for the same reason: no other event type touches that set, and the started/finished pair is always
+    # written in order by the one thread holding `_run_setup_lock`. If the fold ever became
+    # order-sensitive, resume determinism would silently break and this test would catch it.
     from looplab.core.models import run_setup_key
     cmd = ["pip", "install", "-e", "."]
     fin = {"command": cmd, "exit_code": 0, "timed_out": False}
@@ -2540,3 +2542,100 @@ def test_an_unchanged_log_costs_no_reads_so_the_sse_hot_path_stays_cheap(tmp_pat
     store.read_all()
     store.read_all()
     assert calls == [], "an unchanged log must not be re-read"
+
+
+def test_an_interrupted_run_setup_survives_the_crash_as_an_open_attempt(tmp_path):
+    """`run_setup` runs an ARBITRARY operator command; only a started/finished pair can say whether
+    its side effects were applied. Folding just the finish made "never ran" and "died halfway through
+    the install" the same state, so resume re-executed it while still calling itself exactly-once."""
+    from looplab.core.models import run_setup_key
+    from looplab.events.eventstore import EventStore
+
+    cmd = ["pip", "install", "-e", "."]
+    key = run_setup_key(cmd)
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t"})
+    store.append("run_setup_started", {"command": cmd, "cwd": "/repo"})
+
+    interrupted = fold(store.read_all())
+    assert interrupted.run_setup_open == {key}, "a started-without-finish command is ambiguous"
+    assert interrupted.run_setup_done == set()
+
+    # ANY finish closes the ambiguity — a failed command still REPORTED, so the next process is not
+    # resuming through an unknown outcome. Only exit 0 marks the command done.
+    failed = EventStore(tmp_path / "failed.jsonl")
+    failed.append("run_setup_started", {"command": cmd, "cwd": "/repo"})
+    failed.append("run_setup_finished", {"command": cmd, "exit_code": 1, "timed_out": False})
+    assert fold(failed.read_all()).run_setup_open == set()
+    assert fold(failed.read_all()).run_setup_done == set()
+
+    store.append("run_setup_finished", {"command": cmd, "exit_code": 0, "timed_out": False})
+    settled = fold(store.read_all())
+    assert settled.run_setup_open == set() and settled.run_setup_done == {key}
+
+    # Old logs whose started row carried no command fold exactly as they always did.
+    legacy = EventStore(tmp_path / "legacy.jsonl")
+    legacy.append("run_setup_started", {"cwd": "/repo"})
+    assert fold(legacy.read_all()).run_setup_open == set()
+
+
+def test_a_deep_research_attempt_spends_its_trigger_without_a_memo(tmp_path):
+    """The memo only becomes durable at `research_completed`. A kill after the model answered used to
+    leave every trigger gate outstanding, so resume bought the identical think again."""
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t"})
+    store.append("research_attempted",
+                 {"attempt_id": "att-1", "trigger": "cadence", "manual": False, "at_node": 4})
+    st = fold(store.read_all())
+    assert [a["at_node"] for a in st.research_attempts] == [4]
+    assert Engine._already_researched_at(st, 4) is True, "an unrecorded paid think still spent node 4"
+    assert Engine._already_researched_at(st, 5) is False
+
+    # A MANUAL request whose attempt never produced a memo counts as served: `research_served` only
+    # advances on the memo, so without this the queue would re-serve — and re-pay for — the request.
+    manual = EventStore(tmp_path / "manual.jsonl")
+    manual.append("run_started", {"run_id": "r", "task_id": "t"})
+    manual.append("deep_research", {"reason": "go think"})
+    manual.append("research_attempted",
+                  {"attempt_id": "att-2", "trigger": "manual", "manual": True, "at_node": 1})
+    pending = fold(manual.read_all())
+    assert Engine._outstanding_manual_research(pending) == 1
+    assert len(pending.research_requests) <= pending.research_served + 1
+
+    # Once its memo lands the attempt is reconciled and stops counting as outstanding.
+    manual.append("research_completed", {"memo": {"summary": "s"}, "at_node": 1,
+                                         "trigger": "manual", "served_manual": True,
+                                         "attempt_id": "att-2"})
+    served = fold(manual.read_all())
+    assert served.research_attempts_completed == {"att-2"}
+    assert Engine._outstanding_manual_research(served) == 0
+    assert served.research_served == 1
+
+
+def test_a_card_build_attempt_is_bound_to_the_queue_position_it_was_made_against(tmp_path):
+    """The attempt receipt must not outlive the head it belongs to: the same (card, generation) can
+    be legitimately re-elected after its request was closed, and that older — already reconciled —
+    attempt must not quarantine the new head forever."""
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t"})
+    store.append("card_build_requested", {"card_id": "card-a", "generation": 0})
+    store.append("card_build_attempted", {"card_id": "card-a", "generation": 0, "index": 0})
+    open_head = fold(store.read_all())
+    assert Engine._head_has_unreconciled_attempt(open_head, ("card-a", 0)) is True
+
+    # Close it; a fresh request for the SAME identity sits at index 1 and carries no attempt of its own.
+    store.append("card_build_done", {"card_id": "card-a", "generation": 0, "skipped": "stale"})
+    store.append("card_build_requested", {"card_id": "card-a", "generation": 0})
+    reelected = fold(store.read_all())
+    assert reelected.card_builds_done == 1
+    assert Engine._head_has_unreconciled_attempt(reelected, ("card-a", 0)) is False
+
+    # A row without a usable position is inert — it can never quarantine anything.
+    store.append("card_build_attempted", {"card_id": "card-a", "generation": 0})
+    assert len(fold(store.read_all()).card_build_attempts) == 1

@@ -55,6 +55,25 @@ further and say so out loud: a sibling run whose log could not be read to the en
 `PARTIAL SOURCE`, because a truncated log folds into a state that looks complete and would otherwise
 let an agent read "no later experiment exists" out of "the log stopped here".
 
+Work that costs money or touches the outside world is **receipted before it happens, not after**. A
+Deep-Research step appends `research_attempted`, a speculative Card build appends
+`card_build_attempted`, and a repo task's one-time `run_setup` appends `run_setup_started` — each
+before the provider or the command can be reached. Recording only the *result* made a kill between
+"the model answered" and "the memo is durable" indistinguishable from "nothing happened", and resume
+bought the same think, the same build, or the same install a second time. With the attempt on disk:
+
+- a research trigger is spent by its attempt, so an interrupted think is simply lost rather than
+  re-paid (ask again explicitly if you still want it);
+- a Card-build request that carries an attempt from a dead process is **quarantined** — closed and
+  moved to the serial path — instead of silently re-issued to a provider;
+- `run_setup` is exactly-once for a command that reported an outcome and at-least-once across a kill
+  in between, and that repeat is stamped `after_interrupted_attempt` in the log. LoopLab cannot make
+  an arbitrary operator command transactional, so prefer an idempotent one.
+
+Cross-run report generation is paid work over a *set* of runs, so no single run's usage ledger owns
+it: its spend lives in the report's own action receipt, written before the report may be published
+and before the action may claim success.
+
 Not every artifact is an event. Bounded diagnostic trace representations (`spans.jsonl`), Assistant/run chat, logs, and node
 workspaces are independent sidecars. They are useful evidence, but replay does not reconstruct them
 and their absence does not change the folded research state.

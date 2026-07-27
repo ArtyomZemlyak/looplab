@@ -130,7 +130,7 @@ stack(1760,300,DY,[
 ]);
 // CROSS-CUTTING (right column)
 stack(2100,360,DY,[
- {id:"deepres",h:132,t:"Deep Researcher",tag:"LLM · every 3",c:C.dr,sub:["stage absent without an LLM client","tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · REPEATS on an adaptive timer for the whole window (dedup + converge-backoff)","merges the open Card belief board mid-eval only outside Card queue selection (concurrent_consolidate)","memo: summary·findings·claims·directions×5","check claimed support against cited evidence","each direction → open card"]},
+ {id:"deepres",h:154,t:"Deep Researcher",tag:"LLM · every 3",c:C.dr,sub:["stage absent without an LLM client","tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · REPEATS on an adaptive timer for the whole window (dedup + converge-backoff)","merges the open Card belief board mid-eval only outside Card queue selection (concurrent_consolidate)","paid attempt receipted BEFORE the call — never re-bought","memo: summary·findings·claims·directions×5","check claimed support against cited evidence","each direction → open card"]},
  {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: concept-axes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","allocates eval width + LLM total / named lanes","off | rule | llm | agent","no client → deterministic rule fallback","agent_control allow-list per role"]},
  {id:"concept",h:168,t:"Concept graph (Part IV/V)",tag:"mixed defaults",c:C.s,sub:["run_concepts base + explicit full|delta Idea authoring → folded effective membership","bounded consolidation · mode/delta/rename corruption → receipt","tagger receipts: classifier evidence | operator/offline display | authored claim","concept_pivot: ON · coverage every concept_retag_every=30 → uncovered-region hint","graded_novelty: ON · L4 same-dir-new-impl / L5 wrongly-abandoned","typed concept_edge lenses + current co-occurrence → bounded /concepts frame"]},
  {id:"concept_ops",h:132,t:"Concept edits · governance",tag:"durable",c:C.s,sub:["operator retag/set-base intent → generation fence → concept_tag_edited/run_concepts","fold stamps operator provenance; explicit [] stays untagged","Assistant ConceptGovernanceTools: merge · purge/unpurge · split","approval binds normalized payload + revision; ledger CAS serializes mutation","read tools: concept_* in-run · cross_run_concept_map portfolio"]},
@@ -141,7 +141,7 @@ const HY=920;
 box("h_state",40,HY,270,72,"State Card","R",C.r,["Card id = durable work-item identity","immutable seed · editable display · source receipt"]);
 box("h_dedup",350,HY,340,72,"Dedup + merge","R",C.r,["exact id (fold) + agentic paraphrase merge","hybrid grep+BM25+vector RRF → agent decides (open≥4 & +2)"]);
 box("h_prio",730,HY,300,72,"Score + pin priority","R / A",C.r,["policy scorer ranks selectable Cards","operator priority override is applied last"]);
- box("kanban",1070,HY-8,640,104,"Card board · lifecycle kanban","A",C.r,["derived on every fold · bounded public receipt","proposed → building → running → evaluated | gated | dropped","coded/speculative lanes reserved pending durable events","edit display · pin priority/GPU · deliberate drop · generation-fenced"]);
+ box("kanban",1070,HY-8,640,104,"Card board · lifecycle kanban","A",C.r,["derived on every fold · bounded public receipt","proposed → building → running → evaluated | gated | dropped","coded/speculative lanes reserved pending durable events","producer start is receipted; a head carrying a dead process’s attempt is quarantined to the serial path","edit display · pin priority/GPU · deliberate drop · generation-fenced"]);
 
 /* ============ MEMORY WRITE (row y≈1080) ============ */
 const WY=1080;
@@ -171,7 +171,7 @@ box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/sk
 box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → cards · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
 
 /* ============ EVENT SPINE (row y≈1480) ============ */
-box("spine",40,1480,2100,98,"THE EVENT SPINE","",C.sig,["domain/control event → serialized append → events.jsonl → replay.fold → RunState","concept path: run_concepts · concept_tag_edited · node_concepts · concept_edge","one live engine · deterministic RunState fold · traces/snapshots/memory retain explicit sidecars"]);
+box("spine",40,1480,2100,98,"THE EVENT SPINE","",C.sig,["domain/control event → serialized append → events.jsonl → replay.fold → RunState","concept path: run_concepts · concept_tag_edited · node_concepts · concept_edge","one live engine · deterministic RunState fold · traces/snapshots/memory retain explicit sidecars","paid/external work receipts its ATTEMPT first: research_attempted · card_build_attempted · run_setup_started"]);
 
 /* ============ SIGNAL DELIVERY (row y≈1600) — §1: every folded signal reaches the agent that acts on it ============
    Registry engine/signal_delivery.py + tests/test_signal_delivery.py enforce ONE injection site per signal

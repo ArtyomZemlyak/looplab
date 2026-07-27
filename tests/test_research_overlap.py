@@ -82,6 +82,8 @@ class _LoopStub:
         self._cadence = cadence
         self.compute_calls = 0
         self.recorded = []
+        self.attempts = []
+        self.recorded_attempts = []
         self.store = types.SimpleNamespace(read_all=lambda: [])
 
     def _research_repeat_cadence(self):
@@ -92,8 +94,17 @@ class _LoopStub:
         self.compute_calls += 1
         return m
 
-    def _record_deep_research(self, memo, *, trigger, manual):
+    def _record_research_attempt(self, state, *, trigger, manual):
+        # The loop receipts the initially-due trigger before every paid compute; `repeat` passes
+        # ride a timer with no durable gate and are deliberately unreceipted.
+        if trigger == "repeat":
+            return None
+        self.attempts.append(trigger)
+        return f"attempt-{len(self.attempts)}"
+
+    def _record_deep_research(self, memo, *, trigger, manual, attempt_id=None):
         self.recorded.append((research_memo_sig(memo), trigger))
+        self.recorded_attempts.append(attempt_id)
 
 
 async def _cancel_blocked_paid_task(task, started, release, worker_finished):
@@ -140,7 +151,7 @@ def test_repeat_mode_does_not_start_without_a_due_trigger():
         deep_researcher=object(),
         deep_research_every=0,
         _already_researched_at=lambda _state, _n: False,
-        _cadence_research_memos=lambda _state: [],
+        _cadence_research_marks=lambda _state: set(),
         _cadence_due=Engine._cadence_due,
         _research_overlap_loop=lambda _trigger: None,
     )
@@ -260,7 +271,7 @@ def test_repeat_memos_are_excluded_from_the_serial_cadence_gates():
         {"at_node": 2, "trigger": "cadence"},
         {"at_node": 5, "trigger": "repeat"},     # recorded mid-eval by the overlap loop
         {"at_node": 5, "trigger": "repeat"},
-    ])
+    ], research_attempts=[], research_attempts_completed=set())
     counted = Engine._cadence_research_memos(state)
     assert [m["at_node"] for m in counted] == [2]                 # only the real cadence memo counts
     assert Engine._already_researched_at(state, 2) is True        # real memo blocks re-firing at 2
