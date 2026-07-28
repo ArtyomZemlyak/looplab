@@ -107,7 +107,15 @@ def _post(client, event_type, data=None, key="key-1", *, generation=None):
                              "expected_generation": expected_generation})
 
 
-def _terminal(client, record, timeout=1.0, run_id="demo"):
+# Wall-clock ceiling for "an accepted command reached a terminal status". Like the constants below
+# this bounds only the FAILURE case: the loop polls every 10ms and returns the instant a terminal
+# appears, so a passing test never waits. 1.0s was marginal on a loaded full-suite host — the worker
+# had observed neither the `run_finished` append nor the dead process yet, so this asserted on a
+# still-'executing' record while passing in isolation.
+_TERMINAL_SETTLE_TIMEOUT_S = 15.0
+
+
+def _terminal(client, record, timeout=_TERMINAL_SETTLE_TIMEOUT_S, run_id="demo"):
     current = record
     deadline = time.time() + timeout
     while current.get("status") not in TERMINAL_STATUSES and time.time() < deadline:
@@ -121,6 +129,19 @@ def _terminal(client, record, timeout=1.0, run_id="demo"):
 # and exit the instant the work appears, so this only bounds the FAILURE case — 1s was marginal under
 # a loaded full-suite run and flaked there while passing in isolation.
 _WORKER_START_TIMEOUT_S = 15.0
+
+# `command_timeout` for a test that lets its worker RUN and only then stages the run's finish.
+# `_client` derives `max_observation_timeout` from it as max(0.30, timeout * 4), and that is an
+# ABSOLUTE ceiling: the monitor slides `deadline_at` for as long as the driver is alive, then clamps
+# it to `absolute_deadline_at`. At timeout=0.20 that ceiling is 0.80s from record creation, so the
+# staging in between — waiting for the worker (bounded by _WORKER_START_TIMEOUT_S above), an HTTP
+# round-trip and a full event-log read — had to finish inside 0.80s no matter how alive the driver
+# was. On a loaded full-suite host it did not: the command settled `timed_out` at ~1.1s and the
+# terminal assert read 'timed_out' instead of 'succeeded', while passing in isolation. Neither the
+# timeout nor the ceiling is what these tests exercise, so give staging room it cannot outrun.
+# The sibling test that suppresses `_start_worker`, stages the finish, and only then releases the
+# worker is deterministic by construction and deliberately keeps its short budget.
+_STAGED_FINISH_COMMAND_TIMEOUT_S = 30.0
 
 
 def _types(rd):
@@ -729,7 +750,7 @@ def test_restart_waits_for_old_owner_then_requires_exact_replacement_serve(tmp_p
 
     driver.on_spawn = replacement_serves_restart
     driver.alive = False
-    done = _terminal(client, command, timeout=1.5)
+    done = _terminal(client, command, timeout=_TERMINAL_SETTLE_TIMEOUT_S)
     assert done["status"] == "succeeded"
     assert len(driver.calls) == 1 and driver.calls[0][0][0] == "resume"
 
@@ -1464,7 +1485,7 @@ def test_timed_out_command_reconciles_a_late_exact_ack_without_reappend(tmp_path
     client, _srv = _client(tmp_path, driver, startup=0.05, timeout=0.12)
     record = _post(client, "set_strategy", {"strategy": {"policy": "asha"}}, key="late").json()
     intent = _wait_for_intent(rd, record["id"])
-    timed = _terminal(client, record, timeout=1.5)
+    timed = _terminal(client, record, timeout=_TERMINAL_SETTLE_TIMEOUT_S)
     assert timed["status"] == "timed_out" and timed["error"]["code"] == "postcondition_timeout"
     count = _types(rd).count("set_strategy")
 
@@ -1485,7 +1506,7 @@ def test_reload_finalize_reattaches_existing_record_without_event_or_spawn_dupli
         driver.alive = True
 
     driver.on_spawn = start_only
-    client, srv = _client(tmp_path, driver, timeout=0.20)
+    client, srv = _client(tmp_path, driver, timeout=_STAGED_FINISH_COMMAND_TIMEOUT_S)
     first = _post(client, "run_abort", {"reason": "finalized"}, key="browser-before-reload").json()
     deadline = time.time() + _WORKER_START_TIMEOUT_S
     while not driver.calls and time.time() < deadline:
@@ -1652,7 +1673,7 @@ def test_finalize_error_is_not_success_reload_reattaches_and_retry_preserves_sto
 
     retried = client.post(f"/api/runs/demo/commands/{failed['id']}/retry").json()
     assert retried["id"] == failed["id"]
-    done = _terminal(client, retried, timeout=2.5)
+    done = _terminal(client, retried, timeout=_TERMINAL_SETTLE_TIMEOUT_S)
     assert done["status"] == "succeeded" and attempts == 2
     assert _types(rd).count("run_abort") == 1
     assert [event.data.get("reason") for event in EventStore(rd / "events.jsonl").read_all()
@@ -1834,7 +1855,7 @@ def test_monitor_reensures_dead_preexisting_driver_and_heartbeats_long_pause(tmp
 
     driver.on_spawn = restart_and_ack
     driver.alive = False
-    assert _terminal(client, command, timeout=1.5)["status"] == "succeeded"
+    assert _terminal(client, command, timeout=_TERMINAL_SETTLE_TIMEOUT_S)["status"] == "succeeded"
     assert len(driver.calls) == 1
 
     # A long live pause keeps one execution owner and refreshes its claim; repeated GET cannot start
@@ -2160,7 +2181,7 @@ def test_live_but_unacknowledging_driver_has_bounded_observation_ceiling(tmp_pat
     client, _srv = _client(
         tmp_path, driver, startup=0.05, timeout=0.08, observation=0.28)
     command = _post(client, "set_strategy", {"strategy": {"policy": "asha"}}, key="wedged").json()
-    timed = _terminal(client, command, timeout=1.0)
+    timed = _terminal(client, command, timeout=_TERMINAL_SETTLE_TIMEOUT_S)
     assert timed["status"] == "timed_out" and timed["error"]["code"] == "postcondition_timeout"
     assert driver.calls == []
 
