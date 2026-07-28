@@ -638,6 +638,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         digest_char_cap = _opt("digest_char_cap")
         research_verify = _opt("research_verify")
         workdir_audit = _opt("workdir_audit")
+        trace_llm_io = _opt("trace_llm_io")
 
         self.run_dir = Path(run_dir)
         self.task = task
@@ -779,6 +780,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             pass
         self._research_verify = bool(research_verify)
         self._workdir_audit = bool(workdir_audit)
+        # ADR-17 capture policy for THIS run's tracer (below). None = declare nothing and let the
+        # process-wide `set_llm_capture` default decide, exactly as before this knob existed.
+        self._trace_llm_io = None if trace_llm_io is None else bool(trace_llm_io)
         self._coverage_context = bool(coverage_context)
         self._concept_pivot = bool(concept_pivot)
         self._graded_novelty = bool(graded_novelty)
@@ -1180,7 +1184,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Tracing (I14): nested, correlated spans -> spans.jsonl (files-as-truth), bridged to
         # OpenTelemetry when the SDK is configured. Diagnostics only; never drives state.
         self.tracer = Tracer(JsonlSpanExporter(self.run_dir / "spans.jsonl"),
-                             run_id=self.run_dir.name)
+                             run_id=self.run_dir.name,
+                             capture_llm_io=self._trace_llm_io)
         # Task assets (e.g. the dataset) materialized into each node's sandbox workdir.
         assets = getattr(task, "assets", None)
         self._assets: dict = assets() if callable(assets) else {}

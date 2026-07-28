@@ -58,6 +58,11 @@ EXPECTED = {
     "cross_run_advisory": (True, False),
     "cross_run_read_tools": (True, False),
     "fingerprint_universal": (True, False),
+    # ADR-17 LLM-I/O capture: the product surface ships it ON (the UI's per-node trace is the whole
+    # point of a run). The library side declares NOTHING (None) rather than False — a bare
+    # `Engine(...)` must keep deferring to the process-wide `set_llm_capture` default, which is what
+    # it did before the knob existed and what the tracing seam tests toggle.
+    "trace_llm_io": (True, None),
 }
 # Divergent by SHAPE, not a scalar worth freezing: the product default is a non-trivial
 # structure; the library default is "off". Assert the shape relationship, not the payload.
@@ -99,6 +104,14 @@ def test_no_inverted_divergence():
             assert sv and not ov, (
                 f"{f}: divergence inverted (Settings={sv}, Engine={ov}) — the library default "
                 "must not be MORE aggressive than the product default (the novelty_semantic bug).")
+        elif isinstance(sv, bool):
+            # A boolean product knob whose library side is NOT a bool may only be `None` = "declare
+            # nothing, defer to the process-wide default" (trace_llm_io). Without this branch such a
+            # pair slipped past the rule above entirely, so an inverted non-bool default would land
+            # unchallenged — the exact silence this table exists to break.
+            assert ov is None, (
+                f"{f}: boolean product default with a non-bool, non-None library default "
+                f"({ov!r}) — the direction rule cannot be checked, so this divergence is unreviewed.")
 
 
 def test_part_iv_v_default_rationale_discloses_behavior_and_cost():

@@ -23,6 +23,18 @@ The earlier `tracing.py` emitted two flat spans (evaluate/ablate) — a placehol
 | UI **read model** | `readmodel.sqlite`, `trace.json`, `tree.html` | derived | `build_readmodel` + `build_trace_view` |
 | Trace **index** | `spans.index.jsonl` | derived cache (accelerator) | `events.span_index` |
 
+**Per-run LLM-I/O capture permission** (ADR-17): whether a run persists its (bounded, redacted)
+prompt/completion/tool-argument text is that RUN's decision (`Settings.trace_llm_io`), so it is bound
+to the run's own `Tracer` (`Tracer(..., capture_llm_io=…)`, wired by the Engine) and scoped by
+`Tracer.span` through a contextvar for the span's lifetime. Several tracers are live in one process —
+the UI's Assistant, Genesis, a library caller driving two `Engine`s — and with the permission held in
+a single module global the last starter decided for all of them, either persisting an opted-out run's
+prompts or silently dropping an opted-in run's. The module global survives as the PROCESS-WIDE DEFAULT
+(`tracing.set_llm_capture`, what the CLI calls) for tracers that declare nothing. An observation
+(`generation` / `tool`) binds the effective policy when it is CREATED, inside its own span: a streamed
+generation attaches its output across suspensions of a generator that runs in the *consumer's* context,
+which may by then be another run's.
+
 **Delta-encoded generation input** (`tracing.generation`): the agent tool-loop re-sends the WHOLE
 growing conversation on every turn, so storing each generation's full `input` made ~90 % of
 `spans.jsonl` a re-send of the same messages. When a generation STRICTLY EXTENDS the prior one in its

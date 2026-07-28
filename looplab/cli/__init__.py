@@ -272,6 +272,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             Path(settings.speculation_gate_receipt).expanduser().resolve())
     # Capture LLM prompts/completions into spans (UI per-node trace) unless disabled. Diagnostics
     # only; never read by replay.fold. Honors LOOPLAB_TRACE_LLM_IO via Settings.
+    # This sets the PROCESS-WIDE DEFAULT — for LLM calls outside any run's tracer (Genesis before the
+    # Engine exists, the owner Assistant). The run's own decision travels separately as the
+    # `trace_llm_io` EngineOptions knob, which binds it to that Engine's Tracer, so a second run
+    # started later in this process cannot flip the policy out from under this one.
     set_llm_capture(settings.trace_llm_io)
     # The runtime-scope primitive is intentionally bounded to the calibration/public-receipt lane
     # (`max_nodes <= 64`).  Ordinary CLI runs may use the product's much larger node budgets and must

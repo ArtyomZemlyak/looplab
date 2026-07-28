@@ -223,19 +223,39 @@ def current_ids() -> tuple[Optional[str], Optional[str]]:
     return (st[-1]["trace_id"], st[-1]["span_id"]) if st else (None, None)
 
 
-# LLM I/O capture (ADR-17): off by default at import; the engine flips it on per run from
+# LLM I/O capture (ADR-17): off by default at import; each run turns it on from its own
 # Settings.trace_llm_io. When on, record_llm_call attaches the prompt+completion as a span
 # event on whatever operation span is active (propose/implement/repair), so the UI gets a bounded,
 # canonicalized and heuristically redacted diagnostic view — without a new transport or event-log change.
-# CODEX AGENT: this policy is process-global even though tracers/runs are concurrent. The last run to
-# call `set_llm_capture` can expose prompts from an opted-out run or suppress an opted-in run. Bind the
-# permission to Tracer/scoped context and test interleaved opposite-policy traces.
+#
+# The permission is SCOPED, not a bare process flag. Tracers/runs are concurrent inside ONE process
+# (the assistant, genesis, a library caller driving two Engines), and with a single global the LAST
+# caller of `set_llm_capture` decided for all of them — exposing prompts from an opted-out run, or
+# suppressing an opted-in one. A Tracer may therefore declare its OWN policy
+# (`Tracer(..., capture_llm_io=…)`, wired from that run's `Settings.trace_llm_io`), which `Tracer.span`
+# binds to `_capture_ctx` for the span's lifetime. This module-global remains the PROCESS-WIDE DEFAULT
+# for tracers that declare nothing (a bare `Tracer(...)`, the CLI passthrough, the seam tests).
 _CAPTURE_LLM_IO = False
+
+# Effective capture policy for the span open on THIS task/thread: True/False when the active Tracer
+# declared one, None => defer to the process-wide default above. Set/reset by `Tracer.span` alongside
+# the node/phase tokens, and copied across task/thread spawns like the other contextvars — so the
+# policy follows its run into the `anyio.to_thread` eval workers and the concurrent build threads.
+_capture_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_capture", default=None)
 
 
 def set_llm_capture(enabled: bool) -> None:
+    """Set the PROCESS-WIDE default capture policy. A Tracer that declares `capture_llm_io` overrides
+    this inside its own spans; everything untraced (or traced by an undeclared Tracer) follows it."""
     global _CAPTURE_LLM_IO
     _CAPTURE_LLM_IO = bool(enabled)
+
+
+def llm_capture_enabled() -> bool:
+    """Is LLM I/O capture permitted RIGHT HERE? The active span's scoped policy wins; with no scoped
+    policy (nothing traced, or a Tracer that declared none) the process-wide default applies."""
+    scoped = _capture_ctx.get()
+    return _CAPTURE_LLM_IO if scoped is None else scoped
 
 
 def record_llm_call(*, op: str, model: str, messages: list[dict], completion: str,
@@ -247,7 +267,7 @@ def record_llm_call(*, op: str, model: str, messages: list[dict], completion: st
     `completion` is the model's clean answer (the conclusion the UI surfaces). `thinking`, when
     present, is the provider-returned reasoning after the same sanitizer — stored separately so the UI can keep
     it as a collapsed debug-only disclosure rather than the primary view."""
-    if not _CAPTURE_LLM_IO:
+    if not llm_capture_enabled():
         return
     st = _stack.get()
     if not st:
@@ -314,6 +334,13 @@ class ObservationHandle:
 
     def __init__(self, h: "SpanHandle | None"):
         self._h = h
+        # Bind the capture policy AT CONSTRUCTION — inside the owning span, where `_capture_ctx` still
+        # holds THIS run's decision. The caller attaches output/thinking/tool_calls later, and for a
+        # streamed generation that happens across suspensions of a generator whose consumer may have
+        # entered another run's span in between (a sync generator body runs in the CALLER's context,
+        # so the contextvar there is the consumer's, not ours). Re-reading it per attach would apply
+        # the wrong run's policy to this observation.
+        self._capture = llm_capture_enabled()
 
     @property
     def active(self) -> bool:
@@ -327,7 +354,7 @@ class ObservationHandle:
         return self
 
     def output(self, text) -> "ObservationHandle":
-        if self._h is not None and _CAPTURE_LLM_IO and text is not None:
+        if self._h is not None and self._capture and text is not None:
             self._h.set("output", _trace_text(text if isinstance(text, str) else _as_text(text)))
         return self
 
@@ -347,7 +374,7 @@ class ObservationHandle:
         return self
 
     def thinking(self, t) -> "ObservationHandle":
-        if self._h is not None and _CAPTURE_LLM_IO and t:
+        if self._h is not None and self._capture and t:
             self._h.set("thinking", _trace_text(t))
         return self
 
@@ -358,7 +385,7 @@ class ObservationHandle:
         echoed from context. They therefore follow the same opt-in and durable-redaction boundary as prompt
         and completion text instead of going through the generic attribute setter.
         """
-        if self._h is None or not _CAPTURE_LLM_IO or not isinstance(calls, (list, tuple)):
+        if self._h is None or not self._capture or not isinstance(calls, (list, tuple)):
             return self
         safe = []
         remaining = _TRACE_TEXT_CAP
@@ -401,7 +428,7 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
     if model_parameters:
         attrs["model_parameters"] = sanitize_trace_value(model_parameters)
     with tr.span("generation", kind="generation", **attrs) as h:
-        if messages is not None and _CAPTURE_LLM_IO:
+        if messages is not None and llm_capture_enabled():
             # Generation input replays tool observations on the next turn. Sanitize the
             # whole conversation here, not only the dedicated tool span, before delta encoding/OTel.
             cur = _trace_messages(messages)
@@ -444,7 +471,7 @@ def tool(name: str, arguments=None):
         return
     safe_name = _trace_text(name, cap=128, single_line=True)
     with tr.span("tool", kind="tool", tool=safe_name) as h:
-        if arguments is not None and _CAPTURE_LLM_IO:
+        if arguments is not None and llm_capture_enabled():
             h.set("input", sanitize_trace_value(arguments))
         yield ObservationHandle(h)
 
@@ -529,9 +556,14 @@ class SpanHandle:
 
 
 class Tracer:
-    def __init__(self, exporter: JsonlSpanExporter, run_id: str = ""):
+    def __init__(self, exporter: JsonlSpanExporter, run_id: str = "",
+                 capture_llm_io: Optional[bool] = None):
         self.exporter = exporter
         self.run_id = run_id
+        # THIS tracer's LLM-I/O capture policy (see `_CAPTURE_LLM_IO`): the run's own decision, bound
+        # to every span it opens so a concurrent run with the opposite policy cannot leak into it.
+        # None => defer to the process-wide default, keeping a bare `Tracer(...)` byte-identical.
+        self.capture_llm_io = None if capture_llm_io is None else bool(capture_llm_io)
 
     @contextmanager
     def span(self, name: str, *, new_trace: bool = False, kind: str = "operation", **attributes):
@@ -561,6 +593,10 @@ class Tracer:
         # the token discipline of the sibling contextvars above instead of leaking the last generation's
         # (MB-scale) message list past the run into an idle context.
         _tok_prev = _prev_gen.set(None) if new_trace else None
+        # Bind THIS tracer's capture policy for the block (see `_capture_ctx`). ALWAYS set, even when
+        # the tracer declared nothing: an undeclared tracer must fall back to the PROCESS default, not
+        # inherit whatever policy a concurrently-open span of another run left in this context.
+        _tok_cap = _capture_ctx.set(self.capture_llm_io)
         # The context tokens above are reset only in the `finally` below — guard the one OTel call
         # between them so a broken bridged provider can't raise past them and leak a stale
         # node_id/phase onto every later span in this task (spans are diagnostics: degrade, not raise).
@@ -660,6 +696,7 @@ class Tracer:
                 _phase_ctx.reset(_tok_phase)
             if _tok_prev is not None:
                 _prev_gen.reset(_tok_prev)     # restore the outer trace's chain (or None at top level)
+            _capture_ctx.reset(_tok_cap)       # restore the enclosing run's policy (or None = process)
             try:
                 self.exporter.export(rec)
             except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,

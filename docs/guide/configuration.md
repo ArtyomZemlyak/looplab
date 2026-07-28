@@ -471,7 +471,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 | Setting | Env | Default | Description |
 |---|---|---|---|
 | `report_every` | `LOOPLAB_REPORT_EVERY` | `3` | Regenerate the agent-authored run report every N created nodes (0 = off) |
-| `trace_llm_io` | `LOOPLAB_TRACE_LLM_IO` | `true` | Capture a bounded, canonicalized, heuristically redacted diagnostic representation of each LLM call's input/output into `spans.jsonl`; the provider sees the original input and the trace is not byte-exact |
+| `trace_llm_io` | `LOOPLAB_TRACE_LLM_IO` | `true` | Capture a bounded, canonicalized, heuristically redacted diagnostic representation of each LLM call's input/output into `spans.jsonl`; the provider sees the original input and the trace is not byte-exact. The permission is bound to the **run's own tracer**, so two runs sharing one process (the UI's Assistant, Genesis, a library caller driving two `Engine`s) keep opposite policies instead of the last one to start deciding for both. ON in product `Settings`; a bare-library `EngineOptions` declares nothing and defers to the process-wide default set by `looplab.core.tracing.set_llm_capture` (off until a CLI run sets it) |
 | `digest_char_cap` | `LOOPLAB_DIGEST_CHAR_CAP` | `0` | Cap (chars) on the in-run experiment digest injected into prompts (0 = AUTO — scales with run size at ~60 chars/node, bounded to [1200, 6000]) |
 
 ## External-agent governance

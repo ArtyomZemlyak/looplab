@@ -161,6 +161,11 @@ class EngineOptions:
     digest_char_cap: int = 0             # M5: digest prompt budget; 0 = auto-scale with run size
     research_verify: bool = True         # D8: verify memo claims against cited evidence
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
+    # ADR-17: capture this run's bounded/redacted LLM I/O into its spans.jsonl. Bound to the run's OWN
+    # Tracer (core/tracing.py) rather than the process-global flag, so two Engines in one process keep
+    # opposite policies. None = declare nothing and defer to that process-wide default (what a bare
+    # `Engine(...)` did before this knob existed).
+    trace_llm_io: Optional[bool] = None
     coverage_context: bool = True        # narrowing signal: coverage_snapshot at the strategist cadence
     concept_pivot: bool = False          # PART IV 2a: concept-graph uncovered-region pivot (opt-in)
     graded_novelty: bool = False         # PART IV 2b: D3 graded novelty into the live gate (level-4/5 allow)

@@ -593,3 +593,152 @@ def test_new_trace_span_is_a_real_root(tmp_path):
     assert recs["isolated"]["parent_id"] is None, (
         "a new_trace span kept a cross-trace parent — traceview finds a root by parent_id is None, "
         "so this trace has none")
+
+
+def test_llm_capture_policy_is_bound_per_tracer_across_interleaved_traces(tmp_path):
+    """Two runs in ONE process with OPPOSITE capture policies must not decide for each other.
+
+    The permission used to be a single module global (`_CAPTURE_LLM_IO`): whichever run called
+    `set_llm_capture` last won for ALL live tracers, so an opted-OUT run's prompts landed in its
+    spans.jsonl — or an opted-IN run's went missing — purely on interleaving. It is now declared on
+    the Tracer and scoped by `Tracer.span`; the module global is only the process-wide DEFAULT for
+    tracers that declare nothing.
+    """
+    from looplab.core import tracing
+
+    saved = tracing._CAPTURE_LLM_IO
+    try:
+        # What an opted-IN run (or the CLI's `set_llm_capture(settings.trace_llm_io)`) leaves behind.
+        tracing.set_llm_capture(True)
+        secret_prompt = [{"role": "user", "content": "opted-out prompt body"}]
+        off = Tracer(JsonlSpanExporter(tmp_path / "off.jsonl"), run_id="off", capture_llm_io=False)
+        on = Tracer(JsonlSpanExporter(tmp_path / "on.jsonl"), run_id="on", capture_llm_io=True)
+
+        # INTERLEAVED: the opted-out run's span opens while the opted-in run's span is live.
+        with on.span("on-root", new_trace=True):
+            with off.span("off-root", new_trace=True):
+                with tracing.generation(op="off", model="m", messages=secret_prompt) as g:
+                    g.output("opted-out completion").thinking("opted-out reasoning")
+                    g.tool_calls([{"name": "fetch", "arguments": "opted-out args"}])
+                tracing.record_llm_call(op="off", model="m", messages=secret_prompt,
+                                        completion="opted-out completion")
+            # ...and the opted-in run keeps capturing after the opted-out span closes.
+            with tracing.generation(op="on", model="m",
+                                    messages=[{"role": "user", "content": "opted-in prompt"}]) as g:
+                g.output("opted-in completion")
+
+        off_text = (tmp_path / "off.jsonl").read_text(encoding="utf-8")
+        assert "opted-out" not in off_text, (
+            "an opted-OUT run persisted LLM I/O because another run had flipped the process-global "
+            "capture flag on — the policy is not bound to the tracer")
+        off_recs = [orjson.loads(line) for line in off_text.splitlines()]
+        off_gen = next(r for r in off_recs if r["kind"] == "generation")
+        assert "input" not in off_gen["attributes"] and "output" not in off_gen["attributes"]
+        assert not any(e["name"] == "llm_call"
+                       for r in off_recs for e in r["events"])
+
+        on_recs = [orjson.loads(line)
+                   for line in (tmp_path / "on.jsonl").read_text(encoding="utf-8").splitlines()]
+        on_gen = next(r for r in on_recs if r["kind"] == "generation")
+        assert on_gen["attributes"]["input"] and on_gen["attributes"]["output"]
+
+        # And the mirror image: an opted-IN run must still capture while the process default is OFF.
+        tracing.set_llm_capture(False)
+        on2 = Tracer(JsonlSpanExporter(tmp_path / "on2.jsonl"), run_id="on2", capture_llm_io=True)
+        plain = Tracer(JsonlSpanExporter(tmp_path / "plain.jsonl"), run_id="plain")
+        with on2.span("on2-root", new_trace=True):
+            with tracing.generation(op="on2", model="m",
+                                    messages=[{"role": "user", "content": "kept"}]) as g:
+                g.output("kept")
+            # A tracer that declares NOTHING follows the process default, even nested inside a
+            # declared one — it must not inherit the enclosing run's opt-in.
+            with plain.span("plain-root", new_trace=True):
+                with tracing.generation(op="plain", model="m",
+                                        messages=[{"role": "user", "content": "dropped"}]) as g:
+                    g.output("dropped")
+        assert "kept" in (tmp_path / "on2.jsonl").read_text(encoding="utf-8")
+        assert "dropped" not in (tmp_path / "plain.jsonl").read_text(encoding="utf-8")
+        # Leaving the inner span restores the enclosing run's policy rather than the process default.
+        on2_recs = [orjson.loads(line)
+                    for line in (tmp_path / "on2.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert next(r for r in on2_recs if r["kind"] == "generation")["attributes"]["output"]
+    finally:
+        tracing.set_llm_capture(saved)
+
+
+def test_capture_policy_survives_concurrent_opposite_policy_runs(tmp_path):
+    """The scoped policy is a contextvar, so two THREADS driving opposite-policy tracers stay
+    independent — the failure mode the module global had was exactly this race."""
+    import threading
+
+    from looplab.core import tracing
+
+    saved = tracing._CAPTURE_LLM_IO
+    try:
+        tracing.set_llm_capture(False)
+        step = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def drive(name: str, capture: bool) -> None:
+            tracer = Tracer(JsonlSpanExporter(tmp_path / f"{name}.jsonl"), run_id=name,
+                            capture_llm_io=capture)
+            try:
+                for i in range(20):
+                    with tracer.span(f"{name}-root", new_trace=True):
+                        step.wait(timeout=10)      # both threads inside a span at once
+                        with tracing.generation(op=name, model="m",
+                                                messages=[{"role": "user",
+                                                           "content": f"{name}-body-{i}"}]) as g:
+                            g.output(f"{name}-out-{i}")
+                        step.wait(timeout=10)      # ...and both still inside while attaching
+            except BaseException as exc:           # noqa: BLE001 - surface on the main thread
+                errors.append(exc)
+                step.abort()
+
+        threads = [threading.Thread(target=drive, args=("yes", True)),
+                   threading.Thread(target=drive, args=("no", False))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not errors, errors
+        assert not any(t.is_alive() for t in threads)
+
+        yes_text = (tmp_path / "yes.jsonl").read_text(encoding="utf-8")
+        no_text = (tmp_path / "no.jsonl").read_text(encoding="utf-8")
+        assert yes_text.count("yes-body-") == 20 and yes_text.count("yes-out-") == 20
+        assert "no-body-" not in no_text and "no-out-" not in no_text
+    finally:
+        tracing.set_llm_capture(saved)
+
+
+def test_capture_policy_follows_its_run_across_a_worker_thread_hop(tmp_path):
+    """The engine builds/evaluates in `anyio.to_thread` workers, which get a COPY of the parent
+    context — so the run's capture policy must travel with it, in both directions."""
+    from looplab.core import tracing
+
+    def worker() -> None:
+        with tracing.generation(op="in-thread", model="m",
+                                messages=[{"role": "user", "content": "PAYLOAD"}]) as g:
+            g.output("OUT")
+
+    async def drive(tracer) -> None:
+        with tracer.span("root", new_trace=True, node_id=1):
+            await anyio.to_thread.run_sync(worker)
+
+    saved = tracing._CAPTURE_LLM_IO
+    try:
+        # Opted IN while the process default is OFF: the worker must still capture.
+        tracing.set_llm_capture(False)
+        on = Tracer(JsonlSpanExporter(tmp_path / "on.jsonl"), run_id="on", capture_llm_io=True)
+        anyio.run(drive, on)
+        assert "PAYLOAD" in (tmp_path / "on.jsonl").read_text(encoding="utf-8")
+
+        # Opted OUT while the process default is ON: the worker must stay silent.
+        tracing.set_llm_capture(True)
+        off = Tracer(JsonlSpanExporter(tmp_path / "off.jsonl"), run_id="off", capture_llm_io=False)
+        anyio.run(drive, off)
+        off_text = (tmp_path / "off.jsonl").read_text(encoding="utf-8")
+        assert "PAYLOAD" not in off_text and "OUT" not in off_text
+    finally:
+        tracing.set_llm_capture(saved)
