@@ -2578,10 +2578,20 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     corpus_digest = _retrieval_corpus_digest(
         docs, concept_source=concept_source, research_source=research_source,
         claim_source=claim_source)
-    # CODEX AGENT: ``max_corpus`` bounds only the hybrid index: this digest still sorts and serializes
-    # every full claim/concept after preselection already scanned them all. Use a persisted/incremental
-    # corpus revision plus a bounded candidate index and omission receipt so portfolio growth cannot make
-    # one retrieval request O(all stored evidence) in memory and CPU before the advertised cap applies.
+    # COST, stated exactly. `max_corpus` bounds the hybrid INDEX (`indexed_docs`) and the
+    # `retrieval_digest` below is computed over that bounded set — but this `corpus_digest` covers
+    # every row, sorting and serializing each full claim/concept. That is inherent to what it means:
+    # a corpus REVISION has to change when any stored row changes, so a bounded sample cannot express
+    # it. It is also not the only O(n) term — building `docs` in full is deliberate and load-bearing
+    # (see the preselection note above: iterating the public top-512 projection made concept #513 look
+    # absent with source_complete=true and truncated=0), so preselection has already visited every row
+    # before this runs. One retrieval request is therefore O(all stored evidence) in CPU and memory
+    # regardless of `max_corpus`, and portfolio growth scales it.
+    # Fixing that is not a local change: it needs the revision PERSISTED and maintained incrementally
+    # as rows are written, plus a bounded candidate index that can still emit an honest omission
+    # receipt. That is scalability infrastructure over the durable claim/concept stores — tracked work,
+    # not a repair — and a partial version (e.g. combining per-row hashes here) would change the
+    # receipt value that governance consumers compare while still leaving the request O(n).
     indexed_source = {**concept_source, **projection_receipt}
     retrieval_source = {**indexed_source, "research_source": research_source,
                         "claim_source": claim_source}
