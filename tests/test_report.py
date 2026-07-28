@@ -404,6 +404,42 @@ def _refresh_report(client, run_id="demo", *, generation=None, key="test-report-
         json={"expected_generation": generation})
 
 
+def _settled(client, result):
+    """The TERMINAL payload of a report refresh, draining the job when the inline wait lost the race.
+
+    `inline_wait` is an optimization, not an API guarantee (the route caps it at 0.5 s and documents
+    the `{status: running, job_id}` fallback): a loaded runner hands back the durable job receipt even
+    for a trivial worker, and a test that then indexed `["ok"]` raised KeyError. That is scheduling
+    latency, not a contract change — so consume the same job instead, exactly as
+    `test_fast_report_refreshes_do_not_exhaust_shared_job_capacity` already does, and assert on its
+    terminal. The paid receipts are written by the WORKER (`_run_report_refresh_worker`), so the
+    durability assertions hold whichever side of the race wins.
+
+    A no-op when the inline result already arrived: a deterministic pass is left byte-identical, and
+    a test that deliberately forces the queued path (`LOOPLAB_JOB_INLINE_WAIT=0`, or a worker blocked
+    on an event) must keep reading the POST receipt directly rather than calling this.
+    """
+    import time as _time
+    if not isinstance(result, dict) or result.get("status") != "running":
+        return result
+    job_id = result.get("job_id")
+    assert isinstance(job_id, str) and job_id, result
+    for _ in range(500):
+        polled = client.get(f"/api/jobs/{job_id}").json()
+        if polled.get("status") == "running":
+            _time.sleep(0.01)
+            continue
+        # `status` is the JOB receipt's envelope field; the inline path hands back the worker's
+        # payload without it. Strip it from a completed job so both sides of the race present the
+        # IDENTICAL report contract — a test may compare a fresh result against a later durable
+        # terminal replay, which never goes through a job at all. A non-`done` receipt (e.g. an
+        # already-consumed `{status: unknown}`) is returned untouched so it fails loudly.
+        if polled.get("status") == "done" and "ok" in polled:
+            return {key: value for key, value in polled.items() if key != "status"}
+        return polled
+    raise AssertionError(f"report refresh job {job_id} never reached a terminal state")
+
+
 def test_report_refresh_endpoint(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
@@ -414,7 +450,7 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
                                              "trigger": kw.get("trigger", "")})
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
     generation = client.get("/api/runs/demo/state").json()["generation"]
-    r = _refresh_report(client, generation=generation).json()
+    r = _settled(client, _refresh_report(client, generation=generation).json())
     assert r["ok"] is True and r["content"]["headline"] == "live"
     assert r["generation"] == generation
     # it folded into state.report
@@ -424,8 +460,6 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
 
 def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monkeypatch):
     """Every paid result is reachable and consumed, independent of runner scheduling latency."""
-    import time
-
     _build_run(tmp_path, "demo", writer=None)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: {
@@ -436,21 +470,13 @@ def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monk
     generation = client.get("/api/runs/demo/state").json()["generation"]
 
     for index in range(65):
-        result = _refresh_report(
-            client, generation=generation, key=f"fast-refresh-{index}").json()
-        # CODEX AGENT: inline_wait is an optimization, not an API guarantee. A loaded Windows runner
-        # may return the durable job receipt even for this trivial worker; consume that same job instead
-        # of pretending scheduling latency changed the report contract or leaking registry capacity.
-        if result.get("status") == "running":
-            job_id = result.get("job_id")
-            assert isinstance(job_id, str) and job_id
-            for _ in range(500):
-                # A nonterminal GET is intentionally only {status: running}; keep the immutable id from
-                # the POST receipt across every poll instead of expecting it to be echoed by status reads.
-                result = client.get(f"/api/jobs/{job_id}").json()
-                if result.get("status") == "done":
-                    break
-                time.sleep(0.01)
+        # inline_wait is an optimization, not an API guarantee. A loaded runner may return the durable
+        # job receipt even for this trivial worker; `_settled` consumes that same job instead of
+        # pretending scheduling latency changed the report contract or leaking registry capacity.
+        # (It keeps the immutable id from the POST receipt across every poll, because a nonterminal
+        # GET is intentionally only {status: running} and never echoes the id back.)
+        result = _settled(client, _refresh_report(
+            client, generation=generation, key=f"fast-refresh-{index}").json())
         assert result["ok"] is True
         assert result["generation"] == generation
 
@@ -509,7 +535,7 @@ def test_report_refresh_ignores_non_sha_ledger_identity(tmp_path, monkeypatch):
         "headline": "not blocked", "at_node": len(state.nodes),
     })
 
-    result = _refresh_report(client, generation=generation, key="valid-key").json()
+    result = _settled(client, _refresh_report(client, generation=generation, key="valid-key").json())
 
     assert result["ok"] is True and result["content"]["headline"] == "not blocked"
 
@@ -601,8 +627,8 @@ def test_report_refresh_retry_starts_workerless_durable_reservation(tmp_path, mo
         _refresh_report(client, generation=generation, key="workerless-reservation")
 
     monkeypatch.setattr(registry, "run_reserved", original)
-    recovered = _refresh_report(
-        client, generation=generation, key="workerless-reservation").json()
+    recovered = _settled(client, _refresh_report(
+        client, generation=generation, key="workerless-reservation").json())
 
     assert recovered["ok"] is True and recovered["content"]["headline"] == "recovered"
     assert calls == ["demo"]
@@ -680,8 +706,8 @@ def test_report_refresh_job_start_failure_records_restart_safe_terminal(
         }
 
     monkeypatch.setattr(app.state.looplab.jobs, "run_reserved", failed_spawn)
-    first = _refresh_report(
-        client, generation=generation, key="failed-worker-start").json()
+    first = _settled(client, _refresh_report(
+        client, generation=generation, key="failed-worker-start").json())
 
     assert first["code"] == "job_failed"
     failed = [
@@ -691,8 +717,8 @@ def test_report_refresh_job_start_failure_records_restart_safe_terminal(
     assert len(failed) == 1 and failed[0].data["error_kind"] == "internal"
 
     restarted = TestClient(make_app(tmp_path))
-    replayed = _refresh_report(
-        restarted, generation=generation, key="failed-worker-start").json()
+    replayed = _settled(restarted, _refresh_report(
+        restarted, generation=generation, key="failed-worker-start").json())
     assert replayed["code"] == "report_refresh_failed"
     assert replayed["error_kind"] == "internal"
 
@@ -718,14 +744,14 @@ def test_report_refresh_terminal_append_failure_stays_uncertain(
     client = TestClient(make_app(tmp_path))
     generation = client.get("/api/runs/demo/state").json()["generation"]
 
-    result = _refresh_report(
-        client, generation=generation, key="uncertain-terminal").json()
+    result = _settled(client, _refresh_report(
+        client, generation=generation, key="uncertain-terminal").json())
 
     assert result["code"] == "report_refresh_uncertain"
     assert result["generation"] == generation
     restarted = TestClient(make_app(tmp_path))
-    same = _refresh_report(
-        restarted, generation=generation, key="uncertain-terminal").json()
+    same = _settled(restarted, _refresh_report(
+        restarted, generation=generation, key="uncertain-terminal").json())
     assert same["code"] == "report_refresh_uncertain"
     other = _refresh_report(
         restarted, generation=generation, key="must-not-rebill")
@@ -778,19 +804,19 @@ def test_report_refresh_success_requires_durable_terminal_before_success(
     client = TestClient(make_app(tmp_path))
     generation = client.get("/api/runs/demo/state").json()["generation"]
 
-    uncertain = _refresh_report(
-        client, generation=generation, key="terminal-durability").json()
+    uncertain = _settled(client, _refresh_report(
+        client, generation=generation, key="terminal-durability").json())
 
     assert uncertain["code"] == "report_refresh_uncertain"
     assert uncertain["ambiguous"] is True
     assert "same request identity" in uncertain["error"]
-    still_uncertain = _refresh_report(
-        TestClient(make_app(tmp_path)), generation=generation,
-        key="terminal-durability").json()
+    third_client = TestClient(make_app(tmp_path))
+    still_uncertain = _settled(third_client, _refresh_report(
+        third_client, generation=generation, key="terminal-durability").json())
     assert still_uncertain["code"] == "report_refresh_uncertain"
-    reconciled = _refresh_report(
-        TestClient(make_app(tmp_path)), generation=generation,
-        key="terminal-durability").json()
+    fourth_client = TestClient(make_app(tmp_path))
+    reconciled = _settled(fourth_client, _refresh_report(
+        fourth_client, generation=generation, key="terminal-durability").json())
     assert reconciled["ok"] is True
     assert reconciled["content"]["headline"] == "paid terminal"
     assert calls == ["demo"]
@@ -815,8 +841,8 @@ def test_report_refresh_failure_terminal_uses_strict_durability(tmp_path, monkey
         "looplab.serve.report.generate_report",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")),
     )
-    result = _refresh_report(
-        TestClient(make_app(tmp_path)), key="durable-failure-terminal").json()
+    client = TestClient(make_app(tmp_path))
+    result = _settled(client, _refresh_report(client, key="durable-failure-terminal").json())
 
     assert result["ok"] is False
     assert observed == [{"require_lock": True, "require_durable": True}]
@@ -833,15 +859,16 @@ def test_report_refresh_terminal_replay_does_not_require_current_llm_settings(
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
     client = TestClient(make_app(tmp_path))
     generation = client.get("/api/runs/demo/state").json()["generation"]
-    first = _refresh_report(client, generation=generation, key="replay-without-settings").json()
+    first = _settled(client, _refresh_report(
+        client, generation=generation, key="replay-without-settings").json())
     assert first["ok"] is True
 
     monkeypatch.setattr(
         "looplab.serve.settings_store.SettingsStore.load_ui_settings",
         lambda _store: (_ for _ in ()).throw(OSError("settings unreadable")),
     )
-    replayed = _refresh_report(
-        client, generation=generation, key="replay-without-settings").json()
+    replayed = _settled(client, _refresh_report(
+        client, generation=generation, key="replay-without-settings").json())
 
     assert replayed == first
 
@@ -863,8 +890,8 @@ def test_report_refresh_background_http_rejection_records_terminal(
         })
 
     monkeypatch.setattr(app.state.looplab.commands, "run_activity", reject_activity)
-    first = _refresh_report(
-        client, generation=generation, key="rejected-worker").json()
+    first = _settled(client, _refresh_report(
+        client, generation=generation, key="rejected-worker").json())
 
     assert first["code"] == "background_request_rejected"
     assert "secret" not in str(first) and "token=hidden" not in str(first)
@@ -874,8 +901,9 @@ def test_report_refresh_background_http_rejection_records_terminal(
     ]
     assert len(failed) == 1
 
-    replayed = _refresh_report(
-        TestClient(make_app(tmp_path)), generation=generation, key="rejected-worker").json()
+    replay_client = TestClient(make_app(tmp_path))
+    replayed = _settled(replay_client, _refresh_report(
+        replay_client, generation=generation, key="rejected-worker").json())
     assert replayed["code"] == "report_refresh_failed"
 
 
@@ -897,9 +925,10 @@ def test_manual_report_failure_preserves_last_good_report(tmp_path, monkeypatch)
     client = TestClient(make_app(tmp_path))
 
     response = _refresh_report(client, key="failed-manual-report")
+    settled = _settled(client, response.json())
 
-    assert response.status_code == 200 and response.json()["ok"] is False
-    assert "secret" not in str(response.json()) and "token=hidden" not in str(response.json())
+    assert response.status_code == 200 and settled["ok"] is False
+    assert "secret" not in str(settled) and "token=hidden" not in str(settled)
     state = client.get("/api/runs/demo/state").json()["state"]
     assert state["report"]["headline"] == "last known good"
     reports = [event for event in EventStore(rd / "events.jsonl").read_all()
@@ -915,7 +944,7 @@ def test_report_refresh_soft_fails_offline(tmp_path, monkeypatch):
         raise RuntimeError("no model")
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = _refresh_report(client)
-    assert r.status_code == 200 and r.json()["ok"] is False  # soft-fail, no crash
+    assert r.status_code == 200 and _settled(client, r.json())["ok"] is False  # soft-fail, no crash
 
 
 def test_report_refresh_async_job_path(tmp_path, monkeypatch):
