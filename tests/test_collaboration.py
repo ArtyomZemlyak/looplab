@@ -727,3 +727,58 @@ def test_boss_endpoints_reject_a_malformed_body_instead_of_500ing(tmp_path, monk
     # a well-formed body still gets past the parser (whatever the endpoint then decides)
     ok = client.post("/api/runs/demo/chat-compact", headers=OWNER, json={"messages": []})
     assert ok.status_code != 400
+
+
+def test_same_generation_log_rewrites_cannot_split_a_comment_page(tmp_path):
+    """Page one from the old log body and page two from a rewritten one must be impossible.
+
+    The run-generation token hashes only the FIRST durable event, so a repair/rewrite that keeps that
+    event byte-identical keeps the SAME token — the cursor's generation component cannot notice. What
+    actually stops a split page is one layer down, and this locks both of those defenses in
+    (see `serve/routers/collaboration.py::_assert_still_current` for the full adjudication).
+    """
+    def _seed_five(root):
+        rd = _seed(root)
+        store = EventStore(rd / "events.jsonl")
+        for index in range(1, 6):
+            store.append(EV_COMMENT_CREATED,
+                         _create_data(f"cmt_{index:032x}", text=f"c{index}"))
+        return rd
+
+    # (a) `looplab repair-log` truncates to the last valid boundary. The newest comments live in that
+    # dropped tail, so the page-one anchor goes with it.
+    rd = _seed_five(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    page1 = client.get("/api/runs/demo/comments?limit=2").json()
+    assert [row["text"] for row in page1["comments"]] == ["c5", "c4"]
+    log = rd / "events.jsonl"
+    lines = [line for line in log.read_bytes().split(b"\n") if line.strip()]
+    first_line = lines[0]
+    log.write_bytes(b"\n".join(lines[:-2]) + b"\n")
+    assert log.read_bytes().split(b"\n")[0] == first_line       # generation token is UNCHANGED
+    truncated = client.get(
+        "/api/runs/demo/comments", params={"limit": 3, "cursor": page1["next_cursor"]})
+    assert truncated.status_code == 409
+    assert truncated.json()["detail"]["code"] == "comment_cursor_stale"
+
+    # (b) node/run deletion drops records WITHOUT renumbering, so the survivors leave a seq gap and
+    # `EventStore.read_all` fails closed at it — the anchor is not in the recoverable prefix either.
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    rd2 = _seed_five(second_root)
+    client2 = TestClient(make_app(second_root))
+    page1b = client2.get("/api/runs/demo/comments?limit=2").json()
+    assert [row["text"] for row in page1b["comments"]] == ["c5", "c4"]
+    log2 = rd2 / "events.jsonl"
+    lines2 = [line for line in log2.read_bytes().split(b"\n") if line.strip()]
+    first_line2 = lines2[0]
+    # Drop an OLDER record while deliberately RETAINING the page-one anchor (c4) — the exact shape a
+    # generation check alone would wave through.
+    log2.write_bytes(b"\n".join(line for line in lines2 if b'"c2"' not in line) + b"\n")
+    assert log2.read_bytes().split(b"\n")[0] == first_line2     # generation token is UNCHANGED
+    gapped = client2.get(
+        "/api/runs/demo/comments", params={"limit": 3, "cursor": page1b["next_cursor"]})
+    assert gapped.status_code == 409, (
+        "a seq gap left by record deletion no longer truncates the recoverable prefix — comment "
+        "paging would silently serve page two from the rewritten log")
+    assert gapped.json()["detail"]["code"] == "comment_cursor_stale"

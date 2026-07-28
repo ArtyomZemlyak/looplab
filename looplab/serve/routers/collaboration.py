@@ -32,9 +32,26 @@ def _stable_events(srv, rd):
 
 
 def _assert_still_current(srv, rd, generation: str) -> None:
-    # CODEX AGENT: first-event generation does not identify a repaired/replaced log revision. A retained
-    # comment anchor lets page one come from the old file and page two from the replacement. Bind cursors
-    # to a reset-safe file revision and reject same-generation replacement.
+    """Reject a reset/replacement that wins the race against an in-flight projection.
+
+    The token is derived from the FIRST durable event, so it does NOT change when a log is repaired or
+    rewritten in place. That raised a real question: could a RETAINED comment anchor serve page one from
+    the old body and page two from the replacement? Checked against every rewrite this code actually
+    performs, it cannot — each is already rejected one layer down:
+      * `looplab repair-log` truncates to the last valid boundary, dropping the TAIL. The newest
+        comments live there, so a page-one anchor goes with it and `comments_page` rejects the vanished
+        anchor rather than paging into the repaired body.
+      * node/run deletion (`tools/machine_runs_tools.py`) drops records WITHOUT renumbering, so the
+        survivors leave a seq gap and `EventStore.read_all` fails closed AT that gap. Everything newer —
+        including the anchor — is outside the recoverable prefix, so the same rejection applies.
+    The residual is an in-place edit that preserves BOTH dense seq numbering and the anchor row. No path
+    here produces that (it needs events.jsonl edited underneath the server), and it is the same
+    middle-of-prefix case `eventstore._prefix_anchor` already documents its head/tail byte windows
+    cannot catch. Binding cursors to a byte revision here would advertise an integrity guarantee the
+    event store itself declines to make, so this stays a generation check.
+    `tests/test_collaboration.py::test_same_generation_log_rewrites_cannot_split_a_comment_page`
+    locks in both rejections, so weakening either one fails loudly instead of silently mixing pages.
+    """
     if srv.commands.run_generation(rd) != generation:
         raise HTTPException(409, {
             "code": "run_generation_changed",
