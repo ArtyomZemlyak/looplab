@@ -3280,27 +3280,61 @@ def _on_fork(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
           and _event_generation(d) is _MISSING):
         st.fork_requests.append(dict(d))  # legacy queued-before-create intent
 
-def _on_fork_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    """Advance the fork queue cursor — but only for the request currently AT the head.
+def _advance_request_cursor(done: int, total: int, idx: object) -> int:
+    """The ONE rule every `<x>_requests` / `<x>s_done` positional gate advances by.
 
-    `forks_done` indexes `fork_requests`; every producer serves `fork_requests[forks_done]` and stamps
-    that head's `from_node_id` (orchestrator.py:2768/2827/2831). Counting unconditionally let a
-    duplicate or orphan receipt push the cursor PAST the queue, so a fork request appended afterwards
-    sat at an index the engine would never reach again — the operator's fork was silently never built.
+    `fork_requests`/`forks_done` and `inject_requests`/`injects_done` are the operator-steering
+    queues: the engine serves `requests[done]` and appends a receipt naming the position it just
+    completed. Both used to hand-roll their own partial version of this, with complementary holes —
+    fork keyed on `from_node_id` (not unique: re-forking one promising node is the ordinary pattern,
+    so a duplicate receipt consumed the operator's SECOND fork), inject keyed on a stamped absolute
+    index with no queue bound (an orphan receipt walked the cursor past the queue and stranded the
+    next intent forever). `_on_card_build_done` already had the right shape; this is that shape,
+    shared, so a third queue cannot invent a fourth set of semantics.
 
-    Two binds, both no-ops on any log a sanctioned producer wrote:
-      * the cursor may never overrun the queue (this alone closes the duplicate case);
-      * a receipt naming a DIFFERENT parent than the head is not this head's receipt.
-    `generation` is deliberately NOT compared: the served branch stamps `current.attempt`, which for a
-    legacy unstamped request (`generation is None`) differs from the request record by design.
+    The receipt names its own position, which makes the rule self-healing rather than cumulative:
+
+    * a receipt for a position BEFORE the cursor is one already completed — a duplicate or a replay —
+      and must not consume the request now at the head;
+    * a receipt at or after the cursor completes through that position, clamped to the queue, so a
+      log whose stamped indices were computed under older fold semantics still converges on
+      "everything up to here was served" instead of silently dropping every later receipt;
+    * the cursor may never overrun the queue, so nothing can strand an intent appended afterwards.
+
+    A row with NO usable index is legacy (or forged): it advances by one, still queue-bounded, so old
+    logs fold exactly as they always did. Bools are rejected — `type(True) is int` is False, but an
+    explicit check keeps that a stated property rather than an accident of the type test.
     """
-    if st.forks_done >= len(st.fork_requests):
-        return                               # orphan/duplicate: nothing is at the head to complete
-    head = st.fork_requests[st.forks_done]
-    receipt_pid, head_pid = _coerce_node_id(d, "from_node_id"), _coerce_node_id(head, "from_node_id")
-    if receipt_pid is not None and head_pid is not None and receipt_pid != head_pid:
-        return                               # a receipt for some other fork cannot consume this head
-    st.forks_done += 1   # one per processed fork request (gate for replay-safe fulfillment)
+    total = max(0, total)
+    done = min(max(0, done), total)
+    if isinstance(idx, bool) or type(idx) is not int:
+        return min(done + 1, total)          # legacy/unusable index — advance one, never past the end
+    if idx < done:
+        return done                          # already completed; not this head's receipt
+    return min(idx + 1, total)
+
+
+def _on_fork_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Advance the fork queue cursor by the position the receipt names.
+
+    Every producer serves `fork_requests[forks_done]` and stamps that index (`_serve_forced_requests`
+    and `_close_node_creating_forced_request_before_terminal_gate`). `from_node_id` is deliberately
+    NOT the key: two queued forks of the same parent are indistinguishable by it, which is exactly the
+    case a duplicate receipt used to consume. It stays a bind for LEGACY rows that carry no index, and
+    `generation` is compared by neither — the served branch stamps `current.attempt`, which for a
+    legacy unstamped request differs from the request record by design.
+    """
+    if "idx" not in d:
+        # Legacy receipt: keep the parent bind that shipped before the index existed. It cannot
+        # separate two same-parent forks, but it still rejects a receipt naming a different fork.
+        if st.forks_done < len(st.fork_requests):
+            head = st.fork_requests[st.forks_done]
+            receipt_pid = _coerce_node_id(d, "from_node_id")
+            head_pid = _coerce_node_id(head, "from_node_id")
+            if receipt_pid is not None and head_pid is not None and receipt_pid != head_pid:
+                return                       # a receipt for some other fork cannot consume this head
+    st.forks_done = _advance_request_cursor(
+        st.forks_done, len(st.fork_requests), d.get("idx"))
 
 
 def _on_card_build_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -3385,17 +3419,18 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     st.speculative_nodes[node_id] = dict(request)
 
 def _on_inject_node(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.inject_requests.append(d)        # operator-authored experiment (manual tree edit)
+    # COPY, like `_on_fork` does: `EventStore` caches parsed `Event`s across `read_all()`, so
+    # storing the live `data` dict would let any in-place mutation of a folded request change
+    # what every later fold in this process sees — folded state silently diverging from the
+    # bytes on disk. No consumer mutates today; the copy keeps it that way by construction.
+    st.inject_requests.append(dict(d))  # operator-authored experiment (manual tree edit)
 
 def _on_inject_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # Bind to the queue index the producers ALREADY stamp (`{"idx": request_idx}`) — the fold simply
-    # ignored it, so a duplicate/orphan receipt advanced past a freshly appended inject intent and left
-    # it permanently unserved. A row with NO `idx` is legacy and still advances, so old logs fold
-    # byte-identically; a non-int or non-matching `idx` is not this head's receipt.
-    _idx = d.get("idx")
-    if _idx is not None and (type(_idx) is not int or _idx != st.injects_done):
-        return
-    st.injects_done += 1                 # one per processed inject (replay-safe gate)
+    # Same positional rule as `_on_fork_done` — see `_advance_request_cursor` for why the receipt's
+    # own index, not the fold's current cursor, is the authority. Both producers stamp
+    # `{"idx": state.injects_done}`; a legacy row without one advances by a queue-bounded step.
+    st.injects_done = _advance_request_cursor(
+        st.injects_done, len(st.inject_requests), d.get("idx"))
 
 def _on_deep_research(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.research_requests.append(d)       # manual "go think hard" request (control event)

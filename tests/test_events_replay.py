@@ -2388,10 +2388,11 @@ def test_fork_receipt_binds_to_its_own_queue_head(tmp_path):
     """A duplicate/orphan `fork_done` must not consume a LATER fork request.
 
     `forks_done` indexes `fork_requests`: the engine serves `fork_requests[forks_done]` and stamps
-    that head's `from_node_id`. Counting every receipt unconditionally let a duplicate push the cursor
+    that head's index. Counting every receipt unconditionally let a duplicate push the cursor
     PAST the queue, so a fork appended afterwards sat at an index the engine would never reach again —
     the operator's fork was silently never built, with no event recording the loss. Same defect class
-    as the inject queue above; the two gates are the engine's only operator-steering cursors.
+    as the inject queue above; `research_requests`/`research_served` is the third such gate and is
+    clamped in its own handler.
     """
     s = EventStore(tmp_path / "events.jsonl")
     _seed(s)
@@ -2639,3 +2640,111 @@ def test_a_card_build_attempt_is_bound_to_the_queue_position_it_was_made_against
     # A row without a usable position is inert — it can never quarantine anything.
     store.append("card_build_attempted", {"card_id": "card-a", "generation": 0})
     assert len(fold(store.read_all()).card_build_attempts) == 1
+
+
+def test_two_forks_of_one_parent_are_separate_requests(tmp_path):
+    """Re-forking one promising node is the ordinary operator pattern, and `from_node_id` cannot tell
+    those two requests apart. Keying the receipt on the parent therefore let a duplicate consume the
+    SECOND fork while both were still queued — the case a queue-overrun bound alone cannot catch,
+    because the queue is not empty."""
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    s.append("fork", {"from_node_id": 0, "generation": 0})
+    s.append("fork", {"from_node_id": 0, "generation": 0})        # both queued BEFORE any receipt
+    s.append("fork_done", {"idx": 0, "from_node_id": 0, "generation": 0})
+    s.append("fork_done", {"idx": 0, "from_node_id": 0, "generation": 0})   # duplicate of the first
+    st = fold(s.read_all())
+    assert len(st.fork_requests) == 2
+    assert st.forks_done == 1, (
+        "a duplicate receipt consumed the operator's second same-parent fork; it is now permanently "
+        "unserved and nothing in the log records the loss")
+
+
+def test_a_fork_receipt_never_walks_the_cursor_backwards(tmp_path):
+    """`fork_done` is written BEFORE the paid producer, so a receipt the fold declines leaves a
+    request the engine ALREADY served sitting at the head — and resume re-runs Researcher + Developer
+    and mints a second paid child. The cursor must never end up below what the log proves was
+    completed."""
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    s.append("node_created", {"node_id": 1, "parent_ids": [0], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 1, "metric": 0.4, "violations": []})
+    s.append("fork", {"from_node_id": 0, "generation": 0})
+    s.append("fork", {"from_node_id": 1, "generation": 0})
+    # Receipts observed out of order (a spliced/repaired log): both requests ARE completed.
+    s.append("fork_done", {"idx": 1, "from_node_id": 1, "generation": 0})
+    s.append("fork_done", {"idx": 0, "from_node_id": 0, "generation": 0})
+    st = fold(s.read_all())
+    assert len(st.fork_requests) == 2
+    assert st.forks_done == 2, (
+        "the cursor fell behind the completed work, so the engine would re-serve an already-built "
+        "fork and pay for the same experiment twice")
+
+
+def test_an_orphan_inject_receipt_cannot_strand_the_next_intent(tmp_path):
+    """The inject cursor had the index bind but no queue bound, so a receipt arriving before (or
+    beyond) its intent walked `injects_done` past the queue and `len(requests) > done` stayed False
+    forever — the operator's experiment was never built."""
+    for label, receipt in (("stamped", {"idx": 0}), ("legacy", {})):
+        s = EventStore(tmp_path / f"{label}.jsonl")
+        _seed(s)
+        s.append("inject_done", dict(receipt))            # orphan: nothing is queued yet
+        s.append("inject_node", {"idea": {"operator": "draft", "params": {}}})
+        st = fold(s.read_all())
+        assert len(st.inject_requests) == 1, label
+        assert st.injects_done == 0, (
+            f"[{label}] an orphan receipt consumed an intent appended after it; the operator's "
+            "experiment is permanently unservable")
+
+
+def test_the_inject_cursor_converges_on_a_log_the_old_fold_over_advanced(tmp_path):
+    """The receipt's own index — not the fold's current cursor — is the authority.
+
+    A log written while the old fold over-advanced carries indices computed from THAT cursor. Testing
+    the stamped index for equality with the fold's cursor made every receipt after the first rejection
+    mismatch, so replay reported work as outstanding that the log proves was done — and resume re-ran
+    the paid producer for each one.
+    """
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    idea = {"operator": "draft", "params": {}}
+    s.append("inject_node", {"idea": idea})
+    s.append("inject_done", {"idx": 0})
+    s.append("inject_done", {"idx": 0})               # the duplicate the old fold counted
+    s.append("inject_node", {"idea": idea})
+    s.append("inject_done", {"idx": 2})               # stamped from the over-advanced cursor
+    s.append("inject_node", {"idea": idea})
+    s.append("inject_done", {"idx": 3})
+    st = fold(s.read_all())
+    assert len(st.inject_requests) == 3
+    assert st.injects_done == 3, (
+        "receipts after the rejected duplicate were dropped, so resume would re-serve injects that "
+        "already have a node in this very log — a duplicate node plus its Developer spend each")
+
+    # …while a genuine duplicate still cannot consume the request behind it.
+    dup = EventStore(tmp_path / "dup.jsonl")
+    _seed(dup)
+    dup.append("inject_node", {"idea": idea})
+    dup.append("inject_node", {"idea": idea})
+    dup.append("inject_done", {"idx": 0})
+    dup.append("inject_done", {"idx": 0})
+    settled = fold(dup.read_all())
+    assert len(settled.inject_requests) == 2 and settled.injects_done == 1
+
+
+def test_request_cursor_rule_is_shared_and_queue_bounded():
+    """One rule, stated once. Both operator queues route through it, so a third cannot invent a
+    fourth set of semantics — the divergence that produced the fork/inject holes in the first place."""
+    from looplab.events.replay import _advance_request_cursor as advance
+
+    assert advance(0, 0, 0) == 0                 # nothing queued: no receipt can advance
+    assert advance(0, 2, 0) == 1                 # the head's own receipt
+    assert advance(1, 2, 0) == 1                 # already completed -> not this head's receipt
+    assert advance(1, 3, 2) == 3                 # a later position completes through it
+    assert advance(0, 2, 999) == 2               # forged index is clamped to the queue, never past
+    assert advance(0, 2, None) == 1              # legacy row: one step, still bounded
+    assert advance(2, 2, None) == 2
+    assert advance(0, 2, True) == 1              # bool is not an index
+    assert advance(0, 2, 0.0) == 1               # non-int is not an index
+    assert advance(5, 2, None) == 2              # a cursor already past the queue is clamped back

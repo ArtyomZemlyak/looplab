@@ -1845,7 +1845,9 @@ class RunState(BaseModel):
     ablate_requests: list[int] = Field(default_factory=list)    # `force_ablate` (wired in Phase 5)
     ablate_request_generations: list[dict] = Field(default_factory=list)
     fork_requests: list[dict] = Field(default_factory=list)     # `fork`: operator-seeded improve
-    forks_done: int = 0                        # count of processed forks (replay-safe fulfillment)
+    # CURSOR into `fork_requests`, not a count: a receipt names the position it completed and the
+    # fold advances through it, clamped to the queue (`replay._advance_request_cursor`).
+    forks_done: int = 0
     # Layer 5's durable main-task Card producer gate. Hidden because this is execution/recovery state,
     # not a public board payload; old logs therefore keep the exact serialized RunState shape.
     card_build_requests: list[dict] = Field(default_factory=list, exclude=True)
@@ -1870,7 +1872,7 @@ class RunState(BaseModel):
     # optional parent + optional code). The engine materializes each one into a real pending node
     # that the policy then evaluates like any other — so a human can steer the search directly.
     inject_requests: list[dict] = Field(default_factory=list)
-    injects_done: int = 0                      # count of processed injects (replay-safe fulfillment)
+    injects_done: int = 0      # cursor into `inject_requests`; same rule as `forks_done` above
     annotations: dict[int, list[str]] = Field(default_factory=dict)  # legacy `annotation`: node notes
     # Modern collaboration is read only through authenticated, bounded projections.  Excluding it
     # here prevents free-form comment text from entering the tokenless /state + SSE payload.

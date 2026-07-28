@@ -2772,6 +2772,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if len(state.fork_requests) > state.forks_done:
             request = state.fork_requests[state.forks_done]
             self.store.append(EV_FORK_DONE, {
+                # The POSITION is the receipt's identity (`_advance_request_cursor`): `from_node_id`
+                # cannot separate two queued forks of the same parent, which is the ordinary pattern.
+                "idx": state.forks_done,
                 "from_node_id": request.get("from_node_id"),
                 "generation": request.get("generation"),
                 "skipped": reason,
@@ -2828,14 +2831,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # at-most-once: a crash in the gap loses ONE queued fork intent instead of duplicating an
                 # experiment and its spend — and an operator can simply re-request the fork, whereas a
                 # duplicate is silent, already charged, and pollutes the tree.
-                # Fold-safe: `_on_fork_done` (counter) and `_on_node_created` (node) touch disjoint state,
-                # so the swap is order-tolerant and re-folds existing logs byte-identically.
-                self.store.append(EV_FORK_DONE, {"from_node_id": pid, "generation": generation})
+                # Fold-safe: `_on_fork_done` advances only the fork cursor and `_on_node_created` only
+                # the node table, so the swap is order-tolerant. It is NOT byte-identical on every old
+                # log: `_on_fork` drops a request whose parent is tombstoned/aborted at that point in
+                # the replay, and the cursor is now bounded by the queue it indexes, so a historical
+                # receipt for a request the current fold declines no longer advances past it.
+                self.store.append(EV_FORK_DONE, {
+                    "idx": state.forks_done, "from_node_id": pid, "generation": generation})
                 self._create_node({"kind": "improve", "parent_id": pid,
                                    "parent_generations": {str(pid): generation}})
             else:
                 self.store.append(EV_FORK_DONE, {
-                    "from_node_id": pid, "generation": generation,
+                    "idx": state.forks_done, "from_node_id": pid, "generation": generation,
                     "skipped": "stale_generation"})        # advance the gate past an unservable head
             return True
         # Operator-authored experiment (manual tree edit): the human hand-adds a node (an idea
