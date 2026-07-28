@@ -1654,17 +1654,22 @@ def test_concurrent_disjoint_settings_puts_do_not_lose_updates(tmp_path, monkeyp
     app = make_app(tmp_path)
     store = app.state.looplab.settings
     original_transaction = store.ui_settings_transaction
+    # Rendezvous ceiling, not a latency budget: every party returns the instant the last one
+    # arrives, so this bounds only the FAILURE case. At 5s a saturated full-suite host could not
+    # always get both pool threads into the transaction in time, and the barrier broke
+    # (BrokenBarrierError) while the test passed in isolation.
+    _RENDEZVOUS_TIMEOUT_S = 60.0
     arrived = Barrier(3)
     completed = Barrier(3)
 
     @contextmanager
     def synchronized_transaction():
-        arrived.wait(timeout=5)
+        arrived.wait(timeout=_RENDEZVOUS_TIMEOUT_S)
         try:
             with original_transaction():
                 yield
         finally:
-            completed.wait(timeout=5)
+            completed.wait(timeout=_RENDEZVOUS_TIMEOUT_S)
 
     monkeypatch.setattr(store, "ui_settings_transaction", synchronized_transaction)
     clients = (TestClient(app), TestClient(app))
@@ -1673,8 +1678,8 @@ def test_concurrent_disjoint_settings_puts_do_not_lose_updates(tmp_path, monkeyp
             clients[0].put, "/api/settings", json={"settings": {"max_nodes": 91}})
         second = executor.submit(
             clients[1].put, "/api/settings", json={"settings": {"policy": "mcts"}})
-        arrived.wait(timeout=5)
-        completed.wait(timeout=5)
+        arrived.wait(timeout=_RENDEZVOUS_TIMEOUT_S)
+        completed.wait(timeout=_RENDEZVOUS_TIMEOUT_S)
         responses = (first.result(timeout=10), second.result(timeout=10))
 
     assert all(response.status_code == 200 for response in responses)
@@ -2644,7 +2649,7 @@ def test_sse_done_waits_for_finished_engine_to_exit(tmp_path, monkeypatch):
     assert done_index > frames.index(state_frames[1])
 
 
-def test_sse_done_waits_for_error_finalize_recovery(tmp_path):
+def test_sse_done_waits_for_error_finalize_recovery(tmp_path, monkeypatch):
     """A dead driver plus run_finished(error) is finalization-stalled, not terminal-ready."""
     rd = tmp_path / "recovering"
     rd.mkdir()
@@ -2656,18 +2661,32 @@ def test_sse_done_waits_for_error_finalize_recovery(tmp_path):
 
     # Let the stream expose the stalled/error snapshot first, then model a successful same-intent
     # recovery so the request terminates and the ordering is assertable without an endless client.
+    #
+    # The recovery is ordered against the stream's OWN first read, not a wall clock. A
+    # `threading.Timer(0.6, ...)` armed before `make_app` raced app construction plus request
+    # dispatch: on a loaded full-suite host that exceeded 0.6s, so the recovery was already durable
+    # when the stream computed its first payload, the opening frame read `finished`, and no state
+    # frame ever showed `finalizing`. `state_payload` is the exact seam the stream polls (it is
+    # captured by `build_router`, so patch the CLASS before `make_app` rather than the instance).
     recovered = threading.Event()
 
     def finish_recovery():
         store.append("run_finished", {"reason": "aborted"})
         recovered.set()
 
-    timer = threading.Timer(0.6, finish_recovery)
-    timer.start()
-    try:
-        response = TestClient(make_app(tmp_path)).get("/api/runs/recovering/events")
-    finally:
-        timer.join(timeout=2)
+    from looplab.serve.appstate import AppState
+    original_state_payload = AppState.state_payload
+
+    def payload_then_recover(self, *args, **kwargs):
+        payload = original_state_payload(self, *args, **kwargs)
+        # Recover only AFTER the stalled snapshot has been computed, so the first emitted frame is
+        # guaranteed to be the pre-recovery one no matter how the host is scheduled.
+        if not recovered.is_set():
+            finish_recovery()
+        return payload
+
+    monkeypatch.setattr(AppState, "state_payload", payload_then_recover)
+    response = TestClient(make_app(tmp_path)).get("/api/runs/recovering/events")
     assert recovered.is_set() and response.status_code == 200
     frames = [frame for frame in response.text.split("\n\n") if frame]
     states = [frame for frame in frames if "event: state" in frame]
