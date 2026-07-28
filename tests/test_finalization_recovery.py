@@ -865,3 +865,48 @@ def test_one_failing_steward_cannot_disable_the_others_and_leaves_a_receipt(tmp_
                    if event.type == "finalize_step"
                    and event.data.get("step") == "concept_curation")
     assert "concept ledger unavailable" in failure.data.get("error", "")
+
+
+def test_error_recovery_never_acknowledges_a_finish_belonging_to_another_scope(tmp_path):
+    """An older scope must not stamp `finalization_finished` on a LATER, foreign finish.
+
+    `state.last_finish_seq` is the GLOBAL latest finish. A bare fallback error finish — one
+    `finalize_scope_quiescent` deliberately ignores — can land while an older scope is still being
+    recovered, and acknowledging it would close that boundary without it ever running its own
+    checklist. Only a finish this scope actually owns may be acknowledged.
+    """
+    from looplab.engine.finalize import _recover_scoped_terminal, _scope_finish_event
+
+    run_dir = tmp_path / "foreign-finish"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    # The scope under recovery: its own error finish, explicitly stamped.
+    own = store.append("run_finished", {
+        "reason": "error", "error": "first wrap-up failed",
+        "finalization_required": True, "finalize_scope": "finish:own"})
+    store.append("finalize_step", {"scope": "finish:own", "step": "begun",
+                                   "finish_data": {"reason": "error"}})
+    # A LATER bare fallback error finish lands, carrying no scope of its own.
+    foreign = store.append("run_finished", {"reason": "error", "error": "fallback wrap-up failed"})
+    (run_dir / "task.snapshot.json").write_text("{}", encoding="utf-8")
+
+    events = store.read_all()
+    state = fold(events)
+    assert state.last_finish_seq == foreign.seq, "precondition: the foreign finish is the latest"
+    assert _scope_finish_event(events, "finish:own").seq == own.seq
+
+    eng = _EngineStub(run_dir)
+    _recover_scoped_terminal(eng, events, state, "finish:own")
+
+    acknowledged = [
+        event.data.get("finish_seq") for event in eng.store.read_all()
+        if event.type == "finalization_finished"]
+    assert foreign.seq not in acknowledged, (
+        "an older scope acknowledged a later foreign finish — that boundary is now closed without "
+        "ever having run its own finalize checklist")
+    # The scoped attempt still closes itself, so recovery converges instead of spinning.
+    assert any(event.type == "finalize_step"
+               and event.data.get("scope") == "finish:own"
+               and event.data.get("step") == "abandoned"
+               for event in eng.store.read_all())

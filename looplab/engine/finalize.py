@@ -92,6 +92,38 @@ def _scope_terminal(events, scope: str):
     )
 
 
+def _scope_finish_event(events, scope: str):
+    """This scope's OWN `run_finished`, whatever its reason.
+
+    `_scope_terminal` above deliberately skips error finishes — it hunts a re-materializable
+    terminal — so the error-recovery path cannot use it to tell its own boundary from a later,
+    foreign one. Prefer the explicit `finalize_scope` stamp; fall back to the seq a `finish:<n>`
+    scope names. Returns None when the identity is not discoverable (e.g. a legacy `abort:<n>` scope
+    whose finish carries no stamp), which callers must treat as "unknown", never as "foreign".
+    """
+    stamped = next(
+        (
+            event
+            for event in reversed(events)
+            if event.type == EV_RUN_FINISHED
+            and (event.data or {}).get("finalize_scope") == scope
+        ),
+        None,
+    )
+    if stamped is not None:
+        return stamped
+    if scope.startswith("finish:"):
+        try:
+            seq = int(scope.split(":", 1)[1])
+        except ValueError:
+            return None
+        return next(
+            (event for event in events if event.seq == seq and event.type == EV_RUN_FINISHED),
+            None,
+        )
+    return None
+
+
 def _scope_has_step(events, scope: str, step: str) -> bool:
     return any(
         event.type == EV_FINALIZE_STEP
@@ -536,12 +568,24 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
     # run errored out — that IS its terminal state — so close the scope idempotently instead. (A
     # NON-error target, e.g. a transient error finish over a durable ``time_budget`` intent, still
     # re-materializes the original terminal below and converges normally.)
-    # CODEX AGENT: `state.last_finish_seq` may be a later bare fallback error finish that quiescence
-    # deliberately ignores. Acknowledging that foreign finish closes this scope without its checklist.
-    # Require an exact scoped finish with valid adjacency; otherwise abandon only this scoped attempt
-    # and let the fallback own its recovery.
+    # `state.last_finish_seq` is the GLOBAL latest finish, which need not be THIS scope's. A later
+    # bare fallback error finish — one `finalize_scope_quiescent` deliberately ignores — can land
+    # while an older scope is being recovered, and stamping `finalization_finished` on it would close
+    # a foreign boundary that never ran its own checklist. Acknowledge only when this scope's own
+    # finish IS the one that seq names; otherwise abandon just this scoped attempt below and let the
+    # fallback own its recovery.
+    #
+    # An UNDISCOVERABLE identity (`_scope_finish_event` -> None, e.g. a legacy `abort:<n>` scope whose
+    # finish carries no `finalize_scope` stamp) keeps today's behaviour on purpose. The conservative
+    # direction here is NOT "refuse to acknowledge": that would leave `finalization_pending()` true
+    # forever and strand the run as non-terminal in every projection — strictly worse than the narrow
+    # mis-acknowledgement this guard exists to prevent. Only a finish proven to be someone else's is
+    # skipped.
     if str(finish_data.get("reason") or "").lower() == "error":
-        if (state.finished and state.last_finish_seq >= 0
+        _own_finish = _scope_finish_event(events, scope)
+        _finish_is_foreign = (_own_finish is not None
+                              and _own_finish.seq != state.last_finish_seq)
+        if (state.finished and state.last_finish_seq >= 0 and not _finish_is_foreign
                 and not _has_finish_step(events, EV_FINALIZATION_FINISHED, state.last_finish_seq)):
             try:
                 engine.store.append(
