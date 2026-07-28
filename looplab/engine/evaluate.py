@@ -13,11 +13,13 @@ Invariant #2 lives in this file: exactly ONE terminal event per node, emitted at
 attempt loop. Trust scans (reward-hack / code-leakage / critic) stay lazy, method-local imports."""
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Mapping
 from typing import Optional
 
 import anyio
+import orjson
 
 from looplab.core.models import (NodeStatus, developer_artifact_footprint,
                                  normalize_extra_metrics)
@@ -65,6 +67,18 @@ def _card_identity_spellings(state, raw_card_id) -> frozenset[str]:
         spelling for spelling, spelling_owners in owners.items()
         if spelling_owners == {subject}
     )
+
+
+def _workdir_manifest_digest(node) -> str:
+    """Digest of the node source manifest a workdir was materialized from.
+
+    Module-level on purpose: `_evaluate` takes a lazy `import hashlib` further down, which would make
+    `hashlib` an unbound function-local for any closure defined above it.
+    """
+    return hashlib.sha256(orjson.dumps(
+        {"attempt": node.attempt, "code": node.code,
+         "files": node.files or {}, "deleted": sorted(node.deleted or [])},
+        option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
 class EvaluateMixin:
@@ -177,9 +191,33 @@ class EvaluateMixin:
                 except OSError:
                     import shutil
                     shutil.rmtree(workdir, ignore_errors=True)
-            _reuse = bool(node.rerun_stage and workdir.exists() and not _superseded_marker.exists())
+            # Stage reuse is the ONE path that evaluates a workdir it did not just build, so it must
+            # prove the bytes on disk are the manifest the folded node claims. `node_repaired` is
+            # appended BEFORE the repaired files are written (both under the same attempt), so a
+            # process death in that window leaves state claiming the repair while the workdir still
+            # holds the pre-repair source. A later stage-scoped reset then sets `rerun_stage` without
+            # any superseded marker (only the live process writes one, and it died), and reuse would
+            # skip materialization and score the OLD bytes as if they were the repair.
+            # The stamp closes that: it is written only after the files are on disk, so a crash in the
+            # gap leaves it naming the previous manifest and reuse is refused. Fail-closed by
+            # construction — a missing/unreadable/mismatched stamp just forces the full materialize
+            # that every other entry path already does, costing artifacts, never correctness.
+            _manifest_stamp = workdir / ".looplab-manifest"
+            def _stamp_workdir(n) -> None:
+                try:
+                    _manifest_stamp.write_text(_workdir_manifest_digest(n), encoding="ascii")
+                except OSError:
+                    pass          # unstamped => the next reuse check fails closed and rematerializes
+            def _workdir_matches(n) -> bool:
+                try:
+                    return _manifest_stamp.read_text(encoding="ascii").strip() == _workdir_manifest_digest(n)
+                except (OSError, ValueError):
+                    return False
+            _reuse = bool(node.rerun_stage and workdir.exists()
+                          and not _superseded_marker.exists() and _workdir_matches(node))
             if not _reuse:
                 self._materialize(node, workdir)    # seed tree -> node edits -> task assets
+                _stamp_workdir(node)                # the workdir now IS this manifest
                 # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
                 # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
                 # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
@@ -552,16 +590,20 @@ class EvaluateMixin:
                             "idea_footprint": repaired_footprint,
                             "footprint_finalized": True,
                         })
-                    # CODEX AGENT: replay commits the repaired code before the repaired files are
-                    # materialized below. A crash in this window lets resume reuse a stale workdir while
-                    # state claims the new repair; stage reuse can then evaluate the wrong bytes. Publish
-                    # one manifest only after an atomic workdir generation is ready, or rematerialize first.
+                    # This commits the repaired code to folded state BEFORE the files below are
+                    # materialized, so state briefly claims a repair the workdir does not hold. The
+                    # window is closed on the READ side rather than by reordering (either order skews
+                    # one way or the other): the workdir carries a manifest stamp written only after
+                    # its files land, and stage reuse — the one path that evaluates a workdir it did
+                    # not just build — refuses to proceed unless that stamp matches the folded node.
+                    # See `_stamp_workdir` / `_workdir_matches` at the top of this method.
                     self.store.append(EV_NODE_REPAIRED, repair_payload)
                 node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code
                 if node.attempt != generation:
                     await _record_superseded()
                     return                   # reset raced the repair; never adopt its newer lifecycle
                 self._write_node_files(node, workdir)               # re-materialize before re-eval
+                _stamp_workdir(node)     # only NOW does the workdir match the repaired manifest
                 if fold(self.store.read_all()).nodes[node_id].attempt != generation:
                     await _record_superseded()
                     return                   # reset raced the filesystem write; force clean next materialize

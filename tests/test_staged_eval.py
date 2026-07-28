@@ -161,3 +161,71 @@ def test_stage_check_is_sanity_only_and_names_the_objective(tmp_path, monkeypatc
     monkeypatch.setattr(eng, "_reflect_client", lambda: boom)
     res2 = eng._stage_check_fn(node)("train", "Traceback (most recent call last): ...")
     assert res2 and "checkpoint" in res2                 # a HARD failure still stops the pipeline
+
+
+def test_stage_reuse_refuses_a_workdir_that_is_not_the_folded_manifest(tmp_path):
+    """Stage reuse is the one path that evaluates a workdir it did not just build, so it must prove
+    the bytes on disk ARE the manifest the folded node claims.
+
+    `node_repaired` is appended BEFORE the repaired files are written, so a process death in that
+    window leaves state claiming the repair while the workdir still holds the pre-repair source. A
+    later stage-scoped reset then sets `rerun_stage` with no superseded marker (only the live process
+    writes one, and it died), and reuse would skip materialization and score the OLD bytes as the
+    repair. The workdir stamp is written only AFTER the files land, so the crash leaves it naming the
+    previous manifest and reuse is refused.
+    """
+    import anyio
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+    from looplab.engine.evaluate import _workdir_manifest_digest
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    run_dir = tmp_path / "reuse-stamp"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": ""},
+        "code": "print('original')"})
+    # A stage-scoped eval reset: pending-with-code, rerun_stage set, attempt bumped.
+    store.append("node_reset", {"node_id": 0, "kind": "eval", "from_stage": "eval"})
+    # The repair whose files never reached disk (the crash window).
+    store.append("node_repaired", {"node_id": 0, "attempt": 1, "code": "print('repaired')"})
+
+    task = ToyTask()
+    engine = Engine(run_dir, task=task,
+                    researcher=ToyResearcher(task.bounds, seed=task.seed, step=task.step),
+                    developer=ToyObjectiveDeveloper(), sandbox=SubprocessSandbox(),
+                    policy=GreedyTree(n_seeds=1, max_nodes=2), auto_install_deps=False)
+    state = fold(store.read_all())
+    node = state.nodes[0]
+    assert node.rerun_stage == "eval", "precondition: the reset armed stage reuse"
+
+    workdir = engine.run_dir / "nodes" / "node_0"
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "solution.py").write_text("print('original')", encoding="utf-8")
+
+    materialized: list[int] = []
+    engine._materialize = lambda n, wd: materialized.append(n.id)
+
+    # (a) The stamp names the PRE-repair manifest — exactly what a crash in the gap leaves behind.
+    stale = type("N", (), {"attempt": 0, "code": "print('original')",
+                           "files": {}, "deleted": []})()
+    (workdir / ".looplab-manifest").write_text(
+        _workdir_manifest_digest(stale), encoding="ascii")
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1))
+    assert materialized == [0], (
+        "stage reuse accepted a workdir whose bytes are not the folded manifest — the repaired "
+        "code would have been scored using the pre-repair source")
+
+    # (b) A stamp that DOES match keeps the optimization: no rebuild, artifacts survive.
+    materialized.clear()
+    (workdir / ".looplab-manifest").write_text(
+        _workdir_manifest_digest(fold(store.read_all()).nodes[0]), encoding="ascii")
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1))
+    assert materialized == [], "a matching stamp must still reuse the workdir"
