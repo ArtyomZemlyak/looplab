@@ -301,43 +301,6 @@ def _validate(out, known: set, *, id_to_claim: dict | None = None, max_proposals
 
 def curation_is_empty(curation: dict) -> bool:
     return not (curation.get("decisions"))
-
-
-def apply_claim_curation(memory_dir, curation: dict, *, by: str = "steward", at: str = "") -> dict:
-    """Low-level compatibility helper for an already-reviewed batch; the steward never invokes it.
-
-    New operator workflows should use typed `claim-decide` or owner HTTP CAS governance. This helper records
-    scope-precise decisions through `record_claim_decision` and returns an explicit partial-apply receipt.
-    """
-    from looplab.engine.claims import record_claim_decision
-    applied, skipped = [], []
-    if not isinstance(curation, dict):
-        return {"applied": [], "skipped": [{"reason": "curation must be an object"}]}
-    seen = set()
-    for d in (curation.get("decisions") or [])[:_MAX_PROPOSALS]:
-        if not isinstance(d, dict):
-            skipped.append({"reason": "decision must be an object"})
-            continue
-        try:
-            key = (str(d.get("statement") or ""), str(d.get("scope") or ""), str(d.get("metric") or ""))
-            if key in seen:
-                skipped.append({"statement": d.get("statement"), "reason": "duplicate claim operation"})
-                continue
-            seen.add(key)
-            # CODEX AGENT: this compatibility mutation bypasses the observed-decision lifecycle: it has
-            # no live claim UID, evidence digest, expected revision, portfolio identity, or action receipt.
-            # Remove it or require/forward those fences before an old proposal can append a
-            # last-write-wins decision over changed/disappeared evidence.
-            record_claim_decision(memory_dir, statement=d["statement"], decision=d["decision"],
-                                  scope=d.get("scope", ""), metric=d.get("metric", ""),
-                                  note=d.get("why", ""), by=by, at=at)
-            applied.append({"statement": d["statement"], "decision": d["decision"],
-                            "scope": d.get("scope", ""), "metric": d.get("metric", "")})
-        except Exception as e:  # noqa: BLE001 — one invalid proposal must not sink the batch
-            skipped.append({"statement": d.get("statement"), "reason": str(e)[:160]})
-    return {"applied": applied, "skipped": skipped}
-
-
 def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by: str = "steward",
                    at: str = "", structured: bool = True, max_proposals: int = _MAX_PROPOSALS,
                    raise_on_failure: bool = False) -> dict:

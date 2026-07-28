@@ -10,7 +10,7 @@ import json
 import pytest
 
 from looplab.engine.claim_steward import (
-    apply_claim_curation, curation_is_empty, propose_claim_curation, steward_claims,
+    curation_is_empty, propose_claim_curation, steward_claims,
 )
 
 
@@ -178,26 +178,31 @@ def test_bad_output_degrades_to_empty():
     assert curation_is_empty(propose_claim_curation([_claim("x helps")], _Boom()))
 
 
-def test_apply_records_scope_precise_decisions(tmp_path):
-    from looplab.engine.claims import load_claim_decisions
+def test_record_claim_decision_is_scope_and_metric_precise(tmp_path):
+    """Decisions are keyed by the structured claim_uid, so scope/metric never collapse together.
+
+    These assertions used to run through `apply_claim_curation`, an unfenced compatibility helper
+    that wrote straight into the durable decision ledger with no claim UID, evidence digest,
+    expected revision or portfolio identity. Its only caller — the CLI `--apply` flag — is rejected
+    before any mutation, so the helper was removed rather than retrofitted with CAS fences nobody
+    would exercise. The keying contract it was proving is real, so it is asserted directly against
+    the supported writer.
+    """
     from looplab.engine.claim_key import claim_uid
-    rc = apply_claim_curation(str(tmp_path), {"decisions": [
-        {"statement": "adapter tuning helps", "decision": "rejected", "scope": "taskA", "why": "overgeneralized"}]})
-    assert len(rc["applied"]) == 1 and not rc["skipped"]
-    dec = load_claim_decisions(str(tmp_path))
-    # keyed by the structured scope-precise claim_uid (and the legacy statement key)
-    assert dec[claim_uid("adapter tuning helps", scope="taskA")]["decision"] == "rejected"
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
 
+    record_claim_decision(str(tmp_path), statement="adapter tuning helps", decision="rejected",
+                          scope="taskA", note="overgeneralized", by="steward", at="")
+    decisions = load_claim_decisions(str(tmp_path))
+    assert decisions[claim_uid("adapter tuning helps", scope="taskA")]["decision"] == "rejected"
 
-def test_apply_records_metric_precise_decision_and_dedupes_batch(tmp_path):
-    from looplab.engine.claims import load_claim_decisions
-    from looplab.engine.claim_key import claim_uid
-
-    item = {"statement": "adapter helps", "decision": "ratified", "scope": "taskA", "metric": "mrr"}
-    rc = apply_claim_curation(str(tmp_path), {"decisions": [item, item]})
-    assert len(rc["applied"]) == 1 and rc["skipped"][0]["reason"] == "duplicate claim operation"
-    assert load_claim_decisions(str(tmp_path))[claim_uid(
+    record_claim_decision(str(tmp_path), statement="adapter helps", decision="ratified",
+                          scope="taskA", metric="mrr", by="steward", at="")
+    decisions = load_claim_decisions(str(tmp_path))
+    assert decisions[claim_uid(
         "adapter helps", scope="taskA", metric="mrr")]["decision"] == "ratified"
+    # A metric-precise decision must NOT satisfy the scope-only key for the same statement.
+    assert claim_uid("adapter helps", scope="taskA") not in decisions
 
 
 def test_steward_apply_is_rejected_before_llm_or_mutation(tmp_path):
