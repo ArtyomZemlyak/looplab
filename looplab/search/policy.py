@@ -556,10 +556,18 @@ class ASHAPolicy:
                 chosen = sorted(unexpanded)[0]
                 scores = {i: round(state.nodes[i].metric, 4) for i in members
                           if state.nodes[i].metric is not None}
-                # CODEX AGENT: `_rung` is audit-only today: this creates a mutated child and no evaluator
-                # consumes the rung to increase resource/fidelity. Bind promotion to an immutable survivor
-                # plus an explicit higher eval profile before presenting ASHA/BOHB as successive-halving
-                # multi-fidelity search.
+                # SCOPE, stated plainly: this allocates ATTEMPTS, not compute. The rung travels as
+                # `_rung` only to stamp the `rung_promoted` audit receipt (orchestrator) and fold into
+                # `RunState.rungs`; NOTHING reads it back to raise a node's eval fidelity or resources.
+                # Promotion also spends the survivor on a MUTATED child (KIND_IMPROVE), where textbook
+                # successive halving re-runs the SAME configuration with a larger budget. So this is a
+                # halving SELECTION schedule — real, and paired with `asha_live`'s early stop — but not
+                # multi-fidelity racing. Making it so needs an immutable-survivor re-run bound to an
+                # explicit higher eval profile: that is BACKLOG A1 ("multi-fidelity racing
+                # ASHA/Hyperband ... over existing `eval_profile` smoke/full"), still open, and it would
+                # CHANGE what gets evaluated — a feature, not a repair. The operator-facing help text
+                # (`serve/settings_ui_schema.json`) states this limit rather than promising fidelity
+                # scaling the code does not do.
                 return [{"kind": KIND_IMPROVE, "parent_id": chosen,
                          META_SCORES: scores, META_CHOSEN: chosen,
                          META_REASON: f"promote rung {r + 1}",
