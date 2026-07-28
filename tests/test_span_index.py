@@ -704,3 +704,78 @@ def test_persisted_index_offset_drift_returns_none_not_wrong_span(run):
     # The drifted row reads g1_0's bytes; the span_id mismatch is detected → None, never the wrong span.
     assert idx.full_span("g0_1") is None
     assert (idx.full_span("g1_0") or {}).get("span_id") == "g1_0"   # the intact row still resolves
+
+
+def test_a_cold_rebuild_never_materializes_the_whole_source(tmp_path):
+    """The index is ~30x smaller than `spans.jsonl`; deriving it must not first hold the source whole.
+
+    A cold rebuild read the entire file into one bytes object before parsing a line of it, so peak
+    memory tracked the SOURCE (~1.0x) — a multi-GB trace could exhaust the server to produce a
+    lightweight index. The scan is chunked now, so peak is set by the derived index instead.
+    """
+    import tracemalloc
+
+    # FEW spans, each with a lot of generation I/O — the real shape of a long run, and the one that
+    # separates "peak tracks the source" from "peak tracks the index the source produces".
+    heavy = "x" * 300_000           # the generation I/O the light projection throws away
+    source = tmp_path / "spans.jsonl"
+    with open(source, "w", encoding="utf-8") as f:
+        for i in range(60):
+            f.write(json.dumps({
+                "span_id": f"s{i}", "trace_id": "t", "parent_id": None, "kind": "generation",
+                "name": "gen", "t0": 0.0, "t1": 1.0, "attrs": {"node_id": "0"},
+                "input": heavy, "output": heavy,
+            }) + "\n")
+    size = source.stat().st_size
+    assert size > 30 * span_index._SCAN_CHUNK_BYTES, "the source must span many scan chunks"
+
+    span_index._CACHE.clear()
+    tracemalloc.start()
+    try:
+        idx = get_index(source)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+        span_index._CACHE.clear()
+
+    assert idx is not None and idx.covers == size and len(idx.light_spans()) == 60
+    assert peak < size * 0.6, (
+        f"peak {peak} tracked the {size}-byte source, so a multi-GB trace still OOMs the server "
+        "to build an index a fraction of its size")
+
+
+def test_the_chunked_scan_is_indistinguishable_from_one_that_reads_it_all(tmp_path, monkeypatch):
+    """Chunk boundaries are invisible: a line split across reads, a torn tail, and a corrupt line
+    mid-file must each land exactly where an unchunked scan put them."""
+    rows = [
+        json.dumps({"span_id": f"s{i}", "trace_id": "t", "parent_id": None, "kind": "span",
+                    "name": "n", "t0": 0.0, "t1": 1.0, "attrs": {"node_id": "0"}})
+        for i in range(6)
+    ]
+    bodies = {
+        "clean": "\n".join(rows) + "\n",
+        "torn_tail": "\n".join(rows) + "\n" + rows[0][:20],          # no trailing newline
+        "corrupt_middle": "\n".join(rows[:3]) + "\n{not json}\n" + "\n".join(rows[3:]) + "\n",
+    }
+    for label, body in bodies.items():
+        source = tmp_path / f"{label}.jsonl"
+        source.write_text(body, encoding="utf-8")
+        results = {}
+        for chunk in (7, 64, 1024 * 1024):         # 7 bytes splits nearly every line
+            monkeypatch.setattr(span_index, "_SCAN_CHUNK_BYTES", chunk)
+            span_index._CACHE.clear()
+            (source.parent / "spans.index.jsonl").unlink(missing_ok=True)
+            idx = get_index(source)
+            results[chunk] = ([s["span_id"] for s in idx.light_spans()], idx.covers)
+        span_index._CACHE.clear()
+        assert len(set(map(str, results.values()))) == 1, (
+            f"[{label}] the chunk size changed what the scan accepted: {results}")
+
+    # …and the durability rule itself still holds: a corrupt line stops the scan at the last good
+    # boundary, so the rows behind it are NOT indexed.
+    monkeypatch.setattr(span_index, "_SCAN_CHUNK_BYTES", 64)
+    span_index._CACHE.clear()
+    (tmp_path / "spans.index.jsonl").unlink(missing_ok=True)
+    idx = get_index(tmp_path / "corrupt_middle.jsonl")
+    assert [s["span_id"] for s in idx.light_spans()] == ["s0", "s1", "s2"]
+    span_index._CACHE.clear()

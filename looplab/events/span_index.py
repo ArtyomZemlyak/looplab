@@ -49,9 +49,57 @@ _PERSIST_GROWTH = 1.5
 # Bound the in-process cache: a 1 GB run's light spans are ~220 MB of Python dicts, so hold only a few
 # (the user views one run at a time; an evicted index just reloads its persisted form, not a rescan).
 _CACHE_MAX = 3
+# Bytes read per scan step. The OS readahead does the sequential-throughput work, so this only needs
+# to be large enough to amortize the per-chunk scan; keeping it small is what bounds peak RSS to the
+# derived index instead of the source file. One span line larger than this is still held whole (it
+# has to be, to parse it) — the carry below is at most one line.
+_SCAN_CHUNK_BYTES = 1024 * 1024
 
 _CACHE: "OrderedDict[str, SpanIndex]" = OrderedDict()
 _LOCK = threading.Lock()
+
+
+def _scan_light_stream(stream, base: int, size: int, *,
+                       label: str) -> tuple[list[tuple[dict, int, int]], int]:
+    """`_scan_light` over `size` bytes of `stream`, holding only a bounded window in memory.
+
+    A cold rebuild used to read the WHOLE spans.jsonl into one bytes object before parsing a line of
+    it, so a multi-GB trace could exhaust host memory to produce an index the module docstring
+    measures at ~30x smaller. Nothing needs the full file at once: the scanner already works on a
+    slice, so read a fixed chunk, scan the complete lines in it, and carry only the trailing partial
+    line into the next chunk.
+
+    The carry also encodes WHY the scanner stopped, which the chunked form must not confuse:
+
+    * carry with no newline = the last line is torn by the chunk boundary (or by the snapshot's end)
+      — read on; the next chunk completes it;
+    * carry containing a newline = `_scan_light` refused a COMPLETE line as corrupt. That is
+      `iter_jsonl`'s stop-at-first-corruption rule, so the scan ends here and the caller's coverage
+      watermark is the last good boundary — exactly what the unchunked version did.
+
+    A short read before `size` is an I/O failure, same as `_read_exact`: the snapshot the caller
+    validated is gone, and publishing a truncated index would claim the run had fewer spans.
+    """
+    records: list[tuple[dict, int, int]] = []
+    consumed = base
+    carry = b""
+    remaining = max(0, int(size))
+    while remaining:
+        chunk = stream.read(min(_SCAN_CHUNK_BYTES, remaining))
+        if not chunk:
+            got = size - remaining
+            raise OSError(f"short read of {label}: expected {size} bytes, got {got}")
+        remaining -= len(chunk)
+        # Concatenate only when a partial line is actually pending: the common case is a chunk that
+        # ends on a newline, and `carry + chunk` would otherwise copy every byte of the file twice.
+        window = chunk if not carry else carry + chunk
+        found, end = _scan_light(window, consumed)
+        records.extend(found)
+        carry = window[end - consumed:]
+        consumed = end
+        if b"\n" in carry:
+            break                    # corrupt line, not a chunk boundary — stop like iter_jsonl does
+    return records, consumed
 
 
 def _read_exact(stream, size: int, *, label: str) -> bytes:
@@ -183,11 +231,10 @@ class SpanIndex:
         # `handle` is the descriptor `get_index` already validated by `fstat`; reading through it
         # keeps identity, size and content on ONE inode instead of resolving the pathname again.
         with _reading(self.path, handle, 0) as f:
-            # CODEX AGENT: a cold rebuild materializes the entire spans.jsonl before parsing, so a
-            # multi-GB trace can OOM the server even though the resulting index is lightweight. Scan
-            # bounded chunks/lines incrementally and publish only after a complete validated pass.
-            buf = _read_exact(f, size, label="trace source")
-        records, consumed = _scan_light(buf, 0)      # parse OUTSIDE the lock (the slow part)
+            # Streamed in bounded chunks: the index is ~30x smaller than its source, so a multi-GB
+            # trace must never be materialized whole just to derive it. Parsed OUTSIDE the lock (the
+            # slow part) and published below only after the pass completes.
+            records, consumed = _scan_light_stream(f, 0, size, label="trace source")
         with self._rlock:                            # publish the new maps atomically vs a lock-free read
             self.light.clear()
             self.meta.clear()
@@ -203,9 +250,10 @@ class SpanIndex:
         if size <= self.covers:
             return
         with _reading(self.path, handle, self.covers) as f:
-            expected = size - self.covers
-            buf = _read_exact(f, expected, label="trace tail")
-        records, consumed = _scan_light(buf, self.covers)   # parse OUTSIDE the lock
+            # Same bounded stream as `_rebuild`: an appended tail is usually small, but the first
+            # top-up after a long detach can be arbitrarily large.
+            records, consumed = _scan_light_stream(
+                f, self.covers, size - self.covers, label="trace tail")   # parsed OUTSIDE the lock
         with self._rlock:                                   # append is atomic vs a lock-free read
             self._extend(records)
             self.covers = consumed
