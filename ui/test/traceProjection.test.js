@@ -56,7 +56,8 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   ])
   assert.match(inspector, /const unavailable = traceUnavailable\(conv\.projection\)[\s\S]*?if \(unavailable\) return <TraceUnavailable[\s\S]*?if \(!stages\.length\)/,
     'conversation unavailable must win over the ordinary empty state')
-  assert.match(inspector, /catch\(\(\) => alive\(\) && setConv\(\{ stages: \[\], projection: \{ unavailable: true \} \}\)\)/,
+  assert.match(inspector,
+    /conversation\.status === 'fulfilled'[\s\S]*?: \{ stages: \[\], projection: \{ unavailable: true \} \}[\s\S]*?catch\(\(\) => \{[\s\S]*?if \(alive\(\)\) setConv\(\{ stages: \[\], projection: \{ unavailable: true \} \}\)/,
     'conversation transport failures need an explicit unavailable receipt')
   assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(partial\)[\s\S]*?no observations were included[\s\S]*?No execution spans/,
     'an empty node trace must check unavailable and partial before successful empty')

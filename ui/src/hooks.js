@@ -1,9 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  fetchEventStream, get, normalizeRunGeneration, observeRunGeneration, runApiPath,
+  deadlineGet, fetchEventStream, normalizeRunGeneration, observeRunGeneration, runApiPath,
 } from './api.js'
 import { withBuilding } from './buildingModel.js'
-import { deadlineRequest } from './requestDeadline.js'
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -128,6 +127,8 @@ export function useRunState(runId, {
     let reviewPoll = null
     let reviewPollRunning = false
     let reviewEnded = false
+    let initialRequest = null
+    let reviewRequest = null
     setLive(null)
     setSeq(-1)
     setGenerationState({ runId, value: null })
@@ -178,8 +179,7 @@ export function useRunState(runId, {
     }
     function probeTerminal() {
       if (stopped || !terminalMode || hidden() || terminalRequest) return
-      const request = deadlineRequest(
-        signal => get(runApiPath(runId, '/lifecycle'), { signal, cache: 'no-store' }), 8000)
+      const request = deadlineGet(runApiPath(runId, '/lifecycle'))
       terminalRequest = request
       const failed = () => {
         if (stopped || !terminalMode || terminalRequest !== request) return
@@ -283,7 +283,8 @@ export function useRunState(runId, {
 
     // Probe once before opening a self-reconnecting authenticated fetch stream. This turns a mistyped/deleted run
     // URL into an explicit 404 state instead of an endless "Connecting…" loop.
-    get(runApiPath(runId, '/state'))
+    initialRequest = deadlineGet(runApiPath(runId, '/state'))
+    initialRequest.promise
       .then(p => {
         if (stopped) return
         commitSnapshot(p)
@@ -300,7 +301,9 @@ export function useRunState(runId, {
           reviewPoll = () => {
             if (stopped || reviewEnded || reviewPollRunning || (reviewTerminal && hidden())) return
             reviewPollRunning = true
-            get(runApiPath(runId, '/state'))
+            const request = deadlineGet(runApiPath(runId, '/state'))
+            reviewRequest = request
+            request.promise
               .then(next => {
                 if (stopped) return
                 commitSnapshot(next)
@@ -323,6 +326,7 @@ export function useRunState(runId, {
                 setError(error?.message || 'Review refresh failed')
               })
               .finally(() => {
+                if (reviewRequest === request) reviewRequest = null
                 reviewPollRunning = false
                 scheduleReviewPoll()
               })
@@ -355,6 +359,8 @@ export function useRunState(runId, {
       })
     return () => {
       stopped = true; clearTimeout(timer); clearTimeout(pollTimer)
+      initialRequest?.controller.abort()
+      reviewRequest?.controller.abort()
       terminalRequest?.controller.abort()
       streamRef.current?.abort()
       if (typeof document !== 'undefined') {

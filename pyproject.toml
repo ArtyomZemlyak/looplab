@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "LoopLab — autonomous ML/DS research engine (P0 working-loop slice)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Artyom Zemlyak", email = "artyom.zemlyak@gmail.com" }]
 dependencies = [
     "pydantic>=2.6",
@@ -28,6 +28,7 @@ dev = [
     "httpx>=0.27",       # FastAPI's TestClient transport.
     "fastapi>=0.110",    # server/assistant tests import TestClient and app helpers directly.
     "uvicorn>=0.27",     # keep the dev test environment aligned with the runnable UI server.
+    "pytest-split>=0.10", # deterministic CI shards keep portability gates bounded.
 ]
 # Documentation site (MkDocs + Material). `mkdocs serve` for a live preview; CI builds & deploys it.
 docs = ["mkdocs-material>=9.5,<10", "pymdown-extensions>=10"]
@@ -58,7 +59,7 @@ LoopLab = "looplab.cli:app"   # backwards-compatible alias
 looplab = "looplab.runtime.jupyter:setup_looplab"
 
 [build-system]
-requires = ["setuptools>=68", "wheel>=0.43"]
+requires = ["setuptools>=75", "wheel>=0.43"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

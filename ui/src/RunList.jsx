@@ -10,7 +10,7 @@ import DensityToggle from './DensityToggle.jsx'
 import { OpIcon } from './icons.jsx'
 import {
   ALL_RUNS as ALL, UNASSIGNED_RUNS as UNASSIGNED, filterRuns, indexProjects,
-  effectiveRunStatus, metricComparable, scopeRuns, sortRuns,
+  effectiveRunStatus, metricComparable, projectRunCounts, scopeRuns, sortRuns,
 } from './runIndex.js'
 import { defaultCollapsedClusters } from './runMapModel.js'
 import { useDialogFocus } from './useDialogFocus.js'
@@ -18,12 +18,15 @@ import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
 import {
   decodePortfolioViews, normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
 } from './portfolioModel.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 const RunCompare = lazy(() => import('./RunCompare.jsx'))
 const SAVED_VIEWS_KEY = 'll.portfolioViews'
 const COMPARE_COLUMNS_KEY = 'll.compareColumns'
+const LIST_READ_TIMEOUT_MS = 12_000
+const LIST_PAGE_SIZE = 200
 
 export function useResource(read, initial) {
   const [data, setData] = useState(initial)
@@ -34,7 +37,8 @@ export function useResource(read, initial) {
     const owner = ++version.current
     // Poll, visibility and post-mutation reads can overlap. Only the newest request
     // owns the resource; cleanup invalidates every late settlement after this component unmounts.
-    return Promise.resolve().then(read)
+    const timed = deadlineRequest(signal => read(signal), LIST_READ_TIMEOUT_MS)
+    return timed.promise
       .then(value => {
         if (version.current !== owner) return
         setData(value); setState('ready')
@@ -384,8 +388,10 @@ function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDele
 
 export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const compactNav = useMediaQuery('(max-width: 900px)')
-  const [runs, runsState, loadRuns] = useResource(() => get('/api/runs'), null)
-  const [proj, projectsState, loadProjects] = useResource(listProjects, { projects: [], assignments: {} })
+  const [runs, runsState, loadRuns] = useResource(
+    signal => get('/api/runs', { signal, cache: 'no-store' }), null)
+  const [proj, projectsState, loadProjects] = useResource(
+    signal => listProjects({ signal }), { projects: [], assignments: {} })
   const [sel, setSel] = useState(ALL)
   const [expanded, setExpanded] = useState(() => new Set())
   const [renaming, setRenaming] = useState(null)   // project id being renamed (inline)
@@ -396,7 +402,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const runsMainRef = useRef(null)
   const projectsAllRef = useRef(null)
   const [dragRun, setDragRun] = useState(null)
-  const [view, setView] = useState('list')         // list | map | compare
+  const [view, setView] = useState('list')
   const [mapCollapseOverrides, setMapCollapseOverrides] = useState(() => new Map())
   const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
   const projectModalReturnRef = useRef(null)
@@ -405,13 +411,14 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const runModalReturnFocusRef = useRef(null)
   const [runRename, setRunRename] = useState(null) // run object being renamed (popup)
   // Sort + filter of the run list (client-side over the loaded summaries).
-  const [sortKey, setSortKey] = useState('time')   // time | name | metric | task | nodes | phase
-  const [sortDir, setSortDir] = useState('desc')   // asc | desc
-  const [query, setQuery] = useState('')           // free-text over label/id/task/goal
+  const [sortKey, setSortKey] = useState('time')
+  const [sortDir, setSortDir] = useState('desc')
+  const [query, setQuery] = useState('')
   const [taskFilter, setTaskFilter] = useState(ALL)
-  const [statusFilter, setStatusFilter] = useState('all')   // effective status vocabulary from runIndex
-  const [stFilter, setStFilter] = useState(ALL)             // super-task filter (ALL | UNASSIGNED | id)
-  const [superdata, superState, loadSupers] = useResource(listSupertasks, { supertasks: [], assignments: {} })
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [stFilter, setStFilter] = useState(ALL)
+  const [superdata, superState, loadSupers] = useResource(
+    signal => listSupertasks({ signal }), { supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
   const [compareIds, setCompareIds] = useState(() => new Set())
@@ -422,6 +429,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const [activeSavedView, setActiveSavedView] = useState('')
   const [viewModal, setViewModal] = useState(false)
   const [viewMessage, setViewMessage] = useState('')
+  const [listLimit, setListLimit] = useState(LIST_PAGE_SIZE)
   const savedViewReturnRef = useRef(null)
   const [projectsOpen, setProjectsOpen] = useState(false)   // compact-screen Projects drawer
   const projectsToggleRef = useRef(null)
@@ -456,7 +464,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   // Poll the runs list every 2.5s, but skip the request while the tab is hidden (no point refreshing a
   // list nobody's looking at) — and refresh once immediately when it becomes visible again.
   usePoll(loadRuns, 2500, [], { pauseHidden: true })
-  useEffect(() => { loadProjects(); loadSupers() }, [])
+  usePoll(() => Promise.all([loadProjects(), loadSupers()]), 15_000, [], { pauseHidden: true })
 
   const stName = useMemo(() => Object.fromEntries(superdata.supertasks.map(s => [s.id, s.name])), [superdata])
   const assignToSuper = async (runId, sid) => { await assignSupertask(runId, sid === UNASSIGNED ? null : sid); await loadRuns() }
@@ -464,10 +472,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const { byParent, subtree } = useMemo(() => indexProjects(proj.projects), [proj.projects])
   const projName = useMemo(() => Object.fromEntries(proj.projects.map(p => [p.id, p.name])), [proj.projects])
 
-  const runsOf = (id) => {
-    return scopeRuns(runs || [], id, proj.projects)
-  }
-  const count = (id) => runsOf(id).length
+  const scoped = useMemo(() => scopeRuns(runs || [], sel, proj.projects),
+    [runs, sel, proj.projects])
+  const projectCounts = useMemo(() => projectRunCounts(runs || [], proj.projects),
+    [runs, proj.projects])
+  const count = id => projectCounts.get(id) || 0
 
   // Distinct task ids across all loaded runs — populates the task filter dropdown.
   const tasks = useMemo(
@@ -481,6 +490,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     supertask: stFilter, status: statusFilter,
   }), [runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
   const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
+  const displayedRuns = visible.slice(0, listLimit)
   const compareRuns = useMemo(() => {
     const byId = new Map((runs || []).map(run => [run.run_id, run]))
     return [...compareIds].map(id => byId.get(id)).filter(Boolean)
@@ -491,8 +501,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     setQuery(''); setTaskFilter(ALL); setStatusFilter('all'); setStFilter(ALL)
   }
   useEffect(() => {
-    if (sortKey === 'metric' && !metricSortAvailable) setSortKey('time')
-  }, [sortKey, metricSortAvailable])
+    if (sortKey === 'metric' && filtered.length > 0 && !metricSortAvailable) setSortKey('time')
+  }, [sortKey, metricSortAvailable, filtered.length])
   useEffect(() => { storageSet(COMPARE_COLUMNS_KEY, JSON.stringify(compareColumns)) }, [compareColumns])
   useEffect(() => {
     if (!runs) return
@@ -505,6 +515,14 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   useEffect(() => {
     if (view === 'compare' && compareRuns.length < 2) setView('list')
   }, [view, compareRuns.length])
+  useEffect(() => {
+    if (projectsState === 'ready' && sel !== ALL && sel !== UNASSIGNED
+        && !proj.projects.some(project => project.id === sel)) setSel(ALL)
+    if (superState === 'ready' && stFilter !== ALL && stFilter !== UNASSIGNED
+        && !superdata.supertasks.some(task => task.id === stFilter)) setStFilter(ALL)
+  }, [projectsState, proj.projects, sel, superState, superdata.supertasks, stFilter])
+  useEffect(() => setListLimit(LIST_PAGE_SIZE),
+    [sel, query, taskFilter, statusFilter, stFilter, sortKey, sortDir])
 
   const portfolioState = {
     project: sel, query, task: taskFilter, status: statusFilter, supertask: stFilter,
@@ -665,8 +683,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const renameSuper = async (id, name) => { await renameSupertask(id, name); await loadSupers() }
   const removeSuper = async (s) => {
     if (!confirm(`Delete super-task "${s.name}"? Runs in it become unassigned (the runs themselves are kept).`)) return false
+    await deleteSupertask(s.id)
     if (stFilter === s.id) setStFilter(ALL)
-    await deleteSupertask(s.id); await Promise.all([loadSupers(), loadRuns()]); return true
+    await Promise.all([loadSupers(), loadRuns()]); return true
   }
 
   // TreeNode lives at MODULE scope (below) so its component identity is stable across the 2.5s runs
@@ -693,7 +712,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           <OpIcon name="folder" className="t-ic" /> Projects
         </button>
         <button className="btn sm primary new-run-cta" disabled={navigationBusy}
-                onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>
+                onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
           ＋ New run
         </button>
         <span className="spacer" style={{ flex: 1 }} />
@@ -766,7 +785,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                 onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} /> Report<span className="vt-scope"> · {scope.label}</span></button>
             </div>}
           </div>
-          {runs && !!runsOf(sel).length && <div className="portfolio-viewbar">
+          {runs && <div className="portfolio-viewbar">
             <label>Saved view
               <select className="sel" aria-label="Saved portfolio view" value={activeSavedView}
                 onChange={event => event.target.value
@@ -786,7 +805,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
             {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>Dismiss</button>
           </div>}
-          {runs && !!runsOf(sel).length && <div className="runbar">
+          {runs && !!scoped.length && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
             <input className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
                    onChange={e => setQuery(e.target.value)} />
@@ -812,7 +831,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
             <button className="btn sm ghost" disabled={navigationBusy} aria-label="Create or manage super-tasks"
               title="create / manage super-tasks" onClick={event => openSuperTasks(event.currentTarget)}><OpIcon name="target" className="t-ic" /> ＋</button>
             <span style={{ flex: 1 }} />
-            <span className="muted runbar-count">{visible.length}/{runsOf(sel).length}</span>
+            <span className="muted runbar-count">{visible.length}/{scoped.length}</span>
             <select className="sel" aria-label="Sort runs by" value={sortKey} onChange={e => {
               setSortKey(e.target.value)
               if (e.target.value === 'metric') setSortDir('asc')
@@ -843,11 +862,14 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
           {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
           {(!compactNav || !projectsOpen) && mutationNotice}
-          {runsState === 'ready' && runs && !runsOf(sel).length && <div className="notice resource-empty">No runs here.
+          {runsState === 'ready' && runs && !scoped.length && <div className="notice resource-empty">No runs here.
             {sel === ALL
-              ? <button className="btn sm primary" disabled={navigationBusy} onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>Start a new run</button>
+              ? <button className="btn sm primary" disabled={navigationBusy}
+                  onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
+                  Start a new run
+                </button>
               : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
-          {runs && !!runsOf(sel).length && !visible.length && <div className="notice" role="status">
+          {runs && !!scoped.length && !visible.length && <div className="notice" role="status">
             {runsState === 'stale' ? 'No runs in the last loaded data match the filters.' : 'No runs match the filters.'}
             {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy} onClick={clearFilters}>Clear filters</button>}
           </div>}
@@ -864,7 +886,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               names={{ projects: projName, supertasks: stName }}
               onColumns={setCompareColumns} onRemove={toggleCompare} />
           </LazyBoundary>}
-          {view === 'list' && runs && visible.map(r => (
+          {view === 'list' && runs && displayedRuns.map(r => (
             <div className={'run-card' + (compareIds.has(r.run_id) ? ' compare-selected' : '')}
                  key={r.run_id} draggable={!navigationBusy}
                  onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
@@ -918,6 +940,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               </div>
             </div>
           ))}
+          {view === 'list' && displayedRuns.length < visible.length && <div className="run-list-more">
+            <button type="button" className="btn sm"
+              onClick={() => setListLimit(listLimit + LIST_PAGE_SIZE)}>Show more</button>
+            <span className="muted">{displayedRuns.length}/{visible.length}</span>
+          </div>}
         </div>
       </div>
 

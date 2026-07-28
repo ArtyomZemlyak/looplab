@@ -37,14 +37,16 @@ test('report solution evidence fails closed on wrong node and historical snapsho
   assert.equal(normalizeReportNodeDetail({ id: 8, code: 'wrong' }, { nodeId: 7 }), null)
   assert.equal(normalizeReportNodeDetail({ id: 7, code: { untrusted: true } }, { nodeId: 7 }), null)
   assert.deepEqual(normalizeReportNodeDetail({
-    id: 7, code: 'snapshot', historical_seq: 12, historical_generation: generation,
+    id: 7, code: 'snapshot', run_generation: generation,
+    historical_seq: 12, historical_generation: generation,
   }, { nodeId: 7, historySeq: 12, expectedGeneration: generation }), { code: 'snapshot' })
   assert.equal(normalizeReportNodeDetail({
-    id: 7, code: 'live masquerading as history', historical_seq: 13,
+    id: 7, code: 'live masquerading as history', run_generation: generation, historical_seq: 13,
     historical_generation: generation,
   }, { nodeId: 7, historySeq: 12, expectedGeneration: generation }), null)
   assert.equal(normalizeReportNodeDetail({
-    id: 7, code: 'old generation', historical_seq: 12, historical_generation: 'b'.repeat(64),
+    id: 7, code: 'old generation', run_generation: 'b'.repeat(64),
+    historical_seq: 12, historical_generation: 'b'.repeat(64),
   }, { nodeId: 7, historySeq: 12, expectedGeneration: generation }), null)
 })
 

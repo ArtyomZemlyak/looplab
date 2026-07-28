@@ -3339,6 +3339,7 @@ class RunCommandService:
             raise RuntimeError("run has no task.snapshot.json or usable ui_meta.json")
         # The CLI's resume path is stop-aware: it preserves a pending run_abort and appends EV_RESUME
         # only for ordinary paused/finished continuation.  Never append run_reopened here.
+        self.srv.settings.refresh_env_secrets()
         return self.spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
 
     def _claim_restart_spawn(self, rd: Path) -> bool:
@@ -3359,6 +3360,7 @@ class RunCommandService:
             wait_on_alive=False,
             spawn_engine=self.spawn_engine,
             liveness=self._engine_state,
+            before_spawn=self.srv.settings.refresh_env_secrets,
         )
 
     def _postcondition(

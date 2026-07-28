@@ -36,6 +36,7 @@ import {
   listLaunchTransports, subscribeLaunchTransports, subscribeRunCommandLock,
   storageGet, storageSet, storageRemove,
 } from './util.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
 //
@@ -56,12 +57,7 @@ import {
 // session — the background worker persists the reply — so "could not reach" no longer strands a turn.
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
-const boundedRead = (request, ms = 12000) => {
-  let timer
-  return Promise.race([request, new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('request timed out')), ms)
-  })]).finally(() => clearTimeout(timer))
-}
+const boundedRequest = (read, ms = 12000) => deadlineRequest(read, ms).promise
 
 // Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
 const FREEZE = { success: '⏸ run stopped (not finalized)',
@@ -164,7 +160,7 @@ const readFileText = (file) => new Promise((resolve) => {
   r.readAsText(file)
 })
 
-export default function AssistantBar({ runId, hidden = false }) {
+export default function AssistantBar({ runId, hidden = false, onReady }) {
   const compactAssistant = useMediaQuery(`(max-width: ${ASSISTANT_OVERLAY_MAX_PX}px)`)
   const [runAccess, setRunAccessState] = useState(() => getRunAccess(runId))
   const historical = !!runId && runAccess.readOnly
@@ -207,6 +203,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   // poll-sourced pending against this set; it self-heals as the server drops each resolved id.
   const resolvedPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
+  const [shareUnknownSid, setShareUnknownSid] = useState(null)
   const [files, setFiles] = useState([])          // attached text files [{name,size,content,truncated}]
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
 
@@ -281,12 +278,13 @@ export default function AssistantBar({ runId, hidden = false }) {
   }, [view, sideW])
 
   useEffect(() => { assistantCommands().then(r => setCommands(r.commands || [])).catch(() => {}) }, [])
-  usePoll((alive) => get('/api/runs').then(r => alive() && setRuns(r || [])).catch(() => {}), 6000, [])
+  const feedOpen = view === 'side' || view === 'full'
+  usePoll((alive) => get('/api/runs').then(r => alive() && setRuns(r || [])).catch(() => {}),
+    6000, [feedOpen], { enabled: feedOpen })
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
   const refreshSessions = () => assistantSessions().then(r => setSessions(r.sessions || [])).catch(() => {})
   useEffect(() => { if (view === 'full') refreshSessions() }, [view])
 
-  const feedOpen = view === 'side' || view === 'full'
   // Autoscroll ONLY when the user is already near the bottom — don't yank them back down while they've
   // scrolled up to read earlier turns during a streaming reply.
   const onFeedScroll = (e) => { const f = e.currentTarget; atBottomRef.current = f.scrollHeight - f.scrollTop - f.clientHeight < 80 }
@@ -370,7 +368,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     try {
       // Keep the current transcript intact until the target is known to exist. The sequence fence
       // rejects a slow A response after the user has already selected B (or started a new chat).
-      const s = await boundedRead(assistantGet(id))
+      const s = await boundedRequest(signal => assistantGet(id, { signal }))
       if (!mountedRef.current || seq !== openSessionSeqRef.current) return
       if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
       if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
@@ -404,7 +402,9 @@ export default function AssistantBar({ runId, hidden = false }) {
           if (observeOnly || !dangling || exactState !== 'idle') return
           exactState = 'checking'
           let latest
-          try { latest = await assistantGet(id) } catch { exactState = 'idle'; return }
+          try {
+            latest = await boundedRequest(signal => assistantGet(id, { signal }))
+          } catch { exactState = 'idle'; return }
           if (!mountedRef.current || sidRef.current !== id || !runningRef.current) return
           const latestTurn = danglingAssistantTurn(latest.messages || [])
           if (!latestTurn) { exactState = 'settled'; return } // the original reply won the race
@@ -1082,7 +1082,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       await sleep(2000)
       if (authoritativeFailure?.()) return false
       try {
-        const s = await assistantGet(id)
+        const s = await boundedRequest(signal => assistantGet(id, { signal }), 8000)
         const arr = s.messages || []
         const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
         if (arr.length >= priorLen && la) {
@@ -1114,7 +1114,8 @@ export default function AssistantBar({ runId, hidden = false }) {
       // Create the session FIRST; only then clear the attached-file chips — else a create failure
       // strands the user with their files already gone.
       try {
-        const m = await assistantCreate((userText || instruction).slice(0, 60), effectiveMode)
+        const m = await boundedRequest(signal => assistantCreate(
+          (userText || instruction).slice(0, 60), effectiveMode, { signal }))
         if (!mountedRef.current || sessionSeq !== openSessionSeqRef.current) { turnCaptureRef.current = false; return }
         id = m.id; sidRef.current = id; storageSet('ll.asstSid', id); setSid(id)
       } catch {
@@ -1252,7 +1253,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         // Refresh first: if the original POST was staged, openSession performs exact raw/mode recovery;
         // if its reply landed late, simply surface it. Only a genuinely unstaged request falls through
         // to the ordinary new-turn retry below.
-        const session = await assistantGet(id)
+        const session = await boundedRequest(signal => assistantGet(id, { signal }))
         if (!mountedRef.current || sidRef.current !== id) return
         const durableMessages = session.messages || []
         if (danglingAssistantTurn(durableMessages)) {
@@ -1330,6 +1331,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
   useEffect(() => {
     const onNewRun = (event) => {
+      event.preventDefault()
       if (busy || commandBusy || historical) { flash(historical ? 'Return live before starting a run from this context' : commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
       const goal = String(event.detail?.goal || '').trim()
       const command = goal ? `/new ${goal}` : '/new '
@@ -1341,15 +1343,26 @@ export default function AssistantBar({ runId, hidden = false }) {
       requestAnimationFrame(() => inputRef.current?.focus())
     }
     window.addEventListener('ll:new-run', onNewRun)
+    onReady?.()
     return () => window.removeEventListener('ll:new-run', onNewRun)
-  }, [busy, commandBusy, historical, input])
+  }, [busy, commandBusy, historical, input, onReady])
+
+  useEffect(() => {
+    if (!Object.keys(launchDrafts).length) return
+    const warnBeforeUnload = event => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeUnload)
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
+  }, [launchDrafts])
 
   const stop = () => {
     runningRef.current = false                              // halt reattach/recover polling immediately
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* already gone */ } abortRef.current = null }
     const id = sidRef.current || sid                        // cancel server-side (works even post-reload)
     if (id) {
-      const pr = assistantCancel(id).catch(() => {})
+      const pr = boundedRequest(signal => assistantCancel(id, { signal }), 8000).catch(() => {})
       cancelReqRef.current = pr
       pr.finally(() => { if (cancelReqRef.current === pr) cancelReqRef.current = null })   // identity-guarded
     }
@@ -1586,6 +1599,8 @@ export default function AssistantBar({ runId, hidden = false }) {
   const hiddenFileInput = <input ref={fileRef} type="file" multiple style={{ display: 'none' }}
     onChange={e => { onFiles(e.target.files); e.target.value = '' }} />
 
+  const currentSession = sessions.find(s => s.id === sid)
+  const shareUnknown = shareUnknownSid === sid
   return <>
     {hiddenFileInput}
     <output className="sr-only">
@@ -1698,7 +1713,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       </div>
       <div className="asst-main">
         <div className="asst-main-h">
-          <span className="ttl" style={{ flex: 1 }}>{sessions.find(s => s.id === sid)?.title || 'New chat'}</span>
+          <span className="ttl" style={{ flex: 1 }}>{currentSession?.title || 'New chat'}</span>
           {ctxChip}
           {launchRecoveryButton}
           {sid && <button className="btn sm ghost" title="fork this chat into a new session" onClick={async () => {
@@ -1707,22 +1722,34 @@ export default function AssistantBar({ runId, hidden = false }) {
           {/* A share link is a separate secret with an expiry — not this chat's id — and it is frozen
               at the turns that exist right now, so anything said afterwards stays private. "unshare"
               revokes every link for the chat without deleting the conversation. */}
-          {sid && <button className="btn sm ghost" title="Copy read-only snapshot" onClick={async () => {
+          {sid && !currentSession?.shared && !shareUnknown
+            && <button className="btn sm ghost" title="Copy read-only snapshot" onClick={async () => {
             try {
-              const r = await assistantShare(sid)
+              const r = await boundedRequest(signal => assistantShare(sid, false, { signal }))
+              setShareUnknownSid(null)
               const url = location.origin + location.pathname + r.url
               try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
               flash(`Snapshot link copied · expires ${fmtDate(r.expires_at)}.`)
               location.hash = r.url.replace(/^#/, '')   // navigate AFTER copying (the bar hides on the shared page)
-            } catch { flash('Share failed') }
+            } catch (error) {
+              if (error?.status >= 400 && error.status < 500) {
+                flash('Share failed')
+              } else {
+                setShareUnknownSid(sid)
+                await refreshSessions()
+                flash('Share uncertain · revoke before retrying')
+              }
+            }
           }}>⤴ share</button>}
-          {sid && sessions.find(s => s.id === sid)?.shared && <button className="btn sm ghost" title="Revoke every share link" onClick={async () => {
+          {sid && (currentSession?.shared || shareUnknown)
+            && <button className="btn sm ghost" title="Revoke every share link" onClick={async () => {
             try {
-              const r = await assistantUnshare(sid)
+              const r = await boundedRequest(signal => assistantUnshare(sid, { signal }))
+              setShareUnknownSid(null)
               await refreshSessions()
               flash(r.revoked ? `Revoked ${r.revoked} link${r.revoked === 1 ? '' : 's'}.` : 'No active links.')
             } catch { flash('Revoke failed') }
-          }}>⤫ unshare</button>}
+          }}>⤫ {shareUnknown ? 'revoke pending' : 'unshare'}</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>

@@ -339,7 +339,8 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // Inspector node-detail poll: callback receives (alive), rejects a STALER attempt (accepts fresher),
   // and only then writes. (R7: `>= nodeAttempt`, not exact — the detail endpoint often leads the poll.)
   assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
-  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?get\(runNodeApiPath\(runId, nodeId\)\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesNode\(d\) && detailMatchesAttempt\(d\)\)/)
+  assert.match(inspector,
+    /usePoll\(\(alive\) => \{[\s\S]*?deadlineGet\(runNodeApiPath\(runId, nodeId, at\)\)[\s\S]*?timed\.promise\.then\(d => \{[\s\S]*?if \(alive\(\) && detailMatchesNode\(d\) && detailMatchesGeneration\(d\)[\s\S]*?detailMatchesAttempt\(d\)\)/)
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a
   // persistent failure does not flicker the error/Retry banner every 4s.
@@ -368,7 +369,8 @@ test('R6: Dock timeline-window note uses a boolean guard so no stray 0 renders',
 test('R7: Inspector accepts a fresher node-detail payload (no spurious attempt-changed error)', async () => {
   const inspector = await source('Inspector.jsx')
   // detailMatchesAttempt must accept attempt >= summary (fresher after inline repair), not exact-only.
-  assert.match(inspector, /Number\.isSafeInteger\(value\?\.attempt\) && value\.attempt >= nodeAttempt/)
+  assert.match(inspector,
+    /Number\.isSafeInteger\(value\?\.attempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
 })
 
 test('owner lifecycle is announced without duplicating the review banner', async () => {

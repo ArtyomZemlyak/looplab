@@ -10,6 +10,7 @@ const COMPARE_DETAIL_TIMEOUT_MS = 8000
 
 export async function loadDetail(run, signal, timeoutMs = COMPARE_DETAIL_TIMEOUT_MS) {
   let snapshot = null, config = null, probe = null, configReady = false
+  const expectedGeneration = normalizeRunGeneration(run?.generation)
   const timed = deadlineRequest(async requestSignal => {
     snapshot = await get(path(run.run_id, '/state'), { signal: requestSignal, cache: 'no-store' })
     try {
@@ -31,7 +32,8 @@ export async function loadDetail(run, signal, timeoutMs = COMPARE_DETAIL_TIMEOUT
   else signal?.addEventListener('abort', abort, { once: true })
   try {
     await timed.promise
-    const stable = snapshot?.generation && probe?.generation === snapshot.generation
+    const stable = !!expectedGeneration && snapshot?.generation === expectedGeneration
+      && probe?.generation === expectedGeneration
     return {
       runId: run.run_id,
       generation: snapshot?.generation || null,
@@ -80,7 +82,8 @@ const valueFor = (id, run, detail, names) => {
 export default function RunCompare({ runs, columns, names, onColumns, onRemove }) {
   const [resource, setResource] = useState({ status: 'loading', details: [], loadedAt: 0 })
   const [retry, setRetry] = useState(0)
-  const identity = runs.map(run => run.run_id).join('\n')
+  const identity = runs.map(run => `${run.run_id}@${normalizeRunGeneration(run.generation) || '?'}`)
+    .join('\n')
   useEffect(() => {
     const controller = new AbortController()
     setResource(current => ({ ...current, status: 'loading' }))

@@ -16,6 +16,15 @@ def build_router(srv) -> APIRouter:
     router = APIRouter()
     _run_dir, projects = srv.run_dir, srv.projects
 
+    async def _json_object(request: Request) -> dict:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "request body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        return body
+
     # ------------------------------------------------------------------ projects (ClearML-style)
     def _project_call(fn):
         """Map invalid mutations to 400 and an unavailable required durability lock to 503."""
@@ -41,13 +50,13 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/projects")
     async def create_project(request: Request):
-        body = await request.json()
+        body = await _json_object(request)
         p = _project_call(lambda: projects.create(body.get("name", ""), body.get("parent_id")))
         return p.model_dump()
 
     @router.patch("/api/projects/{pid}")
     async def patch_project(pid: str, request: Request):
-        body = await request.json()
+        body = await _json_object(request)
 
         def _apply():
             if "name" in body and body["name"] is not None:
@@ -65,7 +74,7 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/project")
     async def assign_run(run_id: str, request: Request):
         _run_dir(run_id)   # 404 guard: only real runs can be filed
-        body = await request.json()
+        body = await _json_object(request)
         _project_call(lambda: projects.assign(run_id, body.get("project_id")))
         return {"ok": True}
 
@@ -77,13 +86,13 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/supertasks")
     async def create_supertask(request: Request):
-        body = await request.json()
+        body = await _json_object(request)
         st = _project_call(lambda: projects.create_supertask(body.get("name", ""), body.get("task_id")))
         return st
 
     @router.patch("/api/supertasks/{sid}")
     async def patch_supertask(sid: str, request: Request):
-        body = await request.json()
+        body = await _json_object(request)
         _project_call(lambda: projects.rename_supertask(sid, body.get("name", "")))
         return {"ok": True}
 
@@ -95,7 +104,7 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/supertask")
     async def assign_supertask(run_id: str, request: Request):
         _run_dir(run_id)   # 404 guard: only real runs can be filed
-        body = await request.json()
+        body = await _json_object(request)
         _project_call(lambda: projects.assign_supertask(run_id, body.get("supertask_id")))
         return {"ok": True}
 
@@ -103,7 +112,7 @@ def build_router(srv) -> APIRouter:
     async def rename_run(run_id: str, request: Request):
         """Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged."""
         _run_dir(run_id)   # 404 guard
-        body = await request.json()
+        body = await _json_object(request)
         _project_call(lambda: projects.set_label(run_id, body.get("label")))
         return {"ok": True}
 

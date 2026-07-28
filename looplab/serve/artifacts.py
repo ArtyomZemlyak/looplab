@@ -8,6 +8,8 @@ import stat
 from pathlib import Path
 from typing import Callable, Optional
 
+from looplab.core._pathsafe import looks_secret
+
 # ----------------------------------------------------------------- artifacts (run files + repo paths)
 # Surface the files a run produced. Two kinds of root: the run directory itself (events/snapshots, the
 # per-node eval workdirs under nodes/<id>/, operator subdirs) AND — for a RepoTask — the host repo /
@@ -118,6 +120,12 @@ def _artifact_exposure_policy(run_dir: Path) -> ArtifactExposure:
     ) -> bool:
         if not _unambiguous_artifact_path(request_path):
             return False
+        # Artifact inventory is owner-facing, but it is still a generic file browser over paths
+        # copied from a task snapshot. Apply the same secret-name/secret-directory boundary as the
+        # model-facing filesystem tools before either listing or reading a file.
+        if request_path is not None and looks_secret(
+                Path(request_path.replace("\\", "/"))):
+            return False
         try:
             candidate_path = Path(candidate)
             lexical_parent = candidate_path.parent.resolve(strict=True)
@@ -190,6 +198,12 @@ def _artifact_roots(rd: Path) -> list[dict]:
             pass
     out: list[dict] = []
     seen: set = set()
+    try:
+        canonical_run = rd.resolve()
+        canonical_home = Path.home().resolve()
+    except (OSError, RuntimeError, ValueError):
+        canonical_run = rd
+        canonical_home = None
     for r in roots:
         try:
             b = Path(r["base"]).resolve()
@@ -197,6 +211,15 @@ def _artifact_roots(rd: Path) -> list[dict]:
             continue
         if r["id"] in seen or b in seen or not b.is_dir():   # de-dup by id AND by resolved path
             continue
+        if r["id"] != "run":
+            # A task snapshot is run input, not an authorization manifest. Never let a declared path
+            # promote a filesystem root, the server user's entire home, or an ancestor containing
+            # this/all run directories into a browsable artifact root.
+            anchor = Path(b.anchor) if b.anchor else None
+            if ((anchor is not None and b == anchor)
+                    or (canonical_home is not None and b == canonical_home)
+                    or b == canonical_run or b in canonical_run.parents):
+                continue
         seen.add(r["id"])
         seen.add(b)
         out.append({**r, "base": b})

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import secrets
 import stat
 import time
@@ -388,7 +389,8 @@ def build_router(srv) -> APIRouter:
             try:
                 spawned = _claim_and_spawn_resume(
                     rd, cli_args, cancel_event=srv.resume_cancel, wait_on_alive=True,
-                    spawn_engine=_spawn_engine, on_spawn=_record_spawn)
+                    spawn_engine=_spawn_engine, on_spawn=_record_spawn,
+                    before_spawn=srv.settings.refresh_env_secrets)
             except BaseException:
                 if not popen_returned:
                     srv.commands.cancel_external_spawn(rd, "legacy-resume")
@@ -401,16 +403,45 @@ def build_router(srv) -> APIRouter:
             return {"ok": True, "launch_pending": not spawned}
 
     @router.post("/api/runs/{run_id}/reset")
-    def reset_run(run_id: str):
+    async def reset_run(run_id: str, request: Request):
         """round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and
         re-spawn a fresh run on the same run-id. The prior artifacts are RENAMED (not deleted) so the
         history is recoverable."""
+        raw = await request.body()
+        if raw:
+            try:
+                body = json.loads(raw)
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise HTTPException(400, "reset body must be valid JSON") from exc
+            if not isinstance(body, dict):
+                raise HTTPException(400, "reset body must be a JSON object")
+        else:
+            body = {}
+        expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
+        if expected_generation is not None and (
+                not isinstance(expected_generation, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_generation) is None):
+            raise HTTPException(400, "expected_generation must be a lowercase SHA-256 token")
+        # Browser mutations must be generation-fenced. Keep the bodyless no-Origin route as a
+        # deprecated CLI compatibility seam; first-party fetch POSTs carry Origin and always send
+        # the generation below.
+        if expected_generation is None and request.headers.get("origin"):
+            raise HTTPException(428, "expected_generation is required for browser Replay")
         rd = _run_dir(run_id)
         # The command sequencer protects command-aware work/current spawn leases; the lifecycle
         # lock additionally serializes durable resume reconciliation and CLI-compatible launch
         # markers. Keep this lock order (command → lifecycle) everywhere to avoid inversion.
         with srv.commands.destructive_guard(rd, "reset run") as rd:
             with run_lifecycle_lock_http(rd):
+                current_generation = srv.commands.run_generation(rd)
+                if expected_generation is not None and expected_generation != current_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected_generation,
+                        "current_generation": current_generation or None,
+                        "message": "The run was reset or replaced before Replay was submitted.",
+                        "remediation": "Reload the run before replaying it.",
+                    })
                 known_alive = _known_engine_liveness(rd, "reset the run")
                 if (known_alive or _engine_alive(rd) or _fresh_resume_launch_pending(rd)
                         or _fresh_run_launch_pending(rd)

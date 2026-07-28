@@ -1296,7 +1296,10 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   }
   const onReplay = async () => {
     if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
-    try { await resetRun(runId); onToast?.('replaying from scratch') } catch { onToast?.('Reset could not be submitted. Try again.') }
+    try {
+      await resetRun(runId, expectedGeneration)
+      onToast?.('replaying from scratch')
+    } catch { onToast?.('Reset could not be submitted. Reload the run and try again.') }
   }
   // Publish only from the committed layout and bind the callable to this exact run generation. A
   // functional identity cleanup prevents an old StrictMode/unmount cleanup from erasing a newer

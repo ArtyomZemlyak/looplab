@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace, commandFeedback,
-  runNodeApiPath } from './util.js'
+import { deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
+  clearNodeTrace, commandFeedback, runNodeApiPath } from './util.js'
 import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
@@ -17,6 +17,7 @@ import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 // Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
@@ -117,9 +118,12 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // should be rejected. Exact-only matching here flashed a spurious "attempt changed" error banner
   // during normal live repairs until the next poll reconciled.
   const detailMatchesAttempt = value => !Number.isSafeInteger(nodeAttempt)
-    || (Number.isSafeInteger(value?.attempt) && value.attempt >= nodeAttempt)
+    || (Number.isSafeInteger(value?.attempt)
+      && (readOnly ? value.attempt === nodeAttempt : value.attempt >= nodeAttempt))
   const detailMatchesNode = value => value != null && typeof value === 'object' && !Array.isArray(value)
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
+  const detailMatchesGeneration = value => !expectedGeneration
+    || value?.run_generation === expectedGeneration
   const [detailStatus, setDetailStatus] = useState('idle')
   const [detailError, setDetailError] = useState('')
   const [detailNonce, setDetailNonce] = useState(0)
@@ -136,13 +140,15 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     if (readOnlyReason === 'review' && !evidenceAvailable) { setDetailStatus('restricted'); return }
     setDetailStatus('loading')
     let on = true
-    const at = readOnly && historySeq != null
-      ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
-      : ''
-    get(runNodeApiPath(runId, nodeId, at))
+    const query = []
+    if (readOnly && historySeq != null) query.push(`seq=${historySeq}`)
+    if (expectedGeneration) query.push(`expected_generation=${expectedGeneration}`)
+    const at = query.length ? `?${query.join('&')}` : ''
+    const timed = deadlineGet(runNodeApiPath(runId, nodeId, at))
+    timed.promise
       .then(d => {
         const valid = detailMatchesNode(d)
-        if (on && valid && detailMatchesAttempt(d)) {
+        if (on && valid && detailMatchesGeneration(d) && detailMatchesAttempt(d)) {
           setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready')
         } else if (on) {
           setDetailStatus('error')
@@ -152,7 +158,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         }
       })
       .catch(() => { if (on) { setDetailStatus('error'); setDetailError('Full node details could not be loaded.') } })
-    return () => { on = false }
+    return () => { on = false; timed.controller.abort() }
   }, [runId, nodeId, nodeAttempt, state?.nodes?.[nodeId]?.status, readOnly, historySeq,
     expectedGeneration, readOnlyReason, evidenceAvailable, detailScope, detailNonce])
   useEffect(() => {
@@ -196,11 +202,16 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     // alive() gates the async resolution: if the user selects a different node (or the poll is
     // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
     // the newly-selected node's detail — otherwise node A's Code/Trace/Metrics render (stuck) under B.
-    get(runNodeApiPath(runId, nodeId)).then(d => {
-      if (alive() && detailMatchesNode(d) && detailMatchesAttempt(d)) {
+    const at = expectedGeneration
+      ? `?expected_generation=${encodeURIComponent(expectedGeneration)}` : ''
+    const timed = deadlineGet(runNodeApiPath(runId, nodeId, at))
+    timed.promise.then(d => {
+      if (alive() && detailMatchesNode(d) && detailMatchesGeneration(d)
+          && detailMatchesAttempt(d)) {
         setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready'); setDetailError('')
       }
     }).catch(() => {})
+    return timed
   }, 4000, [runId, nodeId, nodeWorking, detailScope],
   { enabled: !readOnly && nodeWorking, immediate: false })
 
@@ -948,11 +959,20 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRe
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
   }, [runId, n.id, working, reloadNonce])
   usePoll((alive) => {
-    nodeConversation(runId, n.id).then(d => alive() && setConv(d || { stages: [] }))
-      .catch(() => alive() && setConv({ stages: [], projection: { unavailable: true } }))
-    // Stage/eval logs ride ALONGSIDE the trace now (moved out of the old Training tab): each stage
-    // band renders its own live log inside it, so opening "Train" shows the training output in place.
-    get(runNodeApiPath(runId, n.id, '/logs')).then(d => alive() && setLogs(d || {})).catch(() => {})
+    const timed = deadlineRequest(signal => Promise.allSettled([
+        nodeConversation(runId, n.id, { signal }),
+        get(runNodeApiPath(runId, n.id, '/logs'), { signal, cache: 'no-store' }),
+      ]), 8000)
+    timed.promise.then(([conversation, logs]) => {
+      if (!alive()) return
+      setConv(conversation.status === 'fulfilled'
+        ? conversation.value || { stages: [] }
+        : { stages: [], projection: { unavailable: true } })
+      if (logs.status === 'fulfilled') setLogs(logs.value || {})
+    }).catch(() => {
+      if (alive()) setConv({ stages: [], projection: { unavailable: true } })
+    })
+    return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
   [runId, n.id, working, reloadNonce])   // reloadNonce also re-runs a finished node's one-shot load
   if (conv === null) return <div className="muted trace-small" role="status">loading…</div>
@@ -1140,7 +1160,9 @@ export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
   // re-arms the effect, so a repair-retrain (pending→failed→pending) resumes live polling.
   usePoll((alive) => {
     const request = ++requestRef.current
-    get(runNodeApiPath(runId, nodeId, `/metrics?attempt=${metricAttempt}`)).then(d => {
+    const timed = deadlineGet(
+      runNodeApiPath(runId, nodeId, `/metrics?attempt=${metricAttempt}`))
+    timed.promise.then(d => {
       if (!d?.metrics || Array.isArray(d.metrics)) throw 0
       if (d.node_id !== nodeId || d.attempt !== metricAttempt) throw 0
       if (alive() && request === requestRef.current) setResource(d.metrics)
@@ -1148,6 +1170,7 @@ export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
       if (alive() && request === requestRef.current) setResource(r => r
         ? Array.isArray(r) ? r : [r] : false)
     })
+    return timed
   }, done ? null : 3000, [runId, nodeId, metricAttempt, done, retryNonce],
   { enabled: nodeId != null })
   const retry = () => {

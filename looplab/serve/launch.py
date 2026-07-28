@@ -348,6 +348,7 @@ def _launch_token(run_id: str, task: dict, settings: dict, source: dict | None,
 
 def preflight_start(srv, body: Any) -> LaunchPreflight:
     """Validate and resolve one launch request without any mutation or provider/model operation."""
+    srv.settings.refresh_env_secrets()
     if not isinstance(body, dict):
         _reject(400, "invalid_launch_request", "start body must be a JSON object")
     unknown_top = sorted(str(key) for key in body if key not in _START_FIELDS)

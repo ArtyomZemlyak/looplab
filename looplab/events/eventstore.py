@@ -684,10 +684,13 @@ class EventStore:
         self._cache: list[Event] = []
         self._cache_bytes: int = 0
         self._cache_mtime_ns: Optional[int] = None
+        self._cache_ctime_ns: Optional[int] = None
         self._cache_identity: Optional[tuple[int, int]] = None
-        # Bounded fingerprint of the cached prefix (see `_prefix_anchor`), re-verified whenever the
-        # file changed, so a rewrite-then-append cannot top a fresh tail onto stale Events.
-        self._cache_anchor: Optional[tuple[bytes, bytes]] = None
+        self._cache_hasher = hashlib.sha256()
+        # Successful writes from this EventStore carry an exact fstat receipt. That common path can
+        # extend the incremental cache without re-hashing its prefix; externally observed growth
+        # must prove the cached prefix still matches disk before joining a new tail to it.
+        self._trusted_growth_stat: Optional[tuple] = None
         # The abort watcher (and, under eval_parallel fan-out, several concurrent watchers) call read_all()
         # from worker THREADS while the main loop may also read — guard the cache top-up so a
         # concurrent extend/offset update can't race into a corrupt cache.
@@ -808,8 +811,10 @@ class EventStore:
             self._cache = []
             self._cache_bytes = 0
             self._cache_mtime_ns = None
+            self._cache_ctime_ns = None
             self._cache_identity = None
-            self._cache_anchor = None
+            self._cache_hasher = hashlib.sha256()
+            self._trusted_growth_stat = None
             self._divergence = None
 
     def append(self, type: str, data: dict[str, Any], *,
@@ -871,6 +876,7 @@ class EventStore:
                       trace_id=trace_id, span_id=span_id)
             line = orjson.dumps(e.model_dump(mode="json"))
             accepted = False
+            written_stat = None
             try:
                 with open(self.path, "ab") as f:
                     f.write(line + b"\n")
@@ -882,11 +888,16 @@ class EventStore:
                         strict_fsync(f.fileno())
                     else:
                         best_effort_fsync(f.fileno())  # read tolerates a torn final line
+                    written_stat = os.fstat(f.fileno())
             except BaseException:
                 if accepted:
                     self._mark_uncertain_append(seq)
                 raise
             self._seq = seq
+            if written_stat is not None:
+                self._trusted_growth_stat = (
+                    written_stat.st_dev, written_stat.st_ino, written_stat.st_size,
+                    written_stat.st_mtime_ns, written_stat.st_ctime_ns)
             # Keep cache bytes + file identity synchronized with our own successful write. Without
             # this top-up, a store that appended but had not yet read the new record could retain
             # `_cache_identity=None`; replacing its one-record log with an empty file would then look
@@ -959,6 +970,7 @@ class EventStore:
             if len(payload) > _MAX_EVENT_BATCH_BYTES:
                 raise ValueError(f"event batch exceeds {_MAX_EVENT_BATCH_BYTES} serialized bytes")
             accepted = False
+            written_stat = None
             try:
                 with open(self.path, "ab") as f:
                     f.write(payload)
@@ -968,11 +980,16 @@ class EventStore:
                         strict_fsync(f.fileno())
                     else:
                         best_effort_fsync(f.fileno())
+                    written_stat = os.fstat(f.fileno())
             except BaseException:
                 if accepted:
                     self._mark_uncertain_append(events[-1].seq)
                 raise
             self._seq = events[-1].seq
+            if written_stat is not None:
+                self._trusted_growth_stat = (
+                    written_stat.st_dev, written_stat.st_ino, written_stat.st_size,
+                    written_stat.st_mtime_ns, written_stat.st_ctime_ns)
             self.read_all()
         return events
 
@@ -987,32 +1004,45 @@ class EventStore:
                 st = self.path.stat() if self.path.exists() else None
                 size = st.st_size if st is not None else 0
                 mtime_ns = st.st_mtime_ns if st is not None else None
+                ctime_ns = st.st_ctime_ns if st is not None else None
                 identity = (st.st_dev, st.st_ino) if st is not None else None
             except OSError:
                 size = 0
                 mtime_ns = None
+                ctime_ns = None
                 identity = None
-            anchored_bytes = self._cache_bytes
+            current_stat = (
+                identity[0], identity[1], size, mtime_ns, ctime_ns) if identity is not None else None
             replaced = (self._cache_identity is not None and identity != self._cache_identity)
             same_size_rewrite = (size == self._cache_bytes and self._cache_mtime_ns is not None
-                                 and mtime_ns != self._cache_mtime_ns)
-            # Growth is not continuity. A prefix rewritten AND then extended arrives here bigger, with
-            # the same inode — every check above passes — and the top-up would land a fresh tail on
-            # stale Events. So whenever the file changed at all, re-verify the bounded anchor over the
-            # prefix we already parsed. Gating on "changed" is what keeps the SSE hot path free: an
-            # unchanged file costs one stat and reads nothing.
-            touched = (self._cache_mtime_ns is not None and mtime_ns != self._cache_mtime_ns)
-            rewritten = False
-            if touched and self._cache_bytes and not (replaced or size < self._cache_bytes):
-                rewritten = _prefix_anchor(self.path, self._cache_bytes) != self._cache_anchor
-            cache_invalidated = (size < self._cache_bytes or replaced or same_size_rewrite
-                                 or rewritten)
+                                 and (mtime_ns != self._cache_mtime_ns
+                                      or ctime_ns != self._cache_ctime_ns))
+            prefix_rewritten = False
+            trusted_growth = (
+                size > self._cache_bytes
+                and current_stat is not None
+                and current_stat == self._trusted_growth_stat
+            )
+            if size > self._cache_bytes and self._cache_bytes > 0 and not trusted_growth and not replaced:
+                try:
+                    with open(self.path, "rb") as f:
+                        prefix = f.read(self._cache_bytes)
+                    prefix_rewritten = (
+                        len(prefix) != self._cache_bytes
+                        or hashlib.sha256(prefix).digest() != self._cache_hasher.digest()
+                    )
+                except OSError:
+                    prefix_rewritten = True
+            self._trusted_growth_stat = None
+            cache_invalidated = (
+                size < self._cache_bytes or replaced or same_size_rewrite or prefix_rewritten)
             if cache_invalidated:
                 # File shrank, was replaced, or was rewritten in place without changing length. The
                 # last case matters on network/FUSE mounts: returning the old cached Events would split
                 # the process from disk truth and could hide a newly-corrupt complete record.
                 self._cache = []
                 self._cache_bytes = 0
+                self._cache_hasher = hashlib.sha256()
                 self._divergence = None
             if size > self._cache_bytes:
                 try:
@@ -1042,6 +1072,7 @@ class EventStore:
                 else:
                     ok_bytes = consumed   # all records valid — trailing blanks count too
                 self._cache.extend(evs)
+                self._cache_hasher.update(new[:ok_bytes])
                 self._cache_bytes += ok_bytes
                 remainder = new[ok_bytes:]
                 if b"\n" in remainder:
@@ -1053,12 +1084,8 @@ class EventStore:
                         "dropped_lines": max(0, remainder.count(b"\n") - 1),
                     }
             self._cache_mtime_ns = mtime_ns
+            self._cache_ctime_ns = ctime_ns
             self._cache_identity = identity
-            if self._cache_bytes != anchored_bytes or self._cache_anchor is None:
-                # Re-fingerprint only when the consumed prefix actually moved. Refreshing it on every
-                # call would re-read the log's head and tail on each SSE tick — exactly the O(new
-                # bytes) property this cache exists to preserve.
-                self._cache_anchor = _prefix_anchor(self.path, self._cache_bytes)
             if cache_invalidated and hasattr(self, "_seq"):
                 # `_seq` is part of the compare-and-set truth, not merely a next-id optimization.
                 # Keeping the pre-replacement high-water mark would let a caller holding that OLD

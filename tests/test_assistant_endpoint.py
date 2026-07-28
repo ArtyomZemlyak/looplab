@@ -173,6 +173,29 @@ def test_shared_route_sanitizes_legacy_provider_failure():
         assert leak not in rendered, leak
 
 
+def test_assistant_share_uses_strict_boolean_and_header_capability(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "share me"}).json()["id"]
+
+    coerced = client.post(
+        f"/api/assistant/sessions/{sid}/share", json={"live": "false"})
+    assert coerced.status_code == 400
+
+    shared = client.post(
+        f"/api/assistant/sessions/{sid}/share", json={"live": False})
+    assert shared.status_code == 200
+    token = shared.json()["url"].rsplit("/", 1)[-1]
+    assert token and token not in "/api/assistant/shared"
+
+    assert client.get("/api/assistant/shared").status_code == 404
+    response = client.get("/api/assistant/shared", headers={"X-LoopLab-Share": token})
+    assert response.status_code == 200
+    assert response.json()["meta"]["title"] == "share me"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert "X-LoopLab-Share" in response.headers["vary"]
+
+
 def test_run_turn_write_with_approval(tmp_path):
     target = tmp_path / "new.txt"
     client = _FakeChatClient([_call("write_file", {"path": str(target), "content": "hi"}), _final("done")])

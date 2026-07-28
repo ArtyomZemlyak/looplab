@@ -25,3 +25,23 @@ def test_sig_detects_a_same_size_subsecond_rewrite(tmp_path):
     os.utime(path, ns=(late, late))                        # a same-size rewrite within one second
     sig2 = RunStateCache.sig(rd)
     assert sig1 != sig2, "fingerprint must be sub-second aware (nanosecond mtime), not int(st_mtime)"
+
+
+def test_corrupt_complete_tail_is_marked_partial_not_silently_complete(tmp_path):
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / "runX"
+    rd.mkdir()
+    path = rd / "events.jsonl"
+    EventStore(path).append("run_started", {
+        "run_id": "runX", "task_id": "task", "goal": "goal", "direction": "max",
+    })
+    cache = RunStateCache(tmp_path)
+    assert cache.state("runX") is not None
+
+    with path.open("ab") as stream:
+        stream.write(b"{complete corrupt record}\n")
+
+    assert cache.state("runX") is not None
+    assert cache.partial("runX") is not None
+    assert "PARTIAL SOURCE" in cache.source_note("runX")

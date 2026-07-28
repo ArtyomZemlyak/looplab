@@ -132,8 +132,8 @@ test('historical Inspector and Report detail reads carry the exact run generatio
     source('RunView.jsx'), source('Inspector.jsx'), source('Report.jsx'),
   ])
   assert.match(runView, /expectedGeneration=\{routeState\.generation\}/g)
-  assert.match(inspector, /expected_generation=\$\{encodeURIComponent\(expectedGeneration \|\| ''\)\}/)
-  assert.match(report, /expected_generation=\$\{encodeURIComponent\(expectedGeneration \|\| ''\)\}/)
+  assert.match(inspector, /query\.push\(`expected_generation=\$\{expectedGeneration\}`\)/)
+  assert.match(report, /params\.set\('expected_generation', expectedGeneration\)/)
 })
 
 test('minted review links carry only scope-safe canonical context after the bearer', async () => {

@@ -31,6 +31,7 @@ export const advisoryArrayLength = value => Array.isArray(value) ? value.length 
 export function normalizeReportNodeDetail(value, { nodeId, historySeq = null,
   expectedGeneration = null } = {}) {
   if (!isAdvisoryRecord(value) || value.id !== nodeId || typeof value.code !== 'string') return null
+  if (expectedGeneration && value.run_generation !== expectedGeneration) return null
   if (historySeq != null && (value.historical_seq !== historySeq
       || value.historical_generation !== expectedGeneration)) return null
   return { code: value.code }

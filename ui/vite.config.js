@@ -23,7 +23,8 @@ export default defineConfig({
       safari10: false,
       compress: {
         passes: 4, pure_getters: true, keep_fargs: false,
-        unsafe: true, unsafe_arrows: true,
+        hoist_props: true, unsafe: true, unsafe_arrows: true, unsafe_methods: true,
+        unsafe_comps: true, unsafe_proto: true, unsafe_regexp: true,
         builtins_ecma: 2022, booleans_as_integers: true,
       },
       mangle: true,
@@ -81,6 +82,14 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'RunList',
+              // Portfolio state is used by the list and its on-demand comparison child. The child is
+              // reachable only from the list, so keeping the small shared model with that parent
+              // removes a request without changing either route's reachable feature set.
+              test: /[/\\]src[/\\](RunList\.jsx|portfolioModel\.js)$/,
+              includeDependenciesRecursively: false,
+            },
+            {
               name: 'collaboration-support',
               // # CODEX AGENT: Both collaboration entrances use the same bounded comment reader.
               // One interaction chunk lets them share vocabulary without making it route-eager.
@@ -121,8 +130,10 @@ export default defineConfig({
             {
               name: 'ui-primitives',
               // App-shell controls and their shared accessibility/icon implementation are always
-              // co-loaded; the raw sprite is kept in the same request instead of a tiny side chunk.
-              test: /[/\\]src[/\\](?:EnergyToggle|PanelShell|ThemeSwitcher|accessibility|fx|icons|runMapModel|useDialogFocus)\.(?:js|jsx)$|[/\\]src[/\\]looplab-icons-v1\.svg/,
+              // co-loaded. React's small shared runtimes are on that same universal boundary; one
+              // stream removes a repeated import and lets both halves share a gzip dictionary.
+              // The raw sprite stays there too instead of becoming another tiny request.
+              test: /[/\\]node_modules[/\\](?:react|react-dom|scheduler)[/\\]|[/\\]src[/\\](?:EnergyToggle|PanelShell|ThemeSwitcher|accessibility|fx|icons|runMapModel|useDialogFocus)\.(?:js|jsx)$|[/\\]src[/\\]looplab-icons-v1\.svg/,
               includeDependenciesRecursively: false,
             },
           ],

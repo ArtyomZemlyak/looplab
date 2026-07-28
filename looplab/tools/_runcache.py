@@ -44,7 +44,7 @@ class RunStateCache:
             # AllRunsTools, so a stale hit lets an agent keep reasoning from an obsolete cross-run evidence
             # prefix. `st_mtime_ns` catches any in-place rewrite; `st_ino`/`st_dev` catch a same-size,
             # mtime-restored REPLACEMENT (rm+recreate, or a sync tool that preserves mtime).
-            return (s.st_size, s.st_mtime_ns, s.st_ino, s.st_dev)
+            return (s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_ino, s.st_dev)
         except OSError:
             return (0, 0)
 

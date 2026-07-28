@@ -520,13 +520,19 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
         try:
             handle = open(p, "rb")
         except FileNotFoundError:
-            if key in _CACHE:
+            try:
+                p.stat()
+            except FileNotFoundError:
+                if key not in _CACHE:
+                    return None  # no spans.jsonl (tracing off / pre-tracing run) — caller degrades
                 # This run has been OBSERVED to have spans. A source that has since disappeared is an
                 # availability failure, not "the run produced no trace" — publishing empty would turn
                 # a vanished/renamed file into false evidence. Let it reach the projection boundary,
                 # which reports `unavailable`. (Every other OSError propagates unconditionally.)
                 raise
-            return None  # no spans.jsonl (tracing off / pre-tracing run) — caller degrades
+            # `open()` reported ENOENT while a following stat still sees the path. This is an
+            # availability race/failure, not evidence that the run produced no trace.
+            raise
         with handle:
             return _index_from_handle(p, key, handle)
 

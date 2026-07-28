@@ -1,5 +1,4 @@
-import { get } from './api.js'
-import { deadlineRequest } from './requestDeadline.js'
+import { deadlineGet } from './api.js'
 
 export const SETTINGS_SCHEMA_VERSION = 2
 const SETTINGS_SCHEMA_TIMEOUT_MS = 15_000
@@ -116,9 +115,8 @@ export function createSettingsSchemaLoader(readSchema) {
 }
 
 const schemaLoader = createSettingsSchemaLoader(({ cache }) => {
-  const timed = deadlineRequest(signal => get(`/api/settings/schema/${SETTINGS_SCHEMA_VERSION}`,
-    { signal, cache }),
-    SETTINGS_SCHEMA_TIMEOUT_MS)
+  const timed = deadlineGet(`/api/settings/schema/${SETTINGS_SCHEMA_VERSION}`,
+    SETTINGS_SCHEMA_TIMEOUT_MS, { cache })
   return timed.promise
 })
 

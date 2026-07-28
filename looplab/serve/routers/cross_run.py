@@ -415,6 +415,22 @@ def build_router(srv) -> APIRouter:
             }, headers={"Cache-Control": "no-store"})
         return target, portfolio_id
 
+    def _assert_portfolio_current(memory_dir: str, expected_portfolio_id: str) -> None:
+        """Reject a projection assembled while the configured directory was replaced."""
+        try:
+            _target, current, _initialized = _resolved_portfolio_identity(memory_dir)
+        except (OSError, RuntimeError, TypeError, ValueError, UnicodeError) as exc:
+            raise HTTPException(503, detail={
+                "code": "cross_run_portfolio_unavailable",
+                "message": "the cross-run portfolio changed while it was being read",
+            }, headers={"Cache-Control": "no-store"}) from exc
+        if not hmac.compare_digest(current, expected_portfolio_id):
+            raise HTTPException(409, detail={
+                "code": "portfolio_identity_changed",
+                "current_portfolio_id": current,
+                "message": "the cross-run portfolio was replaced while this projection was read",
+            }, headers={"Cache-Control": "no-store"})
+
     def _actor() -> str:
         return "deployment-owner" if getattr(srv, "owner_auth_enabled", False) else "local-operator"
 
@@ -539,6 +555,7 @@ def build_router(srv) -> APIRouter:
             source_names=(
                 "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
         ))
+        _assert_portfolio_current(memory_dir, portfolio_id)
         return sanitize_cross_run_projection(
             payload, max_chars=128_000_000, max_items=256,
             max_total_items=500_000)
@@ -576,6 +593,7 @@ def build_router(srv) -> APIRouter:
                 rows, lambda row: row.get("epistemic") == "mixed")
         total = len(rows)
         page = [_public_cross_run_row(row) for row in rows[offset:offset + limit]]
+        _assert_portfolio_current(memory_dir, portfolio_id)
         return {
             "claims": page,
             "n": total,
@@ -729,14 +747,18 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/cross-run/curation-log", response_model=CurationLogResponse)
     def curation_log(limit: int = Query(20, ge=1, le=200)):
         memory_dir, portfolio_id = _portfolio()
-        return _read_governance(lambda: _recent_log(
+        payload = _read_governance(lambda: _recent_log(
             "concept_curation_log.jsonl", limit, memory_dir, portfolio_id))
+        _assert_portfolio_current(memory_dir, portfolio_id)
+        return payload
 
     @router.get("/api/cross-run/claim-curation-log", response_model=CurationLogResponse)
     def claim_curation_log(limit: int = Query(20, ge=1, le=200)):
         memory_dir, portfolio_id = _portfolio()
-        return _read_governance(lambda: _recent_log(
+        payload = _read_governance(lambda: _recent_log(
             "claim_curation_log.jsonl", limit, memory_dir, portfolio_id))
+        _assert_portfolio_current(memory_dir, portfolio_id)
+        return payload
 
     def _steward_client():
         try:

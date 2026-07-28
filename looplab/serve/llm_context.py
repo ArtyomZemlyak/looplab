@@ -25,6 +25,7 @@ def global_settings(store: SettingsStore) -> "Settings":
     authoring paths, run-less Genesis) also need the same resolved values. Keeping this separate from the
     per-run snapshot overlay prevents those surfaces from silently falling back to environment-only state.
     """
+    store.refresh_env_secrets()
     overrides = {key: value for key, value in store.load_ui_settings().items() if value is not None}
     return Settings(**overrides)
 
@@ -57,6 +58,7 @@ def llm_settings(store: SettingsStore, rd: Optional[Path] = None) -> "Settings":
     different model. Falls back to the UI's saved LLM overrides + env when there's no snapshot (or
     for a run-less call). The api_key is NEVER read from the snapshot (it's masked there) — it
     always comes from the server env."""
+    store.refresh_env_secrets()
     # The agentic tool-loop limits ride along so the UI-side agents (boss/genesis/scope-report)
     # honor the same per-run / global caps as the engine agents — unlimited by default.
     _keys = ("llm_model", "llm_base_url", "llm_temperature",

@@ -51,6 +51,7 @@ def _new_revision() -> str:
 # uses). A NEW SecretStr field is then covered by editing ONE place (_SECRET_FIELDS), not three.
 _secret_prefix = Settings.model_config.get("env_prefix", "LOOPLAB_")
 _SECRET_ENV = {k: f"{_secret_prefix}{k.upper()}" for k in _SECRET_FIELDS}   # UI key -> LOOPLAB_* env
+_SECRET_ENV_LOCK = threading.RLock()
 
 
 class SettingsStore:
@@ -64,6 +65,11 @@ class SettingsStore:
         # transaction. Serialize that complete transaction within this server process too.
         self._ui_settings_lock = threading.Lock()
         self._secrets_lock = threading.Lock()
+        # ``os.environ`` is process-local while the secret file is shared by every server worker.
+        # Remember only values this store injected so a later revision can rotate/revoke those
+        # inherited credentials without clobbering an operator-owned env/.env override.
+        self._managed_secret_env: dict[str, Optional[str]] = {}
+        self._secret_file_sig: Optional[tuple[int, int, int, int]] = None
 
     @contextmanager
     def ui_settings_transaction(self):
@@ -127,6 +133,74 @@ class SettingsStore:
         except (OSError, json.JSONDecodeError):
             return {}
 
+    def _secret_signature(self) -> Optional[tuple[int, int, int, int]]:
+        try:
+            st = self._secrets_path.stat()
+            return st.st_ino, st.st_ctime_ns, st.st_size, st.st_mtime_ns
+        except OSError:
+            return None
+
+    @staticmethod
+    def _dotenv_keys() -> set[str]:
+        try:
+            from dotenv import dotenv_values
+            # Pydantic settings matches env names case-insensitively. An explicit empty value still
+            # owns the key and must keep the persisted store from being promoted above ``.env``.
+            return {str(k).upper() for k in dotenv_values(".env")}
+        except Exception:  # noqa: BLE001 — no/unreadable .env means there is no local override
+            return set()
+
+    def _apply_secret_values(self, values: dict, *, force: bool = False) -> None:
+        """Apply one complete stored-secret snapshot to this process.
+
+        ``force`` is used for a PUT handled by this worker: that explicit live update retains the
+        historical behavior of taking effect immediately. Revision refreshes are narrower and only
+        replace values this ``SettingsStore`` previously injected; exported env and ``.env`` remain
+        operator-owned.
+        """
+        dotenv_keys = self._dotenv_keys()
+        with _SECRET_ENV_LOCK:
+            for key, env_name in _SECRET_ENV.items():
+                value = values.get(key)
+                previous = self._managed_secret_env.get(env_name)
+                managed = env_name in self._managed_secret_env
+                if not force:
+                    if env_name.upper() in dotenv_keys:
+                        if managed and os.environ.get(env_name) == previous:
+                            os.environ.pop(env_name, None)
+                        self._managed_secret_env.pop(env_name, None)
+                        continue
+                    if managed and os.environ.get(env_name) != previous:
+                        # Something outside this store changed the live environment. Relinquish the
+                        # key instead of silently overwriting that explicit operator action.
+                        self._managed_secret_env.pop(env_name, None)
+                        continue
+                    if not managed and env_name in os.environ:
+                        continue
+                if value:
+                    os.environ[env_name] = value
+                    self._managed_secret_env[env_name] = value
+                else:
+                    os.environ.pop(env_name, None)
+                    # Manage the absence too, so a credential added by a sibling worker is picked up.
+                    self._managed_secret_env[env_name] = None
+
+    def refresh_env_secrets(self) -> None:
+        """Refresh values this worker inherited from the shared owner-only secret store.
+
+        Atomic replacement makes a file signature a cheap cross-process invalidation token. Every
+        Settings resolution and engine-spawn path calls this method, so a sibling worker cannot keep
+        launching paid work with a credential that another worker rotated or revoked.
+        """
+        signature = self._secret_signature()
+        if signature == self._secret_file_sig:
+            return
+        values = self.load_secrets()
+        self._apply_secret_values(values)
+        # Record after the read/apply. If a concurrent rename moved the file during this window, its
+        # different signature is observed on the next boundary instead of being mistaken as current.
+        self._secret_file_sig = signature
+
     def store_secret(self, key: str, value: str, *, expected_revision: Optional[str] = None) -> str:
         """CAS-write one credential and return its new opaque revision.
 
@@ -164,14 +238,8 @@ class SettingsStore:
                 os.chmod(self._secrets_path, 0o600)
             except OSError:
                 pass
-            env_name = _SECRET_ENV[key]           # live-apply: in-process LLM + future spawns see it now
-            if value:
-                # CODEX AGENT: secret rotation updates only this worker's environment. Sibling server
-                # processes retain the revoked credential and can launch paid work with it; make secret
-                # lookup revision-aware per request/spawn or broadcast a cross-process invalidation.
-                os.environ[env_name] = value
-            else:
-                os.environ.pop(env_name, None)
+            self._apply_secret_values(d, force=True)
+            self._secret_file_sig = self._secret_signature()
             return revision
 
     def prime_env(self) -> None:
@@ -181,21 +249,19 @@ class SettingsStore:
         # os.environ and then WIN over `.env` (pydantic ranks os.environ above the .env file) — silently
         # overriding a key the operator just edited in `.env`. So we skip any key the local `.env`
         # already provides, keeping the documented ".env wins over the saved store" contract true.
-        dotenv_keys: set = set()
-        try:
-            from dotenv import dotenv_values
-            # UPPERCASE every key present (pydantic-settings matches env vars case-INsensitively, so a
-            # lower/mixed-case .env key still feeds Settings) and keep keys with an EMPTY value too (an
-            # explicit `KEY=` is the operator deliberately clearing it — that must still win over the
-            # stored secret). Both were gaps that let the secret store override `.env`.
-            dotenv_keys = {str(k).upper() for k in dotenv_values(".env")}
-        except Exception:  # noqa: BLE001 — no/unreadable .env just means nothing to defer to
-            dotenv_keys = set()
-        for _k, _v in self.load_secrets().items():
-            env_name = _SECRET_ENV[_k]
-            if env_name.upper() in dotenv_keys:    # .env provides it → let .env win, don't prime
-                continue
-            os.environ.setdefault(env_name, _v)
+        dotenv_keys = self._dotenv_keys()
+        values = self.load_secrets()
+        with _SECRET_ENV_LOCK:
+            for key, env_name in _SECRET_ENV.items():
+                if env_name.upper() in dotenv_keys or env_name in os.environ:
+                    continue
+                value = values.get(key)
+                if value:
+                    os.environ[env_name] = value
+                    self._managed_secret_env[env_name] = value
+                else:
+                    self._managed_secret_env[env_name] = None
+            self._secret_file_sig = self._secret_signature()
 
     def resolved_settings(self, s: Optional["Settings"] = None) -> dict:
         """Engine defaults (Settings(): defaults+env) overlaid with the saved UI overrides — i.e.
@@ -205,6 +271,7 @@ class SettingsStore:
         Built by RE-RESOLVING `Settings(**overrides)` (not a shallow overlay) so a `profile` override
         is EXPANDED into its bundle here too — the UI then shows the real values `thorough` turns on,
         matching what the spawned run computes. Falls back to the shallow overlay if that ever raises."""
+        self.refresh_env_secrets()
         overrides = self.load_ui_settings()
         try:
             return Settings(**overrides).masked_snapshot()
@@ -217,6 +284,7 @@ class SettingsStore:
 
     def settings_env(self, settings: dict) -> dict:
         """Render UI settings into LOOPLAB_* env strings pydantic-settings can parse back."""
+        self.refresh_env_secrets()
         env = {}
         for k, v in settings.items():
             if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS or v is None:

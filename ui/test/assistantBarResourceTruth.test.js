@@ -8,7 +8,7 @@ const section = (source, start, end) => source.slice(source.indexOf(start), sour
 test('session selection commits only a current, bounded read and preserves the prior transcript on failure', async () => {
   const source = await assistantSource()
   const open = section(source, 'const openSession =', 'openSessionRef.current = openSession')
-  const read = open.indexOf('await boundedRead(assistantGet(id))')
+  const read = open.indexOf('await boundedRequest(signal => assistantGet(id, { signal }))')
   const commit = open.indexOf('sidRef.current = id; setSid(id); setMsgs([])')
 
   assert.ok(read >= 0 && commit > read, 'the target must be read before replacing the visible session')
@@ -23,7 +23,8 @@ test('session creation and send are single-flight while a failed create preserve
   const send = section(source, 'const send =', 'useEffect(() => {\n    const onNewRun')
   const normalSend = send.slice(send.indexOf('const refs ='))
 
-  assert.ok(run.indexOf('turnCaptureRef.current = true') < run.indexOf('await assistantCreate('))
+  assert.ok(run.indexOf('turnCaptureRef.current = true')
+    < run.indexOf('await boundedRequest(signal => assistantCreate('))
   assert.match(run, /turnCaptureRef\.current \|\| runningRef\.current/)
   assert.match(run, /sessionSeq !== openSessionSeqRef\.current/)
   assert.match(run, /sessionSeq === openSessionSeqRef\.current\) flash\('Could not start the chat — your draft is preserved'\)/)

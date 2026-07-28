@@ -194,9 +194,11 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
     let alive = true
     const controller = typeof AbortController === 'undefined' ? null : new AbortController()
     setBestCodeResource({ status: 'loading', data: null, error: null })
-    const at = readOnly && historySeq != null
-      ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
-      : ''
+    const params = new URLSearchParams()
+    if (readOnly && historySeq != null) params.set('seq', String(historySeq))
+    if (expectedGeneration) params.set('expected_generation', expectedGeneration)
+    const query = params.toString()
+    const at = query ? `?${query}` : ''
     get(runNodeApiPath(runId, best.id, at), controller ? { signal: controller.signal } : {})
       .then(data => {
         if (!alive) return

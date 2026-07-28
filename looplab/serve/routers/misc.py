@@ -426,6 +426,7 @@ def build_router(srv) -> APIRouter:
         # prevent a concurrent rename (or secret env mutation) between payload and token reads.
         # This is the only two-resource lock site; its fixed UI-then-secret order avoids lock cycles.
         with store.ui_settings_transaction(), store.secret_transaction():
+            store.refresh_env_secrets()
             s = Settings()                    # build once; Settings() also reads .env from disk
             defaults = s.model_dump()
             defaults.pop("llm_api_key", None)

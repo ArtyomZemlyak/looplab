@@ -99,11 +99,12 @@ test('stale async resources are cancelled and run ids are encoded at every trans
   ])
   assert.match(deadline, /const controller = new AbortController\(\)/)
   assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/)
-  assert.match(shared, /deadlineRequest\([\s\S]*SHARED_REQUEST_TIMEOUT_MS/)
+  assert.match(shared, /deadlineGet\([\s\S]*SHARED_REQUEST_TIMEOUT_MS/)
   assert.match(shared, /requestRef\.current !== timed/)
   assert.match(shared, /requestRef\.current\?\.controller\.abort\(\)/)
   assert.doesNotMatch(shared, /sharedLoadError = error =>[\s\S]{0,400}error\?*\.message/)
-  assert.match(shared, /shared\/\$\{encodeURIComponent\(sid\)\}/)
+  assert.match(shared, /'\/api\/assistant\/shared'/)
+  assert.match(shared, /'X-LoopLab-Share': String\(sid \|\| ''\)/)
   assert.match(hooks, /fetchEventStream\(runApiPath\(runId, '\/events'\), \{/)
   assert.match(hooks, /const controller = new AbortController\(\)/)
   assert.match(hooks, /lastEventId: lastStreamEventId/)
@@ -114,6 +115,21 @@ test('stale async resources are cancelled and run ids are encoded at every trans
       `${name} must not interpolate a raw run identity into a URL`)
   }
   for (const body of [api, dock, inspector, panels]) assert.match(body, /run(?:Node)?ApiPath\(/)
+})
+
+test('early run creation and uncertain share mutations cannot replay user intent', async () => {
+  const [workspace, assistant, collaboration] = await Promise.all([
+    source('OwnerWorkspace.jsx'), source('AssistantBar.jsx'), source('CollabPanel.jsx'),
+  ])
+  assert.match(workspace, /addEventListener\?\.\('ll:new-run'[\s\S]*?queuedNewRun = event/)
+  assert.match(workspace, /window\.dispatchEvent\(queuedNewRun\)/)
+  assert.match(assistant, /const onNewRun = \(event\) => \{\s*event\.preventDefault\(\)/)
+  assert.match(assistant, /onReady\?\.\(\)/)
+  assert.match(assistant, /shareUnknownSid[\s\S]*?Share uncertain · revoke before retrying/)
+  assert.match(collaboration, /const \[unknownCreate, setUnknownCreate\] = useState\(false\)/)
+  assert.match(collaboration, /if \(busy \|\| unknownCreate\) return/)
+  assert.match(collaboration, /reconcileUnknownCreate[\s\S]*?refreshed\.some\(activeLink\)/)
+  assert.match(collaboration, /disabled=\{busy \|\| unknownCreate\}/)
 })
 
 test('dynamic API paths preserve fragment syntax and a literal encoded slash as one identity segment', async () => {

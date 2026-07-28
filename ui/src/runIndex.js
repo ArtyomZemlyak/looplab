@@ -222,6 +222,24 @@ export function scopeRuns(runs = [], project = ALL_RUNS, projects = []) {
   return runs.filter(run => ids.has(run.project_id))
 }
 
+// One O(runs × project-depth) pass replaces rebuilding/filtering the full run array once for every
+// project row on each dashboard poll. Unknown project ids intentionally match scopeRuns(): they are
+// neither a known subtree nor "unassigned" while the run still carries an assignment.
+export function projectRunCounts(runs = [], projects = []) {
+  const counts = new Map([[ALL_RUNS, runs.length]])
+  const parents = new Map(projects.map(project => [project.id, project.parent_id]))
+  for (const { project_id } of runs) {
+    let id = project_id || UNASSIGNED_RUNS
+    const seen = new Set()
+    while (!seen.has(id) && (id === UNASSIGNED_RUNS || parents.has(id))) {
+      seen.add(id)
+      counts.set(id, (counts.get(id) || 0) + 1)
+      id = parents.get(id)
+    }
+  }
+  return counts
+}
+
 export function filterRuns(runs = [], {
   project = ALL_RUNS, projects = [], query = '', task = ALL_RUNS,
   supertask = ALL_RUNS, status = 'all',

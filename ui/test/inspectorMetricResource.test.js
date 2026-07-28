@@ -8,7 +8,7 @@ import { JSDOM } from 'jsdom'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
-test('metric curves distinguish loading, empty, failed, stale, and superseded reads', async () => {
+test('metric curves distinguish loading, empty, failed, stale, and serialize refresh reads', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: 'https://looplab.test/', pretendToBeVisual: true,
   })
@@ -71,11 +71,13 @@ test('metric curves distinguish loading, empty, failed, stale, and superseded re
     assert.match(document.body.textContent, /train.*1 metric/)
 
     await poll(); await poll()
-    await reply(requests[4], {
-      node_id: 1, attempt: 0, metrics: { 'eval/score': [{ step: 2, value: 0.8 }] },
-    })
+    assert.equal(requests.length, 4, 'overlapping poll ticks queue instead of starting a second read')
     await reply(requests[3], {
       node_id: 1, attempt: 0, metrics: { 'old/loss': [{ step: 1, value: 9 }] },
+    })
+    assert.equal(requests.length, 5, 'the queued refresh starts after the active read settles')
+    await reply(requests[4], {
+      node_id: 1, attempt: 0, metrics: { 'eval/score': [{ step: 2, value: 0.8 }] },
     })
     assert.match(document.body.textContent, /eval.*1 metric/)
     assert.doesNotMatch(document.body.textContent, /old.*1 metric/)

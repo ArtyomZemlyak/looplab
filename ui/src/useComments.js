@@ -4,6 +4,7 @@ import { runComments } from './api.js'
 import {
   commentMatchesSubject, mergeCommentPages, normalizeCommentsPage,
 } from './commentsModel.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 const initialState = () => ({
   pages: [],
@@ -17,6 +18,7 @@ const initialState = () => ({
   loadingMore: false,
   loadMoreError: '',
 })
+const COMMENTS_TIMEOUT_MS = 12_000
 
 export function useComments({
   runId,
@@ -56,7 +58,6 @@ export function useComments({
       return undefined
     }
     const requestId = ++requestRef.current
-    const controller = new AbortController()
     setResource(previous => scopeChanged ? {
       ...initialState(), loading: true,
     } : {
@@ -65,9 +66,12 @@ export function useComments({
       refreshing: previous.initialized,
       error: '',
     })
-    runComments(runId, { nodeId, nodeGeneration, includeResolved, limit })
+    const timed = deadlineRequest(signal => runComments(runId, {
+      nodeId, nodeGeneration, includeResolved, limit, signal,
+    }), COMMENTS_TIMEOUT_MS)
+    timed.promise
       .then(payload => {
-        if (controller.signal.aborted || requestRef.current !== requestId) return
+        if (timed.controller.signal.aborted || requestRef.current !== requestId) return
         const page = normalizeCommentsPage(payload, expectedGeneration)
         if (!page || page.comments.some(comment => !commentMatchesSubject(
           comment, nodeId, nodeGeneration))) {
@@ -80,7 +84,7 @@ export function useComments({
         })
       })
       .catch(error => {
-        if (controller.signal.aborted || requestRef.current !== requestId) return
+        if (timed.controller.signal.aborted || requestRef.current !== requestId) return
         setResource(previous => ({
           ...previous,
           initialized: true,
@@ -90,7 +94,7 @@ export function useComments({
           error: error?.message || 'Comments could not be loaded.',
         }))
       })
-    return () => controller.abort()
+    return () => timed.controller.abort()
   }, [scopeKey, runId, nodeId, nodeGeneration, includeResolved, limit, enabled, expectedGeneration,
     subjectValid, resourceEnabled, refreshToken, refreshKey])
 
@@ -101,9 +105,10 @@ export function useComments({
     loadingMoreRef.current = true
     setResource(previous => ({ ...previous, loadingMore: true, loadMoreError: '' }))
     try {
-      const page = normalizeCommentsPage(await runComments(runId, {
-        nodeId, nodeGeneration, includeResolved, limit, cursor,
-      }), expectedGeneration)
+      const timed = deadlineRequest(signal => runComments(runId, {
+        nodeId, nodeGeneration, includeResolved, limit, cursor, signal,
+      }), COMMENTS_TIMEOUT_MS)
+      const page = normalizeCommentsPage(await timed.promise, expectedGeneration)
       if (!page || page.comments.some(comment => !commentMatchesSubject(
         comment, nodeId, nodeGeneration))) throw new Error('invalid comments page')
       if (scopeRef.current !== requestedScope) return

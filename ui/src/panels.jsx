@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL, saveRunConfig, operatorMeta,
-  commandFeedback, runApiPath, runNodeApiPath,
+import { deadlineGet, get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
+  saveRunConfig, operatorMeta, commandFeedback, runApiPath, runNodeApiPath,
 } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
@@ -577,9 +577,7 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
   const allowConfigNavigationRef = useRef(false)
   useEffect(() => {
     const generation = ++loadGenerationRef.current
-    const configRequest = deadlineRequest(
-      signal => get(runApiPath(runId, '/config'), { signal }), PANEL_REQUEST_TIMEOUT_MS,
-    )
+    const configRequest = deadlineGet(runApiPath(runId, '/config'), PANEL_REQUEST_TIMEOUT_MS)
     // A reused panel must never display or reconcile the previous run while the next config loads.
     mutationRef.current = null
     setBusy(false); setCfg(null); setSettingsSchema(null); setForm(null); setSaved(null); setLoadError('')
@@ -702,9 +700,8 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
     if (!recovery) return
     const mutation = beginMutation('reconciling')
     if (!mutation) return
-    const request = deadlineRequest(
-      signal => get(runApiPath(recovery.runId, '/config'), { signal }), PANEL_REQUEST_TIMEOUT_MS,
-    )
+    const request = deadlineGet(
+      runApiPath(recovery.runId, '/config'), PANEL_REQUEST_TIMEOUT_MS)
     try {
       const response = await request.promise
       if (mutation.generation !== loadGenerationRef.current || recovery.runId !== runId) return

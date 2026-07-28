@@ -2,7 +2,7 @@ import React, { lazy, useEffect, useState } from 'react'
 import OwnerAuth from './OwnerAuth.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
 import OwnerWorkspace from './OwnerWorkspace.jsx'
-import { reviewManifest, reviewTokenFromLocation } from './api.js'
+import { deadlineGet, reviewTokenFromLocation } from './api.js'
 import { initTheme } from './ThemeSwitcher.jsx'
 import { initFx } from './fx.js'
 import { initDensity } from './DensityToggle.jsx'
@@ -36,25 +36,28 @@ function parseHash() {
 }
 
 function ReviewRoute({ token }) {
-  const [resource, setResource] = useState({ status: 'loading', data: null, error: '' })
+  const [resource, setResource] = useState({ status: 'loading', error: '' })
   const [retry, setRetry] = useState(0)
   useEffect(() => {
     let active = true
     if (!token) {
-      setResource({ status: 'gone', data: null,
-        error: 'This review link is incomplete or invalid. Ask the owner for a new link.' })
+      setResource({ status: 'gone',
+        error: 'Review link incomplete or invalid. Ask the owner for a new link.' })
       return () => { active = false }
     }
-    setResource({ status: 'loading', data: null, error: '' })
-    reviewManifest()
+    setResource({ status: 'loading', error: '' })
+    const timed = deadlineGet('/api/review', 12_000)
+    timed.promise
       .then(data => { if (active) setResource({ status: 'ready', data, error: '' }) })
-      .catch(error => { if (active) setResource({
-        status: error?.status === 401 || error?.status === 410 ? 'gone' : 'error', data: null,
-        error: error?.status === 401 || error?.status === 410
-          ? 'This review link is invalid, expired, or was revoked. Ask the owner for a new link.'
-          : (error?.message || 'This review link is unavailable.'),
-      }) })
-    return () => { active = false }
+      .catch(error => {
+        if (!active) return
+        const gone = error?.status === 401 || error?.status === 410
+        setResource({ status: gone ? 'gone' : 'error',
+          error: gone
+            ? 'Review link invalid, expired, or revoked. Ask the owner for a new link.'
+            : 'Review link unavailable. Retry.' })
+      })
+    return () => { active = false; timed.controller.abort() }
   }, [token, retry])
   useEffect(() => {
     const frame = requestAnimationFrame(() => {

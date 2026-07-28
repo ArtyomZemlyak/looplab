@@ -19,12 +19,15 @@ test('RunList resources preserve last-good data and fence every settlement', asy
   assert.match(hook, /useEffect\(\(\) => \(\) => \{ version\.current \+= 1 \}, \[\]\)/,
     'unmount must revoke every in-flight owner')
   assert.match(hook, /const owner = \+\+version\.current/)
+  assert.match(hook, /deadlineRequest\(signal => read\(signal\), LIST_READ_TIMEOUT_MS\)/)
   assert.match(hook, /\.then\(value => \{[\s\S]*version\.current !== owner[\s\S]*setData\(value\); setState\('ready'\)/)
   assert.match(hook, /\.catch\(\(\) => \{[\s\S]*version\.current !== owner[\s\S]*\['ready', 'stale'\]/)
   assert.doesNotMatch(hook.slice(hook.indexOf('.catch')), /setData/,
     'a failed initial load or refresh must not overwrite the last successful payload')
-  assert.match(text, /useResource\(listProjects, \{ projects: \[\], assignments: \{\} \}\)/)
-  assert.match(text, /useResource\(listSupertasks, \{ supertasks: \[\], assignments: \{\} \}\)/)
+  assert.match(text,
+    /useResource\(\s*signal => listProjects\(\{ signal \}\), \{ projects: \[\], assignments: \{\} \}\)/)
+  assert.match(text,
+    /useResource\(\s*signal => listSupertasks\(\{ signal \}\), \{ supertasks: \[\], assignments: \{\} \}\)/)
   assert.doesNotMatch(text, /listSupertasks\(\)\.then\(setSuperdata\)\.catch\(\(\) => \{\}\)/,
     'super-task failures must never be swallowed')
 })
@@ -59,7 +62,7 @@ test('project and super-task empties require a successful current response', asy
 test('run empties and filtered recovery preserve current resource truth', async () => {
   const text = await source()
 
-  assert.match(text, /runsState === 'ready' && runs && !runsOf\(sel\)\.length[\s\S]*No runs here\./,
+  assert.match(text, /runsState === 'ready' && runs && !scoped\.length[\s\S]*No runs here\./,
     'a stale empty snapshot must not be presented as a current empty workspace')
   assert.match(text, /runsState === 'stale' \? 'No runs in the last loaded data match the filters\.'/)
   assert.match(text, /hasActiveFilters && <button[^>]*onClick=\{clearFilters\}>Clear filters<\/button>/,

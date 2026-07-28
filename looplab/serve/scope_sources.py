@@ -464,6 +464,10 @@ def _events_from_line(raw: bytes, *, line_number: int) -> tuple[Event, ...]:
         raise ScopeSourceCorruptError(
             f"event log line {line_number} has unsupported version") from exc
     except Exception as exc:  # noqa: BLE001 - Pydantic exposes several validation failure types
+        if str(exc) == "unsupported event envelope version":
+            raise ScopeSourceCorruptError(
+                f"event log line {line_number} has unsupported version"
+            ) from exc
         raise ScopeSourceCorruptError(
             f"event log has an invalid event at complete line {line_number}"
         ) from exc

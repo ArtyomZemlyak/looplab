@@ -101,8 +101,9 @@ export function validateLaunchDraft(draft) {
         errors[`settings.${field.key}`] = `${field.label} must be an integer${range}`
       }
       if (field.type === 'float' && (typeof value !== 'number' || !Number.isFinite(value)
-          || (field.min != null && value <= field.min))) {
-        errors[`settings.${field.key}`] = `${field.label} must be a number greater than ${field.min}`
+          || (field.min != null && value < field.min))) {
+        errors[`settings.${field.key}`] = `${field.label} must be a number`
+          + (field.min == null ? '' : ` of at least ${field.min}`)
       }
       if (field.type === 'bool' && typeof value !== 'boolean') {
         errors[`settings.${field.key}`] = `${field.label} must be a boolean`

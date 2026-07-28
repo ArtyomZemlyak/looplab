@@ -126,7 +126,8 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     await act(async () => { root.render(React.createElement(SharedAssistant, {
       sid: 'shared/one', onBack() {},
     })); await settle() })
-    assert.match(requests[4].url, /\/api\/assistant\/shared\/shared%2Fone$/)
+    assert.match(requests[4].url, /\/api\/assistant\/shared$/)
+    assert.equal(requests[4].options.headers['X-LoopLab-Share'], 'shared/one')
     assert.ok(requests[4].options.signal instanceof AbortSignal)
     const firstSession = {
       meta: { shared: true, title: 'First shared chat' },

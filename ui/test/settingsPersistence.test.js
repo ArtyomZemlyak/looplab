@@ -114,8 +114,8 @@ test('global Settings commits the settings ACK before the independent secret ACK
 test('per-run Settings bounds reads, protects uncertain writes and rebases an ACK onto newer edits', () => {
   const source = readFileSync(new URL('../src/panels.jsx', import.meta.url), 'utf8')
   assert.match(source, /const generation = \+\+loadGenerationRef\.current/)
-  assert.match(source, /const configRequest = deadlineRequest\(/)
-  assert.match(source, /get\(runApiPath\(runId, '\/config'\), \{ signal \}\)/)
+  assert.match(source, /const configRequest = deadlineGet\(/)
+  assert.match(source, /deadlineGet\(runApiPath\(runId, '\/config'\), PANEL_REQUEST_TIMEOUT_MS\)/)
   assert.match(source, /return \(\) => configRequest\.controller\.abort\(\)/)
   assert.match(source, /const submittedRevision = configMeta\.configRevision/)
   assert.match(source, /saveRunConfig\(submittedRunId, changed, \{[\s\S]*?expectedRevision: submittedRevision/)

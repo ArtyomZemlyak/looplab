@@ -5,6 +5,7 @@
 
 import { assertRunMutationAllowed } from './runMode.js'
 import { splitRouteHash } from './runRouteState.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 const OWNER_TOKEN_KEY = 'll.owner-token'
 let volatileOwnerToken = ''
@@ -1259,7 +1260,10 @@ export async function appendAction(runId, action, options = {}) {
 
 // round-7 "Replay": reset a run IN PLACE — the server archives its event log + spans and re-spawns a
 // fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.
-export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/reset`, {})
+export const resetRun = (rid, expectedGeneration) =>
+  post(`/api/runs/${encodeURIComponent(rid)}/reset`, {
+    expected_generation: expectedGeneration,
+  })
 
 // Clear ONE node's trace: erase its spans from spans.jsonl so a reset+rebuild's fresh bands don't
 // stack on top of the old attempt's. Server refuses (409) while the engine is live (sole writer).
@@ -1468,10 +1472,16 @@ export async function get(path, options = {}) {
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
-export async function post(path, body) {
+export const deadlineGet = (path, timeout = 8000, options) =>
+  deadlineRequest(signal => get(path, { cache: 'no-store', ...options, signal }), timeout)
+export async function post(path, body, { signal } = {}) {
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
-  const r = await fetch(apiUrl(path), { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) })
+  const r = await fetch(apiUrl(path), {
+    method: 'POST', signal,
+    headers: _authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body),
+  })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
@@ -1520,27 +1530,31 @@ export async function verifyOwnerToken(token, { signal } = {}) {
   return data
 }
 export const clearOwnerToken = () => setOwnerToken('')
-export const reviewManifest = () => get('/api/review')
-
 // ---- ClearML-style project API ----
-export const listProjects = () => get('/api/projects')
+export const listProjects = options => get('/api/projects', options)
 export const createProject = (name, parent_id = null) => post('/api/projects', { name, parent_id })
 export const patchProject = (id, body) => send(`/api/projects/${encodeURIComponent(id)}`, 'PATCH', body)
 export const deleteProject = (id) => send(`/api/projects/${encodeURIComponent(id)}`, 'DELETE')
 export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURIComponent(runId)}/project`, { project_id })
 export const renameRun = (runId, label) => send(`/api/runs/${encodeURIComponent(runId)}`, 'PATCH', { label })
 export const deleteRun = (runId) => send(`/api/runs/${encodeURIComponent(runId)}`, 'DELETE')
-export const createRunReview = (runId, { ttl_seconds, include_evidence = false } = {}) =>
-  post(`/api/runs/${encodeURIComponent(runId)}/reviews`, { ttl_seconds, include_evidence })
-export const listRunReviews = (runId) => get(`/api/runs/${encodeURIComponent(runId)}/reviews`)
-export const revokeRunReview = (runId, linkId) =>
-  send(`/api/runs/${encodeURIComponent(runId)}/reviews/${encodeURIComponent(linkId)}`, 'DELETE')
+export const createRunReview = (runId, {
+  ttl_seconds, include_evidence = false,
+} = {}, options) =>
+  post(`/api/runs/${encodeURIComponent(runId)}/reviews`,
+    { ttl_seconds, include_evidence }, options)
+export const listRunReviews = (runId, options) =>
+  get(`/api/runs/${encodeURIComponent(runId)}/reviews`, options)
+export const revokeRunReview = (runId, linkId, options) =>
+  send(`/api/runs/${encodeURIComponent(runId)}/reviews/${encodeURIComponent(linkId)}`,
+    'DELETE', null, options)
 
 // Bounded collaboration projections. In review mode reviewReadPath() translates both owner paths to
 // `/api/review/comments...`; the capability still supplies the run identity and every mutation is
 // rejected before fetch by assertNotReviewMutation().
 export const runComments = (runId, {
   nodeId = null, nodeGeneration = null, includeResolved = true, limit = 100, cursor = null,
+  signal,
 } = {}) => {
   const query = new URLSearchParams()
   if (nodeId != null) query.set('node_id', String(nodeId))
@@ -1549,7 +1563,7 @@ export const runComments = (runId, {
   query.set('limit', String(Math.max(1, Math.min(100, Math.trunc(Number(limit) || 100)))))
   if (cursor != null) query.set('cursor', String(cursor))
   return get(`/api/runs/${encodeURIComponent(runId)}/comments?${query}`,
-    { cache: 'no-store' })
+    { cache: 'no-store', signal })
 }
 export const commentHistory = (runId, commentId, { limit = 100, cursor = null } = {}) => {
   const query = new URLSearchParams()
@@ -1561,7 +1575,7 @@ export const commentHistory = (runId, commentId, { limit = 100, cursor = null } 
 
 // super-tasks: a user-managed, flat grouping of runs by the global task they attack (parallel axis
 // to projects). create / rename / delete the bucket, then assign any run (existing or new) to it.
-export const listSupertasks = () => get('/api/supertasks')
+export const listSupertasks = options => get('/api/supertasks', options)
 export const createSupertask = (name, task_id = null) => post('/api/supertasks', { name, task_id })
 export const renameSupertask = (id, name) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'PATCH', { name })
 export const deleteSupertask = (id) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'DELETE')
@@ -1605,6 +1619,7 @@ const CROSS_RUN_STATE_FIELDS = `portfolio_id n_runs n_concepts n_contested conce
   source_unknown_capsules source_concepts_omitted source_outcomes_omitted source_store_complete
   source_rows_total source_rows_quarantined source_malformed_rows source_invalid_capsule_rows
   source_duplicate_run_rows concept runs run_id task_id task scope task_scope metric direction
+  n_helped n_neutral n_hurt
   claim_uid statement epistemic maturity decision_fresh n_support n_oppose n_unverified
   n_contradicts support oppose unverified contradicts scopes receipt_known read_complete
   research_source_complete lessons research snapshot_digest rows_total rows_retained
@@ -2015,8 +2030,10 @@ export async function genScopeReport(type, id, {
 
 // ---- assistant (general chat agent — the evolution of Genesis) ----
 export const assistantSessions = () => get('/api/assistant/sessions')
-export const assistantCreate = (title = '', mode = 'plan') => post('/api/assistant/sessions', { title, mode })
-export const assistantGet = (sid) => get(`/api/assistant/sessions/${encodeURIComponent(sid)}`)
+export const assistantCreate = (title = '', mode = 'plan', options) =>
+  post('/api/assistant/sessions', { title, mode }, options)
+export const assistantGet = (sid, options) =>
+  get(`/api/assistant/sessions/${encodeURIComponent(sid)}`, options)
 export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE')
 export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
 // Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
@@ -2075,12 +2092,13 @@ export const spanDetail = (runId, spanId) =>
 
 // Linear, de-duplicated conversation view of a node's trace (request once per sub-loop, then each
 // generation's delta interleaved with tool calls) — the readable alternative to the raw span tree.
-export const nodeConversation = (runId, nid) =>
-  get(runNodeApiPath(runId, nid, '/conversation'))
+export const nodeConversation = (runId, nid, options) =>
+  get(runNodeApiPath(runId, nid, '/conversation'), options)
 
 // Stop an in-flight assistant turn server-side (survives a page reload, unlike aborting the local
 // stream). Also used to poll whether a turn is still running (reattach after switch/reload).
-export const assistantCancel = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/cancel`, {})
+export const assistantCancel = (sid, options) =>
+  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/cancel`, {}, options)
 export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
 
 export const assistantCommands = () => get('/api/assistant/commands')
@@ -2088,10 +2106,10 @@ export const assistantRevert = (path) => post('/api/assistant/revert', { path })
 // A share link is its own capability: the response carries the token-bearing URL, when it expires,
 // and whether it follows the chat (`live`) or is frozen at the turns that existed when it was minted.
 // The session id is NOT a share link — unshare revokes every link without touching the conversation.
-export const assistantShare = (sid, live = false) =>
-  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, { live })
-export const assistantUnshare = (sid) =>
-  send(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, 'DELETE')
+export const assistantShare = (sid, live = false, options) =>
+  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, { live }, options)
+export const assistantUnshare = (sid, options) =>
+  send(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, 'DELETE', null, options)
 // Pending human-in-the-loop confirm requests for a session, and resolving one.
 export const assistantPermissions = (sid = null, options = {}) => get(sid == null
   ? '/api/assistant/permissions'

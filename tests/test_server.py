@@ -127,6 +127,10 @@ def test_trace_internals_cannot_escape_through_artifact_aliases(tmp_path, monkey
     # Same basenames are legitimate when they are independent files outside the canonical run dir.
     (repo / "spans.jsonl").write_bytes(b"external spans\n")
     (repo / "trace.json").write_bytes(b"external trace\n")
+    (repo / ".env").write_text("SECRET=must-not-render\n", encoding="utf-8")
+    secret_dir = repo / ".aws"
+    secret_dir.mkdir()
+    (secret_dir / "credentials").write_text("must-not-render\n", encoding="utf-8")
     allowed = repo / "allowed.txt"
     allowed.write_text("allowed\n", encoding="utf-8")
 
@@ -150,27 +154,27 @@ def test_trace_internals_cannot_escape_through_artifact_aliases(tmp_path, monkey
     }), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
     roots = {r["id"]: r for r in client.get("/api/runs/demo/artifacts").json()["roots"]}
-    assert {"run", "editable:.", "reference:parent"} <= roots.keys()
+    assert {"run", "editable:."} <= roots.keys()
+    assert "reference:parent" not in roots
     run_files = {item["path"] for item in roots["run"]["files"]}
-    parent_files = {item["path"] for item in roots["reference:parent"]["files"]}
     repo_files = {item["path"] for item in roots["editable:."]["files"]}
 
     assert "out.txt" in run_files
     assert "tree.html.archive/secret.txt" not in run_files
-    assert "demo/tree.html.archive/secret.txt" not in parent_files
-    for root, path in (("run", "tree.html.archive/secret.txt"),
-                       ("reference:parent", "demo/tree.html.archive/secret.txt")):
-        assert client.get("/api/runs/demo/artifact",
-                          params={"root": root, "path": path}).status_code == 404
+    assert client.get("/api/runs/demo/artifact", params={
+        "root": "run", "path": "tree.html.archive/secret.txt"}).status_code == 404
+    assert client.get("/api/runs/demo/artifact", params={
+        "root": "reference:parent", "path": "demo/out.txt"}).status_code == 404
     for name in protected:
         assert name not in run_files
-        assert f"demo/{name}" not in parent_files
         assert client.get("/api/runs/demo/artifact",
                           params={"root": "run", "path": name}).status_code == 404
-        assert client.get("/api/runs/demo/artifact", params={
-            "root": "reference:parent", "path": f"demo/{name}"}).status_code == 404
 
     assert {"spans.jsonl", "trace.json", "allowed.txt"} <= repo_files
+    assert ".env" not in repo_files and ".aws/credentials" not in repo_files
+    for secret_path in (".env", ".aws/credentials"):
+        assert client.get("/api/runs/demo/artifact", params={
+            "root": "editable:.", "path": secret_path}).status_code == 404
     external = client.get("/api/runs/demo/artifact",
                           params={"root": "editable:.", "path": "spans.jsonl"})
     assert external.status_code == 200 and external.json()["content"] == "external spans\n"
@@ -1243,8 +1247,15 @@ def test_time_travel_seq(tmp_path):
                                  params={"seq": created_seq,
                                          "expected_generation": early["generation"]}).json()
     live_node = client.get(f"/api/runs/demo/nodes/{nid}").json()
+    fenced_live_node = client.get(f"/api/runs/demo/nodes/{nid}", params={
+        "expected_generation": full["generation"]}).json()
     assert historical_node["annotations"] == []
     assert live_node["annotations"] == ["added after the snapshot"]
+    assert fenced_live_node["run_generation"] == full["generation"]
+    stale_live = client.get(f"/api/runs/demo/nodes/{nid}", params={
+        "expected_generation": "0" * 64})
+    assert stale_live.status_code == 409
+    assert stale_live.json()["detail"]["code"] == "run_generation_changed"
     assert historical_node["trace"] == {"nodes": []}
     assert historical_node["historical_seq"] == created_seq
 
@@ -2876,6 +2887,7 @@ def test_supertask_endpoints_round_trip(tmp_path):
     assert r.status_code == 200
     summary = {x["run_id"]: x for x in client.get("/api/runs").json()}
     assert summary["demo"]["supertask_id"] == st["id"]          # surfaced in the run summary
+    assert len(summary["demo"]["generation"]) == 64
 
     client.patch(f"/api/supertasks/{st['id']}", json={"name": "MLE-bench"})
     assert client.get("/api/supertasks").json()["supertasks"][0]["name"] == "MLE-bench"
@@ -2889,6 +2901,44 @@ def test_supertask_endpoints_round_trip(tmp_path):
 
     client.delete(f"/api/supertasks/{st['id']}")
     assert client.get("/api/supertasks").json()["supertasks"] == []
+
+
+def test_org_mutations_reject_non_object_and_malformed_json(tmp_path):
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    project = client.post("/api/projects", json={"name": "p"}).json()
+    supertask = client.post("/api/supertasks", json={"name": "s"}).json()
+    routes = [
+        ("post", "/api/projects"),
+        ("patch", f"/api/projects/{project['id']}"),
+        ("post", "/api/runs/demo/project"),
+        ("post", "/api/supertasks"),
+        ("patch", f"/api/supertasks/{supertask['id']}"),
+        ("post", "/api/runs/demo/supertask"),
+        ("patch", "/api/runs/demo"),
+    ]
+    for method, route in routes:
+        assert client.request(method, route, json=[]).status_code == 400
+        assert client.request(
+            method, route, content="{", headers={"Content-Type": "application/json"},
+        ).status_code == 400
+
+
+def test_browser_replay_requires_and_validates_generation(tmp_path):
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    headers = {"Origin": "http://testserver"}
+
+    missing = client.post("/api/runs/demo/reset", headers=headers)
+    assert missing.status_code == 428
+    malformed = client.post(
+        "/api/runs/demo/reset", headers=headers, json={"expected_generation": "ABC"})
+    assert malformed.status_code == 400
+    stale = client.post(
+        "/api/runs/demo/reset", headers=headers,
+        json={"expected_generation": "0" * 64})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "run_generation_changed"
 
 
 def test_chat_log_persist_and_restore(tmp_path):

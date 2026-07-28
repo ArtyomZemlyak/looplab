@@ -3,6 +3,9 @@
 # server/assistant/TUI tests import fastapi.
 name: tests
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [master]
@@ -27,6 +30,10 @@ jobs:
   pytest-windows:
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,11 +41,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev,ui]"
-      # CODEX AGENT: This monolithic leg currently reaches about 2,984 passing tests, then waits in
-      # threading.Condition and exits via KeyboardInterrupt after roughly eight minutes, while Linux and
-      # UI finish green. Isolate the leaking process/timer with deterministic Windows shards plus one
-      # --full-trace diagnostic job; until then every master push is red and later failures stay hidden.
-      - run: python -m pytest
+      - run: python -m pytest --splits 4 --group ${{ matrix.group }}
 
   ui:
     runs-on: ubuntu-latest
@@ -60,3 +63,27 @@ jobs:
       - name: Enforce bundle budgets
         run: npm run check:bundle
         working-directory: ui
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: python -m pip install build
+      - run: python -m build
+      - name: Prove the sdist builds a wheel without Node dependencies
+        run: |
+          mkdir clean-dist
+          cp dist/*.tar.gz clean-dist/
+          python -m pip wheel --no-deps --no-build-isolation clean-dist/*.tar.gz

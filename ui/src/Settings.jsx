@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, saveSettings, saveSecret, llmHealth } from './util.js'
+import { deadlineGet, saveSettings, saveSecret, llmHealth } from './util.js'
 import {
   toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema,
 } from './settingsSchema.js'
@@ -17,6 +17,7 @@ const SETTINGS_READ_TIMEOUT_MS = 15_000
 const SETTINGS_WRITE_TIMEOUT_MS = 15_000
 const LLM_HEALTH_TIMEOUT_MS = 15_000
 const unknownTransport = error => !Number.isInteger(error?.status)
+  || error.status >= 500 || [408, 425, 429].includes(error.status)
 const publicSubmittedForm = form => ({ ...(form || {}), llm_api_key: '' })
 const boundedSettingsWrite = work =>
   deadlineRequest(signal => work(signal), SETTINGS_WRITE_TIMEOUT_MS).promise
@@ -91,7 +92,7 @@ export default function Settings({ onBack }) {
   const load = (reloadSchema = false) => {
     const owner = ++loadRef.current
     loadControllerRef.current?.abort()
-    const timed = deadlineRequest(signal => get('/api/settings', { signal }), SETTINGS_READ_TIMEOUT_MS)
+    const timed = deadlineGet('/api/settings', SETTINGS_READ_TIMEOUT_MS)
     loadControllerRef.current = timed.controller
     setLoadError('')
     return Promise.all([timed.promise, loadSettingsSchema({ reload: reloadSchema })]).then(([data, nextSchema]) => {
@@ -223,7 +224,7 @@ export default function Settings({ onBack }) {
     if (!recovery) return
     const mutation = beginMutation('reconciling')
     if (!mutation) return
-    const timed = deadlineRequest(signal => get('/api/settings', { signal }), SETTINGS_READ_TIMEOUT_MS)
+    const timed = deadlineGet('/api/settings', SETTINGS_READ_TIMEOUT_MS)
     try {
       const data = await timed.promise
       validateSettingsResource(data, schema)

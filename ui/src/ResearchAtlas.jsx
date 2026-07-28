@@ -319,7 +319,9 @@ export default function ResearchAtlas({ onBack }) {
                     ? <p className="atlas-section-empty">No retained concepts returned.</p>
                     : <ul className="atlas-concepts" tabIndex={0} aria-label="Bounded explored concepts">
                       {view.concepts.map((concept, index) => <li key={`${concept.concept}-${index}`}>
-                        <div><strong>{concept.concept}</strong><span>{countLabel(concept.nRuns, 'run')}</span></div>
+                        <div><strong>{concept.concept}</strong><span>{countLabel(concept.nRuns, 'run')}
+                          {' · '}helped {concept.nHelped} · neutral {concept.nNeutral} · hurt {concept.nHurt}
+                        </span></div>
                         {concept.runs.length > 0 && <div className="atlas-runrefs">
                           {concept.runs.map((run, runIndex) => run.runId
                             ? <AtlasRunReference key={`${run.runId}-${runIndex}`} run={run} />

@@ -5,3 +5,4 @@ include ui/vite.config.js
 recursive-include ui/src *
 recursive-include ui/public *
 recursive-include ui/scripts *
+recursive-include ui/dist *

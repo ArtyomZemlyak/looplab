@@ -538,7 +538,8 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                             wait_on_alive: bool = False,
                             spawn_engine: Optional[Callable[..., Optional[int]]] = None,
                             liveness: Optional[Callable[[Path], Optional[bool]]] = None,
-                            on_spawn: Optional[Callable[[Optional[int]], None]] = None) -> bool:
+                            on_spawn: Optional[Callable[[Optional[int]], None]] = None,
+                            before_spawn: Optional[Callable[[], None]] = None) -> bool:
     """Atomically claim one pending resume in the event log, then launch its detached CLI.
 
     The additive `resume_requested(launch_claim=True)` record is a process-wide bounded lease. It
@@ -612,6 +613,8 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
             with _engine_spawn_gate:
                 if cancel_event is not None and cancel_event.is_set():
                     return False
+                if before_spawn is not None:
+                    before_spawn()
                 # Keep the router's historical spawn patch seam without changing the default: direct
                 # callers and the reconciler still resolve this module's live `_spawn_engine` binding.
                 spawner = spawn_engine or _spawn_engine
@@ -625,12 +628,14 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
             return False       # a hot writer won every CAS; the intent stays durably pending
     if should_wait and wait_on_alive and not (cancel_event is not None and cancel_event.is_set()):
         _spawn_engine_after_exit(
-            waiter_args, run_dir=rd, env=env, cancel_event=cancel_event)
+            waiter_args, run_dir=rd, env=env, cancel_event=cancel_event,
+            before_spawn=before_spawn)
     return False
 
 
 def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
-                             cancel_event: Optional[threading.Event] = None) -> bool:
+                             cancel_event: Optional[threading.Event] = None,
+                             before_spawn: Optional[Callable[[], None]] = None) -> bool:
     """P1-1 on-load reconciler (NO standing daemon): re-spawn the engine for a run whose durable resume
     intent was recorded but never served — either a detached spawn died before the engine ran or the
     request landed in an old engine's post-finish tail. Returns True if it re-spawned. Idempotent
@@ -670,14 +675,15 @@ def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
     try:
         return _claim_and_spawn_resume(
             rd, cli_args, now=now,
-            cancel_event=cancel_event, wait_on_alive=True)
+            cancel_event=cancel_event, wait_on_alive=True, before_spawn=before_spawn)
     except Exception:  # noqa: BLE001 - best-effort recovery must not break startup or the run list
         return False
 
 
 def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
                              env: Optional[dict] = None,
-                             cancel_event: Optional[threading.Event] = None) -> bool:
+                             cancel_event: Optional[threading.Event] = None,
+                             before_spawn: Optional[Callable[[], None]] = None) -> bool:
     """Spawn once after the current owner exits iff a durable resume intent remains pending."""
     key = str(run_dir.resolve())
     with _resume_after_exit_lock:
@@ -725,7 +731,7 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
                     return
                 if _claim_and_spawn_resume(
                         run_dir, cli_args, env=env, cancel_event=cancel_event,
-                        wait_on_alive=False):
+                        wait_on_alive=False, before_spawn=before_spawn):
                     return
                 # A different CLI can acquire engine.lock between our dead probe and claim. Keep
                 # this same registered waiter through that handoff rather than recursively trying to
@@ -759,7 +765,8 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
     return True
 
 
-def install_resume_reconcile_hooks(app, root: Path) -> threading.Event:
+def install_resume_reconcile_hooks(
+        app, root: Path, *, before_spawn: Optional[Callable[[], None]] = None) -> threading.Event:
     """Recover durable resume intents on startup, without requiring a dashboard list poll."""
     timers: list[threading.Timer] = []
     shutdown = threading.Event()
@@ -793,7 +800,8 @@ def install_resume_reconcile_hooks(app, root: Path) -> threading.Event:
             if startup_liveness is True:
                 # A server restart loses the old in-memory tail waiter; reinstall it while the
                 # engine still owns the run. The durable launch claim arbitrates multiple workers.
-                _spawn_engine_after_exit(cli_args, run_dir=rd, cancel_event=shutdown)
+                _spawn_engine_after_exit(
+                    cli_args, run_dir=rd, cancel_event=shutdown, before_spawn=before_spawn)
                 continue
             if startup_liveness is None:
                 # Do not create one 20 Hz waiter thread per malformed/reparse/unsupported run at
@@ -807,13 +815,15 @@ def install_resume_reconcile_hooks(app, root: Path) -> threading.Event:
                      if 0.0 <= elapsed < _RESUME_RECONCILE_GRACE_S else 0.0)
             if delay <= 0:
                 try:
-                    reconcile_pending_resume(rd, now=now, cancel_event=shutdown)
+                    reconcile_pending_resume(
+                        rd, now=now, cancel_event=shutdown, before_spawn=before_spawn)
                 except Exception:  # noqa: BLE001 - one broken run cannot abort server startup
                     pass
                 continue
             def _reconcile_unless_shutdown(run_dir=rd):
                 if not shutdown.is_set():
-                    reconcile_pending_resume(run_dir, cancel_event=shutdown)
+                    reconcile_pending_resume(
+                        run_dir, cancel_event=shutdown, before_spawn=before_spawn)
             timer = threading.Timer(delay + 0.01, _reconcile_unless_shutdown)
             timer.daemon = True
             timers.append(timer)

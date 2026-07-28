@@ -40,6 +40,8 @@ from looplab.tools.perm_modes import (
     GRANT_TTL_SECONDS, RememberedGrantStore, classify_action, normalize_mode)
 from looplab.core.redact import redact_secrets
 
+ASSISTANT_SHARE_HEADER = "X-LoopLab-Share"
+
 
 async def _json_object(request: Request) -> dict:
     """Parse a request body as a JSON object or fail with 400 (mirrors routers/boss + control), so a
@@ -456,7 +458,9 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such session")
         if sess is None:
             raise HTTPException(404, "no such session")
-        live = bool(body.get("live", False))
+        live = body.get("live", False)
+        if not isinstance(live, bool):
+            raise HTTPException(400, "live must be a boolean")
         try:
             token, record = _shares.create(
                 sid, message_count=len(sess["messages"]), live=live,
@@ -491,8 +495,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such session")
         return {"shares": _shares.active_for_session(sid)}
 
-    @router.get("/api/assistant/shared/{token}")
-    def assistant_shared(token: str):
+    def _assistant_shared(token: str):
         record = _shares.resolve(token)
         if record is None:
             # One indistinguishable answer for unknown, expired, revoked and wrong-secret. Anything
@@ -521,6 +524,23 @@ def build_router(srv) -> APIRouter:
                 "title": _shared_text(sess["meta"].get("title") or "Shared chat")}
         return {"meta": meta,
                 "messages": [_shared_message(_sanitize_assistant_message(m)) for m in messages]}
+
+    @router.get("/api/assistant/shared")
+    def assistant_shared_header(request: Request):
+        """Header-carried public capability.
+
+        The browser-facing share URL keeps the secret in its fragment. Carrying it in a request
+        header prevents ordinary origin/proxy access logs from recording the bearer as a path.
+        """
+        token = request.headers.get(ASSISTANT_SHARE_HEADER, "")
+        if not token:
+            raise HTTPException(404, "not shared")
+        return _assistant_shared(token)
+
+    @router.get("/api/assistant/shared/{token}")
+    def assistant_shared_legacy(token: str):
+        # Backward-compatible API for older clients. The current UI uses the header route above.
+        return _assistant_shared(token)
 
     @router.post("/api/assistant/sessions/{sid}/fork")
     def assistant_fork(sid: str):

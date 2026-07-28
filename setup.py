@@ -11,8 +11,9 @@ import subprocess
 from pathlib import Path
 
 from setuptools import setup
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools.command.build_py import build_py as _build_py
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+from setuptools.command.sdist import sdist as _sdist
 
 
 ROOT = Path(__file__).resolve().parent
@@ -29,15 +30,25 @@ def _production_ui_dist() -> Path:
         if not (source / "package.json").is_file():
             raise RuntimeError(
                 "LoopLab wheel build requires the ui/ source tree or LOOPLAB_UI_PREBUILT.")
-        if not (source / "node_modules").is_dir():
-            raise RuntimeError(
-                "LoopLab wheel build requires UI dependencies; run `cd ui && npm ci` first.")
         npm = shutil.which("npm")
-        if npm is None:
-            raise RuntimeError(
-                "LoopLab wheel build requires npm; alternatively set LOOPLAB_UI_PREBUILT.")
-        subprocess.run([npm, "run", "build"], cwd=source, check=True)
         dist = source / "dist"
+        if (source / "node_modules").is_dir():
+            if npm is None:
+                raise RuntimeError(
+                    "LoopLab UI dependencies exist but npm is unavailable; "
+                    "set LOOPLAB_UI_PREBUILT to a verified bundle.")
+            subprocess.run([npm, "run", "build"], cwd=source, check=True)
+        elif (dist / "index.html").is_file() and any((dist / "assets").glob("*.js")):
+            # An sdist carries the release-built bundle so downstream wheel builders need neither
+            # Node nor network access.
+            pass
+        else:
+            if npm is None:
+                raise RuntimeError(
+                    "LoopLab source builds require npm, or a release sdist/prebuilt bundle via "
+                    "LOOPLAB_UI_PREBUILT.")
+            subprocess.run([npm, "ci"], cwd=source, check=True)
+            subprocess.run([npm, "run", "build"], cwd=source, check=True)
     if not (dist / "index.html").is_file():
         raise RuntimeError(f"production UI bundle has no index.html: {dist}")
     if not any((dist / "assets").glob("*.js")):
@@ -79,4 +90,16 @@ class BDistWheelWithUI(_bdist_wheel):
         super().run()
 
 
-setup(cmdclass={"build_py": BuildPyWithUI, "bdist_wheel": BDistWheelWithUI})
+class SDistWithUI(_sdist):
+    """Build once before archiving so a published sdist is a self-contained wheel input."""
+
+    def run(self) -> None:
+        self.distribution._looplab_ui_dist = _production_ui_dist()
+        super().run()
+
+
+setup(cmdclass={
+    "build_py": BuildPyWithUI,
+    "bdist_wheel": BDistWheelWithUI,
+    "sdist": SDistWithUI,
+})

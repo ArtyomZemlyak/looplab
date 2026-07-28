@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from looplab.events.eventstore import EventStore, iter_jsonl
+from looplab.events.eventstore import EventStore, decode_event_record, iter_jsonl
 
 
 def _fresh_seqs(p):
@@ -90,6 +90,29 @@ def test_cache_revalidates_same_size_mid_run_rewrite(tmp_path):
     os.utime(p, ns=(future, future))                         # deterministic mtime change on coarse FS
 
     assert s.read_all()[0].type == "bbbb"
+
+
+def test_cache_revalidates_rewritten_prefix_before_external_growth(tmp_path):
+    """Growth is not append-only proof: a rewritten cached prefix must not be joined to a new tail."""
+    p = tmp_path / "events.jsonl"
+    cached = EventStore(p)
+    cached.append("aaaa", {})
+    cached.append("middle", {})
+    assert [event.type for event in cached.read_all()] == ["aaaa", "middle"]
+
+    raw = p.read_bytes()
+    p.write_bytes(raw.replace(b'"aaaa"', b'"bbbb"', 1))
+    EventStore(p).append("tail", {})
+
+    assert [event.type for event in cached.read_all()] == ["bbbb", "middle", "tail"]
+
+
+def test_ordinary_future_event_envelope_is_rejected():
+    with pytest.raises(ValueError, match="unsupported event envelope version"):
+        decode_event_record({
+            "v": 2, "seq": 0, "ts": 1.0, "type": "run_started", "data": {},
+            "trace_id": None, "span_id": None,
+        })
 
 
 def test_shrink_rebases_seq_and_rejects_pre_reset_cas(tmp_path):

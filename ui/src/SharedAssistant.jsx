@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { get } from './util.js'
+import { deadlineGet } from './util.js'
 import { Turn } from './AssistantChat.jsx'
-import { deadlineRequest } from './requestDeadline.js'
 
 const SHARED_REQUEST_TIMEOUT_MS = 15_000
 
@@ -41,9 +40,8 @@ export default function SharedAssistant({ sid, onBack }) {
   const load = useCallback(async ({ preserve = false } = {}) => {
     if (requestRef.current) return
     const retained = preserve ? dataRef.current : null
-    const timed = deadlineRequest(signal => get(
-      `/api/assistant/shared/${encodeURIComponent(sid)}`, { signal },
-    ), SHARED_REQUEST_TIMEOUT_MS)
+    const timed = deadlineGet('/api/assistant/shared', SHARED_REQUEST_TIMEOUT_MS,
+      { headers: { 'X-LoopLab-Share': String(sid || '') } })
     requestRef.current = timed
     setResource({ status: retained ? 'refreshing' : 'loading', data: retained, error: '' })
     try {

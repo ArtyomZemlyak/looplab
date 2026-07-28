@@ -6,6 +6,14 @@ const lazyOwner = name => lazy(() => import('./OwnerChrome.jsx')
   .then(module => ({ default: module[name] })))
 const AssistantBar = lazyOwner('AssistantBar')
 const AttentionCenter = lazyOwner('AttentionCenter')
+let queuedNewRun
+globalThis.addEventListener?.('ll:new-run', event => queueMicrotask(() => {
+  if (!event.defaultPrevented) queuedNewRun = event
+}))
+const assistantReady = () => {
+  if (queuedNewRun) window.dispatchEvent(queuedNewRun)
+  queuedNewRun = 0
+}
 
 /**
  * Stable owner-plane shell. Route content changes in the first slot; Assistant and Attention keep
@@ -20,7 +28,8 @@ export default function OwnerWorkspace({ route, children,
       <AttentionComponent />
     </LazyBoundary>
     <LazyBoundary label="Assistant">
-      <AssistantComponent runId={route.view === 'run' ? route.id : null} />
+      <AssistantComponent runId={route.view === 'run' ? route.id : null}
+        onReady={assistantReady} />
     </LazyBoundary>
   </div>
 }

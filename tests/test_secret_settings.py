@@ -12,8 +12,9 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from looplab.core.atomicio import atomic_write_text  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
-from looplab.serve.settings_store import _REVISION_KEY  # noqa: E402
+from looplab.serve.settings_store import SettingsStore, _REVISION_KEY  # noqa: E402
 
 
 @pytest.fixture
@@ -135,6 +136,49 @@ def test_stored_secret_primes_env_on_app_start(tmp_path, _restore_key, monkeypat
     os.environ.pop("LOOPLAB_LLM_API_KEY", None)
     TestClient(make_app(tmp_path))
     assert os.environ.get("LOOPLAB_LLM_API_KEY") == "sk-from-disk"
+
+
+def test_worker_refreshes_rotated_and_revoked_stored_secret(tmp_path, _restore_key, monkeypatch):
+    """A sibling process's atomic file update invalidates this worker before its next paid action."""
+    monkeypatch.chdir(tmp_path)
+    secret_path = tmp_path / "secrets.json"
+    atomic_write_text(secret_path, json.dumps({
+        "llm_api_key": "sk-worker-old", _REVISION_KEY: "revision-old",
+    }))
+    os.environ.pop("LOOPLAB_LLM_API_KEY", None)
+    worker = SettingsStore(tmp_path)
+    worker.prime_env()
+    assert os.environ["LOOPLAB_LLM_API_KEY"] == "sk-worker-old"
+
+    atomic_write_text(secret_path, json.dumps({
+        "llm_api_key": "sk-worker-new", _REVISION_KEY: "revision-new",
+    }))
+    worker.refresh_env_secrets()
+    assert os.environ["LOOPLAB_LLM_API_KEY"] == "sk-worker-new"
+
+    atomic_write_text(secret_path, json.dumps({_REVISION_KEY: "revision-cleared"}))
+    worker.refresh_env_secrets()
+    assert "LOOPLAB_LLM_API_KEY" not in os.environ
+
+
+def test_worker_refresh_preserves_operator_owned_environment(
+        tmp_path, _restore_key, monkeypatch):
+    """Revision invalidation owns only values the store injected, never a later explicit override."""
+    monkeypatch.chdir(tmp_path)
+    secret_path = tmp_path / "secrets.json"
+    atomic_write_text(secret_path, json.dumps({
+        "llm_api_key": "sk-worker-old", _REVISION_KEY: "revision-old",
+    }))
+    os.environ.pop("LOOPLAB_LLM_API_KEY", None)
+    worker = SettingsStore(tmp_path)
+    worker.prime_env()
+    os.environ["LOOPLAB_LLM_API_KEY"] = "sk-operator-override"
+
+    atomic_write_text(secret_path, json.dumps({
+        "llm_api_key": "sk-worker-new", _REVISION_KEY: "revision-new",
+    }))
+    worker.refresh_env_secrets()
+    assert os.environ["LOOPLAB_LLM_API_KEY"] == "sk-operator-override"
 
 
 def test_dotenv_key_wins_over_stored_secret(tmp_path, _restore_key, monkeypatch):

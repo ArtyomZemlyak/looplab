@@ -270,6 +270,9 @@ const normalizeConcept = value => {
   return {
     concept,
     nRuns: Math.max(count(row.n_runs), runs.length),
+    nHelped: count(row.n_helped),
+    nNeutral: count(row.n_neutral),
+    nHurt: count(row.n_hurt),
     runs,
   }
 }

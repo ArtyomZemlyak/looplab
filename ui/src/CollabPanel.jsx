@@ -6,6 +6,18 @@ import { hashWithRunRouteState, reviewRouteStateForScope } from './runRouteState
 import { OpIcon } from './icons.jsx'
 import CommentsThread from './CommentsThread.jsx'
 import PanelShell from './PanelShell.jsx'
+import { deadlineRequest } from './requestDeadline.js'
+
+const REVIEW_LINK_TIMEOUT_MS = 12_000
+const boundedLinkRequest = read => deadlineRequest(read, REVIEW_LINK_TIMEOUT_MS)
+const activeLink = link => link?.status === 'active' || link?.status === 'stale'
+const authoritativeFailure = ({ status } = {}) =>
+  status >= 400 && status < 500 && status !== 408
+const reviewLinkFailure = error => error?.status === 409
+  ? 'Run changed during link creation. Refresh and retry.'
+  : error?.status === 400
+    ? 'Link options were rejected. Check them and retry.'
+    : 'Link request was not confirmed.'
 
 /**
  * Comments and review-link management intentionally live outside the owner panel hub. A read-only
@@ -23,43 +35,55 @@ export default function CollabPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [createdUrl, setCreatedUrl] = useState('')
+  const [unknownCreate, setUnknownCreate] = useState(false)
   const refreshLinks = async () => {
     if (reviewMode) return
     setLinksStatus('loading')
     try {
-      const result = await listRunReviews(runId)
-      setLinks(result.links || []); setLinksStatus('ready'); setError('')
+      const result = await boundedLinkRequest(
+        signal => listRunReviews(runId, { signal })).promise
+      const next = result.links || []
+      setLinks(next); setLinksStatus('ready'); setError('')
+      return next
     } catch (caught) {
-      setLinksStatus('error'); setError(caught.message || 'Could not load review links')
+      setLinksStatus('error'); setError('Review links are unavailable.')
+      return null
     }
   }
+  const reconcileUnknownCreate = async () => {
+    const refreshed = await refreshLinks()
+    const unresolved = refreshed == null || refreshed.some(activeLink)
+    setUnknownCreate(unresolved)
+    setError(unresolved
+      ? 'Link creation is uncertain. Revoke active links before retrying.'
+      : '')
+  }
   useEffect(() => {
+    setCreatedUrl(''); setUnknownCreate(false)
     if (reviewMode) {
-      setLinks([]); setLinksStatus('ready'); setError(''); setCreatedUrl('')
+      setLinks([]); setLinksStatus('ready'); setError('')
       return undefined
     }
     let active = true
     setLinksStatus('loading'); setError('')
-    listRunReviews(runId)
+    const timed = boundedLinkRequest(signal => listRunReviews(runId, { signal }))
+    timed.promise
       .then(result => { if (active) { setLinks(result.links || []); setLinksStatus('ready') } })
-      .catch(caught => {
-        if (active) { setLinksStatus('error'); setError(caught.message || 'Could not load review links') }
+      .catch(() => {
+        if (active) { setLinksStatus('error'); setError('Review links are unavailable.') }
       })
-    return () => { active = false }
+    return () => { active = false; timed.controller.abort() }
   }, [runId, reviewMode])
   const copy = async (url) => {
     try { await navigator.clipboard.writeText(url); onToast?.('review link copied') }
     catch { setCreatedUrl(url); onToast?.('Copy the visible link manually') }
   }
   const create = async () => {
-    if (busy) return
+    if (busy || unknownCreate) return
     setBusy(true); setError(''); setCreatedUrl('')
     try {
-      // # CODEX AGENT: this bearer is returned exactly once and the server stores only its digest.
-      // If the mutation lands but the response is lost, the enabled retry mints another unrecoverable
-      // bearer. Give creation a durable client request identity/rejoin contract or surface the first
-      // outcome as unknown instead of inviting a fresh create.
-      const result = await createRunReview(runId, { ttl_seconds: ttl, include_evidence: includeEvidence })
+      const result = await boundedLinkRequest(signal => createRunReview(
+        runId, { ttl_seconds: ttl, include_evidence: includeEvidence }, { signal })).promise
       const base = `${location.origin}${apiPrefix()}/`
       const target = new URL(result.path, base)
       const scopedState = reviewRouteStateForScope({ ...(reviewRouteState || {}),
@@ -70,13 +94,20 @@ export default function CollabPanel({
       setCreatedUrl(url)
       await copy(url)
       await refreshLinks()
-    } catch (caught) { setError(caught.message || 'Could not create review link') }
+    } catch (caught) {
+      if (authoritativeFailure(caught)) setError(reviewLinkFailure(caught))
+      else await reconcileUnknownCreate()
+    }
     finally { setBusy(false) }
   }
   const revoke = async (id) => {
     setBusy(true); setError('')
-    try { await revokeRunReview(runId, id); await refreshLinks(); onToast?.('review link revoked') }
-    catch (caught) { setError(caught.message || 'Could not revoke link') }
+    try {
+      await boundedLinkRequest(signal => revokeRunReview(runId, id, { signal })).promise
+      const refreshed = await refreshLinks()
+      if (refreshed && !refreshed.some(activeLink)) setUnknownCreate(false)
+      onToast?.('review link revoked')
+    } catch { setError('Revoke not confirmed. Refresh links before retrying.') }
     finally { setBusy(false) }
   }
   return <PanelComponent title="Comments & sharing" onClose={onClose}>
@@ -96,8 +127,9 @@ export default function CollabPanel({
       </div>
       {includeEvidence && <div className="notice warn">Source and result details can still contain sensitive project information. Known credential patterns are redacted; raw logs, prompts, traces, and artifacts remain excluded.</div>}
       {error && <div className="notice resource-error" role="alert">{error}</div>}
-      <button className="btn sm primary" disabled={busy} onClick={create}>
-        <OpIcon name="link" size={12} /> {busy ? 'Creating…' : 'Create & copy link'}
+      <button className="btn sm primary" disabled={busy || unknownCreate} onClick={create}>
+        <OpIcon name="link" size={12} /> {busy ? 'Creating…'
+          : unknownCreate ? 'Resolve prior link' : 'Create & copy link'}
       </button>
       {createdUrl && <div className="review-created"><label htmlFor="created-review-url">New link (shown once)</label>
         <div><input id="created-review-url" readOnly value={createdUrl} onFocus={event => event.target.select()} />
@@ -107,11 +139,12 @@ export default function CollabPanel({
         : links.length ? <div className="review-link-list">{links.map(link => <div key={link.id} className="review-link-row">
           <div><b>{link.status}</b> · {(link.scopes || []).includes('evidence') ? 'summary + evidence' : 'summary'}
             <div className="muted">expires {new Date(link.expires_at * 1000).toLocaleString()}</div></div>
-          {['active', 'stale'].includes(link.status) && <button className="btn sm danger" disabled={busy}
+          {activeLink(link) && <button className="btn sm danger" disabled={busy}
             onClick={() => revoke(link.id)}>Revoke</button>}
         </div>)}</div> : linksStatus === 'ready' ? <div className="muted">No review links created yet.</div>
-          : <div className="review-links-error"><span className="muted">Existing links could not be loaded.</span>
-            <button className="btn sm" disabled={busy} onClick={refreshLinks}>Retry</button></div>}
+          : <div className="review-links-error"><span className="muted">Review links unavailable.</span>
+            <button className="btn sm" disabled={busy}
+              onClick={unknownCreate ? reconcileUnknownCreate : refreshLinks}>Retry</button></div>}
     </div>}
     {!reviewMode && <div className="muted" style={{ margin: '16px 0 8px' }}>
       Comments are append-only run events. Review-link recipients can read redacted current comments,

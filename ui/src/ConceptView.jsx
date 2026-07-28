@@ -1,12 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { fmt, get, runApiPath } from './util.js'
+import { deadlineGet, fmt, runApiPath } from './util.js'
 import {
   abandonUnknownConceptLens, acquireConceptLensIntent, clearConceptLensIntent,
   createConceptLensResolutionKey, discoverConceptLensRecovery, peekConceptLensIntent,
   pollDiscoveredConceptLens, requestConceptLens, resolveOrphanedConceptLens,
   updateConceptLensIntent,
 } from './conceptLensRecovery.js'
-import { deadlineRequest } from './requestDeadline.js'
 import { getRunAccess } from './runMode.js'
 import {
   relationshipProjectionCopy, visibleConceptRows, conceptLeaf, deltaTone, fmtCell,
@@ -472,8 +471,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     const query = new URLSearchParams({ lens: target.lens })
     if (target.activeRels) query.set('rels', target.activeRels)
     if (target.requestedSeq !== null) query.set('seq', String(target.requestedSeq))
-    const timed = deadlineRequest(signal => get(
-      `${runApiPath(target.runId, '/concepts')}?${query}`, { signal, cache: 'no-store' }), TIMEOUT_MS)
+    const timed = deadlineGet(
+      `${runApiPath(target.runId, '/concepts')}?${query}`, TIMEOUT_MS)
     const owner = { ...timed, ...target }
     request.current = owner
     setResource(previous => previous.scope === target.scope && previous.data

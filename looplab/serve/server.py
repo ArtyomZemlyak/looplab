@@ -285,6 +285,7 @@ def _unauth_api_ok(p: str) -> bool:
             # The share route (assistant.py::assistant_shared) is INTENTIONALLY untokened and returns
             # only the read-only, separately-redacted transcript (_shared_message / _shared_text) — so a
             # share link works for a non-token holder. Default-deny would otherwise 401 it (F21).
+            or p == "/api/assistant/shared"
             or p.startswith("/api/assistant/shared/"))
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/log-page", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
@@ -565,12 +566,21 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         is_concepts = (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                        and parts[4] == "concepts")
         is_attention = route_path in {"/api/attention", "/api/assistant/permissions"}
+        is_assistant_share = (
+            route_path == "/api/assistant/shared"
+            or route_path.startswith("/api/assistant/shared/")
+        )
         if (is_command or is_start_status or is_log_page or is_report_refresh or is_scope_report
-                or is_scope_report_action or is_job or is_comments or is_concepts or is_attention):
+                or is_scope_report_action or is_job or is_comments or is_concepts or is_attention
+                or is_assistant_share):
             response.headers["Cache-Control"] = "no-store"
+            if is_assistant_share:
+                response.headers["Referrer-Policy"] = "no-referrer"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
             vary.update({"X-LoopLab-Token", "Authorization"})
-            if is_log_page or is_comments:
+            if is_assistant_share:
+                vary.add("X-LoopLab-Share")
+            elif is_log_page or is_comments:
                 vary.add(REVIEW_HEADER)
             elif is_attention:
                 vary.update({"X-LoopLab-Token", REVIEW_HEADER})
@@ -579,15 +589,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             response.headers["Vary"] = ", ".join(sorted(vary, key=str.lower))
         return response
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
-    # JupyterHub reaper hooks (ASGI shutdown + atexit backstop) — registered before the secret
-    # priming below, matching the original make_app construction side-effect order.
+    settings_store = SettingsStore(root)
+    settings_store.prime_env()   # apply stored secrets to this process's env (env/.env still wins)
+    # JupyterHub reaper hooks (ASGI shutdown + atexit backstop).
     sweep_stale_lifecycle_locks(root)   # F22: GC orphaned per-run lifecycle lock files at startup
-    resume_cancel = install_resume_reconcile_hooks(app, root)
+    resume_cancel = install_resume_reconcile_hooks(
+        app, root, before_spawn=settings_store.refresh_env_secrets)
     # Shutdown handlers run in registration order. Cancel/join resume timers + tail waiters first,
     # then reap every child that was registered before cancellation won the spawn gate.
     install_reap_hooks(app)
-    settings_store = SettingsStore(root)
-    settings_store.prime_env()   # apply stored secrets to this process's env (env/.env still wins)
 
     srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry(),
                    reviews=reviews, resume_cancel=resume_cancel)

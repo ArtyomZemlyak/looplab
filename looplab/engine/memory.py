@@ -1256,7 +1256,13 @@ def _portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[
             total = sum(run_signs)
             sign = None if not run_signs else (1 if total > 0 else -1 if total < 0 else 0)
             e = per_concept.setdefault(key, {"concept": key, "_runs": {}})
-            e["_runs"][rid] = {"run_id": rid, "metric": metric, "direction": direction, "sign": sign}
+            e["_runs"][rid] = {
+                "run_id": rid,
+                "task_id": str(c.get("task_id") or ""),
+                "metric": metric,
+                "direction": direction,
+                "sign": sign,
+            }
     concepts = []
     for e in per_concept.values():
         all_runs = [e["_runs"][run_id] for run_id in sorted(e["_runs"])]

@@ -783,6 +783,10 @@ def build_router(srv) -> APIRouter:
                 best = st.best()
                 summary = {
                     "run_id": rd.name, "task_id": st.task_id, "goal": st.goal,
+                    # A run id is reusable after reset/delete.  Portfolio consumers must include the
+                    # durable event-log generation in their resource identity or an in-flight detail
+                    # read for generation A can be joined to generation B's unchanged run id.
+                    "generation": run_generation_token(events),
                     "direction": st.direction, "finished": st.finished,
                     "phase": _phase(st, finalize_incomplete=finalize_incomplete),
                     "finalization_incomplete": finalize_incomplete, "nodes": len(st.nodes),
@@ -820,7 +824,9 @@ def build_router(srv) -> APIRouter:
             # request. The detached re-spawn appears as running on the next refresh.
             if alive is False and resume_pending:
                 try:
-                    reconcile_pending_resume(rd, cancel_event=srv.resume_cancel)
+                    reconcile_pending_resume(
+                        rd, cancel_event=srv.resume_cancel,
+                        before_spawn=srv.settings.refresh_env_secrets)
                 except Exception:  # noqa: BLE001 — recovery is best-effort; never break the run list
                     pass
             return alive
@@ -1746,13 +1752,16 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         # Historical Inspector/Report must use the same prefix fold as the visible DAG.  Falling back
         # to the live fold here leaked later code, annotations and confirmations into old snapshots.
-        historical_generation = (_assert_historical_generation(rd, expected_generation)
-                                 if seq is not None else None)
+        request_generation = (_assert_historical_generation(rd, expected_generation)
+                              if seq is not None or expected_generation is not None else None)
+        historical_generation = request_generation if seq is not None else None
         st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
-        if seq is not None:
+        if request_generation is not None:
             # The expensive fold runs without the exclusive command sequencer. A reset may win while
             # it is assembled, but a mixed-generation payload is rejected before any field is returned.
-            historical_generation = _assert_historical_generation(rd, expected_generation)
+            request_generation = _assert_historical_generation(rd, expected_generation)
+            if seq is not None:
+                historical_generation = request_generation
         n = st.nodes.get(nid)
         if n is None:
             # A node still BUILDING has no node_created yet (not in st.nodes), but its create_node
@@ -1773,8 +1782,10 @@ def build_router(srv) -> APIRouter:
             building = bool(b)
             if building or trace.get("nodes"):
                 b = b or {}
+                if request_generation is not None:
+                    request_generation = _assert_historical_generation(rd, expected_generation)
                 return {"id": nid, "status": "building",
-                        "attempt": attempt or 0,
+                        "attempt": attempt or 0, "run_generation": request_generation,
                         "operator": b.get("operator"), "parent_ids": b.get("parent_ids", []),
                         "idea": None, "code": "", "annotations": [], "trace": trace}
             raise HTTPException(404, "no such node")
@@ -1791,6 +1802,9 @@ def build_router(srv) -> APIRouter:
         # future contents as historical; the UI explains that trace is unavailable in History.
         out["trace"] = (_node_trace(rd, nid, attempt=n.attempt)
                         if seq is None else {"nodes": []})
+        if request_generation is not None:
+            request_generation = _assert_historical_generation(rd, expected_generation)
+        out["run_generation"] = request_generation
         if seq is not None:
             out["historical_seq"] = seq
             out["historical_generation"] = historical_generation
