@@ -816,3 +816,52 @@ def test_a_never_converging_cost_refresh_degrades_instead_of_wedging(tmp_path, m
     closed = [d for d in steps if d.get("step") == "llm_cost"]
     assert closed, "after the bounded retries the step must close so the run can terminate"
     assert any(d.get("degraded") for d in closed), "the shortfall must be DISCLOSED, not silent"
+
+
+def test_one_failing_steward_cannot_disable_the_others_and_leaves_a_receipt(tmp_path, monkeypatch):
+    """Concept curation, claim curation and task faceting are INDEPENDENT governance outputs.
+
+    They used to share a single try/except, so a concept-ledger exception skipped claim and
+    task-facet governance entirely while the run still published complete — one subsystem silently
+    disabling the others. Each now has its own boundary plus a `finalize_step` receipt (a DIAGNOSTIC
+    event, so fold state is untouched), which is what distinguishes "this task genuinely has no
+    facets" from "faceting never ran".
+    """
+    import looplab.engine.finalize as finalize_module
+
+    run_dir = tmp_path / "isolated-stewards"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+    ran: list[str] = []
+
+    def explode(_state):
+        ran.append("concept")
+        raise RuntimeError("concept ledger unavailable")
+
+    eng._store_concept_curation = explode
+    eng._store_claim_curation = lambda _state: ran.append("claim")
+    eng._store_task_facets = lambda _state: ran.append("facets")
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", lambda *_a, **_k: True)
+    final = finalize_module.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    assert ran == ["concept", "claim", "facets"], (
+        "a failing steward still short-circuits the independent ones that follow it")
+    assert not final.finalization_pending()      # completion is never blocked by a steward
+
+    receipts = {
+        event.data.get("step"): event.data.get("outcome")
+        for event in eng.store.read_all()
+        if event.type == "finalize_step" and event.data.get("step") in {
+            "concept_curation", "claim_curation", "task_facets"}
+    }
+    assert receipts == {
+        "concept_curation": "unavailable",
+        "claim_curation": "completed",
+        "task_facets": "completed",
+    }, receipts
+    failure = next(event for event in eng.store.read_all()
+                   if event.type == "finalize_step"
+                   and event.data.get("step") == "concept_curation")
+    assert "concept ledger unavailable" in failure.data.get("error", "")

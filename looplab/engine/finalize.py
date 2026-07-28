@@ -722,17 +722,43 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # reflection must precede claim curation so this run's durable lessons are visible;
         # every steward still precedes llm_cost so its provider usage enters the terminal roll-up.
         if getattr(engine, "_cross_run_curation", False):
-            # CODEX AGENT: three independent stewards share one failure boundary. A concept-ledger
-            # exception skips claim and task-facet governance while the run still publishes complete;
-            # isolate each call and persist a per-steward success/unavailable receipt so one subsystem
-            # cannot silently disable the other Part-IV/V outputs.
+            # Three INDEPENDENT stewards, so they get three failure boundaries. They used to share
+            # one: a concept-ledger exception skipped claim AND task-facet governance outright while
+            # the run still published complete, letting one subsystem silently disable the others'
+            # Part-IV/V outputs. Each now runs on its own and leaves a receipt, so "this task has no
+            # facets" can be told apart from "faceting never ran because curation raised first".
+            #
+            # Deliberately NOT gated on `_finalize_step_done`: idempotency lives in the stores
+            # (append-only aliases, per-task facets) and re-running a steward on resume IS the
+            # intended recovery, so these receipts are observability, not skip markers.
+            # `EV_FINALIZE_STEP` is a DIAGNOSTIC event (types.py), hence fold-ignored — the extra
+            # appends are splice-neutral BY CONSTRUCTION and cannot perturb replay state.
+            def _steward_receipt(step: str, **data) -> None:
+                # A receipt is diagnostics: never let its own append undo the isolation above by
+                # propagating out of a steward's handler and aborting terminal completion.
+                try:
+                    _mark_finalize_step(engine, scope, step, **data)
+                except Exception:  # noqa: BLE001 - see above
+                    pass
+
+            final = None
             try:
                 final = fold(engine.store.read_all())
-                engine._store_concept_curation(final)
-                engine._store_claim_curation(final)   # agentic claim ratify/reject/pin
-                engine._store_task_facets(final)       # agentic task faceting (once/task)
-            except Exception:  # noqa: BLE001 — steward failure must not prevent terminal completion
-                pass
+            except Exception as exc:  # noqa: BLE001 - a fold failure disables every steward at once,
+                _steward_receipt(      # so it is recorded once rather than three times
+                    "stewards", outcome="unavailable", error=str(exc)[:300])
+            if final is not None:
+                for step, steward in (
+                        ("concept_curation", engine._store_concept_curation),
+                        ("claim_curation", engine._store_claim_curation),  # ratify/reject/pin
+                        ("task_facets", engine._store_task_facets)):       # once per task
+                    try:
+                        steward(final)
+                    except Exception as exc:  # noqa: BLE001 — steward failure must not prevent
+                        _steward_receipt(     # terminal completion
+                            step, outcome="unavailable", error=str(exc)[:300])
+                    else:
+                        _steward_receipt(step, outcome="completed")
 
         events = engine.store.read_all()
         cost_step_done = _finalize_step_done(
