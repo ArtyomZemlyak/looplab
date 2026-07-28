@@ -21,6 +21,10 @@ _MAX_JOBS = 64
 # Browser and TUI poll contracts wait up to ten minutes. Never evict a completed receipt while a
 # conforming client can still be waiting for it; bounded capacity fails closed instead.
 _COMPLETED_RETENTION_SECONDS = 660.0
+# A reservation with no worker is created and then either started or discarded inside ONE request.
+# Past this grace it can only be a caller that died in that window, so its slot is provably free.
+# Generous relative to the inline wait so a slow-but-live handler is never mistaken for a corpse.
+_UNSTARTED_RESERVATION_GRACE_SECONDS = 300.0
 
 
 # ---- generic background-job registry (generalizes the genesis pattern) -----------------------
@@ -34,21 +38,75 @@ class JobRegistry:
         self._jobs: dict = {}
         self._idempotent_jobs: dict[str, str] = {}
         self._job_identities: dict[str, str] = {}
+        # Worker threads, kept OUT of the job dicts: `get`/`poll` hand their dict to HTTP, and a
+        # Thread object in a public receipt is neither serializable nor anyone's business. This is
+        # the registry's only PROOF of liveness — for a thread it started itself, `is_alive()` is
+        # authoritative, which is exactly what `discard_orphaned_running` cannot establish alone.
+        self._job_threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
         self._inline_wait = float(os.environ.get("LOOPLAB_JOB_INLINE_WAIT", "8.0"))
 
     def _remove_locked(self, job_id: str) -> None:
         self._jobs.pop(job_id, None)
+        self._job_threads.pop(job_id, None)
         identity = self._job_identities.pop(job_id, None)
         if identity is not None and self._idempotent_jobs.get(identity) == job_id:
             self._idempotent_jobs.pop(identity, None)
 
+    def _reconcile_locked(self, now: float) -> None:
+        """Retire receipts whose work PROVABLY no longer exists, before capacity is judged.
+
+        Without this the cap only ever released completed receipts, so anything that reached
+        ``running`` and never published sat in the registry forever — enough of them and every
+        job-backed feature (genesis, boss commands, report refresh, scope reports) is permanently
+        out of capacity for the life of the process.
+
+        Only provable corpses are retired; a wedged-but-LIVE worker keeps its slot, because a live
+        thread is real work holding a real resource and the registry has no authority to declare
+        otherwise. Two things it CAN prove:
+
+        * a worker thread it started itself that is no longer alive while its receipt still says
+          running — the publish in ``_worker`` cannot have been skipped by anything but the thread
+          dying, so nothing will ever complete this receipt. It becomes a server-side terminal
+          rather than vanishing, so a client polling it gets an answer instead of ``job_unknown``;
+        * a reservation whose worker was never started and whose caller is long gone — reserve and
+          start/discard happen inside one request, so past the grace window no worker can appear.
+        """
+        for job_id, job in list(self._jobs.items()):
+            if job.get("status") != JOB_RUNNING:
+                continue
+            if not job.get("worker_started"):
+                try:
+                    age = now - float(job.get("ts", now))
+                except (TypeError, ValueError):
+                    age = 0.0          # unreadable stamp -> treat as fresh; never raise under the
+                                       # lock and 500 every reservation over a bookkeeping field
+                if age >= _UNSTARTED_RESERVATION_GRACE_SECONDS:
+                    self._remove_locked(job_id)
+                continue
+            thread = self._job_threads.get(job_id)
+            if thread is not None and not thread.is_alive():
+                # `ts` is deliberately NOT refreshed. It is the last sign of life this job gave
+                # (reserved, or a progress write), so leaving it in place makes the ordinary
+                # retention rule measure how long the work has actually been gone: a client still
+                # inside its ten-minute poll window gets the terminal, and a corpse nobody is
+                # waiting for is immediately evictable. Stamping `now` here would instead restart
+                # the clock and let a wall of dead workers hold the registry for another window.
+                job.update({
+                    "status": JOB_DONE,
+                    "result": {
+                        "ok": False,
+                        "code": "job_failed",
+                        "error_kind": "internal",
+                        "ambiguous": True,
+                        "error": "background job worker ended without publishing a result",
+                    },
+                })
+                self._job_threads.pop(job_id, None)
+
     def _make_room_locked(self, now: float) -> bool:
         """Evict only old completed receipts; running work and fresh results are never displaced."""
-        # CODEX AGENT: only done jobs can leave this fixed-cap registry, but daemon workers have no
-        # endpoint-owned deadline/cancellation or provably-dead transition. Enough hung calls permanently
-        # exhaust every job-backed feature after clients time out; add a server-side terminal and
-        # reconciliation lifecycle before claiming bounded capacity.
+        self._reconcile_locked(now)
         if len(self._jobs) < _MAX_JOBS:
             return True
         completed = sorted(
@@ -65,7 +123,14 @@ class JobRegistry:
 
     def put(self, job_id: str, **fields) -> None:
         with self._lock:
-            self._jobs.setdefault(job_id, {}).update(fields)
+            job = self._jobs.get(job_id)
+            if job is None:
+                # NEVER resurrect. A receipt only exists because `reserve` created it, so a write to
+                # an absent id is a late worker whose slot was already retired (or consumed by a
+                # one-shot poll). `setdefault` here silently re-created it, which put the entry back
+                # over the cap and undid the retirement that freed the slot.
+                return
+            job.update(fields)
 
     def get(self, job_id: str):
         with self._lock:
@@ -75,6 +140,10 @@ class JobRegistry:
     def poll(self, job_id: str):
         """Read a public poll receipt, retiring an explicitly consumable terminal atomically."""
         with self._lock:
+            # Reconcile HERE too, not only when someone reserves: this is the endpoint a waiting
+            # client is sitting on, so it is where a worker that died without publishing has to stop
+            # reading as `running` forever. Bounded by the registry cap, so it costs nothing.
+            self._reconcile_locked(time.time())
             job = self._jobs.get(job_id)
             if job is None:
                 return None
@@ -210,7 +279,13 @@ class JobRegistry:
         start_exc: BaseException | None = None
         with launch_lock:
             try:
-                threading.Thread(target=_worker, daemon=True).start()
+                worker = threading.Thread(target=_worker, daemon=True)
+                # Registered BEFORE start(): if the thread dies immediately, reconciliation must find
+                # a handle to prove it rather than an absent one it would read as "not started yet".
+                with self._lock:
+                    if job_id in self._jobs:
+                        self._job_threads[job_id] = worker
+                worker.start()
                 # Authorization belongs inside this protected region: an asynchronous exception
                 # anywhere after start() returned but before this commit must still cancel the target.
                 launch_state = "authorized"

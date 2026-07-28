@@ -32,9 +32,11 @@ def test_capacity_rejoins_running_identity_and_never_evicts_paid_work(monkeypatc
 
     first = _run(registry, paid_compute, inline_wait=0, idempotency_key="same-paid-work")
     assert first["status"] == "running" and entered.wait(3)
-    for index in range(63):
-        registry.put(
-            f"occupied-{index}", status="running", result=None, ts=time.time())
+    # Occupancy is fabricated through the REAL reservation path: `put` only updates an existing
+    # receipt (creating one there would let a late worker resurrect a retired slot over the cap).
+    occupied = [registry.reserve()["job_id"] for _ in range(63)]
+    for job_id in occupied:
+        registry.put(job_id, status="running", result=None, ts=time.time(), worker_started=True)
 
     retry = _run(
         registry, lambda: calls.append("duplicate"), inline_wait=0,
@@ -62,10 +64,10 @@ def test_capacity_rejoins_running_identity_and_never_evicts_paid_work(monkeypatc
     assert completed["result"] == {"ok": True, "value": "durable result"}
 
     # Admission evicts an old completed receipt before running work or the just-completed result.
-    registry.put("occupied-0", status="done", result={"ok": True}, ts=0)
+    registry.put(occupied[0], status="done", result={"ok": True}, ts=0)
     admitted = _run(registry, lambda: {"ok": True, "value": "new"}, inline_wait=1)
     assert admitted == {"ok": True, "value": "new"}
-    assert registry.get("occupied-0") is None
+    assert registry.get(occupied[0]) is None
     assert registry.get(first["job_id"])["result"]["value"] == "durable result"
 
 
@@ -213,18 +215,20 @@ def test_completed_receipt_outlives_the_ten_minute_client_deadline(monkeypatch):
     now = [1_000.0]
     monkeypatch.setattr(jobs_module.time, "time", lambda: now[0])
     registry = JobRegistry()
-    for index in range(64):
-        registry.put(
-            f"done-{index}", status="done", result={"ok": True}, ts=now[0])
+    done_ids = []
+    for _ in range(64):
+        job_id = registry.reserve()["job_id"]
+        registry.put(job_id, status="done", result={"ok": True}, ts=now[0])
+        done_ids.append(job_id)
 
     blocked = registry.reserve("new-work")
     assert blocked["code"] == "job_capacity"
-    assert registry.get("done-0") is not None
+    assert registry.get(done_ids[0]) is not None
 
     now[0] += 661
     admitted = registry.reserve("new-work")
     assert admitted["status"] == "running"
-    assert sum(registry.get(f"done-{index}") is not None for index in range(64)) == 63
+    assert sum(registry.get(job_id) is not None for job_id in done_ids) == 63
 
 
 def test_rejoin_only_receipt_never_recreates_evicted_paid_work(monkeypatch):
@@ -240,8 +244,9 @@ def test_rejoin_only_receipt_never_recreates_evicted_paid_work(monkeypatch):
     receipt = registry.rejoin("durable-paid-claim")
     assert receipt is not None
 
-    for index in range(63):
-        registry.put(f"pressure-{index}", status="running", result=None, ts=now[0])
+    for _ in range(63):
+        pressure = registry.reserve()["job_id"]
+        registry.put(pressure, status="running", result=None, ts=now[0], worker_started=True)
     now[0] += 661
     assert registry.reserve("new-work")["status"] == "running"
     assert registry.get(receipt["job_id"]) is None
@@ -333,3 +338,102 @@ def test_terminal_poll_consumes_only_receipts_with_durable_replay_policy():
     assert generic_terminal["result"] == {"ok": True, "value": "generic"}
     assert registry.poll(generic["job_id"])["result"] == generic_terminal["result"]
     assert registry.rejoin("generic-memory-owner") == generic
+
+
+def test_a_worker_that_dies_without_publishing_stops_holding_its_slot(monkeypatch):
+    """The cap only ever released COMPLETED receipts, so anything that reached `running` and never
+    published sat here forever. Enough of them and genesis, boss commands, report refresh and scope
+    reports are all permanently out of capacity for the life of the process."""
+    from looplab.serve.jobs import _MAX_JOBS
+    from looplab.serve.protocol import JOB_DONE, JOB_RUNNING
+
+    from looplab.serve.jobs import _COMPLETED_RETENTION_SECONDS
+
+    def _corpse(registry, *, age: float):
+        """A receipt that reached `running` whose worker is provably finished without publishing."""
+        job_id = registry.reserve()["job_id"]
+        registry.put(job_id, worker_started=True, ts=time.time() - age)
+        dead = threading.Thread(target=lambda: None, daemon=True)
+        dead.start()
+        dead.join()
+        registry._job_threads[job_id] = dead
+        return job_id
+
+    # A FRESH corpse is terminalized but RETAINED: a client may still be inside its ten-minute poll
+    # window and must get an answer — an ambiguous one, since nobody can say whether the work had an
+    # outside effect before the worker died.
+    registry = JobRegistry()
+    fresh_corpse = _corpse(registry, age=0.0)
+    registry.reserve()                                   # any admission runs reconciliation
+    settled = registry.get(fresh_corpse)
+    assert settled is not None and settled["status"] == JOB_DONE
+    assert settled["result"]["code"] == "job_failed" and settled["result"]["ambiguous"] is True
+
+    # A registry FULL of corpses whose last sign of life predates the retention window must admit
+    # new work. Before this it could not: only completed receipts were ever released, and a worker
+    # that died without publishing never became one.
+    registry = JobRegistry()
+    for _ in range(_MAX_JOBS):
+        _corpse(registry, age=_COMPLETED_RETENTION_SECONDS + 1.0)
+    fresh = registry.reserve()
+    assert fresh.get("job_id"), (
+        "the registry stayed full of workers that can never publish: "
+        f"{fresh.get('code')}")
+
+
+def test_a_live_worker_keeps_its_slot(monkeypatch):
+    """Only PROVABLE corpses are retired. A slow worker is real work holding a real resource, and
+    the registry has no authority to declare it dead — capacity must fail closed instead."""
+    from looplab.serve.jobs import _MAX_JOBS
+    from looplab.serve.protocol import JOB_RUNNING
+
+    registry = JobRegistry()
+    release = threading.Event()
+    threads = []
+    try:
+        for _ in range(_MAX_JOBS):
+            job_id = registry.reserve()["job_id"]
+            registry.put(job_id, worker_started=True)
+            live = threading.Thread(target=release.wait, daemon=True)
+            live.start()
+            threads.append(live)
+            registry._job_threads[job_id] = live
+
+        blocked = registry.reserve()
+        assert blocked.get("code") == "job_capacity", "a live worker was evicted to make room"
+        assert blocked.get("job_id") is None
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=5)
+
+
+def test_an_abandoned_reservation_frees_its_slot_after_the_grace_window(monkeypatch):
+    """`reserve` then `start_reserved`/`discard_reservation` happen inside ONE request. A reservation
+    with no worker past the grace window is a caller that died in that window, so no worker can ever
+    appear for it — before this, that slot was held for the life of the process."""
+    from looplab.serve.jobs import _MAX_JOBS, _UNSTARTED_RESERVATION_GRACE_SECONDS
+
+    registry = JobRegistry()
+    stale = [registry.reserve()["job_id"] for _ in range(_MAX_JOBS)]
+    assert registry.reserve().get("code") == "job_capacity"   # still inside the grace window
+
+    aged = time.time() - _UNSTARTED_RESERVATION_GRACE_SECONDS - 1.0
+    for job_id in stale:
+        registry.put(job_id, ts=aged)
+    assert registry.reserve().get("job_id"), "an abandoned reservation held its slot forever"
+
+
+def test_a_late_worker_write_never_resurrects_a_retired_receipt():
+    """`put` used to `setdefault`, so a worker publishing after its slot was retired re-created the
+    entry — putting the registry back over its cap and undoing the retirement that freed the slot."""
+    from looplab.serve.protocol import JOB_DONE
+
+    registry = JobRegistry()
+    job_id = registry.reserve()["job_id"]
+    registry.discard_reservation(job_id)
+    assert registry.get(job_id) is None
+
+    registry.put(job_id, status=JOB_DONE, result={"ok": True})
+    assert registry.get(job_id) is None, "a retired receipt was resurrected by a late write"
+    assert registry._jobs == {}
