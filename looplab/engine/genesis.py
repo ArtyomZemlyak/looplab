@@ -189,7 +189,7 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         from types import SimpleNamespace
         from looplab.agents.agent import CompositeTools
         from looplab.tools.cross_run_tools import CrossRunTools
-        crt = CrossRunTools(memory_dir, role="researcher")
+        crt = CrossRunTools(memory_dir, role="researcher", audience="run")
         # No task passport exists yet. Bind the provider to the operator's goal/direction; an empty or vague
         # scope fails closed rather than exposing the machine-wide portfolio to an agent prompt.
         crt.bind_state(SimpleNamespace(task_id="", goal=goal, direction=direction or ""))

@@ -120,7 +120,13 @@ class CrossRunTools:
     """Read-only cross-run knowledge for the tool-loop. `role` ∈ {"researcher","developer"} scopes the
     claims to that role's lessons (+ shared/untagged); anything else sees all. Never raises from execute."""
 
-    def __init__(self, memory_dir: str | Path | None, *, role: str = "researcher"):
+    #: An `audience="run"` provider is MODEL-FACING and scoped to one live run: it must be bound
+    #: before it answers. `audience="portfolio"` is the explicit human/CLI (and pre-run Genesis)
+    #: audience, for which portfolio-wide reads ARE the intent.
+    AUDIENCES = ("portfolio", "run")
+
+    def __init__(self, memory_dir: str | Path | None, *, role: str = "researcher",
+                 audience: str = "portfolio"):
         self.dir = Path(memory_dir) if memory_dir else None
         self.role = str(role or "researcher")
         self._task_id = ""
@@ -130,10 +136,15 @@ class CrossRunTools:
         self._concepts: set[str] = set()      # E2: the current run's concept set (for similar_runs overlap)
         self._concept_projection_status = "complete"
         self._concept_projection_reasons: tuple[str, ...] = ()
-        # CODEX AGENT: Scope construction is fail-open: a forgotten/failed ``bind_state`` leaves the
-        # provider portfolio-wide, and ``bind_state(None)`` silently preserves that exposure. Because the
-        # same class is model-facing and human-facing, require an explicit audience/scope mode at creation;
-        # an unbound agent provider should return no rows rather than inherit CLI-level visibility.
+        # Scope is declared at CONSTRUCTION, not inferred from whether `bind_state` happened to run.
+        # This class is both model-facing and human-facing, and `_bound` alone was fail-OPEN: a
+        # forgotten or failed `bind_state` — and `bind_state(None)`, which returns silently — left an
+        # agent's provider reading the entire portfolio while looking exactly like a scoped one.
+        # `audience="run"` says "this answers for ONE run", so unbound means no rows rather than
+        # every run's rows. `portfolio` keeps the CLI/Genesis intent, where unbound IS the scope.
+        self.audience = str(audience or "portfolio")
+        if self.audience not in self.AUDIENCES:
+            self.audience = "run"          # an unrecognized audience fails CLOSED, never portfolio-wide
         self._bound = False
         self._capsule_scope_receipt = {
             "scope_complete": True,
@@ -415,6 +426,13 @@ class CrossRunTools:
     def execute(self, name: str, args: dict) -> str:
         # ToolProvider contract: execute NEVER raises (a junk arg must read as a tool error, not crash
         # the agent phase — drive_tool_loop does not guard tools.execute).
+        if self.audience == "run" and not self._bound:
+            # Fail CLOSED, and say so. A run-scoped provider that was never bound has no scope to
+            # filter by, and answering portfolio-wide would hand one run's model every other run's
+            # rows while every receipt below still printed a scoped-looking result. Saying it out
+            # loud is the point: a silent portfolio answer is indistinguishable from a correct one.
+            return ("(cross-run tools are not bound to this run yet — no rows are in scope; "
+                    "this is a wiring error, not an empty portfolio)")
         try:
             result = self._execute(name, args or {})
             # CODEX AGENT: Auditability gap: the exact rendered tool result, its scope snapshot, and the

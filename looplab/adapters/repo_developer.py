@@ -511,11 +511,13 @@ class LLMRepoDeveloper:
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.
         if getattr(self, "_cross_run_read_tools", False) and getattr(self, "_cross_run_memory_dir", None):
             from looplab.tools.cross_run_tools import CrossRunTools
-            tool = CrossRunTools(self._cross_run_memory_dir, role="developer")
+            tool = CrossRunTools(self._cross_run_memory_dir, role="developer", audience="run")
             task = getattr(self, "task", None)
             if task is not None:
                 # Agent-facing providers are task-bound before use. Unbound reads remain an explicit
-                # human/CLI portfolio capability, never an accidental agent default.
+                # human/CLI portfolio capability, never an accidental agent default — `audience="run"`
+                # is what enforces that: with no task to bind, this provider answers nothing rather
+                # than falling back to the whole portfolio.
                 tool.bind_state(task)
             extra.append(tool)
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]

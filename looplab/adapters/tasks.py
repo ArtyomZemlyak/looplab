@@ -453,7 +453,7 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         # constructor also serves the STRATEGIST, and a hard-coded "researcher" made
         # `_role_lessons` filter every developer-tagged production lesson out of its claims/Atlas/
         # search (an unknown role deliberately sees all roles — cross_run_tools.py:324).
-        providers.append(CrossRunTools(settings.memory_dir, role=role))
+        providers.append(CrossRunTools(settings.memory_dir, role=role, audience="run"))
     if core_only:
         return providers
     cases_path = (str(Path(settings.memory_dir) / "cases.jsonl")

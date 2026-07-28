@@ -1317,3 +1317,63 @@ def test_concept_card_does_not_recommend_minting_invalid_slug_text(tmp_path):
     out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "<script>/x"})
     assert "not a valid concept slug" in out
     assert "looks NEW" not in out
+
+
+def test_a_run_scoped_provider_that_was_never_bound_answers_nothing(tmp_path):
+    """Scope used to be inferred from whether `bind_state` happened to run, which is fail-OPEN.
+
+    A forgotten or failed `bind_state` — and `bind_state(None)`, which returns silently — left an
+    agent's provider reading the ENTIRE portfolio while every receipt still rendered like a scoped
+    one. The audience is declared at construction instead: `run` means "this answers for one run",
+    so unbound is a wiring error that returns nothing, not every other run's rows.
+    """
+    import orjson
+
+    from looplab.tools.cross_run_tools import CrossRunTools
+
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps({
+        "statement": "another run's private lesson", "outcome": "supported", "evidence": [1],
+        "run_id": "other", "task_id": "someone-elses-task", "direction": "min",
+    }) + b"\n")
+
+    for tool_name, args in (("cross_run_search", {"query": "lesson"}),
+                            ("cross_run_atlas", {}),
+                            ("cross_run_claims", {"query": "lesson"})):
+        agent = CrossRunTools(tmp_path, role="researcher", audience="run").execute(tool_name, args)
+        assert "another run" not in agent, f"{tool_name} leaked a portfolio row to an unbound agent"
+        assert "not bound" in agent, f"{tool_name} must say the provider is unwired, not look empty"
+
+    # `bind_state(None)` is the silent no-op that made this fail open — it must not unlock anything.
+    still_unbound = CrossRunTools(tmp_path, role="researcher", audience="run")
+    still_unbound.bind_state(None)
+    assert "not bound" in still_unbound.execute("cross_run_search", {"query": "lesson"})
+
+    # The human/CLI audience is unchanged: unbound IS its scope, and it still reads the portfolio.
+    operator = CrossRunTools(tmp_path, role="researcher").execute(
+        "cross_run_search", {"query": "lesson"})
+    assert "not bound" not in operator
+
+    # An unrecognized audience must fail CLOSED rather than default to portfolio-wide.
+    assert CrossRunTools(tmp_path, audience="whatever").audience == "run"
+
+
+def test_a_bound_run_scoped_provider_reads_normally(tmp_path):
+    """The gate is about being UNBOUND, not about the audience: once bound, a run-scoped provider
+    behaves exactly as it did before — otherwise the fix would quietly cost the agent its memory."""
+    from types import SimpleNamespace
+
+    import orjson
+
+    from looplab.tools.cross_run_tools import CrossRunTools
+
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps({
+        "statement": "hard-negative mining helps recall", "outcome": "supported", "evidence": [1],
+        "run_id": "r-old", "task_id": "t", "direction": "min",
+    }) + b"\n")
+    state = SimpleNamespace(task_id="t", run_id="r-new", direction="min",
+                            goal="improve recall", nodes={})
+    bound = CrossRunTools(tmp_path, role="researcher", audience="run")
+    bound.bind_state(state)
+    out = bound.execute("cross_run_search", {"query": "hard negatives"})
+    assert "not bound" not in out
+    assert "hard-negative mining" in out

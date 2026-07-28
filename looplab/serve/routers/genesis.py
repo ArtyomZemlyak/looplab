@@ -309,7 +309,7 @@ def build_router(srv) -> APIRouter:
                 "-> a file inside edit_surface). Don't just SAY you'll look — look, then call `emit` once.")
             if getattr(gset, "cross_run_read_tools", False) and getattr(gset, "memory_dir", None):
                 from looplab.tools.cross_run_tools import CrossRunTools
-                cross_run = CrossRunTools(gset.memory_dir, role="researcher")
+                cross_run = CrossRunTools(gset.memory_dir, role="researcher", audience="run")
                 task = draft.get("task") if isinstance(draft, dict) else {}
                 direction = task.get("direction", "") if isinstance(task, dict) else ""
                 cross_run.bind_state(SimpleNamespace(task_id="", goal=instruction or convo,

@@ -45,7 +45,10 @@ persisted portfolio-wide run-incarnation UID.
 lessons/capsules accept exact task or a strict related-goal fingerprint, while v3 D8 (which stores no goal
 fingerprint) is exact-task-only. Task facets are metadata reserved for future post-scope ranking and currently
 neither grant visibility nor change ordering. External coding-agent Developer backends receive no D8 provider,
-while the standalone CLI remains portfolio-wide. Proactive Researcher/Strategist influence persists lean
+while the standalone CLI remains portfolio-wide. That difference is now DECLARED at provider
+construction rather than inferred from whether run-binding happened: a model-facing provider is
+built for one run, so if it is never bound it answers with an explicit "not bound to this run" and
+no rows, instead of silently falling back to every run's. Proactive Researcher/Strategist influence persists lean
 source/render digest receipts. Typed owner governance writes now have revision CAS, action-id idempotency and
 explicit clear actions, while stewards remain proposal-only. These projections are real, but they do not yet
 provide an immutable comparison/access scope, one portfolio-wide atomic snapshot, a complete concept/corpus
