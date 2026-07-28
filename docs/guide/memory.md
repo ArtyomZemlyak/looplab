@@ -90,6 +90,12 @@ per-capsule bounds, so it can be zero while file-level quarantine still makes `s
 Consumers must treat `source_complete` as the authority and must never infer completeness from
 `partial_capsules == 0`.
 
+An evidence ref is a node id — an index into that run's node table — so it is non-negative by
+construction. A negative id (as an int or a signed numeric string) would run-qualify into a citation
+like `run:-1`: an authoritative-looking pointer to a node that cannot exist. It quarantines its row
+rather than being silently dropped, for the same reason as every other poisoned element — repairing
+the row in place would leave the surrounding claim marked complete and trustworthy.
+
 D8 claim v3 repeats a validated per-run producer receipt on every retained row (or writes a non-indexed
 receipt sentinel when a non-empty source retains zero claims):
 `claims_total`, `claims_retained`, `claims_omitted`, and `producer_complete`. The writer scans for the first

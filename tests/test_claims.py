@@ -134,8 +134,45 @@ def test_numeric_string_node_ids_are_compatible_and_urls_are_not_node_evidence()
     out = claim_assessments(
         [], research_claims=[{"statement": "s", "node_ids": ["4", "-5"], "urls": ["u"],
                               "verification": {"verdict": "supported", "method": "llm"}}])
+    # A NEGATIVE id is not a legacy spelling of anything — node ids index the run's node table — so
+    # the row is quarantined, not silently repaired (see the next test).
+    assert out == []
+
+    ok = claim_assessments(
+        [], research_claims=[{"statement": "s", "node_ids": ["4", "5"], "urls": ["u"],
+                              "verification": {"verdict": "supported", "method": "llm"}}])
     # Legacy bounded integer strings still coerce exactly; a URL belongs only in sources.
-    assert out[0]["support"] == ["?:-5", "?:4"] and out[0]["sources"] == ["u"]
+    assert ok[0]["support"] == ["?:4", "?:5"] and ok[0]["sources"] == ["u"]
+
+
+def test_a_negative_node_id_never_becomes_a_citation():
+    """`support`/`oppose` refs are the evidence an operator (and cross-run retrieval) follows. A
+    negative id used to clear every gate and be run-qualified into `run:-1` — an authoritative-looking
+    pointer to a node that cannot exist, inside a row the health receipt still called complete.
+
+    It quarantines the row rather than dropping the element, which is this module's existing rule:
+    silently repairing a poisoned source would leave the surrounding claim marked trustworthy.
+    """
+    from looplab.engine.claims import _node_ids, _valid_node_source
+
+    supported = {"verdict": "supported", "method": "llm"}
+    out = claim_assessments([], research_claims=[
+        {"statement": "phantom", "run_id": "r1", "task_id": "t",
+         "node_ids": [2, -1], "verification": supported},
+        {"statement": "signed string", "run_id": "r1", "task_id": "t",
+         "node_ids": ["-7"], "verification": supported},
+        {"statement": "real", "run_id": "r1", "task_id": "t",
+         "node_ids": [2], "verification": supported},
+    ])
+    assert [c["statement"] for c in out] == ["real"], "a negative id was cited as real evidence"
+    assert out[0]["support"] == ["r1:2"]
+
+    assert _valid_node_source([1, -1]) is False
+    assert _valid_node_source(["-1"]) is False
+    assert _valid_node_source(-1) is False
+    assert _valid_node_source([0, 3, "7"]) is True          # non-negative ids are untouched
+    # …and any path that still reaches the coercer drops them instead of emitting a phantom ref.
+    assert _node_ids([0, -1, "2", "-3"]) == [0, 2]
 
 
 def test_empty_input_is_empty():

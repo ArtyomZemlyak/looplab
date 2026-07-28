@@ -270,10 +270,13 @@ def _valid_node_source(raw) -> bool:
     if not isinstance(values, (list, tuple)) or len(values) > _MAX_SOURCE_EVIDENCE:
         return False
     for value in values:
-        # CODEX AGENT: node identities are non-negative, but negative ints/signed strings pass this
-        # completeness fence and become authoritative phantom refs such as `run:-1`. Reject them here
-        # and in the v3 writer/validator.
+        # A node id is an INDEX into the run's node table and is therefore non-negative. A negative
+        # int (or a signed numeric string) used to clear this completeness fence and go on to be
+        # run-qualified into an authoritative-looking phantom ref like `run:-1` — a citation to a node
+        # that cannot exist, in a row the health receipt still called complete.
         if type(value) is int:
+            if value < 0:
+                return False
             continue
         # claim source health is an authority signal, so a poisoned element cannot be
         # silently dropped by ``_node_ids`` while the surrounding row remains "complete". Numeric-string
@@ -282,9 +285,11 @@ def _valid_node_source(raw) -> bool:
             text = value.strip()
             if text and len(text) <= 24 and text.lstrip("-").isdigit():
                 try:
-                    int(text)
+                    parsed = int(text)
                 except (ValueError, OverflowError):
                     return False
+                if parsed < 0:
+                    return False          # same phantom ref, spelled as a string
                 continue
         return False
     return True
@@ -384,7 +389,8 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
                     or not isinstance(row.get("metric"), str)
                     or len(row["metric"]) > 200
                     or not isinstance(row.get("node_ids"), list)
-                    or any(type(node_id) is not int for node_id in row["node_ids"])
+                    or any(type(node_id) is not int or node_id < 0
+                           for node_id in row["node_ids"])
                     or not _valid_research_node_refs(row.get("node_refs"), row["node_ids"])
                     or not isinstance(row.get("urls"), list)
                     or any(not isinstance(url, str) or len(url) > 2000 for url in row["urls"])
@@ -477,13 +483,16 @@ def _node_ids(raw) -> list:
         if isinstance(x, bool):
             continue
         if isinstance(x, int):
-            out.append(x)
+            if x >= 0:                    # a node id indexes the node table; `-1` is not a node
+                out.append(x)
         elif (isinstance(x, str) and len(x.strip()) <= 24
               and x.strip().lstrip("-").isdigit()):
             try:
-                out.append(int(x))
+                parsed = int(x)
             except (ValueError, OverflowError):
                 continue
+            if parsed >= 0:
+                out.append(parsed)
     return out
 
 

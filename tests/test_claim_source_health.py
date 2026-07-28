@@ -72,13 +72,24 @@ def test_poisoned_lesson_semantics_quarantine_whole_row_and_lower_authority(
 def test_bounded_integer_string_node_source_remains_legacy_compatible(tmp_path):
     from looplab.engine.claims import claims_for_memory
 
-    row = {**_lesson("numeric-string evidence", "legacy-run"), "evidence": ["-42", "7"]}
+    row = {**_lesson("numeric-string evidence", "legacy-run"), "evidence": ["42", "7"]}
     (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n")
 
     claims = claims_for_memory(tmp_path, structured=True)
 
-    assert claims[0]["support"] == ["legacy-run:-42", "legacy-run:7"]
+    assert claims[0]["support"] == ["legacy-run:42", "legacy-run:7"]
     assert claims.claim_source["source_complete"] is True
+
+    # A SIGNED numeric string is not part of that legacy compatibility: a node id indexes the run's
+    # node table, so `-42` would qualify into a citation to a node that cannot exist. It quarantines
+    # the row and says so in the receipt instead of being coerced like an unsigned one.
+    signed = tmp_path / "signed"
+    signed.mkdir()
+    (signed / "lessons.jsonl").write_bytes(
+        orjson.dumps({**_lesson("signed evidence", "legacy-run"), "evidence": ["-42"]}) + b"\n")
+    rejected = claims_for_memory(signed, structured=True)
+    assert list(rejected) == []
+    assert rejected.claim_source["source_complete"] is False
 
 
 def test_lenient_health_quarantines_invalid_utf8_and_keeps_later_rows(tmp_path):
