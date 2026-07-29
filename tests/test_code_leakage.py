@@ -199,3 +199,31 @@ def test_fit_before_split_anchors_on_cv_drivers_not_only_instantiation():
 
     assert flags('parts = "a,b".split(",")\nscaler.fit(X_train)') == set()
     assert flags("name = line.split()\nmodel.fit(X_train, y_train)") == set()
+
+
+def test_str_split_receiver_names_do_not_anchor_a_cv_boundary():
+    """`ss`/`kf`/`cv` are ordinary STRING variable names, not just splitter names.
+
+    The receiver alternation was keyed on the name alone, so an honest solution whose `X` already IS
+    the training split got a HARD `fit_before_split` purely because a later line parsed a header
+    through a variable called `ss` — and under `trust_gate='gate'`/`'block'` that silently excludes an
+    honest winner from selection and confirmation. A real splitter's `.split()` takes an array
+    identifier; `str.split()` takes a quoted separator or nothing, which is the discriminator.
+    """
+    from looplab.trust.leakage import code_leakage_scan
+
+    def signals(src):
+        return {f["signal"] for f in code_leakage_scan(src).get("flags", [])}
+
+    honest_sep = ('X = pd.read_csv("train.csv").drop(columns=["y"])\n'
+                  'y = 1\nscaler.fit(X)\nss = header_line\ncols = ss.split(",")\n')
+    honest_bare = ('X = load()\ny = 1\nscaler.fit(X)\nkf = line\nparts = kf.split()\n')
+    assert "fit_before_split" not in signals(honest_sep), (
+        "a plain str.split() through a two-letter variable name still anchors a CV boundary")
+    assert "fit_before_split" not in signals(honest_bare)
+
+    # The recall the receiver rule exists for is unchanged: a real splitter call still anchors.
+    for real in ('X = load()\ny = load_y()\nscaler.fit(X)\nfor a, b in cv.split(X, y):\n    pass\n',
+                 'X = load()\ny = load_y()\nscaler.fit(X)\nfor a, b in skf.split(X, y):\n    pass\n',
+                 'X = load()\ny = load_y()\nscaler.fit(X)\na, b = train_test_split(X, y)\n'):
+        assert "fit_before_split" in signals(real), real

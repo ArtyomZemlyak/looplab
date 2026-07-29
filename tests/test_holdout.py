@@ -341,3 +341,32 @@ def test_candidate_output_refuses_a_symlink_to_the_answer_key(tmp_path):
     assert got == (workdir / "submission.csv").resolve()
     # a missing file is simply "no submission", not an error
     assert _candidate_output(workdir, "nope.csv", "submission.csv") is None
+
+
+def test_holdout_phase_refuses_a_symlinked_predictions_file(tmp_path):
+    """The holdout reader is a host confused-deputy boundary, like its `apply_host_grade` sibling.
+
+    `predictions.json` is NAMED by the task config but WRITTEN by untrusted candidate code, and
+    `read_text` follows symlinks. This reader is the more sensitive of the two: under
+    `holdout_select` its score picks the champion on the unseen partition, and it runs at finish
+    where no reward-hack tell re-fires. It was building the path by hand, so a planted symlink the
+    sibling refused was still read here.
+    """
+    from looplab.engine.holdout import _candidate_output
+
+    workdir = tmp_path / "nodes" / "node_0"
+    workdir.mkdir(parents=True)
+    secret = tmp_path / "private_answer_key.json"
+    secret.write_text('{"0": 1}', encoding="utf-8")
+    (workdir / "predictions.json").symlink_to(secret)
+
+    assert _candidate_output(workdir, "", "predictions.json") is None, (
+        "a symlinked predictions file resolved — the host would grade the answer key")
+    # An honest regular file in the same slot still resolves, so the guard is not a blanket refusal.
+    (workdir / "predictions.json").unlink()
+    (workdir / "predictions.json").write_text('{"0": 0}', encoding="utf-8")
+    assert _candidate_output(workdir, "", "predictions.json") is not None
+
+    # ...and the escape/absolute-name refusals the same helper owns.
+    assert _candidate_output(workdir, "../../etc/passwd", "predictions.json") is None
+    assert _candidate_output(workdir, "/etc/passwd", "predictions.json") is None

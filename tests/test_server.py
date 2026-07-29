@@ -3416,3 +3416,19 @@ def test_boss_command_without_a_key_keeps_the_historical_behaviour(tmp_path, mon
     assert client.post("/api/runs/z/command", json={"instruction": "go"}).json()["ok"] is True
     assert client.post("/api/runs/z/command", json={"instruction": "go"}).json()["ok"] is True
     assert len(calls) == 2
+
+
+def test_author_name_allowlist_rejects_a_trailing_newline(tmp_path):
+    """`$` also matches immediately BEFORE a trailing newline, so `x.md\\n` passed the allow-list.
+
+    The write then landed a file that `list_author`'s `*.md` glob can never match again — the
+    write-only-invisible outcome the allow-list exists to prevent. `\\Z` anchors at the true end.
+    """
+    from looplab.serve.routers.misc import _AUTHOR_NAME_RE
+
+    assert _AUTHOR_NAME_RE.match("note.md")
+    assert _AUTHOR_NAME_RE.match("a_b-c.1.md")
+    assert not _AUTHOR_NAME_RE.match("note.md\n"), (
+        "a trailing newline still passes the authored-markdown allow-list")
+    assert not _AUTHOR_NAME_RE.match("note.txt")
+    assert not _AUTHOR_NAME_RE.match("../escape.md")

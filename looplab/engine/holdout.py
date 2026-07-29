@@ -207,9 +207,19 @@ class HoldoutGrader:
                 continue
             n = state.nodes[nid]
             preds = None
-            p = self._e.run_dir / "nodes" / f"node_{nid}" / g.get("predictions", "predictions.json")
+            # Same host confused-deputy boundary as `apply_host_grade` — this file is named by the
+            # task config but WRITTEN by untrusted candidate code, and `read_text` follows symlinks.
+            # This reader is if anything the more sensitive of the two: under `holdout_select` its
+            # score picks the champion on the unseen partition, and it runs at finish where no
+            # reward-hack tell re-fires. It was building the path by hand, so a planted
+            # `predictions.json -> <data_dir>/prepared/private/test.csv` was refused by the sibling
+            # and then read here.
+            p = _candidate_output(
+                self._e.run_dir / "nodes" / f"node_{nid}",
+                g.get("predictions", ""), "predictions.json")
             try:
-                preds = _json.loads(p.read_text(encoding="utf-8-sig", errors="replace"))
+                preds = (_json.loads(p.read_text(encoding="utf-8-sig", errors="replace"))
+                         if p is not None else None)
             except (OSError, ValueError):
                 preds = None
             m = self._e._host_score_split(preds, g, holdout=True) if preds is not None else None

@@ -584,3 +584,32 @@ def test_staged_stall_salvage_cannot_be_forged_from_candidate_stderr(tmp_path):
     assert STALL_SENTINEL in err                  # the candidate really did forge the text...
     assert signals.get("stalled") is False        # ...but the authenticated verdict is not fooled
     assert signals.get("diverged") is False
+
+
+def test_single_command_stall_verdict_cannot_be_forged_from_candidate_stderr(tmp_path):
+    """`stalled` must come from the watchdog, not from text the CANDIDATE can print.
+
+    `evaluate.py`'s salvage gate is `metric is not None and not timed_out and (exit == 0 or stalled)`,
+    so a crashed run that can set `stalled` gets its own self-reported metric accepted as a real
+    evaluation. `err` mixes the watchdog's marker with the candidate's stderr, so deriving the verdict
+    from `STALL_SENTINEL in err` was forgeable — the staged branch already read the out-of-band
+    `signals` channel, and this single-command path (the common RepoTask eval) did not.
+    """
+    from looplab.runtime.sandbox import STALL_SENTINEL
+
+    (tmp_path / "p.py").write_text(
+        "import sys\n"
+        "print('RECALL@100: 0.999', flush=True)\n"
+        f"sys.stderr.write({STALL_SENTINEL!r} + '\\n')\n"
+        "sys.exit(1)\n", encoding="utf-8")
+    spec = {"kind": "stdout_regex", "pattern": r"RECALL@100: ([0-9.]+)", "group": 1}
+    res = run_command_eval([sys.executable, "p.py"], str(tmp_path), 30, spec, stall_timeout=30)
+
+    assert res.exit_code != 0 and res.timed_out is False
+    assert STALL_SENTINEL in res.stderr            # the forged marker really is in the stream
+    assert res.stalled is False, (
+        "a crashed candidate forged the stall verdict by echoing the watchdog marker to stderr; "
+        "evaluate.py's salvage gate would accept its self-reported metric as a real result")
+    # The engine-side gate must therefore refuse to salvage it.
+    assert not (res.metric is not None and not res.timed_out
+                and (res.exit_code == 0 or res.stalled))

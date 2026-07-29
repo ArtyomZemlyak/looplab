@@ -26,7 +26,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.sandbox import (RunResult, STALL_SENTINEL, _to_float, docker_gpu_argv,
+from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_timed_out, finite_timeout, json_line_extras,
                                      json_line_metric, json_line_trials, run_argv)
 
@@ -875,7 +875,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                                   "seconds": round(time.monotonic() - _t0, 3)})
             if _status != "ok":
                 # STALL-SALVAGE parity with the single-command path: that path reads the metric whenever
-                # the run was not a hard timeout and reports stalled=(STALL_SENTINEL in err), so
+                # the run was not a hard timeout and reports the same authenticated `_sig` verdict, so
                 # evaluate.py's gate (`metric is not None and not timed_out and (exit==0 or stalled)`)
                 # can rescue a train+eval that printed its metric then hung on teardown (a wedged CUDA
                 # finalize, a distributed barrier) and was tree-killed by the stall watchdog. Mirror it
@@ -914,11 +914,20 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             # multi-hour), not just a short scorer — so it gets the STALL watchdog too (health_check
             # stays off here: the NaN scan is for declared training stages, and a scorer may legitimately
             # print 'nan'; the stall watchdog is output-based and safe for any command).
+            # `_sig` is the AUTHENTICATED watchdog verdict, exactly as the staged branch above uses
+            # it. `err` mixes the watchdog's marker with the CANDIDATE's own stderr, so
+            # `STALL_SENTINEL in err` is forgeable: a solution that prints its metric, echoes the
+            # marker to stderr and exits non-zero used to report stalled=True, and evaluate.py's
+            # salvage gate (`metric is not None and not timed_out and (exit == 0 or stalled)`) then
+            # accepted a CRASHED run's self-reported score. This path is the common RepoTask eval, so
+            # it needs the out-of-band flag just as much as the staged one.
+            _sig: dict = {}
             rc, out, err, to = run_argv(
                 _w(_bound(command, timeout), str(wd)), wd, timeout + grace, env, max_output_bytes, cancel,
                 log_path=_log("eval.log"),
                 stall_timeout=(stall_timeout if stall_timeout is not None
-                               else _stall_window(timeout, stall_cap)))
+                               else _stall_window(timeout, stall_cap)),
+                signals=_sig)
             to = to or (is_docker and docker_timed_out(rc))   # 124 (SIGTERM) or 137 (SIGKILL escalation)
             if _h is not None:
                 _h.set_many(exit_code=rc, timed_out=to)
@@ -962,6 +971,6 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials,
-                     stages=stage_results, stalled=(STALL_SENTINEL in err))
+                     stages=stage_results, stalled=bool(_sig.get("stalled")))
 
 

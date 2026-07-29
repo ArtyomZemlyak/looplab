@@ -86,7 +86,11 @@ _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
 #     `scaler.fit(X)` before `cv.split(X, y)` scanned CLEAN. So anchor additionally on the CV-driver
 #     calls and on a `.split(` whose RECEIVER is a conventional splitter name. Neither can match the
 #     `str.split()` collision the class anchors were introduced to avoid: `"a,b".split(",")` has no
-#     cross_val*/check_cv token and its receiver is a string literal/arbitrary name, not `cv`/`skf`/….
+#     cross_val*/check_cv token, and the receiver alternation additionally requires the FIRST
+#     ARGUMENT to be an identifier: `cv.split(X, y)` matches, `ss.split(",")` and a bare
+#     `ss.split()` do not. That argument test is what makes the SHORT names safe — `ss`, `kf` and
+#     `cv` are also ordinary string-variable names, and keying on the receiver alone hard-gated an
+#     honest `scaler.fit(X)` whenever a later line parsed a header with one of them.
 _SPLIT_RE = re.compile(
     r"train_test_split\s*\("
     r"|[A-Za-z]*KFold\s*\("
@@ -94,7 +98,8 @@ _SPLIT_RE = re.compile(
     r"|TimeSeriesSplit\s*\(|PredefinedSplit\s*\("
     r"|Leave[A-Za-z]*Out\s*\("
     r"|cross_val\w*\s*\(|check_cv\s*\("
-    r"|\b(?:cv|cvs|skf|skfold|kf|kfold|sss|gss|ss|splitter|folds?)\s*\.\s*split\s*\("
+    r"|\b(?:cv|cvs|skf|skfold|kf|kfold|sss|gss|ss|splitter|folds?)"
+    r"\s*\.\s*split\s*\(\s*(?![\"\'\)])"
 )
 # The early-stopping monitor kwarg (split off from the fit ARGS so a benign eval_set on VALIDATION
 # isn't read as fit-on-validation) and the TEST-monitor tell. The monitor tell matches the substring

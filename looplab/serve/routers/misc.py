@@ -38,7 +38,7 @@ _MEMORY_SOURCE_ROWS = 1000
 # name pattern keeps `PUT /api/{kind}/{name}` to the authored-markdown surface `list_author` can show.
 _AUTHOR_MAX_FILES = 500
 _AUTHOR_MAX_BYTES = 256 * 1024
-_AUTHOR_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.md$")
+_AUTHOR_NAME_RE = re.compile(r"\A[A-Za-z0-9._-]+\.md\Z")
 _ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
 _SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_ENV))})$"
 
