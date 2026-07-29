@@ -147,6 +147,8 @@ const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|
 const FILE_CHAR_CAP = 20000
 const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv into the tab (OOM)
 const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
+const NEW_CHAT_COMPOSER_KEY = '__new__'
+const newComposerDraft = () => ({ input: '', files: [] })
 const ASSISTANT_OVERLAY_MAX_PX = 1439
 const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 880))
 const clampAssistantWidth = (value, compact = window.innerWidth <= ASSISTANT_OVERLAY_MAX_PX) => {
@@ -171,7 +173,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const readOnlyShort = staleDiagnostic
     ? 'Stale diagnostic link · open the current generation'
     : `History seq ${runAccess.seq} · return live`
-  const [input, setInput] = useState('')
+  const [input, setInputState] = useState('')
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
   // Editable Genesis task/settings can be sensitive.  Retain them only in this mounted Assistant's
@@ -204,7 +206,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const resolvedPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
   const [shareUnknownSid, setShareUnknownSid] = useState(null)
-  const [files, setFiles] = useState([])          // attached text files [{name,size,content,truncated}]
+  const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
 
   // A permission card cannot render in the collapsed composer bar. Reveal the side thread as soon as
@@ -237,6 +239,49 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const commandFocusRequestedRef = useRef(false)
   const openSessionRef = useRef(null)
   const toastRunIdRef = useRef(runId)
+  // A composer belongs to the chat it was written in. Keep text and attachments in memory per session
+  // so selecting another transcript cannot silently send the previous chat's draft. The unsaved
+  // new-chat composer has its own slot; "+ New" deliberately resets that slot.
+  const composerDraftsRef = useRef(new Map([
+    [NEW_CHAT_COMPOSER_KEY, newComposerDraft()],
+  ]))
+  const composerKeyRef = useRef(NEW_CHAT_COMPOSER_KEY)
+  const composerDraftRef = useRef(composerDraftsRef.current.get(NEW_CHAT_COMPOSER_KEY))
+  const setInput = React.useCallback(update => {
+    const draft = composerDraftRef.current
+    const next = typeof update === 'function' ? update(draft.input) : update
+    draft.input = next
+    setInputState(next)
+  }, [])
+  const updateComposerFiles = React.useCallback((draft, update) => {
+    const next = typeof update === 'function' ? update(draft.files) : update
+    draft.files = next
+    if (composerDraftRef.current === draft) setFilesState(next)
+  }, [])
+  const setFiles = React.useCallback(update => {
+    updateComposerFiles(composerDraftRef.current, update)
+  }, [updateComposerFiles])
+  const activateComposer = React.useCallback((key, { clear = false } = {}) => {
+    const draft = clear
+      ? newComposerDraft()
+      : composerDraftsRef.current.get(key) || newComposerDraft()
+    composerDraftsRef.current.set(key, draft)
+    composerKeyRef.current = key
+    composerDraftRef.current = draft
+    setInputState(draft.input)
+    setFilesState(draft.files)
+    setSuggestionsDismissed(false)
+    setSuggestionIndex(0)
+  }, [])
+  const bindComposerToSession = React.useCallback(id => {
+    const previousKey = composerKeyRef.current
+    const draft = composerDraftRef.current
+    composerDraftsRef.current.set(id, draft)
+    if (previousKey === NEW_CHAT_COMPOSER_KEY) {
+      composerDraftsRef.current.set(NEW_CHAT_COMPOSER_KEY, newComposerDraft())
+    }
+    composerKeyRef.current = id
+  }, [])
   useEffect(() => {
     setRunAccessState(getRunAccess(runId))
     const onAccess = (e) => {
@@ -372,6 +417,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (!mountedRef.current || seq !== openSessionSeqRef.current) return
       if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
       if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
+      activateComposer(id)
       sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
       storageSet('ll.asstSid', id)
       const arr = s.messages || []
@@ -561,7 +607,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // the departing turn's finally is sid-guarded — reset the shared flags here (see openSession)
     runningRef.current = false; setBusy(false); setPending([])
     sidRef.current = null; setSid(null); setMsgs([])
-    setPreview(''); setHasNew(false); setInput(''); setFiles([])
+    setPreview(''); setHasNew(false)
+    activateComposer(NEW_CHAT_COMPOSER_KEY, { clear: true })
     storageRemove('ll.asstSid')
   }
   const delSession = async (id, e) => {
@@ -582,6 +629,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     try {
       await assistantDelete(id)
       setLaunchDrafts(current => clearLaunchDraftSession(current, id))
+      composerDraftsRef.current.delete(id)
       if (id === storageGet('ll.asstSid')) storageRemove('ll.asstSid')
       if (id === sidRef.current) newChat()
     } catch { flash('Could not delete this Assistant chat'); refreshSessions() }
@@ -1054,6 +1102,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // ── attached files ──
   const onFiles = async (list) => {
+    const ownerDraft = composerDraftRef.current
     const picked = [...(list || [])]
     const bad = picked.filter(f => !TEXT_EXT.test(f.name))
     if (bad.length) flash(`skipped non-text: ${bad.map(f => f.name).join(', ')}`)
@@ -1064,7 +1113,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     if (big.length) flash(`too large (>2MB): ${big.map(f => f.name).join(', ')}`)
     const ok = txt.filter(f => !SECRET_RE.test(f.name) && f.size <= MAX_FILE_BYTES)
     const read = (await Promise.all(ok.map(readFileText))).filter(Boolean)
-    if (read.length) setFiles(f => {   // dedup by name (React key + removeFile both key on name)
+    if (read.length) updateComposerFiles(ownerDraft, f => {   // dedup by name (React key + removeFile both key on name)
       const seen = new Set(f.map(x => x.name)); return [...f, ...read.filter(r => !seen.has(r.name))]
     })
   }
@@ -1106,7 +1155,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     if (ensureVisible && view === 'bar') setView('side')
     const wasBar = view === 'bar' && !ensureVisible
     setPreview(''); setHasNew(false)
-    const atts = retryFiles || files
+    const draftAtSend = composerDraftRef.current
+    const inputAtSend = draftAtSend.input
+    const atts = retryFiles != null ? [...retryFiles] : [...draftAtSend.files]
     const effectiveMode = turnMode || mode
     const sessionSeq = openSessionSeqRef.current
     let id = sid
@@ -1117,17 +1168,23 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         const m = await boundedRequest(signal => assistantCreate(
           (userText || instruction).slice(0, 60), effectiveMode, { signal }))
         if (!mountedRef.current || sessionSeq !== openSessionSeqRef.current) { turnCaptureRef.current = false; return }
-        id = m.id; sidRef.current = id; storageSet('ll.asstSid', id); setSid(id)
+        id = m.id
+        bindComposerToSession(id)
+        sidRef.current = id; storageSet('ll.asstSid', id); setSid(id)
       } catch {
         turnCaptureRef.current = false
         if (sessionSeq === openSessionSeqRef.current) flash('Could not start the chat — your draft is preserved')
         return
       }
     }
-    // Keep a typed /new goal intact if creating the Assistant session failed.  Once a durable session
-    // exists, the exact visible/raw turn below owns recovery and the composer can safely clear.
-    if (clearComposer) setInput('')
-    if (!retryFiles) setFiles([])   // a retry reuses its own snapshot; do not clear newly composed files
+    // Keep the exact composer intact if creating the session failed. After durable creation, clear
+    // only what this send captured: typing or file reads completed during the request remain as a draft.
+    if (clearComposer && composerDraftRef.current === draftAtSend && draftAtSend.input === inputAtSend) {
+      setInput('')
+    }
+    if (retryFiles == null) {
+      updateComposerFiles(draftAtSend, current => current.filter(file => !atts.includes(file)))
+    }
     // What was silently attached to this turn (run, #experiments, files) — shown as a faint caption
     // ABOVE the user's bubble so the injected context is visible, not hidden inside the instruction.
     const ctxInfo = { run: context?.run || null, refs: context?.refs || [], files: atts.map(a => a.name) }
