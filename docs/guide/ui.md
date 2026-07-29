@@ -150,10 +150,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   revocable, expiring capability for one run. Summary links expose the DAG/report and derived metrics;
   an explicit evidence option adds redacted node source/results. Assistant, actions, raw
   logs/prompts/traces, artifacts, and owner settings are never available to the recipient. A review
-  link is a capability over **one** run, so nothing describing sibling runs travels with it: both the
-  run's `cross_run_priors` and the per-Card `cross_run_prior` (which name other runs and their
-  metrics) are dropped, and the Card completeness receipt reports them as omitted rather than
-  certifying data the response no longer carries.
+  link is a capability over **one** run, so nothing describing sibling runs travels with it: the
+  run's `cross_run_priors`, the per-Card `cross_run_prior`, and an imported node's `origin` (all of
+  which name other runs and their metrics) are dropped, and the Card completeness receipt reports
+  them as omitted rather than certifying data the response no longer carries. Within-run provenance
+  such as `research_origin` is unaffected, so a reviewer still sees an imported experiment — just not
+  which run it came from.
 - **Read-only chat share links** — the Assistant's **⤴ share** mints a link with its own secret (not
   the chat's id), an expiry, and a **⤫ unshare** that revokes every link for that chat while keeping
   the conversation. A link is **frozen** at the messages that existed when it was created, so

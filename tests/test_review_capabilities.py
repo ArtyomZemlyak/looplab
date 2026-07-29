@@ -495,3 +495,47 @@ def test_slow_review_projection_does_not_block_generation_replacement(tmp_path, 
     replacer.join(3)
     assert not reader.is_alive() and not replacer.is_alive()
     assert len(responses) == 1 and responses[0].status_code == 410
+
+
+def test_cross_run_node_origin_never_names_a_sibling_run_to_a_review_bearer(tmp_path, monkeypatch):
+    """`Node.origin` is the THIRD carrier of the portfolio disclosure the review scope already denies.
+
+    A review link is a capability over ONE run. `RunState.cross_run_priors` is dropped by
+    `_SUMMARY_OMIT_KEYS` and the Card-level `cross_run_prior` by `REVIEW_OMITTED_CARD_FIELDS`, both
+    because they name sibling run_ids. A node SEEDED from a sibling run carries the identical fact in
+    `Node.origin` ({"run_id","node_id","metric"}) — and it rode through both review projections: the
+    light state payload never trimmed it, and the evidence node route allow-listed it and then
+    scrubbed with NO omit set. The UI even renders it as a link to `#/run/<sibling>`, so the bearer
+    was handed a run id plus that run's metric.
+    """
+    rd = _seed_run(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_created", {
+        "node_id": 1, "parent_ids": [0], "operator": "import",
+        "idea": {"operator": "import", "params": {}, "rationale": "seeded"},
+        "code": "print('imported')\n",
+        "origin": {"run_id": "sibling-run-xyz", "node_id": 7, "metric": 0.5},
+    })
+    store.append("node_evaluated", {"node_id": 1, "metric": 0.5})
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+
+    # The owner keeps the provenance — this is a review-scope narrowing, not a data removal.
+    owner = client.get("/api/runs/demo/state", headers=OWNER)
+    assert owner.status_code == 200
+    assert owner.json()["state"]["nodes"]["1"]["origin"]["run_id"] == "sibling-run-xyz"
+
+    token = _create(client, evidence=True)["token"]
+    header = {"X-LoopLab-Review": token}
+    state = client.get("/api/review/state", headers=header)
+    assert state.status_code == 200
+    assert "sibling-run-xyz" not in json.dumps(state.json(), ensure_ascii=False)
+    assert "origin" not in state.json()["state"]["nodes"]["1"]
+
+    detail = client.get("/api/review/nodes/1", headers=header)
+    assert detail.status_code == 200
+    assert "sibling-run-xyz" not in json.dumps(detail.json(), ensure_ascii=False)
+    assert "origin" not in detail.json()
+    # `research_origin` is WITHIN-run provenance (which memo steered the proposal) and must survive
+    # the narrowing — an omit set that swept it away would be over-broad.
+    assert "research_origin" in reviews_router._REVIEW_NODE_KEYS

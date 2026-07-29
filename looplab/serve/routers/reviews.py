@@ -47,6 +47,13 @@ _SUMMARY_OMIT_KEYS = {
     # granted. (The Card-level `cross_run_prior` metadata rides through the preserved Cards
     # fragment and still needs the review-specific DTO tracked separately.)
     "cross_run_priors",
+    # THIRD carrier of the same portfolio disclosure: `Node.origin` ({"run_id","node_id","metric"})
+    # is set when the node was SEEDED from an experiment in a sibling run, and the light state
+    # projection never trimmed it. It is audit/UI-only (the Dag renders it as a link to that other
+    # run), so dropping it costs a reviewer nothing they were granted. Only the EXACT key `origin`
+    # is omitted — `research_origin` is WITHIN-run provenance (which deep-research memo steered the
+    # proposal) and deliberately survives.
+    "origin",
 }
 _BENIGN_SECRET_KEYS = {
     "tokenizer", "max_tokens", "num_tokens", "n_tokens", "total_tokens", "prompt_tokens",
@@ -64,7 +71,10 @@ _REVIEW_NODE_KEYS = {
     "id", "parent_ids", "operator", "idea", "code", "files", "deleted", "metric", "status",
     "error_reason", "confirmed_mean", "confirmed_std", "confirmed_seeds", "holdout_metric",
     "generalization_gap", "eval_seconds", "extra_metrics", "violations", "feasible", "stages",
-    "failed_stage", "attempt", "origin", "research_origin",
+    # `origin` is deliberately ABSENT: it names a sibling run (see `_SUMMARY_OMIT_KEYS`), and this
+    # route's closing `_scrub_json` carries no omit set, so allow-listing it here would disclose the
+    # portfolio through the evidence scope even though the summary scope denies it.
+    "failed_stage", "attempt", "research_origin",
 }
 
 
