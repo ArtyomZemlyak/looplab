@@ -91,6 +91,14 @@ def _concept_source_receipt(overview: dict, payload: list[dict]) -> dict:
         and 0 <= value <= _MAX_RECEIPT_COUNT else 0
         for key, value in raw_counts.items()
     }
+    # CLAUDE REVIEW: [LOGIC] This consistency predicate ignores `source_store_complete`:
+    # `_capsule_source_summary` defines source_complete = (partial_capsules == 0 AND
+    # source_store_complete), so a well-formed overview whose only defect is quarantined durable rows
+    # (partial_capsules == 0, store incomplete, source_complete False) fails the
+    # `source_complete == (partial_capsules == 0)` check and is reported as receipt_known=False —
+    # i.e. "malformed/unknown receipt" — instead of a known-but-incomplete source. The outcome is
+    # fail-closed (split/purge blocked either way), but the digest/prompt receipt misclassifies a
+    # legitimate producer receipt; include store health in the predicate to keep the two axes distinct.
     consistent = (
         counts_valid
         and counts["source_unknown_capsules"] <= counts["partial_capsules"]

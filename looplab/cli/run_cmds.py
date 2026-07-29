@@ -637,6 +637,10 @@ def resume(
     settings = Settings()
     snap = run_dir / "config.snapshot.json"
     if snap.exists():
+        # CLAUDE REVIEW: [QUALITY] Unguarded json.loads/settings_from_snapshot: a corrupt or
+        # hand-edited config.snapshot.json dumps a raw JSONDecodeError/ValidationError traceback at
+        # the user, while the `run` path maps the same failure to a one-line BadParameter
+        # (_pending_finalization_inputs). Same gap in `finalize` below.
         data = json.loads(snap.read_text(encoding="utf-8"))
         settings = settings_from_snapshot(data)
     # Settings.max_nodes carries ge=1, but assignment validation is disabled (flat-settings/snapshot
@@ -669,6 +673,11 @@ def resume(
         initial.paused or initial.finished or initial.stop_requested
         or incomplete_finalize_scope(initial_events) is not None
         or initial.finalization_pending())
+    # CLAUDE REVIEW: [QUALITY] Unbounded, silent wait: when wait_for_handoff is True and the old
+    # owner is wedged (crashed while holding engine.lock on a platform/filesystem that doesn't
+    # release it, or stuck in a hung finalization tail), this loop spins at 20 Hz forever with no
+    # message and no timeout — the operator sees `resume` hang with zero output. A periodic
+    # "waiting for engine.lock held by ..." echo and/or a deadline would make the stall diagnosable.
     while True:
         with _engine_singleton(run_dir) as ok:
             if ok:
@@ -779,6 +788,8 @@ def finalize(
     settings = Settings()
     csnap = run_dir / "config.snapshot.json"
     if csnap.exists():
+        # CLAUDE REVIEW: [QUALITY] Same unguarded snapshot load as `resume` above — a corrupt
+        # config.snapshot.json aborts finalize with a raw traceback instead of a BadParameter.
         data = json.loads(csnap.read_text(encoding="utf-8"))
         settings = settings_from_snapshot(data)
     eng = _engine(run_dir, _load_task(snap), settings, crash_after=None)

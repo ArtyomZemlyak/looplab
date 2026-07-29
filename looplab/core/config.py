@@ -900,6 +900,10 @@ class Settings(BaseSettings):
     # choice. 0.0 (default) = OFF (act on every pick, the historical behavior); raise toward ~0.5 to
     # make the world model defer when it isn't sure. Pairs with the foresight track record (§1) the
     # predictor is now primed with. Range 0.0-1.0.
+    # CLAUDE REVIEW: [EDGE-CASE] the field comment says "Range 0.0-1.0" but unlike the sibling
+    # confidence/fraction knobs (train_monitor_kill_confidence, asha_live_quantile, ...) there is no
+    # Field(ge=0.0, le=1.0) bound, so e.g. 5.0 validates silently — a gate that can never pass, so
+    # every foresight pick permanently abstains with nothing in the snapshot to show why.
     foresight_min_confidence: float = 0.0
     # PART IV Phase 2c — replace the world model's SELF-REPORTED confidence (measured Pearson≈0 with the
     # realized outcome, §21.12) with a CALIBRATED §12-verifier score. When on and a client is available,
@@ -1431,6 +1435,12 @@ class ConfigSnapshotVersionError(ValueError):
 # Pre-versioned snapshots are full Settings dumps, so absence is a reliable per-field version marker.
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
+# CLAUDE REVIEW: [LOGIC] this map is incomplete against its own contract: several later-added flags
+# that default ON and add paid LLM work or change candidate generation (foresight/foresight_panel/
+# foresight_agentic/foresight_verify, concept_pivot, graded_novelty, the cross_run_* bundle,
+# memora_llm, comparative_lessons/lessons_every) are absent here, so any snapshot written BEFORE such
+# a field existed resumes with the paid product default ACTIVE — exactly the "silently add paid
+# calls ... to an old run" the paragraph above says re-entry must never do.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "parallel_build": 1,
     "eval_parallel": None,

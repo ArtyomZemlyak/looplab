@@ -226,6 +226,12 @@ class SettingsStore:
             fd, tmp = tempfile.mkstemp(
                 dir=str(self._secrets_path.parent), prefix=".secrets-", suffix=".tmp")
             try:
+                # CLAUDE REVIEW: [QUALITY] No flush+fsync before os.replace (unlike atomic_write_text,
+                # which the module otherwise uses precisely for its "unique temp + safe fsync"). On a
+                # crash/power loss the rename can survive while the data blocks do not, publishing an
+                # empty/truncated secrets.json — i.e. silently losing the stored credential (and the
+                # CAS revision falls back to the initial token). fsync the fd before replace, and
+                # ideally fsync the directory after, matching the atomic-write contract used elsewhere.
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(json.dumps(d))
                 os.replace(tmp, self._secrets_path)    # the 0600 mode rides along from the temp inode

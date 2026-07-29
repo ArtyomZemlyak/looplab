@@ -19,6 +19,10 @@ class RunStateCache:
 
     def __init__(self, run_root):
         self.run_root = Path(run_root)
+        # CLAUDE REVIEW: [PERF] Unbounded, never-evicted cache of FULL RunStates (every node's code,
+        # logs, trials). A long-lived assistant/server process whose MachineRunsTools lists many runs
+        # (list_runs folds every run under the root) accumulates all of them in memory for the
+        # process lifetime; a stale-run eviction or LRU bound would cap this.
         self._cache: dict[str, tuple] = {}     # run_id -> (sig, RunState, divergence|None)
 
     def safe_dir(self, run_id: Optional[str]) -> Optional[Path]:

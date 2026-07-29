@@ -207,6 +207,10 @@ class RepoScoutTools:
                 rows.append(f"FILE {c.name}  ({sz}b)")
         if len(children) > _MAX_ENTRIES:
             rows.append(f"… (+{len(children) - _MAX_ENTRIES} more)")
+        # CLAUDE REVIEW: [EDGE-CASE] 200 rows of "FILE <name> (size)" easily exceeds RESULT_CAP
+        # (4000 chars), and the loop's head-cut then drops the trailing "… (+K more)" receipt — the
+        # module's own header comment calls that silent-tail loss a bug for read_file, but list_dir
+        # (and find_files) have no equivalent under-cap budget.
         return f"{p}:\n" + ("\n".join(rows) if rows else "(empty)")
 
     def _overlay_get(self, path: str):
@@ -229,6 +233,11 @@ class RepoScoutTools:
         # DIFFERENT file's staged content on any repo with duplicate basenames (test.py / __init__.py),
         # so the Developer edited a file it never actually read.
         if norm.startswith("/") or (len(norm) > 1 and norm[1] == ":"):
+            # CLAUDE REVIEW: [EDGE-CASE] First-match-wins over dict order: with two staged keys where
+            # one is a suffix of the other ("test.py" and "sub/test.py"), an absolute request for
+            # ".../sub/test.py" also suffix-matches "/test.py", so which file's content is returned
+            # depends on overlay insertion order. Prefer the LONGEST matching key so the most
+            # specific staged path always wins.
             for k, v in self._overlay.items():
                 kk = str(k).replace("\\", "/")
                 if kk and norm.endswith("/" + kk):
@@ -353,6 +362,10 @@ class RepoScoutTools:
             return f"(not a directory: {root})"
         hits = []
         try:
+            # CLAUDE REVIEW: [PERF] `sorted(p.glob(...))` materializes EVERY match before the 200-entry
+            # cap applies — a "**/*" pattern walks the whole tree (including the GB-scale checkpoint
+            # dirs `_SKIP_DIRS` exists to avoid in `_grep`) even though only 200 hits are kept. Iterate
+            # lazily with a bounded collect (or prune like `_grep`) so the cap bounds the walk too.
             for m in sorted(p.glob(pattern or "*")):
                 # pathlib glob accepts `..` segments and follows symlinks, so a pattern like
                 # "../../etc/*" escapes the allowed roots — re-validate every hit against the roots
@@ -382,6 +395,10 @@ class RepoScoutTools:
         except _re.error:
             rx = _re.compile(_re.escape(pattern))   # not a valid regex -> treat as a literal substring
         cap = max(1, min(int(max_hits) if max_hits else 40, 200))   # clamp: a model-supplied max can't disable the cap
+        # CLAUDE REVIEW: [EDGE-CASE] Even the default 40 hits (each path + 200-char snippet) can far
+        # exceed RESULT_CAP, and unlike env_inspect's `_clamp` there is no provider-side line-boundary
+        # clamp here — the loop's head-cut then drops the trailing "(capped at N hits)" /
+        # "(stopped after N files…)" receipts, so the model can't tell a complete grep from a cut one.
         hits: list[str] = []
         # STAGED overlay first — the code the caller is EDITING wins over disk, and its paths dedup the
         # disk walk (so a patched file isn't grepped in both its edited and pristine form).

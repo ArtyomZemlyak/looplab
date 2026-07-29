@@ -452,6 +452,15 @@ class TrainingMonitorMixin:
             try:
                 tail = await anyio.to_thread.run_sync(
                     lambda: read_training_tail(workdir, snapshot=log_snapshot))
+                # CLAUDE REVIEW: [EDGE-CASE] Two blind spots in the changed-digest gate: (1) a HUNG
+                # training (process alive but no new log output — a classic wasted run this monitor
+                # exists to catch) produces an unchanged digest forever, so the LLM is never consulted
+                # again and a hang can never be flagged or killed, even with train_monitor_kill on;
+                # (2) `last_digest` is committed BEFORE the verdict call below, so a transient LLM/
+                # endpoint failure (verdict None) permanently skips judging THIS digest — the monitor
+                # stays silent until the log changes again, which for a slow-logging stage can be a
+                # long window. Consider a no-new-output staleness signal and/or only committing
+                # last_digest after a usable verdict.
                 if not tail or tail == last_digest:
                     continue                 # no live log yet, or nothing new since last tick -> no LLM call
                 last_digest = tail

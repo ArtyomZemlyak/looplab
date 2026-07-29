@@ -111,10 +111,20 @@ class LLMEmbedder:
     def embed_many(self, texts: list[str]) -> list[Vector]:
         if not texts:
             return []
+        # CLAUDE REVIEW: [PERF] `_live` only degrades to False on a FIRST-call failure. If the
+        # endpoint dies AFTER one success, `_live` stays True forever and every subsequent embed
+        # blocks up to `timeout` (30s default) before falling back — a rebuild that embeds hundreds
+        # of notes one-by-one then stalls ~30s per note. Consider a consecutive-failure breaker
+        # (e.g. degrade after N failures) instead of only pinning the first call's outcome.
         if self._live is not False:                      # untried or known-live -> try the endpoint
             vecs = self._call(texts)
             if vecs is not None:
                 self._live = True
+                # CLAUDE REVIEW: [EDGE-CASE] Only vecs[0]'s dimension is checked against the committed
+                # dim. A malformed batch whose ROWS disagree with each other (row 0 at the committed
+                # dim, later rows at another) passes this guard whole; the off-dim vectors are stored
+                # and then silently score 0.0 in `cosine`, making those items permanently unreachable.
+                # Validate every row's length (the docstring claims `_cosine` never sees a mismatch).
                 dim = len(vecs[0])
                 if self._dim is None:
                     self._dim = dim
@@ -196,6 +206,12 @@ class InMemoryVectorStore:
         for it in items:
             store[it.id] = it
 
+    # CLAUDE REVIEW: [RACE] No locking: `search` iterates `store.values()` while `upsert`/`delete`
+    # may run from another thread (the engine has a concurrent-research task and llm_parallel worker
+    # threads; CaseLibrary upserts into this store mid-run). A dict mutated during iteration raises
+    # RuntimeError("dictionary changed size during iteration"), which would surface as a tool/loop
+    # error. A threading.Lock around the three mutating/iterating methods (or snapshotting
+    # list(store.values())) would close it cheaply.
     def search(self, index: str, query: Vector, k: int) -> list[Hit]:
         store = self._idx.get(index, {})
         # Drop non-positive scores: `cosine` returns 0.0 on a DIMENSION MISMATCH (a query embedded at a

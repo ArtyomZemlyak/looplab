@@ -818,6 +818,11 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         # Stage-scoped re-run (Phase 2): `start_stage` re-runs the pipeline FROM that stage, reusing the
         # earlier stages' on-disk artifacts (the checkpoint `train` wrote survives in the workdir). So a
         # crashed `eval` is fixed without paying to re-`train`. Stages before it are marked "reused".
+        # CLAUDE REVIEW: [TEST-GAP] No test calls run_command_eval with start_stage — the reuse path
+        # below (_run_from skip, zero-work "reused" markers, unknown-name fallback to a FULL re-run)
+        # is exercised only through stubs (test_inline_repair fakes the eval to capture the kwarg);
+        # a regression could silently re-run an expensive already-paid stage or resume from the wrong
+        # stage and clobber the artifacts a repair meant to reuse.
         _run_from = 0
         if start_stage:
             for _i, _s in enumerate(stages):
@@ -825,6 +830,13 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                     _run_from = _i
                     break
         stage_results = []
+        # CLAUDE REVIEW: [BUG] `_sig` is missing from this defensive pre-binding. When every stage is
+        # skipped (all reused via start_stage, or an unvalidated stage list whose commands are empty —
+        # `if not _scmd: continue`), the loop never binds `_sig`, and the final
+        # `RunResult(..., stalled=bool(_sig.get("stalled")))` below raises
+        # `NameError: cannot access local variable '_sig'` (reproduced: stages=[{"name":"a",
+        # "command":[]}]). rc/out/err/to were pre-bound for exactly this case; `_sig` needs the same
+        # (`_sig: dict = {}` here).
         rc, out, err, to = 0, "", "", False      # bound even if every stage is reused/empty (defensive)
         for _i, _stg in enumerate(stages):
             _sname = str(_stg.get("name") or f"stage{_i}")
@@ -939,6 +951,11 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # falsely reject it (a spurious violation → the node is wrongly excluded from best). Relax those
     # secondary readers to no freshness gate in that mode. The PRIMARY metric stays strict: it comes from
     # the final (re-RUN) stage, so it MUST be freshly produced — a no-op stage can't promote an old value.
+    # CLAUDE REVIEW: [TEST-GAP] The F13 secondary-reader relaxation below (start_stage -> since=None
+    # for constraint/extra/cross-check readers) has no test coverage — regressing it one way
+    # spuriously marks repaired nodes infeasible (reused-stage artifacts rejected as stale, node
+    # wrongly excluded from best), and the other way lets a stale prior-attempt artifact corroborate
+    # or gate a fresh metric.
     _reader_since = None if start_stage else _eval_started
     drift = None
     if enforce_drift and cross_check and m is not None:

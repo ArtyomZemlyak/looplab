@@ -8,6 +8,11 @@ import html
 from looplab.core.models import NodeStatus, RunState
 
 
+# CLAUDE REVIEW: [EDGE-CASE] _span_li recurses into span children, so a pathologically deep
+# parent_id chain in a crafted/corrupt spans.jsonl (the exact case traceview._tree was made
+# iterative for — see its why-comment) raises RecursionError here; at finalize the caller
+# swallows the exception and the whole tree.html is silently lost. Render the forest
+# iteratively or depth-cap the recursion to honor the "tolerate corrupt spans" contract.
 def _span_li(span: dict) -> str:
     """One span as a nested <li>: name · duration · status, recursing into children."""
     status = span.get("status", "OK")

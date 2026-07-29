@@ -285,6 +285,12 @@ class LLMRepoDeveloper:
         from pathlib import Path as _P
         parts: list[str] = []
         used = 0
+        # CLAUDE REVIEW: [EDGE-CASE] Only TOP-LEVEL files of each editable root are listed and
+        # previewed (root.iterdir(), non-recursive) — a src/-layout repo yields an empty preview AND
+        # a "files:" listing that omits every source file, while the system prompt still asserts
+        # "The repository's key source files are PREVIEWED below". (_recipes and _results_context
+        # share the same top-level-only limitation.) The scout tools compensate at runtime, but the
+        # prompt's claim is misleading for nested layouts.
         for ed in self._editables:
             root = _P(ed["path"])
             if not root.is_dir():
@@ -847,6 +853,11 @@ class LLMRepoDeveloper:
                         steps = self._propose_plan(system, idea, write)
                 if len(steps) >= getattr(self, "_plan_min_steps", 2):
                     for i, step in enumerate(steps, 1):
+                        # CLAUDE REVIEW: [QUALITY] _run_step's "(step N error: …)" return value is
+                        # discarded here, so a step session that raised is swallowed with no
+                        # log/trace record of WHICH plan steps failed — the eval then runs on
+                        # whatever was written, and a later failure can't be attributed to the
+                        # broken step.
                         self._run_step(idea, step, i, len(steps), write, system,
                                        stage_note=stage_note)  # a step error can't abort the plan
                 else:

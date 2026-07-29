@@ -100,6 +100,13 @@ def build_router(srv) -> APIRouter:
         topic = (body.get("topic") or "").strip()
         if not topic:
             raise HTTPException(400, "topic is required")
+        # CLAUDE REVIEW: [LOGIC] This bypasses the canonical settings path (srv.llm_settings +
+        # srv.make_llm_client) used by every other LLM endpoint: load_ui_settings() returns RAW
+        # overrides, so a model configured via a profile (resolved_settings expands it) is ignored
+        # and the bare default model is used; llm_api_key is never in ui_settings (secrets live in
+        # the secret store) so the filter is dead, and store.refresh_env_secrets() is not called
+        # here — a secret stored after server start works on /genesis but can miss here. Use
+        # srv.llm_settings(None) / srv.make_llm_client like the /genesis route below.
         s = Settings(**{k: v for k, v in srv.settings.load_ui_settings().items()
                         if k in {"llm_model", "llm_base_url", "llm_temperature", "llm_api_key"}})
         try:

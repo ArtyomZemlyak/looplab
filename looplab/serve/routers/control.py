@@ -431,6 +431,13 @@ def build_router(srv) -> APIRouter:
         # The command sequencer protects command-aware work/current spawn leases; the lifecycle
         # lock additionally serializes durable resume reconciliation and CLI-compatible launch
         # markers. Keep this lock order (command → lifecycle) everywhere to avoid inversion.
+        # CLAUDE REVIEW: [PERF] reset_run is `async def` yet everything below runs BLOCKING on the
+        # event loop: destructive_guard/sequence acquire a cross-process flock with a timeout of up
+        # to 60s, run_lifecycle_lock_http another flock, plus full-log folds (srv.state), cost
+        # flushing, a chain of renames and a Popen. While any of that waits, every concurrent
+        # SSE tick/poll on this worker is frozen — the exact hazard the /control handler above
+        # documents and offloads via anyio.to_thread.run_sync. This handler (and start_run below)
+        # needs the same offload; only the body parse needs the event loop.
         with srv.commands.destructive_guard(rd, "reset run") as rd:
             with run_lifecycle_lock_http(rd):
                 current_generation = srv.commands.run_generation(rd)
@@ -633,6 +640,15 @@ def build_router(srv) -> APIRouter:
         stop the run first. Non-destructive to the event log (events.jsonl, the source of truth, is
         untouched) — only the diagnostics trace is dropped."""
         rd = _run_dir(run_id)
+        # CLAUDE REVIEW: [RACE] Unlike reset_run, this destructive rewrite takes neither the
+        # run_lifecycle_lock nor any pending-resume fence (_fresh_resume_launch_pending /
+        # resume_pending). The resume reconciler (reconcile_pending_resume — fired from the runs-list
+        # poll and the startup timers) spawns engines under the LIFECYCLE lock only, not the command
+        # sequencer destructive_guard holds, so on a dead-engine run with an unserved resume intent
+        # older than the grace window it can Popen a new engine between the liveness check below and
+        # the whole-file rewrite — the fresh engine then appends spans while write_jsonl_atomic
+        # replaces spans.jsonl (lost spans / index divergence). Hold run_lifecycle_lock_http and
+        # refuse when state.resume_pending(), as reset_run does.
         with srv.commands.destructive_guard(rd, "clear node trace") as rd:
             # Re-check inside the command sequencer: a pending worker must not Popen between the
             # liveness probe and the whole-file atomic rewrite.
@@ -933,6 +949,13 @@ def build_router(srv) -> APIRouter:
 
         # Lost-response replay is resolved before rereading mutable sources/defaults or rejecting the
         # now-owned run name. The request digest contains effects, never the raw idempotency key.
+        # CLAUDE REVIEW: [PERF] Async handler, blocking body: both this `with srv.commands.sequence`
+        # block and the main launch block below run directly on the event loop — cross-process flock
+        # acquisition (up to lock_acquire_timeout=60s under contention), start-record I/O,
+        # current_token's re-stat/Settings work, file materialization and the engine Popen. The
+        # preflight is carefully offloaded via anyio.to_thread.run_sync two lines down, but these
+        # heavier sections are not, so a contended or slow launch freezes every SSE/poll on this
+        # worker. Wrap the sequence-holding sections in to_thread like /control and submit_command.
         if key:
             with srv.commands.sequence(rd):
                 record, public, same_key = _inspect_keyed_start(rd, key_digest, request_digest)

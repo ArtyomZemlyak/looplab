@@ -258,6 +258,11 @@ def foresight_scoreboard(state, last_n: int = 12) -> str:
     for p in picks:
         nid = p.get("node_id")
         if nid is not None:
+            # CLAUDE REVIEW: [LOGIC] The comment above claims "dict insertion order = event order",
+            # but overwriting an existing key keeps the key's ORIGINAL position — so the
+            # `[-last_n:]` window below orders nodes by their FIRST pick, not their last. Harmless
+            # for the adjacent dual-pick case this dedup targets, but a node re-picked much later
+            # in the log is treated as old and can be evicted from the recency window early.
             by_node[nid] = p          # last-wins per node
     graded = beat = 0
     confs: list[float] = []

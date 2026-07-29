@@ -556,6 +556,12 @@ def build_router(srv) -> APIRouter:
                 "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
         ))
         _assert_portfolio_current(memory_dir, portfolio_id)
+        # CLAUDE REVIEW: [QUALITY] These caps are bounds in name only: 128,000,000 chars per string
+        # and 500,000 total items dwarf every other cross-run cap in this module (rows use 640_000
+        # chars / 4_096 items) and would let a single atlas response serialize hundreds of MB to
+        # the browser, contradicting the docstring's "bounded per section" promise. If the payload
+        # is already bounded upstream, say so and drop the misleading numbers; otherwise use a
+        # realistic ceiling.
         return sanitize_cross_run_projection(
             payload, max_chars=128_000_000, max_items=256,
             max_total_items=500_000)

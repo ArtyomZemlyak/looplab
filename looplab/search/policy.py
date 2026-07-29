@@ -106,6 +106,14 @@ def operator_yields(state: RunState) -> dict[str, dict]:
     Strategist's rule table becomes priors, not hard-coded cadences). Draft nodes have no
     parent, so 'draft' yield is not defined here (drafts are the exploration baseline)."""
     out: dict[str, dict] = {}
+    # CLAUDE REVIEW: [LOGIC] This yield fold iterates state.nodes RAW: tombstoned, aborted and
+    # gate-flagged (breed_excluded) evaluated nodes all contribute credit, so a hard-flagged cheating
+    # node's inflated Δmetric rewards its operator in the P4 bandit — unlike MCTSPolicy's subtree
+    # valuation below, which explicitly excludes breed_excluded/infeasible "matching breedable_nodes".
+    # Also `n.metric is None` does not reject NaN (replay tolerates non-usable metrics; cf.
+    # core/fitness.is_usable_metric): one NaN child or parent metric makes `gain` NaN, poisons the
+    # running mean AND gmax in _bandit_pick, and every UCB comparison then evaluates False — the
+    # bandit silently degrades to always returning candidates[0].
     for n in state.nodes.values():
         if not n.parent_ids or n.status is not NodeStatus.evaluated or n.metric is None:
             continue
@@ -174,6 +182,12 @@ def debug_action(state: RunState, debug_depth: int) -> Optional[dict]:
     has_child: set[int] = set()
     for n in state.nodes.values():
         has_child.update(n.parent_ids)
+    # CLAUDE REVIEW: [EDGE-CASE] Excludes aborted failed leaves but NOT tombstoned ones: a failed leaf
+    # whose subtree was logically deleted (§6.3 — models.py gates ALL downstream selection on
+    # `not tombstoned`) is still returned here, so plain policies breed a debug child from a deleted
+    # node. card_selection deliberately masks this via `_effective_policy_state` ("a tombstoned/gated
+    # failed node cannot be rediscovered forever as a bare debug action"), but the legacy
+    # `next_actions` path calls debug_action on the raw state and keeps the hazard.
     for n in sorted(state.nodes.values(), key=lambda n: n.id):
         if (n.status is NodeStatus.failed and n.id not in state.aborted_nodes
                 and n.id not in has_child
@@ -441,6 +455,13 @@ class MCTSPolicy:
             # Value the subtree by its feasible descendants' metrics, EXCLUDING gate-flagged (cheating)
             # nodes: their inflated metric must not make an ancestor's subtree look good and pull MCTS
             # exploration toward a cheating lineage (§2.2, matching breedable_nodes for direct targets).
+            # CLAUDE REVIEW: [EDGE-CASE] The descendant filter checks `metric is not None and feasible`
+            # but not `is_usable_metric` (which feasible_nodes uses to reject NaN/inf tolerated by
+            # replay), and does not exclude tombstoned/aborted descendants (the §6.3 lifecycle gate the
+            # candidate pool honors). A NaN descendant metric makes `value`/`reward`/`ucb` NaN; when
+            # that happens on the FIRST candidate, `best_ucb is None` selects it and every later
+            # `ucb > best_ucb` compares False against NaN — the NaN subtree hijacks selection for the
+            # rest of the run. A logically-deleted descendant's metric likewise still steers UCB here.
             metrics = [state.nodes[i].metric for i in tree
                        if state.nodes[i].metric is not None and state.nodes[i].feasible
                        and i not in state.breed_excluded]  # #5

@@ -274,6 +274,9 @@ class OpenAICompatibleClient:
         self.guided_json = guided_json
         # T7: in-process content-addressed response cache for DETERMINISTIC (temperature 0) calls
         # only. None = disabled (default). Never caches sampling calls (temp>0) — those must vary.
+        # CLAUDE REVIEW: [PERF] the cache is unbounded: every distinct deterministic request stores a
+        # deep-copied response body for the client's lifetime (clients are shared/reused across a
+        # run), so a long run of temp-0 calls grows memory without limit — no LRU/size cap.
         self._cache: Optional[dict] = {} if cache else None
         # Transport: the openai SDK over an httpx client. `connect` bounds TCP/TLS establishment
         # (=header_timeout); `read` = the inter-read idle limit (a long-but-alive generation keeps
@@ -446,6 +449,12 @@ class OpenAICompatibleClient:
             # lingering daemon thread (it exits when its own read finally errors) rather than cause N
             # spurious failures and re-spends; the caller still unblocks on the APITimeoutError below,
             # which is the guarantee that actually matters.
+            # CLAUDE REVIEW: [RACE] TOCTOU between this _alone check and the teardown below: a sibling
+            # call can start (incrementing _inflight) right after the lock is released, then have its
+            # fresh in-flight connection ripped out by _shutdown_pool_sockets / _client.close(), and
+            # `self._sdk = self._new_sdk()` is also an unsynchronized write racing concurrent
+            # `self._sdk` readers — re-introducing, in a narrow window, exactly the spurious sibling
+            # failure the inflight counting exists to prevent.
             with self._inflight_lock:
                 _alone = self._pool_teardown_is_safe_locked()
             if _alone:
@@ -476,6 +485,10 @@ class OpenAICompatibleClient:
         usage: dict = {}
         for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
             if getattr(ev, "usage", None):
+                # CLAUDE REVIEW: [EDGE-CASE] `ev.usage.model_dump()` assumes a pydantic object; a
+                # provider/mock chunk whose `usage` is a plain dict raises AttributeError here and
+                # aborts the whole call, while the sibling path (complete_text_stream) tolerates that
+                # shape via _stream_usage(). Use the same tolerant extractor.
                 usage = ev.usage.model_dump()
             if not ev.choices:
                 continue
@@ -510,6 +523,10 @@ class OpenAICompatibleClient:
                 for i, s in sorted(tcs.items())]
         return {"choices": [{"message": msg, "finish_reason": finish}], "usage": usage}
 
+    # CLAUDE REVIEW: [DEAD-CODE] _read_stream (and the urllib-era helpers only it drives:
+    # _sse_chunks, _socket_watchdog, _SSETail, _raw_socket) has no production caller since the
+    # openai-SDK migration — _sdk_chat streams via _accumulate_stream. Only tests exercise this
+    # path, yet its docstring still reads as if it were the live one.
     def _read_stream(self, resp) -> dict:
         """Reassemble an OpenAI SSE stream into the non-streaming response body shape
         ({"choices":[{"message":{content,reasoning?,tool_calls?}, "finish_reason"}], "usage"}). Each
@@ -642,6 +659,10 @@ class OpenAICompatibleClient:
             # to a single blocking read for the attempt right after a stream stall, and permanently
             # once this client has stalled STREAM_STALL_DEGRADE_AFTER times — a flaky proxied endpoint
             # often answers the SAME request fine without SSE while its stream wedges mid-generation.
+            # CLAUDE REVIEW: [READABILITY] the `"stream": False` field that complete_text/chat/
+            # complete_tool put in `payload` is IGNORED — streaming is decided solely by self.stream
+            # + the stall-degrade state here. The dead payload field misleads readers into thinking
+            # those calls are non-streaming; drop it or honor it.
             use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
                           and not _stalled_prev)
             try:
@@ -1171,6 +1192,9 @@ class LiteLLMClient:
                     time.sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"litellm completion for {self.model} failed: {e}") from e
+        # CLAUDE REVIEW: [DEAD-CODE] unreachable: every loop iteration either returns or raises (on
+        # the final attempt `transient and attempt < 3` is False, so the except re-raises), so the
+        # loop can never fall through to this line.
         raise LLMError(f"litellm completion for {self.model} failed: {last}")
 
     def _account(self, resp) -> None:
@@ -1227,6 +1251,12 @@ class LiteLLMClient:
             if not calls:  # endpoint ignored tool_choice -> KeyError so parse.py falls back
                 gen.usage(self._usage(resp)).error("no tool_calls in response")
                 raise KeyError("no tool_calls in response")
+            # CLAUDE REVIEW: [LOGIC] blind `calls[0]` — OpenAICompatibleClient.complete_tool was
+            # explicitly fixed to select the forced "emit" call BY NAME, because a backend that
+            # ignores tool_choice can return some OTHER tool's coincidentally schema-valid arguments
+            # as the emit payload (a wrong answer under the right shape, uncatchable downstream);
+            # this litellm backend still has the pre-fix behaviour despite `_completion`'s claim of
+            # "the OpenAICompatibleClient's resilience contract".
             args = calls[0].function.arguments
             m = resp.choices[0].message
             # Not `_reasoning_of`: object attributes + reasoning_content-first (see complete_text).
@@ -1444,6 +1474,9 @@ def make_llm_client(settings, *, model: str | None = None,
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
+        # CLAUDE REVIEW: [QUALITY] the 45.0 fallback literals duplicate DEFAULT_HEADER_TIMEOUT_S,
+        # which this module declares (and config.py imports) as "the single source" of this default —
+        # change the constant and this getattr fallback silently drifts.
         header_timeout=float(getattr(settings, "llm_header_timeout", 45.0) or 45.0),
         trust_env=bool(getattr(settings, "llm_trust_env", False)),  # direct-connect by default (bypass proxy)
         cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache

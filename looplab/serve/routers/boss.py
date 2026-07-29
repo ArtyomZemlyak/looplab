@@ -518,6 +518,12 @@ def build_router(srv) -> APIRouter:
         per request serialize within the process, so no cross-process lock is needed here."""
         rd = _run_dir(run_id)
         generation = srv.commands.run_generation(rd)
+        # CLAUDE REVIEW: [EDGE-CASE] The 32 MiB file cap below bounds the FILE, not the TURN: a
+        # single POST body is read whole into memory by request.json() with no size limit and then
+        # appended in full, so one oversized turn (accidental or hostile on a same-origin deploy —
+        # the exact threat the cap's own comment describes) can blow past _CHAT_LOG_MAX_BYTES by an
+        # arbitrary amount and OOM the server first. The concept-lens routes stream-bound their
+        # bodies (_concept_lens_json_body); this append needs the same per-request byte ceiling.
         try:
             turn = await request.json()
         except (ValueError, UnicodeDecodeError) as exc:
@@ -541,6 +547,12 @@ def build_router(srv) -> APIRouter:
                                          "the run to start a fresh transcript")
         except OSError:
             pass                                   # no file yet (or unstat-able) -> nothing to bound
+        # CLAUDE REVIEW: [PERF] `async def` handler doing blocking I/O on the event loop:
+        # run_activity acquires the run command sequencer (thread + OS file lock) and the fsync of
+        # a chat.jsonl that may be tens of MiB can take seconds on FUSE/S3-backed storage — during
+        # which every SSE stream and async handler in the process stalls. The sibling LLM routes in
+        # this file offload via anyio.to_thread; this append (and the run_generation log scan
+        # above) should run in a worker thread too.
         with srv.commands.run_activity(rd, "chat_append", generation=generation):
             with open(path, "ab") as f:
                 f.write(orjson.dumps(turn) + b"\n")
@@ -589,6 +601,12 @@ def build_router(srv) -> APIRouter:
         body = await _json_object(request)
         msgs = body.get("messages") or []
         nid = body.get("node_id")
+        # CLAUDE REVIEW: [PERF] srv.state(rd) is a full event-log read + fold and boss_prompt_parts
+        # below reads run files — all executed inline on the event loop of this `async def` handler
+        # even though the actual LLM call is carefully offloaded to a thread. On a large run every
+        # chat turn freezes the server's event loop for the fold's duration; /suggest and /command
+        # have the same synchronous st = srv.state(rd) + prompt-assembly prologue. Move the fold
+        # and prompt assembly into the offloaded worker (or anyio.to_thread) as well.
         st = srv.state(rd)
         # advisory=True: /chat has no actions channel, so the RUN STATUS block must recommend,
         # not command ("you MUST act: resume") — else the model claims actions it can't take.
@@ -845,6 +863,12 @@ def build_router(srv) -> APIRouter:
         settings = None
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"
+        # CLAUDE REVIEW: [PERF] `async def` handler blocking the event loop: the command sequencer
+        # (thread + OS file lock, bounded-retry acquire) and EventStore.read_all() over the ENTIRE
+        # events.jsonl for the refresh ledger both run inline. On a multi-hundred-MB run log this
+        # freezes every other client (SSE ticks included) per report-refresh POST; wrap the
+        # sequenced ledger section in anyio.to_thread.run_sync (the paid worker itself already runs
+        # on a job thread).
         with srv.commands.sequence(rd):
             rd = srv.commands.validate_paths(rd)
             generation = srv.commands.run_generation(rd)

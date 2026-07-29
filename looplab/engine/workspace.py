@@ -38,6 +38,11 @@ class WorkspaceSeeder:
             return
         wd = Path(workdir)
         wd.mkdir(parents=True, exist_ok=True)
+        # CLAUDE REVIEW: [EDGE-CASE] Assumes every asset value is str: the orchestrator's setup
+        # provenance explicitly hashes bytes assets too (`c.encode(...) if isinstance(c, str) else
+        # bytes(c)`), but write_text raises TypeError on bytes — a task exposing a binary asset
+        # passes setup cleanly, then crashes every node materialization. Mirror the str/bytes
+        # branch here (write_bytes for non-str content).
         for name, content in self._e._assets.items():
             (wd / name).write_text(content, encoding="utf-8")
 

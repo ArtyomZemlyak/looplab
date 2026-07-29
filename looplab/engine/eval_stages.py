@@ -59,6 +59,12 @@ class EvalStagesMixin:
             if err is None:
                 return _expand(clean)
 
+        # CLAUDE REVIEW: [LOGIC] When the operator DID declare stages but validate_stages rejects
+        # them, control falls through to this developer-manifest branch — so the actual fallback is
+        # not "the single command" (as the comment above claims) but a pipeline whose preceding
+        # stages come from the agent-authored looplab_stages.json, in exactly the case the docstring
+        # says that file is IGNORED. An invalid operator stage list should collapse to the bare
+        # command (or fail loudly), not hand stage authorship to the Developer.
         # single-command cmd: read the Developer's PRECEDING stages, append the protected cmd stage.
         # `materialized_stages` applies the SAME shared rules as the declare_stages tool (reserved
         # 'score', no duplicates, argv shape) and accepts both the wrapped + bare-list manifest shapes

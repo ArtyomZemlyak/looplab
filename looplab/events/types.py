@@ -41,6 +41,11 @@ How to add an event type:
 """
 from __future__ import annotations
 
+# CLAUDE REVIEW: [DOCS-MISMATCH] The exception list below is incomplete: EV_RUN_CONCEPTS (in this
+# DOMAIN section) is ALSO UI/CLI-appendable — it is allow-listed in both serve/protocol.py
+# CONTROL_EVENTS and COLLABORATION_EVENTS ("operator/assistant sets the run's BASE concept set") —
+# but is not enumerated here beside spec_approved/approval_granted/trust_gate_changed/
+# report_generated, so this header understates who may write into the domain namespace.
 # --- DOMAIN events (folded into RunState by `replay.fold`; the engine is the sole writer,
 #     except a few UI/CLI-writable ratification/config events: `spec_approved`/`approval_granted`
 #     (ratify), `trust_gate_changed` (PUT /config), and `report_generated` (report_refresh) — all
@@ -188,6 +193,9 @@ EV_CONFIRM_DONE = "confirm_done"         # fulfillment gate for `force_confirm` 
 # re-spawns — idempotent because a second engine no-ops on the lock. resume_served is engine-written.
 EV_RESUME_SERVED = "resume_served"
 
+# CLAUDE REVIEW: [DOCS-MISMATCH] Stale pointer: CONTROL_EVENTS now lives canonically in
+# serve/protocol.py (serve/server.py only re-imports it to keep the historical import path alive);
+# CLAUDE.md also names serve/protocol.py::CONTROL_EVENTS as the authority.
 # --- CONTROL events (live operator/UI intents appended to the same log; the engine reads
 #     the folded intent and writes the matching DOMAIN effect — see CONTROL_EVENTS in
 #     serve/server.py and the control section of `replay.fold`). ---
@@ -202,6 +210,11 @@ EV_RESUME = "resume"
 EV_NODE_ABORT = "node_abort"
 EV_NODE_RESET = "node_reset"      # re-run an EXISTING node in place from a stage (propose|implement|
 #                                   eval, or any eval-pipeline stage name — train, data_prep, …)
+# CLAUDE REVIEW: [DOCS-MISMATCH] stage_finished is engine-written (eval-pipeline progress, folded
+# into Node.stages) and is NOT in serve/protocol.py::CONTROL_EVENTS — it is a DOMAIN event filed in
+# this "live operator/UI intents" section. Unlike the other engine-written entries placed here
+# (foresight_selected, hypothesis_merged, the card ledger) it carries no clarifying note, so a
+# reader could wrongly conclude the UI may append it.
 EV_STAGE_FINISHED = "stage_finished"   # one stage of a multi-stage eval pipeline finished (name, status)
 EV_BUDGET_EXTEND = "budget_extend"
 EV_HINT = "hint"

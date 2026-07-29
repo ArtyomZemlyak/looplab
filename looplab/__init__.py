@@ -242,6 +242,13 @@ class _CompatLoader(importlib.abc.Loader):
     def __init__(self, canonical: str):
         self._canonical = canonical
 
+    # CLAUDE REVIEW: [EDGE-CASE] Returning the canonical module from create_module makes
+    # module_from_spec overwrite its __spec__ with the ALIAS spec (verified: after `import
+    # looplab.sandbox`, looplab.runtime.sandbox.__spec__.name == "looplab.sandbox"; __name__ is
+    # preserved). Consequence: importlib.reload() of the canonical module afterwards resolves
+    # through this loader, whose exec_module is a no-op — the reload silently does nothing — and
+    # tooling that trusts __spec__.name sees the wrong canonical identity. Restoring __spec__ in
+    # exec_module would keep the alias while leaving the canonical module's metadata intact.
     def create_module(self, spec):
         return importlib.import_module(self._canonical)
 

@@ -2534,6 +2534,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._select_verifier = _entry.select_verifier_tiebreak
             self._verifier_ci_tie = _entry.verifier_ci_tie   # R1-d: re-pin the recorded CI-tie rule
             self._select_verifier_samples = _entry.select_verifier_samples
+        # CLAUDE REVIEW: [TEST-GAP] This resume re-pin block (recorded holdout_fraction/holdout_select
+        # — and the select_verifier/verifier_ci_tie re-pin just above — winning over LIVE config,
+        # engine-side invariant #6) has no test that resumes with a CHANGED live setting and asserts
+        # the recorded value wins; a regression would score pre- vs post-resume nodes on different
+        # holdout splits and silently crown a champion from incomparable metrics.
         # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
         # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
         # before vs. after a config change would be scored on different splits and the champion pick
@@ -2692,6 +2697,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         if self._node_reservation_slots_remaining(state) >= 1:
             return False
+        # CLAUDE REVIEW: [PERF] While a fork/inject/ablate head waits on the node budget, every 0.5s
+        # tick makes the main loop re-read and re-fold the ENTIRE event log (plus the ack/mirror
+        # re-reads per turn) until an operator sends budget_extend — potentially hours of
+        # O(total-events) busy-polling on a long log, the same cost class the resource-wait comment
+        # in _dispatch_evals already flags. Gate the refold on the tail seq moving, or back off the
+        # tick geometrically.
         await anyio.sleep(0.5)
         return True
 
@@ -2843,6 +2854,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # receipt for a request the current fold declines no longer advances past it.
                 self.store.append(EV_FORK_DONE, {
                     "idx": state.forks_done, "from_node_id": pid, "generation": generation})
+                # CLAUDE REVIEW: [LOGIC] Beyond the documented crash-in-the-gap case, _create_node
+                # can also fail SILENTLY in a live process: _reserve_node_build returns None on a
+                # lost proposal-authority CAS / a slot race / paused, and the novelty/card-contract
+                # gate can drop the proposal — _create_node then just returns. The fork receipt
+                # above is already spent, so the operator's request vanishes with the Researcher
+                # call already paid and no event recording that the fork produced nothing. A
+                # "fork produced no node" marker (or a bounded retry) would make the drop observable.
                 self._create_node({"kind": "improve", "parent_id": pid,
                                    "parent_generations": {str(pid): generation}})
             else:
@@ -3165,6 +3183,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation (evals joined) — must propagate
+            # CLAUDE REVIEW: [EDGE-CASE] `calls` is only incremented after a SUCCESSFUL
+            # _compute_deep_research, and this blanket handler retries every `base` seconds — so a
+            # provider that consistently raises (broken auth, endpoint down, or failing AFTER tokens
+            # were partially charged) is re-called indefinitely for the whole eval window and never
+            # counts against the `concurrent_research_max_calls` backstop. Count attempts (or bound
+            # consecutive failures) so the per-window LLM cap also bounds failed paid attempts.
             except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
                 next_sleep = base
                 continue
@@ -3905,6 +3929,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         score_id = state.best_node_id if requested is None else requested
         if score_id is None:
             return None, None, True
+        # CLAUDE REVIEW: [READABILITY] Mixed return arity: the valid-but-empty case above returns
+        # the 3-tuple (None, None, True) while an INVALID id returns bare None below — a caller that
+        # unpacks without the exact `is None` check gets a TypeError, and the two falsy-looking
+        # shapes are easy to conflate in review. A single Optional[NamedTuple] would be safer.
         if type(score_id) is not int or not 0 <= score_id <= (1 << 31) - 1:
             return None
         node = state.nodes.get(score_id)
@@ -5373,6 +5401,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         idea_d["params"] = params
 
         raw_parents = req.get("parent_ids")
+        # CLAUDE REVIEW: [EDGE-CASE] Unknown parent ids are silently DROPPED (the inject proceeds as
+        # a parentless draft) while a tombstoned/aborted parent raises below — asymmetric: an
+        # operator typo'ing a parent id gets a rootless node with lost lineage and no error, whereas
+        # the comparable stale/unavailable cases fail the request loudly. Rejecting unknown ids like
+        # `unavailable` does would surface the mistake instead. (Only the explicit
+        # parent_generations snapshot catches the drop, and only when the caller supplied one.)
         if isinstance(raw_parents, list):
             parents = [parent_id for parent_id in raw_parents if parent_id in state.nodes]
         else:

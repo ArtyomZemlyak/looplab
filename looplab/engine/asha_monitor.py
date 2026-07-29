@@ -388,6 +388,13 @@ class AshaMonitorMixin:
                 # ADVISORY record — only when the verdict CHANGES (no log/feed spam), kept separate from
                 # the kill decision below so a persistent-underperform streak still reaches the kill check.
                 previous_flag = last_flag
+                # CLAUDE REVIEW: [EDGE-CASE] `last_flag` is committed BEFORE the EV_ASHA_RANK append
+                # below; if that append (or the tracer span) raises, the per-tick handler swallows it
+                # and the transition is permanently deduped away — the warning/recovery edge this
+                # block exists to publish is lost until the NEXT verdict change, so projections/
+                # Attention keep the stale flag. The sibling train monitor got this right: it updates
+                # its dedup state (`last_event_status`) only AFTER a successful append, so a failed
+                # append retries on the next tick. Move this assignment after the append.
                 if diagnostic_key != previous_flag:
                     last_flag = diagnostic_key
                     underperforming = bool(endpoint_under) or comparable_under is True

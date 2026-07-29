@@ -459,6 +459,13 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
     """Draft/refresh an auto-distilled skill. New claim -> status: candidate. If a candidate
     with the same slug already exists from a DIFFERENT task fingerprint (Jaccard < 0.6), the
     technique generalized -> status: promoted. Never raises (best-effort memory)."""
+    # CLAUDE REVIEW: [RACE] This is a read-modify-write (read_text -> parse fingerprints -> rewrite)
+    # over a file in the SHARED cross-run memory dir, with NO `_interprocess_lock` — unlike every other
+    # mutable cross-run store here (JsonlCaseLibrary.add, ConceptCapsuleStore.add, the governance
+    # ledgers all lock + re-read inside the lock). Two runs sharing LOOPLAB_MEMORY_DIR that distill the
+    # same slug concurrently can lose each other's fingerprint (last atomic write wins), which both
+    # loses evidence and can miss (or spuriously delay) the candidate -> promoted transition that
+    # depends on the accumulated fingerprint list.
     try:
         d = Path(skills_dir)
         d.mkdir(parents=True, exist_ok=True)
@@ -565,6 +572,12 @@ class JsonlCaseLibrary:
         prev = next((c for c in self.cases if c.get("task_id") == tid), None)
         if prev is not None:
             # Keep the old case only when both metrics are comparable and the new one is not better.
+            # CLAUDE REVIEW: [LOGIC] Incomparable always REPLACES: a new case with metric=None (which
+            # valid_case_record admits) bypasses this guard and overwrites a stored case that has a
+            # real metric — the retain-on-improvement contract ("keeps a case only when its metric
+            # beats the stored one", module docstring) is inverted for the metric-less writer. A
+            # measured prior solution should not be clobbered by an unmeasured one; require the new
+            # metric to be non-None (or explicitly better) before replacing a measured case.
             if metric is not None and prev.get("metric") is not None:
                 better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
                 if not better:
@@ -1526,6 +1539,11 @@ class CaseLibrary:
         prev = Abstraction(str(target.payload.get("abstraction", "")),
                            list(target.payload.get("anchors", [])))
         merged_ab = prev.merge(ab)
+        # CLAUDE REVIEW: [EDGE-CASE] Consolidation is triggered by embedding similarity alone, but the
+        # merged "better metric" below is judged under the NEW payload's direction. Two near-duplicate
+        # cases from tasks with opposite directions (min vs max) merge under one direction, so the
+        # kept `metric` can be the worse of the two for the target case's own task. Guard the merge
+        # (or the metric fold) on matching directions.
         direction = payload.get("direction") or target.payload.get("direction") or "min"
         p = {**target.payload, **payload}               # newer content wins for scalar fields
         om, nm = target.payload.get("metric"), payload.get("metric")

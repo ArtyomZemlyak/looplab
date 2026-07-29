@@ -137,6 +137,11 @@ class InstallResult:
 # whole run; ANY pip RESPONSE (a success, or a clean "no matching distribution" failure — both prove
 # egress works) resets the count. The clean fix for a true no-egress pod is a pre-baked image with
 # auto_install_deps off. A connection-REFUSED fails fast and is handled per-package by the caller.
+# CLAUDE REVIEW: [RACE] `_consecutive_install_timeouts` is an unsynchronized module global, but the
+# crash-repair path that calls install() runs inside `_create_node`, which the engine fans out to
+# `anyio.to_thread` workers under llm_parallel — two concurrent installs can lose an increment or
+# reset each other, delaying (or briefly re-arming) the egress latch. Benign in effect but worth a
+# lock or an atomic-ish single-writer note if the fan-out ever widens.
 _consecutive_install_timeouts = 0
 _EGRESS_TIMEOUT_LATCH = 2
 
@@ -163,6 +168,13 @@ def install(package: str, *, python: Optional[str] = None, timeout: float = 900.
     py = python or sys.executable
     argv = [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", package]
     try:
+        # CLAUDE REVIEW: [SECURITY] Unlike every other child spawn (sandbox.run_argv,
+        # bg_tasks._child_env), the pip child inherits the FULL os.environ un-scrubbed. `pip install`
+        # of an sdist executes the package's setup.py/build backend — arbitrary code — with the
+        # operator's LLM_API_KEY / cloud creds in its environment. The curated allowlist keeps the
+        # risk low (well-known packages, wheels), but install() itself does not enforce
+        # `is_installable` (that guard is caller-side in crash_repair), so a future caller bypassing
+        # it would hand a typosquatted sdist the secrets. Scrub with SECRET_ENV here for parity.
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:

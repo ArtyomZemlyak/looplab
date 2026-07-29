@@ -129,5 +129,12 @@ def run_sweep(
 
     if emit:
         # Final line the sandbox scans for. Keep it last and on its own line.
+        # CLAUDE REVIEW: [EDGE-CASE] json.dumps has no `default=`: a numpy scalar (np.float32 is NOT
+        # a float subclass), an ndarray, or any other non-JSON value in a trial's `extra_metrics` /
+        # a grid value in `params` raises TypeError HERE — after every trial already trained — so the
+        # whole completed sweep's output is lost and the node fails with an opaque traceback. This
+        # module is the prompted default for LLM-written train_fn's, where numpy return values are
+        # the norm; `default=float`-with-fallback (or coercing in _normalize) would make the final
+        # emit robust.
         print(json.dumps({"trials": trials}))
     return trials

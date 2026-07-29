@@ -10,6 +10,14 @@ A run is an `Engine` (orchestrator) driving four roles in a cycle:
 1. **Researcher** — proposes an `Idea` (an operator + params), reasoning about the goal and prior
    results. Foresight ranks the candidates *before* an eval; the idea also states a one-line
    **hypothesis** that lands on the board.
+   <!-- CLAUDE REVIEW: [DOCS-MISMATCH] the next step presents the novelty stage as opt-in / "off by
+   default", but the shipped default is novelty_mode="llm" (looplab/core/config.py:573): an LLM
+   near-duplicate adjudication (one extra LLM call per proposal, with one informed re-propose) runs by
+   default whenever a client is available — matching the infographic's NOVELTY STAGE box ("shipped
+   mode: LLM if client") and llm-and-agents.md ("the LLM adjudicates"). Only the ALGORITHMIC gate
+   (novelty_gate=false) is off by default, and its idea-text-cosine >= 0.92 arm additionally requires
+   novelty_semantic=true (also false by default, config.py:586) — enabling novelty_gate alone gives
+   the numeric param-distance check only. -->
 2. **Novelty gate** *(opt-in — `novelty_gate`, off by default)* — an algorithmic reject of a
    proposal too close to one already tried (idea-text cosine ≥ `0.92`, or numeric param distance
    < `0.05`), with one informed re-propose. **Off by default** (and *not* turned on by

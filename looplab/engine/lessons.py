@@ -225,6 +225,15 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if stamp == self.seen_stamp:
             self._e.store.append(EV_LESSONS_REFRESHED, {"at_node": n, "skipped": "unchanged"})
             return fold(self._e.store.read_all())
+        # CLAUDE REVIEW: [EDGE-CASE] The priors rebuild below is UNGUARDED, unlike every sibling
+        # advisory path in this cluster ("best-effort — never raises"). `_load_reflection_priors_both`
+        # re-reads + re-scores the whole store and, with memora on, re-embeds through a possibly
+        # remote/custom embedder (`retrieve_lessons_harmonic` has no internal guard either); an
+        # exception propagates out of `_run_cadences` into the run() spine and errors the run — and
+        # since the EV_LESSONS_REFRESHED gate only advances on success, a persistent embedder outage
+        # crash-loops the run at the same cadence on every resume. Also `seen_stamp` is committed
+        # BEFORE the load succeeds; harmless today only because the raise aborts the process, but a
+        # future caller that catches would silently skip re-reading a changed store.
         self.seen_stamp = stamp
         before = (self.prior_note_text, self.dev_prior_note_text)
         rid = state.run_id or None
@@ -398,6 +407,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 # the valid retained subset of a partial classifier result remains positive
                 # evidence, but the producer-level denominator below permanently forbids absence/frequency
                 # inference. Authored/heuristic labels and deleted/aborted attempts never cross this wall.
+                # CLAUDE REVIEW: [LOGIC] Mixed dict keys: the read side uses the RAW `c`
+                # (`outcomes.get(c)` / `outcomes[c]`) while the write side stores under `str(c)`.
+                # For any non-str concept value (the surrounding `str(c)` coercions imply that is
+                # considered possible) the lookup always misses, so the best-of `_better` comparison
+                # is bypassed and the outcome degrades to last-node-wins instead of best-metric-wins.
+                # Use one spelling (`s = str(c)`) for add/get/set.
                 for c in node_concepts.get(nd.id) or []:
                     concepts.add(str(c))
                     if (nd.id in eligible_ids and m is not None

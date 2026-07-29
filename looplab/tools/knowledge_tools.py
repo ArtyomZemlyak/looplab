@@ -82,6 +82,13 @@ class RepoTools:
     def execute(self, name: str, args: dict) -> str:
         try:
             if name == "repo_grep":
+                # CLAUDE REVIEW: [SECURITY] Unlike repo_list (which filters ".git" from parts) and
+                # RepoScoutTools._grep (which prunes _SKIP_DIRS and applies the `readable` extension
+                # allowlist), this grep walks EVERYTHING under the root: `.git/config` lines — which
+                # can carry credentialed remote URLs (https://user:TOKEN@host) — and arbitrary
+                # unrecognized dotfiles are matchable and streamed into the (possibly remote) model
+                # prompt. `looks_secret` does not cover `.git`. Skip `.git` and apply the same
+                # `_pathsafe.readable` gate the scout uses.
                 glob = args.get("glob") or "*"
                 out = []
                 for label, root in self.roots.items():
@@ -110,6 +117,11 @@ class RepoTools:
                 target = self._resolve(args.get("path", ""))
                 if target is None or not target.is_file():
                     return f"(no such file: {args.get('path')})"
+                # CLAUDE REVIEW: [SECURITY] No `.git` exclusion and no `_pathsafe.readable` extension
+                # allowlist here (RepoScoutTools._read_file applies both): repo_read(".git/config")
+                # returns git remotes — including any embedded credentials — and any binary/dotfile
+                # in the repo is slurped (errors=replace) into the model context. Mirror the scout's
+                # allowlist + .git guard.
                 # Refuse to read credential files back into the (possibly remote) model context.
                 for r in self.roots.values():
                     try:

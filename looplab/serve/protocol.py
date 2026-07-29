@@ -58,6 +58,11 @@ RUN_GENERATION_FIELD = "generation"
 EXPECTED_RUN_GENERATION_FIELD = "expected_generation"
 
 # Control events the UI is allowed to append (intent). The engine writes the domain effect.
+# CLAUDE REVIEW: [QUALITY] This is the security-load-bearing append allow-list (routers/control.py
+# membership check, run_commands CONTROL_SPECS assertion), yet it is a MUTABLE module-level set —
+# any imported code (or a careless test doing CONTROL_EVENTS.add(...)) can widen it process-wide
+# with no failing assertion, silently authorizing new appendable types without a ControlSpec review.
+# COLLABORATION_EVENTS below is already a frozenset; make this one frozen too.
 CONTROL_EVENTS = {
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,
     EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,

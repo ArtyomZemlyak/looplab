@@ -681,6 +681,11 @@ def build_router(srv) -> APIRouter:
         for p in names[:_AUTHOR_MAX_FILES]:
             if p.is_symlink() or not p.is_file():
                 continue
+            # CLAUDE REVIEW: [EDGE-CASE] knowledge_dir is agent-writable (as the comment above
+            # says), so a file can be deleted/renamed between the glob and this open — the
+            # resulting FileNotFoundError/OSError surfaces as a 500 for the whole listing instead
+            # of skipping the one vanished file. Wrap the open/read in a try/except OSError:
+            # continue.
             with open(p, "rb") as fh:
                 head = fh.read(_AUTHOR_MAX_BYTES + 1)
             text = head[:_AUTHOR_MAX_BYTES].decode("utf-8", errors="replace")
@@ -706,6 +711,12 @@ def build_router(srv) -> APIRouter:
         target = (d / name).resolve()
         if d.resolve() not in target.parents:    # path-traversal guard
             raise HTTPException(400, "bad name")
+        # CLAUDE REVIEW: [EDGE-CASE] Two gaps vs the read side: (1) a non-UTF-8 body raises
+        # UnicodeDecodeError here -> unhandled 500 (should be a 400); (2) there is NO size bound on
+        # the write while list_author caps reads at _AUTHOR_MAX_BYTES (256 KiB) — a huge PUT is
+        # persisted whole (request.body() also buffers it fully in RAM), then silently shown
+        # truncated forever, and the oversized file is hot-reloaded into agent context. Reject
+        # bodies over the same cap and return 400 on undecodable bytes.
         body = await request.body()
         target.write_text(body.decode("utf-8"), encoding="utf-8")  # engine hot-reloads on next run
         return {"ok": True, "name": name}

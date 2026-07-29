@@ -105,6 +105,11 @@ SPECULATION_QUALITY_GATE_SCHEMA = "looplab.speculation-quality-gate/v1"
 
 # These values are source-owned.  There is deliberately no thresholds argument on any public API.
 SPECULATION_QUALITY_THRESHOLDS: Mapping[str, int | float] = MappingProxyType({
+    # CLAUDE REVIEW: [QUALITY] "min_pairs" is published in every receipt but never enforced by name:
+    # the gate checks `len(pair_reports) == len(SPECULATION_CALIBRATION_SEEDS)` (exactly 3), which
+    # only coincidentally matches. If the seed set ever changes size, the receipt would keep
+    # advertising a min_pairs=3 threshold that no code path applies — bind the check to this
+    # constant (or drop the row) so the published thresholds stay truthful.
     "min_pairs": 3,
     "scorer_mismatches": 0,
     "max_mean_normalized_regret": 0.05,
@@ -980,6 +985,10 @@ def _validate_calibration_greedy_authority(
         # this prefix is consumed only for card_added/card_build_requested. At the admitted 100k-event
         # bound this approaches quadratic work. Extend on every row, but snapshot only immediately
         # before the authority event types that actually consult the prefix.
+        # CLAUDE REVIEW: [PERF] The code does NOT implement the note above: snapshot() still runs
+        # UNCONDITIONALLY on every event, so the quadratic deep-copy cost the comment prescribes
+        # avoiding is fully incurred (contrast _validate_calibration_card_owners, which snapshots
+        # only inside its EV_CARD_ADDED branch). Move this line into the two authority branches.
         prefix = cursor.snapshot()
         if event.type == EV_CARD_ADDED:
             data = event.data if isinstance(event.data, Mapping) else {}

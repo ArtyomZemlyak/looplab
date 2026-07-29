@@ -44,6 +44,9 @@ def _pearson(a: Sequence[float], b: Sequence[float]) -> float:
 
 def train_test_contamination(train_rows: list, test_rows: list) -> dict:
     """Detect identical rows shared between train and test splits."""
+    # CLAUDE REVIEW: [EDGE-CASE] `tuple(r)` on a row containing an unhashable cell (a nested
+    # list/dict from a JSON-shaped dataset) raises TypeError out of the detector instead of
+    # abstaining — every other detector in this module degrades gracefully on malformed input.
     train = {tuple(r) for r in train_rows}
     dups = [r for r in test_rows if tuple(r) in train]
     frac = len(dups) / len(test_rows) if test_rows else 0.0
@@ -163,6 +166,11 @@ def code_leakage_scan(code: str) -> dict:
         # truncates at the first `)`, so a test tuple in a SECOND eval_set entry
         # (`eval_set=[(X_val,y_val),(X_test,y_test)]`) never reaches `arg` — the line-level scan sees it.
         head = _EVALSET_KW_RE.split(arg, maxsplit=1)[0]
+        # CLAUDE REVIEW: [EDGE-CASE] The TEST-monitor scan reads only the fit's FIRST source line, so a
+        # multiline monitor kwarg — `.fit(X, y, eval_set=[\n  (X_test, y_test)\n])` — escapes both `arg`
+        # (truncated at the first `)`) and this line-level check. The finditer refactor above fixed
+        # multiline ARGS for the other tells; this one still has a single-line horizon, and unlike the
+        # other misses it is not listed among the ACCEPTED RECALL GAP notes.
         line_src = lines[line_i].lower() if line_i < len(lines) else m.group(0).lower()
         test_monitor = _TEST_MONITOR_RE.search(line_src)
         if (_LEAKY_FIT_ARG_RE.search(head)                             # val/test token in the fit args = leak
@@ -179,6 +187,11 @@ def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]
     cutoff — i.e. training on future information."""
     if not train_timestamps or not test_timestamps:
         return {"detector": "temporal_leakage", "leak": False, "overlap": 0}
+    # CLAUDE REVIEW: [EDGE-CASE] A NaN in `test_timestamps` can poison `min()` (NaN comparisons are
+    # False, so if the FIRST element is NaN the min stays NaN) and then every `t >= cutoff` below is
+    # False — the detector silently reports leak=False on data that genuinely overlaps. This is the
+    # same NaN-poisoning false-negative class `_pearson` explicitly guards against (arch-review §4
+    # P1-7); filter non-finite timestamps before taking the cutoff.
     cutoff = min(test_timestamps)
     overlap = sum(1 for t in train_timestamps if t >= cutoff)
     return {"detector": "temporal_leakage", "leak": overlap > 0,

@@ -88,6 +88,12 @@ class McpTools:
             # Cap at the loop's RESULT_CAP (the ToolProvider convention: derive budgets FROM it, not a
             # free-standing 8000 that the loop's own 4000 tail-cut always dominates anyway).
             from looplab.tools._base import RESULT_CAP
+            # CLAUDE REVIEW: [LOGIC] Silent truncation: a bare [:RESULT_CAP] slice appends no marker,
+            # and because the result is then EXACTLY cap-length the loop's _cap_tool_result (which
+            # only marks results LONGER than the cap) adds none either — so a cut MCP reply is
+            # indistinguishable from a complete one, against the codebase's honest-truncation
+            # convention (env_inspect._clamp, reposcout._paginate). Clip to RESULT_CAP minus marker
+            # headroom and append an explicit truncation note.
             return str(server.call(tool, args or {}))[:RESULT_CAP]
         except Exception as e:  # noqa: BLE001 - a tool error is data for the model, never a crash
             return f"(mcp error calling {name}: {e})"

@@ -377,6 +377,12 @@ class Tui:
                     return
                 continue
             # A goal/refinement turn -> the boss (re)plans.
+            # CLAUDE REVIEW: [LOGIC] The new user turn is appended to `msgs` BEFORE the call, yet it
+            # is ALSO passed separately as `instruction` — the genesis route renders
+            # "Goal: <instruction>" plus the full "Conversation:" (which now ends with the same
+            # text), so the newest message reaches the boss twice. `_boss_turn` avoids exactly this
+            # with `history_for_boss(history[:-1])`; mirror that here (append after the call, or
+            # send msgs[:-1]).
             msgs.append({"role": "user", "content": text})
             self.console.print(f"[green]you ›[/green] {_esc(text)}")
             try:
@@ -396,6 +402,11 @@ class Tui:
             new_spec = (r or {}).get("spec")
             # Only adopt a REAL spec — the offline soft-fail returns ok:false with a blank spec, which
             # must not wipe a good draft the user already has.
+            # CLAUDE REVIEW: [EDGE-CASE] The "real spec" gate tests task.kind, but Genesis is
+            # instructed to author COMPOSABLE tasks with NO `kind` field (see spec_lines/spec_ready,
+            # which both handle kind-less tasks) — so a composable inline task only survives this
+            # gate via a non-empty run_id. A reply that fills in the task but leaves run_id/task_file
+            # blank is silently discarded.
             if (r or {}).get("ok") is not False and new_spec and (
                     new_spec.get("run_id") or new_spec.get("task_file") or (new_spec.get("task") or {}).get("kind")):
                 spec = new_spec
@@ -917,6 +928,13 @@ class Tui:
                 unresolved = True
             else:
                 unresolved = True
+                # CLAUDE REVIEW: [QUALITY] `status` is interpolated into rich markup WITHOUT `_esc`,
+                # unlike the analogous defensive branch in `_control` (which escapes it). Today the
+                # branch is unreachable — `Api._command_record` rejects any status outside
+                # _COMMAND_DONE|_COMMAND_FAILED|_COMMAND_PENDING — but if the client-side validation
+                # ever loosens, a markup-bearing status ("[/x]") raises rich MarkupError inside
+                # _reconcile_pending, which re-runs on every reopen of the run view (the exact
+                # re-crash loop the _esc docstring warns about).
                 self.console.print(
                     f"  [yellow]…[/yellow] {_esc(label)} — unexpected command status {status or 'missing'}")
         return not unresolved
@@ -979,6 +997,14 @@ class Tui:
                                   and report_refresh_id and len(report_refresh_id) <= 512 else None)
                 if target is None and not row_command_id and not staged_id and safe_report_id:
                     target = by_report.get(safe_report_id)
+                # CLAUDE REVIEW: [RACE] The positional fallback assumes `action_index` (recorded as
+                # len(history)-1 by the writing TUI process) still names the same row after folding.
+                # chat.jsonl is shared with the web Dock: any turn another client appends between the
+                # staged action and its command_status row shifts the folded indices, and this can
+                # bind a status (done/failed) to a DIFFERENT action row — the guard only checks the
+                # row at that index is SOME action. Narrow today (only report-refresh rows that lost
+                # every durable id reach this branch), but an id-less correlation across an
+                # append-only shared file cannot be made exact; prefer refusing over guessing.
                 if (target is None and not row_command_id and not staged_id and not safe_report_id
                         and isinstance(row.get("action_index"), int)):
                     index = row["action_index"]

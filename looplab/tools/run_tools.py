@@ -162,6 +162,13 @@ class RunTools:
             if name == "read_research_memo":
                 return self._research_memo(st)
             return f"(unknown tool: {name})"
+        # CLAUDE REVIEW: [EDGE-CASE] The module/provider contract says execute "soft-fails (never
+        # raises)", and drive_tool_loop does NOT guard tools.execute (cross_run_tools.py documents
+        # this explicitly) — but this catch tuple misses AttributeError / RecursionError / anything
+        # raised inside the concept-projection / digest helpers, so an unexpected shape in folded
+        # state propagates and can kill the whole agent phase. cross_run_tools/memory_tools catch
+        # Exception broadly for exactly this reason; the same applies to SiblingRunTools and
+        # AllRunsTools below.
         except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             return f"(tool error: {e})"
 
@@ -703,6 +710,9 @@ class SiblingRunTools:
             if name == "find_analogous_across_runs":
                 return self._analogous(args)
             return f"(unknown tool: {name})"
+        # CLAUDE REVIEW: [EDGE-CASE] Same too-narrow catch as RunTools.execute (see comment there):
+        # AttributeError and other unexpected exceptions from folding foreign logs / projections
+        # escape the "never raises" contract.
         except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             return f"(tool error: {e})"
 
@@ -778,6 +788,9 @@ class SiblingRunTools:
         if not self.task_id or getattr(st, "task_id", "") != self.task_id:  # same-task boundary (see `_read`)
             return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
         self._reader.bind_state(st, None)
+        # CLAUDE REVIEW: [QUALITY] Unlike `_read` above, this omits `self._runs.source_note(run_id)`:
+        # code read from a torn/partial sibling log carries no PARTIAL-SOURCE receipt, so the agent
+        # can't tell it may be looking at a stale prefix of that run.
         return f"# from run {run_id}\n" + self._reader.execute("read_code", {"node_id": nid})
 
     def _analogous(self, args: dict) -> str:
@@ -862,6 +875,7 @@ class AllRunsTools:
             if name == "read_run_experiment":
                 return self._read(args.get("run_id"), int(args.get("node_id")), args.get("trials"))
             return f"(unknown tool: {name})"
+        # CLAUDE REVIEW: [EDGE-CASE] Same too-narrow catch as RunTools.execute (see comment there).
         except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             return f"(tool error: {e})"
 
@@ -889,6 +903,10 @@ class AllRunsTools:
         return (f"{len(lines)} run(s) on this machine (across all tasks):\n" + "\n".join(lines)
                 ) if lines else "(no other runs on this machine)"
 
+    # CLAUDE REVIEW: [QUALITY] `_list_runs` above marks partial sources, but neither `_code` nor
+    # `_read` prepends `self._runs.source_note(run_id)` the way SiblingRunTools._read /
+    # MachineRunsTools._read_experiment do — a node read from a truncated foreign log looks
+    # authoritative here.
     def _code(self, run_id, nid: int) -> str:
         st = self._state(run_id)
         if st is None:

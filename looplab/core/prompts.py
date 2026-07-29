@@ -32,6 +32,11 @@ class PromptStore:
         text = default
         if self.dir is not None:
             f = self.dir / f"{name}.md"
+            # CLAUDE REVIEW: [EDGE-CASE] exists()-then-read races with a concurrent delete of the
+            # override file (hot-reload invites live editing), and read_text can raise OSError
+            # (permissions, transient FUSE errors) — either propagates and crashes the calling role,
+            # instead of falling back to the built-in default as the module docstring promises for a
+            # missing file. Wrap the read in try/except OSError.
             if f.exists():  # re-read each call -> hot reload
                 # utf-8-sig strips a BOM so a Windows-edited prompt's frontmatter still matches ^---.
                 text = _strip_frontmatter(f.read_text(encoding="utf-8-sig", errors="replace")).strip()

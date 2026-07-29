@@ -52,6 +52,12 @@ def _slug_norm(s: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(s or "")).casefold()
     return "".join(char for char in normalized if char.isalnum())
 _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
+# CLAUDE REVIEW: [LOGIC] 16k is 4x the agent loop's RESULT_CAP (4000, tools/_base.py): every result
+# longer than 4000 chars is head-truncated by drive_tool_loop, which drops the TAIL — and these
+# tools deliberately append their trust receipts ("[receipt …]", PARTIAL warnings, omission counts)
+# at the END. So exactly the honesty metadata this module works hardest to attach is what gets cut
+# for any sizeable answer. _base.py instructs providers to derive budgets FROM RESULT_CAP; either
+# bound to RESULT_CAP minus headroom or move the receipts to the head.
 _MAX_TOOL_RESULT_CHARS = 16_000
 
 

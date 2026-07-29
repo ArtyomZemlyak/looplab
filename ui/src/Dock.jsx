@@ -716,6 +716,11 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
     ? rawTraceGeneration : null
   // `liveBuilding` is a Map<nodeId, generation> of every concurrent build; this row live-polls its trace
   // only when it IS one of those exact building lifecycles (right node AND right generation).
+  // CLAUDE REVIEW: [READABILITY] Doc drift: buildingGenerations() returns a plain object (and the
+  // comments here and at the Dock call site both say "Map<nodeId, generation>"). The bracket read
+  // below works only because it is NOT a Map — a future reader "fixing" this to .get() or actually
+  // constructing a Map would silently disable every live trace poll. Align the comments with the
+  // real plain-object contract (or return a real Map from buildingModel.js consistently).
   const exactBuilding = liveBuilding != null && traceNid != null && traceGeneration != null
     && liveBuilding[traceNid] === traceGeneration
   // Clear the error flag only on a SUCCESSFUL exact-attempt load (not eagerly at each poll tick).

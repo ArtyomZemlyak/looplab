@@ -273,6 +273,10 @@ def record_llm_call(*, op: str, model: str, messages: list[dict], completion: st
     if not st:
         return
     rec = st[-1]
+    # CLAUDE REVIEW: [EDGE-CASE] int() on untrusted usage values raises ValueError/TypeError for a
+    # malformed non-numeric entry (e.g. usage={"prompt_tokens": "n/a"}) and escapes into the traced
+    # LLM call — violating this module's own "tracing must never perturb the operation" rule.
+    # `_norm_usage` below shares the same unguarded int() pattern for ObservationHandle.usage().
     tokens = {
         "prompt": int((usage or {}).get("prompt_tokens") or 0),
         "completion": int((usage or {}).get("completion_tokens") or 0),

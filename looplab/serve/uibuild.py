@@ -130,6 +130,12 @@ def _ui_build_lock(src: Path) -> Iterator[None]:
         else:
             import fcntl
 
+            # CLAUDE REVIEW: [QUALITY] Asymmetric with Windows: the POSIX path takes a BLOCKING
+            # LOCK_EX with no deadline, while _acquire_windows_lock enforces the 300s
+            # _BUILD_LOCK_TIMEOUT_S. A wedged sibling builder (hung npm under the lock) therefore
+            # blocks `looplab ui` startup indefinitely on POSIX with no diagnostic, where Windows
+            # fails after five minutes with a clear TimeoutError. Use LOCK_NB + the same
+            # deadline/poll loop.
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             locked = True
         yield

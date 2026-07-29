@@ -265,6 +265,11 @@ class CliAgentDeveloper:
                             p.communicate(timeout=10)  # reap the signalled group; drain/free the pipes
                         except Exception:  # noqa: BLE001 — SIGKILL'd tree; __exit__ still closes the fds
                             pass
+                        # CLAUDE REVIEW: [QUALITY] The partial stdout/stderr captured before the
+                        # timeout (available on e.stdout/e.stderr, and whatever the reap
+                        # communicate() above drained — its return value is discarded) is thrown
+                        # away: AgentRun records only str(e), so validation/triage loses everything
+                        # the agent printed before it hung.
                         self.last_run = AgentRun(launched=True, timed_out=True,
                                                  stderr_tail=str(e)[-2000:])
                     except BaseException:
@@ -280,6 +285,12 @@ class CliAgentDeveloper:
                 # binary missing / not executable -> leave the seed; the validator flags
                 # `agent_launched=False` and the loop's eval/debug copes.
                 self.last_run = AgentRun(launched=False, stderr_tail=str(e)[-2000:])
+            # CLAUDE REVIEW: [EDGE-CASE] When git is unavailable or the seed commit failed
+            # (seed_sha is None) in seed_dirs/patch-gate mode, this silently falls through to the
+            # solution.py readback: in repo mode ALL the agent's edits are discarded with the temp
+            # dir, last_files stays {} and last_patch stays None — the node quietly evaluates the
+            # unmodified baseline with no diagnostic distinguishing "gate skipped (no git)" from
+            # "agent made no changes" (the validator just sees a no-op).
             if (self.patch_gate or self.seed_dirs) and seed_sha:
                 return self._collect_gated(wd, seed_sha)
             return _read_if(wd / "solution.py")

@@ -387,6 +387,10 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
     return None
 
 
+# CLAUDE REVIEW: [QUALITY] Near-duplicate of engine_proc._resolve_task_file (same snapshot->ui_meta
+# fallback logic, independently maintained). The two can drift silently — e.g. one gaining a new
+# fallback or validation the other lacks; routers/control.py already aliases the engine_proc one.
+# Consider one shared helper.
 def task_file_for(rd: Path) -> Optional[str]:
     """Resolve the immutable run snapshot, with a safe existing-file legacy fallback."""
     snapshot = rd / "task.snapshot.json"
@@ -2136,6 +2140,13 @@ class RunCommandService:
             return path, record
         return None, None
 
+    # CLAUDE REVIEW: [PERF] This helper re-reads and re-parses the ENTIRE events.jsonl
+    # (self._events = EventStore.read_all) and may additionally trigger a second full read+fold via
+    # srv.state(rd) — on every submit (_decision), every legacy /control POST (reject_if_active) and
+    # every destructive_guard entry. The incremental CommandObservationIndex was built precisely to
+    # avoid this quadratic re-parsing and already exposes both pieces
+    # (observation.incomplete_finalize_scope() and observation.state()); a submit against a large log
+    # currently costs several full-log parses per request.
     def _finalize_incomplete(self, rd: Path, state=None) -> bool:
         """A finalize remains pending until its terminal projections are durably complete."""
         events = self._events(rd)
@@ -3118,6 +3129,13 @@ class RunCommandService:
             raise HTTPException(503, detail)
         return result
 
+    # CLAUDE REVIEW: [READABILITY] The docstrings above (_reconcile_observation: "GET is
+    # observation-only: it never appends or spawns") describe only TERMINAL-record reconciliation,
+    # but this method restarts a worker for any nonterminal record — and that worker DOES append the
+    # marked intent and may Popen an engine. That is the intended crash-recovery path (an accepted
+    # record whose worker died must be drivable again by polling), but the blanket "never
+    # appends or spawns" claim is misleading to a reader auditing GET side effects; scope the claim
+    # to terminal records where it is stated.
     def get(self, rd: Path, command_id: str) -> dict:
         path = self._path(rd, command_id)
         with self.sequence(rd):
@@ -3205,6 +3223,11 @@ class RunCommandService:
                 except OSError:
                     if lock.exists():
                         return False
+                    # CLAUDE REVIEW: [TEST-GAP] This no-hardlink O_EXCL fallback (and its unlink-on-
+                    # failure cleanup) has no test coverage — every claim test publishes through
+                    # os.link; a regression here on network/FAT mounts could leave a partial or
+                    # orphaned .executing claim that deadlocks the run's command lane, or let two
+                    # workers execute the same command.
                     # Some network/FAT filesystems cannot hard-link. Preserve functionality with a
                     # short O_EXCL write; any kill inside this fallback is recoverable through the
                     # explicit active-claim resolver rather than becoming a permanent deadlock.
@@ -3241,6 +3264,13 @@ class RunCommandService:
             # deadline and positive evidence that the owning process exited or its PID was reused.
             try:
                 owner_gone = self._execution_owner_definitely_gone(lock)
+                # CLAUDE REVIEW: [LOGIC] The mtime-age condition here is dead: it can only return
+                # False when `not owner_gone`, which the very next `if not owner_gone: return False`
+                # already does unconditionally — so reclaim actually happens IMMEDIATELY on positive
+                # owner death regardless of age, contradicting the comment above ("only after the
+                # full command deadline AND positive evidence"). Either the age fence or the comment
+                # is wrong; _active_command_ids documents the immediate-on-positive-death policy, so
+                # most likely this condition and the comment are stale leftovers.
                 if (time.time() - lock.stat().st_mtime <= self.command_timeout + 30
                         and not owner_gone):
                     return False
@@ -3320,6 +3350,9 @@ class RunCommandService:
             return None
         return event
 
+    # CLAUDE REVIEW: [DEAD-CODE] _domain_progress has no callers anywhere in the codebase (only
+    # CommandObservation.has_domain_progress is exercised, and only by tests). Either wire it into
+    # the monitor loop it was written for or remove it before it drifts from the observation API.
     def _domain_progress(
             self, rd: Path, after_seq: int,
             observation: Optional[CommandObservation] = None) -> bool:
@@ -3442,6 +3475,9 @@ class RunCommandService:
             return observation.has_ack(command_id, event_seq)
         return False
 
+    # CLAUDE REVIEW: [DEAD-CODE] _driver_or_progress is never called (grep: no call sites in
+    # looplab/ or tests/). Dead recovery logic on this safety-critical class invites misuse or
+    # bit-rot; remove it or add the caller it was intended for.
     def _driver_or_progress(
             self, rd: Path, record: dict,
             observation: Optional[CommandObservation] = None) -> bool:

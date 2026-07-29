@@ -20,6 +20,12 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+# CLAUDE REVIEW: [ARCH] Module-level `from ... import drive_tool_loop` EARLY-BINDS the loop: a
+# monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (the path CLAUDE.md and
+# many tests use) never reaches DeepResearcher.research, because this module keeps its own captured
+# binding. The sibling call sites (strategist.py, foresight.py, serve/assistant.py,
+# serve/scope_report.py) all import it lazily inside the function for exactly this reason — do the
+# same here (see also the identical issue in unified_agent.py).
 from looplab.agents.agent import drive_tool_loop
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
 from looplab.core.llm import BudgetExceeded

@@ -688,6 +688,14 @@ class StrategyCadenceMixin:
         # before any durable invocation claim exists. A crash after provider success but before the event
         # append purchases the same semantic work again on resume. Claim the bounded input digest before
         # dispatch and persist terminal/ambiguous receipts; an eventual snapshot is not a payment fence.
+        # CLAUDE REVIEW: [DOCS-MISMATCH] The imperative comment above describes a claim-before-dispatch
+        # protocol that is NOT implemented on this path: `_concept_coverage_snapshot` dispatches the
+        # paid tagging/consolidation calls directly with no durable claim (contrast the finalize
+        # stewards' `_paid_curation_attempt` in lessons.py, which do implement it). A crash between
+        # the provider calls and the EV_NODE_CONCEPTS/EV_CONCEPT_COVERAGE_SNAPSHOT appends still
+        # re-purchases the un-recorded tagging on resume — only bounded by _RETAG_CAP/_HYP_TAG_CAP
+        # and per-node incremental reuse, not prevented. Either implement the claim or reword the
+        # comment so it stops reading as a description of existing behavior.
         snap = self._concept_coverage_snapshot(state)
         if snap is None:
             return state

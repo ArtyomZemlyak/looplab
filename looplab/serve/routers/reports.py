@@ -1575,6 +1575,12 @@ def build_router(srv) -> APIRouter:
     def _scope_run_ids(scope_type: str, scope_id: str) -> list:
         """The runs a scope covers. project = the folder AND everything nested under it; task = same
         task_id; supertask = assigned to that super-task."""
+        # CLAUDE REVIEW: [PERF] Every scope-report request (GET staleness check included) invokes
+        # the FULL /api/runs handler: it stats + potentially re-folds every run in the workspace
+        # AND runs the per-run engine-liveness lock probe and the best-effort resume reconciler
+        # (which can SPAWN an engine process) — heavy work and a mutation side effect for what this
+        # caller needs, which is only the run_id -> task/project/supertask membership columns. A
+        # membership-only projection (no _alive probe) would make report reads side-effect free.
         summaries = srv.list_runs_fn()
         if scope_type == "task":
             return [s["run_id"] for s in summaries if s.get("task_id") == scope_id]
@@ -2571,6 +2577,13 @@ def build_router(srv) -> APIRouter:
         action_id = _scope_action_id(idempotency_key)
         if action_id is None:
             raise HTTPException(428 if idempotency_key is None else 400, _SCOPE_ACTION_REQUIRED)
+        # CLAUDE REVIEW: [PERF] `async def` handler doing heavy blocking preflight on the event
+        # loop before the job hand-off: _scope_store_lock holds a GLOBAL thread lock + interprocess
+        # file lock, _read_reconciled_action does strict lease/fence file I/O and re-publication,
+        # and below _scope_run_ids() re-runs the whole runs-list fold, _scope_sig/_scope_source_sizes
+        # stat every run, and _scope_context_digest reloads the project store — all inline. Any
+        # contention on the single store lock (another generation publishing) stalls the entire
+        # event loop, not just this request. Offload the preflight to a worker thread.
         try:
             with _scope_store_lock(_reports_dir):
                 existing_action = _read_reconciled_action(

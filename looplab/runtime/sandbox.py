@@ -28,6 +28,12 @@ from typing import Optional, Protocol
 # Env-var NAMES that look like a secret — redacted from the child process environment so generated
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
 # never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
+# CLAUDE REVIEW: [SECURITY] The name filter misses several common secret-BEARING env names:
+# connection strings with embedded credentials (DATABASE_URL / MONGO_URI / *_DSN), PASSPHRASE,
+# *_AUTH / AUTHORIZATION, SESSION/COOKIE values, and webhook URLs (SLACK_WEBHOOK_URL). A
+# `print(os.environ)` in generated code exfiltrates all of these into the durable stdout tail on
+# every tier that relies on this regex (run_argv, docker_gpu_env, bg_tasks._child_env). Consider
+# adding (URI|URL|DSN|PASSPHRASE|AUTH|SESSION|COOKIE|WEBHOOK) or value-based entropy screening.
 SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
 
 # A sane wall-clock ceiling for any single subprocess run. A "timeout" larger than this is a
@@ -428,6 +434,13 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
             # runs in a FRESH single-threaded interpreter where no such lock can be inherited, applies
             # the same caps, and `execvp`s the real argv (same pid, so `_kill_tree`/pgid are
             # unaffected). It is passed as `-c` source rather than `-m` so it needs nothing importable.
+            # CLAUDE REVIEW: [EDGE-CASE] Latent interaction with the docker-cidfile branch above: if a
+            # `docker run` argv is ever passed together with mem_bytes/fsize_bytes on POSIX, this
+            # rewrite (a) applies RLIMIT_AS/FSIZE to the docker CLI client, not the container, and
+            # (b) replaces argv[0] with sys.executable, so the post-kill cleanup below calls
+            # `_remove_docker_container(str(argv[0]), ...)` == `<python> rm -f <cid>` — a silent no-op
+            # that leaks the daemon-owned container. No current caller mixes the two, but this is the
+            # universal choke point; capturing the docker binary before this rewrite would close it.
             argv = [sys.executable, "-c", _RLIMIT_LAUNCHER,
                     str(_mem or 0), str(_fsize or 0), "--", *argv]
     # Don't hand the child code the host's secrets (review C2): a `print(os.environ)` or a stack
@@ -647,6 +660,13 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 monitor.feed(text)
             if final:
                 monitor.finish()
+            # CLAUDE REVIEW: [LOGIC] The cross-stream SUM partially undermines the class's
+            # "CONSECUTIVE, not cumulative" guarantee: a finite metric resets only ITS OWN stream's
+            # streak, so hits stranded on a stream that then goes quiet (e.g. a one-off stderr dump
+            # with a few `loss: nan` tokens and no later finite record there) stay counted forever
+            # and let non-sustained non-finiteness on the OTHER stream trip the shared threshold.
+            # Sustained real divergence is still caught either way; this only weakens the
+            # false-positive protection the docstring promises for mixed-stream logs.
             if (not diverged.is_set()
                     and sum(item.hits for item in monitors.values()) >= monitor.threshold):
                 diverged.set()
@@ -761,6 +781,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     stall_marker = (f"\n‼ LOOPLAB health-check: stage STALLED — no output for "
                     f"{int(stall_timeout or 0)}s while the process stayed alive (likely a hung "
                     "distributed finalize / wedged CUDA op / deadlock); aborting the stage early.\n")
+    # CLAUDE REVIEW: [LOGIC] When BOTH watchdogs fire (stall kill first, then divergence confirmed by
+    # the decoder's final flush via _observe_health(final=True)), the stall verdict wins everywhere the
+    # callers look: active_marker is the STALL marker and command_eval reads only signals["stalled"]
+    # (RunResult has no `diverged` field). The salvage gate `metric is not None and (exit==0 or
+    # stalled)` then ACCEPTS a metric from a training the DIVERGE watchdog meant to fail closed.
+    # Narrow window, but the fail-closed intent of DIVERGED should take precedence over stall-salvage.
     active_marker = stall_marker if stalled.is_set() else marker
     if (diverged.is_set() or stalled.is_set()) and logf is not None:
         try:

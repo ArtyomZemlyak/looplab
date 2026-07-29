@@ -343,6 +343,13 @@ class CommandObservationIndex:
         metadata = _metadata(stat)
         probe_before = _probe_signature(handle, size)
         index = self._indexes.get(key)
+        # CLAUDE REVIEW: [EDGE-CASE] The metadata/probe rebuild fences apply only at EQUAL size. An
+        # in-place rewrite that also GROWS the file (same inode, prefix bytes changed) is never
+        # detected: the scan resumes from valid_end over foreign bytes, the seq-continuity check
+        # merely stops the tail, and the already-indexed intents/acks/finishes from the OLD image are
+        # then re-certified against the NEW image's probe signature and trusted indefinitely. Safe
+        # only while every writer honors the append-only contract; a repair tool or manual edit that
+        # rewrites-and-appends silently poisons this cache until identity/shrink changes.
         rebuild = (
             index is None
             or index.identity != identity
@@ -382,6 +389,11 @@ class CommandObservationIndex:
         # names the indexed handle. Ordinary append growth after the snapshot is fine: this
         # observation consistently names the earlier complete prefix and the next poll reads delta.
         for attempt in range(3):
+            # CLAUDE REVIEW: [PERF] The single registry-wide RLock is held across the whole
+            # _refresh_locked call, including the probe reads and the incremental _scan. The first
+            # observation of a large log (or any big append burst) parses the entire new suffix under
+            # this global lock, stalling every other run's command monitor/GET for the duration. A
+            # per-run lock (the registry already keys per path) would confine the stall to one run.
             with open(path, "rb") as handle, self._lock:
                 self.metrics.refreshes += 1
                 stat = os.fstat(handle.fileno())

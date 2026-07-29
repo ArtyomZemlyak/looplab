@@ -605,6 +605,12 @@ def build_digest(scope_label: str, briefs: list) -> str:
     return digest
 
 
+# CLAUDE REVIEW: [DEAD-CODE] Under schema v1 `_comparison_projection` initializes winner=None and
+# never assigns it (and `_sanitize_content` forces winner back to None), so the `groups[0]["winner"]
+# is None` guard below is ALWAYS true: this function unconditionally returns [] and the by_id
+# reconstruction on the last two lines is unreachable. No production caller exists; the tests pin
+# only the empty result. Either delete it or leave an explicit "reserved for a future outcome-policy
+# schema" marker on the unreachable tail.
 def _ranked(briefs: list) -> list:
     """Rank only one exact explicit cohort; never manufacture a portfolio-wide total order."""
     projected, _coverage = _project_briefs(briefs)
@@ -713,6 +719,11 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
         source_coverage["source_runs"], declared_source_runs)
     source_coverage["unavailable_runs"] = max(
         0, source_coverage["source_runs"] - len(projected_briefs))
+    # CLAUDE REVIEW: [READABILITY] This rebinds the `briefs` PARAMETER to the prompt-included
+    # subset; every later use of `briefs` (the empty-projection return below, _deterministic,
+    # _CrossRunTools, _sanitize_content) silently means "included briefs", not the caller's
+    # argument. Rename to `included_briefs` — a future edit that means the original list will
+    # get the wrong one without any error.
     digest, briefs, coverage = _build_digest_projection(
         label, projected_briefs, source_coverage)
     if not projected_briefs:

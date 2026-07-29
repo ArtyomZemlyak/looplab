@@ -504,6 +504,12 @@ class EvaluateMixin:
                 # TERMINAL events, and no terminal is emitted mid-repair, so an LLM whose repairs vary
                 # the stderr (never tripping anti-stuck) can overshoot the eval budget by multiples
                 # inside ONE node. Abandon once this node's cumulative eval time would cross the ceiling.
+                # CLAUDE REVIEW: [LOGIC] `state` here is the fold taken at eval START, so under
+                # eval_parallel>1 every terminal a parallel sibling appended SINCE this worker began
+                # is invisible and this "cumulative ceiling" check undercounts the run-wide
+                # total_eval_seconds — the repair loop can keep re-running full evals well past
+                # max_eval_seconds when siblings burned the remaining budget mid-loop. Re-fold
+                # (cheap relative to an eval) before this comparison.
                 if max_es is not None and state.total_eval_seconds + total_eval >= max_es:
                     triage_outcome = ("abandon", "eval budget exhausted during inline repair")
                     break
@@ -762,6 +768,12 @@ class EvaluateMixin:
                         # of the exact scanned surface (provenance — which bytes produced these signals),
                         # so a stored flag isn't a bare {node_id, signals}. Additive; the fold reads the
                         # new fields with defaults, so old logs are unaffected.
+                        # CLAUDE REVIEW: [QUALITY] This function-local `import hashlib` shadows the
+                        # MODULE-level import and makes `hashlib` a function-local name for ALL of
+                        # _evaluate — the exact unbound-local trap _workdir_manifest_digest's
+                        # docstring documents having to dodge by moving out of this method. It is
+                        # redundant (hashlib is imported at module top); any future `hashlib` use
+                        # earlier in this method would raise UnboundLocalError at runtime. Delete it.
                         import hashlib
                         self.store.append(EV_REWARD_HACK_SUSPECTED,
                                           {"node_id": node_id, "generation": generation,

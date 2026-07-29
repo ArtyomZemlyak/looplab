@@ -441,6 +441,13 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                                                     "and call it again with a valid, COMPLETE idea — "
                                                     "never an empty one."})
                         continue
+                # CLAUDE REVIEW: [EDGE-CASE] An accepted emit returns immediately: the emit's own
+                # tool_call_id — and any sibling tool_calls listed AFTER the emit in this same
+                # assistant turn — never get a role:"tool" answer, leaving dangling tool_call_ids in
+                # `messages`. The rejected-emit branch above deliberately `continue`s to avoid exactly
+                # that, and serve/assistant.py must strip unanswered ids before re-calling the LLM
+                # over this trace (strict OpenAI-compatible backends 400 on it). Any new caller that
+                # reuses `messages` after an accepted emit inherits that footgun, undocumented here.
                 return finalize(args)
             if _cancelled():
                 # Stop pressed while this turn's calls were executing: do NOT run the remaining
@@ -498,6 +505,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # nudge at `emit_after` tool turns; FORCE the emit at `emit_force` if it still hasn't committed.
         # The nudge wording is ROLE-NEUTRAL: this loop also drives the strategist/pilot/triage emits
         # (via loop_opts_from_settings), where "your best idea / next node" would be nonsense.
+        # CLAUDE REVIEW: [LOGIC] `tool_turns` counts every turn that carried ANY tool_call, including
+        # turns whose only call was a rejected emit or an update_plan — no retrieval actually ran,
+        # yet the emit_after nudge ("You have investigated enough (N tool turns)") and the emit_force
+        # ceiling still advance, so a model bouncing on emit validation burns "investigation" budget
+        # and the nudge's stated count overstates the real investigation.
         if (emit_after or emit_force) and tools is not None:
             tool_turns += 1
             if emit_force and tool_turns >= emit_force:

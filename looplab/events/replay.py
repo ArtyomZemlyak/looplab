@@ -150,6 +150,12 @@ def is_hard_signal(sig: str) -> bool:
     # pattern `[x]*NNN`) that also matches ordinary buffer pre-allocation (`weights = [0]*1000`); a
     # constant predictor already loses on ground truth, so hard-gating it only risks silently excluding
     # an HONEST winner. Advisory (surface, never gate), exactly like perfect_metric.
+    # CLAUDE REVIEW: [LOGIC] Fail-open classifier: any signal name NOT matching the advisory prefixes
+    # is HARD — including the empty string that `s.get("signal", "")` yields for a signals entry with
+    # no "signal" key. A malformed/empty entry therefore gate-excludes an honest node from
+    # best-selection under "gate"/"block". Defaulting UNKNOWN future signal names to hard may be
+    # intended fail-closed behavior, but "" is not a signal and should be rejected as malformed
+    # rather than counted as high-precision cheating evidence.
     return not sig.startswith(("critic:", "perfect_metric", "protected_audit_unavailable",
                                "suspicious_output"))
 
@@ -301,6 +307,11 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         and all(ch in "0123456789abcdef" for ch in _calibration_profile[7:])
         else ""
     )
+    # CLAUDE REVIEW: [PERF] Row COUNT is capped at 256 but each row dict is copied with unbounded
+    # size — unlike every other fold boundary in this file (the card/concept handlers bound both
+    # count and per-item size). A hand-edited/foreign run_started can park megabytes in RunState,
+    # which FoldCursor then deep-copies on EVERY snapshot — the exact amplification the card
+    # handlers' bounding comments warn about.
     _calibration_inventory = d.get("speculation_calibration_gpu_inventory", [])
     st.speculation_calibration_gpu_inventory = (
         [dict(row) for row in _calibration_inventory]
@@ -1459,6 +1470,13 @@ def _on_data_profiled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.data_profile = d.get("columns")
 
 def _on_data_provenance(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # CLAUDE REVIEW: [QUALITY] Stores the LIVE Event.data reference (likewise host_grading, leakage,
+    # archive, spec_proposed, hypothesis_ranking, the many `append(d)` audit journals, and
+    # Node.files/deleted in _on_node_created/_on_node_repaired). `_on_inject_node` documents exactly
+    # why that is hazardous — EventStore caches parsed Events across read_all(), so a consumer that
+    # mutates folded state in place silently diverges every later fold from the bytes on disk — and
+    # copies for that reason; these handlers alias anyway, so the no-mutation guarantee holds only
+    # by convention, not by construction.
     st.data_provenance = d   # D4: pinned dataset/asset content hashes
 
 def _on_host_grading(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1500,6 +1518,11 @@ def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.leakage = d
 
 def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # CLAUDE REVIEW: [TEST-GAP] The stale-CAS REJECT branch below (after_seq present but != e.seq-1,
+    # or a bool/garbage after_seq) has no test coverage — only the accept path is exercised (the real
+    # engine in test_archive_hitl stamps a valid after_seq); a regression that wrongly accepts a stale
+    # request could re-open/rebind the HITL approval gate after an intervening abort/reset, and one
+    # that wrongly rejects would silently strand every modern approval request (run never pauses).
     if "after_seq" in d:
         raw_after = d.get("after_seq")
         if isinstance(raw_after, bool):
@@ -2240,6 +2263,15 @@ def _on_reward_hack_suspected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") 
     generation = _event_generation(d)
     if generation is not _MISSING and (n is None or not _generation_matches(n, d)):
         return
+    # CLAUDE REVIEW: [BUG] `signals` is folded verbatim with no shape validation, but
+    # `hard_flagged_ids._has_current_hard_signal` later runs `s.get("signal", "")` over
+    # `rh.get("signals") or []`. A malformed/hand-edited event whose `signals` is a truthy scalar
+    # (TypeError on iteration) or a list of non-dicts, e.g. ["leak"] (AttributeError on .get),
+    # crashes the trust post-pass — bricking EVERY fold/replay/resume of the run whenever
+    # trust_gate is "gate"/"block" (and the digest's trust reflection even under "audit").
+    # That violates the fold-totality standard applied everywhere else in this file (cf. the
+    # `trials`, `node_ids` and `scores` container guards); normalize to a bounded list of
+    # {"signal": str} dicts at this fold boundary.
     record = {"node_id": nid, "signals": d.get("signals", []),
               "evidence_version": d.get("evidence_version", 0),
               "code_digest": d.get("code_digest")}

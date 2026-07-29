@@ -162,6 +162,16 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
             continue
         if event.type == EV_REPORT_GENERATED and data.get("finalize_scope") == scope:
             continue
+        # CLAUDE REVIEW: [REPLAY-SAFETY] This allow-list is missing EV_CARD_ENRICHED, yet
+        # `finalize_run` itself appends card_enriched (a FOLDED event) via `_sync_card_enrichments`
+        # between the scope's `begun` claim and its completion markers. A crash in that window makes
+        # the finalization's OWN effect read as a foreign event on resume: `finalize_scope_quiescent`
+        # returns False, `incomplete_finalize_scope` returns None, and for a scoped finish WITHOUT
+        # `finalization_required` (the old scoped-log compatibility population this predicate exists
+        # for) `should_finalize` never fires again — the scope is silently abandoned with its
+        # llm_cost roll-up / completion markers permanently missing. This is the same failure class
+        # the REPLAY-1 fix below closed for reflection_note/lessons_distilled; card_enriched needs
+        # the same treatment (it is emitted only by the main task and is selection-fenced by replay).
         if event.type in {EV_LLM_USAGE, EV_COMMAND_ACK, EV_READMODEL_SKIPPED,
                           EV_REFLECTION_NOTE, EV_LESSONS_DISTILLED}:
             # The reflection finalize step emits reflection_note (always) and lessons_distilled
@@ -428,6 +438,14 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
     if resolved is not None:
         return resolved
     if not writer_available:
+        # CLAUDE REVIEW: [EDGE-CASE] A run resumed WITHOUT a report_writer whose scope planned a
+        # finish report (`finish_report_planned=True`) but never reached `report_begun` returns False
+        # here on every pass: the report step can never be dispatched NOR closed, so
+        # `requirements_complete` stays False and the scope never publishes completion —
+        # finalization re-runs on every resume forever with no disclosed degradation. This is the
+        # same never-self-healing shape the llm_cost step bounds with
+        # `_COST_REFRESH_MAX_ATTEMPTS` + a disclosed `degraded` marker; consider an analogous
+        # bounded/disclosed close (e.g. `outcome="writer_unavailable"`) instead of a silent wedge.
         if not _scope_has_step(current, scope, "report_begun"):
             return False
         # A differently configured process may currently own this attempt.  An optional guard waits
@@ -772,6 +790,10 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # comparative lessons produced during finalize (and also repairs a crash gap on retry) before
         # the terminal cost/publication steps, while Card events remain authored by the main task.
         try:
+            # CLAUDE REVIEW: [REPLAY-SAFETY] This append of FOLDED card_enriched events happens inside
+            # an open finalize scope, but EV_CARD_ENRICHED is not in `finalize_scope_quiescent`'s
+            # allow-list — see the comment there: a crash after this line but before the completion
+            # markers breaks quiescence for a non-`finalization_required` scoped finish on resume.
             engine._sync_card_enrichments(fold(engine.store.read_all()))
         except Exception:  # noqa: BLE001 - advisory Card links must never block terminal completion
             pass

@@ -106,6 +106,15 @@ class EvalDispatchMixin:
         if interrupted:
             _LOG.warning("run_setup %r is being re-executed after an interrupted attempt: its side "
                          "effects may be applied twice", cmd)
+        # CLAUDE REVIEW: [REPLAY-SAFETY] run_setup_started/finished are FOLDED events (deliberately
+        # moved out of DIAGNOSTIC_EVENTS) yet these appends execute inside an eval WORKER THREAD
+        # (_run_eval runs under anyio.to_thread from _evaluate), outside `_write_lock` and outside
+        # every documented invariant-#1 exception (BACKGROUND_APPENDABLE / DIAGNOSTIC_EVENTS / the
+        # per-node parallel-build seam). It is safe today only because EventStore.append serializes
+        # bytes, `_run_setup_lock` makes this a once-per-run section, and the fold keys
+        # run_setup_open/done purely by command — but nothing asserts any of that at this append
+        # site (unlike the train-monitor's DIAGNOSTIC membership assert). Document/registry this
+        # seam so a future edit can't silently widen thread-side folded appends.
         self.store.append(EV_RUN_SETUP_STARTED,
                           {"command": cmd, "cwd": cwd, "after_interrupted_attempt": interrupted})
         log = str(Path(self.run_dir) / "run_setup.log")

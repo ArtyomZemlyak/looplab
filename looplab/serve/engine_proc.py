@@ -715,6 +715,13 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
             while True:
                 while _spawn_liveness(run_dir) is not False:
                     sig = _log_sig()
+                    # CLAUDE REVIEW: [PERF] _pending() re-reads and re-folds the ENTIRE events.jsonl
+                    # every time the log signature changes. While the live owner is actively
+                    # appending (long finalization tail, or a stale unserved resume request on an
+                    # engine that runs for hours), this waiter refolds the full log once per append
+                    # at up to 20 Hz for the run's whole remaining lifetime — O(n) per event, O(n^2)
+                    # aggregate. An incremental observation (CommandObservationIndex) or a
+                    # tail-only resume_served check would bound this.
                     if sig != last_sig:
                         last_sig = sig
                         # A live owner explicitly served the wake-up. Stop probing its lock for the
@@ -771,6 +778,11 @@ def install_resume_reconcile_hooks(
     timers: list[threading.Timer] = []
     shutdown = threading.Event()
 
+    # CLAUDE REVIEW: [PERF] _scan_startup runs synchronously inside the ASGI startup hook and does
+    # fold(store.read_all()) — a full parse + fold of the COMPLETE event log — for EVERY run under the
+    # root. A run root with many/large runs (multi-GB logs) blocks server readiness for the whole
+    # scan. Only resume_pending() is needed here; a cheap tail/derived check (or offloading the scan
+    # to a background thread like the reap/timer machinery already uses) would keep startup O(1).
     def _scan_startup() -> None:
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold

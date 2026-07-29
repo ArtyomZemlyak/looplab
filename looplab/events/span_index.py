@@ -92,6 +92,12 @@ def _scan_light_stream(stream, base: int, size: int, *,
         remaining -= len(chunk)
         # Concatenate only when a partial line is actually pending: the common case is a chunk that
         # ends on a newline, and `carry + chunk` would otherwise copy every byte of the file twice.
+        # CLAUDE REVIEW: [PERF] A single span line larger than _SCAN_CHUNK_BYTES makes this loop
+        # quadratic in that line's length: every iteration copies the growing carry (`carry + chunk`)
+        # AND _scan_light re-scans the whole window from offset 0 for a newline it already failed to
+        # find — ~O(L^2 / chunk) byte copies + scans for an L-byte line. Multi-MB generation spans
+        # are the norm in exactly the files this module targets; remembering the no-newline scan
+        # position (or accumulating chunks in a list until a newline appears) keeps it linear.
         window = chunk if not carry else carry + chunk
         found, end = _scan_light(window, consumed)
         records.extend(found)
@@ -200,6 +206,11 @@ class SpanIndex:
 
     # -- construction --------------------------------------------------------------------------
     def _append(self, light: dict, off: int, length: int) -> bool:
+        # CLAUDE REVIEW: [PERF] Records arriving via _extend from _scan_light were already normalized
+        # (and I/O-stripped) during the scan; re-normalizing every span here doubles the most
+        # expensive part of a rebuild/top-up (redaction/entropy over every text field of every span).
+        # Only _load_persisted's records are untrusted input — validate those at that call site (or
+        # pass a pre-validated flag) instead of paying 2x on the hot scan path of a 1 GB trace.
         normalized = _normalize_span(light)
         if normalized is None:
             return False

@@ -144,6 +144,8 @@ def card_fits_resource_envelope(
         memory = envelope.gpu_memory_mib
         if len(memory) != envelope.gpu_count:
             return True
+        # CLAUDE REVIEW: [DEAD-CODE] Unreachable: `required == 0` already returned True four lines
+        # above (`if not isinstance(requested_memory, int) or required == 0: return True`).
         if required == 0:
             return True
         effective_memory = min(requested_memory, sorted(memory, reverse=True)[required - 1])
@@ -656,6 +658,14 @@ def _novelty_signal(card: Card) -> float:
     number = float(level)
     if not math.isfinite(number):
         return 0.0
+    # CLAUDE REVIEW: [LOGIC] `level / 5` treats the §21.4 grade as a monotone novelty ORDER, but it
+    # is a classification: level 0 = "novel" (a genuinely new region) is never recorded as a
+    # novelty_graded event (engine/novelty.py records levels 4/5 only), so a truly novel card has NO
+    # verdict and lands in the `return 0.0` above — the LOWEST exploration credit — while a level-2
+    # near-duplicate ("repropose", not in the block-list guard) earns 0.4, level-3 tried-across-runs
+    # 0.6, and a level-4 same-direction variant 0.8. Under stance="explore" the novelty term
+    # therefore prefers same-direction variants and even surviving near-dups over genuinely new
+    # regions — inverted from what an exploration bonus should reward.
     return min(1.0, max(0.0, number / 5.0))
 
 

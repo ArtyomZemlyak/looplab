@@ -384,6 +384,11 @@ def build_router(srv) -> APIRouter:
             node_dir = (rd / "nodes" / f"node_{nid}").resolve()
             if rd not in node_dir.parents:
                 raise HTTPException(404, "node metrics are unavailable")
+            # CLAUDE REVIEW: [LOGIC] Unlike the owner route (runs.py node_metrics), this read skips
+            # the metrics_attempt_receipt fencing, so after a node_reset a reviewer receives the
+            # PREVIOUS attempt's series mixed with (or instead of) the current one — exactly the
+            # known-stale data the owner endpoint deliberately refuses to serve. Apply the same
+            # receipt/attempt gate (empty series when the receipt doesn't match) here.
             try:
                 metrics = _review_metrics(read_node_metrics(str(node_dir)))
             except Exception:  # noqa: BLE001 - observability must not take down a review
@@ -400,6 +405,9 @@ def build_router(srv) -> APIRouter:
             st = srv.state(rd)
             node = st.nodes.get(nid)
             if node is None:
+                # CLAUDE REVIEW: [DEAD-CODE] The `seq is not None` branch of this conditional can
+                # never be taken: any non-None seq already raised 400 a few lines above, so the
+                # "at requested sequence" message is unreachable — simplify to the plain 404.
                 raise HTTPException(404, "no such node at requested sequence" if seq is not None else "no such node")
             dumped = node.model_dump(mode="json")
             out = {key: dumped[key] for key in _REVIEW_NODE_KEYS if key in dumped}

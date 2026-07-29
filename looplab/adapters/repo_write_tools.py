@@ -434,6 +434,8 @@ def _xlsx_to_markdown(path: str, *, max_rows: int = 120, cap: int = 9000) -> Opt
     header = "| label | " + " | ".join(f"c{i+1}" for i in range(ncol)) + " | notes |"
     sep = "|" + "---|" * (ncol + 2)
     lines = [header, sep]
+    # CLAUDE REVIEW: [QUALITY] Only `notes` escapes "|" — a pipe inside a label or a non-numeric
+    # cell value is emitted verbatim into the markdown row and shifts every column after it.
     for r in rows:
         vals = r["vals"] + [""] * (ncol - len(r["vals"]))
         notes = ("; ".join(r["notes"])[:200]).replace("|", "/")

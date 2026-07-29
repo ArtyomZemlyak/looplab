@@ -21,6 +21,10 @@ def _dir_fingerprint(path) -> str:
     p = Path(path)
     if not p.exists():
         return "absent"
+    # CLAUDE REVIEW: [QUALITY] No timeout on this git call (every other git invocation in the
+    # engine passes one — 10s/15s/120s): on a wedged FUSE/network mount `git rev-parse` can hang
+    # forever, blocking setup and every resume with no diagnostic. Same gap in
+    # _shallow_fingerprint below.
     try:
         r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")

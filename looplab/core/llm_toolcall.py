@@ -90,6 +90,10 @@ def _extract_native_tool_calls(content: str):
     m0 = next((m for m in _NATIVE_OPEN_RE.finditer(content) if not _quoted(m.start())), None)
     if m0 is None:                # invoke text without any tag-anchored opener — quoted, not leaked
         return None, content
+    # CLAUDE REVIEW: [EDGE-CASE] only the text BEFORE the first opener survives: any assistant text
+    # AFTER the closing invoke tag (a model that keeps talking after its leaked call) is silently
+    # discarded from the cleaned content — for a FINAL-answer recovery in _apply_native_tool_calls
+    # that trailing prose is simply lost.
     clean = content[:m0.start()].strip()
     return calls, clean
 

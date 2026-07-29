@@ -2038,6 +2038,12 @@ export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeUR
 export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
 // Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
 // Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
+// CLAUDE REVIEW: [QUALITY] Duplicated drifting SSE parser: this function hand-rolls event-stream
+// parsing instead of reusing createEventStreamParser above, and the copy is weaker — frames are split
+// only on '\n\n' (a server/proxy emitting CRLF framing would never dispatch a single event, and the
+// caller's success path then reports "(no reply)"), and multiple `data:` lines are concatenated with
+// per-line .trim() instead of the spec's newline join, which would corrupt any multi-line data frame.
+// The robust parser in this same file already handles CR/LF splits and incremental chunk boundaries.
 export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal, display = null) {
   const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
     { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),

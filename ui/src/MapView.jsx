@@ -69,6 +69,11 @@ export function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
   const byId = Object.fromEntries(projects.map(project => [project.id, project]))
   const childrenOf = { root: [] }
   projects.forEach(project => { (childrenOf[project.parent_id || 'root'] ||= []).push(project) })
+  // CLAUDE REVIEW: [EDGE-CASE] Duplicated drifting helper: runIndex.js::indexProjects sorts the same
+  // project rows with String(a.name || '').localeCompare(...) and documents that a null/undefined
+  // project name "would otherwise throw and break the entire run list / map render". This copy calls
+  // a.name.localeCompare directly, so one project with a null name crashes the whole Map view while
+  // the List view survives. Coerce here too (or reuse indexProjects' byParent).
   Object.values(childrenOf).forEach(items => items.sort((a, b) => a.name.localeCompare(b.name)))
 
   const runsByProject = {}
@@ -77,6 +82,11 @@ export function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
     ;(runsByProject[projectId] ||= []).push(run)
   })
   const subtreeCache = new Map()
+  // CLAUDE REVIEW: [BUG] Unguarded graph traversals: runIndex.js::indexProjects' subtree walk added an
+  // explicit `if (!out.has(child.id))` guard with a comment that a malformed/cyclic parent_id chain
+  // (a -> b -> a) "would otherwise re-push forever and FREEZE the run list / map render". This
+  // duplicated subtree walk pushes children unconditionally, and depthOf/ancestorCollapsed below walk
+  // parent_id chains with no visited-set either — the same cyclic data hangs the Map view forever.
   const subtree = (id) => {
     if (subtreeCache.has(id)) return subtreeCache.get(id)
     const out = new Set([id]); const stack = [id]

@@ -392,6 +392,11 @@ def build_router(srv) -> APIRouter:
             return {"status": JOB_UNKNOWN}
         if j.get("status") != JOB_DONE:
             return {"status": JOB_RUNNING}
+        # CLAUDE REVIEW: [EDGE-CASE] `{**j["result"], ...}` assumes every publisher stored a dict. A
+        # compute callable that returns None (or any non-dict) on success is published verbatim by
+        # start_reserved's worker, and this line then raises TypeError — a 500 on every poll of that
+        # job for its whole retention window (and for consume_on_poll jobs the receipt is retired
+        # BEFORE the raise, so the one answer the client would ever get is lost). Guard the shape.
         return {**j["result"], "status": JOB_DONE}
 
     return router

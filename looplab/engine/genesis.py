@@ -129,6 +129,11 @@ def _scout_tools(data: Optional[str], repo: Optional[str]):
     try:
         from looplab.agents.agent import CompositeTools
         from looplab.tools.reposcout import RepoScoutTools
+        # CLAUDE REVIEW: [SECURITY] Rooting the read-only scout at the ENTIRE home directory lets
+        # the model list/read any file under $HOME (~/.ssh, ~/.aws, .env, browser profiles) and copy
+        # it into the provider-bound prompt, even though the user only named one data/repo path.
+        # Scope roots to the named paths (+ their parents for siblings, as below) and drop
+        # Path.home().
         roots = [Path.home()]
         for p in named:
             fp = Path(os.path.expanduser(p))
@@ -233,6 +238,11 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         _normalize_repo_task(task)
     # A user-given --data path the model dropped: put it where this kind expects it, so an explicit
     # path is never silently lost.
+    # CLAUDE REVIEW: [EDGE-CASE] If the model authored a `repo` task with NO path fields while the
+    # user passed only --data (a dataset, not a repo), this installs the DATA path as
+    # `editable_path` — the CSV/dataset directory becomes the "editable repo" that gets seeded,
+    # fingerprinted and edited. For kind=="repo" a bare --data path belongs in `data`
+    # ({name: path}), not `editable_path`; only a --repo path should ever fill the editable slot.
     if task and data and not (task.get("data_path") or task.get("editable_path") or task.get("data")):
         task["editable_path" if task.get("kind") == "repo" else "data_path"] = data
     return GenesisResult(task=task, rationale=plan.rationale, reply=plan.reply)

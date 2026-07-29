@@ -63,6 +63,10 @@ class BM25:
         if not self.avgdl:
             return out
         q = set(query_tokens)
+        # CLAUDE REVIEW: [PERF] `Counter(d)` is rebuilt for EVERY doc on EVERY query even though the
+        # corpus is fixed at construction. cluster_near_duplicates calls scores() once per corpus
+        # member, so consolidation pays O(n^2 * doc_len) just re-counting term frequencies; hoisting
+        # the per-doc Counter (and doc length) into __init__ makes each query O(n * |q|).
         for i, d in enumerate(self.docs):
             if not d:
                 continue

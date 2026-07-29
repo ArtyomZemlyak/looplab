@@ -39,6 +39,10 @@ class FileBackups:
     def _key(self, path) -> Path:
         return self.dir / hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()[:16]
 
+    # CLAUDE REVIEW: [PERF] Snapshots are append-only and never pruned: every write/edit/patch stacks
+    # a full byte copy of the pre-image under backup_dir for the process/session lifetime, so a long
+    # assistant session repeatedly editing a large file grows disk unboundedly. A per-path depth cap
+    # (keep last N) or session-end cleanup would bound it without weakening undo.
     def save(self, path) -> bool:
         try:
             p = Path(path)

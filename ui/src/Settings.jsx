@@ -184,6 +184,10 @@ export default function Settings({ onBack }) {
     roles.has(role) ? roles.delete(role) : roles.add(role)
     return { ...current, [key]: [...roles] }
   })
+  // CLAUDE REVIEW: [BUG] Toast timer race: the previous setTimeout is never cleared, so a second toast
+  // shown within 2.5s is hidden early by the first toast's timer (RunView.jsx::showToast documents and
+  // fixes this exact bug with a cleared timer ref). The timer also survives unmount. Keep the timeout
+  // id in a ref, clearTimeout before re-arming, and clear it in an unmount effect.
   const show = message => {
     setToast(message)
     setTimeout(() => setToast(null), 2500)

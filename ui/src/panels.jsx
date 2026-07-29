@@ -1043,6 +1043,12 @@ export function RegistryPanel({ state, onClose }) {
         : <div className="muted">none — use Promote on a node</div>}
       <div className="section-h">Cross-run leaderboard</div>
       <PanelResourceNotice resource={resource} label="Cross-run leaderboard" onRetry={retry} />
+      {/* CLAUDE REVIEW: [LOGIC] Min/max direction confusion: this "leaderboard" always sorts by raw
+          metric DESCENDING, so for a `direction === 'min'` task the best run sorts LAST (and runs of
+          different tasks/directions/metric units are ranked on one unitless axis). CrossRunPanel and
+          runIndex.js::sortRuns both handle this (direction-aware compare, or explicitly refusing to
+          rank); either respect each run's `direction` like sortRuns' metric comparator, or present
+          these as unranked observations like CrossRunPanel does. */}
       {runs.length > 0 && <DataTable caption="Cross-run solution leaderboard" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
         {[...runs].sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
           .map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}

@@ -1114,6 +1114,13 @@ class SpeculationMixin:
             # Keep both the durable head and its isolated result alive. A later add_nodes extension can
             # commit the exact paid result without rebuilding it or acknowledging the request as stale.
             return False
+        # CLAUDE REVIEW: [EDGE-CASE] The result is popped BEFORE the durable close. For the "stale"
+        # outcome, if `_append_card_build_done` exhausts all 64 CAS retries (returns False) the head
+        # stays open with no in-memory result and no inflight marker; the next service turn then hits
+        # `_head_has_unreconciled_attempt` and closes the head as "producer_failed" — permanently
+        # barring the Card from speculative election even though this process's producer actually
+        # succeeded and the claim was merely stale. Popping only after a successful close (or keeping
+        # a "reconciled" marker per attempt) would preserve the intended "stale" disposition.
         self._discard_spec_result(self._spec_builds.pop(key, None))
         if outcome == "created" and node_id is not None:
             return self._append_card_build_done(request, node_id=node_id)
@@ -1877,6 +1884,14 @@ class SpeculationMixin:
                                         proposal_node_ceiling = self._node_id_ceiling(
                                             proposal_events, proposal_state,
                                         )
+                                        # CLAUDE REVIEW: [EDGE-CASE] Asymmetric with `_start_head_producer`,
+                                        # which wraps its `start_soon` in try/except BaseException to roll back
+                                        # the inflight marker. Here, if `start_soon` raises (task group already
+                                        # closing), `_spec_raw_stage_inflight` stays True forever: the finally in
+                                        # `_produce_raw_card_stage` never runs, `_ensure_speculation_state` only
+                                        # initializes MISSING attrs, and every session-exit gate below includes it
+                                        # in `memory_pending` — so the NEXT `_run_card_session` can never reach its
+                                        # break conditions and polls indefinitely. Mirror the producer's rollback.
                                         self._spec_raw_stage_inflight = True
                                         task_group.start_soon(
                                             self._produce_raw_card_stage,

@@ -370,6 +370,10 @@ def _normalize_span(value) -> Optional[dict]:
                 budget.omit("omitted_attributes")
             else:
                 attributes[key] = normalized
+    # CLAUDE REVIEW: [READABILITY] The note below describes the hash-order nondeterminism in the
+    # present tense ("insert ... in string-hash order", "is therefore not byte-stable"), but the four
+    # loops beneath already iterate sorted(...) — the instruction at its end was applied. As written
+    # it reads as a live defect; reword it into a why-comment for the sorted() iteration.
     # _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS / _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS
     # are SETS, so these four loops insert into `attributes` in string-hash order — randomized per
     # process via PYTHONHASHSEED. The serialized projection (and any persisted index record built from
@@ -599,6 +603,8 @@ def _cap_str(v, n: int = _IO_CAP):
     return redact_persisted_text(v, max_chars=max(0, int(n)), entropy=True)
 
 
+# CLAUDE REVIEW: [DEAD-CODE] _cap_msgs has no callers anywhere in the repo (serve/routers/runs.py
+# imports only _cap_str; message capping goes through _project_messages/_normalize_span directly).
 def _cap_msgs(msgs: list) -> list:
     if not isinstance(msgs, list):
         return msgs
@@ -719,6 +725,13 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
             # `input_from is None`) matches `hydrate_inputs`, which likewise treats carry=0 as
             # self-contained, so a degenerate carry=0-with-back-ref span is still read as a base.
             # Old full logs have no `input_carry` → fall back to the message-count-drop heuristic.
+            # CLAUDE REVIEW: [LOGIC] The legacy fallback treats an EQUAL message count as a sub-loop
+            # boundary (`n <= prev_in`), but the docstring says a request is re-emitted only when the
+            # count DROPS. Normalization caps a generation's `input` at _MSGS_CAP (10) messages, so on
+            # an old full log (no `input_carry`) every generation past 10 messages plateaus at
+            # n == prev_in == 10 and re-emits the "request" turn on EVERY turn — exactly the
+            # re-duplication this projection exists to remove. The heuristic needs a strict drop
+            # (n < prev_in) to survive the capture-time cap.
             is_base = (a.get("input_carry") == 0) if ("input_carry" in a) \
                 else (prev_in is None or n <= prev_in)
             if is_base:                              # first call / context reset → new sub-loop
@@ -779,6 +792,12 @@ def hydrate_inputs(spans: list[dict]) -> list[dict]:
     chain can't bottom out at its real base, so the reconstruction is a TRUNCATED prefix; such spans are
     stamped `input_partial=True` so a reader never presents a short input as a complete retained
     prompt projection."""
+    # CLAUDE REVIEW: [PERF] Triple normalization on the finalize path: load_spans already normalized
+    # every span, this re-normalizes them, and build_trace_view then normalizes a third time
+    # (build_conversation similarly re-normalizes spans the index's _read_full already normalized).
+    # _normalize_span runs redaction/entropy analysis over every text field, so a large run pays the
+    # most expensive pass up to 3x; an already-normalized marker (like _tree's `_normalized` flag)
+    # would keep this idempotent without the repeated work.
     spans = _normalize_spans(spans)
     by_sid = {s.get("span_id"): s for s in spans if s.get("span_id")}
     memo: dict = {}
@@ -881,6 +900,14 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
         root = next((s for s in ss_sorted if s.get("parent_id") is None), None)
         first = root or (ss_sorted[0] if ss_sorted else None)
         nid = _node_id_of(first) if first else None
+        # CLAUDE REVIEW: [LOGIC] Trace attribution here is asymmetric with the selection predicate:
+        # _bounded_node_trace_tail and SpanIndex.node_tids select a trace when ANY of its spans
+        # carries this node_id, but this filter keeps a trace only when its ROOT/first span does.
+        # With per-span node_id stamping (a long-lived tool-loop trace serving several nodes in
+        # sequence — the case build_trace_view's effective-node comment describes), the target
+        # node's turns in such a shared trace are silently dropped from its conversation, while the
+        # trace's spans still count toward _observed_total/reported_total — the gap surfaces as
+        # generic truncation instead of the missing attribution it actually is.
         if nid is None or str(nid) != str(node_id):
             continue
         matching_span_count += len(ss)

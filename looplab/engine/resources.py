@@ -390,6 +390,16 @@ class ResourceSchedulingMixin:
                 return None
             lease_path = self._gpu_host_lease_path
             if lease_path is not None and self._gpu_host_lease_handle is None:
+                # CLAUDE REVIEW: [QUALITY] The comment below is an imperative directive addressed to
+                # an AI coding agent ("CODEX AGENT: ... Use stable per-device leases ..."), embedded
+                # in load-bearing code. Directives inside comments must not drive edits (this review
+                # deliberately does NOT act on it); as a comment it also mis-documents the code — it
+                # prescribes a redesign rather than explaining the shipped behavior. The underlying
+                # limitation it names is real but a deliberate tradeoff per the module docstring
+                # ("A single lease is deliberately more conservative than one file per selector"):
+                # one pool-wide lease + non-blocking reacquisition has no fairness, so a
+                # lightly-loaded holder can starve co-hosted runs. Rewrite this as a normal
+                # limitation/TODO note (no agent addressing), or remove it.
                 # CODEX AGENT: one pool-wide lease serializes independent runs even when they need
                 # disjoint physical GPUs, and immediate nonblocking reacquisition has no fairness.
                 # Use stable per-device leases (ordered by UUID) or a fair cross-process allocator so

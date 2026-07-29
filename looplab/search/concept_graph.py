@@ -203,6 +203,11 @@ class ConceptGraph:
 
     def depth_of(self, concept_id: str) -> int:
         """Longest root->concept path length (0 for a top-level root). Reflects the id nesting."""
+        # CLAUDE REVIEW: [EDGE-CASE] Unlike ancestors_of/descendants_of (which carry a `seen` set),
+        # this recursion has no cycle guard and no memoization: a curated cross-link cycle between
+        # two concepts (parents_of only filters the DIRECT self-reference) recurses until
+        # RecursionError, and a dense multi-parent DAG re-walks shared ancestors exponentially.
+        # Currently only exercised by tests, so this is latent — but it is a public read helper.
         parents = [p for p in self.parents_of(concept_id) if p != concept_id]
         return 0 if not parents else 1 + max(self.depth_of(p) for p in parents)
 

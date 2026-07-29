@@ -534,6 +534,15 @@ class ResearchCadenceMixin:
         open_hyps = [c for c in state.open_research_cards()
                      if not c.selection_ready and _pure_belief(c)]
         n = len(open_hyps)
+        # CLAUDE REVIEW: [LOGIC] The baseline recorded below is the PRE-merge open-board size, so a
+        # successful consolidation that shrinks the board (e.g. 8 open cards merged down to 4) makes
+        # every later pass require the board to re-grow past the OLD pre-merge peak + 2 (>= 10 here)
+        # before merging again — not "grown by >= 2 since the last pass" as the docstring says.
+        # Duplicates re-accumulating after a big merge go unconsolidated for far longer than the
+        # documented cadence. Recording the POST-merge open count (re-derived after the fold at the
+        # bottom) would match the stated gate. Also note the baseline is spent even when
+        # `consolidate` raises (the except path returns after this assignment), silently skipping
+        # the cadence window on a transient LLM failure.
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
             return state
         self._last_hyp_merge_n = n

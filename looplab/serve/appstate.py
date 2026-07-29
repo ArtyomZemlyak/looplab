@@ -37,6 +37,13 @@ from looplab.serve.settings_store import SettingsStore
 
 # run-root subdirectories that are NOT runs and must never be used as a run_id (would collide with the
 # cross-run scope-report store at <run-root>/reports/).
+# CLAUDE REVIEW: [EDGE-CASE] Incomplete: the run root also holds server-owned FILES that a launch can
+# claim as a run_id — "ui_settings.json", "secrets.json", "projects.json" (plus their ".lock"
+# siblings and the ".looplab-lifecycle-*.lock" fence files). safe_run_dir's events.jsonl conflict
+# check passes for these (a file has no events.jsonl child), so /api/start with run_id
+# "secrets.json" reserves a start record and either fails late at mkdir (file exists) or, if the
+# file does not exist yet, occupies the path and breaks the later store_secret/os.replace and the
+# lifecycle lock's open("a+") — a confusing wedge rather than a clean 400.
 _RESERVED_RUN_IDS = {"reports", "assistant", ".reviews", ".command-locks"}
 
 # Fields that can contain verbatim source, captured process output, private host paths, or an internal
@@ -112,6 +119,16 @@ class AppState:
     # ------------------------------------------------------------------ helpers
     def run_dir(self, run_id: str) -> Path:
         rd = (self.root / run_id).resolve()
+        # CLAUDE REVIEW: [SECURITY] This guard accepts any DESCENDANT of root, not only direct
+        # children (root is in the parents of root/a/b/c). A run_id like "run1/nodes/n3_ws" therefore
+        # resolves to a sandbox-WRITABLE node workspace, and any events.jsonl the evaluated candidate
+        # code writes there becomes addressable as a fake "run" by every caller of run_dir (read
+        # routes, inject_node's source_run before commands.validate_paths tightens it, assistant
+        # tooling) — attacker-authored events folded and rendered to the operator, plus unbounded
+        # server-side fold work. Single-segment HTTP route params largely mask this today, but the
+        # command service already had to re-restrict to `canonical.parent == root`; this base helper
+        # should enforce direct-child too (rd == root is also accepted here only to be 404'd by the
+        # events.jsonl check — root itself never has one — which is fragile rather than explicit).
         if self.root != rd and self.root not in rd.parents:   # path-traversal guard
             raise HTTPException(404, "no such run")
         if not (rd / "events.jsonl").exists():

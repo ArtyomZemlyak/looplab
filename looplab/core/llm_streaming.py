@@ -131,6 +131,11 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
         stop = threading.Event()
         fb = first_byte_limit if first_byte_limit and first_byte_limit > 0 else idle_limit
 
+        # CLAUDE REVIEW: [EDGE-CASE] the idle clock also ticks while this GENERATOR is suspended at
+        # `yield`: a slow CONSUMER (e.g. a UI client draining complete_text_stream's SSE relay slower
+        # than idle_limit) draws no events, `last` never resets, and the watchdog shuts down a
+        # perfectly healthy provider connection — a consumer stall is indistinguishable from a
+        # provider stall here, and the resulting APITimeoutError is misattributed to the endpoint.
         def _wd():
             while not stop.wait(min(5.0, min(fb, idle_limit) / 4)):
                 now = time.monotonic()

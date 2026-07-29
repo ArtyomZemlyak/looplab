@@ -41,6 +41,10 @@ def confirm_top_k(
     direction: str = "min",
 ) -> dict:
     """`eval_fn(node, seed) -> metric`. Returns the robust best plus per-node summaries."""
+    # CLAUDE REVIEW: [EDGE-CASE] `sorted(..., key=lambda n: n.metric)` raises TypeError if any node
+    # in `nodes` has metric=None (None is unorderable) — the function defends against zero usable
+    # SEEDS below but not against an unevaluated node in its input. A `n.metric is not None`
+    # pre-filter would keep this public helper total.
     ranked = sorted(nodes, key=lambda n: n.metric, reverse=(direction == "max"))
     candidates = ranked[:k]
 

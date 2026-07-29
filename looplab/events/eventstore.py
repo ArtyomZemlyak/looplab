@@ -588,6 +588,10 @@ def repair_log(path: str | os.PathLike) -> dict:
 _CACHE_ANCHOR_BYTES = 64 * 1024
 
 
+# CLAUDE REVIEW: [DEAD-CODE] `_prefix_anchor` has no callers — every consumer (serve/log_pages)
+# uses `prefix_anchor_from_handle` directly, and EventStore.read_all validates external growth with
+# a FULL prefix sha256 instead of this bounded anchor. Either wire it into read_all (see the PERF
+# note there) or drop it; as-is it documents a strategy the store itself does not use.
 def _prefix_anchor(path: Path, consumed: int) -> Optional[tuple[bytes, bytes]]:
     """A bounded fingerprint of the first and last `_CACHE_ANCHOR_BYTES` of a consumed prefix.
 
@@ -764,6 +768,10 @@ class EventStore:
                 continue
             if isinstance(obj, dict) and "seq" in obj:
                 return int(obj["seq"])
+        # CLAUDE REVIEW: [TEST-GAP] This >64KB-tail fallback (last seq absent from the 65536-byte
+        # window -> full scan) has no test coverage — no test appends a record larger than the window;
+        # a regression here lets a concurrent second writer mint a duplicate seq after one huge final
+        # record, which the duplicate-sequence fence then fails closed for the entire log.
         # Tail window missed the last seq (e.g. a >64KB final line with no newline in the window):
         # fall back to a full scan so a concurrent writer can't mint a duplicate seq. Non-recursive.
         return self._scan_last_seq()
@@ -798,6 +806,11 @@ class EventStore:
         except OSError:
             pass  # best-effort healing; a read still tolerates the torn tail
 
+    # CLAUDE REVIEW: [TEST-GAP] The accepted-but-unsynced fence has no test coverage: no test forces
+    # strict_fsync/close to fail after the write was accepted (both append() and append_many() route
+    # their except paths here) — if the seq reservation or cache drop regresses, a failed
+    # require_durable append lets the next append mint a DUPLICATE seq, and the dense-sequence fence
+    # then fails the whole log closed on the next read (or paid work is silently double-claimed).
     def _mark_uncertain_append(self, seq: int) -> None:
         """Fence a seq whose bytes were accepted but whose sync was unconfirmed.
 
@@ -993,6 +1006,11 @@ class EventStore:
             self.read_all()
         return events
 
+    # CLAUDE REVIEW: [DOCS-MISMATCH] The docstring below claims "Historical sequence gaps are
+    # preserved", but the incremental loop enforces DENSE continuation via event_sequence_continues —
+    # a forward seq jump fails closed (see its docstring restoring the 5f011a2 fence, and
+    # tests/test_events_replay.py::test_monotonic_logical_sequence_gap_fails_closed). Gaps are
+    # rejected, not preserved; only this stale sentence claims otherwise.
     def read_all(self) -> list[Event]:
         """Return every Event on disk (up to the first torn/corrupt line), served from an incremental
         cache. Only bytes appended since the previous call are read+parsed; the returned sequence is
@@ -1023,6 +1041,15 @@ class EventStore:
                 and current_stat is not None
                 and current_stat == self._trusted_growth_stat
             )
+            # CLAUDE REVIEW: [PERF] Growth is "trusted" only for THIS store's own immediately-preceding
+            # append, so a process reading a log another process writes (the UI server tailing the
+            # engine at POLL_SECONDS, or the engine observing UI control appends) re-reads AND
+            # re-hashes the ENTIRE consumed prefix on every read_all that observes new bytes —
+            # O(log size) per external append, i.e. O(n^2) over a run for a reader-only process:
+            # the exact quadratic cost this cache exists to avoid. `_prefix_anchor`'s bounded
+            # head/tail windows were designed for this check (its docstring argues a full-prefix
+            # digest defeats the cache) but are not used here. Correctness is preserved; the cost
+            # for cross-process readers of large logs is not.
             if size > self._cache_bytes and self._cache_bytes > 0 and not trusted_growth and not replaced:
                 try:
                     with open(self.path, "rb") as f:

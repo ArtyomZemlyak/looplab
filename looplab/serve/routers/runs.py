@@ -674,6 +674,11 @@ def _operator_stage_names(rd: Path) -> tuple:
         names = ()
     # Prune this run dir's entries for OLDER snapshot versions before inserting, so the dict stays
     # bounded per run (a rewrite would otherwise leave one dead entry behind per version).
+    # CLAUDE REVIEW: [RACE] _OP_STAGE_NAMES is a module-global dict mutated from FastAPI threadpool
+    # threads with no lock: this comprehension iterates the dict while a concurrent node_logs poll
+    # for another run inserts into it, which raises RuntimeError("dictionary changed size during
+    # iteration") -> 500. attention.py and AppState._trace_view_cache guard their identical caches
+    # with a threading.Lock for exactly this reason — this cache should too.
     for stale in [k for k in _OP_STAGE_NAMES if k[0] == key[0]]:
         del _OP_STAGE_NAMES[stale]
     _OP_STAGE_NAMES[key] = names
@@ -802,6 +807,11 @@ def build_router(srv) -> APIRouter:
                                            if isinstance(n.origin, dict) and n.origin.get("run_id")}),
                     "themes": _theme_rollup(st),
                     "mtime": stt.st_mtime,    # last activity (events.jsonl mtime) — time sort + "updated"
+                    # CLAUDE REVIEW: [LOGIC] st_ctime is NOT creation time on POSIX — it is the
+                    # inode-change time, which every append to events.jsonl advances, so on Linux
+                    # "created" tracks "mtime" and the RunList's "started <date>" tooltip shows the
+                    # last-update date, not the run's start. The run's true start time is available
+                    # from the first event's ts (run_started) and could be cached in this summary.
                     "created": stt.st_ctime,  # run creation time (events.jsonl ctime) — "started" date
                 }
                 _summary_cache[rd.name] = (*sig, summary)
@@ -1141,6 +1151,13 @@ def build_router(srv) -> APIRouter:
         request_digest = _concept_lens_prompt_digest(raw_idempotency_key, prompt)
         reservation = None
         compute = None
+        # CLAUDE REVIEW: [PERF] This is an `async def` handler, yet everything inside this block is
+        # blocking work executed on the event loop: srv.commands.sequence() acquires a threading
+        # lock + OS file lock with bounded retries (can park for the full lock_acquire_timeout),
+        # and EventStore(...).read_all() re-reads the ENTIRE events.jsonl. While it runs, every SSE
+        # stream and other async handler on the server stalls. The two abandon endpoints below and
+        # the recovery GET share the same pattern (the GET at least runs on the threadpool). Wrap
+        # the sequenced section in anyio.to_thread.run_sync like chat/report workers do.
         with srv.commands.sequence(rd):
             rd = srv.commands.validate_paths(rd)
             current_generation = srv.commands.run_generation(rd)
@@ -2414,6 +2431,11 @@ def build_router(srv) -> APIRouter:
     def run_config(run_id: str):
         rd = _run_dir(run_id)
         snap = rd / "config.snapshot.json"
+        # CLAUDE REVIEW: [EDGE-CASE] A corrupt/truncated config.snapshot.json (torn write on a
+        # crash, hand-edited file) raises json.JSONDecodeError here and surfaces as an unhandled
+        # 500. _put_run_config_locked has the same unguarded json.loads. Other snapshot readers in
+        # this package fail closed with an explicit error; this GET should 500 with a clear
+        # "snapshot unreadable" detail (or 409) instead of a bare traceback.
         current = (json.loads(snap.read_text(encoding="utf-8"))
                    if snap.exists() else Settings().masked_snapshot())
         if not isinstance(current, dict):
@@ -2612,6 +2634,11 @@ def build_router(srv) -> APIRouter:
         try:
             # The required OS lock is the cross-process guarantee; the bounded stripe supplies the
             # same guarantee to multiple threads in this process on every supported platform.
+            # CLAUDE REVIEW: [PERF] `async def` handler blocking the event loop: a plain
+            # threading.Lock acquire (striped — unrelated runs can contend on the same stripe), an
+            # OS interprocess lock, and _put_run_config_locked's srv.state(rd) (a full event-log
+            # read + fold) all run inline on the loop. A contended stripe or a large run freezes
+            # every other client (including SSE) for the duration; offload to a worker thread.
             with (_run_config_thread_lock(snap),
                   _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
                 # Checked INSIDE the lock: reset can land between the request arriving and the write.

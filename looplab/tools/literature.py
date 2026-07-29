@@ -13,6 +13,9 @@ import urllib.request
 
 from looplab.tools._base import fn_spec
 
+# CLAUDE REVIEW: [SECURITY] Plain http: the response is injected into the Researcher's prompt as
+# grounding, so an on-path attacker can tamper with titles/abstracts (prompt-injection surface) and
+# queries travel in cleartext. export.arxiv.org serves the same API over https — switch the scheme.
 _ARXIV = "http://export.arxiv.org/api/query"
 # Bound the download (see web.py `_MAX_DOWNLOAD_BYTES`): a plain `r.read()` slurps the whole Atom
 # response into host RAM before we parse the top few entries — cap it so a huge/hostile response can't

@@ -1081,6 +1081,13 @@ def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
     )
 
 
+# CLAUDE REVIEW: [PERF] Per-field admission below re-serializes the ENTIRE accumulated candidate
+# for each of the ~45 _FIELDS (O(fields x card_bytes) json.dumps per card, bounded by the 8 KiB
+# card cap), and `_card_projection_receipt` then re-projects every field a second time for the
+# lossless check. With PUBLIC_CARD_MAX_COUNT=256 admitted cards this is tens of MB of json.dumps
+# per /state response and per SSE frame — additive to the O(total source cards) nsmallest cost
+# already flagged in public_cards_projection. A running byte budget (serialize each field once,
+# add its encoded size) would keep the same bound at O(fields) serializations per card.
 def _dto(card, authoritative_id: str, omit_fields=frozenset()) -> dict:
     # fixed admission order keeps identity/lifecycle available; rich optional fields enter
     # only while the complete UTF-8 JSON representation remains inside the per-card SSE envelope.

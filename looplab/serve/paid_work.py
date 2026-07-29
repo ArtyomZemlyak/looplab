@@ -102,6 +102,12 @@ def flush_pending_run_costs(srv, run_dir) -> bool:
             if not durable:
                 retained.append(entry)
                 continue
+            # CLAUDE REVIEW: [EDGE-CASE] If this __exit__ raises, the exception escapes the loop and
+            # the `with flush_lock` block before the re-insert below runs — every entry already
+            # collected in `retained` AND every not-yet-examined entry was popped from `pending` at
+            # the top and is silently lost (their leases/ledgers are dropped from the retry
+            # registry). Wrap the release, or re-insert `retained` + the unprocessed tail in a
+            # try/finally.
             entry["activity_ctx"].__exit__(None, None, None)
 
         if retained:

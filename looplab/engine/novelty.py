@@ -287,6 +287,12 @@ class NoveltyGateMixin:
         # `node_reset` re-creates the SAME id with a NEW idea — a node_id-keyed cache then returned the
         # OLD vector and the semantic-novelty gate compared future proposals against a stale idea. The
         # cache is in-memory only (never persisted/replayed), so a per-process `hash(text)` key is safe.
+        # CLAUDE REVIEW: [QUALITY] "safe" above covers staleness, not COLLISIONS: `hash(text)` is not
+        # content identity, so two distinct idea texts colliding on the 64-bit hash silently share one
+        # embedding and corrupt the semantic-dup verdict (no error, just a wrong nearest-node score).
+        # Vanishingly rare per-run, but keying by the text itself (or a real digest, as the sibling
+        # `_cached_prior_idea_identity` cache does) removes the failure mode; note also this cache has
+        # no size bound, unlike `_idea_identity_cache`'s `_IDEA_IDENTITY_CACHE_MAX` clear-on-full.
         key = hash(text)
         v = self._idea_vecs.get(key)
         if v is None:

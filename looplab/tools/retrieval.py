@@ -30,6 +30,11 @@ def grep(pattern: str, root: str, glob: str = "*", max_hits: int = 200,
         return []
     hits: list[GrepHit] = []
     base = Path(root)
+    # CLAUDE REVIEW: [PERF] No directory pruning (contrast reposcout._SKIP_DIRS): rglob("*")
+    # materializes and sorts EVERY path under root, descending into .git, node_modules, .venv,
+    # checkpoint/cache dirs. Fine for a small knowledge dir, but RepoTools.repo_grep points this at
+    # whole task repos, where the walk is both slow and includes VCS internals the caller must then
+    # filter out (it currently doesn't — see the SECURITY note in knowledge_tools.RepoTools).
     for path in sorted(base.rglob("*")):
         if not path.is_file() or not fnmatch.fnmatch(path.name, glob):
             continue

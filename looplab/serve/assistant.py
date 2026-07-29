@@ -35,6 +35,11 @@ from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa
 # The LoopLab source tree (…/looplab/looplab/assistant.py -> repo root two levels up). The assistant
 # may read (and, in later phases, edit) the code that runs it — this is what "fix LoopLab itself"
 # needs — so the repo root is always an allowed root alongside the run-root and the user's home.
+# CLAUDE REVIEW: [READABILITY] Stale comment: the path above is the pre-split flat location and
+# "two levels up" no longer matches parents[2] (three levels up from serve/assistant.py — correct
+# only because the module moved one directory deeper). Note also that under a pip install
+# parents[2] is the site-packages PARENT (the env prefix), not a repo root, which silently widens
+# the assistant's always-allowed root to the whole Python environment.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -500,6 +505,11 @@ def expand_mentions(text: str, run_root, *, alive_fn: Optional[Callable] = None,
             # refusal string in the prompt — mirrors the @run branch and the docstring's promise. The
             # scout returns a single-line "(…reason…)" on refusal; a real file is multi-line or not so
             # wrapped, so this only drops genuine refusals.
+            # CLAUDE REVIEW: [EDGE-CASE] The claim above is not airtight: a genuine one-line file
+            # whose entire content is parenthesized (e.g. a stub "(placeholder)") is
+            # indistinguishable from a refusal and is silently dropped — the user gets no grounding
+            # and no signal why. A structured (ok, text) return from the scout would remove the
+            # sniffing entirely.
             _b = body.strip()
             if not (_b.startswith("(") and _b.endswith(")") and "\n" not in _b):
                 blocks.append(f"[@file:{raw}]\n```\n{body}\n```")

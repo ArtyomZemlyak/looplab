@@ -537,6 +537,9 @@ _ASSET_SYSTEM = (
 )
 
 
+# CLAUDE REVIEW: [DEAD-CODE] The `parser` parameter is accepted (and threaded through by
+# `asset_brief` below) but never used in this function's body — `agentic_text` is called without it.
+# Either pass it through or drop it from both signatures so callers don't believe it has effect.
 def agentic_asset_brief(repo_root, *, client=None, parser: str = "tool_call",
                         loop_opts: Optional[dict] = None, task_type: Optional[str] = None,
                         seed_scan: bool = True) -> str:

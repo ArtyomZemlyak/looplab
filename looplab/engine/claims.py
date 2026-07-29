@@ -1362,6 +1362,11 @@ def load_claim_decisions(memory_dir) -> dict:
         # One semantic UID may have several historical display spellings. Retire every index that points
         # at the same namespace before applying its newest row, so ``clear`` cannot be bypassed through an
         # older legacy statement key.
+        # CLAUDE REVIEW: [PERF] This retirement scan is O(rows^2) over the decision ledger (a full
+        # `out.items()` walk per row). `load_claim_decisions` runs on every claims_for_memory /
+        # retrieval / governance read, so a long-lived portfolio with thousands of appended decisions
+        # pays a quadratic re-index on each read. A uid -> keys reverse index built alongside `out`
+        # makes this linear.
         if uid:
             for old_key, old in list(out.items()):
                 if str(old.get("claim_uid") or "") == uid:
@@ -1920,6 +1925,11 @@ def _structured_assessments(lessons, research_claims, decisions, *,
         if item["support"]:
             g = item["group"]
             raw_contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(item)
+        # CLAUDE REVIEW: [READABILITY] `g` is only bound inside the FIRST `if` above; this second `if`
+        # silently reuses it. It is correct today only because both conditions require item["support"],
+        # so the first branch always ran for the same item — but reordering/editing either condition
+        # (e.g. relaxing the support requirement on the live map) turns this into a stale-`g` bug or a
+        # NameError on the first item. Bind `g = item["group"]` once at the top of the loop.
         if item["maturity"] != "operator-rejected" and item["support"]:
             contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(item)
 

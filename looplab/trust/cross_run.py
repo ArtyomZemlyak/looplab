@@ -151,6 +151,11 @@ def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
                         # on the ORIGINAL key too — same as the secret gate above (8d1bcda). safe_key is a
                         # truncated/NFKC-rewritten DISPLAY form, so keying the opt-out on it would let an
                         # alias spelling of e.g. run_id inherit the mask exemption; fail closed instead.
+                        # CLAUDE REVIEW: [EDGE-CASE] `key.casefold()` assumes a str key: a single non-str
+                        # dict key (int node-ids are common keys in Python-side projections) raises
+                        # AttributeError, and the enclosing broad except collapses the ENTIRE mapping to
+                        # "<mapping unavailable>" — fail-closed, but one odd key erases every sibling
+                        # field. `str(key).casefold()` (or an isinstance guard) keeps the rest of the row.
                         child_identity = key.casefold() in _OPAQUE_IDENTITY_KEYS
                         out[safe_key] = walk(
                             child, depth + 1, entropy=not child_identity, identity=child_identity)

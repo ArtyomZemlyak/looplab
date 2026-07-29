@@ -325,6 +325,11 @@ class EnvInspectTools:
                                         return self._clamp("\n".join(hits) + f"\n(capped at {cap} hits)")
                     except OSError:
                         continue
+        # CLAUDE REVIEW: [EDGE-CASE] For a builtin/C-extension module (e.g. 'sys', 'math', or a
+        # compiled submodule whose origin is a .so) `roots` is empty and `single` is None, so `walked`
+        # is empty and NOTHING is scanned — yet this returns "'query' not found under <package>",
+        # which the model reads as evidence of absence. Return an explicit "(no Python source to
+        # grep)" style message when zero files were scanned instead.
         return self._clamp("\n".join(hits)) if hits \
             else f"(grep_installed: '{query}' not found under {package})"
 

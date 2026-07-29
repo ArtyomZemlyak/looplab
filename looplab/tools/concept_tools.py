@@ -27,6 +27,10 @@ from looplab.tools.perm_modes import (
 from looplab.trust.cross_run import cross_run_text
 
 
+# CLAUDE REVIEW: [LOGIC] Same RESULT_CAP mismatch as cross_run_tools.py: the loop head-caps every
+# tool result at 4000 chars (tools/_base.py RESULT_CAP), so a `concept_taxonomy` listing bounded to
+# 16k loses its tail — including the final "Bounded projection omitted: …" receipt — to the loop's
+# blunt cut on any large taxonomy. Derive this budget from RESULT_CAP per the _base.py contract.
 _MAX_TOOL_RESULT_CHARS = 16_000
 _MAX_APPROVAL_PREVIEW_CHARS = 4_000
 

@@ -610,6 +610,11 @@ class MachineRunsTools:
                 return self._read_trace(args.get("run_id"), int(args.get("node_id")),
                                         args.get("stage"))
             return f"(unknown tool: {name})"
+        # CLAUDE REVIEW: [EDGE-CASE] Too-narrow catch for the "soft-fails, never raises" contract in
+        # the module docstring: AttributeError (or anything else raised while folding a foreign log /
+        # building the trace conversation) is not in this tuple and propagates — drive_tool_loop does
+        # not guard tools.execute (see cross_run_tools.py's comment), so this can kill the assistant
+        # turn. RunControlTools below catches Exception broadly; this class should match.
         except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             return f"(tool error: {e})"
 
@@ -695,6 +700,9 @@ class MachineRunsTools:
         return (f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
             "read_experiment", {"node_id": nid, "trials": trials_arg})
 
+    # CLAUDE REVIEW: [QUALITY] `_read_run`/`_read_experiment` prepend the PARTIAL-SOURCE
+    # `source_note`, but `_read_logs` and `_read_trace` don't — logs/trace read from a truncated
+    # log look complete, the exact absence-inference hazard the note exists to prevent.
     def _read_logs(self, run_id, nid: int) -> str:
         st = self._state(run_id)
         if st is None:
@@ -1100,6 +1108,10 @@ class RunControlTools:
                 rd, etype, data, idempotency_key=key, expected_generation=generation)
         return _render_command_result(record, name=name, run_id=rid, completed=verb)
 
+    # CLAUDE REVIEW: [DEAD-CODE] `_resume_run` is unreachable: `execute` routes "resume_run" through
+    # `_control` (which submits EV_RESUME via the command service), and nothing else in the repo
+    # calls this method. Its lifecycle-lock/spawn logic now duplicates the command service's resume
+    # path and will silently rot; delete it or wire it back in deliberately.
     def _resume_run(self, rid: str, rd: Path) -> str:
         """Durably hand resume to the singleton owner/claim funnel; never reopen before lock ownership."""
         from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
@@ -1529,6 +1541,10 @@ class RunControlTools:
                 kept_spans = [line for line in spans.read_text("utf-8").splitlines()
                               if line.strip() and _span_node(line) not in subtree]
 
+            # CLAUDE REVIEW: [EDGE-CASE] The backup name is keyed only by the root node id: a second
+            # purge of the SAME nid (e.g. after a scope-change retry, or a node id reused post-purge
+            # on resume) silently OVERWRITES the previous backup — the safety receipt for an
+            # irreversible operation. A timestamp/sequence suffix would make backups append-only.
             shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")
             atomic_write_text(evp, "".join(json.dumps(record) + "\n" for record in kept))
             if kept_spans is not None:
