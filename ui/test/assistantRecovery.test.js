@@ -11,7 +11,18 @@ import {
 const completedStream = () => ({
   ok: true,
   status: 200,
-  body: { getReader: () => ({ read: async () => ({ done: true }) }) },
+  body: { getReader: () => {
+    let sent = false
+    return {
+      read: async () => {
+        if (sent) return { done: true }
+        sent = true
+        return { done: false, value: new TextEncoder().encode(
+          'event: done\ndata: {"ok":true,"reply":"done"}\n\n') }
+      },
+      cancel: async () => {},
+    }
+  } },
 })
 
 const withFetch = async (fetchImpl, fn) => {

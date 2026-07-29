@@ -2038,12 +2038,21 @@ export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeUR
 export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
 // Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
 // Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
-// CLAUDE REVIEW: [QUALITY] Duplicated drifting SSE parser: this function hand-rolls event-stream
-// parsing instead of reusing createEventStreamParser above, and the copy is weaker — frames are split
-// only on '\n\n' (a server/proxy emitting CRLF framing would never dispatch a single event, and the
-// caller's success path then reports "(no reply)"), and multiple `data:` lines are concatenated with
-// per-line .trim() instead of the spec's newline join, which would corrupt any multi-line data frame.
-// The robust parser in this same file already handles CR/LF splits and incremental chunk boundaries.
+const incompleteAssistantStream = reason => {
+  const error = new Error(`Assistant stream ended before a terminal event: ${reason}`)
+  error.code = 'assistant_stream_incomplete'
+  error.transient = true
+  error.ambiguous = true
+  error.submissionMayHaveSucceeded = true
+  return error
+}
+
+const abortedAssistantStream = () => {
+  const error = new Error('Assistant stream aborted')
+  error.name = 'AbortError'
+  return error
+}
+
 export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal, display = null) {
   const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
     { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
@@ -2051,45 +2060,54 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
       // the explicit three-field body is the exact durable-turn contract, not a newly composed send.
       body: JSON.stringify(display != null ? { instruction, display, mode } : { instruction, mode }), signal })
   if (!r.ok) { await _throw(r, 'message_stream'); return null }
-  // A 2xx with no readable body (empty stream, or an environment/proxy that doesn't expose one) is NOT
-  // a server error — returning null lets the caller fall back to the non-streaming path instead of
-  // surfacing a misleading "message_stream: 200" toast from _throw's status fallback.
-  if (!r.body) return null
-  const reader = r.body.getReader(); const dec = new TextDecoder()
-  let buf = ''; let result = null
+  if (signal?.aborted) throw abortedAssistantStream()
+  // A 2xx only proves that the turn may have been accepted. Without a readable stream there is no
+  // terminal receipt, so the caller must reconcile the existing turn instead of inventing success.
+  if (!r.body || typeof r.body.getReader !== 'function') {
+    throw incompleteAssistantStream('no readable response body')
+  }
+
+  let result = null
+  let terminal = false
+  const parser = createEventStreamParser(({ type: ev, data }) => {
+    if (terminal) return
+    let parsed
+    try { parsed = JSON.parse(data) } catch { parsed = data }
+    if (ev === 'token') cbs.onToken?.(parsed)
+    else if (ev === 'text') cbs.onText?.(parsed)
+    else if (ev === 'step') cbs.onStep?.(parsed)
+    else if (ev === 'todos') cbs.onTodos?.(parsed)
+    else if (ev === 'error') {
+      cbs.onError?.(parsed)
+      result = { ok: false, error: parsed }
+      terminal = true
+    } else if (ev === 'done') {
+      result = parsed
+      cbs.onDone?.(parsed)
+      terminal = true
+    }
+  })
+  const reader = r.body.getReader()
+  const dec = new TextDecoder()
   for (;;) {
-    // An AbortSignal cancellation and a mid-stream TRANSPORT RESET are not the same event. Breaking on
-    // every rejected `reader.read()` turned an ambiguous but possibly-accepted server turn into a
-    // successful `(no reply)`: the caller took its success path and never reached the `catch` that runs
-    // `recoverReply(...)`, even though the server may have completed the turn (mutations, paid tokens).
-    // Abort still breaks cleanly — the caller's `if (!runningRef.current) return` owns that case — but a
-    // real transport error is rethrown so reconciliation runs.
     let chunk
     try { chunk = await reader.read() }
     catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') break   // aborted (stop/unmount) — stop cleanly
-      throw error                                                  // transport reset — reconcile, don't fake success
+      if (signal?.aborted) throw abortedAssistantStream()
+      throw error
     }
     const { done, value } = chunk
     if (done) break
-    buf += dec.decode(value, { stream: true })
-    let i
-    while ((i = buf.indexOf('\n\n')) >= 0) {
-      const block = buf.slice(0, i); buf = buf.slice(i + 2)
-      let ev = 'message'; let data = ''
-      for (const line of block.split('\n')) {
-        if (line.startsWith('event:')) ev = line.slice(6).trim()
-        else if (line.startsWith('data:')) data += line.slice(5).trim()
-      }
-      let parsed; try { parsed = JSON.parse(data) } catch { parsed = data }
-      if (ev === 'token') cbs.onToken && cbs.onToken(parsed)
-      else if (ev === 'text') cbs.onText && cbs.onText(parsed)
-      else if (ev === 'step') cbs.onStep && cbs.onStep(parsed)
-      else if (ev === 'todos') cbs.onTodos && cbs.onTodos(parsed)
-      else if (ev === 'error') { cbs.onError && cbs.onError(parsed); result = { ok: false, error: parsed } }
-      else if (ev === 'done') { result = parsed; cbs.onDone && cbs.onDone(parsed) }
+    parser.push(dec.decode(value, { stream: true }))
+    if (terminal) {
+      try { await reader.cancel() } catch { /* the terminal receipt already owns the outcome */ }
+      return result
     }
   }
+  if (signal?.aborted) throw abortedAssistantStream()
+  parser.push(dec.decode())
+  parser.finish()
+  if (!terminal) throw incompleteAssistantStream('connection closed')
   return result
 }
 // Bounded/redacted I/O projection for one observation, with explicit omission metadata.

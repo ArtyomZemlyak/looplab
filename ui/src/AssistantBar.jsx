@@ -1286,9 +1286,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         }),
       }, ctrl.signal, userText || instruction)   // persist the CLEAN bubble, not the ctx-augmented instruction
       if (!mountedRef.current || sidRef.current !== id) return
-      // Stop was pressed: aborting a fetch mid-stream does NOT throw (the reader catch swallows it and
-      // returns), so we land here on the success path — but the turn is cancelled. Don't overwrite the
-      // "(stopped)" bubble stop() already wrote with a "(no reply)".
+      // Stop may race with a terminal frame. Even if the stream resolved first, the turn is cancelled:
+      // do not overwrite the "(stopped)" bubble that stop() already wrote.
       if (!runningRef.current) return
       const rawReply = streamedFailure || (res && res.reply) || acc || (res && res.ok === false && res.error ? `Assistant error: ${res.error}` : '(no reply)')
       const reply = assistantErrorInfo(rawReply) ? normalizedFailureText(rawReply) : rawReply
@@ -1297,19 +1296,21 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                   error_kind: res && res.error_kind })
       setPreview(previewText(reply)); setHasNew(wasBar)
     } catch (e) {
-      if (!mountedRef.current || sidRef.current !== id || e.name === 'AbortError') { /* handled in finally */ }
+      // Only our own AbortController proves a quiet local stop/unmount. A transport/runtime can also
+      // label a remote reset AbortError; that ambiguous accepted turn still requires reconciliation.
+      if (!mountedRef.current || sidRef.current !== id || ctrl.signal.aborted) { /* handled in finally */ }
       else if (streamedFailure) {
         patchLast({ content: streamedFailure, streaming: false })
       }
-      else if (acc) {
-        // We already have partial tokens — keep them (the stream dropped mid-answer).
-        patchLast({ content: acc, streaming: false })
-        flash('stream interrupted — showing partial reply')
-      } else {
-        // No tokens arrived (proxy killed the stream at the headers). The worker is still running in
-        // the background; poll the session for the persisted reply instead of failing.
-        patchLast({ content: '', streaming: true, recovering: true })
-        flash('reconnecting…')
+      else {
+        // A clean EOF is not proof that the turn finished. Keep any SSE or /progress text visibly live
+        // while GET-only reconciliation waits for the durable assistant reply; never repeat the POST.
+        patchLast(prev => {
+          const observed = String(prev?.content || '')
+          return { content: acc.length >= observed.length ? acc : observed,
+            streaming: true, recovering: true }
+        })
+        flash(acc ? 'stream interrupted — recovering final reply…' : 'reconnecting…')
         const ok = await recoverReply(id, priorLen)
         // `runningRef` guard: if the user hit Stop during recovery, keep the "(stopped)" bubble.
         if (mountedRef.current && sidRef.current === id && runningRef.current && !ok) patchLast({
