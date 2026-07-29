@@ -943,3 +943,40 @@ def test_error_recovery_never_acknowledges_a_finish_belonging_to_another_scope(t
                and event.data.get("scope") == "finish:own"
                and event.data.get("step") == "abandoned"
                for event in eng.store.read_all())
+
+
+def test_finalize_own_card_enrichment_does_not_abandon_its_scope(tmp_path):
+    """`card_enriched` inside an open scope is the finalization's OWN effect, not a foreign event.
+
+    `finalize_run` calls `_sync_card_enrichments` between the scope's `begun` claim and
+    `_publish_completion`, and that appends FOLDED `card_enriched` events. While the type was absent
+    from `finalize_scope_quiescent`'s allow-list, a crash in that window made the wrap-up's own write
+    read as foreign: quiescence went False, `incomplete_finalize_scope` went None, and for a scoped
+    finish WITHOUT `finalization_required` — exactly the old scoped-log population this predicate
+    exists for — `should_finalize` never fired again, so the llm_cost roll-up and completion markers
+    were lost forever. Same failure class REPLAY-1 closed for reflection_note/lessons_distilled.
+    """
+    from looplab.engine.finalize import finalize_scope_quiescent, incomplete_finalize_scope
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    finish = store.append("run_finished", {"reason": "aborted", "finalize_scope": "abort:3"})
+    store.append("finalize_step", {"scope": "abort:3", "step": "begun",
+                                   "after_seq": finish.seq})
+    store.append("reflection_note", {"note": "wrapping up"})
+    events = store.read_all()
+    assert finalize_scope_quiescent(events, "abort:3") is True
+    assert incomplete_finalize_scope(events) == "abort:3"
+
+    store.append("card_enriched", {"id": "card-1", "footprint": {"gpus": 1}})
+    events = store.read_all()
+    assert finalize_scope_quiescent(events, "abort:3") is True, (
+        "the wrap-up's own card enrichment must not read as a foreign event")
+    assert incomplete_finalize_scope(events) == "abort:3", (
+        "the scope must stay recoverable, or its cost roll-up and completion markers are lost")
+
+    # A genuinely foreign domain event still invalidates the stale decision.
+    store.append("node_created", {"node_id": 9, "operator": "draft", "idea": {"operator": "draft"}})
+    assert finalize_scope_quiescent(store.read_all(), "abort:3") is False

@@ -150,12 +150,15 @@ def is_hard_signal(sig: str) -> bool:
     # pattern `[x]*NNN`) that also matches ordinary buffer pre-allocation (`weights = [0]*1000`); a
     # constant predictor already loses on ground truth, so hard-gating it only risks silently excluding
     # an HONEST winner. Advisory (surface, never gate), exactly like perfect_metric.
-    # CLAUDE REVIEW: [LOGIC] Fail-open classifier: any signal name NOT matching the advisory prefixes
-    # is HARD — including the empty string that `s.get("signal", "")` yields for a signals entry with
-    # no "signal" key. A malformed/empty entry therefore gate-excludes an honest node from
-    # best-selection under "gate"/"block". Defaulting UNKNOWN future signal names to hard may be
-    # intended fail-closed behavior, but "" is not a signal and should be rejected as malformed
-    # rather than counted as high-precision cheating evidence.
+    # An unknown FUTURE signal name stays hard on purpose (fail closed toward catching cheating).
+    # A BLANK one is different: it is not a signal at all, only the `s.get("signal", "")` default for
+    # an entry that never carried the key. Counting it as high-precision cheating evidence let a
+    # single malformed/hand-edited record gate-exclude an honest winner under "gate"/"block" — and
+    # the digest then rendered it as `node 1 ()`, the contentless warning this function's own
+    # contract says can never happen. Reject the malformed shape; keep every named signal hard.
+    sig = sig.strip() if isinstance(sig, str) else ""
+    if not sig:
+        return False
     return not sig.startswith(("critic:", "perfect_metric", "protected_audit_unavailable",
                                "suspicious_output"))
 
@@ -2264,16 +2267,18 @@ def _on_reward_hack_suspected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") 
     generation = _event_generation(d)
     if generation is not _MISSING and (n is None or not _generation_matches(n, d)):
         return
-    # CLAUDE REVIEW: [BUG] `signals` is folded verbatim with no shape validation, but
-    # `hard_flagged_ids._has_current_hard_signal` later runs `s.get("signal", "")` over
-    # `rh.get("signals") or []`. A malformed/hand-edited event whose `signals` is a truthy scalar
-    # (TypeError on iteration) or a list of non-dicts, e.g. ["leak"] (AttributeError on .get),
-    # crashes the trust post-pass — bricking EVERY fold/replay/resume of the run whenever
-    # trust_gate is "gate"/"block" (and the digest's trust reflection even under "audit").
-    # That violates the fold-totality standard applied everywhere else in this file (cf. the
-    # `trials`, `node_ids` and `scores` container guards); normalize to a bounded list of
-    # {"signal": str} dicts at this fold boundary.
-    record = {"node_id": nid, "signals": d.get("signals", []),
+    # `signals` MUST be a list of dicts. `hard_flagged_ids._has_current_hard_signal` later runs
+    # `s.get("signal", "")` over `rh.get("signals") or []`, and the fold loop has no per-event
+    # try/except — so a forged/hand-edited truthy SCALAR (`"leak"`, `5` -> TypeError on iteration)
+    # or a list of non-dicts (`["leak"]`, `[None]` -> AttributeError on `.get`) bricks EVERY
+    # fold/replay/resume/view of the run under trust_gate gate/block, and the digest's trust
+    # reflection even under `audit`. Same class as the `node_ids` scalar guard above; fold must stay
+    # total. Bounded like every other list this fold admits, so a forged event cannot park an
+    # unbounded array in RunState either.
+    raw_signals = d.get("signals")
+    record = {"node_id": nid,
+              "signals": [s for s in raw_signals if isinstance(s, dict)][:64]
+                         if isinstance(raw_signals, list) else [],
               "evidence_version": d.get("evidence_version", 0),
               "code_digest": d.get("code_digest")}
     if n is not None:

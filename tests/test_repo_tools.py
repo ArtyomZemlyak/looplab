@@ -93,3 +93,41 @@ def test_make_roles_no_repo_tools_for_param_search(tmp_path):
     researcher, _ = make_roles(t, s)
     provs = getattr(getattr(researcher, "tools", None), "providers", [])
     assert not any(isinstance(p, RT) for p in provs)
+
+
+def test_git_internals_never_reach_the_model_context(tmp_path):
+    """A credentialed clone parks its token in plain text in `.git/config`.
+
+    `repo_list` already filtered `.git`, but `repo_grep` and `repo_read` did not, and
+    `_pathsafe.looks_secret` does not know `.git` (its SECRET_DIRS has `.config`, not `.git`). So an
+    ordinary `repo_grep(pattern="http")` — or a model orienting itself with `repo_read(".git/config")`
+    — returned `url = https://user:ghp_…@github.com/org/repo` straight into the prompt sent to the
+    (possibly remote) provider. `redact_secrets` in the tool loop covers only the durable trace
+    preview, not the model-bound message, so the filter has to live at the tool boundary.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    (repo / ".git" / "config").write_text(
+        f'[remote "origin"]\n\turl = https://user:{token}@github.com/org/repo.git\n', encoding="utf-8")
+    # A hook is a shell script — a readable EXTENSION — so an extension allowlist alone is not enough.
+    (repo / ".git" / "hooks").mkdir()
+    (repo / ".git" / "hooks" / "pre-push.sh").write_text(
+        f"curl -H 'Authorization: {token}' https://example.invalid\n", encoding="utf-8")
+    (repo / "train.py").write_text("import requests  # https://example.invalid\n", encoding="utf-8")
+    tools = RepoTools([{"name": ".", "path": str(repo)}])
+
+    hits = tools.execute("repo_grep", {"pattern": "https"})
+    assert token not in hits
+    assert ".git/" not in hits
+    assert "train.py" in hits, "the guard must not blind the grep to ordinary source files"
+
+    for path in (".git/config", ".git/hooks/pre-push.sh"):
+        body = tools.execute("repo_read", {"path": path})
+        assert token not in body
+        assert "refused" in body, body
+
+    # Regression guard on the two files that LOOK like git metadata but are ordinary repo content.
+    (repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    assert "__pycache__" in tools.execute("repo_read", {"path": ".gitignore"})
+    assert "requests" in tools.execute("repo_read", {"path": "train.py"})

@@ -27,6 +27,26 @@ def _abstraction_of(payload: dict):
     return Abstraction(str(payload.get("abstraction", "")), list(payload.get("anchors", [])))
 
 
+def _readable_repo_path(p: Path) -> bool:
+    """Is this repo path safe to stream back into the (possibly REMOTE) model context?
+
+    `_pathsafe.looks_secret` is not enough on its own here. It knows `.ssh`/`.aws`/`.env` but NOT
+    `.git`, and a clone made with a credentialed HTTPS remote parks that credential in plain text
+    in `.git/config` (`url = https://user:ghp_…@github.com/org/repo`) — a routine pattern for
+    private repos in CI/hub environments. `repo_list` already filtered `.git` out; `repo_grep` and
+    `repo_read` did not, so the Researcher could reach the credential with an ordinary
+    `repo_grep(pattern="http")` or `repo_read(".git/config")` and it would ride into the prompt.
+    The unconditional `redact_secrets` in `agents/tool_loop.py` protects only the durable trace
+    PREVIEW, not the model-bound message, so the filter has to happen here.
+
+    Two gates, matching what `RepoScoutTools._read_file` has always applied to the same class of
+    content: no `.git` internals, and a known source/doc/config extension. `.gitignore` and
+    `.dockerignore` are in `_pathsafe.SAFE_NAMES` and stay readable — only paths that live INSIDE
+    a `.git` directory are excluded.
+    """
+    return ".git" not in p.parts and _pathsafe.readable(p)
+
+
 
 
 class RepoTools:
@@ -82,13 +102,6 @@ class RepoTools:
     def execute(self, name: str, args: dict) -> str:
         try:
             if name == "repo_grep":
-                # CLAUDE REVIEW: [SECURITY] Unlike repo_list (which filters ".git" from parts) and
-                # RepoScoutTools._grep (which prunes _SKIP_DIRS and applies the `readable` extension
-                # allowlist), this grep walks EVERYTHING under the root: `.git/config` lines — which
-                # can carry credentialed remote URLs (https://user:TOKEN@host) — and arbitrary
-                # unrecognized dotfiles are matchable and streamed into the (possibly remote) model
-                # prompt. `looks_secret` does not cover `.git`. Skip `.git` and apply the same
-                # `_pathsafe.readable` gate the scout uses.
                 glob = args.get("glob") or "*"
                 out = []
                 for label, root in self.roots.items():
@@ -100,6 +113,8 @@ class RepoTools:
                         rp = hp.relative_to(root)
                         if _pathsafe.looks_secret(rp):
                             continue            # don't stream secret-file contents into the LLM prompt
+                        if not _readable_repo_path(rp):
+                            continue            # .git internals / binaries — see the helper's docstring
                         out.append(f"{pre}{rp.as_posix()}:{h.lineno}: {h.line}")
                 return "\n".join(out[:40]) or "(no matches)"
             if name == "repo_list":
@@ -117,11 +132,6 @@ class RepoTools:
                 target = self._resolve(args.get("path", ""))
                 if target is None or not target.is_file():
                     return f"(no such file: {args.get('path')})"
-                # CLAUDE REVIEW: [SECURITY] No `.git` exclusion and no `_pathsafe.readable` extension
-                # allowlist here (RepoScoutTools._read_file applies both): repo_read(".git/config")
-                # returns git remotes — including any embedded credentials — and any binary/dotfile
-                # in the repo is slurped (errors=replace) into the model context. Mirror the scout's
-                # allowlist + .git guard.
                 # Refuse to read credential files back into the (possibly remote) model context.
                 for r in self.roots.values():
                     try:
@@ -129,6 +139,9 @@ class RepoTools:
                             return f"(refused: {target.name} looks like a secret/credential)"
                     except ValueError:
                         continue
+                if not _readable_repo_path(target):
+                    return (f"(refused: {target.name} is not a readable source file — "
+                            "repository internals and binaries are not returned)")
                 # PAGINATE (reuse read_file's window logic) instead of a blind [:max_bytes] head — the
                 # same truncation that made the agent re-read the same file 8× on a >max_bytes file.
                 # Read the WHOLE file (bound = its own size) BEFORE paginating: read_file's default

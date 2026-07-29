@@ -30,6 +30,7 @@ from looplab.events.replay import fold
 from looplab.events.traceview import build_trace_view, hydrate_inputs, load_spans
 from looplab.events.types import (
     EV_BUDGET,
+    EV_CARD_ENRICHED,
     EV_COMMAND_ACK,
     EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
@@ -162,23 +163,21 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
             continue
         if event.type == EV_REPORT_GENERATED and data.get("finalize_scope") == scope:
             continue
-        # CLAUDE REVIEW: [REPLAY-SAFETY] This allow-list is missing EV_CARD_ENRICHED, yet
-        # `finalize_run` itself appends card_enriched (a FOLDED event) via `_sync_card_enrichments`
-        # between the scope's `begun` claim and its completion markers. A crash in that window makes
-        # the finalization's OWN effect read as a foreign event on resume: `finalize_scope_quiescent`
-        # returns False, `incomplete_finalize_scope` returns None, and for a scoped finish WITHOUT
-        # `finalization_required` (the old scoped-log compatibility population this predicate exists
-        # for) `should_finalize` never fires again — the scope is silently abandoned with its
-        # llm_cost roll-up / completion markers permanently missing. This is the same failure class
-        # the REPLAY-1 fix below closed for reflection_note/lessons_distilled; card_enriched needs
-        # the same treatment (it is emitted only by the main task and is selection-fenced by replay).
         if event.type in {EV_LLM_USAGE, EV_COMMAND_ACK, EV_READMODEL_SKIPPED,
-                          EV_REFLECTION_NOTE, EV_LESSONS_DISTILLED}:
+                          EV_REFLECTION_NOTE, EV_LESSONS_DISTILLED, EV_CARD_ENRICHED}:
             # The reflection finalize step emits reflection_note (always) and lessons_distilled
             # (comparative). They are this finalization's OWN effects, so — like llm_usage/command_ack
             # diagnostics — they must not read as a foreign event that abandons scope-based recovery
             # (REPLAY-1): otherwise a crash after reflection_note but before the completion markers
             # leaves the non-modern error-recovery finish permanently unfinished.
+            # `card_enriched` is the same case, found later: `finalize_run` appends it itself via
+            # `_sync_card_enrichments` between the scope's `begun` claim and `_publish_completion`.
+            # Left out, a crash in that window made the finalization's OWN effect read as foreign —
+            # `finalize_scope_quiescent` False, `incomplete_finalize_scope` None — and for a scoped
+            # finish WITHOUT `finalization_required` (exactly the old scoped-log population this
+            # predicate exists for) `should_finalize` never fired again, so the llm_cost roll-up and
+            # completion markers stayed missing forever. It is main-task-authored and
+            # selection-fenced by replay, so it qualifies on the same terms as the reflection pair.
             continue
         if event.type in {EV_BUDGET, EV_DIVERSITY_ARCHIVE, EV_LLM_COST} and (
             data.get("finalize_scope") == scope
@@ -792,10 +791,10 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # comparative lessons produced during finalize (and also repairs a crash gap on retry) before
         # the terminal cost/publication steps, while Card events remain authored by the main task.
         try:
-            # CLAUDE REVIEW: [REPLAY-SAFETY] This append of FOLDED card_enriched events happens inside
-            # an open finalize scope, but EV_CARD_ENRICHED is not in `finalize_scope_quiescent`'s
-            # allow-list — see the comment there: a crash after this line but before the completion
-            # markers breaks quiescence for a non-`finalization_required` scoped finish on resume.
+            # These FOLDED card_enriched appends land inside the open finalize scope, so
+            # `finalize_scope_quiescent` allow-lists EV_CARD_ENRICHED as one of this finalization's
+            # OWN effects — see the rationale there. Without that entry a crash between this line and
+            # the completion markers permanently abandoned a non-`finalization_required` scoped finish.
             engine._sync_card_enrichments(fold(engine.store.read_all()))
         except Exception:  # noqa: BLE001 - advisory Card links must never block terminal completion
             pass

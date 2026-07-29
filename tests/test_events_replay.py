@@ -2748,3 +2748,43 @@ def test_request_cursor_rule_is_shared_and_queue_bounded():
     assert advance(0, 2, True) == 1              # bool is not an index
     assert advance(0, 2, 0.0) == 1               # non-int is not an index
     assert advance(5, 2, None) == 2              # a cursor already past the queue is clamped back
+
+
+def test_a_malformed_reward_hack_signal_can_neither_brick_the_fold_nor_gate_an_honest_node():
+    """`fold` must stay TOTAL, and a shape that is not a signal is not cheating evidence.
+
+    `hard_flagged_ids` runs `s.get("signal", "")` over `rh.get("signals") or []`, and the fold loop
+    has no per-event try/except. A forged/hand-edited truthy scalar (`"leak"`, `5`) or a list of
+    non-dicts (`["leak"]`, `[None]`) therefore raised straight out of `fold`, bricking EVERY
+    replay/resume/view of the run under trust_gate gate/block — the same class the `node_ids` scalar
+    guard already closes. Separately, an entry with no `signal` key yielded `""`, and
+    `is_hard_signal("")` was True, so one malformed record gate-excluded the honest winner.
+    """
+    base = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max", "trust_gate": "gate"}),
+        ("node_created", {"node_id": 1, "operator": "draft", "idea": {"operator": "draft"}}),
+        ("node_evaluated", {"node_id": 1, "metric": 0.9}),
+        ("node_created", {"node_id": 2, "operator": "draft", "idea": {"operator": "draft"}}),
+        ("node_evaluated", {"node_id": 2, "metric": 0.5}),
+    ]
+
+    def _fold(signals):
+        rows = [*base, ("reward_hack_suspected", {"node_id": 1, "signals": signals})]
+        return fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(rows)])
+
+    for malformed in (["leak"], "leak", 5, [None], {"signal": "x"}, [[], 7.5]):
+        state = _fold(malformed)                       # must not raise
+        assert 1 not in state.breed_excluded, malformed
+        assert state.best_node_id == 1, malformed
+    # An entry that simply lacks the key is malformed too, not high-precision cheating evidence.
+    assert _fold([{"detail": "no signal name"}]).best_node_id == 1
+    # A MIXED list keeps its valid entries: the junk is dropped, the real signal still gates.
+    mixed = _fold([{"signal": "metric_hardcoded"}, "leak", None])
+    assert set(mixed.breed_excluded) == {1} and mixed.reward_hacks[0]["signals"] == [
+        {"signal": "metric_hardcoded"}]
+    # ...while a REAL hard signal still gates, and an advisory one still does not.
+    hard = _fold([{"signal": "metric_hardcoded"}])
+    assert set(hard.breed_excluded) == {1} and hard.best_node_id == 2
+    assert _fold([{"signal": "perfect_metric"}]).best_node_id == 1
+    # The retained list stays bounded, so a forged event cannot park an unbounded array in RunState.
+    assert len(_fold([{"signal": "s"}] * 500).reward_hacks[0]["signals"]) == 64
