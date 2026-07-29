@@ -144,7 +144,17 @@ export function useRunState(runId, {
     let backoff = MIN_BACKOFF
     const hidden = () => typeof document !== 'undefined' && document.hidden
     const identity = (payload, probe = false) => {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('Invalid run snapshot.')
+      }
       if (probe && payload?.schema !== 1) throw new Error('Invalid lifecycle probe.')
+      if (!Number.isSafeInteger(payload.seq) || payload.seq < -1) {
+        throw new Error('Invalid run sequence.')
+      }
+      if (!probe && (!payload.state || typeof payload.state !== 'object'
+        || Array.isArray(payload.state))) {
+        throw new Error('Invalid run state.')
+      }
       const alive = probe ? payload?.engine_running : payload?.state?.engine_running
       const nextGeneration = normalizeRunGeneration(payload?.generation)
       const nextEventCount = normalizeEventCount(payload?.event_count)
@@ -160,6 +170,11 @@ export function useRunState(runId, {
       || next[2] !== lastGeneration || next[3] !== lastEventCount
     const commitSnapshot = payload => {
       const next = identity(payload)
+      const sameGeneration = next[2] != null && next[2] === lastGeneration
+      if (sameGeneration && (next[0] < lastSeq
+        || (next[3] != null && lastEventCount != null && next[3] < lastEventCount))) {
+        throw new Error('Run snapshot moved backwards.')
+      }
       if (!identityChanged(next)) return next
       ;[lastSeq, lastAlive, lastGeneration, lastEventCount] = next
       setGenerationState({ runId, value: next[2] })
@@ -219,13 +234,27 @@ export function useRunState(runId, {
       const controller = new AbortController()
       streamRef.current = controller
       let terminal = false
+      let acceptedTerminal = false
+      const rejectLiveStream = () => {
+        if (stopped || controller.signal.aborted) return
+        const delay = backoff
+        acceptedTerminal = false
+        lastStreamEventId = ''
+        setConnected(false)
+        controller.abort()
+        reconnect(delay)
+        backoff = Math.min(backoff * 2, MAX_BACKOFF)
+      }
       fetchEventStream(runApiPath(runId, '/events'), {
         signal: controller.signal,
         lastEventId: lastStreamEventId,
         onEvent: event => {
           if (stopped || controller.signal.aborted) return
-          if (event.lastEventId !== '') lastStreamEventId = event.lastEventId
           if (event.type === 'done') {
+            if (!acceptedTerminal) {
+              rejectLiveStream()
+              return
+            }
             // A finished run can be reopened later, but immediately reopening this terminal stream
             // would just receive `done` again forever. Switch to the small minute-scale identity probe.
             terminal = true
@@ -235,8 +264,23 @@ export function useRunState(runId, {
           }
           if (event.type !== 'state') return
           let p
-          try { p = JSON.parse(event.data) } catch { return }
-          try { commitSnapshot(p) } catch { return }
+          let next
+          try {
+            p = JSON.parse(event.data)
+            if (event.lastEventId !== String(p?.seq)) {
+              throw new Error('Run stream cursor does not match its snapshot.')
+            }
+            next = commitSnapshot(p)
+          } catch {
+            // A live connection is only healthy after an accepted snapshot. Do not acknowledge a
+            // rejected frame's cursor; force a full resync and mark last-good data offline meanwhile.
+            rejectLiveStream()
+            return
+          }
+          acceptedTerminal = terminalSnapshot(p)
+          // Numeric seq ids are scoped to one durable run generation. Empty/reset startup states have
+          // no generation yet, so carrying their `-1` (or the prior generation's id) is ambiguous.
+          lastStreamEventId = next[2] != null && event.lastEventId !== '' ? event.lastEventId : ''
           backoff = MIN_BACKOFF
           setConnected(true)
           setStatus('ready')
