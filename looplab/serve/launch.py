@@ -20,7 +20,8 @@ from pydantic import ValidationError
 from looplab.adapters import tasks as task_adapters
 from looplab.core.appconfig import load_document
 from looplab.core.comparison import canonical_comparison_contract
-from looplab.core.config import Settings, canonicalize_parallelism_source
+from looplab.core.config import (Settings, canonicalize_parallelism_source,
+                                 flatten_parallelism_layers)
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
@@ -262,11 +263,11 @@ def _resolved_settings(task: dict, saved: dict, file_settings: dict,
     base, base_digest = _base_settings_fingerprint()
     # Saved UI settings < task-file settings < explicit launch settings. Canonicalize aliases in
     # each layer before flattening so a spelling change cannot invert source precedence.
-    merged = {
-        **canonicalize_parallelism_source(saved),
-        **canonicalize_parallelism_source(file_settings),
-        **canonicalize_parallelism_source(launch_settings),
-    }
+    merged = flatten_parallelism_layers([
+        canonicalize_parallelism_source(saved),
+        canonicalize_parallelism_source(file_settings),
+        canonicalize_parallelism_source(launch_settings),
+    ])
     inferred = False
     # An env/.env backend is an explicit operator choice too.  Only infer when every higher-precedence
     # source and the base Settings source left it unset.

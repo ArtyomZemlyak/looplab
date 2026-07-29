@@ -115,18 +115,44 @@ def canonicalize_parallelism_source(
         # flattened result, so the alias migration cannot invert CLI > file > env precedence.
         if canonical not in out and out.get(legacy) is not None:
             out[canonical] = out[legacy]
-    # PRECEDENCE REPAIR for the non-promoted pair. Skipping promotion above is right (a legacy-only
-    # layer must not flip on the shared broker), but it also let a LOWER-priority canonical value
-    # survive a HIGHER-priority legacy override: file `llm_parallel: 2` + CLI `-s parallel_build=8`
-    # flattened to BOTH keys, and the orchestrator prefers `llm_parallel`, so the operator's explicit
-    # CLI width was silently discarded — exactly the inversion `build_settings`' docstring says this
-    # per-layer canonicalization exists to prevent. Mask it with the LEGACY SENTINEL instead of
-    # promoting: `llm_parallel=None` is the durable "legacy mode — take the build width from
-    # parallel_build, no shared total", so the higher layer wins with the semantics it asked for.
-    if (not promote_build_to_llm_parallel and "llm_parallel" not in out
-            and out.get("parallel_build") is not None):
-        out["llm_parallel"] = None
     return out
+
+
+def flatten_parallelism_layers(layers) -> dict:
+    """Flatten same-tier precedence layers (LOWEST priority first) and resolve the legacy pair.
+
+    PRECEDENCE REPAIR for the non-promoted `parallel_build`/`llm_parallel` pair. Declining to promote
+    in `canonicalize_parallelism_source` is right (a legacy-only layer must not flip on the shared
+    broker), but it let a LOWER-priority canonical value survive a HIGHER-priority legacy override:
+    file `llm_parallel: 2` + CLI `-s parallel_build=8` flattened to BOTH keys, and the orchestrator
+    prefers `llm_parallel`, so the operator's explicit CLI width was silently discarded. When a higher
+    layer names the legacy width over a lower layer's canonical one, mask with the LEGACY SENTINEL
+    (`llm_parallel=None` is the durable "legacy mode — build width from parallel_build, no shared
+    total"), so the higher layer wins with the semantics it asked for.
+
+    The mask lives HERE, not in the per-layer canonicalizer, because only a flatten knows the layer
+    ORDER. Stamping it per layer meant any layer naming `parallel_build` emitted `llm_parallel=None`
+    even when NO layer in the tier set the canonical key — and since pydantic-settings ranks init
+    kwargs above env, that sentinel then silently overrode a `LOOPLAB_LLM_PARALLEL` the operator had
+    exported as a deliberate provider rate/cost ceiling. Precedence is per FIELD: a tier that never
+    spelled `llm_parallel` has not set it, and it must fall through to env/.env/defaults — which is
+    exactly what `build_settings`' docstring promises ("the merged dict wins only where it actually
+    sets a value").
+    """
+    merged: dict = {}
+    legacy_at = canonical_at = -1
+    for index, layer in enumerate(layers):
+        if not isinstance(layer, dict):
+            continue
+        merged.update(layer)
+        if layer.get("parallel_build") is not None:
+            legacy_at = index
+        if "llm_parallel" in layer:
+            canonical_at = index
+    # Only when this tier DID set the canonical key, at a strictly lower layer than the legacy one.
+    if canonical_at >= 0 and legacy_at > canonical_at:
+        merged["llm_parallel"] = None
+    return merged
 
 # Settings whose semantics are committed by ``run_started`` and restored from the folded event log
 # on every re-entry.  Changing one only in ``config.snapshot.json`` would mix incompatible evidence

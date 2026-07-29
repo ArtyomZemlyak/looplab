@@ -114,13 +114,13 @@ def test_canonicalize_parallelism_source_keeps_broker_optin_off_by_default():
     # True alias: always promoted (no broker semantics).
     assert canonicalize_parallelism_source({"max_parallel": 5}) == {
         "max_parallel": 5, "eval_parallel": 5}
-    # Legacy build width: NOT promoted at config/startup load (broker stays opt-in). It DOES stamp the
-    # legacy sentinel `llm_parallel: None` so this layer can MASK a lower-priority canonical value —
-    # without that, a file `llm_parallel: 2` silently beat a CLI `-s parallel_build=8` (the orchestrator
-    # prefers llm_parallel), inverting CLI > file precedence. None is the durable "legacy mode, no shared
-    # total", so the mask carries exactly the semantics the legacy spelling asked for.
-    assert canonicalize_parallelism_source({"parallel_build": 3}) == {
-        "parallel_build": 3, "llm_parallel": None}
+    # Legacy build width: NOT promoted at config/startup load (broker stays opt-in), and NOT masked
+    # here either. The layer canonicalizer sees ONE layer, so it cannot know whether some other layer
+    # in the tier set the canonical key; the precedence mask therefore lives in
+    # `flatten_parallelism_layers`, which knows the order (see the test below). Stamping it here made
+    # every legacy-only layer emit `llm_parallel: None`, and because pydantic-settings ranks init
+    # kwargs above env, that sentinel silently overrode an exported `LOOPLAB_LLM_PARALLEL`.
+    assert canonicalize_parallelism_source({"parallel_build": 3}) == {"parallel_build": 3}
     # Strategist opt-in DOES promote parallel_build -> llm_parallel (deliberate full alias).
     assert canonicalize_parallelism_source(
         {"parallel_build": 3}, promote_build_to_llm_parallel=True) == {
@@ -285,3 +285,34 @@ def test_the_document_marker_does_not_move_the_speculation_runtime_scope():
     snap = Settings(max_nodes=8).masked_snapshot()
     without = {k: v for k, v in snap.items() if k != CONFIG_SNAPSHOT_SCHEMA_KEY}
     assert speculation_runtime_scope_digest(snap) == speculation_runtime_scope_digest(without)
+
+
+def test_legacy_parallel_build_layer_does_not_mask_an_env_llm_parallel(monkeypatch):
+    """A tier that never spelled `llm_parallel` has not SET it — env must still supply it.
+
+    Precedence is per FIELD (CLI > file > env > defaults). The mask that makes a higher layer's
+    legacy width beat a LOWER layer's canonical one used to be stamped per layer, so any layer
+    naming `parallel_build` emitted `llm_parallel: None` — and since pydantic-settings ranks init
+    kwargs above env, that sentinel silently discarded a `LOOPLAB_LLM_PARALLEL` the operator had
+    exported as a deliberate provider rate/cost ceiling, switching the shared broker off.
+    """
+    from looplab.core.appconfig import build_settings
+    from looplab.core.config import flatten_parallelism_layers
+
+    monkeypatch.setenv("LOOPLAB_LLM_PARALLEL", "4")
+    assert build_settings({}, {}, {}).llm_parallel == 4          # baseline: env is honoured
+    assert build_settings({"parallel_build": 2}, {}, {}).llm_parallel == 4, (
+        "a legacy-only layer masked the operator's env-set canonical broker budget")
+    monkeypatch.delenv("LOOPLAB_LLM_PARALLEL")
+
+    # The inversion the mask exists for is unchanged: a HIGHER layer's legacy width still beats a
+    # LOWER layer's canonical value, because that tier really did set both keys.
+    assert build_settings({"llm_parallel": 2}, {}, {"parallel_build": 8}).llm_parallel is None
+    assert build_settings({"llm_parallel": 2}, {}, {}).llm_parallel == 2
+
+    # Same rule at the helper level, lowest-priority layer first.
+    assert flatten_parallelism_layers([{"llm_parallel": 2}, {"parallel_build": 8}]) == {
+        "llm_parallel": None, "parallel_build": 8}
+    assert flatten_parallelism_layers([{"parallel_build": 8}, {"llm_parallel": 2}]) == {
+        "parallel_build": 8, "llm_parallel": 2}
+    assert "llm_parallel" not in flatten_parallelism_layers([{"parallel_build": 8}])

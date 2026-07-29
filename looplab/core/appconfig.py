@@ -32,7 +32,8 @@ import math
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.config import Settings, canonicalize_parallelism_source
+from looplab.core.config import (Settings, canonicalize_parallelism_source,
+                                 flatten_parallelism_layers)
 
 
 def _read_doc(path: Path) -> dict:
@@ -152,11 +153,11 @@ def build_settings(file_settings: dict, typed_overrides: dict, sets: dict) -> Se
     ``__init__`` kwargs above env, so the merged dict wins only where it actually sets a value."""
     # These layers all become one Pydantic "init" source. Promote aliases BEFORE flattening them,
     # otherwise a file canonical value can shadow a higher-priority CLI legacy override.
-    merged = {
-        **canonicalize_parallelism_source(file_settings),
-        **canonicalize_parallelism_source(typed_overrides),
-        **canonicalize_parallelism_source(sets),
-    }
+    merged = flatten_parallelism_layers([
+        canonicalize_parallelism_source(file_settings),
+        canonicalize_parallelism_source(typed_overrides),
+        canonicalize_parallelism_source(sets),
+    ])
     return Settings(**merged)
 
 

@@ -523,3 +523,51 @@ def test_rlimit_caps_are_applied_without_preexec_fn(tmp_path):
     rc_missing, _o, err_missing, _t = run_argv(
         ["looplab-no-such-binary-exists"], str(tmp_path), 30.0, mem_bytes=64 * 1024 * 1024)
     assert rc_missing != 0 and "failed to launch" in err_missing
+
+
+def test_kill_tree_reaps_the_group_when_the_leader_already_exited(tmp_path):
+    """A leader that exits without being collected must still take its GROUP down.
+
+    `_tee_drain` calls `_kill_tree` right after a 250 ms `proc.wait` timeout, so the leader can exit
+    inside that window. The guard used to call `poll()` — which REAPS the zombie and then returned
+    early — so the DataLoader/torchrun descendants kept running on a GPU the scheduler had already
+    released. A zombie retains its pid and pgid, so the group kill still reaches them; only a caller
+    that ALREADY reaped (`returncode` set) may name a reused pid, and that case still returns.
+    """
+    import subprocess
+    import sys
+    import time
+
+    from looplab.runtime.sandbox import _kill_tree
+
+    evidence = tmp_path / "grandchild_ran.txt"
+    (tmp_path / "leader.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c',\n"
+        f"  \"import time, pathlib; time.sleep(3); pathlib.Path({str(evidence)!r}).write_text('x')\"])\n"
+        "sys.exit(0)\n", encoding="utf-8")
+
+    proc = subprocess.Popen([sys.executable, str(tmp_path / "leader.py")], start_new_session=True)
+    time.sleep(0.4)                       # the leader has exited but nothing collected it yet
+    assert proc.returncode is None, "precondition: an unreaped zombie leader"
+    _kill_tree(proc)
+    time.sleep(3.5)                       # past the grandchild's own sleep
+    assert not evidence.exists(), (
+        "the orphaned grandchild outlived _kill_tree — its process group was never signalled")
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def test_kill_tree_never_signals_an_already_reaped_process(tmp_path):
+    """The PID-reuse fence: once the caller reaped, the pid may name a stranger's group."""
+    import subprocess
+    import sys
+
+    from looplab.runtime.sandbox import _kill_tree
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    proc.wait()
+    assert proc.returncode is not None
+    _kill_tree(proc)                      # must be a no-op, not a killpg on a possibly-reused pid

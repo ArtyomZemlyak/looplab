@@ -887,22 +887,34 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # shares the ENGINE's process group — so an unguarded killpg could SIGKILL the engine itself. This is
     # the same PID-reuse hazard `runtime/bg_tasks.py` documents and guards with `deadline_lock`; here the
     # `returncode` check is the fence, and it must precede BOTH the group kill and the psutil path.
-    _rc = getattr(proc, "returncode", None)
-    if _rc is None:
-        _poll = getattr(proc, "poll", None)
-        if callable(_poll):
-            try:
-                _rc = _poll()
-            except Exception:      # noqa: BLE001 - an unpollable handle is treated as still-running
-                _rc = None
-    if _rc is not None:
+    # Read `returncode` ONLY — never call `poll()` here. `poll()` REAPS an exited child, and reaping
+    # is exactly what frees the PID for reuse, so asking destroys the evidence this fence needs. Worse,
+    # it made the function RETURN on a child that had just exited while its GROUP was still alive:
+    # `_tee_drain` reaches here right after a 250 ms `proc.wait` timeout, so a leader that exits in
+    # that window left its DataLoader/torchrun descendants running on a GPU the scheduler then
+    # released (reproduced: the grandchild survived `_kill_tree`). A ZOMBIE retains its pid and pgid,
+    # so killpg still reaches the survivors; `returncode` is set only when the CALLER already reaped
+    # (`cli_agent.py`'s post-`communicate()` path), which is the one state where the pid may name a
+    # stranger's group.
+    if getattr(proc, "returncode", None) is not None:
         return
     if os.name != "nt":
         try:
-            os.killpg(os.getpgid(proc.pid), 9)
-            return
+            pgid, own = os.getpgid(proc.pid), os.getpgid(0)
         except (OSError, ValueError):
-            pass
+            pgid = own = None
+        if pgid is not None and pgid == own:
+            # `start_new_session=True` did not take effect (or the caller built this Popen itself), so
+            # the child shares the ENGINE's group and signalling it would SIGKILL the engine. Mirrors
+            # the identical guard in `_reap_process_group` above; the pre-existing killpg here had the
+            # `returncode` fence only, which does not cover a LIVE same-group child.
+            return
+        if pgid is not None:
+            try:
+                os.killpg(pgid, 9)
+                return
+            except (OSError, ValueError):
+                pass
     try:
         import psutil  # optional (extras: proc) — Windows tree kill, or a POSIX fallback if killpg failed
 
