@@ -16,6 +16,19 @@ import {
 const source = readFileSync(new URL('../src/ScopeReport.jsx', import.meta.url), 'utf8')
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
+// jsdom does not implement `window.confirm`: it logs "Not implemented" and returns `undefined`.
+// ScopeReport's paid-generation guard reads `!window.confirm(...)`, so every click these tests make
+// would silently cancel and the assertions would run against a request that was never issued —
+// which is exactly how three of them went red. Consent explicitly, and record the prompts so a test
+// can assert the operator really was warned before a paid call.
+const scopeDom = (confirmations = []) => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'https://looplab.test/', pretendToBeVisual: true,
+  })
+  dom.window.confirm = message => { confirmations.push(String(message)); return true }
+  return dom
+}
+
 const record = overrides => ({
   exists: true,
   authoritative: true,
@@ -166,9 +179,8 @@ test('ScopeReport fences late requests and quarantines outcome-bearing legacy co
 })
 
 test('ScopeReport renders only current authority and ignores an old generation after navigation', async () => {
-  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
-    url: 'https://looplab.test/', pretendToBeVisual: true,
-  })
+  const confirmations = []
+  const dom = scopeDom(confirmations)
   const requests = []
   const installed = {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
@@ -236,11 +248,25 @@ test('ScopeReport renders only current authority and ignores an old generation a
     await render({ type: 'task', id: 'scope-a', label: 'scope-a' })
     await reply(requests[2], payload('A'))
     assert.match(document.body.textContent, /VERDICT A.*Model-advisory narrative.*HEADLINE A/s)
+    // The paid-generation guard is load-bearing, not decoration. Check it here, while the button is
+    // still idle: DECLINING must issue no request at all. Without this, stubbing `confirm` to always
+    // consent would quietly turn the guard back off for every assertion in this file.
+    dom.window.confirm = () => false
+    await act(async () => {
+      const declined = [...document.querySelectorAll('button')].find(button => /Regenerate/.test(button.textContent))
+      declined.click()
+      await Promise.resolve()
+    })
+    assert.equal(requests.length, 3, 'a declined confirmation must not start a paid generation')
+    dom.window.confirm = message => { confirmations.push(String(message)); return true }
     await act(async () => {
       const regenerate = [...document.querySelectorAll('button')].find(button => /Regenerate/.test(button.textContent))
       regenerate.click(); regenerate.click()
       await Promise.resolve()
     })
+    assert.equal(confirmations.length, 2,
+      'each click prompts — the one-request burst dedup happens AFTER consent, not instead of it')
+    assert.match(confirmations[0], /paid generation|provider cost/i)
     assert.match(requests[3].url, /\/scope-a\/generate$/)
     assert.equal(requests.length, 4, 'one scope generation click burst starts one paid request')
     const actionId = requests[3].options.headers['Idempotency-Key']
@@ -264,9 +290,8 @@ test('ScopeReport renders only current authority and ignores an old generation a
 })
 
 test('ScopeReport reload resumes one stored paid action through job then durable GET', async () => {
-  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
-    url: 'https://looplab.test/', pretendToBeVisual: true,
-  })
+  const confirmations = []
+  const dom = scopeDom(confirmations)
   const requests = []
   const installed = {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
@@ -407,9 +432,8 @@ test('ScopeReport reload resumes one stored paid action through job then durable
 })
 
 test('ScopeReport adopts a server-fenced action from another tab before recovery', async () => {
-  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
-    url: 'https://looplab.test/', pretendToBeVisual: true,
-  })
+  const confirmations = []
+  const dom = scopeDom(confirmations)
   const requests = []
   const installed = {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
@@ -497,9 +521,8 @@ test('ScopeReport adopts a server-fenced action from another tab before recovery
 })
 
 test('ScopeReport re-probes repaired storage and clears a settled uppercase UUID', async () => {
-  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
-    url: 'https://looplab.test/', pretendToBeVisual: true,
-  })
+  const confirmations = []
+  const dom = scopeDom(confirmations)
   const actionId = '12345678-1234-4234-9234-123456789abc'
   const storageKey = 'll.scope-report-generation.'
     + encodeURIComponent(JSON.stringify(['task', 'storage-recovery']))
