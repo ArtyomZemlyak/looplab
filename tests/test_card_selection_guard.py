@@ -673,46 +673,47 @@ def test_card_schema_exposes_identity_readiness_and_stable_blockers():
     assert "identity_not_native" in blockers and "work_terminal" in blockers
 
 
-def test_an_outstanding_build_request_owns_its_card_even_before_node_building():
-    """A crash between `card_build_requested` and `node_building` must not publish a free work item.
+def test_an_outstanding_build_request_leaves_its_card_claimable_by_the_head_servicer():
+    """`card_build_requested` must NOT make the card unready — the producer re-folds and needs it.
 
-    The engine already treats an outstanding request head as owned — its card_id is in
-    `_election_excluded_card_ids` (via `SpeculationMixin._speculative_card_ids`), so it can never be
-    re-elected. The fold, however, only looked at `node_building` markers and evidence nodes, so the
-    replayed Card came back status='proposed', owner_state='none', with NO `work_in_flight` blocker
-    and `selection_ready=True`: every folded-state consumer (the board, the public DTO, any card
-    scorer) called it free to pick while the engine refused to touch it. The two views of ownership
-    must agree, because `selection_ready` is what the queue boundary fails closed on.
+    A review proposal wanted outstanding request heads folded into the same in-flight ownership set
+    as `node_building` markers, on the grounds that the engine already excludes them from election.
+    That conflates two different questions. `_election_excluded_card_ids` prevents a SECOND build of
+    the same card; `selection_ready` is what lets the FIRST one proceed — `_prepare_existing_card_claim`
+    demands it, and both `_producer_card_reservation` and `_commit_card_build` re-fold AFTER the
+    request is already durable. Blocking on the request therefore starves its own servicer: every
+    speculative build returns "stale" and the engine test hangs (observed, not hypothesised).
+
+    Ownership is stamped at `node_building`, one step later, once the claim has been validated.
     """
     from looplab.engine.speculation import SpeculationMixin
+    from looplab.search.card_selection import _strictly_selection_ready
 
     card_id = "opaque-work-item"
     rows = [*_baseline(), _native_card_added(card_id)]
-    free = fold(_events(rows))
-    assert free.cards[card_id].selection_ready is True          # precondition: nothing owns it yet
-
     reserved = fold(_events([
         *rows,
         ("card_build_requested", {"card_id": card_id, "generation": 0}),
     ]))
     card = reserved.cards[card_id]
-    assert card.selection_provenance.owner_state == "in_flight"
-    assert "work_in_flight" in card.selection_blockers
-    assert card.selection_ready is False
-    # "Building — code is being produced" is precisely this state: the producer holds the card.
-    assert card.status == "building"
-    # The whole point: the fold's ownership view now matches the engine's exclusion set.
+    assert card.selection_provenance.owner_state == "none"
+    assert card.selection_blockers == []
+    assert card.selection_ready is True
+    assert card.status == "proposed"
+    # The exact predicate the claim path re-asserts before reconstructing the Idea.
+    assert _strictly_selection_ready(card) is True
+    # ...while the engine's election exclusion DOES hold it, so it cannot be built twice.
     assert SpeculationMixin._speculative_card_ids(reserved) == {card_id}
 
-    # Discharging the request releases the card again — the reservation is not a permanent block.
-    # A producer failure is the case that must NOT wedge the card forever: the request closes, the
-    # card returns to the pool, and the engine falls back to the serial path for it.
-    released = fold(_events([
+    # `node_building` is where ownership becomes visible to the fold.
+    building = fold(_events([
         *rows,
         ("card_build_requested", {"card_id": card_id, "generation": 0}),
-        ("card_build_done", {"card_id": card_id, "generation": 0,
-                             "skipped": "producer_failed"}),
+        ("node_building", {"node_id": 4, "operator": "improve", "parent_ids": [1],
+                           "card_id": card_id}),
     ]))
-    assert SpeculationMixin._speculative_card_ids(released) == set()
-    assert released.cards[card_id].selection_ready is True
-    assert released.cards[card_id].status == "proposed"
+    owned = building.cards[card_id]
+    assert owned.selection_provenance.owner_state == "in_flight"
+    assert "work_in_flight" in owned.selection_blockers
+    assert owned.selection_ready is False
+    assert owned.status == "building"
