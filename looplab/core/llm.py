@@ -352,9 +352,13 @@ class OpenAICompatibleClient:
             # on THIS thread after a worker thread created it is safe: sync-httpx sequential handoff, no
             # concurrent access.
             header_join = self.header_timeout + min(10.0, self.header_timeout)
+            # The header wait must finish BEFORE `_streaming_body` opens. Nesting the two (evaluating
+            # `_bounded_create` as an argument inside the `with`) made ONE wedged call count itself
+            # twice — `_inflight=1` plus `_stream_inflight=1` — so `_pool_teardown_is_safe_locked`
+            # saw a phantom sibling and the call skipped the very teardown it needed.
+            _stream = self._bounded_create(kwargs, header_join)
             with self._streaming_body():
-                return self._accumulate_stream(self._bounded_create(kwargs, header_join),
-                                               self.timeout, self.header_timeout)
+                return self._accumulate_stream(_stream, self.timeout, self.header_timeout)
         return self._nonstream_bounded(kwargs)
 
     def _nonstream_bounded(self, kwargs: dict) -> dict:

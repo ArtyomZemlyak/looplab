@@ -87,3 +87,36 @@ def test_inflight_is_not_leaked_when_the_worker_thread_cannot_start():
     finally:
         threading.Thread = real_thread
     assert client._inflight == before, "the in-flight counter leaked when the thread never started"
+
+
+def test_the_streaming_guard_does_not_open_until_the_header_wait_is_over():
+    """A wedged call must not be double-counted as its own sibling.
+
+    `_streaming_body` covers the BODY read; `_bounded_create`'s `_inflight` covers the header wait.
+    Nesting them (evaluating `_bounded_create` as an argument inside the `with`) charged ONE call to
+    both counters at once, so `_pool_teardown_is_safe_locked` saw a phantom sibling and a black-holed
+    stream skipped the socket shutdown + client rebuild that is the whole point of the abort path.
+    """
+    from looplab.core.llm import OpenAICompatibleClient
+
+    client = OpenAICompatibleClient(base_url="http://x/v1", api_key="k", model="m",
+                                    stream=True, timeout=0.3, header_timeout=0.3)
+    seen: list[tuple[int, int, bool]] = []
+
+    class _SDK:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_kwargs):
+                    # Sampled from INSIDE the header wait, where the abort decision is made.
+                    with client._inflight_lock:
+                        seen.append((client._inflight, client._stream_inflight,
+                                     client._pool_teardown_is_safe_locked()))
+                    return []
+
+    client._sdk = _SDK()
+    client._sdk_chat({"model": "m", "messages": []}, use_stream=True)
+    assert seen, "the transport never reached the SDK"
+    inflight, stream_inflight, alone = seen[0]
+    assert (inflight, stream_inflight) == (1, 0)
+    assert alone, "a lone wedged stream would refuse its own teardown"
