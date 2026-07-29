@@ -539,3 +539,61 @@ def test_cross_run_node_origin_never_names_a_sibling_run_to_a_review_bearer(tmp_
     # `research_origin` is WITHIN-run provenance (which memo steered the proposal) and must survive
     # the narrowing — an omit set that swept it away would be over-broad.
     assert "research_origin" in reviews_router._REVIEW_NODE_KEYS
+
+
+def test_no_cross_run_carrier_reaches_a_review_bearer(tmp_path, monkeypatch):
+    """One tripwire over EVERY way a sibling run's identity can ride into the review surface.
+
+    Three carriers are closed individually — `RunState.cross_run_priors` by `_SUMMARY_OMIT_KEYS`, the
+    per-Card `cross_run_prior` by `REVIEW_OMITTED_CARD_FIELDS`, and `Node.origin` by both the omit set
+    and the evidence allow-list. Each was found separately, after the previous one was already fixed,
+    which is the signal that per-carrier tests are not enough. This asserts the PROPERTY instead: a
+    marker string that only ever appears in sibling-run identity must be present in the owner's view
+    and absent from every review projection, so a FOURTH carrier fails here the day it is added.
+    """
+    marker = "sibling-run-marker-xyz"
+    rd = _seed_run(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_created", {
+        "node_id": 1, "parent_ids": [0], "operator": "import",
+        "idea": {"operator": "import", "params": {}, "rationale": "seeded"},
+        "code": "print('imported')\n",
+        "origin": {"run_id": marker, "node_id": 3, "metric": 0.25},
+    })
+    store.append("node_evaluated", {"node_id": 1, "metric": 0.25})
+    store.append("cross_run_prior", {
+        "concept": "model/tree", "prior_runs": [{"run_id": marker, "metric": 0.9}],
+    })
+    store.append("card_added", {
+        "id": "card-x", "statement": "a direction", "source": "engine",
+        "idea": {"operator": "improve", "params": {"lr": 0.1}},
+    })
+    store.append("card_enriched", {
+        "id": "card-x",
+        "cross_run_prior": {
+            "v": 2, "matched_concepts": ["model/tree"],
+            "prior_runs": [{"run_id": marker, "run_best_metric": 0.9}],
+            "prior_runs_total": 1, "prior_runs_omitted": 0, "prior_runs_complete": True,
+        },
+    })
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+
+    owner = client.get("/api/runs/demo/state", headers=OWNER)
+    assert owner.status_code == 200
+    owner_state = owner.json()["state"]
+    # Per-carrier vacuity guards: if a fold/shape change silently stops producing one of these, the
+    # absence assertions below would still pass while covering nothing.
+    assert owner_state["nodes"]["1"]["origin"]["run_id"] == marker
+    assert marker in json.dumps(owner_state["cross_run_priors"], ensure_ascii=False)
+    assert marker in json.dumps(owner_state["cards"]["card-x"]["cross_run_prior"],
+                                ensure_ascii=False)
+
+    token = _create(client, evidence=True)["token"]
+    header = {"X-LoopLab-Review": token}
+    for path in ("/api/review", "/api/review/state", "/api/review/nodes/0",
+                 "/api/review/nodes/1", "/api/review/comments", "/api/review/cost"):
+        response = client.get(path, headers=header)
+        assert response.status_code == 200, (path, response.text)
+        assert marker not in json.dumps(response.json(), ensure_ascii=False), (
+            f"{path} disclosed a sibling run id to a one-run review capability")
