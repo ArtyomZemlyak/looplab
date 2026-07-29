@@ -1036,10 +1036,13 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 
 /* ---------- modal popup (create project / rename run) ---------- */
 .modal { background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 12px;
-  box-shadow: var(--shadow); width: min(440px, 92%); margin-top: 12vh; overflow: hidden; }
-.modal-h { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+  box-shadow: var(--shadow); width: min(440px, 92%); max-height: calc(100dvh - 72px);
+  display: flex; flex-direction: column; align-self: center; margin-top: 0; overflow: hidden; }
+.modal-h { display: flex; align-items: center; gap: 10px; padding: 11px 14px;
+  border-bottom: 1px solid var(--line); flex: none; }
 .modal-h b { font-size: 14px; }
-.modal-b { padding: 14px; }
+.modal-b { padding: 14px; flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
 /* ---------- inject-experiment dialog ---------- */
@@ -2039,6 +2042,9 @@ pre.code.event-json { max-height: 220px; }
   .overlay { padding: 0; align-items: stretch; }
   .overlay > .panel, .overlay > .modal { width: 100% !important; max-width: none; max-height: 100dvh;
     height: 100dvh; margin: 0; border: 0; border-radius: 0; }
+  .overlay > .modal > .modal-b {
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  }
   .panel-b { padding: 10px; }
   .authoring-layout { flex-direction: column; }
   .authoring-list { display: flex; width: 100%; max-height: 30dvh; overflow: auto; gap: 6px; }
