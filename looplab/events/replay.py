@@ -5029,10 +5029,6 @@ def _derive_cards(st: RunState) -> None:
     # Its explicit card_id is nevertheless the durable in-flight ownership link. Resolve it through the
     # same merge/statement aliases as every other card control so a reservation made just before a merge
     # follows the surviving work item. Unknown or malformed ids cannot synthesize a substance-free card.
-    # CODEX AGENT: outstanding `card_build_requests[card_builds_done:]` are also durable in-flight
-    # owners. A crash before node_building currently publishes the reserved Card as proposed,
-    # owner_state=none, selection_ready=true even though the engine excludes it. Alias-resolve request
-    # heads into this ownership projection.
     building_card_ids: set[str] = set()
     for marker in st.buildings.values():
         if not isinstance(marker, dict):
@@ -5043,9 +5039,31 @@ def _derive_cards(st: RunState) -> None:
         canonical_id = _canon(marker_card_id)
         if canonical_id in cards:
             building_card_ids.add(canonical_id)
+    # An OUTSTANDING `card_build_request` (one past `card_builds_done`) is the same durable ownership
+    # one step earlier: the producer holds the card and is generating its code, but the physical
+    # `node_building` marker does not exist yet. The engine already treats these as owned — a request
+    # head's card_id is in `_election_excluded_card_ids` (via `SpeculationMixin._speculative_card_ids`)
+    # and so cannot be re-elected. Without them here the fold disagreed with the engine after a crash
+    # in that gap: the card replayed as status='proposed', owner_state='none', NO `work_in_flight`
+    # blocker and `selection_ready=True` — a work item every folded-state consumer would call free to
+    # pick while the engine refuses to touch it. Same set as the markers, so the display lane agrees
+    # too ("Building — code is being produced" is exactly this state).
+    _requests_done = max(0, min(int(st.card_builds_done), len(st.card_build_requests)))
+    for request in st.card_build_requests[_requests_done:]:
+        if not isinstance(request, dict):
+            continue
+        request_card_id = _card_id(request.get("card_id"))
+        if request_card_id is None:
+            continue
+        # Alias-resolve exactly like the markers: a request made just before a merge must follow the
+        # surviving work item rather than leaving the merged-away id owning nothing.
+        canonical_id = _canon(request_card_id)
+        if canonical_id in cards:
+            building_card_ids.add(canonical_id)
 
     # 6) lifecycle `status` lane (frozen vocab; DISTINCT from the verdict). Dropped/merged-away wins;
-    #    else an explicit node_building.card_id reservation -> building; else a pending node -> running;
+    #    else durable producer ownership (an outstanding build request OR an explicit
+    #    node_building.card_id reservation) -> building; else a pending node -> running;
     #    else evidence all trust-gated/breed-excluded/infeasible -> gated; else terminal evidence ->
     #    evaluated; no evidence -> proposed.
     for cid, c in cards.items():

@@ -671,3 +671,48 @@ def test_card_schema_exposes_identity_readiness_and_stable_blockers():
     assert schema["properties"]["pinned"]["type"] == "boolean"
     blockers = schema["properties"]["selection_blockers"]["items"]["enum"]
     assert "identity_not_native" in blockers and "work_terminal" in blockers
+
+
+def test_an_outstanding_build_request_owns_its_card_even_before_node_building():
+    """A crash between `card_build_requested` and `node_building` must not publish a free work item.
+
+    The engine already treats an outstanding request head as owned — its card_id is in
+    `_election_excluded_card_ids` (via `SpeculationMixin._speculative_card_ids`), so it can never be
+    re-elected. The fold, however, only looked at `node_building` markers and evidence nodes, so the
+    replayed Card came back status='proposed', owner_state='none', with NO `work_in_flight` blocker
+    and `selection_ready=True`: every folded-state consumer (the board, the public DTO, any card
+    scorer) called it free to pick while the engine refused to touch it. The two views of ownership
+    must agree, because `selection_ready` is what the queue boundary fails closed on.
+    """
+    from looplab.engine.speculation import SpeculationMixin
+
+    card_id = "opaque-work-item"
+    rows = [*_baseline(), _native_card_added(card_id)]
+    free = fold(_events(rows))
+    assert free.cards[card_id].selection_ready is True          # precondition: nothing owns it yet
+
+    reserved = fold(_events([
+        *rows,
+        ("card_build_requested", {"card_id": card_id, "generation": 0}),
+    ]))
+    card = reserved.cards[card_id]
+    assert card.selection_provenance.owner_state == "in_flight"
+    assert "work_in_flight" in card.selection_blockers
+    assert card.selection_ready is False
+    # "Building — code is being produced" is precisely this state: the producer holds the card.
+    assert card.status == "building"
+    # The whole point: the fold's ownership view now matches the engine's exclusion set.
+    assert SpeculationMixin._speculative_card_ids(reserved) == {card_id}
+
+    # Discharging the request releases the card again — the reservation is not a permanent block.
+    # A producer failure is the case that must NOT wedge the card forever: the request closes, the
+    # card returns to the pool, and the engine falls back to the serial path for it.
+    released = fold(_events([
+        *rows,
+        ("card_build_requested", {"card_id": card_id, "generation": 0}),
+        ("card_build_done", {"card_id": card_id, "generation": 0,
+                             "skipped": "producer_failed"}),
+    ]))
+    assert SpeculationMixin._speculative_card_ids(released) == set()
+    assert released.cards[card_id].selection_ready is True
+    assert released.cards[card_id].status == "proposed"

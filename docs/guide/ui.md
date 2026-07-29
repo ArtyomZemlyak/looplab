@@ -172,8 +172,11 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
 - **Cards board** — the run's bounded work-item projection, grouped into the replay-derived lifecycle
-  lanes (proposed / building / running / evaluated / gated / dropped). `coded` and optional speculative
-  lanes are reserved UI vocabulary until durable ownership/eval-start events make them derivable;
+  lanes (proposed / building / running / evaluated / gated / dropped). **building** covers durable
+  producer ownership from the build *request* onward, not only once a node reservation exists — so a
+  crash between the two replays the card as owned (blocker `work_in_flight`, not selection-ready)
+  rather than as a free proposal the engine would nonetheless refuse to pick. `coded` and optional
+  speculative lanes are reserved UI vocabulary until durable ownership/eval-start events make them derivable;
   unknown future statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, or deliberately
