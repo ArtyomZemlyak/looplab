@@ -146,3 +146,36 @@ def test_host_graded_end_to_end(tmp_path):
     nd0 = tmp_path / "run" / "nodes" / "node_0"
     assert (nd0 / "predictions.json").exists()
     assert not (nd0 / "grader.py").exists()
+
+
+def test_synthetic_held_out_labels_are_reconstructible_from_the_mounted_split():
+    """The `mlebench` fixture's `host_graded` mode is a PIPELINE demo, not a confidentiality claim.
+
+    `make_classification_dataset` derives everything from `seed`, so a candidate holding only the
+    `test.json` it was mounted can search seeds until the generated features match and then read the
+    private answer key straight off — no `grader.py`, no `task.snapshot.json`, no FS escape needed.
+    This test performs exactly that attack. It exists so the caveat in `MLEBenchTask.host_graded`
+    and `docs/guide/tasks.md` cannot rot into a guarantee: give the fixture host-only entropy and
+    this goes red, at which point the claim may be upgraded deliberately rather than by accident.
+    """
+    from looplab.adapters.mlebench import make_classification_dataset
+
+    task = MLEBenchTask(host_graded=True, seed=5)
+    assets = task.assets()
+    assert "grader.py" not in assets                      # the answer key is not on the candidate FS
+    mounted_test_x = json.loads(assets["test.json"])["X"]
+    truth = task.host_grader()["labels"]
+
+    recovered = None
+    for guess in range(64):                               # a small, entirely offline seed search
+        _xtr, _ytr, xte, yte = make_classification_dataset(
+            guess, task.n_train, task.n_test, task.n_features, task.sep, task.noise)
+        if xte == mounted_test_x:
+            recovered = yte
+            break
+    assert recovered == truth, "the held-out key was NOT recoverable — update the documented caveat"
+
+    source = (ROOT / "looplab" / "adapters" / "mlebench.py").read_text(encoding="utf-8")
+    assert "NOT a confidentiality boundary FOR THIS TASK" in source
+    guide = (ROOT / "docs" / "guide" / "tasks.md").read_text(encoding="utf-8")
+    assert "not a confidentiality boundary" in guide

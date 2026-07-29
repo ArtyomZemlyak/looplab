@@ -263,7 +263,15 @@ Same data fields as `regression`.
 A competition-shaped task with **leaderboard grading**: the solution gets `train.json` (X + labels)
 and `test.json` (X only — labels withheld) and must call a private `grader.score(preds)`, so the
 loop optimizes the *true held-out* metric, not a self-reported one. The grader is asset-name
-protected so the agent can't overwrite it.
+protected so the agent can't overwrite it. Setting `host_graded: true` moves scoring out of the
+candidate process entirely (it writes `predictions.json`; the host scores it and no answer key is
+written into the workdir).
+
+> **This is a test fixture, not a confidentiality boundary.** The blobs are a pure function of
+> `seed`, so a determined candidate can recover the held-out labels from the `test.json` it was
+> given by searching seeds — no answer key needed. Use it to exercise the held-out-grading pipeline
+> offline; for a benchmark where the key genuinely cannot be derived, use
+> [`mlebench_real`](#mlebench_real).
 
 ```jsonc
 {

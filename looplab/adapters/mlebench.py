@@ -191,13 +191,23 @@ class MLEBenchTask(BaseModel):
     sep: float = 2.0
     noise: float = 1.0
     max_k: int = 15
-    # CODEX AGENT: synthetic labels are deterministic from these serialized fields, and the evaluator
-    # mounts `task.snapshot.json`. Candidate code can reconstruct `_data()` and emit the exact y_test
-    # despite host grading. Use host-only entropy/opaque identity or explicitly downgrade this mode's
-    # confidentiality claim.
-    # Out-of-process grading (recommended for untrusted/real benchmarks): the solution writes
-    # predictions.json and the HOST scores it against held-out labels never placed on the candidate
-    # FS — there is no answer key to read or self-report. False keeps the legacy in-workdir grader.
+    # Out-of-process grading: the solution writes predictions.json and the HOST scores it against
+    # held-out labels never placed on the candidate FS. False keeps the legacy in-workdir grader,
+    # whose `grader.py` embeds the answer key outright.
+    #
+    # NOT a confidentiality boundary FOR THIS TASK, and deliberately so. The labels here are a pure
+    # function of `seed` (`make_classification_dataset`: `y == i % 2` before a seeded shuffle), so a
+    # candidate holding the mounted `test.json` can recover them WITHOUT any answer key — try seeds
+    # until the generated test features match the ones it was given, then read off the labels. The
+    # engine also writes `task.snapshot.json` (in the RUN dir, not the workdir) which names the seed
+    # outright, and the subprocess sandbox tier imposes no FS isolation at all.
+    # `tests/test_mlebench.py::test_synthetic_held_out_labels_are_reconstructible_from_the_mounted_split`
+    # performs the reconstruction, so this caveat cannot quietly rot into a false guarantee.
+    # Closing it would mean host-only entropy that must ALSO survive resume (the seed is what makes a
+    # run reproducible), which is machinery a Gaussian-blobs test fixture does not earn. What this
+    # flag buys here is exercising the out-of-process grading PIPELINE offline; `mlebench_real` is
+    # where the claim is real — its answer key lives only in the mle-bench data dir and is never
+    # derivable from the public split (see docs/MLEBENCH.md).
     host_graded: bool = False
 
     def _data(self):
