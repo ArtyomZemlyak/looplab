@@ -356,6 +356,14 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
     observeGeneration(flight, epoch)
   }
 
+  const generateWithConfirmation = () => {
+    const action = data?.exists ? 'Regenerate' : 'Generate'
+    const warning = `${action} this cross-run report? This starts a paid generation and may incur provider cost. Continue?`
+    if (typeof window === 'undefined' || typeof window.confirm !== 'function'
+        || !window.confirm(warning)) return
+    generate()
+  }
+
   const generateReplacement = () => {
     if (!publicationUnconfirmed) return
     // This escape hatch starts a new paid UUID after an unconfirmed publication.
@@ -441,8 +449,9 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
       <div className="panel-h">
         <span className="ttl">Cross-run report · {label}</span>
         <span className="right" />
-        {data?.exists && <button className="btn sm" disabled={busy || uncertain} onClick={generate}>
-          {uncertain ? '… outcome unknown' : busy ? '… generating' : '↻ Regenerate'}</button>}
+        {data?.exists && <button className="btn sm" disabled={busy || uncertain}
+          onClick={generateWithConfirmation}>
+          {uncertain ? '… outcome unknown' : busy ? '… generating' : '↻ Regenerate · paid'}</button>}
         <button className="btn sm ghost" onClick={onClose} aria-label="Close report">✕</button>
       </div>
       <div className="panel-b">
@@ -481,8 +490,9 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
           <div className="muted">
             No report — <b>{runCount}</b> runs. Evidence is bounded.
           </div>
-          <button className="btn primary" disabled={busy || uncertain || !runCount} onClick={generate}>
-            {uncertain ? '… outcome unknown' : busy ? '… generating' : '✦ Generate report'}</button>
+          <button className="btn primary" disabled={busy || uncertain || !runCount}
+            onClick={generateWithConfirmation}>
+            {uncertain ? '… outcome unknown' : busy ? '… generating' : '✦ Generate report · paid'}</button>
         </div>}
 
         {data?.exists && c && <div className="sr-body">
