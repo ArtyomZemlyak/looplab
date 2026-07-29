@@ -19,6 +19,7 @@ import json
 import math
 import os
 import sys
+from contextlib import contextmanager
 import threading
 import time
 from typing import Callable, NamedTuple, Optional
@@ -294,6 +295,12 @@ class OpenAICompatibleClient:
         # re-spend. Counting lets the teardown stay scoped to the safe case.
         self._inflight_lock = threading.Lock()
         self._inflight = 0
+        # Streams whose BODY is still being read. `_inflight` cannot see them: for stream=True
+        # `create()` returns at HEADERS, so `_call`'s finally decrements while the caller thread is
+        # still minutes from finishing the generation on the SAME pooled connection. `_alone` then
+        # saw a healthy sibling as absent and tore the pool down under it — the exact failure it was
+        # added to prevent, in the configuration (streaming, the DEFAULT) its comment calls normal.
+        self._stream_inflight = 0
         self._sdk = self._new_sdk()
 
     def _new_sdk(self):
@@ -345,8 +352,9 @@ class OpenAICompatibleClient:
             # on THIS thread after a worker thread created it is safe: sync-httpx sequential handoff, no
             # concurrent access.
             header_join = self.header_timeout + min(10.0, self.header_timeout)
-            return self._accumulate_stream(self._bounded_create(kwargs, header_join),
-                                           self.timeout, self.header_timeout)
+            with self._streaming_body():
+                return self._accumulate_stream(self._bounded_create(kwargs, header_join),
+                                               self.timeout, self.header_timeout)
         return self._nonstream_bounded(kwargs)
 
     def _nonstream_bounded(self, kwargs: dict) -> dict:
@@ -354,6 +362,32 @@ class OpenAICompatibleClient:
         while the payload never completes), so bound the WHOLE call (headers + body) via `_bounded_create`
         at timeout+header_timeout, then serialize the completed response."""
         return self._bounded_create(kwargs, self.timeout + self.header_timeout + 10).model_dump()
+
+    def _pool_teardown_is_safe_locked(self) -> bool:
+        """May this wedged call tear down the SHARED client? Caller holds `_inflight_lock`.
+
+        Counts stream BODIES as well as header waits: a sibling past its headers still owns a pooled
+        connection, and `_shutdown_pool_sockets` + rebuilding `self._sdk` would kill its live
+        generation. Over-counting is the safe direction — it only skips the teardown more often,
+        which the abort path already accepts (it tolerates one lingering daemon instead).
+        """
+        return (self._inflight + self._stream_inflight) <= 1
+
+    @contextmanager
+    def _streaming_body(self):
+        """Hold `_stream_inflight` while a stream's BODY is read on THIS thread.
+
+        `_bounded_create`'s `_inflight` covers only the header wait — its worker returns the Stream the
+        moment headers land. Everything after that runs here, on the caller thread, with the pooled
+        connection still in use, so the abort path has to be able to see it.
+        """
+        with self._inflight_lock:
+            self._stream_inflight += 1
+        try:
+            yield
+        finally:
+            with self._inflight_lock:
+                self._stream_inflight -= 1
 
     def _bounded_create(self, kwargs: dict, join_s: float):
         """Run one `chat.completions.create(**kwargs)` in a worker thread bounded by a `join_s` wall-clock
@@ -381,7 +415,16 @@ class OpenAICompatibleClient:
         with self._inflight_lock:
             self._inflight += 1
         th = threading.Thread(target=_call, daemon=True)
-        th.start()
+        try:
+            th.start()
+        except BaseException:
+            # `_call`'s finally is the ONLY decrement and never runs if the thread never started
+            # (`RuntimeError: can't start new thread` under exhaustion). Leaking the counter would
+            # pin `_alone` False for the process lifetime, disabling this abort path for every later
+            # wedged call — and thread exhaustion is exactly when it is needed.
+            with self._inflight_lock:
+                self._inflight -= 1
+            raise
         th.join(join_s)
         if th.is_alive():
             # Force the wedged recv() to return so the worker thread EXITS (doesn't linger): shutdown the
@@ -400,7 +443,7 @@ class OpenAICompatibleClient:
             # spurious failures and re-spends; the caller still unblocks on the APITimeoutError below,
             # which is the guarantee that actually matters.
             with self._inflight_lock:
-                _alone = self._inflight <= 1
+                _alone = self._pool_teardown_is_safe_locked()
             if _alone:
                 # Force the wedged recv() to return so the worker thread EXITS: shutdown before close() —
                 # close() cannot interrupt a kernel read, only socket.shutdown() can.
@@ -809,6 +852,8 @@ class OpenAICompatibleClient:
                             # socket stayed open until GC, so a UI reader that navigates away mid-answer
                             # leaked a live connection out of the shared pool.
                             _stream = self._bounded_create(kwargs, header_join)
+                            _body = self._streaming_body()
+                            _body.__enter__()
                             try:
                                 for ev in _stream_with_idle_guard(
                                         _stream, self.timeout, self.header_timeout):
@@ -827,6 +872,7 @@ class OpenAICompatibleClient:
                                     _stream.close()
                                 except Exception:  # noqa: BLE001 - best-effort release, never mask
                                     pass
+                                _body.__exit__(None, None, None)
                         # A role-only/empty clean EOF is NOT a successful assistant answer. Falling
                         # through here returned a generator that yielded nothing, so the caller
                         # persisted a zero-content "success" — and the docstring's promised
