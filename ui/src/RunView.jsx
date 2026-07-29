@@ -1299,7 +1299,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </>}
 
       {panel && panelAllowed(panel) && <LazyBoundary label={`${HUB_OF[panel] || panel} panel`}
-        mode="overlay" resetKey={panel}>
+        mode="overlay" resetKey={panel} onClose={closePanel}>
       <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }} />}
