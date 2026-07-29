@@ -260,7 +260,7 @@ export default function Settings({ onBack }) {
   }
   const onSave = async () => {
     if (invalidCount) {
-      show(`Fix ${countLabel(invalidCount, 'invalid numeric setting')} before saving`)
+      show(`Fix ${countLabel(invalidCount, 'invalid setting')} before saving`)
       focusFirstInvalid()
       return
     }
@@ -492,7 +492,7 @@ export default function Settings({ onBack }) {
       <span className="spacer" style={{ flex: 1 }} />
       {invalidCount
         ? <button type="button" className="settings-summary-link settings-save-state is-invalid"
-            onClick={focusFirstInvalid}>{countLabel(invalidCount, 'invalid numeric setting')} — review</button>
+            onClick={focusFirstInvalid}>{countLabel(invalidCount, 'invalid setting')} — review</button>
         : <span className={'settings-save-state' + (unsaved ? ' is-unsaved' : '')}
             role="status" aria-live="polite">
           {unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'All changes saved'}

@@ -214,7 +214,7 @@ export function splitRunConfigPayload(payload, schema = null) {
       ? [...new Set(value.filter(name => typeof name === 'string' && name.length > 0))]
       : []
   }
-  if (schema) validateSettingsRecord(config, schema)
+  if (schema) validateSettingsRecord(config, schema, { complete: true })
   const pinnedFields = new Set(cleanNames(meta.run_start_pinned_fields))
   const readOnlyFields = new Set([
     ...pinnedFields, ...cleanNames(meta.run_read_only_fields),

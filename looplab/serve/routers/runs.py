@@ -21,8 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
-    RUN_START_PINNED_FIELDS, Settings, migrate_config_snapshot,
-    run_start_pinned_settings, settings_from_snapshot)
+    RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings, settings_from_snapshot)
 from looplab.core.node_evidence import metrics_attempt_receipt
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
@@ -2430,9 +2429,10 @@ def build_router(srv) -> APIRouter:
         Python contract in JavaScript.
         """
         pinned = run_start_pinned_settings(srv.state(rd))
-        # Keep revision bound to the exact on-disk object, but expose the same historically-safe
-        # missing-field projection that resume consumes. GET is read-only and never backfills bytes.
-        effective = migrate_config_snapshot(snapshot)
+        # Keep revision bound to the exact on-disk object, but expose the complete effective Settings
+        # projection that resume consumes. Preserve unknown snapshot keys; GET stays read-only and
+        # never backfills legacy bytes.
+        effective = {**snapshot, **settings_from_snapshot(snapshot).masked_snapshot()}
         mismatches = sorted(k for k, value in pinned.items() if effective.get(k) != value)
         effective.update(pinned)
         effective["_looplab_config_meta"] = {

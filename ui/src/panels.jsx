@@ -889,7 +889,7 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
           {invalidCount > 0 && <button type="button"
             className="settings-summary-link settings-save-state is-invalid"
             onClick={focusFirstInvalid}>
-            {invalidCount} invalid numeric setting{invalidCount === 1 ? '' : 's'} — review
+            {invalidCount} invalid setting{invalidCount === 1 ? '' : 's'} — review
           </button>}
           <button className="btn sm ghost" disabled={controlBusy || !hasChanges} onClick={() => { setForm(saved); setAgentControl(savedAC) }}>↺ revert</button>
           <button className="btn sm primary" disabled={controlBusy || !canSave} onClick={onSave}>Save</button>
