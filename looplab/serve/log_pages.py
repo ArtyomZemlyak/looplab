@@ -490,8 +490,8 @@ class EventLogPager:
         except OSError as exc:
             raise HTTPException(404, "no such run") from exc
         # CLAUDE REVIEW: [PERF] The single process-global RLock is held for the WHOLE request —
-        # including the initial full-file `_scan` of a never-indexed log (up to MAX_SOURCE_ROW_BYTES
-        # rows over a multi-MB file) and the `_materialize` disk reads — and it serializes page
+        # including the initial full-file `_scan` of a never-indexed multi-MB log and the
+        # `_materialize` disk reads — and it serializes page
         # requests across ALL runs, not just this one. One slow first-index (or a cold NFS read)
         # stalls every other run's timeline poll. A per-path lock (as the OrderedDict LRU already
         # suggests) would confine the stall to the run being indexed.

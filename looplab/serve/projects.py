@@ -111,9 +111,11 @@ class ProjectStore:
     # ------------------------------------------------------------------ queries
     # CLAUDE REVIEW: [EDGE-CASE] load() shape-checks only the top-level containers, not per-item
     # shape: a hand-edited projects.json row missing "id" makes this KeyError (and Project(**p) in
-    # rename/reparent can ValidationError) in EVERY mutator — surfacing as a 500 instead of the
-    # documented ProjectError->400 path, and blocking all project CRUD until the file is fixed by
-    # hand. Consider dropping malformed rows in load() like the top-level coercion already does.
+    # rename/reparent can ValidationError) in every mutator that traverses the rows —
+    # rename/reparent/delete/assign-to-project/create-with-parent surface a 500 instead of the
+    # documented ProjectError->400 path until the file is fixed by hand (create/assign(None)/
+    # set_label/forget and the supertask methods keep working). Consider dropping malformed rows in
+    # load() like the top-level coercion already does.
     def _index(self, data: dict) -> dict[str, dict]:
         return {p["id"]: p for p in data["projects"]}
 

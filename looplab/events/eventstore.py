@@ -768,10 +768,11 @@ class EventStore:
                 continue
             if isinstance(obj, dict) and "seq" in obj:
                 return int(obj["seq"])
-        # CLAUDE REVIEW: [TEST-GAP] This >64KB-tail fallback (last seq absent from the 65536-byte
-        # window -> full scan) has no test coverage — no test appends a record larger than the window;
-        # a regression here lets a concurrent second writer mint a duplicate seq after one huge final
-        # record, which the duplicate-sequence fence then fails closed for the entire log.
+        # CLAUDE REVIEW: [TEST-GAP] This >64KB-tail fallback IS exercised incidentally (e.g.
+        # test_card_public_projection appends ~400KB lines), but no test asserts its cross-process
+        # guarantee: a regression to `return -1` here would be masked by the same-store `self._seq`
+        # while letting a concurrent SECOND writer mint a duplicate seq after one huge final record,
+        # which the duplicate-sequence fence then fails closed for the entire log.
         # Tail window missed the last seq (e.g. a >64KB final line with no newline in the window):
         # fall back to a full scan so a concurrent writer can't mint a duplicate seq. Non-recursive.
         return self._scan_last_seq()
@@ -806,11 +807,6 @@ class EventStore:
         except OSError:
             pass  # best-effort healing; a read still tolerates the torn tail
 
-    # CLAUDE REVIEW: [TEST-GAP] The accepted-but-unsynced fence has no test coverage: no test forces
-    # strict_fsync/close to fail after the write was accepted (both append() and append_many() route
-    # their except paths here) — if the seq reservation or cache drop regresses, a failed
-    # require_durable append lets the next append mint a DUPLICATE seq, and the dense-sequence fence
-    # then fails the whole log closed on the next read (or paid work is silently double-claimed).
     def _mark_uncertain_append(self, seq: int) -> None:
         """Fence a seq whose bytes were accepted but whose sync was unconfirmed.
 

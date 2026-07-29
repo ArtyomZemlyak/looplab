@@ -438,14 +438,16 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
     if resolved is not None:
         return resolved
     if not writer_available:
-        # CLAUDE REVIEW: [EDGE-CASE] A run resumed WITHOUT a report_writer whose scope planned a
-        # finish report (`finish_report_planned=True`) but never reached `report_begun` returns False
-        # here on every pass: the report step can never be dispatched NOR closed, so
-        # `requirements_complete` stays False and the scope never publishes completion —
-        # finalization re-runs on every resume forever with no disclosed degradation. This is the
-        # same never-self-healing shape the llm_cost step bounds with
-        # `_COST_REFRESH_MAX_ATTEMPTS` + a disclosed `degraded` marker; consider an analogous
-        # bounded/disclosed close (e.g. `outcome="writer_unavailable"`) instead of a silent wedge.
+        # CLAUDE REVIEW: [EDGE-CASE] A scope that planned a finish report (`finish_report_planned`)
+        # but never reached `report_begun` returns False here on every pass when no report_writer is
+        # available — the report step can never be dispatched NOR closed. The reachable population
+        # (crash inside `_finish_with_report_if_quiescent` before the report lands) is not a
+        # permanent wedge: on resume the engine re-finishes under a NEW scope (report unplanned) and
+        # `incomplete_finalize_scope` tracks that newer candidate — but the old scope is silently
+        # ORPHANED and the planned report is lost with no disclosed degradation. This is the same
+        # never-self-healing shape the llm_cost step bounds with `_COST_REFRESH_MAX_ATTEMPTS` + a
+        # disclosed `degraded` marker; consider an analogous disclosed close
+        # (e.g. `outcome="writer_unavailable"`) instead of a silent orphan.
         if not _scope_has_step(current, scope, "report_begun"):
             return False
         # A differently configured process may currently own this attempt.  An optional guard waits

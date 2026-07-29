@@ -226,14 +226,15 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             self._e.store.append(EV_LESSONS_REFRESHED, {"at_node": n, "skipped": "unchanged"})
             return fold(self._e.store.read_all())
         # CLAUDE REVIEW: [EDGE-CASE] The priors rebuild below is UNGUARDED, unlike every sibling
-        # advisory path in this cluster ("best-effort — never raises"). `_load_reflection_priors_both`
-        # re-reads + re-scores the whole store and, with memora on, re-embeds through a possibly
-        # remote/custom embedder (`retrieve_lessons_harmonic` has no internal guard either); an
-        # exception propagates out of `_run_cadences` into the run() spine and errors the run — and
-        # since the EV_LESSONS_REFRESHED gate only advances on success, a persistent embedder outage
-        # crash-loops the run at the same cadence on every resume. Also `seen_stamp` is committed
-        # BEFORE the load succeeds; harmless today only because the raise aborts the process, but a
-        # future caller that catches would silently skip re-reading a changed store.
+        # advisory path in this cluster ("best-effort — never raises"). The embedder side is safe
+        # (`retrieve_lessons_harmonic` guards per-item and per-query internally), but
+        # `_load_reflection_priors_both` reads the store via `read_jsonl_lenient`, which raises
+        # OSError on an UNREADABLE lessons.jsonl/meta_notes.jsonl (permissions, transient FS fault);
+        # that propagates out of `_run_cadences` into the run() spine and errors the run — and since
+        # the EV_LESSONS_REFRESHED gate only advances on success, a persistently unreadable shared
+        # store crash-loops the run at the same cadence on every resume. Also `seen_stamp` is
+        # committed BEFORE the load succeeds; harmless today only because the raise aborts the
+        # process, but a future caller that catches would silently skip re-reading a changed store.
         self.seen_stamp = stamp
         before = (self.prior_note_text, self.dev_prior_note_text)
         rid = state.run_id or None

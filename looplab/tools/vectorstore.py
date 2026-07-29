@@ -206,12 +206,13 @@ class InMemoryVectorStore:
         for it in items:
             store[it.id] = it
 
-    # CLAUDE REVIEW: [RACE] No locking: `search` iterates `store.values()` while `upsert`/`delete`
-    # may run from another thread (the engine has a concurrent-research task and llm_parallel worker
-    # threads; CaseLibrary upserts into this store mid-run). A dict mutated during iteration raises
-    # RuntimeError("dictionary changed size during iteration"), which would surface as a tool/loop
-    # error. A threading.Lock around the three mutating/iterating methods (or snapshotting
-    # list(store.values())) would close it cheaply.
+    # CLAUDE REVIEW: [RACE] LATENT: no locking — `search` iterating `store.values()` concurrent
+    # with an `upsert`/`delete` from another thread raises RuntimeError("dictionary changed size
+    # during iteration"). No production path hits this today (the vector-backed CaseLibrary is
+    # test-only; KnowledgeTools' index is read-only after build; the harmonic-retrieval store is a
+    # per-call local), but the engine does run concurrent-research + llm_parallel worker threads,
+    # so any future shared use trips it. A threading.Lock around the three mutating/iterating
+    # methods (or snapshotting list(store.values())) would close it cheaply.
     def search(self, index: str, query: Vector, k: int) -> list[Hit]:
         store = self._idx.get(index, {})
         # Drop non-positive scores: `cosine` returns 0.0 on a DIMENSION MISMATCH (a query embedded at a

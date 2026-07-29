@@ -1518,11 +1518,12 @@ def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.leakage = d
 
 def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # CLAUDE REVIEW: [TEST-GAP] The stale-CAS REJECT branch below (after_seq present but != e.seq-1,
-    # or a bool/garbage after_seq) has no test coverage — only the accept path is exercised (the real
-    # engine in test_archive_hitl stamps a valid after_seq); a regression that wrongly accepts a stale
-    # request could re-open/rebind the HITL approval gate after an intervening abort/reset, and one
-    # that wrongly rejects would silently strand every modern approval request (run never pauses).
+    # CLAUDE REVIEW: [TEST-GAP] The stale-CAS REJECT branch below is only PARTIALLY covered:
+    # test_attention folds a stale after_seq through it, but its assertion (notification identity
+    # stable) cannot detect a wrong-ACCEPT (the same subject/generation is already pending either
+    # way), and the bool/garbage after_seq sub-branches are untested. A regression that wrongly
+    # accepts a stale request could re-open/rebind the HITL approval gate after an intervening
+    # abort/reset; one that wrongly rejects would strand every modern approval request.
     if "after_seq" in d:
         raw_after = d.get("after_seq")
         if isinstance(raw_after, bool):

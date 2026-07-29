@@ -34,12 +34,12 @@ def _ssrf_blocked(url: str) -> str | None:
         return None
     return None
 
-# CLAUDE REVIEW: [EDGE-CASE] Behind an env-configured HTTP(S) proxy (urllib honors HTTPS_PROXY by
-# default — the documented deployment for this repo's agent environment), the connected peer is the
-# PROXY, not the target: a proxy on a private/loopback address makes this block EVERY fetch (false
-# positive), while a public-address proxy means the DNS-rebind TOCTOU this check exists to close is
-# silently NOT covered (the proxy does the target connect). Consider detecting
-# urllib.request.getproxies() and adjusting/annotating behavior in the proxied case.
+# CLAUDE REVIEW: [EDGE-CASE] IF an env-configured HTTP(S) proxy is present (urllib honors
+# HTTPS_PROXY by default), the connected peer is the PROXY, not the target: a proxy on a
+# private/loopback address makes this block EVERY fetch (false positive), while a public-address
+# proxy means the DNS-rebind TOCTOU this check exists to close is silently NOT covered (the proxy
+# does the target connect). Consider detecting urllib.request.getproxies() and
+# adjusting/annotating behavior in the proxied case.
 def _peer_blocked(response) -> str | None:
     """Verify the address we ACTUALLY connected to, after the socket is open.
 

@@ -110,10 +110,8 @@ def operator_yields(state: RunState) -> dict[str, dict]:
     # gate-flagged (breed_excluded) evaluated nodes all contribute credit, so a hard-flagged cheating
     # node's inflated Δmetric rewards its operator in the P4 bandit — unlike MCTSPolicy's subtree
     # valuation below, which explicitly excludes breed_excluded/infeasible "matching breedable_nodes".
-    # Also `n.metric is None` does not reject NaN (replay tolerates non-usable metrics; cf.
-    # core/fitness.is_usable_metric): one NaN child or parent metric makes `gain` NaN, poisons the
-    # running mean AND gmax in _bandit_pick, and every UCB comparison then evaluates False — the
-    # bandit silently degrades to always returning candidates[0].
+    # (NaN metrics are NOT a concern here: replay's `_finite_metric` nulls non-finite values at fold
+    # time, so folded state never carries a NaN metric.)
     for n in state.nodes.values():
         if not n.parent_ids or n.status is not NodeStatus.evaluated or n.metric is None:
             continue
@@ -455,13 +453,11 @@ class MCTSPolicy:
             # Value the subtree by its feasible descendants' metrics, EXCLUDING gate-flagged (cheating)
             # nodes: their inflated metric must not make an ancestor's subtree look good and pull MCTS
             # exploration toward a cheating lineage (§2.2, matching breedable_nodes for direct targets).
-            # CLAUDE REVIEW: [EDGE-CASE] The descendant filter checks `metric is not None and feasible`
-            # but not `is_usable_metric` (which feasible_nodes uses to reject NaN/inf tolerated by
-            # replay), and does not exclude tombstoned/aborted descendants (the §6.3 lifecycle gate the
-            # candidate pool honors). A NaN descendant metric makes `value`/`reward`/`ucb` NaN; when
-            # that happens on the FIRST candidate, `best_ucb is None` selects it and every later
-            # `ucb > best_ucb` compares False against NaN — the NaN subtree hijacks selection for the
-            # rest of the run. A logically-deleted descendant's metric likewise still steers UCB here.
+            # CLAUDE REVIEW: [EDGE-CASE] The descendant filter does not exclude tombstoned/aborted
+            # descendants (the §6.3 lifecycle gate the candidate pool honors) — a logically-deleted
+            # descendant's metric still steers UCB toward its ancestor's subtree here. (NaN metrics
+            # are not reachable: replay's `_finite_metric` nulls non-finite values at fold time, so
+            # the `metric is not None` check already excludes them.)
             metrics = [state.nodes[i].metric for i in tree
                        if state.nodes[i].metric is not None and state.nodes[i].feasible
                        and i not in state.breed_excluded]  # #5

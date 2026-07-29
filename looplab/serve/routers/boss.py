@@ -518,12 +518,6 @@ def build_router(srv) -> APIRouter:
         per request serialize within the process, so no cross-process lock is needed here."""
         rd = _run_dir(run_id)
         generation = srv.commands.run_generation(rd)
-        # CLAUDE REVIEW: [EDGE-CASE] The 32 MiB file cap below bounds the FILE, not the TURN: a
-        # single POST body is read whole into memory by request.json() with no size limit and then
-        # appended in full, so one oversized turn (accidental or hostile on a same-origin deploy —
-        # the exact threat the cap's own comment describes) can blow past _CHAT_LOG_MAX_BYTES by an
-        # arbitrary amount and OOM the server first. The concept-lens routes stream-bound their
-        # bodies (_concept_lens_json_body); this append needs the same per-request byte ceiling.
         try:
             turn = await request.json()
         except (ValueError, UnicodeDecodeError) as exc:

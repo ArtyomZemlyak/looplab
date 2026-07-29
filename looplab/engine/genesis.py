@@ -129,11 +129,14 @@ def _scout_tools(data: Optional[str], repo: Optional[str]):
     try:
         from looplab.agents.agent import CompositeTools
         from looplab.tools.reposcout import RepoScoutTools
-        # CLAUDE REVIEW: [SECURITY] Rooting the read-only scout at the ENTIRE home directory lets
-        # the model list/read any file under $HOME (~/.ssh, ~/.aws, .env, browser profiles) and copy
-        # it into the provider-bound prompt, even though the user only named one data/repo path.
-        # Scope roots to the named paths (+ their parents for siblings, as below) and drop
-        # Path.home().
+        # CLAUDE REVIEW: [SECURITY] Rooting the read-only scout at the ENTIRE home directory is
+        # broader than the task needs: RepoScoutTools' shared guards do block the classic secret
+        # targets (`looks_secret` hides ~/.ssh, ~/.aws, .env*, key/credential names; reads are
+        # extension-allowlisted), but any NON-secret allowlisted text file anywhere under $HOME —
+        # personal notes, other repos, e.g. ~/.mozilla profile .js files, which SECRET_DIRS does not
+        # cover — is listable/readable and provider-bound even though the user only named one
+        # data/repo path. The home root is a documented design choice, but scoping roots to the
+        # named paths (+ parents for siblings, as below) would shrink the exposure to intent.
         roots = [Path.home()]
         for p in named:
             fp = Path(os.path.expanduser(p))

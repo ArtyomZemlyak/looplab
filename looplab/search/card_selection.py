@@ -660,12 +660,12 @@ def _novelty_signal(card: Card) -> float:
         return 0.0
     # CLAUDE REVIEW: [LOGIC] `level / 5` treats the §21.4 grade as a monotone novelty ORDER, but it
     # is a classification: level 0 = "novel" (a genuinely new region) is never recorded as a
-    # novelty_graded event (engine/novelty.py records levels 4/5 only), so a truly novel card has NO
-    # verdict and lands in the `return 0.0` above — the LOWEST exploration credit — while a level-2
-    # near-duplicate ("repropose", not in the block-list guard) earns 0.4, level-3 tried-across-runs
-    # 0.6, and a level-4 same-direction variant 0.8. Under stance="explore" the novelty term
-    # therefore prefers same-direction variants and even surviving near-dups over genuinely new
-    # regions — inverted from what an exploration bonus should reward.
+    # novelty_graded event (engine/novelty.py records levels 4/5 ONLY — on engine-written logs
+    # levels 0-3 never appear as verdicts), so a truly novel card has NO verdict and lands in the
+    # `return 0.0` above — the LOWEST exploration credit — while a surviving level-4 same-direction
+    # variant earns 0.8 and a level-5 near-dup 1.0. Under stance="explore" the novelty term
+    # therefore prefers same-direction variants over genuinely new regions — inverted from what an
+    # exploration bonus should reward.
     return min(1.0, max(0.0, number / 5.0))
 
 

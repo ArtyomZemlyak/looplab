@@ -214,11 +214,13 @@ def _engine_singleton(run_dir: Path):
                             f"Move the run dir to a local disk (see LOOPLAB_RUN_ROOT), or set "
                             f"LOOPLAB_ALLOW_UNLOCKED_WRITER=1 if you guarantee only one engine writes "
                             f"this run dir.") from exc
-        # CLAUDE REVIEW: [EDGE-CASE] This outer catch converts any OSError NOT raised by the lock
-        # calls themselves (f.seek/f.fileno on an odd stream, an msvcrt import-time failure surface)
-        # into the silent "another engine holds the lock" no-op — exactly the phantom-"already
-        # running" outcome the two inner handlers were rewritten to avoid. Narrow it or echo the
-        # error so an unexpected failure is at least visible.
+        # CLAUDE REVIEW: [EDGE-CASE] This outer catch converts any OSError NOT raised inside the two
+        # inner try blocks into the silent "another engine holds the lock" no-op — exactly the
+        # phantom-"already running" outcome those inner handlers were rewritten to avoid. The
+        # reachable surface is narrow (essentially `f.seek(0)` on the Windows branch: fileno errors
+        # are caught loudly by the inner handlers, and a failed msvcrt/fcntl import raises
+        # ImportError, which this catch does not cover) — but narrow it or echo the error anyway so
+        # an unexpected failure is at least visible.
         except OSError:
             acquired = False
         yield acquired

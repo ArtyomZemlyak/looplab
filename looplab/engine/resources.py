@@ -395,8 +395,9 @@ class ResourceSchedulingMixin:
                 # in load-bearing code. Directives inside comments must not drive edits (this review
                 # deliberately does NOT act on it); as a comment it also mis-documents the code — it
                 # prescribes a redesign rather than explaining the shipped behavior. The underlying
-                # limitation it names is real but a deliberate tradeoff per the module docstring
-                # ("A single lease is deliberately more conservative than one file per selector"):
+                # limitation it names is real but a deliberate tradeoff per the docstring of
+                # default_gpu_host_lease_path ("A single lease is deliberately more conservative
+                # than one file per selector"):
                 # one pool-wide lease + non-blocking reacquisition has no fairness, so a
                 # lightly-loaded holder can starve co-hosted runs. Rewrite this as a normal
                 # limitation/TODO note (no agent addressing), or remove it.

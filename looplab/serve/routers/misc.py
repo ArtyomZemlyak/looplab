@@ -712,11 +712,11 @@ def build_router(srv) -> APIRouter:
         if d.resolve() not in target.parents:    # path-traversal guard
             raise HTTPException(400, "bad name")
         # CLAUDE REVIEW: [EDGE-CASE] Two gaps vs the read side: (1) a non-UTF-8 body raises
-        # UnicodeDecodeError here -> unhandled 500 (should be a 400); (2) there is NO size bound on
-        # the write while list_author caps reads at _AUTHOR_MAX_BYTES (256 KiB) — a huge PUT is
-        # persisted whole (request.body() also buffers it fully in RAM), then silently shown
-        # truncated forever, and the oversized file is hot-reloaded into agent context. Reject
-        # bodies over the same cap and return 400 on undecodable bytes.
+        # UnicodeDecodeError here -> unhandled 500 (should be a 400); (2) the write bound is only
+        # the server-wide 2 MB API body cap while list_author caps reads at _AUTHOR_MAX_BYTES
+        # (256 KiB) — a 256 KiB..2 MB PUT is persisted whole, then silently shown truncated forever,
+        # and the oversized file is hot-reloaded into agent context. Reject bodies over the read cap
+        # and return 400 on undecodable bytes.
         body = await request.body()
         target.write_text(body.decode("utf-8"), encoding="utf-8")  # engine hot-reloads on next run
         return {"ok": True, "name": name}

@@ -398,7 +398,9 @@ class RepoScoutTools:
         # CLAUDE REVIEW: [EDGE-CASE] Even the default 40 hits (each path + 200-char snippet) can far
         # exceed RESULT_CAP, and unlike env_inspect's `_clamp` there is no provider-side line-boundary
         # clamp here — the loop's head-cut then drops the trailing "(capped at N hits)" /
-        # "(stopped after N files…)" receipts, so the model can't tell a complete grep from a cut one.
+        # "(stopped after N files…)" receipts. The loop's generic "[truncated by the tool-result
+        # cap…]" marker does still tell the model the result was cut, but the specific hit-cap /
+        # file-budget receipts (how much was searched, how much omitted) are exactly what gets lost.
         hits: list[str] = []
         # STAGED overlay first — the code the caller is EDITING wins over disk, and its paths dedup the
         # disk walk (so a patched file isn't grepped in both its edited and pristine form).

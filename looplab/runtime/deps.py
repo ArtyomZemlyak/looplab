@@ -137,11 +137,11 @@ class InstallResult:
 # whole run; ANY pip RESPONSE (a success, or a clean "no matching distribution" failure — both prove
 # egress works) resets the count. The clean fix for a true no-egress pod is a pre-baked image with
 # auto_install_deps off. A connection-REFUSED fails fast and is handled per-package by the caller.
-# CLAUDE REVIEW: [RACE] `_consecutive_install_timeouts` is an unsynchronized module global, but the
-# crash-repair path that calls install() runs inside `_create_node`, which the engine fans out to
-# `anyio.to_thread` workers under llm_parallel — two concurrent installs can lose an increment or
-# reset each other, delaying (or briefly re-arming) the egress latch. Benign in effect but worth a
-# lock or an atomic-ish single-writer note if the fan-out ever widens.
+# CLAUDE REVIEW: [QUALITY] `_consecutive_install_timeouts` is an unsynchronized module global.
+# Today every install() caller reaches it via crash_repair._prepare_env, which serializes under the
+# engine's `_dep_lock`, so no live race exists — but nothing at THIS definition documents or enforces
+# that; a future caller that skips `_dep_lock` silently makes the latch lossy. Worth a lock or an
+# explicit "callers must hold _dep_lock" note here.
 _consecutive_install_timeouts = 0
 _EGRESS_TIMEOUT_LATCH = 2
 

@@ -677,8 +677,8 @@ def _operator_stage_names(rd: Path) -> tuple:
     # CLAUDE REVIEW: [RACE] _OP_STAGE_NAMES is a module-global dict mutated from FastAPI threadpool
     # threads with no lock: this comprehension iterates the dict while a concurrent node_logs poll
     # for another run inserts into it, which raises RuntimeError("dictionary changed size during
-    # iteration") -> 500. attention.py and AppState._trace_view_cache guard their identical caches
-    # with a threading.Lock for exactly this reason — this cache should too.
+    # iteration") -> 500. routers/attention.py and AppState._trace_view_cache guard their identical
+    # caches with a threading.Lock for exactly this reason — this cache should too.
     for stale in [k for k in _OP_STAGE_NAMES if k[0] == key[0]]:
         del _OP_STAGE_NAMES[stale]
     _OP_STAGE_NAMES[key] = names

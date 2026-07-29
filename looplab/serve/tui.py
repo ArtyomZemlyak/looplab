@@ -402,11 +402,6 @@ class Tui:
             new_spec = (r or {}).get("spec")
             # Only adopt a REAL spec — the offline soft-fail returns ok:false with a blank spec, which
             # must not wipe a good draft the user already has.
-            # CLAUDE REVIEW: [EDGE-CASE] The "real spec" gate tests task.kind, but Genesis is
-            # instructed to author COMPOSABLE tasks with NO `kind` field (see spec_lines/spec_ready,
-            # which both handle kind-less tasks) — so a composable inline task only survives this
-            # gate via a non-empty run_id. A reply that fills in the task but leaves run_id/task_file
-            # blank is silently discarded.
             if (r or {}).get("ok") is not False and new_spec and (
                     new_spec.get("run_id") or new_spec.get("task_file") or (new_spec.get("task") or {}).get("kind")):
                 spec = new_spec

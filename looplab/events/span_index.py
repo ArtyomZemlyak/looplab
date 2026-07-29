@@ -206,11 +206,12 @@ class SpanIndex:
 
     # -- construction --------------------------------------------------------------------------
     def _append(self, light: dict, off: int, length: int) -> bool:
-        # CLAUDE REVIEW: [PERF] Records arriving via _extend from _scan_light were already normalized
-        # (and I/O-stripped) during the scan; re-normalizing every span here doubles the most
-        # expensive part of a rebuild/top-up (redaction/entropy over every text field of every span).
-        # Only _load_persisted's records are untrusted input — validate those at that call site (or
-        # pass a pre-validated flag) instead of paying 2x on the hot scan path of a 1 GB trace.
+        # CLAUDE REVIEW: [QUALITY] Records arriving via _extend from _scan_light were already
+        # normalized (and I/O-stripped) during the scan, so this re-normalization is redundant work —
+        # though modest in cost: the expensive redaction/entropy fields (input/output/thinking) were
+        # already stripped, so the second pass runs only over the small light records. Only
+        # _load_persisted's records are untrusted input — validating those at that call site (or a
+        # pre-validated flag) would make the trust boundary explicit and drop the redundant pass.
         normalized = _normalize_span(light)
         if normalized is None:
             return False

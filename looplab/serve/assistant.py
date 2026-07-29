@@ -38,8 +38,8 @@ from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa
 # CLAUDE REVIEW: [READABILITY] Stale comment: the path above is the pre-split flat location and
 # "two levels up" no longer matches parents[2] (three levels up from serve/assistant.py — correct
 # only because the module moved one directory deeper). Note also that under a pip install
-# parents[2] is the site-packages PARENT (the env prefix), not a repo root, which silently widens
-# the assistant's always-allowed root to the whole Python environment.
+# parents[2] resolves to site-packages itself, not a repo root, which silently widens the
+# assistant's always-allowed root to the whole site-packages tree.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
