@@ -205,7 +205,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // poll-sourced pending against this set; it self-heals as the server drops each resolved id.
   const resolvedPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
-  const [shareUnknownSid, setShareUnknownSid] = useState(null)
+  const [shareUnknownSids, setShareUnknownSids] = useState(() => new Set())
+  const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
+  const [shareBusySid, setShareBusySid] = useState(null)
   const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
 
@@ -239,6 +241,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const commandFocusRequestedRef = useRef(false)
   const openSessionRef = useRef(null)
   const toastRunIdRef = useRef(runId)
+  const shareActionSessionRef = useRef(null)
+  const deletingSessionsRef = useRef(new Set())
   // A composer belongs to the chat it was written in. Keep text and attachments in memory per session
   // so selecting another transcript cannot silently send the previous chat's draft. The unsaved
   // new-chat composer has its own slot; "+ New" deliberately resets that slot.
@@ -281,6 +285,25 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       composerDraftsRef.current.set(NEW_CHAT_COMPOSER_KEY, newComposerDraft())
     }
     composerKeyRef.current = id
+  }, [])
+  const setShareUnknown = React.useCallback((sessionId, unknown) => {
+    setShareUnknownSids(current => {
+      const next = new Set(current)
+      if (unknown) next.add(sessionId)
+      else next.delete(sessionId)
+      return next
+    })
+  }, [])
+  const retainShareCopy = React.useCallback((sessionId, fallback) => {
+    setShareCopyFallbacks(current => ({ ...current, [sessionId]: fallback }))
+  }, [])
+  const clearShareCopy = React.useCallback(sessionId => {
+    setShareCopyFallbacks(current => {
+      if (!Object.prototype.hasOwnProperty.call(current, sessionId)) return current
+      const next = { ...current }
+      delete next[sessionId]
+      return next
+    })
   }, [])
   useEffect(() => {
     setRunAccessState(getRunAccess(runId))
@@ -327,7 +350,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   usePoll((alive) => get('/api/runs').then(r => alive() && setRuns(r || [])).catch(() => {}),
     6000, [feedOpen], { enabled: feedOpen })
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
-  const refreshSessions = () => assistantSessions().then(r => setSessions(r.sessions || [])).catch(() => {})
+  const refreshSessions = () => assistantSessions().then(r => {
+    const next = r.sessions || []
+    if (mountedRef.current) setSessions(next)
+    return next
+  }).catch(() => null)
   useEffect(() => { if (view === 'full') refreshSessions() }, [view])
 
   // Autoscroll ONLY when the user is already near the bottom — don't yank them back down while they've
@@ -624,15 +651,24 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (sidRef.current === id) openSide()
       return
     }
+    if (shareActionSessionRef.current === id) {
+      flash('Wait for the current share action before deleting this chat')
+      return
+    }
+    if (deletingSessionsRef.current.has(id)) return
+    deletingSessionsRef.current.add(id)
     setSessions(ss => ss.filter(s => s.id !== id))   // optimistic: drop it now (geesefs list can lag)
     requestAnimationFrame(() => focusAfterDelete?.isConnected && focusAfterDelete.focus({ preventScroll: true }))
     try {
       await assistantDelete(id)
       setLaunchDrafts(current => clearLaunchDraftSession(current, id))
       composerDraftsRef.current.delete(id)
+      setShareUnknown(id, false)
+      clearShareCopy(id)
       if (id === storageGet('ll.asstSid')) storageRemove('ll.asstSid')
       if (id === sidRef.current) newChat()
     } catch { flash('Could not delete this Assistant chat'); refreshSessions() }
+    finally { deletingSessionsRef.current.delete(id) }
   }
 
   const resolvePerm = async (reqId, decision) => {
@@ -1657,7 +1693,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     onChange={e => { onFiles(e.target.files); e.target.value = '' }} />
 
   const currentSession = sessions.find(s => s.id === sid)
-  const shareUnknown = shareUnknownSid === sid
+  const shareUnknown = !!sid && shareUnknownSids.has(sid)
+  const shareCopy = sid ? shareCopyFallbacks[sid] || null : null
+  const shareBusy = shareBusySid != null
+  const deletingCurrentSession = !!sid && deletingSessionsRef.current.has(sid)
   return <>
     {hiddenFileInput}
     <output className="sr-only">
@@ -1779,37 +1818,101 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           {/* A share link is a separate secret with an expiry — not this chat's id — and it is frozen
               at the turns that exist right now, so anything said afterwards stays private. "unshare"
               revokes every link for the chat without deleting the conversation. */}
-          {sid && !currentSession?.shared && !shareUnknown
-            && <button className="btn sm ghost" title="Copy read-only snapshot" onClick={async () => {
+          {sid && !deletingCurrentSession && !currentSession?.shared && !shareUnknown && !shareCopy
+            && <button className="btn sm ghost" title="Copy read-only snapshot" disabled={shareBusy}
+              onClick={async () => {
+            const shareSid = sid
+            if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
+            if (deletingSessionsRef.current.has(shareSid)) {
+              flash('This chat is being deleted')
+              return
+            }
+            shareActionSessionRef.current = shareSid
+            setShareBusySid(shareSid)
             try {
-              const r = await boundedRequest(signal => assistantShare(sid, false, { signal }))
-              setShareUnknownSid(null)
+              const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
+              if (!mountedRef.current) return
+              setShareUnknown(shareSid, false)
+              setSessions(current => current.map(session => session.id === shareSid
+                ? { ...session, shared: true } : session))
               const url = location.origin + location.pathname + r.url
-              try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
+              if (sidRef.current !== shareSid) {
+                retainShareCopy(shareSid, { url, expiresAt: r.expires_at })
+                flash('Snapshot created for the previous chat · reopen it to copy or revoke')
+                return
+              }
+              try {
+                if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+                await navigator.clipboard.writeText(url)
+              } catch {
+                if (!mountedRef.current) return
+                retainShareCopy(shareSid, { url, expiresAt: r.expires_at })
+                flash('Clipboard blocked · select the visible snapshot link and copy it manually')
+                return
+              }
+              if (!mountedRef.current || sidRef.current !== shareSid) {
+                if (mountedRef.current) flash('Snapshot link copied for the previous chat')
+                return
+              }
+              clearShareCopy(shareSid)
               flash(`Snapshot link copied · expires ${fmtDate(r.expires_at)}.`)
               location.hash = r.url.replace(/^#/, '')   // navigate AFTER copying (the bar hides on the shared page)
             } catch (error) {
+              if (!mountedRef.current) return
               if (error?.status >= 400 && error.status < 500) {
                 flash('Share failed')
               } else {
-                setShareUnknownSid(sid)
-                await refreshSessions()
+                setShareUnknown(shareSid, true)
+                refreshSessions()
                 flash('Share uncertain · revoke before retrying')
               }
+            } finally {
+              if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
+              if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
             }
-          }}>⤴ share</button>}
-          {sid && (currentSession?.shared || shareUnknown)
-            && <button className="btn sm ghost" title="Revoke every share link" onClick={async () => {
+          }}>{shareBusySid === sid ? 'working…' : '⤴ share'}</button>}
+          {sid && !deletingCurrentSession && (currentSession?.shared || shareUnknown || shareCopy)
+            && <button className="btn sm ghost" title="Revoke every share link" disabled={shareBusy}
+              onClick={async () => {
+            const shareSid = sid
+            if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
+            if (deletingSessionsRef.current.has(shareSid)) {
+              flash('This chat is being deleted')
+              return
+            }
+            shareActionSessionRef.current = shareSid
+            setShareBusySid(shareSid)
             try {
-              const r = await boundedRequest(signal => assistantUnshare(sid, { signal }))
-              setShareUnknownSid(null)
-              await refreshSessions()
+              const r = await boundedRequest(signal => assistantUnshare(shareSid, { signal }))
+              if (!mountedRef.current) return
+              setShareUnknown(shareSid, false)
+              clearShareCopy(shareSid)
+              setSessions(current => current.map(session => session.id === shareSid
+                ? { ...session, shared: false } : session))
               flash(r.revoked ? `Revoked ${r.revoked} link${r.revoked === 1 ? '' : 's'}.` : 'No active links.')
-            } catch { flash('Revoke failed') }
-          }}>⤫ {shareUnknown ? 'revoke pending' : 'unshare'}</button>}
+            } catch (error) {
+              if (!mountedRef.current) return
+              if (error?.status >= 400 && error.status < 500) flash('Revoke failed')
+              else {
+                setShareUnknown(shareSid, true)
+                refreshSessions()
+                flash('Revoke uncertain · retry to confirm')
+              }
+            } finally {
+              if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
+              if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
+            }
+          }}>{shareBusySid === sid ? 'working…' : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>
+        {shareCopy && <div className="copy-link-fallback" role="status">
+          <label htmlFor={`assistant-share-fallback-${sid}`}>
+            Snapshot link — shown once; copy before unsharing (expires {fmtDate(shareCopy.expiresAt)})
+          </label>
+          <input id={`assistant-share-fallback-${sid}`} readOnly value={shareCopy.url}
+            onFocus={event => event.currentTarget.select()} />
+        </div>}
         <div className="asst-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
           aria-live="off" aria-busy={busy} tabIndex={0}
           onScroll={onFeedScroll}>{renderThread()}</div>
