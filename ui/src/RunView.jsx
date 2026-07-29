@@ -1259,7 +1259,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               </aside>
             </>}
       </div>
+        </>}
 
+      {(view === 'dag' || view === 'report') && <>
       {!reviewMode && (timelineDeferred || reportTimelineFocusPending)
         && <div className="dock timeline-deferred-trigger" aria-busy={reportTimelineFocusPending}>
         <div className="dock-tabs">
@@ -1296,7 +1298,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           }}
           height={dockH} />
       </LazyBoundary>}
-        </>}
+      </>}
 
       {panel && panelAllowed(panel) && <LazyBoundary label={`${HUB_OF[panel] || panel} panel`}
         mode="overlay" resetKey={panel} onClose={closePanel}>
