@@ -341,8 +341,25 @@ def test_finalize_curation_off_is_noop(tmp_path):
     mem.mkdir()
     _seed_two_mergeable(mem)
     eng = _fake_engine_with_client(mem, _Client({"merges": [], "splits": [], "purges": []}), on=False)
-    LessonMemory(eng).store_concept_curation(RunState(run_id="r", task_id="t"))
+    assert LessonMemory(eng).store_concept_curation(
+        RunState(run_id="r", task_id="t")) == "disabled"
     assert not (mem / "concept_curation_log.jsonl").exists()   # flag off -> nothing happens
+
+
+def test_finalize_curation_reports_unavailable_without_client(tmp_path):
+    from looplab.engine.lessons import LessonMemory
+    from looplab.core.models import RunState
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    _seed_two_mergeable(mem)
+    outcome = LessonMemory(
+        _fake_engine_with_client(mem, None, on=True)
+    ).store_concept_curation(RunState(run_id="r", task_id="t"))
+
+    assert outcome == "unavailable"
+    rec = json.loads((mem / "concept_curation_log.jsonl").read_text().splitlines()[0])
+    assert rec["outcome"] == outcome
 
 
 def test_finalize_curation_logs_but_does_not_apply_by_default(tmp_path):
@@ -353,8 +370,9 @@ def test_finalize_curation_logs_but_does_not_apply_by_default(tmp_path):
     _seed_two_mergeable(mem)
     client = _Client({"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
                       "splits": [], "purges": []})
-    LessonMemory(_fake_engine_with_client(mem, client, on=True, auto=False)).store_concept_curation(
-        RunState(run_id="r", task_id="t"))
+    assert LessonMemory(
+        _fake_engine_with_client(mem, client, on=True, auto=False)
+    ).store_concept_curation(RunState(run_id="r", task_id="t")) == "proposed"
     assert (mem / "concept_curation_log.jsonl").exists()       # proposal LOGGED for operator
     assert not (mem / "concept_aliases.jsonl").exists()        # but NOT applied (default = ratify path)
 

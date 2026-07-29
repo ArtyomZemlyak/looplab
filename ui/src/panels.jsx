@@ -204,15 +204,14 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = [...memoProjection.memos].reverse()   // newest retained first
   const steer = async (text) => {
-    // # CODEX AGENT: every click/retry creates a fresh command identity for an append-only standing
-    // hint. A double click or lost-response retry can therefore queue the same direction twice; retain
-    // one logical idempotency key per memo/direction until its command reaches a terminal record.
     try {
       const feedback = commandFeedback(await CONTROL.hint(runId, 'try this research direction: ' + text), {
         success: 'Steered the next proposal', noop: 'That direction was already queued',
         executing: 'Steer request accepted — waiting for the run', failure: 'Could not steer',
       }); onToast?.(feedback.message)
-    } catch (error) { onToast?.(`Could not steer: ${error.message || error}`) }
+    } catch (error) {
+      onToast?.(`Could not steer: ${error.message || error}`)
+    }
   }
   return (
     <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
@@ -257,7 +256,10 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
             <ul className="rsch-dirs">{m.recommended_directions.map((d, j) => (
               <li key={j}><span>{d}</span>
                 <button className="btn sm ghost" title="steer the next proposal toward this direction (posts a hint)"
-                        onClick={() => steer(d)}>steer →</button></li>))}</ul></>}
+                        onClick={() => steer(d)}>
+                  steer →
+                </button>
+              </li>))}</ul></>}
           {(m.sources || []).length > 0 && <><div className="section-h">Sources</div>
             <ul className="bul">{m.sources.map((source, index) => {
               // Deep-research sources are untrusted provider output. Only credential-free HTTP(S)
@@ -2097,11 +2099,10 @@ export function EventExplorer({ runId, timeline, historyActive = false, onReturn
 
 const _MAX_VIEW = 2_000_000   // mirrors server _ART_MAX_BYTES (inline text view cap)
 
-// Artifacts browser: lists every file a run produced — the run directory (events/snapshots, per-node
-// eval workdirs, operator subdirs) AND, for a RepoTask, the separate host repo / reference / data paths
-// the task declared (where a training command may have written checkpoints / submissions / logs). Text
-// files open inline; binary / oversize ones are flagged. Backed by GET /api/runs/{id}/artifacts (the
-// listing) + /artifact (one file's content, traversal-guarded + 2 MB cap, both server-side).
+// Workspace file browser: lists the run directory and live host repo / reference / data paths declared
+// by a RepoTask. Those task paths can contain inputs, later edits and outputs; without a start-time
+// manifest the UI deliberately makes no file-level production claim. Text files open inline; binary /
+// oversize ones are flagged. Backed by GET /api/runs/{id}/artifacts + /artifact.
 export function ArtifactsPanel({ runId, onToast, onClose }) {
   const [roots, setRoots] = useState(null)
   const [err, setErr] = useState(null)
@@ -2140,14 +2141,14 @@ export function ArtifactsPanel({ runId, onToast, onClose }) {
   const ql = filter.trim().toLowerCase()
   const binary = content && content.is_text === false   // the server's verdict, not the extension guess
   return (
-    <Panel title="Artifacts" sub={runId} wide onClose={onClose}>
-      {err && <div className="notice">Could not load artifacts: {err}</div>}
+    <Panel title="Files" sub={runId} wide onClose={onClose}>
+      {err && <div className="notice">Could not load files: {err}</div>}
       {!roots ? <div className="muted">Loading…</div> :
         <div className="art-wrap">
           <div className="art-list">
-            <input className="text art-filter" aria-label="Filter artifact files" placeholder="filter files…" value={filter}
+            <input className="text art-filter" aria-label="Filter files" placeholder="filter files…" value={filter}
                    onChange={e => setFilter(e.target.value)} />
-            {roots.length === 0 && <div className="muted">No artifacts found for this run.</div>}
+            {roots.length === 0 && <div className="muted">No files found.</div>}
             {roots.map(r => {
               const isOpen = !!open[r.id]
               // Filter only the EXPANDED root — collapsed roots aren't rendered, so don't rescan their
@@ -2161,7 +2162,6 @@ export function ArtifactsPanel({ runId, onToast, onClose }) {
                     <b>{r.label}</b>
                     <span className="muted art-root-n">
                       {isOpen && ql ? `${files.length}/${r.n_files}` : `${r.n_files}${r.truncated ? '+' : ''}`}</span>
-                    {!r.is_run_dir && <span className="pill art-tag" title={r.path}>repo path</span>}
                   </button>
                   {isOpen && <div className="art-files">
                     {files.length === 0 ? <div className="muted art-empty">{ql ? 'no match' : 'empty'}</div>
@@ -2190,7 +2190,7 @@ export function ArtifactsPanel({ runId, onToast, onClose }) {
                 : binary ? <div className="notice">Binary file — not shown inline ({fmtBytes(content.size)}).</div>
                 : content ? <>
                     {content.truncated && <div className="notice art-trunc">Showing the first {fmtBytes(_MAX_VIEW)} — the file is larger.</div>}
-                    <pre className="art-pre" role="region" aria-label={`Artifact ${sel.path} contents`} tabIndex={0}>{content.content}</pre>
+                    <pre className="art-pre" role="region" aria-label={`File ${sel.path} contents`} tabIndex={0}>{content.content}</pre>
                   </> : <div className="muted art-hint">Could not load this file.</div>}
             </>}
           </div>

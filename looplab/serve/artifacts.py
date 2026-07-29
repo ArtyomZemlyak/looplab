@@ -1,4 +1,4 @@
-"""Artifact discovery for the UI server (run files + repo paths). Extracted verbatim from
+"""Run workspace file discovery for the UI server (run files + declared task paths). Extracted from
 `serve/server.py` (BACKLOG §4) — the route handlers live in `serve/routers/runs.py`."""
 from __future__ import annotations
 
@@ -11,12 +11,11 @@ from typing import Callable, Optional
 from looplab.core._pathsafe import looks_secret
 
 # ----------------------------------------------------------------- artifacts (run files + repo paths)
-# Surface the files a run produced. Two kinds of root: the run directory itself (events/snapshots, the
-# per-node eval workdirs under nodes/<id>/, operator subdirs) AND — for a RepoTask — the host repo /
-# reference / data paths the task declared, since a training command may write its outputs (checkpoints,
-# submissions, logs) straight into the editable repo rather than under runs/. Both are read-only, walked
-# with heavy/noise dirs pruned, and served with a path-traversal guard + a size cap. Pure helpers (no
-# FastAPI) so the routes own the HTTP errors.
+# Surface files currently visible to a run. Two kinds of root: the run directory itself
+# (events/snapshots, per-node eval workdirs, operator subdirs) AND — for a RepoTask — the live host repo /
+# reference / data paths the task declared. The latter can contain inputs, later edits, and run outputs;
+# without a start-time manifest this browser must not claim which file the run produced. Both are
+# read-only, walked with heavy/noise dirs pruned, and served with a traversal guard + size cap.
 _ART_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "env", "node_modules", ".mypy_cache",
                   ".pytest_cache", ".ipynb_checkpoints", ".idea", ".vscode", ".tox", ".cache",
                   ".DS_Store", ".eggs"}
@@ -160,7 +159,7 @@ def _art_expand(p: str) -> str:
 
 
 def _artifact_roots(rd: Path) -> list[dict]:
-    """Allowed artifact roots for a run: the run dir, plus any host repo / reference / data paths the
+    """Allowed visible-file roots for a run: the run dir, plus any host repo / reference / data paths the
     task snapshot declares (RepoTask). Each is {id, label, base(Path resolved)}; only EXISTING dirs are
     returned, de-duplicated. The fixed id set is what the content route validates a request against, so a
     browser can never reach a path outside these roots."""

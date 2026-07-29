@@ -3612,15 +3612,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return self.lessons.store_research_claims(final)
 
     @in_llm_lane("enrichment")
-    def _store_concept_curation(self, final: RunState) -> None:
+    def _store_concept_curation(self, final: RunState) -> str:
         return self.lessons.store_concept_curation(final)
 
     @in_llm_lane("enrichment")
-    def _store_claim_curation(self, final: RunState) -> None:
+    def _store_claim_curation(self, final: RunState) -> str:
         return self.lessons.store_claim_curation(final)
 
     @in_llm_lane("enrichment")
-    def _store_task_facets(self, final: RunState) -> None:
+    def _store_task_facets(self, final: RunState) -> str:
         return self.lessons.store_task_facets(final)
 
     @staticmethod

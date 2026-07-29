@@ -63,8 +63,7 @@ def test_state_exposes_deprecated_hypotheses_compat_projection(tmp_path):
 
 
 def test_artifacts_list_and_view(tmp_path):
-    """Artifacts: list the run dir AND a declared separate repo path, view text content, flag binary,
-    and block path traversal / unknown roots."""
+    """Visible files: distinguish run workspace from live task paths, serve content, and stay bounded."""
     _build_run(tmp_path)                                   # tmp_path/demo with events.jsonl, nodes/, …
     rd = tmp_path / "demo"
     (rd / "out.txt").write_bytes(b"hello artifact\n")      # bytes: no CRLF translation, exact-content check
@@ -78,8 +77,12 @@ def test_artifacts_list_and_view(tmp_path):
         json.dumps({"kind": "repo", "editable_path": str(repo)}), encoding="utf-8")
 
     client = TestClient(make_app(tmp_path))
-    roots = {r["id"]: r for r in client.get("/api/runs/demo/artifacts").json()["roots"]}
+    inventory = client.get("/api/runs/demo/artifacts").json()
+    assert inventory["inventory_semantics"] == "live_workspace_snapshot"
+    roots = {r["id"]: r for r in inventory["roots"]}
     assert "run" in roots and "editable:." in roots         # run dir + the separate repo path
+    assert roots["run"]["visibility"] == "run_workspace"
+    assert roots["editable:."]["visibility"] == "live_task_path"
     run_files = {f["path"] for f in roots["run"]["files"]}
     assert {"out.txt", "blob.bin"} <= run_files
     repo_files = {f["path"] for f in roots["editable:."]["files"]}
@@ -472,6 +475,49 @@ def test_public_state_drops_all_nested_raw_payloads_and_redacts_secrets(tmp_path
     assert secret not in str(state)
     # the FULL stdout tail is still available via the node-detail endpoint (token-gated in prod)
     assert secret in (client.get("/api/runs/demo/nodes/0").json().get("stdout_tail") or "")
+
+
+def test_provenance_keeps_parent_generation_after_reset(tmp_path):
+    """A child remains derived from the parent bytes it used, not a later in-place replacement."""
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append(
+        "run_started",
+        {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"},
+    )
+    idea = {"operator": "draft", "params": {}, "rationale": ""}
+    store.append("node_created", {
+        "node_id": 0, "generation": 0, "parent_ids": [], "operator": "draft", "idea": idea,
+    })
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 2.0})
+    store.append("node_created", {
+        "node_id": 1,
+        "generation": 0,
+        "parent_ids": [0],
+        "parent_generations": {"0": 0},
+        "operator": "improve",
+        "idea": {**idea, "operator": "improve"},
+    })
+    store.append("node_evaluated", {"node_id": 1, "generation": 0, "metric": 1.0})
+    store.append("node_reset", {
+        "node_id": 0, "generation": 0, "from_stage": "eval",
+    })
+    store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 0.5})
+
+    graph = TestClient(make_app(tmp_path)).get("/api/runs/demo/prov").json()
+
+    assert {"sol:0:0", "sol:0:1", "sol:1:0"} <= set(graph["entity"])
+    assert graph["entity"]["sol:0:0"]["ll:lifecycle"] == "historical"
+    assert graph["used"]["used:1:0-0:0"] == {
+        "prov:activity": "exp:1:0",
+        "prov:entity": "sol:0:0",
+    }
+    assert all(
+        edge["prov:usedEntity"] != "sol:0:1"
+        for edge in graph["wasDerivedFrom"].values()
+        if edge["prov:generatedEntity"] == "sol:1:0"
+    )
 
 
 def test_runs_list_state_and_node_detail(tmp_path):

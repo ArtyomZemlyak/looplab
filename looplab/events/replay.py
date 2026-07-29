@@ -435,6 +435,11 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     if current is not None and generation != current.attempt:
         return                       # a late rebuild from a superseded lifecycle
+    parent_ids = [
+        parent_id
+        for raw_parent_id in d.get("parent_ids", [])
+        if (parent_id := _coerce_node_id({"node_id": raw_parent_id})) is not None
+    ]
     speculative = d.get("speculative") is True
     raw_card_build_generation = d.get("card_build_generation")
     card_build_generation = (
@@ -446,7 +451,14 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     try:
         n = Node(
             id=nid,
-            parent_ids=d.get("parent_ids", []),
+            parent_ids=parent_ids,
+            # `_parent_generation_map_matches` proved each parent exists at this event boundary. Capture
+            # that boundary even for legacy/mapless rows, otherwise a later parent reset makes provenance
+            # point at replacement bytes the child never used.
+            parent_generations={
+                str(parent_id): st.nodes[parent_id].attempt
+                for parent_id in parent_ids
+            },
             operator=d["operator"],
             idea=Idea(**d["idea"]),
             code=d.get("code", ""),
@@ -3233,7 +3245,13 @@ def _on_hint(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # instead of accumulating contradictory ones. Replay-safe: deterministic over the log.
     if d.get("replace"):
         st.pending_hints = [d]
-    else:
+    elif not any(
+        hint.get("text") == d.get("text")
+        for hint in st.pending_hints
+        if isinstance(hint, dict)
+    ):
+        # Standing directives are semantic state, not command history. A double click, lost-response
+        # retry, or old duplicate events must not repeat the same instruction in every later prompt.
         st.pending_hints.append(d)
 
 def _on_set_strategy(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

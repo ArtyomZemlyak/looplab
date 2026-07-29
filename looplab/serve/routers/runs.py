@@ -2228,15 +2228,12 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/artifacts")
     def artifacts(run_id: str):
-        """List every file the run produced, grouped by root: the run directory (events/snapshots, the
-        per-node eval workdirs under nodes/<id>/, operator subdirs) PLUS — for a RepoTask — the host
-        repo / reference / data paths the task declared, so outputs a training command wrote straight
-        into the actual repo (not under runs/) are reachable too. Each file carries size + mtime + a
-        cheap is_text guess; /artifact serves the content."""
-        # CODEX AGENT: this request-time walk has no baseline, lifecycle generation or content manifest,
-        # so declared repo/reference/data inputs and files created after the run are labelled as outputs.
-        # Persist an output manifest or expose explicit `live_workspace` / `provenance_unknown` semantics
-        # instead of claiming that the run produced every current file.
+        """List files currently visible to the run, grouped by root.
+
+        The run directory and declared RepoTask host paths are live request-time views. They can contain
+        inputs, later edits and outputs, so this endpoint explicitly reports workspace visibility rather
+        than claiming file-level production provenance it cannot prove.
+        """
         rd = _run_dir(run_id)
         try:
             exposed = _artifact_exposure_policy(rd)
@@ -2246,10 +2243,15 @@ def build_router(srv) -> APIRouter:
         out = []
         for r in _artifact_roots(rd):
             files, truncated = _list_artifact_files(r["base"], exposed=exposed)
+            visibility = "run_workspace" if r["id"] == "run" else "live_task_path"
             out.append({"id": r["id"], "label": r["label"], "path": str(r["base"]),
                         "is_run_dir": r["id"] == "run", "truncated": truncated,
-                        "n_files": len(files), "files": files})
-        return {"run_id": run_id, "roots": out}
+                        "visibility": visibility, "n_files": len(files), "files": files})
+        return {
+            "run_id": run_id,
+            "inventory_semantics": "live_workspace_snapshot",
+            "roots": out,
+        }
 
     @router.get("/api/runs/{run_id}/artifact")
     def artifact(run_id: str, root: str, path: str):
@@ -2375,21 +2377,34 @@ def build_router(srv) -> APIRouter:
         agent = f"agent:looplab/{st.config_hash or 'run'}"
         ent, act, wgb, used, wdf, waw = {}, {}, {}, {}, [], {}
         for n in st.nodes.values():
-            # CODEX AGENT: provenance identities omit lifecycle generation even though node ids survive
-            # reset. A child derived from parent generation 0 is later reported as derived from replacement
-            # generation 1; retain parent_generations and key entities/activities by `(node_id, attempt)`.
-            e, a = f"sol:{n.id}", f"exp:{n.id}"
-            ent[e] = {"prov:label": f"solution node {n.id}",
+            generation = n.attempt
+            e, a = f"sol:{n.id}:{generation}", f"exp:{n.id}:{generation}"
+            ent[e] = {"prov:label": f"solution node {n.id} · generation {generation}",
+                      "ll:node_id": n.id, "ll:generation": generation,
                       "ll:metric": n.robust_metric,
                       "ll:status": n.status, "ll:operator": n.operator, "ll:feasible": n.feasible,
                       "ll:is_best": n.id == st.best_node_id}
-            act[a] = {"prov:label": f"{n.operator} experiment", "ll:params": n.idea.params,
+            act[a] = {"prov:label": f"{n.operator} experiment · node {n.id} · generation {generation}",
+                      "ll:node_id": n.id, "ll:generation": generation,
+                      "ll:params": n.idea.params,
                       "ll:rationale": n.idea.rationale}
-            wgb[f"wgb:{n.id}"] = {"prov:entity": e, "prov:activity": a}
-            waw[f"waw:{n.id}"] = {"prov:activity": a, "prov:agent": agent}
+            wgb[f"wgb:{n.id}:{generation}"] = {"prov:entity": e, "prov:activity": a}
+            waw[f"waw:{n.id}:{generation}"] = {"prov:activity": a, "prov:agent": agent}
             for p in n.parent_ids:
-                used[f"used:{n.id}-{p}"] = {"prov:activity": a, "prov:entity": f"sol:{p}"}
-                wdf.append({"prov:generatedEntity": e, "prov:usedEntity": f"sol:{p}"})
+                parent_generation = n.parent_generations.get(str(p), 0)
+                parent_entity = f"sol:{p}:{parent_generation}"
+                # If the parent has since been reset, its historical lifecycle is no longer a full Node
+                # in the folded state. Keep an explicit superseded entity so the edge stays resolvable
+                # without inventing the replacement generation's metric/status.
+                ent.setdefault(parent_entity, {
+                    "prov:label": f"solution node {p} · generation {parent_generation}",
+                    "ll:node_id": p,
+                    "ll:generation": parent_generation,
+                    "ll:lifecycle": "historical",
+                })
+                edge = f"{n.id}:{generation}-{p}:{parent_generation}"
+                used[f"used:{edge}"] = {"prov:activity": a, "prov:entity": parent_entity}
+                wdf.append({"prov:generatedEntity": e, "prov:usedEntity": parent_entity})
         return {"prefix": {"prov": "http://www.w3.org/ns/prov#", "ll": "urn:looplab:"},
                 "entity": ent, "activity": act, "agent": {agent: {"prov:type": "prov:SoftwareAgent"}},
                 "wasGeneratedBy": wgb, "used": used,

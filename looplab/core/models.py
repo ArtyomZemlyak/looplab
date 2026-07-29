@@ -1000,6 +1000,10 @@ class Node(BaseModel):
     """A node in the search DAG. `parent_ids` is a list to allow merges (P2)."""
     id: int
     parent_ids: list[int] = Field(default_factory=list)
+    # Fold-internal lineage receipt: the exact parent lifecycles this node was built from. Node ids
+    # survive reset, so looking up a parent's CURRENT attempt later can silently rewrite history.
+    # Public state keeps its compact parent_ids projection; the W3C-PROV export consumes this sidecar.
+    parent_generations: dict[str, int] = Field(default_factory=dict, exclude=True)
     operator: str
     idea: Idea
     code: str = ""

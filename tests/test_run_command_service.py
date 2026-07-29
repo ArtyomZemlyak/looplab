@@ -308,6 +308,18 @@ def test_idempotency_is_durable_one_event_and_key_digest_only(tmp_path):
     assert "data" not in public and "idempotency_key_digest" not in public and "payload_digest" not in public
 
 
+def test_identical_standing_hint_is_a_semantic_noop_across_command_keys(tmp_path):
+    rd = _seed(tmp_path)
+    client, _srv = _client(tmp_path, _Driver())
+
+    first = _post(client, "hint", {"text": "try robust scaling"}, key="first-hint")
+    second = _post(client, "hint", {"text": "try robust scaling"}, key="second-hint")
+
+    assert _terminal(client, first.json())["status"] == "succeeded"
+    assert _terminal(client, second.json())["status"] == "noop"
+    assert _types(rd).count("hint") == 1
+
+
 def test_new_command_requires_a_strict_observed_generation_but_normalizes_hex_case(tmp_path):
     rd = _seed(tmp_path)
     client, _srv = _client(tmp_path, _Driver())

@@ -238,16 +238,39 @@ def test_finalize_claim_curation_gating(tmp_path):
         return SimpleNamespace(memory_dir=str(tmp_path), _cross_run_curation=on, _cross_run_curation_auto=auto,
                                researcher=SimpleNamespace(client=client, inner=None, fallback=None), developer=None)
     # off -> nothing
-    LessonMemory(_eng(False)).store_claim_curation(RunState(run_id="r", task_id="t"))
+    assert LessonMemory(_eng(False)).store_claim_curation(
+        RunState(run_id="r", task_id="t")) == "disabled"
     assert not (tmp_path / "claim_curation_log.jsonl").exists()
     # on, legacy auto requested -> logged for operator, never applied by finalize
-    LessonMemory(_eng(True, auto=True)).store_claim_curation(RunState(run_id="r", task_id="t"))
+    assert LessonMemory(_eng(True, auto=True)).store_claim_curation(
+        RunState(run_id="r", task_id="t")) == "proposed"
     assert (tmp_path / "claim_curation_log.jsonl").exists()
     from looplab.engine.claims import claims_for_memory
     got = {c["statement"]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
     assert got["reranking helps"] == "machine-proposed"
     rec = json.loads((tmp_path / "claim_curation_log.jsonl").read_text().splitlines()[0])
     assert rec["outcome"] == "proposed" and rec["auto"] is False and rec["auto_requested"] is True
+
+
+def test_finalize_claim_curation_reports_unavailable_without_client(tmp_path):
+    import orjson
+    from types import SimpleNamespace
+    from looplab.engine.lessons import LessonMemory
+    from looplab.core.models import RunState
+
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(
+        {"statement": "reranking helps", "outcome": "supported", "evidence": [1],
+         "run_id": "r1", "task_id": "t"}) + b"\n")
+    eng = SimpleNamespace(
+        memory_dir=str(tmp_path), _cross_run_curation=True, _cross_run_curation_auto=False,
+        researcher=SimpleNamespace(client=None, inner=None, fallback=None), developer=None,
+    )
+
+    outcome = LessonMemory(eng).store_claim_curation(RunState(run_id="r", task_id="t"))
+
+    assert outcome == "unavailable"
+    rec = json.loads((tmp_path / "claim_curation_log.jsonl").read_text().splitlines()[0])
+    assert rec["outcome"] == outcome
 
 
 def test_finalize_empty_claim_curation_is_durably_logged(tmp_path):

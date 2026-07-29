@@ -1938,7 +1938,7 @@ pre.code.event-json { max-height: 220px; }
   [data-fx="full"] .react-flow__edge.debug .react-flow__edge-path { filter: url(#ll-energy-glow); }
 }
 
-/* ---------- artifacts browser (run files + repo-path outputs) ---------- */
+/* ---------- workspace file browser (run directory + live declared task paths) ---------- */
 .art-wrap { display: flex; gap: 12px; min-height: 380px; height: min(64vh, 560px); }
 .art-list { flex: 0 0 320px; overflow: auto; border-right: 1px solid var(--line); padding-right: 8px; }
 .art-filter { width: 100%; margin-bottom: 8px; }
@@ -1946,7 +1946,6 @@ pre.code.event-json { max-height: 220px; }
 .art-root-h:hover { color: var(--fg); }
 .art-chev { width: 12px; color: var(--fg-mut); display: inline-block; }
 .art-root-n { margin-left: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
-.art-tag { margin-left: auto; }
 .art-files { margin: 2px 0 10px 14px; }
 .art-file { display: flex; align-items: center; gap: 8px; padding: 2px 6px; border-radius: 5px; cursor: pointer; }
 .art-file:hover { background: var(--bg-2); }

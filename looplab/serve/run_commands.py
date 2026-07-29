@@ -2708,6 +2708,15 @@ class RunCommandService:
             "retry this exact command id after the run produces less event traffic",
             retryable=True)
 
+    def _standing_hint_duplicate(self, rd: Path, event_type: str, data: Optional[dict]) -> bool:
+        if event_type != EV_HINT or (data or {}).get("replace"):
+            return False
+        text = (data or {}).get("text")
+        return any(
+            isinstance(hint, dict) and hint.get("text") == text
+            for hint in self.srv.state(rd).pending_hints
+        )
+
     def _decision(self, rd: Path, event_type: str) -> tuple[str, Optional[dict]]:
         # Command-only collaboration never requires STARTING a driver. A live driver may observe an
         # intent (notably operator Card drop), but the strict append lock is the only ownership
@@ -2968,6 +2977,9 @@ class RunCommandService:
                         record["engine_policy"] = CONTROL_SPECS[event_type].engine_policy.value
                         record["postcondition"] = CONTROL_SPECS[event_type].postcondition
                         decision, err = self._decision(rd, event_type)
+                        if (decision == "append"
+                                and self._standing_hint_duplicate(rd, event_type, normalized)):
+                            decision = "noop"
                         if decision == "reject":
                             record["status"] = "rejected"
                             record["error"] = err
@@ -3508,6 +3520,10 @@ class RunCommandService:
                 before_decision = self._events(rd)
                 decision_baseline = before_decision[-1].seq if before_decision else -1
                 decision, err = self._decision(rd, event_type)
+                if (decision == "append"
+                        and self._standing_hint_duplicate(
+                            rd, event_type, record.get("data"))):
+                    decision = "noop"
                 if decision == "reject":
                     self._terminal(path, record, "rejected", error=err)
                     return

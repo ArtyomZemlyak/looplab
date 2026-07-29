@@ -857,7 +857,7 @@ def test_one_failing_steward_cannot_disable_the_others_and_leaves_a_receipt(tmp_
             "concept_curation", "claim_curation", "task_facets"}
     }
     assert receipts == {
-        "concept_curation": "unavailable",
+        "concept_curation": "error",
         "claim_curation": "completed",
         "task_facets": "completed",
     }, receipts
@@ -865,6 +865,39 @@ def test_one_failing_steward_cannot_disable_the_others_and_leaves_a_receipt(tmp_
                    if event.type == "finalize_step"
                    and event.data.get("step") == "concept_curation")
     assert "concept ledger unavailable" in failure.data.get("error", "")
+
+
+def test_finalize_receipts_preserve_bounded_steward_outcomes(tmp_path, monkeypatch):
+    """A steward's successful call is not proof that governance work completed.
+
+    Production stewards deliberately catch provider/storage errors so finalization can continue. Their
+    bounded return value must reach the diagnostic receipt instead of being flattened to ``completed``.
+    """
+    import looplab.engine.finalize as finalize_module
+
+    run_dir = tmp_path / "truthful-steward-receipts"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+    eng._store_concept_curation = lambda _state: "unavailable"
+    eng._store_claim_curation = lambda _state: "error"
+    eng._store_task_facets = lambda _state: "already-governed"
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", lambda *_a, **_k: True)
+    final = finalize_module.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    assert not final.finalization_pending()
+    receipts = {
+        event.data.get("step"): event.data.get("outcome")
+        for event in eng.store.read_all()
+        if event.type == "finalize_step" and event.data.get("step") in {
+            "concept_curation", "claim_curation", "task_facets"}
+    }
+    assert receipts == {
+        "concept_curation": "unavailable",
+        "claim_curation": "error",
+        "task_facets": "already-governed",
+    }
 
 
 def test_error_recovery_never_acknowledges_a_finish_belonging_to_another_scope(tmp_path):

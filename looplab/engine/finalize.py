@@ -49,6 +49,17 @@ if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestr
     from looplab.engine.orchestrator import Engine
 
 
+_STEWARD_RECEIPT_OUTCOMES = frozenset({
+    "disabled",
+    "already-resolved",
+    "already-governed",
+    "empty",
+    "unavailable",
+    "proposed",
+    "error",
+})
+
+
 def _adjacent_claim(event) -> bool:
     """Validate an optional physical tail claim carried by a lifecycle event."""
     data = event.data or {}
@@ -625,7 +636,8 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
                 expected_last_seq=tail_seq,
             )
         except EventStoreConcurrencyError:
-            return engine.store.read_all(), fold(engine.store.read_all())
+            refreshed = engine.store.read_all()
+            return refreshed, fold(refreshed)
         tail_seq = cloned.seq
     payload = {
         **finish_data,
@@ -635,7 +647,8 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
     try:
         engine.store.append(EV_RUN_FINISHED, payload, expected_last_seq=tail_seq)
     except EventStoreConcurrencyError:
-        return engine.store.read_all(), fold(engine.store.read_all())
+        refreshed = engine.store.read_all()
+        return refreshed, fold(refreshed)
     mark_finish_report_complete(engine, scope)
     refreshed = engine.store.read_all()
     return refreshed, fold(refreshed)
@@ -797,12 +810,20 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                         ("claim_curation", engine._store_claim_curation),  # ratify/reject/pin
                         ("task_facets", engine._store_task_facets)):       # once per task
                     try:
-                        steward(final)
+                        outcome = steward(final)
                     except Exception as exc:  # noqa: BLE001 — steward failure must not prevent
                         _steward_receipt(     # terminal completion
-                            step, outcome="unavailable", error=str(exc)[:300])
+                            step, outcome="error", error=str(exc)[:300])
                     else:
-                        _steward_receipt(step, outcome="completed")
+                        # Old/custom Engine shims returned None. Preserve their successful receipt while
+                        # allowing the production stewards to disclose the exact bounded outcome they
+                        # already wrote to their governance log.
+                        receipt_outcome = (
+                            outcome if isinstance(outcome, str)
+                            and outcome in _STEWARD_RECEIPT_OUTCOMES
+                            else "completed"
+                        )
+                        _steward_receipt(step, outcome=receipt_outcome)
 
         events = engine.store.read_all()
         cost_step_done = _finalize_step_done(

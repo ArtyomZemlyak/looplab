@@ -77,7 +77,7 @@ const HUBS = [
   ['Progress', [['queue', 'Queue'], ['hypotheses', 'Cards'], ['research', 'Research'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
-  ['Lab', [['artifacts', 'Artifacts'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Comments & sharing'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
+  ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Comments & sharing'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
 ]
 const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
 // Historical overlays must derive only from the exact folded snapshot. Panels that fetch current

@@ -182,11 +182,31 @@ def test_finalize_facets_are_proposal_only_and_audited(tmp_path):
         researcher=SimpleNamespace(client=client, inner=None, fallback=None), developer=None,
         task=SimpleNamespace(kind="dataset"),
     )
-    LessonMemory(eng).store_task_facets(RunState(run_id="r", task_id="t1", goal="dense retrieval"))
+    assert LessonMemory(eng).store_task_facets(
+        RunState(run_id="r", task_id="t1", goal="dense retrieval")) == "proposed"
     assert "t1" not in load_task_facets(str(tmp_path))
     rec = json.loads((tmp_path / "task_facets_curation_log.jsonl").read_text().splitlines()[0])
     assert rec["outcome"] == "proposed" and rec["auto"] is False and rec["auto_requested"] is True
     assert rec["proposals"]["facets"] == {"domain": "ir", "modality": "text"}
+
+
+def test_finalize_facets_report_unavailable_without_client(tmp_path):
+    from types import SimpleNamespace
+    from looplab.core.models import RunState
+    from looplab.engine.lessons import LessonMemory
+
+    eng = SimpleNamespace(
+        memory_dir=str(tmp_path), _cross_run_curation=True, _cross_run_curation_auto=False,
+        researcher=SimpleNamespace(client=None, inner=None, fallback=None), developer=None,
+        task=SimpleNamespace(kind="dataset"),
+    )
+
+    outcome = LessonMemory(eng).store_task_facets(
+        RunState(run_id="r", task_id="t1", goal="dense retrieval"))
+
+    assert outcome == "unavailable"
+    rec = json.loads((tmp_path / "task_facets_curation_log.jsonl").read_text().splitlines()[0])
+    assert rec["outcome"] == outcome
 
 
 def test_cli_task_facets_is_proposal_only(tmp_path, monkeypatch):

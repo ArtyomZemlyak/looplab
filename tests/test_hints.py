@@ -49,6 +49,16 @@ def test_append_hint_accumulates(tmp_path):
     assert [h["text"] for h in st.pending_hints] == ["a", "b"]
 
 
+def test_duplicate_standing_hint_is_folded_once(tmp_path):
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("hint", {"text": "try robust scaling", "_command_id": "cmd_one"})
+    s.append("hint", {"text": "try robust scaling", "_command_id": "cmd_two"})
+
+    st = fold(s.read_all())
+
+    assert [h["text"] for h in st.pending_hints] == ["try robust scaling"]
+
+
 def test_replace_then_append(tmp_path):
     s = EventStore(tmp_path / "events.jsonl")
     s.append("hint", {"text": "old"})
