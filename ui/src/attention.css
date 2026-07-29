@@ -353,19 +353,22 @@
   to { transform: translateX(0); opacity: 1; }
 }
 
+@media (min-width: 1440px) {
+  body.asst-side-open .attention-trigger {
+    right: calc(var(--asst-side-w, 440px) + 16px);
+  }
+}
+
 @media (max-width: 900px) {
-  /* Compact run/home headers wrap to a second row; keep the floating inbox below that row instead
-     of covering the goal, phase, or portfolio controls. */
+  /* Compact headers have variable height. Keep the inbox in a reserved top-right slot instead of
+     guessing where a wrapped second row ends. */
   .attention-trigger {
-    top: calc(108px + env(safe-area-inset-top, 0px));
+    top: calc(6px + env(safe-area-inset-top, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
   }
 }
 
 @media (max-width: 600px) {
-  .attention-trigger {
-    right: 12px;
-    top: calc(112px + env(safe-area-inset-top, 0px));
-  }
   .attention-drawer { width: 100vw; border-left: 0; }
   .attention-header { padding-left: 12px; }
   .attention-header-action,

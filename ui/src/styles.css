@@ -2310,6 +2310,10 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 @media (max-width: 900px) {
   html, body, #root { min-width: 0; overflow-x: hidden; }
 
+  .app-shell-main > .app > .topbar:first-of-type {
+    min-height: calc(56px + env(safe-area-inset-top, 0px));
+    padding-right: calc(68px + env(safe-area-inset-right, 0px));
+  }
   .topbar.run-head { gap: 6px; flex-wrap: wrap; align-items: stretch; }
   .run-head .brand, .run-head > .phase, .run-head > .chip,
   .run-head > .spacer, .run-head > .fx-switch { display: none; }
