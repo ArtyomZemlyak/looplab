@@ -571,3 +571,78 @@ def test_kill_tree_never_signals_an_already_reaped_process(tmp_path):
     proc.wait()
     assert proc.returncode is not None
     _kill_tree(proc)                      # must be a no-op, not a killpg on a possibly-reused pid
+
+
+def test_kill_tree_still_kills_a_same_group_child_without_signalling_the_engine(tmp_path):
+    """Sharing the engine's group disqualifies killpg — it must not disqualify the KILL.
+
+    A helper spawned without `start_new_session=True` sits in the engine's own process group, so
+    `os.killpg` there would SIGKILL the engine. The guard for that used to `return` outright, which
+    left the entire tree running — an eval that keeps burning a GPU the scheduler already released,
+    traded for the crash it avoided. psutil walks the tree by PID and touches nothing else, so the
+    same-group case belongs on that path, not on an early exit. The last-resort branch is gated the
+    same way: it is reached precisely when psutil is missing, which is when a bare killpg is lethal.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from looplab.runtime import sandbox as sandbox_module
+    from looplab.runtime.sandbox import _kill_tree
+
+    signalled: list[int] = []
+    real_killpg = os.killpg
+    # No `start_new_session`: the child lands in this test process's group, like the engine's own.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert os.getpgid(proc.pid) == os.getpgid(0), "precondition: the child shares our group"
+
+    def _recording_killpg(pgid, sig):
+        signalled.append(pgid)
+        raise AssertionError(f"_kill_tree signalled process group {pgid} — that is the engine's")
+
+    os.killpg = _recording_killpg
+    try:
+        _kill_tree(proc)
+    finally:
+        os.killpg = real_killpg
+    assert signalled == []
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and proc.poll() is None:
+        time.sleep(0.05)
+    assert proc.poll() is not None, "the same-group child survived _kill_tree entirely"
+
+
+def test_kill_tree_last_resort_never_group_kills_a_same_group_child(monkeypatch, tmp_path):
+    """Without psutil the fallback must degrade to `proc.kill()`, not to an engine-killing killpg."""
+    import builtins
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from looplab.runtime.sandbox import _kill_tree
+
+    real_import = builtins.__import__
+
+    def _no_psutil(name, *args, **kwargs):
+        if name == "psutil":
+            raise ImportError("psutil is not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_psutil)
+    real_killpg = os.killpg
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(
+        AssertionError(f"last-resort killpg reached the engine's group {pgid}")))
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert os.getpgid(proc.pid) == os.getpgid(0)
+    try:
+        _kill_tree(proc)
+    finally:
+        os.killpg = real_killpg
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and proc.poll() is None:
+        time.sleep(0.05)
+    assert proc.poll() is not None, "the fallback neither group-killed nor plain-killed the child"

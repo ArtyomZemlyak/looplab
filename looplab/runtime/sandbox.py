@@ -898,18 +898,21 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # stranger's group.
     if getattr(proc, "returncode", None) is not None:
         return
+    # `start_new_session=True` did not take effect (or the caller built this Popen itself), so the
+    # child shares the ENGINE's group and killpg would SIGKILL the engine. Mirrors the guard in
+    # `_reap_process_group` above; the pre-existing killpg here had the `returncode` fence only,
+    # which does not cover a LIVE same-group child. This DISQUALIFIES the group syscall, not the
+    # kill: fall through to the psutil path, which walks the tree by PID and so never touches the
+    # engine. Returning outright instead would leave the whole tree running — trading "we killed
+    # ourselves" for "the eval keeps burning a GPU the scheduler already released".
+    same_group = False
     if os.name != "nt":
         try:
             pgid, own = os.getpgid(proc.pid), os.getpgid(0)
         except (OSError, ValueError):
             pgid = own = None
-        if pgid is not None and pgid == own:
-            # `start_new_session=True` did not take effect (or the caller built this Popen itself), so
-            # the child shares the ENGINE's group and signalling it would SIGKILL the engine. Mirrors
-            # the identical guard in `_reap_process_group` above; the pre-existing killpg here had the
-            # `returncode` fence only, which does not cover a LIVE same-group child.
-            return
-        if pgid is not None:
+        same_group = pgid is not None and pgid == own
+        if pgid is not None and not same_group:
             try:
                 os.killpg(pgid, 9)
                 return
@@ -928,10 +931,15 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # Last-resort fallback (no psutil, or the group kill above failed): OS-branched WHOLE-TREE kill.
     # Plain proc.kill() on Windows ends only the direct child, orphaning grandchildren
     # (DataLoader/worker/nested-train subprocesses) — so use `taskkill /T`; on POSIX kill the group.
+    # `same_group` gates that killpg for the same reason it gated the one above: this branch is
+    # reached when psutil is absent, which is exactly when an unguarded group kill would take the
+    # engine down with the child. There the single `proc.kill()` below is all that is safe.
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                            capture_output=True, timeout=10)
+        elif same_group:
+            proc.kill()
         else:
             os.killpg(os.getpgid(proc.pid), 9)
     except Exception:

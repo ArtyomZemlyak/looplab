@@ -80,6 +80,9 @@ Score, …); the **Card lifecycle board** (1 card = 1 hypothesis), **cross-run m
     command exited: a metric-producing parent that leaves a descendant running would otherwise keep
     the GPU while the scheduler hands it to the next node. The sweep runs while the child is still an
     un-reaped zombie, so its process group id cannot have been recycled onto an unrelated process.
+    A child that ended up in the *engine's own* process group (no new session) is swept per-PID
+    instead, so the group syscall that would take the engine down with it is never issued — the tree
+    still dies, just by a route that cannot overshoot.
 
 ## Where each piece lives in the code
 
