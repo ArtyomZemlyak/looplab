@@ -3260,20 +3260,16 @@ class RunCommandService:
                     pass
 
         if not publish():
-            # A missed heartbeat can mean suspension, not death. Reclaim only after the full command
-            # deadline and positive evidence that the owning process exited or its PID was reused.
+            # A missed heartbeat can mean suspension, not death, so reclaim needs POSITIVE evidence
+            # that the owning process exited or its PID was reused — and that evidence is conclusive
+            # immediately, exactly as `_active_command_ids` states ("age protects only ambiguous/live
+            # owners from heartbeat pauses, not a PID the OS says no longer exists"). An additional
+            # `time.time() - lock.stat().st_mtime <= command_timeout + 30 and not owner_gone` fence
+            # used to sit here; it could only fire when `not owner_gone`, which the check below
+            # already covers unconditionally, so it never changed an outcome while implying a
+            # deadline this path does not wait for.
             try:
                 owner_gone = self._execution_owner_definitely_gone(lock)
-                # CLAUDE REVIEW: [LOGIC] The mtime-age condition here is dead: it can only return
-                # False when `not owner_gone`, which the very next `if not owner_gone: return False`
-                # already does unconditionally — so reclaim actually happens IMMEDIATELY on positive
-                # owner death regardless of age, contradicting the comment above ("only after the
-                # full command deadline AND positive evidence"). Either the age fence or the comment
-                # is wrong; _active_command_ids documents the immediate-on-positive-death policy, so
-                # most likely this condition and the comment are stale leftovers.
-                if (time.time() - lock.stat().st_mtime <= self.command_timeout + 30
-                        and not owner_gone):
-                    return False
                 if not owner_gone:
                     return False
                 lock.unlink()

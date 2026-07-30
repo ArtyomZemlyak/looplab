@@ -475,9 +475,13 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         capsule_store = ConceptCapsuleStore(
             Path(self._e.memory_dir) / "concept_capsules.jsonl")
         if requires_existing_capsule:
-            # A brand-new never-classified run contributes no capsule. If this run already published
-            # evidence, though, leaving it active would resurrect stale concepts after a reset erased
-            # provenance. Supersede it with an explicitly UNKNOWN empty snapshot, never an exact zero.
+            # A brand-new run with no live classified evidence contributes NO capsule — an absent row
+            # says "unknown", which is the truth, whereas a written one would claim knowledge of zero.
+            # If this run ALREADY published, though, leaving that row active would resurrect stale
+            # concepts after an abort/tombstone/reset erased their provenance, so it is superseded.
+            # That supersede row is deliberately `observed=true` with empty collections — the
+            # SAME-RUN TOMBSTONE `build_concept_capsule` documents (engine/memory.py): this run really
+            # does carry no concepts now, and readers must retire the old ones rather than keep them.
             if not any(c.get("run_id") == run_id for c in capsule_store.all()):
                 return
         # `add` returns False WITHOUT raising when the row fails validation (an empty run_id, a

@@ -348,3 +348,33 @@ def test_trust_reflection_names_a_hardcoded_metric_flag():
     assert "critic:hardcoded_metric" in out          # the hard reason is named...
     assert "node 7 ()" not in out                    # ...never a contentless warning
     assert "critic:style_nit" not in out             # advisory critic noise stays hidden
+
+
+def test_foresight_scoreboard_window_orders_by_the_LATEST_pick():
+    """The recency window must be recency by LAST pick, which is what the dedup comment promises.
+
+    One node can fold two `foresight_selected` entries (the researcher's idea-pick and the
+    developer's best-of-N solution-pick), so the scoreboard keeps the last per node. A plain
+    `by_node[nid] = p` overwrite keeps the key's ORIGINAL position, so the window ordered nodes by
+    their FIRST pick: a node re-picked late in the log counted as old and was evicted while
+    genuinely older nodes stayed, quietly scoring the world model on the wrong sample."""
+    from looplab.search.foresight import foresight_scoreboard
+    st = RunState(direction="min", goal="g")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                       metric=1.0, status=NodeStatus.evaluated)
+    # node 1 IMPROVES on its parent; nodes 2 and 3 regress.
+    for nid, metric in ((1, 0.5), (2, 2.0), (3, 3.0)):
+        st.nodes[nid] = Node(id=nid, operator="improve", parent_ids=[0],
+                             idea=Idea(operator="improve", params={}),
+                             metric=metric, status=NodeStatus.evaluated)
+    # Node 1 is picked FIRST and then RE-picked last — it is the most recent pick of the three.
+    st.foresight_selected = [
+        {"node_id": 1, "confidence": 0.9},
+        {"node_id": 2, "confidence": 0.5},
+        {"node_id": 3, "confidence": 0.5},
+        {"node_id": 1, "confidence": 0.9},
+    ]
+    out = foresight_scoreboard(st, last_n=2)
+    # The two most recent DISTINCT picks are nodes 3 and 1, and node 1 improved -> 1 of 2.
+    assert "1 improved" in out, out
+    assert "2 " in out and "improved" in out, out

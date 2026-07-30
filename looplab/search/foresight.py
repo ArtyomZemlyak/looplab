@@ -252,18 +252,20 @@ def foresight_scoreboard(state, last_n: int = 12) -> str:
     # De-dup by node_id BEFORE scoring: one node can fold TWO foresight_selected entries — the
     # researcher's idea-pick AND the developer's best-of-N solution-pick (foresight_panel>1 +
     # best_of_n>1). Scoring both would double-weight dual-pick nodes 2:1 and halve the effective
-    # lookback. Keep the LAST pick per node (dict insertion order = event order), then take the last
-    # `last_n` DISTINCT nodes, so the track record reflects distinct predicted nodes.
+    # lookback. Keep the LAST pick per node, then take the last `last_n` DISTINCT nodes, so the
+    # track record reflects distinct predicted nodes.
     by_node: dict = {}
     for p in picks:
         nid = p.get("node_id")
         if nid is not None:
-            # CLAUDE REVIEW: [LOGIC] The comment above claims "dict insertion order = event order",
-            # but overwriting an existing key keeps the key's ORIGINAL position — so the
-            # `[-last_n:]` window below orders nodes by their FIRST pick, not their last. Harmless
-            # for the adjacent dual-pick case this dedup targets, but a node re-picked much later
-            # in the log is treated as old and can be evicted from the recency window early.
-            by_node[nid] = p          # last-wins per node
+            # Re-inserting under an existing key keeps that key's ORIGINAL position, so a plain
+            # overwrite would order the window by each node's FIRST pick. That is fine for the
+            # adjacent dual-pick this dedup targets, but a node re-picked much later in the log
+            # would count as old and be evicted from the recency window while genuinely older nodes
+            # stayed. Delete first so the key takes the LATEST pick's position and insertion order
+            # really is event order, as the window below assumes.
+            by_node.pop(nid, None)
+            by_node[nid] = p          # last-wins per node, at the last pick's position
     graded = beat = 0
     confs: list[float] = []
     for p in list(by_node.values())[-last_n:]:
