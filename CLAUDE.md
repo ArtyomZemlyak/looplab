@@ -63,7 +63,13 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    sites; `tests/test_background_appendable.py` proves splice-position neutrality). A concurrent task
    MAY additionally append `DIAGNOSTIC_EVENTS` (fold-ignored, so splice-neutral BY CONSTRUCTION — the
    fold never reads them): the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under
-   `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site. UI/CLI append
+   `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site.
+   *Thread-side setup* is the remaining typed exception: `_ensure_run_setup` (`engine/eval_dispatch.py`)
+   appends the FOLDED `events/types.py::SETUP_THREAD_APPENDABLE` pair from an eval WORKER THREAD
+   (`_run_eval` under `anyio.to_thread`), outside `_write_lock`. Safe because `EventStore.append`
+   serializes bytes, `_run_setup_lock` makes the section once-per-run, and the fold keys
+   `run_setup_open`/`run_setup_done` purely BY COMMAND; membership is asserted at both append sites and
+   `tests/test_setup_thread_appendable.py` proves splice-position neutrality. UI/CLI append
    only *control intents* (allow-listed in `serve/protocol.py::CONTROL_EVENTS`, enforced by
    `serve/routers/control.py`).
    *Concurrent build fan-out* (canonical `llm_parallel`; legacy `parallel_build`) is a further
@@ -106,7 +112,8 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   `adapters/tasks.py::TASK_OPTIONAL_HOOKS`; role outputs `agents/roles.py::DEVELOPER_OUTPUT_ATTRS`
   / `RESEARCHER_ACTION_ATTRS`; hint attrs `agents/roles.py::RESEARCHER_HINT_ATTRS`; prompt keys
   `core/prompts.py::PROMPT_KEYS`; delivered signals `engine/signal_delivery.py::SIGNALS`;
-  background-appendable events `events/types.py::BACKGROUND_APPENDABLE`. Adding/renaming any such
+  background-appendable events `events/types.py::BACKGROUND_APPENDABLE` + its thread-side sibling
+  `SETUP_THREAD_APPENDABLE`. Adding/renaming any such
   seam means updating the registry in the SAME change. Note `search/foresight.py`'s
   panel is a `__getattr__` proxy over the wrapped agent: a typo'd read silently resolves to the
   base object, and an attribute SET on the panel shadows reads *through the panel* but does NOT

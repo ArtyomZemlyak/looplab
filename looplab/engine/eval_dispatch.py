@@ -16,7 +16,8 @@ from typing import Optional
 from looplab.core.models import normalize_extra_metrics
 from looplab.engine.action_governance import effective_researcher_eval_timeout
 from looplab.events.replay import fold
-from looplab.events.types import EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED
+from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
+                                  SETUP_THREAD_APPENDABLE)
 
 # THE engine sentinel (engine/options.py): `_evaluate` passes it into `_run_eval` positionally
 # (as `next_start`), so the identity check here MUST see the same object the orchestrator uses.
@@ -106,15 +107,16 @@ class EvalDispatchMixin:
         if interrupted:
             _LOG.warning("run_setup %r is being re-executed after an interrupted attempt: its side "
                          "effects may be applied twice", cmd)
-        # CLAUDE REVIEW: [REPLAY-SAFETY] run_setup_started/finished are FOLDED events (deliberately
-        # moved out of DIAGNOSTIC_EVENTS) yet these appends execute inside an eval WORKER THREAD
-        # (_run_eval runs under anyio.to_thread from _evaluate), outside `_write_lock` and outside
-        # every documented invariant-#1 exception (BACKGROUND_APPENDABLE / DIAGNOSTIC_EVENTS / the
-        # per-node parallel-build seam). It is safe today only because EventStore.append serializes
-        # bytes, `_run_setup_lock` makes this a once-per-run section, and the fold keys
-        # run_setup_open/done purely by command — but nothing asserts any of that at this append
-        # site (unlike the train-monitor's DIAGNOSTIC membership assert). Document/registry this
-        # seam so a future edit can't silently widen thread-side folded appends.
+        # These are FOLDED events appended from an eval WORKER THREAD (`_run_eval` runs under
+        # `anyio.to_thread` from `_evaluate`), so they sit outside `_write_lock` and outside
+        # BACKGROUND_APPENDABLE / DIAGNOSTIC_EVENTS / the per-node parallel-build seam. That is
+        # invariant #1's remaining thread-side exception, and it is now a REGISTRY rather than a
+        # prose claim: `SETUP_THREAD_APPENDABLE` states the conditions (append serializes bytes,
+        # `_run_setup_lock` makes this once-per-run, the fold keys run_setup_open/done purely BY
+        # COMMAND), the asserts below pin membership at the append sites the way the train-monitor
+        # pins DIAGNOSTIC_EVENTS, and tests/test_setup_thread_appendable.py guards both ends.
+        assert EV_RUN_SETUP_STARTED in SETUP_THREAD_APPENDABLE
+        assert EV_RUN_SETUP_FINISHED in SETUP_THREAD_APPENDABLE
         self.store.append(EV_RUN_SETUP_STARTED,
                           {"command": cmd, "cwd": cwd, "after_interrupted_attempt": interrupted})
         log = str(Path(self.run_dir) / "run_setup.log")

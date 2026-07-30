@@ -333,6 +333,20 @@ BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
     EV_RESEARCH_COMPLETED, EV_RESEARCH_ATTEMPTED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
 })
 
+# Invariant #1's OTHER thread-side seam, registried for the same reason. `_ensure_run_setup`
+# (engine/eval_dispatch.py) appends these FOLDED events from an eval WORKER THREAD — `_run_eval`
+# runs under `anyio.to_thread` from `_evaluate` — so they are outside `_write_lock` and outside
+# BACKGROUND_APPENDABLE/DIAGNOSTIC_EVENTS/the per-node parallel-build seam. It is safe because
+# `EventStore.append` serializes bytes, `_run_setup_lock` makes the section once-per-run, and the
+# fold keys `run_setup_open`/`run_setup_done` purely BY COMMAND — never by position, node or
+# ordering against any other event. That argument was prose at the append site and nothing checked
+# it; membership here is asserted at the append site and guarded by
+# `tests/test_setup_thread_appendable.py`, so widening thread-side folded appends can no longer
+# happen silently.
+SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
+    EV_RUN_SETUP_STARTED, EV_RUN_SETUP_FINISHED,
+})
+
 # Conditional extension for legacy Hypothesis/Policy selection only. ``hypothesis_merged`` became a
 # Card ownership/lifecycle input when native Card selection landed, so it is not universally neutral.
 # The overlap call site must prove Card-driven selection is off; Card mode performs consolidation only
