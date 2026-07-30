@@ -146,7 +146,10 @@ def test_llm_health_never_reflects_configured_base_url_or_exception(tmp_path, mo
 
 
 def test_research_provider_failure_is_redacted(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.adapters.tasks.make_llm_client", _provider_boom)
+    # Patched at `looplab.serve.server.make_llm_client` — the documented single seam every router
+    # resolves late through (AppState.make_llm_client). /api/research used to import the factory
+    # straight from adapters.tasks, so it missed this patch point AND the canonical settings path.
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _provider_boom)
     response = TestClient(make_app(tmp_path)).post(
         "/api/research", json={"topic": "bounded security review"})
     body = response.json()
@@ -295,3 +298,31 @@ def test_report_timeout_terminal_replays_sanitized_kind_without_a_second_call(
     assert replayed["ok"] is False and replayed["error_kind"] == "unavailable"
     assert calls == ["paid"]
     _assert_safe(replayed)
+
+
+def test_research_uses_the_canonical_llm_settings_path(tmp_path, monkeypatch):
+    """/api/research must resolve its client the way every other LLM endpoint does.
+
+    It hand-filtered `load_ui_settings()` down to four keys, which dropped the connection-PROFILE
+    fields — so a model configured through `llm_profile` silently fell back to the bare default —
+    and it skipped `srv.llm_settings`, and with it `store.refresh_env_secrets()`: a key saved after
+    server start worked on /genesis but could fail here. `llm_api_key` was in that filter but is
+    never in ui_settings at all (secrets live in the secret store), so it never did anything."""
+    seen = {}
+
+    def _capture(settings, *_args, **_kwargs):
+        seen["model"] = settings.llm_model
+        seen["profile"] = settings.llm_profile
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _capture)
+    app = make_app(tmp_path)
+    app.state.looplab.settings.write_ui_settings({
+        "llm_profile": "fast",
+        "llm_profiles": {"fast": {"model": "profile-model", "base_url": "http://p/v1"}},
+    })
+
+    body = TestClient(app).post("/api/research", json={"topic": "t"}).json()
+    assert body["ok"] is False
+    # The profile reaches the client factory, which is what expands it into the real model.
+    assert seen["profile"] == "fast", seen
