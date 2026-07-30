@@ -13,6 +13,7 @@ import os
 import hashlib
 import http.client
 import json
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -200,41 +201,45 @@ class InMemoryVectorStore:
 
     def __init__(self) -> None:
         self._idx: dict[str, dict[str, Item]] = {}
+        # The index dicts are shared mutable state, and the engine runs concurrent-research and
+        # llm_parallel WORKER THREADS. `search` used to iterate `store.values()` unguarded, so a
+        # concurrent `upsert`/`delete` raised RuntimeError("dictionary changed size during
+        # iteration"). Held only around the cheap dict ops — the (relatively slow) cosine scan below
+        # runs OUTSIDE it, over a snapshot, so a search can never block a writer.
+        self._lock = threading.Lock()
 
     def upsert(self, index: str, items: list[Item]) -> None:
-        store = self._idx.setdefault(index, {})
-        for it in items:
-            store[it.id] = it
+        with self._lock:
+            store = self._idx.setdefault(index, {})
+            for it in items:
+                store[it.id] = it
 
-    # CLAUDE REVIEW: [RACE] LATENT: no locking — `search` iterating `store.values()` concurrent
-    # with an `upsert`/`delete` from another thread raises RuntimeError("dictionary changed size
-    # during iteration"). No production path hits this today (the vector-backed CaseLibrary is
-    # test-only; KnowledgeTools' index is read-only after build; the harmonic-retrieval store is a
-    # per-call local), but the engine does run concurrent-research + llm_parallel worker threads,
-    # so any future shared use trips it. A threading.Lock around the three mutating/iterating
-    # methods (or snapshotting list(store.values())) would close it cheaply.
     def search(self, index: str, query: Vector, k: int) -> list[Hit]:
-        store = self._idx.get(index, {})
+        with self._lock:
+            items = list((self._idx.get(index) or {}).values())
         # Drop non-positive scores: `cosine` returns 0.0 on a DIMENSION MISMATCH (a query embedded at a
         # different dim than the stored vectors — e.g. the embedding endpoint died mid-run and queries
         # fell back to hash_embed), so without this filter search would return k ARBITRARY notes at
         # score 0 tie-broken by id, presented to the model as relevant. An orthogonal (0-similarity)
         # hit is likewise not a real match.
         hits = [h for h in (Hit(it.id, cosine(query, it.vector), it.payload)
-                            for it in store.values()) if h.score > 0.0]
+                            for it in items) if h.score > 0.0]
         hits.sort(key=lambda h: (-h.score, h.id))
         return hits[:k]
 
     def get(self, index: str, id: str) -> Optional[Hit]:
-        it = self._idx.get(index, {}).get(id)
+        with self._lock:
+            it = (self._idx.get(index) or {}).get(id)
         return Hit(it.id, 1.0, it.payload) if it else None
 
     def delete(self, index: str, ids: list[str]) -> None:
-        store = self._idx.get(index, {})
-        for i in ids:
-            store.pop(i, None)
+        with self._lock:
+            store = self._idx.get(index, {})
+            for i in ids:
+                store.pop(i, None)
 
     def rebuild(self, index: str) -> None:
         # In-memory store has no derived state to rebuild; LanceDB re-derives from
         # canonical knowledge/*.md here.
-        self._idx.setdefault(index, {})
+        with self._lock:
+            self._idx.setdefault(index, {})
