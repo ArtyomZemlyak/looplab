@@ -21,17 +21,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from looplab.tools._base import fn_spec
+from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.tools.perm_modes import (
     DEFAULT_MODE, approval_allows, decide_action, default_approver)
 from looplab.trust.cross_run import cross_run_text
 
 
-# CLAUDE REVIEW: [LOGIC] Same RESULT_CAP mismatch as cross_run_tools.py: the loop head-caps every
-# tool result at 4000 chars (tools/_base.py RESULT_CAP), so a `concept_taxonomy` listing bounded to
-# 16k loses its tail — including the final "Bounded projection omitted: …" receipt — to the loop's
-# blunt cut on any large taxonomy. Derive this budget from RESULT_CAP per the _base.py contract.
-_MAX_TOOL_RESULT_CHARS = 16_000
+# DERIVED from the loop's cap, same as cross_run_tools.py. A flat 16k let a `concept_taxonomy`
+# listing run past the loop's 4000-char head-cut, which then dropped the tail — including the final
+# "Bounded projection omitted: …" receipt — on exactly the large taxonomies that most needed it.
+# The -400 headroom matches env_inspect._clamp.
+_MAX_TOOL_RESULT_CHARS = RESULT_CAP - 400
 _MAX_APPROVAL_PREVIEW_CHARS = 4_000
 
 

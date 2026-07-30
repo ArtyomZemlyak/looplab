@@ -329,3 +329,30 @@ def test_registry_exception_text_never_crosses_tool_boundary(tmp_path, monkeypat
     out = _auto(tmp_path).execute(
         "concept_merge", {"from_concept": "loss/a", "to_concept": "loss/b"})
     assert "rejected" in out and secret not in out
+
+
+def test_taxonomy_receipt_survives_the_agent_loops_own_result_cap(tmp_path):
+    """A provider's budget must be DERIVED from RESULT_CAP, not four times larger than it.
+
+    `_MAX_TOOL_RESULT_CHARS` was a flat 16k while `drive_tool_loop` head-caps every observation at
+    RESULT_CAP (4000) — dropping the TAIL. So on exactly the large taxonomies that need it, the
+    final "Bounded projection omitted: …" receipt was the first thing cut, and the model read a
+    silently truncated listing as the whole vocabulary. Everything past char 4000 never reached it
+    anyway, so deriving the budget costs no information the agent could see."""
+    from looplab.agents.tool_loop import _cap_tool_result
+    from looplab.tools._base import RESULT_CAP
+    from looplab.tools.concept_tools import _MAX_TOOL_RESULT_CHARS
+
+    assert _MAX_TOOL_RESULT_CHARS < RESULT_CAP, "the provider budget must fit inside the loop's cap"
+
+    concepts = [f"family{i:03d}/technique-with-a-long-descriptive-name-{i:03d}" for i in range(200)]
+    _seed_portfolio(tmp_path, concepts)
+    t = _auto(tmp_path)
+    for i in range(0, 198, 2):                      # plenty of edits to overflow any sane budget
+        t.execute("concept_merge", {"from_concept": concepts[i], "to_concept": concepts[i + 1]})
+
+    out = t.execute("concept_taxonomy", {})
+    assert len(out) <= _MAX_TOOL_RESULT_CHARS
+    assert "Bounded projection omitted:" in out              # the receipt is IN the answer...
+    assert _cap_tool_result(out) == out                      # ...and the loop's cap leaves it there
+    assert "Bounded projection omitted:" in _cap_tool_result(out)
