@@ -434,6 +434,54 @@ def test_reserved_run_id_is_case_insensitive(tmp_path):
         assert r.status_code == 400 and "reserved" in r.json()["detail"]["message"], rid
 
 
+def test_start_cannot_claim_a_server_owned_file_in_the_run_root(tmp_path):
+    """The run root also holds server-owned FILES — the settings/secrets/projects stores, their
+    `.lock` siblings, and the digest-suffixed `.looplab-lifecycle-*.lock` fences. `safe_run_dir`'s
+    conflict check only looks for an `events.jsonl` CHILD, which a file never has, so /api/start
+    reserved a start record for `run_id: "secrets.json"` and then either failed late at mkdir or —
+    when the file did not exist yet — occupied the path and wedged the later store_secret/os.replace
+    and the lifecycle lock's `open("a+")`. A run is a directory; refuse cleanly here instead."""
+    client = TestClient(make_app(tmp_path))
+    task = {"kind": "quadratic", "goal": "g", "direction": "min"}
+
+    # reserved by NAME — refused even before the file exists on disk
+    for rid in ("secrets.json", "ui_settings.json", "projects.json", "SECRETS.JSON",
+                "secrets.json.lock", ".looplab-lifecycle-deadbeef.lock"):
+        response = client.post("/api/start", json={"run_id": rid, "task": task})
+        assert response.status_code == 400, rid
+        assert "reserved" in response.json()["detail"]["message"], rid
+
+    # ...and any OTHER existing non-directory in the root is a clean 409, not a late mkdir wedge
+    (tmp_path / "some-future-store.json").write_text("{}", encoding="utf-8")
+    response = client.post("/api/start", json={"run_id": "some-future-store.json", "task": task})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "run_path_conflict"
+
+
+def test_a_node_workspace_is_not_addressable_as_a_run(tmp_path):
+    """`run_dir` accepted any DESCENDANT of the root, so `demo/nodes/n0_ws` — a SANDBOX-WRITABLE node
+    workspace — resolved happily. Any events.jsonl the evaluated candidate wrote there became a fake
+    "run" for every caller of this base helper: read routes, `inject_node`'s `source_run` (a request
+    BODY field, not a single-segment path param), assistant tooling. A run is a DIRECT child.
+    """
+    from fastapi import HTTPException
+
+    _build_run(tmp_path)
+    fake = tmp_path / "demo" / "nodes" / "n0_ws"
+    fake.mkdir(parents=True)
+    (fake / "events.jsonl").write_text(
+        json.dumps({"seq": 1, "ts": 0.0, "type": "run_started",
+                    "data": {"run_id": "pwned", "task_id": "t", "goal": "g", "direction": "min"}})
+        + "\n", encoding="utf-8")
+    srv = make_app(tmp_path).state.looplab
+
+    assert srv.run_dir("demo") == (tmp_path / "demo").resolve()      # a real run still resolves
+    for escape in ("demo/nodes/n0_ws", "./demo/nodes/n0_ws", "demo/../demo/nodes/n0_ws"):
+        with pytest.raises(HTTPException) as excinfo:
+            srv.run_dir(escape)
+        assert excinfo.value.status_code == 404, escape
+
+
 def test_start_rejects_filesystem_ambiguous_run_names(tmp_path):
     client = TestClient(make_app(tmp_path))
     for rid in ("trailing.", " trailing", "trailing ", "bad:name", "NUL", "com1.txt"):

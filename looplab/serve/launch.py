@@ -22,7 +22,7 @@ from looplab.core.appconfig import load_document
 from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
-from looplab.serve.appstate import _RESERVED_RUN_IDS
+from looplab.serve.appstate import _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
 
@@ -70,10 +70,19 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
         _reject(400, "invalid_run_id", f"run_id cannot be resolved: {exc}", "run_id")
     if resolved == root or resolved.parent != root:
         _reject(400, "invalid_run_id", "run_id must be a plain name, not a path", "run_id")
-    if resolved.name.lower() in _RESERVED_RUN_IDS:
+    if (resolved.name.lower() in _RESERVED_RUN_IDS
+            or resolved.name.lower().startswith(_LIFECYCLE_LOCK_PREFIX)):
+        # The lifecycle fences are `.looplab-lifecycle-<digest>.lock`, so only the PREFIX is knowable.
         _reject(400, "reserved_run_id", f"run_id {resolved.name!r} is reserved", "run_id")
     if requested.is_symlink():
         _reject(409, "run_path_conflict", "run path is a symbolic link", "run_id")
+    # A run is a DIRECTORY. The events.jsonl check below cannot see a file conflict (a file has no
+    # events.jsonl child), so a run_id naming any server-owned file in the root — the settings/secrets/
+    # projects stores and their `.lock` siblings today, whatever is added later — reserved a start
+    # record and then wedged at mkdir instead of failing cleanly here. Name-based reservation above
+    # still carries the case where the file does not exist yet.
+    if resolved.exists() and not resolved.is_dir():
+        _reject(409, "run_path_conflict", "run path is an existing file", "run_id")
     if check_conflict and (resolved / "events.jsonl").exists():
         _reject(409, "run_id_conflict", f"run {run_id!r} already exists", "run_id")
     return resolved
