@@ -141,3 +141,39 @@ def test_clamp_fill_leaves_swept_dims_to_the_grid():
     idea2 = Idea(operator="improve", params={}, space={"degree": [1, 2]})
     out2 = _clamp_fill(idea2, {"degree": (0.0, 6.0), "lam": (0.0, 10.0)})
     assert "degree" not in out2.params and out2.params["lam"] == 5.0
+
+
+def test_emit_survives_a_non_json_value_after_every_trial_trained(capsys):
+    """The final `json.dumps` runs AFTER all training — a TypeError there destroys the whole sweep.
+
+    `looplab/sweep.py` is the prompted default for LLM-written `train_fn`s, and numpy return values
+    are the norm there: `np.float32`/`np.int64` are NOT float/int subclasses, so json refuses them.
+    Without `default=`, one such value in any trial's extras (or one numpy grid value in `params`)
+    meant the `{"trials": …}` line was never printed, the sandbox found no trials, and a multi-hour
+    grid died with an opaque traceback at the last instruction.
+    """
+    import json
+
+    class _NumpyLike:                      # exposes .item() like every numpy scalar
+        def __init__(self, value):
+            self._value = value
+
+        def item(self):
+            return self._value
+
+    class _Opaque:                         # no .item, no .tolist, not float()-able
+        def __repr__(self):
+            return "Opaque()"
+
+    def train(params, seed):
+        return {"metric": 0.5, "n_correct": _NumpyLike(7), "note": _Opaque()}
+
+    trials = run_sweep({"lr": [0.1, 0.2]}, train, emit=True)
+    assert len(trials) == 2
+
+    printed = capsys.readouterr().out.strip().splitlines()[-1]
+    payload = json.loads(printed)          # must be parseable — this is what the sandbox scans for
+    assert len(payload["trials"]) == 2
+    # Fidelity order: a numpy-like scalar keeps its exact value; an opaque value is still REPORTED.
+    assert payload["trials"][0]["extra_metrics"]["n_correct"] == 7
+    assert payload["trials"][0]["extra_metrics"]["note"] == "Opaque()"

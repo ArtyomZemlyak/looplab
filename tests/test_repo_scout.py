@@ -249,3 +249,44 @@ def test_repo_write_refuses_a_drive_qualified_path():
     assert safe_rel("src/a.py") == "src/a.py"
     assert safe_rel("./src/b.py") == "src/b.py"
     assert safe_rel("/tmp/x.py") is None and safe_rel("../x.py") is None
+
+
+def test_overlay_never_serves_a_different_file_with_the_same_basename(tmp_path):
+    """The absolute-path suffix match could return ANOTHER file's staged content.
+
+    Two defects in one branch. Inside a known root, an absolute `<root>/src/train.py` also ends with
+    the staged root-level key `train.py`, so any repo with a duplicated basename (train.py,
+    config.py, __init__.py) could show the Developer one file and have it edit another — exactly the
+    read/write split the comment above the branch claims to have closed for relative paths. And with
+    two staged keys where one is a suffix of the other, which content came back depended on dict
+    insertion order.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "train.py").write_text("DISK ROOT TRAIN\n", encoding="utf-8")
+    (repo / "src" / "train.py").write_text("DISK SRC TRAIN\n", encoding="utf-8")
+
+    # Only the ROOT file is staged: an absolute read of src/train.py must fall through to ITS disk
+    # content, never to the staged root file.
+    scout = RepoScoutTools(roots=[str(repo)], default_root=str(repo),
+                           overlay={"train.py": "STAGED ROOT TRAIN"})
+    assert "DISK SRC TRAIN" in scout.execute("read_file", {"path": str(repo / "src" / "train.py")})
+    assert "STAGED ROOT TRAIN" in scout.execute("read_file", {"path": str(repo / "train.py")})
+
+    # Both staged: each absolute path resolves to its OWN staged content.
+    both = RepoScoutTools(roots=[str(repo)], default_root=str(repo),
+                          overlay={"train.py": "STAGED ROOT", "src/train.py": "STAGED SRC"})
+    assert "STAGED SRC" in both.execute("read_file", {"path": str(repo / "src" / "train.py")})
+    assert "STAGED ROOT" in both.execute("read_file", {"path": str(repo / "train.py")})
+
+    # Outside every root (the sandbox node-workdir COPY this branch exists for) the suffix match
+    # stays, but must pick the LONGEST key so the answer no longer depends on dict order.
+    for overlay in ({"train.py": "ROOT", "sub/train.py": "SUB"},
+                    {"sub/train.py": "SUB", "train.py": "ROOT"}):
+        copy = RepoScoutTools(roots=[str(repo)], default_root=str(repo), overlay=overlay)
+        assert copy._overlay_get("/runs/demo/nodes/node_3/sub/train.py") == "SUB"
+    # ...and the case the branch was written for still works: the agent reads its own just-written
+    # file through an absolute workdir path that matches no root.
+    own = RepoScoutTools(roots=[str(repo)], default_root=str(repo),
+                         overlay={"test_looplab.py": "JUST WROTE THIS"})
+    assert own._overlay_get("/runs/demo/nodes/node_59/test_looplab.py") == "JUST WROTE THIS"

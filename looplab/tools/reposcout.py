@@ -233,15 +233,29 @@ class RepoScoutTools:
         # DIFFERENT file's staged content on any repo with duplicate basenames (test.py / __init__.py),
         # so the Developer edited a file it never actually read.
         if norm.startswith("/") or (len(norm) > 1 and norm[1] == ":"):
-            # CLAUDE REVIEW: [EDGE-CASE] First-match-wins over dict order: with two staged keys where
-            # one is a suffix of the other ("test.py" and "sub/test.py"), an absolute request for
-            # ".../sub/test.py" also suffix-matches "/test.py", so which file's content is returned
-            # depends on overlay insertion order. Prefer the LONGEST matching key so the most
-            # specific staged path always wins.
+            # INSIDE a known root the repo-relative key is EXACT, so resolve it and stop. Suffix
+            # matching from in here is what handed back a DIFFERENT file: an absolute
+            # `<root>/src/train.py` also ends with the staged root-level `train.py`, and any repo with
+            # a duplicated basename (train.py, config.py, __init__.py) could therefore show the agent
+            # one file's content and then have it edit another. A miss on the exact key means "not
+            # staged", never "try a shorter key".
+            for name, root in ([("", r) for r in self._roots]
+                               + [(n, r) for (n, r) in self._named_roots]):
+                rp = str(root).replace("\\", "/").rstrip("/")
+                if rp and (norm == rp or norm.startswith(rp + "/")):
+                    rel = norm[len(rp) + 1:]
+                    # Multi-editable overlays are keyed `<name>/<rel>` (mirroring RepoWriteTools).
+                    return self._overlay.get(f"{name}/{rel}" if name else rel)
+            # OUTSIDE every root: the sandbox/workdir COPY case this branch exists for (the agent
+            # reads its own just-written file through an absolute node-workdir path). Keep matching by
+            # suffix, but take the LONGEST matching key so the most specific staged path wins instead
+            # of whichever one the dict happened to yield first.
+            best_key, best_value = None, None
             for k, v in self._overlay.items():
                 kk = str(k).replace("\\", "/")
-                if kk and norm.endswith("/" + kk):
-                    return v
+                if kk and norm.endswith("/" + kk) and (best_key is None or len(kk) > len(best_key)):
+                    best_key, best_value = kk, v
+            return best_value
         return None
 
     def _read_file(self, path: str, start_line=0, lines=0) -> str:

@@ -56,6 +56,31 @@ def _base_seed(seed: int) -> int:
         return int(seed)
 
 
+def _jsonable(value: Any):
+    """Last-resort coercion for the final emit — see the `default=` note in `run_sweep`.
+
+    Ordered by fidelity: numpy scalars expose `.item()` (exact Python scalar), anything else numeric
+    goes through `float`, and the remainder degrades to `repr` so the value is still *reported*
+    rather than taking the whole sweep down with it.
+    """
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except Exception:  # noqa: BLE001 - a foreign `.item` must not break the emit either
+            pass
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return tolist()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return repr(value)
+
+
 def _normalize(result: Any) -> tuple[Optional[float], dict]:
     """train_fn may return a bare metric or a dict {"metric": x, **extras}. -> (metric, extras)."""
     if isinstance(result, dict):
@@ -129,12 +154,13 @@ def run_sweep(
 
     if emit:
         # Final line the sandbox scans for. Keep it last and on its own line.
-        # CLAUDE REVIEW: [EDGE-CASE] json.dumps has no `default=`: a numpy scalar (np.float32 is NOT
-        # a float subclass), an ndarray, or any other non-JSON value in a trial's `extra_metrics` /
-        # a grid value in `params` raises TypeError HERE — after every trial already trained — so the
-        # whole completed sweep's output is lost and the node fails with an opaque traceback. This
-        # module is the prompted default for LLM-written train_fn's, where numpy return values are
-        # the norm; `default=float`-with-fallback (or coercing in _normalize) would make the final
-        # emit robust.
-        print(json.dumps({"trials": trials}))
+        # `default=` is load-bearing, not politeness. This runs AFTER every trial has trained, and
+        # this module is the prompted default for LLM-written `train_fn`s — where numpy return values
+        # are the norm (`np.float32`/`np.int64` are NOT float/int subclasses, so json refuses them).
+        # Without a fallback one such value in any trial's extras, or one numpy grid value in
+        # `params`, raised TypeError here and destroyed the whole completed sweep: the `{"trials":…}`
+        # line is never printed, the sandbox finds no trials, and a multi-hour grid dies with an
+        # opaque traceback at the last instruction. Losing fidelity on one exotic value is strictly
+        # better than losing every result.
+        print(json.dumps({"trials": trials}, default=_jsonable))
     return trials
