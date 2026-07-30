@@ -2029,7 +2029,7 @@ export async function genScopeReport(type, id, {
 }
 
 // ---- assistant (general chat agent — the evolution of Genesis) ----
-export const assistantSessions = () => get('/api/assistant/sessions')
+export const assistantSessions = (options) => get('/api/assistant/sessions', options)
 export const assistantCreate = (title = '', mode = 'plan', options) =>
   post('/api/assistant/sessions', { title, mode }, options)
 export const assistantGet = (sid, options) =>

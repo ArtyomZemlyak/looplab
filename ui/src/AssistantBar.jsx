@@ -205,6 +205,21 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // poll-sourced pending against this set; it self-heals as the server drops each resolved id.
   const resolvedPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
+  const [sessionsStatus, setSessionsStatus] = useState('idle')
+  const sessionsLoadedRef = useRef(false)
+  const sessionsRequestSeqRef = useRef(0)
+  const sessionDeleteTombstonesRef = useRef(new Map())
+  const mutateSessionsLocally = React.useCallback(update => {
+    // Share controls can be used while the first list read is still loading. An empty local array is
+    // not list truth in that state, so let the caller start a fresh authoritative read instead.
+    if (!sessionsLoadedRef.current) return false
+    // A locally confirmed mutation is newer than every list read already in flight. Fence those
+    // responses so a slow refresh cannot resurrect a deleted chat or undo share-state truth.
+    sessionsRequestSeqRef.current += 1
+    setSessions(update)
+    setSessionsStatus(current => current === 'stale' ? current : 'ready')
+    return true
+  }, [])
   const [shareUnknownSids, setShareUnknownSids] = useState(() => new Set())
   const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
   const [shareBusySid, setShareBusySid] = useState(null)
@@ -350,12 +365,33 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   usePoll((alive) => get('/api/runs').then(r => alive() && setRuns(r || [])).catch(() => {}),
     6000, [feedOpen], { enabled: feedOpen })
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
-  const refreshSessions = () => assistantSessions().then(r => {
-    const next = r.sessions || []
-    if (mountedRef.current) setSessions(next)
-    return next
-  }).catch(() => null)
-  useEffect(() => { if (view === 'full') refreshSessions() }, [view])
+  const refreshSessions = React.useCallback(async () => {
+    const requestSeq = ++sessionsRequestSeqRef.current
+    setSessionsStatus(sessionsLoadedRef.current ? 'refreshing' : 'loading')
+    try {
+      const result = await boundedRequest(signal => assistantSessions({ signal }))
+      if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current) return null
+      if (!Array.isArray(result?.sessions)) throw new Error('Invalid Assistant session list.')
+      const returnedIds = new Set(result.sessions.map(session => String(session?.id || '')))
+      for (const [id, state] of sessionDeleteTombstonesRef.current) {
+        if (state === 'confirmed' && !returnedIds.has(id)) {
+          sessionDeleteTombstonesRef.current.delete(id)
+        }
+      }
+      const visibleSessions = result.sessions.filter(
+        session => !sessionDeleteTombstonesRef.current.has(String(session?.id || '')),
+      )
+      sessionsLoadedRef.current = true
+      setSessions(visibleSessions)
+      setSessionsStatus('ready')
+      return visibleSessions
+    } catch {
+      if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current) return null
+      setSessionsStatus(sessionsLoadedRef.current ? 'stale' : 'error')
+      return null
+    }
+  }, [])
+  useEffect(() => { if (view === 'full') refreshSessions() }, [view, refreshSessions])
 
   // Autoscroll ONLY when the user is already near the bottom — don't yank them back down while they've
   // scrolled up to read earlier turns during a streaming reply.
@@ -657,7 +693,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     if (deletingSessionsRef.current.has(id)) return
     deletingSessionsRef.current.add(id)
-    setSessions(ss => ss.filter(s => s.id !== id))   // optimistic: drop it now (geesefs list can lag)
+    sessionDeleteTombstonesRef.current.set(String(id), 'pending')
+    const deletedIndex = sessions.findIndex(session => session.id === id)
+    const deletedSession = deletedIndex >= 0 ? sessions[deletedIndex] : null
+    mutateSessionsLocally(ss => ss.filter(s => s.id !== id)) // optimistic: drop it now (geesefs list can lag)
     requestAnimationFrame(() => focusAfterDelete?.isConnected && focusAfterDelete.focus({ preventScroll: true }))
     try {
       await assistantDelete(id)
@@ -667,7 +706,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       clearShareCopy(id)
       if (id === storageGet('ll.asstSid')) storageRemove('ll.asstSid')
       if (id === sidRef.current) newChat()
-    } catch { flash('Could not delete this Assistant chat'); refreshSessions() }
+      sessionDeleteTombstonesRef.current.set(String(id), 'confirmed')
+    } catch {
+      sessionDeleteTombstonesRef.current.delete(String(id))
+      if (deletedSession) mutateSessionsLocally(current => {
+        if (current.some(session => session.id === id)) return current
+        const restored = [...current]
+        restored.splice(Math.min(deletedIndex, restored.length), 0, deletedSession)
+        return restored
+      })
+      flash('Could not delete this Assistant chat')
+      refreshSessions()
+    }
     finally { deletingSessionsRef.current.delete(id) }
   }
 
@@ -1795,8 +1845,25 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           <span className="ttl" style={{ flex: 1 }}>Assistant</span>
           <button className="btn sm primary" onClick={newChat}>+ New</button>
         </div>
-        <div className="asst-sessions">
-          {sessions.length === 0 && <div className="muted" style={{ padding: 12, fontSize: 12 }}>No chats yet.</div>}
+        <div className="asst-sessions"
+          aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
+          {sessionsStatus === 'loading' && <div className="asst-session-resource" role="status">
+            <span>Loading chats…</span>
+          </div>}
+          {sessionsStatus === 'refreshing' && <div className="asst-session-resource" role="status">
+            <span>Refreshing chats…</span>
+          </div>}
+          {['error', 'stale'].includes(sessionsStatus) && <div
+            className={`asst-session-resource ${sessionsStatus}`}
+            role={sessionsStatus === 'error' ? 'alert' : 'status'}>
+            <OpIcon name="alert" size={13} />
+            <span>{sessionsStatus === 'stale'
+              ? 'Showing the last loaded chat list. Refresh failed.'
+              : 'Chats could not be loaded.'}</span>
+            <button type="button" className="btn xs" onClick={refreshSessions}>Retry</button>
+          </div>}
+          {sessionsStatus === 'ready' && sessions.length === 0
+            && <div className="muted asst-session-empty">No chats yet.</div>}
           {sessions.map(s => <div key={s.id} className={'asst-sess' + (s.id === sid ? ' active' : '')}>
             <button type="button" className="asst-sess-open" aria-current={s.id === sid ? 'page' : undefined}
               onClick={() => openSession(s.id)}>
@@ -1834,8 +1901,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
               if (!mountedRef.current) return
               setShareUnknown(shareSid, false)
-              setSessions(current => current.map(session => session.id === shareSid
+              mutateSessionsLocally(current => current.map(session => session.id === shareSid
                 ? { ...session, shared: true } : session))
+              refreshSessions()
               const url = location.origin + location.pathname + r.url
               if (sidRef.current !== shareSid) {
                 retainShareCopy(shareSid, { url, expiresAt: r.expires_at })
@@ -1888,8 +1956,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               if (!mountedRef.current) return
               setShareUnknown(shareSid, false)
               clearShareCopy(shareSid)
-              setSessions(current => current.map(session => session.id === shareSid
+              mutateSessionsLocally(current => current.map(session => session.id === shareSid
                 ? { ...session, shared: false } : session))
+              refreshSessions()
               flash(r.revoked ? `Revoked ${r.revoked} link${r.revoked === 1 ? '' : 's'}.` : 'No active links.')
             } catch (error) {
               if (!mountedRef.current) return
