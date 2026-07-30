@@ -684,3 +684,53 @@ def test_repair_fires_for_repo_with_empty_files(tmp_path):
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=4))
     anyio.run(eng.run)
     assert dev.repaired                                 # repair fired despite empty parent.files
+
+
+def test_inline_repair_budget_sees_a_parallel_siblings_spend(tmp_path):
+    """The repair loop's eval-budget ceiling must be checked against a FRESH fold.
+
+    It compared `state.total_eval_seconds` from the fold taken at eval START, so under
+    eval_parallel>1 every terminal a sibling appended since this worker began was invisible: the
+    loop kept re-running full evals well past `max_eval_seconds` while the remaining budget was
+    already gone. The stuck guard does not save it — the comment above the check names exactly this
+    case, "an LLM whose repairs vary the stderr" — so each repair here fails with a DIFFERENT
+    missing module."""
+    class _VaryingCrashAndBurnBudget:
+        """Every repair crashes with a fresh error, and burns a sibling's eval budget on the way."""
+        def __init__(self):
+            self.repair_calls = 0
+            self.store = None
+
+        def implement(self, idea):
+            return "import definitely_not_a_real_module_zzz0\n"
+
+        def repair(self, idea, code, error):
+            self.repair_calls += 1
+            if self.repair_calls == 1:
+                # A PARALLEL sibling finishes here and consumes the rest of the eval budget. The
+                # start-of-eval fold cannot see it; only a re-fold can.
+                self.store.append("node_created", {
+                    "node_id": 99, "parent_ids": [], "operator": "draft",
+                    "idea": {"operator": "draft", "params": {}, "rationale": "sibling"},
+                    "code": "print(1)"})
+                self.store.append("node_evaluated", {
+                    "node_id": 99, "metric": 1.0, "eval_seconds": 5_000.0})
+            return f"import definitely_not_a_real_module_zzz{self.repair_calls}\n"
+
+    dev = _VaryingCrashAndBurnBudget()
+    eng = _engine(tmp_path / "budget", dev, inline_repair=True, inline_repair_attempts=5)
+    dev.store = eng.store
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": dev.implement(None)})
+
+    anyio.run(eng._evaluate, 0, anyio.CapacityLimiter(1), 600.0)
+
+    evs = _events(tmp_path / "budget")
+    repaired = [e for e in evs if e.type == "node_repaired" and e.data.get("node_id") == 0]
+    # ONE repair: the next iteration's budget check re-folds, sees the sibling's spend, abandons.
+    assert len(repaired) == 1, [e.data for e in repaired]
+    failed = [e for e in evs if e.type == "node_failed" and e.data.get("node_id") == 0]
+    assert failed, "the abandoned node still gets exactly one terminal event"

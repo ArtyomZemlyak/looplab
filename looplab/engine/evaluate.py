@@ -504,15 +504,18 @@ class EvaluateMixin:
                 # TERMINAL events, and no terminal is emitted mid-repair, so an LLM whose repairs vary
                 # the stderr (never tripping anti-stuck) can overshoot the eval budget by multiples
                 # inside ONE node. Abandon once this node's cumulative eval time would cross the ceiling.
-                # CLAUDE REVIEW: [LOGIC] `state` here is the fold taken at eval START, so under
-                # eval_parallel>1 every terminal a parallel sibling appended SINCE this worker began
-                # is invisible and this "cumulative ceiling" check undercounts the run-wide
-                # total_eval_seconds — the repair loop can keep re-running full evals well past
-                # max_eval_seconds when siblings burned the remaining budget mid-loop. Re-fold
-                # (cheap relative to an eval) before this comparison.
-                if max_es is not None and state.total_eval_seconds + total_eval >= max_es:
-                    triage_outcome = ("abandon", "eval budget exhausted during inline repair")
-                    break
+                # RE-FOLD before comparing. `state` is the fold taken at eval START, so under
+                # eval_parallel>1 every terminal a sibling appended since this worker began is
+                # invisible to it and the "cumulative ceiling" undercounts run-wide
+                # total_eval_seconds — the repair loop kept re-running full evals well past
+                # max_eval_seconds whenever siblings burned the remaining budget mid-loop. This is
+                # invariant 4 (never carry derived state across loop iterations); one fold is cheap
+                # next to the full eval it is guarding.
+                if max_es is not None:
+                    spent = fold(self.store.read_all()).total_eval_seconds
+                    if spent + total_eval >= max_es:
+                        triage_outcome = ("abandon", "eval budget exhausted during inline repair")
+                        break
                 # Inline-repair gate: feature on, repairable reason, a Developer that can repair, and
                 # something to repair (whole-file code, multi-file edits, or a repo). The attempt CAP is
                 # skipped when unlimited (_inline_repair_attempts == 0); the anti-stuck guard bounds it.
