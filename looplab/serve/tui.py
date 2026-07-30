@@ -77,6 +77,12 @@ def _report_success(result: object, generation: str) -> bool:
             and result.get("generation") == generation)
 
 
+# An action turn that already carries its outcome. `pending`/`running` are the open states; these two
+# are the only terminals this module ever writes (grep `"status"] = `). A resolved row must not absorb
+# a second, positionally-guessed status — see the `action_index` fallback in `_history`.
+_RESOLVED_ACTION_STATUSES = frozenset({"done", "failed"})
+
+
 def _report_refresh_identity(row: object) -> Optional[str]:
     """Return a persisted paid-report identity only when it is safe to correlate exactly."""
     if not isinstance(row, dict):
@@ -992,19 +998,24 @@ class Tui:
                                   and report_refresh_id and len(report_refresh_id) <= 512 else None)
                 if target is None and not row_command_id and not staged_id and safe_report_id:
                     target = by_report.get(safe_report_id)
-                # CLAUDE REVIEW: [RACE] The positional fallback assumes `action_index` (recorded as
-                # len(history)-1 by the writing TUI process) still names the same row after folding.
-                # chat.jsonl is shared with the web Dock: any turn another client appends between the
-                # staged action and its command_status row shifts the folded indices, and this can
-                # bind a status (done/failed) to a DIFFERENT action row — the guard only checks the
-                # row at that index is SOME action. Narrow today (only report-refresh rows that lost
-                # every durable id reach this branch), but an id-less correlation across an
-                # append-only shared file cannot be made exact; prefer refusing over guessing.
+                # Last resort: correlate by POSITION, for a status row that carries no durable id at
+                # all — `_reconcile_pending`'s verdict on a legacy pending row whose command dict was
+                # written without an `id`, and a report refresh that lost its `idempotency_key`.
+                # `action_index` was recorded as len(history)-1 by the writing TUI process, but
+                # chat.jsonl is shared with the web Dock: a turn another client appends in between
+                # shifts the folded indices, so the row at that index may not be the intended one.
+                # Requiring it to still be UNRESOLVED is what this can guarantee — a stale index can
+                # no longer overwrite an outcome some other status already settled, which is the
+                # corruption that actually destroys information. It cannot tell two still-pending
+                # actions apart; nothing can, once every id is gone. Leaving one "pending" is then
+                # the honest answer, so this refuses rather than guesses again.
                 if (target is None and not row_command_id and not staged_id and not safe_report_id
                         and isinstance(row.get("action_index"), int)):
                     index = row["action_index"]
-                    if 0 <= index < len(history) and history[index].get("role") == "action":
-                        target = history[index]
+                    candidate = history[index] if 0 <= index < len(history) else None
+                    if (isinstance(candidate, dict) and candidate.get("role") == "action"
+                            and candidate.get("status") not in _RESOLVED_ACTION_STATUSES):
+                        target = candidate
                 if target is not None:
                     target["status"] = row.get("status") or target.get("status")
                     if isinstance(row.get("command"), dict):

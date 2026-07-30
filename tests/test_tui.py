@@ -1715,3 +1715,29 @@ def test_genesis_does_not_send_the_new_turn_twice():
     assert api.sent[1][0] == [{"role": "user", "content": "first goal"},
                               {"role": "assistant", "content": "planned 1"}]
     assert all(m["content"] != "second goal" for m in api.sent[1][0])
+
+
+def test_a_stale_index_cannot_overwrite_an_already_settled_action():
+    """chat.jsonl is shared with the web Dock, so a turn another client appends between a staged
+    action and its command_status shifts the folded indices. The positional fallback (the last resort
+    for a status row carrying NO durable id) then landed on whatever action sat at that index — here
+    a `resume` that some other status had already settled as `done`, which its stale `failed` would
+    overwrite. Requiring the indexed row to still be UNRESOLVED is the part that can be guaranteed;
+    telling two still-pending actions apart cannot be, once every id is gone."""
+    class FakeApi:
+        def get(self, path, timeout=None):
+            return [
+                # index 0 — already settled by its own durable identity
+                {"role": "action", "action": {"type": "resume"}, "status": "pending",
+                 "command": {"id": "cmd-real", "status": "executing"}},
+                {"role": "command_status", "command_id": "cmd-real", "status": "done",
+                 "command": {"id": "cmd-real", "status": "succeeded"}},
+                # ...and an id-less verdict whose index has since drifted onto it
+                {"role": "command_status", "command_id": None, "action_index": 0,
+                 "status": "failed", "error": "no command id", "command": {}},
+            ]
+
+    history = _command_tui(FakeApi())._load_chat("demo")
+    assert len(history) == 1
+    assert history[0]["status"] == "done", "a stale positional verdict overwrote a settled outcome"
+    assert "error" not in history[0]
