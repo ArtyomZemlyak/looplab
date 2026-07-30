@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   ALL_RUNS, UNASSIGNED_RUNS, dagEmptyPresentation, effectiveRunStatus, filterRuns, finalizationIncomplete,
-  lifecyclePhaseLabel, metricComparable, runLifecycle, scopeRuns, sortRuns, terminalReady,
+  indexProjects, lifecyclePhaseLabel, metricComparable, projectAncestorCollapsed, projectDepth,
+  runLifecycle, scopeRuns, sortRuns, terminalReady,
 } from '../src/runIndex.js'
 
 const projects = [
@@ -189,4 +190,37 @@ test('metric ordering is objective-aware and missing values stay last', () => {
   assert.equal(metricComparable(maxRuns), true)
   assert.equal(metricComparable(runs), false)
   assert.deepEqual(sortRuns(runs, 'metric', 'asc'), runs) // incompatible tasks are not ranked
+})
+
+test('project walks survive a cyclic parent chain instead of freezing the render', () => {
+  // Project parentage is stored assignment data, so a bad edit or an import can produce a -> b -> a.
+  // The List view's subtree walk has always guarded that; the Map view's copies of depthOf /
+  // ancestorCollapsed did not, and the same rows hung it forever.
+  const cyclic = [{ id: 'a', name: 'A', parent_id: 'b' }, { id: 'b', name: 'B', parent_id: 'a' }]
+  const { byId, subtree } = indexProjects(cyclic)
+
+  assert.deepEqual([...subtree('a')].sort(), ['a', 'b'])
+  assert.equal(projectDepth(byId, 'a'), 1)          // bounded by the visited set, not by the cycle
+  assert.equal(projectDepth(byId, 'b'), 1)
+  assert.equal(projectAncestorCollapsed(byId, 'a', new Set(['b'])), true)
+  assert.equal(projectAncestorCollapsed(byId, 'a', new Set(['zzz'])), false)
+
+  // A well-formed chain is unaffected: depth still counts real ancestors.
+  const tree = [{ id: 'root', name: 'R', parent_id: null }, { id: 'mid', name: 'M', parent_id: 'root' },
+                { id: 'leaf', name: 'L', parent_id: 'mid' }]
+  const chain = indexProjects(tree)
+  assert.equal(projectDepth(chain.byId, 'leaf'), 2)
+  assert.equal(projectAncestorCollapsed(chain.byId, 'leaf', new Set(['root'])), true)
+  assert.equal(projectAncestorCollapsed(chain.byId, 'leaf', new Set()), false)
+})
+
+test('a project with no name does not crash the index the map view builds from', () => {
+  // The Map view sorted with a bare `a.name.localeCompare(b.name)`, so a null-named project threw
+  // "Cannot read properties of null" and took the whole view down while the List view — which
+  // coerces via String(name || '') — kept rendering. Order matters: the throw needs the null name to
+  // reach the comparator's LEFT side, which it does for every position but first.
+  const { byParent } = indexProjects([{ id: 'y', name: 'Y', parent_id: null },
+                                      { id: 'x', name: null, parent_id: null },
+                                      { id: 'z', name: 'Z', parent_id: null }])
+  assert.deepEqual(byParent[null].map(project => project.id), ['x', 'y', 'z'])
 })

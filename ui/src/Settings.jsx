@@ -84,6 +84,7 @@ export default function Settings({ onBack }) {
   const [mutationUnknown, setMutationUnknown] = useState(null)
   const [invalidFocus, setInvalidFocus] = useState({ key: '', request: 0 })
   const mutationRef = useRef(null)
+  const toastTimer = useRef(null)
   const loadRef = useRef(0)
   const loadControllerRef = useRef(null)
   const allowNavigationRef = useRef(false)
@@ -122,7 +123,13 @@ export default function Settings({ onBack }) {
   }
   useEffect(() => {
     load()
-    return () => { loadRef.current += 1; loadControllerRef.current?.abort() }
+    // The toast timer is torn down here too: it outlived the component otherwise, and firing
+    // setToast on an unmounted Settings view is a wasted render at best.
+    return () => {
+      loadRef.current += 1
+      loadControllerRef.current?.abort()
+      if (toastTimer.current) clearTimeout(toastTimer.current)
+    }
   }, [])
 
   // Values that differ from engine defaults stay marked after Save.
@@ -184,13 +191,13 @@ export default function Settings({ onBack }) {
     roles.has(role) ? roles.delete(role) : roles.add(role)
     return { ...current, [key]: [...roles] }
   })
-  // CLAUDE REVIEW: [BUG] Toast timer race: the previous setTimeout is never cleared, so a second toast
-  // shown within 2.5s is hidden early by the first toast's timer (RunView.jsx::showToast documents and
-  // fixes this exact bug with a cleared timer ref). The timer also survives unmount. Keep the timeout
-  // id in a ref, clearTimeout before re-arming, and clear it in an unmount effect.
   const show = message => {
+    // Clear the previous timer so a second toast isn't hidden early by the first one's timeout —
+    // the same fix RunView.jsx::showToast carries. Two saves within 2.5s used to leave the second
+    // confirmation on screen for whatever was left of the first one's window.
+    if (toastTimer.current) clearTimeout(toastTimer.current)
     setToast(message)
-    setTimeout(() => setToast(null), 2500)
+    toastTimer.current = setTimeout(() => setToast(null), 2500)
   }
   // State-driven `disabled` attributes render one tick after a click. The token closes that gap so
   // save and secret-clear can never issue overlapping writes, even under a same-tick double click.

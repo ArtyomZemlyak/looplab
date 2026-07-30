@@ -207,6 +207,31 @@ export function indexProjects(projects = []) {
   return { byParent, byId, subtree }
 }
 
+// Ancestor walks over the same `parent_id` chain `indexProjects` indexes. They live here, beside
+// that guarded descent, because BOTH the run list and the Map view walk this data and a cyclic chain
+// (a -> b -> a) freezes whichever one forgot its visited set — the drift these helpers exist to end.
+export function projectDepth(byId = {}, id) {
+  let depth = 0, current = byId[id]
+  const seen = new Set([id])
+  while (current?.parent_id && !seen.has(current.parent_id)) {
+    seen.add(current.parent_id)
+    depth += 1
+    current = byId[current.parent_id]
+  }
+  return depth
+}
+
+export function projectAncestorCollapsed(byId = {}, id, collapsed = new Set()) {
+  let current = byId[id]?.parent_id
+  const seen = new Set([id])
+  while (current && !seen.has(current)) {
+    if (collapsed.has(current)) return true
+    seen.add(current)
+    current = byId[current]?.parent_id
+  }
+  return false
+}
+
 export function effectiveRunStatus(run) {
   const mode = runLifecycle(run).mode
   // The list has one operator-facing "finalizing" filter. Fold its stalled and terminal-write-out

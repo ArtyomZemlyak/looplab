@@ -8,7 +8,9 @@ import { regionGeometry, groupColor } from './grouping.js'
 import { RegionShell, SuperShell } from './groupnodes.jsx'
 import { OpIcon } from './icons.jsx'
 import { packRunGrid, UNASSIGNED_CLUSTER } from './runMapModel.js'
-import { effectiveRunStatus } from './runIndex.js'
+import {
+  effectiveRunStatus, indexProjects, projectAncestorCollapsed, projectDepth,
+} from './runIndex.js'
 import { followClientRoute } from './accessibility.jsx'
 
 // Cross-run map: projects are regions and runs are readable cards inside them. Large clusters are
@@ -66,38 +68,28 @@ function ProjSuper({ data }) {
 const nodeTypes = { run: RunNode, projRegion: ProjRegion, projSuper: ProjSuper }
 
 export function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
-  const byId = Object.fromEntries(projects.map(project => [project.id, project]))
-  const childrenOf = { root: [] }
-  projects.forEach(project => { (childrenOf[project.parent_id || 'root'] ||= []).push(project) })
-  // CLAUDE REVIEW: [EDGE-CASE] Duplicated drifting helper: runIndex.js::indexProjects sorts the same
-  // project rows with String(a.name || '').localeCompare(...) and documents that a null/undefined
-  // project name "would otherwise throw and break the entire run list / map render". This copy calls
-  // a.name.localeCompare directly, so one project with a null name crashes the whole Map view while
-  // the List view survives. Coerce here too (or reuse indexProjects' byParent).
-  Object.values(childrenOf).forEach(items => items.sort((a, b) => a.name.localeCompare(b.name)))
+  // Reuse the List view's index instead of re-deriving it: this copy sorted with a bare
+  // `a.name.localeCompare(b.name)`, so ONE project with a null name crashed the whole Map view while
+  // the list — which coerces via String(a.name || '') — carried on. `indexProjects` also returns the
+  // cycle-guarded `subtree` this file used to reimplement without the guard. Roots are keyed `null`
+  // there, not 'root'.
+  const { byParent: childrenOf, byId, subtree: rawSubtree } = indexProjects(projects)
 
   const runsByProject = {}
   runs.forEach(run => {
     const projectId = run.project_id && byId[run.project_id] ? run.project_id : UNASSIGNED_CLUSTER
     ;(runsByProject[projectId] ||= []).push(run)
   })
+  // Memoize the shared subtree walk: this view asks for the same regions on every render pass.
   const subtreeCache = new Map()
-  // CLAUDE REVIEW: [BUG] Unguarded graph traversals: runIndex.js::indexProjects' subtree walk added an
-  // explicit `if (!out.has(child.id))` guard with a comment that a malformed/cyclic parent_id chain
-  // (a -> b -> a) "would otherwise re-push forever and FREEZE the run list / map render". This
-  // duplicated subtree walk pushes children unconditionally, and depthOf/ancestorCollapsed below walk
-  // parent_id chains with no visited-set either — the same cyclic data hangs the Map view forever.
   const subtree = (id) => {
-    if (subtreeCache.has(id)) return subtreeCache.get(id)
-    const out = new Set([id]); const stack = [id]
-    while (stack.length) {
-      const current = stack.pop()
-      ;(childrenOf[current] || []).forEach(child => { out.add(child.id); stack.push(child.id) })
-    }
-    subtreeCache.set(id, out); return out
+    if (!subtreeCache.has(id)) subtreeCache.set(id, rawSubtree(id))
+    return subtreeCache.get(id)
   }
-  const depthOf = (id) => { let depth = 0, current = byId[id]; while (current?.parent_id) { depth++; current = byId[current.parent_id] } return depth }
-  const ancestorCollapsed = (id) => { let current = byId[id]?.parent_id; while (current) { if (collapsed.has(current)) return true; current = byId[current]?.parent_id } return false }
+  // The ancestor walks are shared too, and cycle-guarded for the same reason: `subtree`'s guard is
+  // per-descent and says nothing about a parent chain that loops back on itself.
+  const depthOf = (id) => projectDepth(byId, id)
+  const ancestorCollapsed = (id) => projectAncestorCollapsed(byId, id, collapsed)
   const visibleCount = (ids) => runs.reduce((count, run) => count + (ids.has(run.project_id) ? 1 : 0), 0)
   const maxDepth = projects.length ? Math.max(...projects.map(project => depthOf(project.id))) : 0
 
@@ -124,7 +116,7 @@ export function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
     placeRuns(runsByProject[project.id] || [], depth * INDENT)
     ;(childrenOf[project.id] || []).forEach(visit)
   }
-  childrenOf.root.forEach(visit)
+  ;(childrenOf[null] || []).forEach(visit)
 
   const unassigned = runsByProject[UNASSIGNED_CLUSTER] || []
   if (unassigned.length) {
