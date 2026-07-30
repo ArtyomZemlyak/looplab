@@ -547,11 +547,14 @@ def test_explore_vs_exploit_stance_changes_only_the_open_band_order():
         node_concepts={0: ["seen"]},
         best_node_id=0,
         cards={
+            # §21.4 levels are a classification, not a scale: 0 is `novel` (a genuinely new region)
+            # and 5 is `wrongly_abandoned` (re-opens a direction this run already failed), so the
+            # explore-worthy card is the level-0 one.
             "exploit": _ready_card(
-                "exploit", concepts=("seen",), confidence=1.0, novelty_level=0,
+                "exploit", concepts=("seen",), confidence=1.0, novelty_level=5,
             ),
             "explore": _ready_card(
-                "explore", concepts=("new",), confidence=0.0, novelty_level=5,
+                "explore", concepts=("new",), confidence=0.0, novelty_level=0,
             ),
         },
     )
@@ -567,6 +570,32 @@ def test_explore_vs_exploit_stance_changes_only_the_open_band_order():
     )
     assert exploit[0]["_card_id"] == "exploit"
     assert explore[0]["_card_id"] == "explore"
+
+
+def test_a_recorded_grade_never_out_explores_an_unremarked_proposal():
+    """The two grades engine/novelty.py actually RECORDS (levels 4/5) are both LESS novel than a
+    proposal the novelty machinery never spoke about — level 4 shares a concept branch with a tried
+    node and level 5 re-opens a direction this run already failed. Scoring the grade as `level / 5`
+    put them at 0.8/1.0 while a truly novel card (never graded, because level 0 defers to the flat
+    gate and records nothing) sat at 0.0, so under stance="explore" the exploration bonus preferred
+    the KNOWN directions over the new region it exists to reward."""
+    state = RunState(
+        nodes={0: _node(0)},
+        best_node_id=0,
+        cards={
+            "graded-4": _ready_card("graded-4", novelty_level=4),
+            "graded-5": _ready_card("graded-5", novelty_level=5),
+            "ungraded": _ready_card("ungraded"),          # no verdict at all — could be level 0
+        },
+    )
+    policy = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=0)
+    policy.card_select_k = 3
+    order = [card.id for card in card_selection_set(
+        state, policy, 8,
+        scoring={"stance": "explore", "novelty_weight": 1.0, "coverage_weight": 0.0},
+    )]
+
+    assert order == ["ungraded", "graded-4", "graded-5"]   # a reopened failure is the least novel
 
 
 def test_equal_scores_use_card_id_as_the_stable_final_tie_break():

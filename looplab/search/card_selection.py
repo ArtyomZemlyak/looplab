@@ -643,10 +643,30 @@ def _explored_concepts(state: RunState) -> set[str]:
     return _coverage_inputs(state)[0]
 
 
+# §21.4 grades are a CLASSIFICATION, not a monotone novelty ORDER: level 0 is `novel` and level 5 is
+# `wrongly_abandoned` (a direction this run already FAILED), so scoring `level / 5` ranked the grades
+# exactly backwards. Credit each grade by how much of the space it leaves unexplored instead
+# (search/graded_novelty.py::_LEVELS is the taxonomy).
+_NOVELTY_LEVEL_CREDIT = {
+    0: 1.0,      # novel — no overlap with any tried direction
+    1: 0.0,      # identical params to a tried node
+    2: 0.1,      # near-duplicate in this run (same concept set, trivially-close params)
+    3: 0.6,      # tried in a PRIOR run only — still new HERE, with an outcome to beat
+    4: 0.4,      # same direction as a tried node, materially different implementation
+    5: 0.3,      # re-opens a direction this run already failed
+}
+# A card the novelty machinery never spoke about carries NO evidence either way: `graded_novelty` may
+# be off, or the grade was 0-3 and DEFERRED to the flat gate, which records nothing (engine/novelty.py
+# emits `novelty_graded` for levels 4/5 ONLY). Absence is not proof of non-novelty, so it sits at the
+# neutral midpoint rather than the floor — pinning it at 0.0 let the only two grades that ARE recorded,
+# both LESS novel than an unremarked proposal, outrank every genuinely new region under stance="explore".
+_UNGRADED_NOVELTY = 0.5
+
+
 def _novelty_signal(card: Card) -> float:
     verdict = card.novelty_verdict
     if not isinstance(verdict, Mapping):
-        return 0.0
+        return _UNGRADED_NOVELTY
     recommendation = verdict.get("recommendation")
     if isinstance(recommendation, str) and recommendation.lower() in {
         "block", "drop", "reject", "supersede",
@@ -654,19 +674,15 @@ def _novelty_signal(card: Card) -> float:
         return 0.0
     level = verdict.get("level")
     if isinstance(level, bool) or not isinstance(level, (int, float)):
+        # a verdict that IS present but carries no usable grade is a `novelty_rejected` audit row —
+        # the flat gate found a near-duplicate. That is real evidence of non-novelty, so it keeps the
+        # floor; only a wholly ABSENT verdict is uninformative.
         return 0.0
     number = float(level)
-    if not math.isfinite(number):
-        return 0.0
-    # CLAUDE REVIEW: [LOGIC] `level / 5` treats the §21.4 grade as a monotone novelty ORDER, but it
-    # is a classification: level 0 = "novel" (a genuinely new region) is never recorded as a
-    # novelty_graded event (engine/novelty.py records levels 4/5 ONLY — on engine-written logs
-    # levels 0-3 never appear as verdicts), so a truly novel card has NO verdict and lands in the
-    # `return 0.0` above — the LOWEST exploration credit — while a surviving level-4 same-direction
-    # variant earns 0.8 and a level-5 near-dup 1.0. Under stance="explore" the novelty term
-    # therefore prefers same-direction variants over genuinely new regions — inverted from what an
-    # exploration bonus should reward.
-    return min(1.0, max(0.0, number / 5.0))
+    if not math.isfinite(number) or number != int(number):
+        return _UNGRADED_NOVELTY
+    # an unrecognized (future) grade is unreadable evidence, not a novelty claim — stay neutral.
+    return _NOVELTY_LEVEL_CREDIT.get(int(number), _UNGRADED_NOVELTY)
 
 
 def _coverage_signal(
