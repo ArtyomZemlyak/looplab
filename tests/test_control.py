@@ -152,6 +152,36 @@ def test_fork_creates_improve_node(tmp_path):
     assert s3.forks_done == 1   # processed exactly once across resumes
 
 
+def test_a_fork_that_produced_no_node_is_recorded_instead_of_vanishing(tmp_path):
+    """The `fork_done` receipt is spent BEFORE `_create_node` (at-most-once beats duplicating a paid
+    experiment), and `_create_node` can then decline silently: a lost proposal-authority CAS, a slot
+    race, `paused`, or the novelty/card-contract gate dropping the proposal. The operator's request
+    then vanished with the Researcher call already paid and NOTHING in the log saying the fork
+    produced nothing. Fold-ignored, so the cursor and every selection input stay exactly as they were.
+    """
+    from looplab.events.types import DIAGNOSTIC_EVENTS, EV_FORK_UNFULFILLED
+
+    rd = tmp_path / "run"
+    s1 = _paused(rd)
+    nid = s1.best().id
+    n0 = len(s1.nodes)
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 1})
+    store.append("fork", {"from_node_id": nid})
+
+    engine = _engine(rd, require_approval=True)
+    engine._create_node = lambda *a, **k: None          # the silent-decline paths, in one stub
+    s2 = anyio.run(engine.run)
+
+    assert s2.forks_done == 1                            # the receipt really was spent...
+    assert len(s2.nodes) == n0                           # ...and no node came of it
+    rows = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == EV_FORK_UNFULFILLED]
+    assert rows and rows[-1].data["from_node_id"] == nid
+    # fold-ignored: replaying with the marker present changes nothing about the folded state
+    assert EV_FORK_UNFULFILLED in DIAGNOSTIC_EVENTS
+    assert fold(EventStore(rd / "events.jsonl").read_all()).forks_done == 1
+
+
 def test_force_confirm_records_robustness_without_hijacking_best(tmp_path):
     rd = tmp_path / "run"
     s1 = _paused(rd)

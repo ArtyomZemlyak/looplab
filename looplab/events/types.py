@@ -311,6 +311,14 @@ EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 # remains splice-neutral and replay-safe. The raw advisory row can still feed a later proposal through
 # watchdog_reflection; that prompt effect is separate from fold/champion semantics.
 EV_ASHA_RANK = "asha_rank"
+# A served `fork` request whose `fork_done` receipt was spent but which produced NO node. The receipt
+# is appended BEFORE `_create_node` on purpose (at-most-once beats duplicating a paid experiment), and
+# `_create_node` can then decline silently in a live process: a lost proposal-authority CAS, a slot
+# race, `paused`, or the novelty/card-contract gate dropping the proposal. The operator's request then
+# vanished with the Researcher call already paid and nothing in the log saying so. DIAGNOSTIC /
+# fold-ignored — the fork cursor already advanced, so this only makes the drop legible in the event
+# log, `looplab replay` and the trace; it never re-serves the request or changes selection.
+EV_FORK_UNFULFILLED = "fork_unfulfilled"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
@@ -370,6 +378,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     EV_TRAIN_MONITOR_ALERT,
     EV_ASHA_RANK,
+    EV_FORK_UNFULFILLED,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
 })

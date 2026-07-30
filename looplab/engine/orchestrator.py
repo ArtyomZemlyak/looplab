@@ -32,7 +32,7 @@ from looplab.events.types import (
     EV_COMMAND_ACK,
     EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED, EV_CARD_MERGED,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE,
-    EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HOST_GRADING,
+    EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_FORK_UNFULFILLED, EV_HOST_GRADING,
     EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_FINALIZE_STEP,
     EV_NODE_BUILDING,
@@ -2854,15 +2854,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # receipt for a request the current fold declines no longer advances past it.
                 self.store.append(EV_FORK_DONE, {
                     "idx": state.forks_done, "from_node_id": pid, "generation": generation})
-                # CLAUDE REVIEW: [LOGIC] Beyond the documented crash-in-the-gap case, _create_node
-                # can also fail SILENTLY in a live process: _reserve_node_build returns None on a
-                # lost proposal-authority CAS / a slot race / paused, and the novelty/card-contract
-                # gate can drop the proposal — _create_node then just returns. The fork receipt
-                # above is already spent, so the operator's request vanishes with the Researcher
-                # call already paid and no event recording that the fork produced nothing. A
-                # "fork produced no node" marker (or a bounded retry) would make the drop observable.
+                # Beyond the crash-in-the-gap above, `_create_node` can also decline SILENTLY in a
+                # live process: `_reserve_node_build` returns None on a lost proposal-authority CAS, a
+                # slot race or `paused`, and the novelty/card-contract gate can drop the proposal — it
+                # then simply returns. The receipt is already spent, so the operator's request used to
+                # vanish with the Researcher call paid and NOTHING in the log saying the fork produced
+                # nothing. Record that. Fold-ignored (see EV_FORK_UNFULFILLED), so the cursor and every
+                # selection input are untouched and the append stays splice-neutral by construction;
+                # this only makes the drop legible. Re-fold rather than trusting a cached state
+                # (invariant 4) and look for a node PARENTED ON `pid` past the pre-call ceiling: a
+                # concurrent parallel-build sibling can add an unrelated node in the same window, and
+                # miscounting that as success is the safe direction (it only stays quiet).
+                before = {n.id for n in fold(self.store.read_all()).nodes.values()}
                 self._create_node({"kind": "improve", "parent_id": pid,
                                    "parent_generations": {str(pid): generation}})
+                after = fold(self.store.read_all()).nodes
+                if not any(nid not in before and pid in (getattr(nd, "parent_ids", None) or [])
+                           for nid, nd in after.items()):
+                    self.store.append(EV_FORK_UNFULFILLED, {
+                        "idx": state.forks_done, "from_node_id": pid, "generation": generation})
             else:
                 self.store.append(EV_FORK_DONE, {
                     "idx": state.forks_done, "from_node_id": pid, "generation": generation,
