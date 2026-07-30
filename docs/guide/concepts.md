@@ -10,20 +10,20 @@ A run is an `Engine` (orchestrator) driving four roles in a cycle:
 1. **Researcher** — proposes an `Idea` (an operator + params), reasoning about the goal and prior
    results. Foresight ranks the candidates *before* an eval; the idea also states a one-line
    **hypothesis** that lands on the board.
-   <!-- CLAUDE REVIEW: [DOCS-MISMATCH] the next step presents the novelty stage as opt-in / "off by
-   default", but the shipped default is novelty_mode="llm" (looplab/core/config.py:573): an LLM
-   near-duplicate adjudication (one extra LLM call per proposal, with one informed re-propose) runs by
-   default whenever a client is available — matching the infographic's NOVELTY STAGE box ("shipped
-   mode: LLM if client") and llm-and-agents.md ("the LLM adjudicates"). Only the ALGORITHMIC gate
-   (novelty_gate=false) is off by default, and its idea-text-cosine >= 0.92 arm additionally requires
-   novelty_semantic=true (also false by default, config.py:586) — enabling novelty_gate alone gives
-   the numeric param-distance check only. -->
-2. **Novelty gate** *(opt-in — `novelty_gate`, off by default)* — an algorithmic reject of a
-   proposal too close to one already tried (idea-text cosine ≥ `0.92`, or numeric param distance
-   < `0.05`), with one informed re-propose. **Off by default** (and *not* turned on by
-   `profile=thorough`): duplicate-detection is the agentic Researcher's call — it reads past
-   experiments and *decides* — and the semantic/embedding search only **suggests** candidates for the
-   LLM to adjudicate.
+2. **Novelty stage** — a near-duplicate check on the fresh proposal, selected by `novelty_mode`
+   (default **`llm`**). Duplicate detection is the agentic Researcher's call, so the shipped path is
+   the LLM one: whenever a client is available an LLM *reads the real prior experiments* and
+   adjudicates whether the idea repeats one, then asks for something different **once** — one extra
+   LLM call per proposal. `novelty_mode=off` drops even that and trusts the Researcher's own
+   read-the-history judgment.
+
+   The **algorithmic** gate (`novelty_mode=algo`, or the legacy alias `novelty_gate=true`, or a
+   Strategist novelty stance of `explore`) is the opt-in alternative: **off by default** and *not*
+   turned on by `profile=thorough`. It nudges a proposal off a duplicate by numeric param distance
+   < `novelty_epsilon` (`0.05`). Its idea-text-cosine ≥ `novelty_semantic_threshold` (`0.92`) arm
+   additionally requires `novelty_semantic` (also **off by default**), because embedding similarity
+   mis-fires on paraphrases and cannot explain itself — semantic/param search stays available to the
+   Researcher as a **tool** that suggests candidates for the LLM to judge.
 3. **Developer** — implements the idea as runnable code (or applies params to an existing repo). On
    a fresh repo node it runs three phases — **stages → plan → implement** (see
    [below](#the-developers-three-phases-stages-plan-implement)); a repair is one focused session.
