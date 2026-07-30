@@ -120,3 +120,74 @@ def test_the_streaming_guard_does_not_open_until_the_header_wait_is_over():
     inflight, stream_inflight, alone = seen[0]
     assert (inflight, stream_inflight) == (1, 0)
     assert alone, "a lone wedged stream would refuse its own teardown"
+
+
+def test_a_sibling_that_starts_during_the_abort_never_binds_the_doomed_client():
+    """The wedged-call abort must not rip the pool out from under a call that starts DURING it.
+
+    `_alone` was read under `_inflight_lock`, the lock released, and only then was the pool shut down
+    and `self._sdk` rebuilt — a window of the whole shutdown+close+join(5) in which a sibling could
+    bind the client about to be destroyed and have its fresh connection killed. That is precisely the
+    spurious sibling failure the in-flight counting exists to prevent. The check and the swap now
+    happen under one hold, and every call binds its client under the same lock, so a call either
+    counted itself in BEFORE the check (forbidding the teardown) or gets the replacement.
+    """
+    import threading
+
+    import pytest
+
+    from looplab.core import llm as llm_mod
+    from looplab.core.llm import OpenAICompatibleClient
+
+    client = OpenAICompatibleClient(base_url="http://x/v1", api_key="k", model="m")
+    started = threading.Event()
+    sibling_sdks: list = []
+
+    class _WedgedSDK:
+        """The client the abort is about to tear down; its `create` never returns."""
+        _client = None
+
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_kwargs):
+                    started.set()
+                    threading.Event().wait(30)      # wedged in "recv" forever
+
+    class _FreshSDK:
+        _client = None
+
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_kwargs):
+                    return {"ok": True}
+
+    client._sdk = wedged = _WedgedSDK()
+    client._new_sdk = lambda: _FreshSDK()
+    # Observe which client a call starting DURING the teardown binds. `_shutdown_pool_sockets` is the
+    # first thing the abort does after publishing the replacement, so a sibling launched from here
+    # races the rest of the teardown exactly as a real one would.
+    torn_down: list = []
+    real_shutdown = llm_mod._shutdown_pool_sockets
+
+    def _observing_shutdown(http_client):
+        torn_down.append(http_client)
+        sibling = threading.Thread(
+            target=lambda: sibling_sdks.append(client._sdk), daemon=True)
+        sibling.start()
+        sibling.join(5)
+        return real_shutdown(http_client)
+
+    llm_mod._shutdown_pool_sockets = _observing_shutdown
+    try:
+        with pytest.raises(Exception):              # APITimeoutError after the join deadline
+            client._bounded_create({"stream": False}, 0.2)
+    finally:
+        llm_mod._shutdown_pool_sockets = real_shutdown
+    assert started.is_set(), "precondition: the wedged call really did reach the transport"
+
+    assert torn_down == [None], "the abort tore down exactly the WEDGED client's http client"
+    assert sibling_sdks and sibling_sdks[0] is not wedged, (
+        "a call starting during the abort bound the client the teardown was destroying")
+    assert isinstance(client._sdk, _FreshSDK)

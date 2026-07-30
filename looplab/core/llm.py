@@ -412,7 +412,7 @@ class OpenAICompatibleClient:
 
         def _call():
             try:
-                box["resp"] = self._sdk.chat.completions.create(**kwargs)
+                box["resp"] = sdk.chat.completions.create(**kwargs)
             except BaseException as e:  # noqa: BLE001 — ferry ANY error back to the caller thread
                 box["exc"] = e
             finally:
@@ -421,6 +421,12 @@ class OpenAICompatibleClient:
 
         with self._inflight_lock:
             self._inflight += 1
+            # Bind the client UNDER the same lock that counts this call in. The abort path below
+            # publishes its replacement `self._sdk` while holding this lock too, so a call either
+            # binds the doomed client BEFORE that check — and is therefore counted as a sibling, which
+            # forbids the teardown — or binds the fresh one. Reading `self._sdk` inside `_call` left a
+            # window where a call could pick up the client the teardown was about to shut down.
+            sdk = self._sdk
         th = threading.Thread(target=_call, daemon=True)
         try:
             th.start()
@@ -449,24 +455,27 @@ class OpenAICompatibleClient:
             # lingering daemon thread (it exits when its own read finally errors) rather than cause N
             # spurious failures and re-spends; the caller still unblocks on the APITimeoutError below,
             # which is the guarantee that actually matters.
-            # CLAUDE REVIEW: [RACE] TOCTOU between this _alone check and the teardown below: a sibling
-            # call can start (incrementing _inflight) right after the lock is released, then have its
-            # fresh in-flight connection ripped out by _shutdown_pool_sockets / _client.close(), and
-            # `self._sdk = self._new_sdk()` is also an unsynchronized write racing concurrent
-            # `self._sdk` readers — re-introducing, in a narrow window, exactly the spurious sibling
-            # failure the inflight counting exists to prevent.
+            # The check and the SWAP happen under ONE hold of the lock. Reading `_alone` and then
+            # releasing left a window in which a sibling could start, bind the doomed client and have
+            # its fresh connection ripped out by the teardown below — reintroducing exactly the
+            # spurious sibling failure the inflight counting exists to prevent — and `self._sdk =
+            # self._new_sdk()` was an unsynchronized write racing those readers. Publishing the
+            # replacement here instead means every later call binds the NEW client (see
+            # `sdk = self._sdk` above), so the teardown can only ever touch connections belonging to
+            # calls that were already counted when `_alone` said there were none.
+            doomed = None
             with self._inflight_lock:
-                _alone = self._pool_teardown_is_safe_locked()
-            if _alone:
+                if self._pool_teardown_is_safe_locked():
+                    doomed, self._sdk = self._sdk, self._new_sdk()
+            if doomed is not None:
                 # Force the wedged recv() to return so the worker thread EXITS: shutdown before close() —
                 # close() cannot interrupt a kernel read, only socket.shutdown() can.
-                _shutdown_pool_sockets(getattr(self._sdk, "_client", None))
+                _shutdown_pool_sockets(getattr(doomed, "_client", None))
                 try:
-                    self._sdk._client.close()
+                    doomed._client.close()
                 except Exception:  # noqa: BLE001
                     pass
                 th.join(5)   # after the shutdown the recv errors out, so the daemon is reaped here
-                self._sdk = self._new_sdk()
             raise openai.APITimeoutError(request=httpx.Request("POST", self.base_url))
         if "exc" in box:
             raise box["exc"]
