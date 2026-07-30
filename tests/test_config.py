@@ -316,3 +316,45 @@ def test_legacy_parallel_build_layer_does_not_mask_an_env_llm_parallel(monkeypat
     assert flatten_parallelism_layers([{"parallel_build": 8}, {"llm_parallel": 2}]) == {
         "parallel_build": 8, "llm_parallel": 2}
     assert "llm_parallel" not in flatten_parallelism_layers([{"parallel_build": 8}])
+
+
+def test_legacy_snapshot_resume_does_not_switch_on_paid_work_the_run_never_did():
+    """`LEGACY_CONFIG_SNAPSHOT_DEFAULTS` reaches back past the week the map was written.
+
+    The map's stated rule is that re-entry "must not silently add paid calls, interventions,
+    concurrency or a different selection policy to an old run", and absence of a key in a
+    pre-versioned snapshot is the per-field version marker. But the map only listed flags added
+    2026-07-19..07-21, while foresight/concept_pivot/graded_novelty/the cross_run_* bundle/
+    memora_llm/comparative_lessons/the lesson+research+report cadences were added 2026-06-24..07-17 —
+    after `config.snapshot.json` existed (2026-06-23) and before the map did. A snapshot from that
+    window therefore resumed with today's paid product defaults ACTIVE: predict-before-execute and
+    cross-run LLM calls the original run never made, and a different novelty admission policy.
+
+    This pins the fields the map DOES claim; it is not a completeness assertion (see the map's own
+    "WHAT THIS MAP IS NOT" note — latent knobs and magnitudes stay out by design).
+    """
+    from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS, settings_from_snapshot
+
+    era_snapshot = {"max_nodes": 8, "direction": "min", "backend": "toy"}
+    resumed = settings_from_snapshot(era_snapshot)
+    for field in ("foresight", "foresight_agentic", "foresight_verify", "concept_pivot",
+                  "graded_novelty", "cross_run_concepts", "cross_run_advisory",
+                  "cross_run_structured_claims", "cross_run_curation", "cross_run_read_tools",
+                  "concept_run_base", "fingerprint_universal", "memora_llm", "comparative_lessons",
+                  "unified_agent", "failure_reflection", "reflection_priors",
+                  "agent_drives_actions", "concurrent_research", "deep_repair"):
+        assert getattr(resumed, field) is False, f"{field} switched on for a legacy run"
+    for field in ("lessons_every", "lessons_refresh_every", "deep_research_every", "report_every"):
+        assert getattr(resumed, field) == 0, f"{field} cadence switched on for a legacy run"
+    # ...while today's product defaults are the opposite, which is what made this a live gap.
+    live = Settings()
+    assert live.foresight is True and live.concept_pivot is True and live.lessons_every == 4
+
+    # A snapshot that DOES carry the keys is untouched — `setdefault`, never an override.
+    modern = Settings(foresight=True, concept_pivot=True, lessons_every=4).masked_snapshot()
+    kept = settings_from_snapshot(modern)
+    assert kept.foresight is True and kept.concept_pivot is True and kept.lessons_every == 4
+
+    # Deliberate omissions: guessing these would REMOVE behaviour an old run really had.
+    assert "debug_depth" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS
+    assert "foresight_panel" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS

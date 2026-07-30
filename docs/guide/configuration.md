@@ -17,7 +17,14 @@ dir. The file carries its own format version in `config_snapshot_schema`; a snap
 **newer** LoopLab is refused rather than loaded, because `Settings` ignores fields it does not
 recognize and resuming would otherwise continue the same event history under different paid,
 concurrency or selection semantics with no diagnostic. Upgrade LoopLab to resume such a run. A
-snapshot with no version key predates the marker and still loads under its historical contract.
+snapshot with no version key predates the marker and still loads under its historical contract: a
+pre-versioned snapshot is a full settings dump, so a **missing** key means the field did not exist
+when the run was launched, and resume restores the pre-field behaviour (feature off, cadence `0`)
+instead of today's default. That keeps re-entry from adding paid calls, interventions, concurrency
+or a different selection policy to a run that never had them — see
+`LEGACY_CONFIG_SNAPSHOT_DEFAULTS` in `looplab/core/config.py` for the exact list and for the two
+classes (knobs latent under an off parent, and magnitudes for behaviour that already existed) that
+are deliberately left out.
 
 `resume` loads that snapshot, but it is not the sole authority for every effective field:
 `card_driven_selection`, `speculation_depth`, `holdout_fraction`, `holdout_select`, `select_verifier`,

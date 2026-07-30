@@ -1435,12 +1435,6 @@ class ConfigSnapshotVersionError(ValueError):
 # Pre-versioned snapshots are full Settings dumps, so absence is a reliable per-field version marker.
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
-# CLAUDE REVIEW: [LOGIC] this map is incomplete against its own contract: several later-added flags
-# that default ON and add paid LLM work or change candidate generation (foresight/foresight_panel/
-# foresight_agentic/foresight_verify, concept_pivot, graded_novelty, the cross_run_* bundle,
-# memora_llm, comparative_lessons/lessons_every) are absent here, so any snapshot written BEFORE such
-# a field existed resumes with the paid product default ACTIVE — exactly the "silently add paid
-# calls ... to an old run" the paragraph above says re-entry must never do.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "parallel_build": 1,
     "eval_parallel": None,
@@ -1464,6 +1458,57 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # Zero means unlimited; 40 was the first bounded default, and is latent while repeat is disabled.
     "concurrent_research_max_calls": 40,
     "concurrent_consolidate": False,
+    # The map originally covered only the flags added in the days just before it was written
+    # (the entries above are all 2026-07-19..07-21; the map itself landed 07-22). Everything below was
+    # added 2026-06-24..07-17 — AFTER `config.snapshot.json` existed (it ships in the initial commit,
+    # 2026-06-23) and BEFORE this map did — so a snapshot from that window carries none of these keys
+    # and, without an entry here, resumed with today's paid product default ACTIVE. That is precisely
+    # the "silently add paid calls ... to an old run" the paragraph above forbids: the resumed half of
+    # the run would make predict-before-execute and cross-run LLM calls the original never made, and
+    # admit candidates under a different novelty policy.
+    # `setdefault` makes every one of these a no-op for a snapshot that DOES carry the key, so only
+    # genuinely older runs are affected. Each value is the behaviour before the field existed: absent
+    # feature = off, absent cadence = 0 (the same "conservative library" value the frozen
+    # Settings-vs-EngineOptions divergence table records for these fields). Each was dated against the
+    # tree before being listed — e.g. `report_every` (2026-06-25) is 0 because the run-report writer
+    # itself did not exist before that commit, so an older run wrote no report to preserve.
+    "foresight": False,
+    "foresight_agentic": False,
+    "foresight_verify": False,
+    "concept_pivot": False,
+    "graded_novelty": False,
+    "cross_run_concepts": False,
+    "cross_run_advisory": False,
+    "cross_run_structured_claims": False,
+    "cross_run_curation": False,
+    "cross_run_read_tools": False,
+    "concept_run_base": False,
+    "fingerprint_universal": False,
+    "memora_llm": False,
+    "comparative_lessons": False,
+    "lessons_every": 0,
+    "lessons_refresh_every": 0,
+    "unified_agent": False,
+    "deep_research_every": 0,
+    "report_every": 0,
+    "failure_reflection": False,
+    "reflection_priors": False,
+    "agent_drives_actions": False,
+    "concurrent_research": False,
+    "deep_repair": False,
+    # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
+    # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
+    # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour
+    # the original run really had:
+    #  * knobs that are latent while their parent feature is off — `foresight_panel`,
+    #    `foresight_verify_samples`, `memora_anchors`, `holdout_top_k`, `asha_eta`: the parent above
+    #    already pins them out of play, and their own before-the-field value is not recoverable;
+    #  * magnitudes and depths for behaviour that ALREADY existed — `debug_depth`,
+    #    `context_budget_chars`, `developer_plan_max_steps`, `agent_emit_after`: guessing 0/off there
+    #    disables working machinery rather than preserving history.
+    # A new field belongs here only when it (a) postdates 2026-06-23, (b) defaults to adding paid
+    # calls / interventions / concurrency / a different selection policy, and (c) has a historical
+    # value you can point at a commit for. When (c) fails, leave it out and say so here.
 }
 
 
