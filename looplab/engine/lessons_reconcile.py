@@ -245,14 +245,11 @@ class LessonReconcileMixin:
         if not path.exists():
             return state
         try:
-            # CLAUDE REVIEW: [DOCS-MISMATCH] This comment is stale: the rewrite is no longer
-            # index-keyed. `stale_idx` is only a boolean gate now (plus the stale_pairs/reflect_stale
-            # derivation), and the actual drop re-reads the file inside the lock and matches rows by
-            # IDENTITY (`_is_stale`), as the comment above `_is_stale` explains. `keep_bad=True` is
-            # harmless but no longer load-bearing for alignment; the rationale given here no longer
-            # describes the code and will mislead the next editor.
-            # keep_bad=True: stale_idx below is keyed by RAW line number, so placeholders must
-            # hold the slot of every bad line for the index-keyed rewrite to stay aligned.
+            # keep_bad=True: placeholders hold the slot of every unparseable line, so this scan's
+            # `enumerate` indices track the RAW file. It is no longer load-bearing for the REWRITE —
+            # that re-reads the file inside the lock and matches rows by IDENTITY (`_is_stale`, see
+            # its comment), never by line number, so `stale_idx` survives only as a boolean gate
+            # alongside the stale_pairs/reflect_stale derivation below.
             rows: list = read_jsonl_lenient(path, keep_bad=True)
         except OSError:
             self._reconcile_sig_hash = None
