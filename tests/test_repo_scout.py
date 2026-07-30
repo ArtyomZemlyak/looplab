@@ -290,3 +290,106 @@ def test_overlay_never_serves_a_different_file_with_the_same_basename(tmp_path):
     own = RepoScoutTools(roots=[str(repo)], default_root=str(repo),
                          overlay={"test_looplab.py": "JUST WROTE THIS"})
     assert own._overlay_get("/runs/demo/nodes/node_59/test_looplab.py") == "JUST WROTE THIS"
+
+
+def test_find_files_reports_its_own_cap_and_bounds_its_walk(tmp_path):
+    """A capped `find_files` answer used to be byte-identical to a complete one.
+
+    `_list_dir` prints "... (+K more)" and `_grep` prints "(capped at N hits)", so a model reads a
+    bare 200-line list as THE match set. `find_files` printed nothing, and it also called
+    `sorted(p.glob(...))` — materializing every match before the cap applied. `Path.home()` is one
+    of this tool's roots (serve/assistant.py), so `find_files(root="~", pattern="**/*")` was a
+    full-tree stat walk plus hundreds of MB of Path objects inside the server process to return
+    200 lines."""
+    import looplab.tools.reposcout as rs
+
+    for i in range(250):
+        (tmp_path / f"f{i:04d}.py").write_text("x", encoding="utf-8")
+    s = RepoScoutTools(roots=[str(tmp_path)])
+
+    out = s.execute("find_files", {"root": str(tmp_path), "pattern": "**/*.py"}).splitlines()
+    assert len(out) == 201                      # 200 entries + one receipt line
+    assert "showing 200 of 250 matches" in out[-1]
+    # The 200 shown are still the deterministic alphabetically-first ones, not walk order.
+    assert out[0].endswith("f0000.py") and out[199].endswith("f0199.py")
+
+    # The walk itself is bounded, and says so when the bound bites.
+    budget = rs._FIND_SCAN_BUDGET
+    try:
+        rs._FIND_SCAN_BUDGET = 10
+        stopped = s.execute(
+            "find_files", {"root": str(tmp_path), "pattern": "**/*.py"}).splitlines()
+    finally:
+        rs._FIND_SCAN_BUDGET = budget
+    assert len(stopped) == 11
+    assert "stopped after scanning 10 paths" in stopped[-1]
+
+    # An UNCAPPED answer carries no receipt at all — the note must not become noise on every call.
+    (tmp_path / "only").mkdir()
+    (tmp_path / "only" / "one.txt").write_text("x", encoding="utf-8")
+    clean = s.execute("find_files", {"root": str(tmp_path), "pattern": "**/*.txt"})
+    assert clean.splitlines() == [str(tmp_path / "only" / "one.txt")]
+
+
+def test_find_files_prunes_heavy_dirs_without_hiding_the_repo_or_its_dotdirs(tmp_path):
+    """The prune is RELATIVE to the searched root, and it is not a hidden-file filter.
+
+    Testing `_SKIP_DIRS` against the absolute path's parts instead would make every repo that
+    happens to live under a directory named `checkpoints`/`venv`/`ckpt`/… answer "(no matches)" for
+    everything, while `grep`/`list_dir`/`read_file` on the same repo kept working. And unlike
+    `_grep`, this tool must NOT drop dot-directories: `**/*.yml` under `.github/workflows` is a
+    legitimate find."""
+    repo = tmp_path / "checkpoints" / "myrepo"      # the repo is INSIDE a skip-named directory
+    for rel in ("a.py", "src/b.py", ".github/workflows/ci.yml",
+                "venv/lib/junk.py", "node_modules/pkg/x.py"):
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x", encoding="utf-8")
+    s = RepoScoutTools(roots=[str(repo)])
+
+    found = s.execute("find_files", {"root": str(repo), "pattern": "**/*.py"}).splitlines()
+    assert found == [str(repo / "a.py"), str(repo / "src" / "b.py")]   # repo visible, venv pruned
+    assert s.execute("find_files", {"root": str(repo), "pattern": "**/*.yml"}).splitlines() == [
+        str(repo / ".github" / "workflows" / "ci.yml")]                # dot-dirs are NOT pruned
+
+
+def test_find_files_keeps_pathlib_semantics_on_the_shapes_it_does_not_walk(tmp_path):
+    """Only `**/<name-glob>` is walked by hand; every other shape must match pathlib exactly."""
+    for rel in ("a.py", "src/b.py", "src/deep/c.py", ".dot.py"):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x", encoding="utf-8")
+    for pattern in ("*.py", "src/*.py", "*/*.py", "**/src/*.py", "src/**/*.py"):
+        walked = RepoScoutTools._iter_glob(tmp_path, pattern)
+        mine = sorted(str(m) for m, matched in walked if matched)
+        assert mine == sorted(str(m) for m in tmp_path.glob(pattern)), pattern
+
+
+def test_find_files_budget_bounds_the_walk_not_just_the_matches(tmp_path):
+    """The budget counts every path LOOKED AT, so a narrow pattern over a huge tree still stops.
+
+    Counting only matches would leave `**/*.py` free to stat a million-file checkpoint tree that
+    happens to hold no `.py` at all — the same unbounded walk the budget exists to prevent, wearing
+    a bound that never fires."""
+    import looplab.tools.reposcout as rs
+
+    (tmp_path / "a.py").write_text("x", encoding="utf-8")          # sorts first: one real hit
+    for i in range(40):
+        (tmp_path / f"b{i:02d}.txt").write_text("x", encoding="utf-8")
+    s = RepoScoutTools(roots=[str(tmp_path)])
+    budget = rs._FIND_SCAN_BUDGET
+    try:
+        rs._FIND_SCAN_BUDGET = 10
+        out = s.execute("find_files", {"root": str(tmp_path), "pattern": "**/*.py"}).splitlines()
+        # ...and when the cut leaves NOTHING, the answer must not read as a clean "not here".
+        empty = tmp_path / "haystack"
+        empty.mkdir()
+        for i in range(40):
+            (empty / f"b{i:02d}.txt").write_text("x", encoding="utf-8")
+        none = RepoScoutTools(roots=[str(empty)]).execute(
+            "find_files", {"root": str(empty), "pattern": "**/*.py"})
+    finally:
+        rs._FIND_SCAN_BUDGET = budget
+    assert out == [str(tmp_path / "a.py"),
+                   "... (stopped after scanning 10 paths — narrow `pattern`/`root` for the rest)"]
+    assert "the walk stopped there" in none and "in the first 10 paths" in none

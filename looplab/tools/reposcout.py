@@ -49,6 +49,12 @@ _MAX_ENTRIES = 200         # entries per list_dir / find_files
 # that a trainer repo carries by the GB (walking them stalls a grep on a FUSE mount).
 _SKIP_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", "node_modules", ".mypy_cache",
               ".pytest_cache", ".venv", "venv", "wandb", "lightning_logs", "ckpt", "checkpoints"}
+# Paths `find_files` may look at before it gives up, mirroring `_grep`'s 4000-file budget. Set FAR
+# above the 200-entry display cap on purpose: an ordinary repo (this one is ~4.7k files) is still
+# enumerated WHOLE, so the 200 shown stay the deterministic alphabetically-first ones rather than
+# whatever the walk happened to reach first. Only a pathological tree trades that for a bounded
+# walk — and then the result says it did.
+_FIND_SCAN_BUDGET = 20000
 
 
 class RepoScoutTools:
@@ -150,7 +156,10 @@ class RepoScoutTools:
                      ["path"]),
             fn_spec("find_files",
                      "Recursively find files matching a glob under a directory (read-only; capped at "
-                     "200 matches — narrow the pattern if the list ends without your file).",
+                     "200 matches — narrow the pattern if the list ends without your file). A "
+                     "**/... pattern skips caches and weight dirs (.git, node_modules, venv, "
+                     "checkpoints, ckpt, wandb, lightning_logs, __pycache__) — search those by "
+                     "naming the directory in `root`. Any cut is stated on the last line.",
                      {"root": {"type": "string"},
                       "pattern": {"type": "string", "description": "glob, e.g. **/*.py or **/README*"}},
                      ["root"]),
@@ -368,6 +377,41 @@ class RepoScoutTools:
             tail = ""
         return head + body + tail
 
+    @staticmethod
+    def _iter_glob(base: Path, pattern: str):
+        """Lazily yield `(path, matched)` for every path LOOKED AT resolving `base.glob(pattern)`.
+
+        The `matched` flag is what lets the caller's budget bound the WALK rather than just the
+        answer: counting only matches would leave `**/*.py` free to stat a million-file checkpoint
+        tree that happens to hold no `.py`, which is the exact runaway this budget exists to stop.
+
+        pathlib has no prune hook, so `base.glob("**/…")` stats every byte of the GB-scale
+        checkpoint/venv dirs `_SKIP_DIRS` exists to avoid before any caller-side budget can act.
+        `**/<name-glob>` is both the shape that can run away and the one models actually send, so
+        walk it here with the same prune `_grep` uses, and report every entry examined. Every other
+        shape is depth-bounded by its own literal segments (`*.py`, `sub/*.py`, `*/*/x.py`) and
+        falls through to pathlib with its semantics untouched — there only matches are observable,
+        so for those the budget bounds MEMORY (the Path objects held) and not the stat walk.
+
+        Deliberately matched to pathlib, not to `_grep`: HIDDEN entries are yielded (`.github/*.yml`
+        is a legitimate find), a `**/*` yields directories as well as files, and matching is
+        case-SENSITIVE (`fnmatchcase`, since `fnmatch` would fold case on a Windows/macOS host while
+        pathlib's POSIX flavour does not). Symlinked dirs are not descended, which is os.walk's
+        default and pathlib's `**` behaviour both."""
+        tail = pattern[3:] if pattern.startswith("**/") else None
+        if tail is None or not tail or "/" in tail or "**" in tail:
+            for m in base.glob(pattern):
+                yield m, True
+            return
+        import os as _os
+        from fnmatch import fnmatchcase as _fnmatchcase
+        for dp, dirs, files in _os.walk(base):
+            dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
+            # `dirs` is already the PRUNED list, so a skipped dir is neither descended nor yielded —
+            # the same "this subtree does not exist for search" rule `_grep` applies.
+            for name in list(dirs) + sorted(files):
+                yield Path(dp) / name, _fnmatchcase(name, tail)
+
     def _find_files(self, root: str, pattern: str) -> str:
         p = self._resolve(root)
         if not p:
@@ -375,12 +419,22 @@ class RepoScoutTools:
         if not p.is_dir():
             return f"(not a directory: {root})"
         hits = []
+        scanned = 0
+        stopped = False
         try:
-            # CLAUDE REVIEW: [PERF] `sorted(p.glob(...))` materializes EVERY match before the 200-entry
-            # cap applies — a "**/*" pattern walks the whole tree (including the GB-scale checkpoint
-            # dirs `_SKIP_DIRS` exists to avoid in `_grep`) even though only 200 hits are kept. Iterate
-            # lazily with a bounded collect (or prune like `_grep`) so the cap bounds the walk too.
-            for m in sorted(p.glob(pattern or "*")):
+            # Iterate LAZILY under a scan budget. `sorted(p.glob(...))` materialized EVERY match
+            # before the 200-entry cap applied, so a `**/*` pattern built and sorted the whole tree
+            # first; one of this tool's roots is `Path.home()` (serve/assistant.py), where that is a
+            # full-tree stat walk plus hundreds of MB of Path objects inside the server process, to
+            # return 200 lines. `_iter_glob` prunes the recursive shape and reports every path it
+            # LOOKS AT, so `scanned` bounds the walk itself, not just the answer.
+            for m, matched in self._iter_glob(p, pattern or "*"):
+                scanned += 1
+                if scanned > _FIND_SCAN_BUDGET:
+                    stopped = True
+                    break
+                if not matched:
+                    continue
                 # pathlib glob accepts `..` segments and follows symlinks, so a pattern like
                 # "../../etc/*" escapes the allowed roots — re-validate every hit against the roots
                 # (and run the secret filter on the RESOLVED path so a symlinked secret is caught).
@@ -388,11 +442,28 @@ class RepoScoutTools:
                 if rm is None or _looks_secret(rm) or self._is_deleted_abs(rm):
                     continue
                 hits.append(self._disp(rm))   # repo-relative for the Developer so a hit round-trips
-                if len(hits) >= _MAX_ENTRIES:
-                    break
         except (OSError, ValueError) as e:
             return f"(bad pattern: {e})"
-        return "\n".join(hits) if hits else f"(no matches for {pattern!r} under {root})"
+        if not hits:
+            # "(no matches)" would be a LIE about a walk that never finished — the model would cross
+            # the file off and stop looking for it. Say which of the two happened.
+            if stopped:
+                return (f"(no matches for {pattern!r} in the first {_FIND_SCAN_BUDGET} paths under "
+                        f"{root}; the walk stopped there — narrow `root`)")
+            return f"(no matches for {pattern!r} under {root})"
+        # ALWAYS say when the list is partial. `_list_dir` prints "... (+K more)" and `_grep` prints
+        # "(capped at N hits)"; this one printed nothing, so a capped result was byte-identical to a
+        # complete one and the model read the first 200 matches as the whole match set.
+        notes = []
+        shown = sorted(hits)
+        if len(shown) > _MAX_ENTRIES:
+            notes.append(f"showing {_MAX_ENTRIES} of {len(shown)} matches")
+            shown = shown[:_MAX_ENTRIES]
+        if stopped:
+            notes.append(f"stopped after scanning {_FIND_SCAN_BUDGET} paths")
+        if not notes:
+            return "\n".join(shown)
+        return "\n".join(shown) + f"\n... ({'; '.join(notes)} — narrow `pattern`/`root` for the rest)"
 
     def _grep(self, pattern: str, root: str, glob: str, max_hits) -> str:
         import os as _os
