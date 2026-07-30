@@ -1143,3 +1143,40 @@ def test_complete_tool_requires_the_forced_emit_call(monkeypatch):
     # a real emit is selected BY NAME even when another call is listed first
     monkeypatch.setattr(c, "_post", lambda payload: _msg("search_web", "emit"))
     assert c.complete_tool([{"role": "user", "content": "go"}], {"type": "object"}) == {"x": 1}
+
+
+def test_litellm_complete_tool_requires_the_forced_emit_call(monkeypatch):
+    """The litellm backend forces `tool_choice: emit` too, so it must select that call BY NAME.
+
+    `OpenAICompatibleClient.complete_tool` was fixed for exactly this; the litellm path kept the
+    pre-fix `calls[0]`, so a backend that ignores tool_choice could have some OTHER tool's
+    coincidentally schema-valid arguments accepted as the emit payload — a wrong answer under the
+    right shape, which no downstream validation can catch. `_completion` claims "the
+    OpenAICompatibleClient's resilience contract"; this is part of it."""
+    import types
+
+    import looplab.core.llm as llm
+    c = llm.LiteLLMClient("fake")
+
+    def _resp(*names):
+        calls = [types.SimpleNamespace(
+            id=f"c{i}", type="function",
+            function=types.SimpleNamespace(name=n, arguments='{"x": %d}' % i))
+            for i, n in enumerate(names)]
+        message = types.SimpleNamespace(role="assistant", content="", tool_calls=calls,
+                                        reasoning_content=None)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)], usage=None)
+
+    monkeypatch.setattr(c, "_account", lambda _resp: None)
+    monkeypatch.setattr(c, "_usage", lambda _resp: {})
+    monkeypatch.setattr(c, "_cost", lambda _resp: None)
+
+    # An endpoint that ignored the force returns only some other tool -> KeyError, so parse.py falls
+    # back to the text path instead of accepting that tool's arguments as the structured result.
+    monkeypatch.setattr(c, "_completion", lambda **_kw: _resp("search_web"))
+    with pytest.raises(KeyError):
+        c.complete_tool([{"role": "user", "content": "go"}], {"type": "object"})
+
+    # A real emit is selected BY NAME even when another call is listed first.
+    monkeypatch.setattr(c, "_completion", lambda **_kw: _resp("search_web", "emit"))
+    assert c.complete_tool([{"role": "user", "content": "go"}], {"type": "object"}) == {"x": 1}

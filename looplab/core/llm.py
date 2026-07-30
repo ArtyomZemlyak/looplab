@@ -1251,13 +1251,21 @@ class LiteLLMClient:
             if not calls:  # endpoint ignored tool_choice -> KeyError so parse.py falls back
                 gen.usage(self._usage(resp)).error("no tool_calls in response")
                 raise KeyError("no tool_calls in response")
-            # CLAUDE REVIEW: [LOGIC] blind `calls[0]` — OpenAICompatibleClient.complete_tool was
-            # explicitly fixed to select the forced "emit" call BY NAME, because a backend that
-            # ignores tool_choice can return some OTHER tool's coincidentally schema-valid arguments
-            # as the emit payload (a wrong answer under the right shape, uncatchable downstream);
-            # this litellm backend still has the pre-fix behaviour despite `_completion`'s claim of
-            # "the OpenAICompatibleClient's resilience contract".
-            args = calls[0].function.arguments
+            # This endpoint FORCES `tool_choice: emit`, so the result must actually be that call.
+            # Taking `calls[0]` blindly let a backend that ignores tool_choice have some OTHER tool's
+            # coincidentally schema-valid arguments accepted as the emit payload — a wrong answer
+            # under the right shape, which no downstream validation can catch. Select by NAME, the
+            # same fix OpenAICompatibleClient.complete_tool carries, and treat "no emit anywhere"
+            # exactly like the empty case: raise so parse.py falls back to the text path, the honest
+            # reading of an endpoint that ignored the force. litellm hands back objects rather than
+            # dicts, hence the getattr walk.
+            emit = next(
+                (c for c in calls
+                 if getattr(getattr(c, "function", None), "name", None) == "emit"), None)
+            if emit is None:
+                gen.usage(self._usage(resp)).error("forced emit not honored")
+                raise KeyError("no tool_calls in response")
+            args = emit.function.arguments
             m = resp.choices[0].message
             # Not `_reasoning_of`: object attributes + reasoning_content-first (see complete_text).
             thinking, _ = _clean_thinking(
