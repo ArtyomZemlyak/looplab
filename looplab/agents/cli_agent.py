@@ -285,14 +285,18 @@ class CliAgentDeveloper:
                 # binary missing / not executable -> leave the seed; the validator flags
                 # `agent_launched=False` and the loop's eval/debug copes.
                 self.last_run = AgentRun(launched=False, stderr_tail=str(e)[-2000:])
-            # CLAUDE REVIEW: [EDGE-CASE] When git is unavailable or the seed commit failed
-            # (seed_sha is None) in seed_dirs/patch-gate mode, this silently falls through to the
-            # solution.py readback: in repo mode ALL the agent's edits are discarded with the temp
-            # dir, last_files stays {} and last_patch stays None — the node quietly evaluates the
-            # unmodified baseline with no diagnostic distinguishing "gate skipped (no git)" from
-            # "agent made no changes" (the validator just sees a no-op).
             if (self.patch_gate or self.seed_dirs) and seed_sha:
                 return self._collect_gated(wd, seed_sha)
+            if self.patch_gate or self.seed_dirs:
+                # `_git_seed` returned None — no git, or the seed commit failed (a global
+                # `commit.gpgsign` with no usable key, a failing `core.hooksPath` hook). Without a
+                # seed there is nothing to diff against, so in repo mode EVERY edit the agent made is
+                # discarded with the temp dir and the node evaluates the untouched baseline. Say so:
+                # left as None, the validator reported the generic "no in-surface changes" and every
+                # node of the run shipped the baseline metric as an experiment result, blaming the
+                # agent for a gate that never ran. Mirrors the "git add failed" marker below.
+                self.last_patch = {"ok": False, "paths": [], "rejected": [],
+                                   "error": "git seed unavailable — no diff base, edits discarded"}
             return _read_if(wd / "solution.py")
 
     def _collect_gated(self, wd: Path, seed_sha: str) -> str:

@@ -161,3 +161,37 @@ def test_engine_protects_grader_asset_from_agent_overwrite(tmp_path):
     # submission as malformed (wrong length vs the 10-element held-out key) -> exactly 0.0, never 1.0.
     for n in state.evaluated_nodes():
         assert n.metric == 0.0
+
+
+def test_a_broken_git_seed_is_reported_instead_of_blaming_the_agent(tmp_path, monkeypatch):
+    """`_git_seed` returning None left `last_patch` as None, so the node shipped a silent no-op.
+
+    Without a seed commit there is nothing to diff against: in repo mode every edit the agent made
+    is discarded with the temp dir and the node evaluates the untouched baseline. The validator then
+    reported the generic "no in-surface changes" — blaming the agent for a gate that never ran —
+    while every node of the run submitted the baseline metric as an experiment result. Reachable on
+    a host with a global `commit.gpgsign` and no usable key, a failing `core.hooksPath` hook, or no
+    git at all.
+    """
+    import looplab.agents.cli_agent as cli_agent_module
+    from looplab.core.validate import validate_agent_code
+
+    monkeypatch.setattr(cli_agent_module, "_git_seed", lambda wd: None)
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=_stub(tmp_path, "m2.py", _MULTI),
+                            patch_gate=True, surface=["*.py"])
+    dev.implement(Idea(operator="draft", params={}))
+
+    assert dev.last_patch is not None, "a failed seed must not look like 'the agent did nothing'"
+    assert dev.last_patch["ok"] is False
+    assert "git seed unavailable" in dev.last_patch["error"]
+
+    # ...and that reason is what the operator-facing validator check actually says.
+    detail = [c.detail for c in validate_agent_code("print(1)\n", patch=dev.last_patch).checks
+              if c.name == "edit_in_surface"]
+    assert detail and "gate unavailable" in detail[0], detail
+    # A genuine no-op still reads as a no-op — the new wording is not a blanket excuse.
+    plain = [c.detail for c in validate_agent_code(
+        "print(1)\n", patch={"ok": False, "paths": [], "rejected": []}).checks
+        if c.name == "edit_in_surface"]
+    assert plain == ["no in-surface changes"]

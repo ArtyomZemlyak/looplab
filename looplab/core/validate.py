@@ -101,7 +101,13 @@ def validate_agent_code(
 
     # --- edit-surface gate (patch-gated agents) ------------------------------------
     if patch is not None:
+        # `error` wins over the generic wording: the gate can fail for reasons that are NOT the
+        # agent's doing (no git, a failed seed commit, a stale index), and reporting those as
+        # "no in-surface changes" blamed the agent for a broken gate — the one message an operator
+        # reads when a node ships the untouched baseline.
         checks.append(Check("edit_in_surface", bool(patch.get("ok")),
+                            f"edit-surface gate unavailable: {patch.get('error')}"
+                            if patch.get("error") else
                             f"out-of-surface edits rejected: {patch.get('rejected')}"
                             if patch.get("rejected") else "no in-surface changes"))
 
