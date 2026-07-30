@@ -166,13 +166,19 @@ def code_leakage_scan(code: str) -> dict:
         # truncates at the first `)`, so a test tuple in a SECOND eval_set entry
         # (`eval_set=[(X_val,y_val),(X_test,y_test)]`) never reaches `arg` — the line-level scan sees it.
         head = _EVALSET_KW_RE.split(arg, maxsplit=1)[0]
-        # CLAUDE REVIEW: [EDGE-CASE] The TEST-monitor scan reads only the fit's FIRST source line, so a
-        # multiline monitor kwarg — `.fit(X, y, eval_set=[\n  (X_test, y_test)\n])` — escapes both `arg`
-        # (truncated at the first `)`) and this line-level check. The finditer refactor above fixed
-        # multiline ARGS for the other tells; this one still has a single-line horizon, and unlike the
-        # other misses it is not listed among the ACCEPTED RECALL GAP notes.
+        # Scan BOTH the fit's source LINE and the MATCHED CALL text — they miss different things and
+        # neither alone is enough:
+        #   * the LINE catches a test tuple in a SECOND eval_set entry
+        #     (`eval_set=[(X_val,y_val),(X_test,y_test)]`), which `[^)]*` truncates out of `arg`;
+        #   * the matched CALL catches a monitor kwarg wrapped across lines
+        #     (`.fit(X, y, eval_set=[\n  (X_test, y_test)\n])`), which the line-level horizon missed —
+        #     so purely cosmetic wrapping flipped a genuinely leaking fit from leak=True to leak=False
+        #     and, under trust_gate gate/block, kept a fit-on-test node eligible to win, breed and
+        #     confirm. That miss was never among this file's ACCEPTED RECALL GAP notes.
+        # `[^=]` in `_TEST_MONITOR_RE` is a negated class, so it spans newlines; no re.S needed.
         line_src = lines[line_i].lower() if line_i < len(lines) else m.group(0).lower()
-        test_monitor = _TEST_MONITOR_RE.search(line_src)
+        test_monitor = (_TEST_MONITOR_RE.search(line_src)
+                        or _TEST_MONITOR_RE.search(m.group(0).lower()))
         if (_LEAKY_FIT_ARG_RE.search(head)                             # val/test token in the fit args = leak
                 or test_monitor):                                       # test INSIDE the monitor = leak
             flags.append({"signal": "fit_on_test", "line": line_i + 1, "code": snippet})

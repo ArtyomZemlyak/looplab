@@ -325,13 +325,19 @@ class EnvInspectTools:
                                         return self._clamp("\n".join(hits) + f"\n(capped at {cap} hits)")
                     except OSError:
                         continue
-        # CLAUDE REVIEW: [EDGE-CASE] For a builtin/C-extension module (e.g. 'sys', 'math', or a
-        # compiled submodule whose origin is a .so) `roots` is empty and `single` is None, so `walked`
-        # is empty and NOTHING is scanned — yet this returns "'query' not found under <package>",
-        # which the model reads as evidence of absence. Return an explicit "(no Python source to
-        # grep)" style message when zero files were scanned instead.
-        return self._clamp("\n".join(hits)) if hits \
-            else f"(grep_installed: '{query}' not found under {package})"
+        if hits:
+            return self._clamp("\n".join(hits))
+        if scanned == 0:
+            # A builtin or C-extension module ('sys', 'math', a compiled submodule whose origin is a
+            # .so) has neither `submodule_search_locations` nor a .py origin, so `walked` was empty
+            # and NOT ONE file was read. Reporting "not found" there states a completed negative
+            # search that never happened, and the model takes it as evidence of absence. Say what
+            # actually happened instead — the same honesty rule `_clamp` and the file-budget branch
+            # above already follow.
+            return (f"(grep_installed: {package} has no Python source to grep — it is a builtin or "
+                    "compiled module, so nothing was searched; this is NOT evidence that "
+                    f"'{query}' is absent)")
+        return f"(grep_installed: '{query}' not found in {scanned} scanned file(s) under {package})"
 
     @staticmethod
     def _clamp(text: str, budget: int = RESULT_CAP - 400,

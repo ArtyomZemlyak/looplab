@@ -227,3 +227,35 @@ def test_str_split_receiver_names_do_not_anchor_a_cv_boundary():
                  'X = load()\ny = load_y()\nscaler.fit(X)\nfor a, b in skf.split(X, y):\n    pass\n',
                  'X = load()\ny = load_y()\nscaler.fit(X)\na, b = train_test_split(X, y)\n'):
         assert "fit_before_split" in signals(real), real
+
+
+def test_line_wrapping_cannot_hide_a_test_monitor():
+    """Cosmetic wrapping flipped a genuinely leaking fit from leak=True to leak=False.
+
+    The TEST-monitor tell was scanned only against the fit's FIRST source line, so
+    `.fit(X, y, eval_set=[\\n  (X_test, y_test)\\n])` escaped both `arg` (`_FIT_RE`'s `[^)]*`
+    truncates at the first `)`) and the line-level check. Under trust_gate gate/block that kept a
+    fit-on-test node eligible to win, breed and confirm — and unlike this module's other misses it
+    was never listed among the ACCEPTED RECALL GAP notes. The line scan still has to stay: it is what
+    catches a test tuple in a SECOND eval_set entry, which `arg` truncates away.
+    """
+    leaking = [
+        "model.fit(X_train, y_train, eval_set=[(X_test, y_test)])\n",
+        "model.fit(X_train, y_train, eval_set=[\n    (X_test, y_test)\n])\n",
+        "model.fit(X, y, eval_set=[(X_val, y_val), (X_test, y_test)])\n",
+        "model.fit(\n    X_train, y_train,\n    eval_set=[\n        (X_test, y_test),\n    ],\n)\n",
+    ]
+    for source in leaking:
+        result = code_leakage_scan(source)
+        assert result["leak"] is True, source
+        assert "fit_on_test" in [f["signal"] for f in result["flags"]], source
+
+    # Precision is unchanged: ordinary early stopping on a VALIDATION set is not leakage, wrapped or
+    # not — hard-gating it would exclude every early-stopping solution.
+    clean = [
+        "model.fit(X_train, y_train, eval_set=[(X_val, y_val)])\n",
+        "model.fit(X_train, y_train, eval_set=[\n    (X_val, y_val)\n])\n",
+        "model.fit(X_train, y_train)\n",
+    ]
+    for source in clean:
+        assert code_leakage_scan(source)["leak"] is False, source

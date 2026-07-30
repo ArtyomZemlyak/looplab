@@ -156,3 +156,27 @@ def test_read_installed_null_lines_falls_back_to_max_lines():
                                         "lines": None, "max_lines": 5})
     b = _t().execute("read_installed", {"module": "json.decoder", "start_line": 3, "lines": 5})
     assert a == b and "(lines 3-7 of" in a
+
+
+def test_grep_installed_never_reports_a_search_it_did_not_run():
+    """A builtin/C-extension module has no Python source, so ZERO files are read.
+
+    `roots` is empty and `single` is None for such a module, so the walk is empty — yet the result
+    read "'query' not found under <package>", a completed negative search that never happened. The
+    model takes that as evidence of absence. The file-budget branch and `_clamp` in the same function
+    already report their own truncation honestly; this branch did not.
+    """
+    tools = EnvInspectTools()
+
+    for package, query in (("math", "sqrt"), ("sys", "argv")):
+        answer = tools.execute("grep_installed", {"package": package, "query": query})
+        assert "not found" not in answer, answer
+        assert "no Python source" in answer
+        assert "NOT evidence" in answer
+
+    # A real source package still greps, and a real miss still says so — now with the file count, so
+    # "not found" is always backed by a search that actually happened.
+    found = tools.execute("grep_installed", {"package": "json", "query": "dumps"})
+    assert "json" in found and "no Python source" not in found
+    missing = tools.execute("grep_installed", {"package": "json", "query": "zz_absent_token_zz"})
+    assert "not found" in missing and "scanned file" in missing
