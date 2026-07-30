@@ -402,6 +402,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const runsMainRef = useRef(null)
   const projectsAllRef = useRef(null)
   const [dragRun, setDragRun] = useState(null)
+  const compareDragGuardRef = useRef(null)
   const [view, setView] = useState('list')
   const [mapCollapseOverrides, setMapCollapseOverrides] = useState(() => new Map())
   const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
@@ -889,11 +890,28 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           {view === 'list' && runs && displayedRuns.map(r => (
             <div className={'run-card' + (compareIds.has(r.run_id) ? ' compare-selected' : '')}
                  key={r.run_id} draggable={!navigationBusy}
-                 onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
-              <input type="checkbox" className="compare-check" draggable={false}
-                checked={compareIds.has(r.run_id)}
-                aria-label={`Select ${r.label || r.run_id} for comparison`}
-                onChange={() => toggleCompare(r.run_id)} />
+                 onPointerDownCapture={() => { compareDragGuardRef.current = null }}
+                 onPointerUp={() => { compareDragGuardRef.current = null }}
+                 onPointerCancel={() => { compareDragGuardRef.current = null }}
+                 onDragStart={event => {
+                   if (compareDragGuardRef.current === r.run_id) {
+                     event.preventDefault()
+                     compareDragGuardRef.current = null
+                     return
+                   }
+                   setDragRun(r.run_id)
+                 }}
+                 onDragEnd={() => {
+                   compareDragGuardRef.current = null
+                   setDragRun(null)
+                 }}>
+              <label className="compare-toggle" draggable={false}
+                onPointerDown={() => { compareDragGuardRef.current = r.run_id }}>
+                <input type="checkbox" className="compare-check" draggable={false}
+                  checked={compareIds.has(r.run_id)}
+                  aria-label={`Select ${r.label || r.run_id} for comparison`}
+                  onChange={() => toggleCompare(r.run_id)} />
+              </label>
               {(() => {
                 // A zombie (not finished, but no engine holds the lock) reads as "search" from phase
                 // alone — surface it as "stalled" so the list matches the run header's badge.

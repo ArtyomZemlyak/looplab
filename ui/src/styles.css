@@ -975,8 +975,12 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .run-card:hover { border-color: var(--accent-dim); }
 .run-card.compare-selected { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
 .run-card[draggable] { cursor: grab; }
-.compare-check { flex: none; width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
-.compare-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.compare-toggle { flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; border-radius: 8px; cursor: pointer; }
+.compare-toggle:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.compare-toggle:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.compare-check { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.compare-check:focus-visible { outline: 0; }
 .run-card-main { flex: 1; min-width: 0; color: inherit; cursor: pointer; border-radius: 6px; }
 .run-card-main:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .run-card .move-sel { width: auto; max-width: 150px; }
@@ -2396,7 +2400,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .runbar .text.runbar-q { flex-basis: calc(100% - 22px); }
   .run-card { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: start;
     gap: 8px 10px; padding: 11px; }
-  .compare-check { grid-column: 1; grid-row: 1; margin-top: 3px; }
+  .compare-toggle { grid-column: 1; grid-row: 1; align-self: start; margin: -7px 0 0 -7px; }
   .run-card > .phase { grid-column: 2; grid-row: 1; }
   .run-card-main { min-width: 0; grid-column: 3; }
   .run-card-metrics { grid-column: 3; text-align: left !important; }
