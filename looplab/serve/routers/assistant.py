@@ -358,14 +358,17 @@ def build_router(srv) -> APIRouter:
         path = (body.get("path") or "").strip()
         if not path:
             raise HTTPException(400, "path is required")
+        from looplab.tools.perm_modes import DEFAULT_MODE
         from looplab.tools.write_tools import WriteTools
-        # CLAUDE REVIEW: [SECURITY] This mutation bypasses the entire HITL permission machinery
-        # this file builds: mode="auto" is hardcoded (ignoring the session's plan/confirm mode),
-        # there is no session id, no approver, and no epoch binding — any authenticated caller can
-        # overwrite any file under home/repo/root for which an assistant backup exists, replaying
-        # an old snapshot over newer edits. If the undo affordance is intentional, it should at
-        # least be scoped to a session and honor that session's permission mode.
-        wt = WriteTools([Path.home(), _ASSISTANT_REPO_ROOT, root], mode="auto",
+        # This is the OPERATOR-CLICKED undo, and the click IS the approval — so it calls the bare
+        # `WriteTools.revert`, which `write_tools.py` deliberately leaves un-gated for exactly this
+        # caller (the MODEL-invocable `_revert_tool` next to it carries the mode/approver gate). The
+        # path is still bounded by `_check`: allowed roots, `looks_secret`, and the protected-file
+        # list, none of which depend on the mode.
+        # `mode` is therefore inert here — `revert` never reaches `_authorize`. It is pinned to the
+        # fail-closed DEFAULT rather than "auto" so that if this route is ever pointed at a GATED
+        # verb, the permission machinery denies by default instead of silently self-approving.
+        wt = WriteTools([Path.home(), _ASSISTANT_REPO_ROOT, root], mode=DEFAULT_MODE,
                         repo_root=_ASSISTANT_REPO_ROOT, backup_dir=root / "assistant" / "backups")
         return {"ok": True, "result": wt.revert(path)}
 
