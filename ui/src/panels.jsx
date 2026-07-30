@@ -16,6 +16,7 @@ import {
   validateRunConfigSaveAck,
 } from './settingsModel.js'
 import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
+import { metricComparable, sortRuns } from './runIndex.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
@@ -1023,6 +1024,12 @@ export function MemoryPanel({ onClose }) {
 export function RegistryPanel({ state, onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
+  // Rank through the list view's own comparator instead of a raw descending sort. A raw sort put the
+  // BEST run last on a `direction: 'min'` task, and ranked runs of different tasks / objectives /
+  // metric units against each other on one unitless axis. `metricComparable` is where that judgement
+  // already lives: one task, one direction, or no ranking at all.
+  const rankable = metricComparable(runs)
+  const rankedRuns = rankable ? sortRuns(runs, 'metric', 'asc') : runs   // 'asc' = best first
   const champ = state.champion != null ? state.nodes[state.champion] : (state.best_node_id != null ? state.nodes[state.best_node_id] : null)
   return (
     <Panel title="Solution registry & cross-run" onClose={onClose} wide>
@@ -1041,17 +1048,16 @@ export function RegistryPanel({ state, onClose }) {
       {(state.promotions || []).length
         ? <DataTable caption="Promoted solution nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>alias</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{p.alias || 'champion'}</td></tr>)}</tbody></table></DataTable>
         : <div className="muted">none — use Promote on a node</div>}
-      <div className="section-h">Cross-run leaderboard</div>
+      <div className="section-h">{rankable ? 'Cross-run leaderboard' : 'Cross-run solutions'}</div>
       <PanelResourceNotice resource={resource} label="Cross-run leaderboard" onRetry={retry} />
-      {/* CLAUDE REVIEW: [LOGIC] Min/max direction confusion: this "leaderboard" always sorts by raw
-          metric DESCENDING, so for a `direction === 'min'` task the best run sorts LAST (and runs of
-          different tasks/directions/metric units are ranked on one unitless axis). CrossRunPanel and
-          runIndex.js::sortRuns both handle this (direction-aware compare, or explicitly refusing to
-          rank); either respect each run's `direction` like sortRuns' metric comparator, or present
-          these as unranked observations like CrossRunPanel does. */}
-      {runs.length > 0 && <DataTable caption="Cross-run solution leaderboard" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
-        {[...runs].sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
-          .map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
+      {runs.length > 0 && !rankable && <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
+        Mixed tasks or objectives — listed, not ranked.</div>}
+      {/* The caption stays a static literal: dataTableMigration.test.js checks every table region's
+          accessible name for uniqueness and meaning, which it can only do statically. So it says what
+          the rows ARE, true whether or not they are ranked; the heading and the note above carry the
+          ranked/unranked distinction. */}
+      {runs.length > 0 && <DataTable caption="Cross-run best metric per run" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
+        {rankedRuns.map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
       </tbody></table></DataTable>}
       {resource.state === 'ready' && !runs.length && <div className="muted">No runs in the registry yet.</div>}
     </Panel>

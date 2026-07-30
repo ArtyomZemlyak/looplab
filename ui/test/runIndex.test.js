@@ -224,3 +224,28 @@ test('a project with no name does not crash the index the map view builds from',
                                       { id: 'z', name: 'Z', parent_id: null }])
   assert.deepEqual(byParent[null].map(project => project.id), ['x', 'y', 'z'])
 })
+
+test('cross-run ranking is direction-aware and refuses incomparable sets', () => {
+  // The registry panel sorted by raw metric DESCENDING, so on a `direction: 'min'` task the BEST run
+  // sorted LAST, and runs of different tasks/objectives/metric units were ranked against each other
+  // on one unitless axis. `sortRuns(..., 'metric', 'asc')` is best-first and already encodes both
+  // rules; `metricComparable` is the gate.
+  const minRuns = [
+    { run_id: 'worse', task_id: 't', direction: 'min', best_metric: 9 },
+    { run_id: 'best', task_id: 't', direction: 'min', best_metric: 1 },
+  ]
+  assert.equal(metricComparable(minRuns), true)
+  assert.deepEqual(sortRuns(minRuns, 'metric', 'asc').map(r => r.run_id), ['best', 'worse'])
+  // A raw descending sort would have produced the opposite for this exact input.
+  assert.notDeepEqual(
+    [...minRuns].sort((a, b) => (b.best_metric ?? -Infinity) - (a.best_metric ?? -Infinity))
+      .map(r => r.run_id),
+    ['best', 'worse'])
+
+  const maxRuns = minRuns.map(r => ({ ...r, direction: 'max' }))
+  assert.deepEqual(sortRuns(maxRuns, 'metric', 'asc').map(r => r.run_id), ['worse', 'best'])
+
+  // Mixed tasks or mixed objectives are not rankable at all — the caller must present them unranked.
+  assert.equal(metricComparable([...minRuns, { run_id: 'x', task_id: 'other', direction: 'min', best_metric: 0 }]), false)
+  assert.equal(metricComparable([minRuns[0], { ...minRuns[1], direction: 'max' }]), false)
+})
