@@ -320,3 +320,88 @@ def test_loop_without_initial_trigger_waits_a_full_cadence_first():
 
     anyio.run(drive)
     assert stub.compute_calls == 0                              # never researched a short window
+
+
+# --------------------------------------------------------------------------- merge cadence baseline
+
+def _belief_card(cid):
+    return types.SimpleNamespace(
+        id=cid, statement=f"belief {cid}", selection_ready=False,
+        selection_provenance=types.SimpleNamespace(action_source="none"))
+
+
+class _BoardState:
+    """The slice of RunState `_maybe_merge_hypotheses` reads."""
+
+    def __init__(self, cards):
+        self._cards, self.goal, self.nodes = list(cards), "g", {}
+
+    def open_research_cards(self):
+        return list(self._cards)
+
+
+class _NullStore:
+    def __init__(self):
+        self.appended = []
+
+    def append(self, event_type, data):
+        self.appended.append((event_type, data))
+
+    def read_all(self):
+        return []
+
+
+def _merge_engine(store):
+    import contextlib
+
+    @contextlib.contextmanager
+    def _span(*_a, **_k):
+        yield types.SimpleNamespace(set=lambda *a, **k: None)
+
+    eng = object.__new__(Engine)
+    eng._track_hypotheses = True
+    eng._reflect_client = lambda: object()          # any non-None client enables the pass
+    eng._embedder = None
+    eng.lessons = None
+    eng.store = store
+    eng._op_span = _span
+    return eng
+
+
+def test_merge_cadence_baseline_is_the_POST_merge_board(monkeypatch):
+    """"Grown by >=2 since the last pass" must mean since the board the last pass LEFT.
+
+    The baseline used to be recorded before the merge, so consolidating 8 open cards down to 4 left
+    it at 8: the board then had to re-grow to 10 before the next pass instead of 6. The more
+    effective the merge, the longer the blackout it caused, and duplicates re-accumulated far past
+    the documented cadence."""
+    import looplab.engine.research_cadence as research_cadence
+    import looplab.search.hybrid_merge as hybrid_merge
+
+    groups = [{"members": [0, 1, 2], "merged": "m1"}, {"members": [3, 4, 5], "merged": "m2"}]
+    monkeypatch.setattr(hybrid_merge, "consolidate", lambda texts, client, **kw: groups)
+    # 8 open cards in, 4 left after the two 3-way merges.
+    monkeypatch.setattr(research_cadence, "fold",
+                        lambda _events: _BoardState(_belief_card(f"c{i}") for i in range(4)))
+
+    store = _NullStore()
+    eng = _merge_engine(store)
+    eng._maybe_merge_hypotheses(_BoardState(_belief_card(f"c{i}") for i in range(8)))
+
+    assert [t for t, _ in store.appended] == ["hypothesis_merged"] * 2
+    assert eng._last_hyp_merge_n == 4          # the board the pass LEFT, not the 8 it found
+
+
+def test_a_failed_merge_does_not_consume_the_cadence_window(monkeypatch):
+    """A transient LLM/transport failure must not silently skip the next consolidation window."""
+    import looplab.search.hybrid_merge as hybrid_merge
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(hybrid_merge, "consolidate", _boom)
+    eng = _merge_engine(_NullStore())
+    eng._maybe_merge_hypotheses(_BoardState(_belief_card(f"c{i}") for i in range(6)))
+
+    # Baseline untouched, so the very next pass on the same board still runs.
+    assert getattr(eng, "_last_hyp_merge_n", -1) == -1

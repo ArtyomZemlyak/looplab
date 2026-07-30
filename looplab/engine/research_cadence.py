@@ -534,18 +534,8 @@ class ResearchCadenceMixin:
         open_hyps = [c for c in state.open_research_cards()
                      if not c.selection_ready and _pure_belief(c)]
         n = len(open_hyps)
-        # CLAUDE REVIEW: [LOGIC] The baseline recorded below is the PRE-merge open-board size, so a
-        # successful consolidation that shrinks the board (e.g. 8 open cards merged down to 4) makes
-        # every later pass require the board to re-grow past the OLD pre-merge peak + 2 (>= 10 here)
-        # before merging again — not "grown by >= 2 since the last pass" as the docstring says.
-        # Duplicates re-accumulating after a big merge go unconsolidated for far longer than the
-        # documented cadence. Recording the POST-merge open count (re-derived after the fold at the
-        # bottom) would match the stated gate. Also note the baseline is spent even when
-        # `consolidate` raises (the except path returns after this assignment), silently skipping
-        # the cadence window on a transient LLM failure.
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
             return state
-        self._last_hyp_merge_n = n
         try:
             from looplab.search.hybrid_merge import consolidate
             texts = [h.statement for h in open_hyps]
@@ -574,8 +564,19 @@ class ResearchCadenceMixin:
                         "at_node": len(state.nodes)})
                     wrote = True
         except Exception:  # noqa: BLE001 — advisory hygiene; a merge hiccup must not disturb the loop
+            # The cadence baseline is NOT consumed here. It used to be assigned before the call, so a
+            # transient LLM/transport failure silently skipped the whole window and duplicates piled
+            # up until the board grew another 2 past a merge that never happened.
             return state
-        return fold(self.store.read_all()) if wrote else state
+        merged_state = fold(self.store.read_all()) if wrote else state
+        # Baseline = the POST-merge open board, which is what "grown by >=2 SINCE THE LAST PASS"
+        # means. Recording the pre-merge count made a successful consolidation raise its own bar:
+        # merging 8 cards down to 4 left the baseline at 8, so the board had to re-grow to 10 before
+        # the next pass instead of 6, and duplicates re-accumulated for far longer than the
+        # documented cadence — the more effective the merge, the longer the blackout it caused.
+        self._last_hyp_merge_n = len([c for c in merged_state.open_research_cards()
+                                      if not c.selection_ready and _pure_belief(c)])
+        return merged_state
 
     def _maybe_refresh_report(self, state: RunState) -> RunState:
         """Regenerate the agent-authored run report on a node-count cadence, then re-fold. No-op when
