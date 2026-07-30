@@ -2018,6 +2018,14 @@ def test_command_record_save_retries_transient_windows_replace_denial(tmp_path, 
     attempts = []
 
     def sharing_violation_then_write(path, payload):
+        # Count only OUR target. `atomic_write_text` is patched on the MODULE, so every
+        # RunCommandService._save in this process routes through here — including a background
+        # command worker an earlier test left running. Under full-suite load one of those wrote
+        # while this test was counting, and `attempts` picked up a path from another test's tmp dir
+        # (4 != 3). Filtering by path keeps the assertion about this record's retries and leaves the
+        # stray writer's own write correct.
+        if Path(path) != target:
+            return real_write(path, payload)
         attempts.append(path)
         if len(attempts) < 3:
             exc = PermissionError("destination is briefly open")
