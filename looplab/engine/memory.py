@@ -575,16 +575,17 @@ class JsonlCaseLibrary:
         prev = next((c for c in self.cases if c.get("task_id") == tid), None)
         if prev is not None:
             # Keep the old case only when both metrics are comparable and the new one is not better.
-            # CLAUDE REVIEW: [LOGIC] Incomparable always REPLACES: a new case with metric=None (which
-            # valid_case_record admits) bypasses this guard and overwrites a stored case that has a
-            # real metric — the retain-on-improvement contract ("keeps a case only when its metric
-            # beats the stored one", module docstring) is inverted for the metric-less writer. A
-            # measured prior solution should not be clobbered by an unmeasured one; require the new
-            # metric to be non-None (or explicitly better) before replacing a measured case.
+            # An UNMEASURED new case never displaces a MEASURED stored one: `valid_case_record`
+            # admits `metric=None`, and the incomparable branch used to fall straight through to the
+            # replace — inverting the module's retain-on-improvement contract for exactly the writer
+            # that has no evidence to justify the replacement. Replacing an unmeasured prior is still
+            # allowed (nothing is lost), as is the first write for a task.
             if metric is not None and prev.get("metric") is not None:
                 better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
                 if not better:
                     return False
+            elif metric is None and prev.get("metric") is not None:
+                return False
         # quarantine is a read decision, never permission for an unrelated upsert to erase
         # malformed or future-schema bytes. Replace only understood current rows for this task; retain every
         # other raw line byte-for-byte and append the new current record atomically under the required lock.

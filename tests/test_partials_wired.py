@@ -143,6 +143,20 @@ def test_memory_persists_and_retains_best(tmp_path):
                      "metric": first_metric - 100, "params": {}}) is True
     assert len(JsonlCaseLibrary(mem / "cases.jsonl").all()) == 1  # still one (upsert)
 
+    # An UNMEASURED case never displaces a measured one. `valid_case_record` admits metric=None, and
+    # the incomparable branch used to fall straight through to the replace — inverting the
+    # retain-on-improvement contract for exactly the writer with no evidence to justify it.
+    kept = JsonlCaseLibrary(mem / "cases.jsonl")
+    assert kept.add({"task_id": "toy_quadratic", "goal": "g", "direction": "min",
+                     "metric": None, "params": {}}) is False
+    stored = JsonlCaseLibrary(mem / "cases.jsonl").all()
+    assert len(stored) == 1 and stored[0]["metric"] == first_metric - 100
+
+    # ...but it may still land for a task with no measured case at all.
+    fresh = JsonlCaseLibrary(mem / "cases.jsonl")
+    assert fresh.add({"task_id": "unmeasured_task", "goal": "g", "direction": "min",
+                      "metric": None, "params": {}}) is True
+
 
 def test_past_cases_become_searchable_knowledge(tmp_path):
     """I19 retrieval: a stored case is indexed by KnowledgeTools so the Researcher can
