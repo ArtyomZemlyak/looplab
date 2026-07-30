@@ -1679,3 +1679,39 @@ def test_status_panel_survives_rich_markup_in_goal_and_stop_reason():
     app.console.print(panel)                       # would raise rich.errors.MarkupError before the fix
     out = app.console.file.getvalue()
     assert "strip" in out and "aborted" in out     # goal + stop_reason rendered (escaped), not crashed
+
+
+def test_genesis_does_not_send_the_new_turn_twice():
+    """The newest user turn must reach the boss ONCE.
+
+    `genesis` appends the turn to `msgs` and ALSO passes the same text as `instruction`, and the
+    genesis route renders "Goal: <instruction>" above the full "Conversation:" — so sending `msgs`
+    delivered the message twice, once as the goal and again as the last conversation line.
+    `_boss_turn` already avoids exactly this with `history_for_boss(history[:-1])`."""
+    class FakeApi:
+        def __init__(self):
+            self.sent = []
+
+        def genesis(self, messages, instruction, draft):
+            self.sent.append((list(messages), instruction))
+            return {"ok": True, "reply": f"planned {len(self.sent)}", "spec": None}
+
+    api = FakeApi()
+    app = _command_tui(api)
+    followups = iter(["second goal"])
+
+    def _input(*_args, **_kwargs):
+        try:
+            return next(followups)
+        except StopIteration:
+            raise EOFError
+    app.console.input = _input
+    app.genesis(seed="first goal")
+
+    assert [instruction for _msgs, instruction in api.sent] == ["first goal", "second goal"]
+    # Turn 1: nothing but the instruction — the route renders "Goal: first goal" itself.
+    assert api.sent[0][0] == []
+    # Turn 2: the PRIOR turns only. "second goal" travels once, as the instruction.
+    assert api.sent[1][0] == [{"role": "user", "content": "first goal"},
+                              {"role": "assistant", "content": "planned 1"}]
+    assert all(m["content"] != "second goal" for m in api.sent[1][0])

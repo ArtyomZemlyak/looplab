@@ -377,17 +377,17 @@ class Tui:
                     return
                 continue
             # A goal/refinement turn -> the boss (re)plans.
-            # CLAUDE REVIEW: [LOGIC] The new user turn is appended to `msgs` BEFORE the call, yet it
-            # is ALSO passed separately as `instruction` — the genesis route renders
-            # "Goal: <instruction>" plus the full "Conversation:" (which now ends with the same
-            # text), so the newest message reaches the boss twice. `_boss_turn` avoids exactly this
-            # with `history_for_boss(history[:-1])`; mirror that here (append after the call, or
-            # send msgs[:-1]).
             msgs.append({"role": "user", "content": text})
             self.console.print(f"[green]you ›[/green] {_esc(text)}")
             try:
                 with self.console.status("boss is planning…", spinner="dots"):
-                    r = self.api.genesis(msgs, text, spec)
+                    # `text` also goes over as `instruction`, and the genesis route renders
+                    # "Goal: <instruction>" ABOVE the full "Conversation:" — so sending `msgs`,
+                    # which now ends with this very turn, delivered the newest message twice.
+                    # Send the PRIOR turns only, exactly as `_boss_turn` does with
+                    # `history_for_boss(history[:-1])`. The append stays BEFORE the call so the
+                    # error paths below can still `msgs.pop()` it back off.
+                    r = self.api.genesis(msgs[:-1], text, spec)
             except ApiError as e:
                 self.console.print(f"[red]planner unreachable: {_esc(e)}[/red]")
                 msgs.pop()
