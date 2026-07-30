@@ -463,3 +463,38 @@ def test_lessons_route_by_role(tmp_path):
     eng._dev_prior_note_text = dev
     di = eng._directed_idea(Idea(operator="draft", params={}, rationale="base"), RunState())
     assert "guard empty input" in di.rationale and "deeper trees" not in di.rationale
+
+
+def test_auto_skill_write_serializes_on_the_shared_memory_lock(tmp_path):
+    """Two runs distilling the same skill must not clobber each other's evidence.
+
+    `write_auto_skill` is a read-modify-write (read the file, parse `fingerprints`, rewrite) over a
+    file in a SHARED `LOOPLAB_MEMORY_DIR`. Without the interprocess lock every other mutable
+    cross-run store takes, concurrent runs both read the old list and the last atomic write wins —
+    losing a fingerprint, and with it the second distinct task that decides candidate -> promoted."""
+    import threading
+    from pathlib import Path as _Path
+
+    from looplab.events.eventstore import _interprocess_lock
+
+    first = write_auto_skill(tmp_path, "Cache the featurizer", "body",
+                             ["kind:dataset", "dir:max", "churn"], "task-a")
+    assert first and "status: candidate" in first.read_text(encoding="utf-8")
+
+    done = threading.Event()
+
+    def _second_run():
+        write_auto_skill(tmp_path, "Cache the featurizer", "body",
+                         ["kind:repo", "dir:min", "latency"], "task-b")
+        done.set()
+
+    worker = threading.Thread(target=_second_run, daemon=True)
+    # flock is per open-file-description, so this second acquisition blocks a same-process writer
+    # exactly as it blocks another run's process.
+    with _interprocess_lock(_Path(str(first) + ".lock"), required=True):
+        worker.start()
+        assert not done.wait(0.75), "the skill write did not wait for the shared-memory lock"
+    worker.join(timeout=30)
+    assert done.is_set()
+    # ...and once it does run, it sees the FIRST fingerprint and promotes on the second distinct task.
+    assert "status: promoted" in first.read_text(encoding="utf-8")

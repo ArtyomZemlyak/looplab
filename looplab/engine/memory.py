@@ -459,41 +459,44 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
     """Draft/refresh an auto-distilled skill. New claim -> status: candidate. If a candidate
     with the same slug already exists from a DIFFERENT task fingerprint (Jaccard < 0.6), the
     technique generalized -> status: promoted. Never raises (best-effort memory)."""
-    # CLAUDE REVIEW: [RACE] This is a read-modify-write (read_text -> parse fingerprints -> rewrite)
-    # over a file in the SHARED cross-run memory dir, with NO `_interprocess_lock` — unlike every other
-    # mutable cross-run store here (JsonlCaseLibrary.add, ConceptCapsuleStore.add, the governance
-    # ledgers all lock + re-read inside the lock). Two runs sharing LOOPLAB_MEMORY_DIR that distill the
-    # same slug concurrently can lose each other's fingerprint (last atomic write wins), which both
-    # loses evidence and can miss (or spuriously delay) the candidate -> promoted transition that
-    # depends on the accumulated fingerprint list.
     try:
         d = Path(skills_dir)
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"auto-{skill_slug(statement)}.md"
-        status, fps = "candidate", [fingerprint]
-        if p.exists():
-            head = p.read_text(encoding="utf-8")
-            m = re.search(r"fingerprints:\s*(\[.*?\])\s*$", head, re.M | re.S)
-            if m:
-                try:
-                    fps = json.loads(m.group(1))
-                except json.JSONDecodeError:
-                    fps = []
-            prior_status = "promoted" if "status: promoted" in head else "candidate"
-            different = any(fingerprint_similarity(fingerprint, old) < 0.6 for old in fps if old)
-            status = "promoted" if (different or prior_status == "promoted") else "candidate"
-            if fingerprint not in fps:
-                fps = (fps + [fingerprint])[-6:]
-        text = ("---\n"
-                f"name: auto-{skill_slug(statement)}\n"
-                f"description: {normalize_statement(statement)[:120]}\n"
-                "provenance: auto\n"
-                f"status: {status}\n"
-                f"source_task: {task_id}\n"
-                f"fingerprints: {json.dumps(fps)}\n"
-                "---\n\n"
-                f"# {statement.strip()}\n\n{body.strip()}\n")
-        atomic_write_text(p, text)
+        from looplab.events.eventstore import _interprocess_lock
+        # Under the same required interprocess lock every other mutable cross-run store here uses
+        # (JsonlCaseLibrary.add, ConceptCapsuleStore.add, the governance ledgers). This is a
+        # read-modify-write over a file in a SHARED memory dir, so two runs distilling the same slug
+        # at once lost each other's fingerprint to the last atomic write — dropping evidence AND
+        # perturbing the accumulated list the candidate -> promoted transition is decided from. The
+        # read happens INSIDE the lock so a stale read cannot overwrite a concurrent write.
+        # A filesystem that cannot provide the lock leaves the draft unwritten (the outer except
+        # returns None): skipping one best-effort skill beats clobbering another run's evidence.
+        with _interprocess_lock(Path(str(p) + ".lock"), required=True):
+            status, fps = "candidate", [fingerprint]
+            if p.exists():
+                head = p.read_text(encoding="utf-8")
+                m = re.search(r"fingerprints:\s*(\[.*?\])\s*$", head, re.M | re.S)
+                if m:
+                    try:
+                        fps = json.loads(m.group(1))
+                    except json.JSONDecodeError:
+                        fps = []
+                prior_status = "promoted" if "status: promoted" in head else "candidate"
+                different = any(fingerprint_similarity(fingerprint, old) < 0.6 for old in fps if old)
+                status = "promoted" if (different or prior_status == "promoted") else "candidate"
+                if fingerprint not in fps:
+                    fps = (fps + [fingerprint])[-6:]
+            text = ("---\n"
+                    f"name: auto-{skill_slug(statement)}\n"
+                    f"description: {normalize_statement(statement)[:120]}\n"
+                    "provenance: auto\n"
+                    f"status: {status}\n"
+                    f"source_task: {task_id}\n"
+                    f"fingerprints: {json.dumps(fps)}\n"
+                    "---\n\n"
+                    f"# {statement.strip()}\n\n{body.strip()}\n")
+            atomic_write_text(p, text)
         return p
     except Exception:  # noqa: BLE001 — skill distillation is best-effort, never fails a run
         return None
