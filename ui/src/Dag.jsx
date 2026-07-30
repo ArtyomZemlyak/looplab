@@ -343,6 +343,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                              themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null }) {
   const workId = workingId(state)
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
+  const [groupActionKey, setGroupActionKey] = useState('')
+  useEffect(() => setGroupActionKey(''), [groupMode])
   const dagRef = useRef(null)
   const menuRef = useRef(null)
   const menuOpenSequence = useRef(0)
@@ -584,6 +586,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   }, [projection, geometry, state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
       themeFilter, highlightIds, fx, onNodeAction, openActions])
   const { edges, groupKeys } = base
+  const activeGroupActionKey = groupKeys.includes(groupActionKey) ? groupActionKey : ''
   // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on
   // menu?.nodeId. This is an O(n) shallow pass over the already-laid-out nodes (one new object for the
   // open node, others returned by reference) — so toggling the menu never re-runs the layout memo above.
@@ -677,6 +680,23 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           {GROUP_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
         {groupMode !== 'none' && groupKeys.length > 0 && <>
+          <select className="text grp-picker" aria-label="Choose one experiment group"
+                  value={activeGroupActionKey} onChange={e => setGroupActionKey(e.target.value)}>
+            <option value="">one group…</option>
+            {groupKeys.map(key => <option key={key} value={key}>
+              {key} · {collapsed.has(key) ? 'collapsed' : 'expanded'}
+            </option>)}
+          </select>
+          <button type="button" className="btn sm ghost grp-picker-action"
+                  disabled={!activeGroupActionKey}
+                  aria-label={activeGroupActionKey
+                    ? `${collapsed.has(activeGroupActionKey) ? 'Expand' : 'Collapse'} group ${activeGroupActionKey}`
+                    : 'Choose a group before collapsing or expanding it'}
+                  onClick={() => activeGroupActionKey && onToggleGroup?.(activeGroupActionKey)}>
+            {activeGroupActionKey
+              ? collapsed.has(activeGroupActionKey) ? 'expand' : 'collapse'
+              : 'choose group'}
+          </button>
           <button className="btn sm ghost" title="collapse all groups" onClick={() => onCollapseAll && onCollapseAll(groupKeys)}>⊟ all</button>
           <button className="btn sm ghost" title="expand all groups" onClick={() => onExpandAll && onExpandAll()}>⊞ all</button>
           {(groupMode === 'theme' || groupMode === 'niche') && onAutoCollapse &&
