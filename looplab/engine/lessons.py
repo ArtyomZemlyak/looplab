@@ -37,7 +37,9 @@ from looplab.core.models import (
     NODE_CONCEPT_PROVENANCE_CLASSIFIER,
     RunState,
     latest_lesson_node_count,
+    valid_concept_id,
 )
+from looplab.engine.concept_registry import normalize_key
 from looplab.engine.lessons_distill import LessonDistillMixin
 # The role constants moved to lessons_priors.py with the prior renderer that filters on them;
 # re-imported so `from looplab.engine.lessons import LESSON_ROLE_*` (tests, cross-run tooling)
@@ -380,27 +382,28 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             if direction not in ("min", "max"):
                 return
 
-            def _better(a, b) -> bool:          # is metric a strictly better than b for this direction?
-                return a < b if direction == "min" else a > b
-
-            # NOTE: raw per-run concept LABELS — no `concept_consolidation` canonicalization / UID /
-            # taxonomy version yet (the CR1a concept_uid resolver is the §21.20.13 TODO), so a later reader
-            # matches by exact string. Attempt coverage retains every tagged node, while a durable numeric
-            # outcome may come only from the same feasible, live, unflagged pool used for promotion.
+            # NOTE: per-run concept labels carry no `concept_consolidation` / UID / taxonomy version
+            # yet (the CR1a concept_uid resolver is the §21.20.13 TODO), so a later reader matches by
+            # string — which is exactly why the ONE spelling below has to be the CANONICAL one.
+            # Attempt coverage retains every tagged node, while a durable numeric outcome may come
+            # only from the same feasible, live, unflagged pool used for promotion.
             concepts, outcomes = set(), {}
             provenance = getattr(final, "node_concept_provenance", None) or {}
             materialization_receipts = (
                 getattr(final, "node_concept_materialization_receipts", None) or {})
             aborted = set(getattr(final, "aborted_nodes", None) or [])
-            classifier_observed = any(
-                provenance.get(nd.id) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
-                for nd in final.nodes.values())
             evidence_nodes_total = evidence_nodes_incomplete = 0
+            classifier_observed = False
             eligible_ids = {node.id for node in promotion_eligible_nodes(final)}
             for nd in final.nodes.values():
-                if nd.id in aborted or getattr(nd, "tombstoned", False):
-                    continue
-                if provenance.get(nd.id) != NODE_CONCEPT_PROVENANCE_CLASSIFIER:
+                classified = provenance.get(nd.id) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+                # `classifier_observed` counts a node whose classifier RAN, including one later
+                # aborted or deleted — it answers "did this run ever classify?", which is what
+                # separates "no evidence" from "evidence unknown" below. The evidence loop then
+                # skips those lifecycles, so the two counts differ ON PURPOSE (pinned by
+                # tests/test_cross_run_concepts.py's tombstone/abort/classifier_empty cases).
+                classifier_observed = classifier_observed or classified
+                if not classified or nd.id in aborted or getattr(nd, "tombstoned", False):
                     continue
                 evidence_nodes_total += 1
                 evidence_nodes_incomplete += int(nd.id in materialization_receipts)
@@ -408,20 +411,52 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 # the valid retained subset of a partial classifier result remains positive
                 # evidence, but the producer-level denominator below permanently forbids absence/frequency
                 # inference. Authored/heuristic labels and deleted/aborted attempts never cross this wall.
-                # ONE spelling for add/get/set. The read side used the raw `c` while the write side
-                # stored under `str(c)`, so for any non-str concept value — which the surrounding
-                # coercions exist precisely because it is possible — the lookup always missed, the
-                # `_better` comparison was skipped, and the recorded outcome degraded from
-                # best-metric-wins to last-node-wins.
+                record = m is not None and nd.id in eligible_ids
+                # ONE spelling for add/get/set, and it must be the READER's spelling. The classifier's
+                # RAW casing is deliberately preserved by `bounded_raw_concept_values`, so a single
+                # technique arrives as `Data/Hard-Negative-Mining` on one node and
+                # `data/hard-negative-mining` on another; keying the outcome map by the raw string made
+                # those two different concepts, so the best-of comparison never ran between them and
+                # the capsule published the SAME concept as both a winner and a loser — which also fed
+                # a phantom value into `_concept_profit_signs`' run median, shifting unrelated
+                # concepts' signs. The spelling is `concept_registry.normalize_key` (guarded by
+                # `valid_concept_id`), which is exactly what `canonicalize_concepts` applies on the
+                # READ side (novelty/portfolio/cards); `core/concepts.py::normalize_concept_id` would
+                # NOT do — it maps spaces to `-`, so `A B` would be written `a-b` and never intersect
+                # the reader's `a b`. Governance (aliases/splits) stays out: the capsule records what
+                # this run observed, and readers apply the CURRENT rules when they read it.
+                # Dropping (not coercing) an unusable id is the same rule the rest of the stack
+                # follows — `str()` would launder `7`/`None` into the perfectly valid ids `'7'`/`'None'`
+                # and persist them as cross-run evidence.
+                node_dropped_a_tag = False
                 for c in node_concepts.get(nd.id) or []:
-                    key = str(c)
+                    key = normalize_key(c) if valid_concept_id(c) else None
+                    if not key:
+                        node_dropped_a_tag = True
+                        continue
                     concepts.add(key)
-                    if (nd.id in eligible_ids and m is not None
-                            and (outcomes.get(key) is None or _better(m, outcomes[key]))):
-                        outcomes[key] = m
+                    if record:
+                        prev = outcomes.get(key)
+                        # `RunState.is_better` is THE comparator (core/fitness.py) — one spelling of
+                        # "better" across the fold, the policies and this capsule.
+                        if prev is None or final.is_better(m, prev):
+                            outcomes[key] = m
+                # `evidence_nodes_incomplete` counts NODES, not tags: `build_concept_capsule` rejects
+                # the whole capsule when it exceeds `evidence_nodes_total`, and a per-tag increment on
+                # a node with two unusable tags would do exactly that — the BUILD `except` below then
+                # swallows the ValueError and NO capsule is written at all.
+                if node_dropped_a_tag and nd.id not in materialization_receipts:
+                    evidence_nodes_incomplete += 1
             run_id = final.run_id or final.task_id
+            # `evidence_nodes_total == 0` is the term that matters: without it a run whose only
+            # classifier node was later aborted took the write path with classifier_observed=True and
+            # published `nodes_total=0, evidence_complete=True, concepts_complete=True` — the exact
+            # zero the comment below forbids, asserting complete knowledge of no concepts for a run
+            # that classified one. The other two conjuncts are implied by `not classifier_observed`
+            # (nothing can be counted without a classified node) and stay for readability.
             requires_existing_capsule = (
-                not concepts and evidence_nodes_incomplete == 0 and not classifier_observed)
+                not concepts and evidence_nodes_incomplete == 0
+                and (not classifier_observed or evidence_nodes_total == 0))
             best = final.best()
             capsule = build_concept_capsule(
                 run_id=run_id, task_id=final.task_id, direction=direction,
@@ -445,7 +480,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             # provenance. Supersede it with an explicitly UNKNOWN empty snapshot, never an exact zero.
             if not any(c.get("run_id") == run_id for c in capsule_store.all()):
                 return
-        capsule_store.add(capsule)
+        # `add` returns False WITHOUT raising when the row fails validation (an empty run_id, a
+        # concepts/outcomes key-set mismatch). Discarding it dropped the capsule forever while
+        # finalize still marked the step done — the silent loss the comment above says must not
+        # happen. Raise so it reaches finalize's retry handshake like any other write failure.
+        if not capsule_store.add(capsule):
+            raise RuntimeError(f"concept capsule for run {run_id!r} was rejected by the store")
 
     def _already_curated(self, log_name: str, curation_key: str) -> bool:
         """Whether semantic work has a terminal outcome; unavailable clients do not consume the key."""

@@ -69,6 +69,9 @@ collections: `fingerprint_total` / `fingerprint_omitted` / `fingerprint_complete
 within-run rank signs against the full valid outcome field before retaining the bounded projection. Invalid
 concept IDs and outcome keys are never persisted as evidence and count as omitted input, so their removal cannot
 produce `complete=true`; an invalid direction is rejected instead of being coerced into inverted `min` evidence.
+An unusable label the capsule WRITER drops before the builder sees it — the only way it can key one concept
+under one spelling — is counted on the producer denominator below instead, marking that node incomplete, so it
+likewise cannot produce `complete=true`.
 The writer also persists the classifier-producer denominator
 `concept_evidence_nodes_total` / `concept_evidence_nodes_incomplete` / `concept_evidence_complete` over active
 nodes. Tombstoned and aborted nodes are excluded. Valid labels retained from an incomplete classifier result

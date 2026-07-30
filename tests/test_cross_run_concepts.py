@@ -40,8 +40,11 @@ def test_store_concept_capsule_writes_best_per_concept_outcome(tmp_path):
     s = EventStore(tmp_path / "events.jsonl")
     s.append("run_started", {"run_id": "r-now", "task_id": "t", "goal": "dense retrieval reviews",
                              "direction": "max"})
-    # two nodes on the SAME concept; the better (max) metric must win the concept's outcome
-    for nid, metric in ((0, 0.85), (1, 0.90)):
+    # Two nodes on the SAME concept; the better (max) metric must win the concept's outcome.
+    # The BEST metric is written FIRST on purpose: with best == last the assertion below holds under
+    # last-node-wins too, so it could not tell the two rules apart (mutation-proved: replacing the
+    # best-of guard with an unconditional write left this whole file green).
+    for nid, metric in ((0, 0.90), (1, 0.85)):
         s.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
                                   "idea": {"operator": "draft", "params": {"t": float(nid)}, "theme": "x"}})
         s.append("node_evaluated", {"node_id": nid, "metric": metric})
@@ -55,6 +58,124 @@ def test_store_concept_capsule_writes_best_per_concept_outcome(tmp_path):
     assert c["concepts"] == ["data/hard-negative-mining"]
     assert c["best_metric"] == 0.90
     assert c["concept_outcomes"]["data/hard-negative-mining"] == 0.90   # best-of, not last-of
+
+
+def test_capsule_keys_one_concept_by_its_canonical_spelling(tmp_path):
+    """One concept tagged under two RAW spellings must be ONE capsule entry, best-of.
+
+    `bounded_raw_concept_values` deliberately preserves the classifier's raw casing, so the same
+    technique arrives as `Data/Hard-Negative-Mining` on one node and `data/hard-negative-mining` on
+    another. Keying the outcome map by the raw string made those two different concepts: the best-of
+    comparison never ran between them and the capsule published the SAME concept as both a winner
+    and a loser, which also fed a phantom value into `_concept_profit_signs`' run median and shifted
+    unrelated concepts' signs."""
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "r-spell", "task_id": "t", "goal": "dense retrieval reviews",
+                             "direction": "max"})
+    # An UNRELATED concept rides along on both nodes: with the duplicate present it saw a 3-value
+    # outcome field instead of 2, which moved the run median and flipped its persisted sign.
+    for nid, metric, spelling in ((0, 0.90, "data/hard-negative-mining"),
+                                  (1, 0.40, "Data/Hard-Negative-Mining")):
+        s.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {"t": float(nid)}}})
+        s.append("node_evaluated", {"node_id": nid, "metric": metric})
+        s.append("node_concepts", {"node_id": nid, "concepts": [spelling, "loss/mnr"], "mode": "llm"})
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
+
+    c = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
+    assert c["concepts"] == ["data/hard-negative-mining", "loss/mnr"]          # ONE hard-negative concept
+    assert c["concept_outcomes"] == {"data/hard-negative-mining": 0.90, "loss/mnr": 0.90}
+    # ...so it cannot be published as a winner AND a loser at once, and the phantom second value no
+    # longer skews the run median that decides the UNRELATED concept's sign.
+    assert c["concept_signs"] == {"data/hard-negative-mining": 0, "loss/mnr": 0}
+
+
+def test_capsule_spelling_is_the_one_the_readers_look_up(tmp_path):
+    """The write side must canonicalize with the READER's normalizer, not a lookalike.
+
+    Every consumer (novelty priors, the portfolio overview, concept cards) canonicalizes what it
+    reads through `canonicalize_concepts` → `concept_registry.normalize_key`, which KEEPS spaces.
+    `core/concepts.py::normalize_concept_id` maps a space to `-`, so keying the capsule by it would
+    persist `a-b` where every reader looks up `a b` and the cross-run prior would silently stop
+    firing for that concept — a worse failure than the raw-spelling split it was meant to fix, since
+    it is invisible in the capsule itself."""
+    from looplab.engine.concept_registry import canonicalize_concepts
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "r-space", "task_id": "t", "goal": "dense retrieval reviews",
+                             "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    # A space-containing label survives the fold verbatim (bounded_raw_concept_values keeps raw casing).
+    s.append("node_concepts", {"node_id": 0, "concepts": ["Hard Negatives"], "mode": "llm"})
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
+
+    c = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
+    assert c["concepts"] == canonicalize_concepts(["Hard Negatives"]) == ["hard negatives"]
+    assert c["concept_outcomes"] == {"hard negatives": 0.9}
+
+
+def test_a_run_whose_only_classified_node_was_aborted_publishes_no_exact_zero(tmp_path):
+    """`classifier_observed` must not outvote the lifecycle filter the evidence loop applies.
+
+    A node keeps its `node_concept_provenance` through an abort, so a run whose only classified node
+    was aborted used to reach the write path with `classifier_observed=True` and publish
+    `nodes_total=0, evidence_complete=True, concepts_complete=True` — an authoritative claim of
+    complete knowledge of zero concepts, for a run that classified one. `concept_card` then reports
+    that concept as never-tried. The function's own comment forbids exactly this: "never an exact
+    zero"."""
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "r-abort", "task_id": "t", "goal": "dense retrieval reviews",
+                             "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    s.append("node_concepts", {"node_id": 0, "concepts": ["data/hard-negative-mining"], "mode": "llm"})
+    s.append("node_abort", {"node_id": 0})
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
+
+    # A brand-new run with no live classified evidence contributes NO capsule at all.
+    assert ConceptCapsuleStore(mem / "concept_capsules.jsonl").all() == []
+
+
+def test_an_unusable_concept_tag_is_omitted_input_not_laundered(tmp_path):
+    """An id the resolver rejects must be dropped and COUNTED, never coerced into a valid one.
+
+    `str()` would turn `7`/`None` into the perfectly valid ids `'7'`/`'None'`, so an unusable tag
+    would become durable cross-run evidence — against docs/guide/memory.md's "Invalid concept IDs
+    and outcome keys are never persisted as evidence and count as omitted input"."""
+    from looplab.core.concepts import normalize_concept_id
+    from looplab.engine.lessons import LessonMemory as _LM
+
+    assert normalize_concept_id("///") is None and normalize_concept_id(7) is None
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "r-bad", "task_id": "t", "goal": "dense retrieval reviews",
+                             "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    s.append("node_concepts", {"node_id": 0, "concepts": ["data/hn"], "mode": "llm"})
+    state = fold(s.read_all())
+    # TWO unusable tags on ONE node: `evidence_nodes_incomplete` counts NODES, so a per-tag increment
+    # would push it past `evidence_nodes_total`, `build_concept_capsule` would raise, the BUILD
+    # `except` would swallow it and NO capsule would be written at all.
+    state.node_concepts[0] = ["data/hn", 7, None]   # a producer that bypassed the fold's own guard
+    _LM(_fake_engine(mem)).store_concept_capsule(state)
+
+    c = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
+    assert c["concepts"] == ["data/hn"] and c["concept_outcomes"] == {"data/hn": 0.9}
+    assert c["concept_evidence_nodes_total"] == 1                # the node counter stays a NODE count
+    assert c["concept_evidence_nodes_incomplete"] == 1
+    assert c["concepts_complete"] is False       # ...and the dropped tags still forbid absence claims
 
 
 def test_concept_capsule_records_direction_normalized_profit_signs():
