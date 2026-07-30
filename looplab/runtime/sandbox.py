@@ -578,6 +578,10 @@ class _StageHealthMonitor:
     def __init__(self, threshold: int = 5):
         self.threshold = threshold
         self.hits = 0
+        # Set by the last feed()/finish() that saw a FINITE metric record. `_StageHealthPair` runs two
+        # monitors against ONE shared threshold and needs to know training recovered on this step in
+        # order to clear the SIBLING stream's streak too.
+        self.recovered = False
         self._buf = ""
 
     def _observe(self, ln: str) -> None:
@@ -587,10 +591,12 @@ class _StageHealthMonitor:
             self.hits += 1
         elif self._FINITE.search(ln):
             self.hits = 0
+            self.recovered = True
 
     def feed(self, text: str) -> bool:
         """Accept a streamed chunk; return True once divergence is CONFIRMED (>= threshold CONSECUTIVE
         non-finite loss/grad records). Idempotent-safe to call after firing."""
+        self.recovered = False
         self._buf += text
         *lines, self._buf = self._BREAK.split(self._buf)  # keep the trailing partial record for next chunk
         if len(self._buf) > 8192:                    # bound a pathological no-newline stream
@@ -601,10 +607,51 @@ class _StageHealthMonitor:
 
     def finish(self) -> bool:
         """Observe the final unterminated record at EOF. Safe to call more than once."""
+        self.recovered = False
         final, self._buf = self._buf, ""
         if final:
             self._observe(final)
         return self.hits >= self.threshold
+
+
+class _StageHealthPair:
+    """The stdout + stderr monitors behind ONE shared divergence threshold.
+
+    The two streams need independent record buffers (a partial line from one must never be spliced
+    onto the other), but they are usually ONE logical training log split over two fds — framework
+    loggers commonly write to stderr while the user's metrics go to stdout — so threshold evidence
+    legitimately straddles both. That makes the streak a property of the PAIR, not of a stream: hits
+    SUM across them, and a finite metric record on EITHER stream clears BOTH, because a finite metric
+    anywhere means training recovered on that step.
+
+    Clearing only its own stream stranded hits on a stream that then went quiet (a one-off stderr
+    dump of a few `loss: nan` tokens with no later finite record THERE): they stayed counted forever
+    and let non-sustained non-finiteness on the other stream trip the shared threshold, tree-killing
+    a healthy run and breaking `_StageHealthMonitor`'s "CONSECUTIVE, not cumulative" guarantee. Real
+    divergence logs no finite metric on either stream, so it is caught exactly as before.
+
+    Thread-safe: both pump threads call `observe` concurrently."""
+
+    def __init__(self, threshold: int = 5):
+        import threading           # module-local, like `_tee_drain`'s own import
+
+        self.threshold = threshold
+        self.monitors = {"out": _StageHealthMonitor(threshold),
+                         "err": _StageHealthMonitor(threshold)}
+        self._lock = threading.Lock()
+
+    def observe(self, key: str, text: str = "", *, final: bool = False) -> bool:
+        """Feed one stream's chunk (or flush it at EOF); True once divergence is CONFIRMED."""
+        with self._lock:
+            monitor = self.monitors[key]
+            if text:
+                monitor.feed(text)
+            if final:
+                monitor.finish()
+            if monitor.recovered:
+                for item in self.monitors.values():
+                    item.hits = 0
+            return sum(item.hits for item in self.monitors.values()) >= self.threshold
 
 
 def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=False,
@@ -639,11 +686,9 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
             logf = None
     lock = threading.Lock()
     bufs: dict[str, list[bytes]] = {"out": [], "err": []}
-    # stdout and stderr need independent record buffers (never splice two partial lines),
-    # but one shared threshold. Framework loggers commonly use stderr while user metrics use stdout.
-    monitors = ({"out": _StageHealthMonitor(), "err": _StageHealthMonitor()}
-                if health_check else None)
-    health_lock = threading.Lock()
+    # stdout and stderr need independent record buffers (never splice two partial lines) but share one
+    # divergence threshold — see `_StageHealthPair`, which owns that policy and its own lock.
+    health = _StageHealthPair() if health_check else None
     diverged = threading.Event()
     stalled = threading.Event()
     # Last-output clock for the STALL watchdog: any chunk on either stream bumps it (monotonic). The
@@ -652,29 +697,13 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     last_output = [_time.monotonic()]
 
     def _observe_health(key: str, text: str = "", *, final: bool = False) -> None:
-        if monitors is None:
-            return
-        with health_lock:
-            monitor = monitors[key]
-            if text:
-                monitor.feed(text)
-            if final:
-                monitor.finish()
-            # CLAUDE REVIEW: [LOGIC] The cross-stream SUM partially undermines the class's
-            # "CONSECUTIVE, not cumulative" guarantee: a finite metric resets only ITS OWN stream's
-            # streak, so hits stranded on a stream that then goes quiet (e.g. a one-off stderr dump
-            # with a few `loss: nan` tokens and no later finite record there) stay counted forever
-            # and let non-sustained non-finiteness on the OTHER stream trip the shared threshold.
-            # Sustained real divergence is still caught either way; this only weakens the
-            # false-positive protection the docstring promises for mixed-stream logs.
-            if (not diverged.is_set()
-                    and sum(item.hits for item in monitors.values()) >= monitor.threshold):
-                diverged.set()
+        if health is not None and health.observe(key, text, final=final):
+            diverged.set()
 
     def _pump(stream, key):
         size = 0
         # A decoder is needed to feed the health monitor even when there is no live log file.
-        scan = monitors is not None
+        scan = health is not None
         decoder = (codecs.getincrementaldecoder("utf-8")("replace")
                    if (logf is not None or scan) else None)
         try:

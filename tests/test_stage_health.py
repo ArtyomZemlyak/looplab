@@ -9,7 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from looplab.runtime.sandbox import _StageHealthMonitor, run_argv  # noqa: E402
+from looplab.runtime.sandbox import (  # noqa: E402
+    _StageHealthMonitor, _StageHealthPair, run_argv)
 
 
 def test_monitor_fires_only_after_threshold():
@@ -137,6 +138,32 @@ def test_run_argv_combines_stdout_and_stderr_health_evidence():
     assert rc != 0 and not timed_out
     assert out.count("loss: nan") == 2 and err.count("loss: nan") == 3
     assert "DIVERGED" in err
+
+
+def test_pair_does_not_strand_one_stream_s_hits_across_the_other_s_recovery():
+    # The two streams share ONE threshold, so the streak must also clear across them. A one-off stderr
+    # dump of a few `loss: nan` tokens with no later finite record THERE used to stay counted forever,
+    # letting non-sustained stdout non-finiteness (every blip interrupted by a healthy finite step)
+    # trip the shared threshold and tree-kill a run that never diverged.
+    pair = _StageHealthPair(threshold=5)
+    for _ in range(3):                                     # stranded stderr dump...
+        assert not pair.observe("err", "loss: nan\n")
+    for _ in range(6):                                     # ...then stderr goes quiet forever
+        assert not pair.observe("out", "loss: 0.4\n")      # a healthy step...
+        assert not pair.observe("out", "loss: nan\n")      # ...a 2-record blip, never sustained
+        assert not pair.observe("out", "loss: nan\n")
+    assert not pair.observe("out", "loss: 0.3\n")
+
+
+def test_pair_still_fires_on_divergence_straddling_both_streams():
+    # The cross-stream reset must not blunt the shared threshold: with NO finite metric anywhere, an
+    # alternating stdout/stderr nan stream still reaches it. (`test_run_argv_combines_stdout_and_
+    # stderr_health_evidence` covers the same contract end-to-end through the subprocess.)
+    pair = _StageHealthPair(threshold=4)
+    assert not pair.observe("out", "loss: nan\n")
+    assert not pair.observe("err", "loss: nan\n")
+    assert not pair.observe("out", "loss: nan\n")
+    assert pair.observe("err", "loss: nan\n")              # 4 straddling records -> still fires
 
 
 def test_run_argv_fails_closed_when_diverged_process_exits_zero_before_poll(tmp_path):
