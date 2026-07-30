@@ -1352,11 +1352,14 @@ class Settings(BaseSettings):
         The `api_key_env` rules exist for a specific reason. It must LOOK like a secret to
         `runtime/sandbox.py::SECRET_ENV`, because that is the filter that strips the operator's keys
         out of the environment handed to generated candidate code — a key parked in a variable named
-        `MY_AUTH` would be invisible to it and ride straight into the sandbox. (The pattern is
-        duplicated below rather than imported: layering forbids `core` from importing `runtime`.
-        `tests/test_secret_env_pattern.py` pins the two together.) And a literal key inside a profile
-        is refused outright: the profile map is written verbatim into config.snapshot.json and served
-        over HTTP precisely because it is supposed to contain no secrets."""
+        `MY_HANDLE` would be invisible to it and ride straight into the sandbox. This pattern is
+        deliberately the STRICTER of the two (the sandbox has to recognize whatever already exists;
+        this names a variable the operator is about to create), and it is duplicated below rather than
+        imported because layering forbids `core` from importing `runtime`.
+        `tests/test_secret_env_pattern.py` pins the two together — including the invariant that every
+        name accepted here is one the sandbox strips. And a literal key inside a profile is refused
+        outright: the profile map is written verbatim into config.snapshot.json and served over HTTP
+        precisely because it is supposed to contain no secrets."""
         from looplab.core.llm import LLM_ROLE_KEYS
         if not isinstance(self.llm_profiles, dict):
             raise ValueError("llm_profiles must be a map of profile name -> profile")

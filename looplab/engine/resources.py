@@ -20,7 +20,7 @@ import anyio
 
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
-from looplab.runtime.sandbox import GpuPinUnenforceable, SECRET_ENV
+from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
 
 
 _CUDA_DISABLED_SELECTORS = frozenset({"-1", "none", "nodevfiles", "void"})
@@ -591,12 +591,12 @@ class ResourceSchedulingMixin:
         # a pinned/CPU reservation can override CUDA_VISIBLE_DEVICES. But the host env holds LLM_API_KEY /
         # cloud creds, and `run_argv` (subprocess tier) overlays this dict on top of its own
         # secret-filtered base — re-adding the secrets it just stripped — so we MUST filter here or the
-        # subprocess tier leaks. Filter the inherited host names by SECRET_ENV, the same guard `run_argv`
+        # subprocess tier leaks. Filter the inherited host env by `is_secret_env`, the same guard `run_argv`
         # applies to os.environ. The untrusted Docker tier ALSO strips secrets independently at its `-e`
         # choke point (`docker_gpu_env`), so this is defense-in-depth for that tier, not its sole guard.
         # `base` (LOOPLAB_EVAL_SEED, etc.) is the engine's own explicit env, kept as-is;
         # CUDA_VISIBLE_DEVICES is set below regardless.
-        host = ({k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+        host = ({k: v for k, v in os.environ.items() if not is_secret_env(k, v)}
                 if inherit_host else {})
         env = {**host, **(base or {})}
         env["CUDA_VISIBLE_DEVICES"] = (

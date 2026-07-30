@@ -28,13 +28,27 @@ from typing import Optional, Protocol
 # Env-var NAMES that look like a secret — redacted from the child process environment so generated
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
 # never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
-# CLAUDE REVIEW: [SECURITY] The name filter misses several common secret-BEARING env names:
-# connection strings with embedded credentials (DATABASE_URL / MONGO_URI / *_DSN), PASSPHRASE,
-# *_AUTH / AUTHORIZATION, SESSION/COOKIE values, and webhook URLs (SLACK_WEBHOOK_URL). A
-# `print(os.environ)` in generated code exfiltrates all of these into the durable stdout tail on
-# every tier that relies on this regex (run_argv, docker_gpu_env, bg_tasks._child_env). Consider
-# adding (URI|URL|DSN|PASSPHRASE|AUTH|SESSION|COOKIE|WEBHOOK) or value-based entropy screening.
-SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
+# `core/config.py::_SECRET_ENV_NAME` is the stricter sibling that validates a profile's `api_key_env`;
+# `tests/test_secret_env_pattern.py` pins the two, and this one must stay the LOOSER of the pair.
+SECRET_ENV = re.compile(
+    r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|API_KEY|AUTH|COOKIE|WEBHOOK|DSN)",
+    re.IGNORECASE)
+# ...and the class of secret NO name pattern can catch: a connection string carrying inline
+# credentials (`postgres://user:pw@host/db`) under a perfectly innocent name — DATABASE_URL,
+# MONGO_URI, *_DSN. Matching those names would also strip LOOPLAB_LLM_BASE_URL and every other
+# legitimate endpoint, so the VALUE is what is screened: userinfo in the authority is what makes it a
+# credential. A plain `https://host/v1` has none and is untouched.
+_CREDENTIAL_URL_VALUE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.\-]*://[^/\s@]*:[^/\s@]*@")
+
+
+def is_secret_env(name: str, value: str = "") -> bool:
+    """Whether a variable must be withheld from a child process (candidate code, agent shell, pip).
+
+    Two independent screens: a NAME that declares itself a secret, and a VALUE that is a URL with
+    inline credentials. A `print(os.environ)` or a stack trace in generated code would otherwise
+    exfiltrate either into the durable stdout tail, on every tier that spawns a child."""
+    return bool(SECRET_ENV.search(str(name or ""))) or bool(
+        _CREDENTIAL_URL_VALUE.match(str(value or "")))
 
 # A sane wall-clock ceiling for any single subprocess run. A "timeout" larger than this is a
 # misconfiguration, not an intent, so it is clamped rather than trusted — one eval must not be able
@@ -117,7 +131,7 @@ def docker_gpu_env(env: Optional[dict], *, gpu_args: list[str]) -> dict:
     # from this dict reaches candidate code. Strip secret-named vars at this single choke point — the same
     # guard `run_argv` applies to os.environ — so a host LLM_API_KEY / cloud cred that rode in via `env`
     # is never handed to adversarial code, and neither caller has to re-implement the filter.
-    clean = {k: v for k, v in env.items() if not SECRET_ENV.search(k)} if isinstance(env, dict) else {}
+    clean = {k: v for k, v in env.items() if not is_secret_env(k, v)} if isinstance(env, dict) else {}
     if "CUDA_VISIBLE_DEVICES" not in clean:
         return clean
     devices = str(clean.get("CUDA_VISIBLE_DEVICES") or "").strip()
@@ -447,7 +461,7 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # trace would otherwise exfiltrate LLM_API_KEY / cloud creds into the durable stdout tail. Drop
     # env vars whose NAME looks secret, but keep everything a process needs (PATH, SYSTEMROOT, …)
     # and always keep what the engine explicitly passes in `env` (e.g. LOOPLAB_EVAL_SEED).
-    base = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+    base = {k: v for k, v in os.environ.items() if not is_secret_env(k, v)}
     full_env = {**base, **{k: str(v) for k, v in (env or {}).items()}}
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
     # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
