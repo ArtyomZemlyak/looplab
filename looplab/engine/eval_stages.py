@@ -58,13 +58,16 @@ class EvalStagesMixin:
             clean, err = command_eval.validate_stages(task_stages)
             if err is None:
                 return _expand(clean)
+            # A BAD operator list falls back to the SINGLE COMMAND, and must not fall THROUGH to the
+            # developer-manifest branch below. Falling through handed stage authorship to the
+            # agent-authored looplab_stages.json in exactly the case this branch exists to prevent
+            # ("the agent can't rewrite how it's scored"): one malformed stage in an old/hand-edited
+            # snapshot silently promoted the Developer's preceding stages into the pipeline. The
+            # operator's `cmd` still runs — dropping their unusable stage list is the conservative
+            # reading, and the alternative (raising) would fail a resumed run on a snapshot the
+            # engine can still honour the scoring half of.
+            return None
 
-        # CLAUDE REVIEW: [LOGIC] When the operator DID declare stages but validate_stages rejects
-        # them, control falls through to this developer-manifest branch — so the actual fallback is
-        # not "the single command" (as the comment above claims) but a pipeline whose preceding
-        # stages come from the agent-authored looplab_stages.json, in exactly the case the docstring
-        # says that file is IGNORED. An invalid operator stage list should collapse to the bare
-        # command (or fail loudly), not hand stage authorship to the Developer.
         # single-command cmd: read the Developer's PRECEDING stages, append the protected cmd stage.
         # `materialized_stages` applies the SAME shared rules as the declare_stages tool (reserved
         # 'score', no duplicates, argv shape) and accepts both the wrapped + bare-list manifest shapes

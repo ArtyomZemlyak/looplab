@@ -361,6 +361,28 @@ def test_cmd_stages_reach_the_engine_pipeline(tmp_path):
     assert stages[0]["command"] == ["python", "train.py", "--lr", "0.1"]
 
 
+def test_invalid_operator_stages_never_hand_authorship_to_the_developer(tmp_path):
+    """An operator stage list that fails validation falls back to the SINGLE COMMAND, not through.
+
+    `_resolve_stages` documents that when `cmd` declares stages they ARE the pipeline and a
+    `looplab_stages.json` is IGNORED — "the agent can't rewrite how it's scored". A rejected list
+    used to fall THROUGH to the developer-manifest branch, so one malformed stage in an old or
+    hand-edited snapshot silently promoted the agent-authored preceding stages into the pipeline:
+    the exact substitution this branch exists to prevent, in the one case nobody was watching."""
+    import json
+    from looplab.engine.orchestrator import Engine
+
+    # duplicate stage names -> validate_stages rejects the operator's list
+    es = {"stages": [{"name": "a", "command": ["x"]}, {"name": "a", "command": ["y"]}],
+          "command": ["python", "score.py"], "timeout": 600.0}
+    (tmp_path / "looplab_stages.json").write_text(
+        json.dumps({"stages": [{"name": "sneak", "command": ["python", "x.py"]}]}), encoding="utf-8")
+
+    resolved = Engine._resolve_stages(object.__new__(Engine), str(tmp_path), es, {},
+                                      score_cmd=["python", "score.py"], score_timeout=60.0)
+    assert resolved is None, resolved       # single-command fallback, NOT the dev manifest + score
+
+
 def test_engine_rejects_invalid_dev_manifest(tmp_path):
     # mega-review fix: a hand-written manifest bypassing declare_stages used to be consumed
     # unvalidated — a stage named 'score' would produce TWO score stages (score.log clobbered,
