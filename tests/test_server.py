@@ -3478,3 +3478,27 @@ def test_author_name_allowlist_rejects_a_trailing_newline(tmp_path):
         "a trailing newline still passes the authored-markdown allow-list")
     assert not _AUTHOR_NAME_RE.match("note.txt")
     assert not _AUTHOR_NAME_RE.match("../escape.md")
+
+
+def test_runs_list_started_date_is_the_runs_start_not_its_last_append(tmp_path):
+    """`created` feeds the RunList's "started <date>" tooltip, so it must be the run's START.
+
+    It was `events.jsonl`'s `st_ctime`, which on POSIX is the inode-CHANGE time — every append
+    advances it, so "started" silently tracked "updated" and a week-old run looked like it began
+    minutes ago. The FIRST event's `ts` is the wall clock the run began at (`setup_started` when the
+    task has a setup phase, else `run_started`)."""
+    _build_run(tmp_path)
+    log = tmp_path / "demo" / "events.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    assert first["type"] in ("setup_started", "run_started")   # whichever the engine wrote first
+    started = 1_600_000_000.0            # a start long before this test ran, so the two can't tie
+    first["ts"] = started
+    lines[0] = json.dumps(first)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    client = TestClient(make_app(tmp_path))
+    row = next(r for r in client.get("/api/runs").json() if r["run_id"] == "demo")
+    assert row["created"] == started                          # ...from run_started.ts
+    assert row["created"] < log.stat().st_ctime - 86_400      # ...NOT from the inode-change stat
+    assert row["mtime"] == pytest.approx(log.stat().st_mtime)  # "updated" still tracks the file

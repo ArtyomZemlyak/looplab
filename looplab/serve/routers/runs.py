@@ -785,6 +785,7 @@ def build_router(srv) -> APIRouter:
                     continue
                 events = srv.events(rd)
                 st = fold(events)
+                first_ts = events[0].ts if events else 0.0
                 finalize_incomplete = (
                     incomplete_finalize_scope(events) is not None or st.finalization_pending())
                 best = st.best()
@@ -810,12 +811,15 @@ def build_router(srv) -> APIRouter:
                                            if isinstance(n.origin, dict) and n.origin.get("run_id")}),
                     "themes": _theme_rollup(st),
                     "mtime": stt.st_mtime,    # last activity (events.jsonl mtime) — time sort + "updated"
-                    # CLAUDE REVIEW: [LOGIC] st_ctime is NOT creation time on POSIX — it is the
-                    # inode-change time, which every append to events.jsonl advances, so on Linux
-                    # "created" tracks "mtime" and the RunList's "started <date>" tooltip shows the
-                    # last-update date, not the run's start. The run's true start time is available
-                    # from the first event's ts (run_started) and could be cached in this summary.
-                    "created": stt.st_ctime,  # run creation time (events.jsonl ctime) — "started" date
+                    # The run's true START, from the log itself. `st_ctime` is NOT creation time on
+                    # POSIX — it is the inode-CHANGE time, which every append to events.jsonl
+                    # advances, so on Linux this tracked `mtime` and the RunList's
+                    # "started <date>" tooltip showed the last-update date. The FIRST event's `ts`
+                    # is the wall clock the run actually began at (`setup_started` when the task has
+                    # a setup phase, else `run_started`). Fall back to the stat only when the log
+                    # carries no usable timestamp (an empty or hand-edited recoverable prefix),
+                    # where a wrong-but-close date beats none.
+                    "created": (first_ts if first_ts > 0 else stt.st_ctime),  # "started" date
                 }
                 _summary_cache[rd.name] = (*sig, summary)
                 out.append(summary)
