@@ -408,17 +408,17 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 # the valid retained subset of a partial classifier result remains positive
                 # evidence, but the producer-level denominator below permanently forbids absence/frequency
                 # inference. Authored/heuristic labels and deleted/aborted attempts never cross this wall.
-                # CLAUDE REVIEW: [LOGIC] Mixed dict keys: the read side uses the RAW `c`
-                # (`outcomes.get(c)` / `outcomes[c]`) while the write side stores under `str(c)`.
-                # For any non-str concept value (the surrounding `str(c)` coercions imply that is
-                # considered possible) the lookup always misses, so the best-of `_better` comparison
-                # is bypassed and the outcome degrades to last-node-wins instead of best-metric-wins.
-                # Use one spelling (`s = str(c)`) for add/get/set.
+                # ONE spelling for add/get/set. The read side used the raw `c` while the write side
+                # stored under `str(c)`, so for any non-str concept value — which the surrounding
+                # coercions exist precisely because it is possible — the lookup always missed, the
+                # `_better` comparison was skipped, and the recorded outcome degraded from
+                # best-metric-wins to last-node-wins.
                 for c in node_concepts.get(nd.id) or []:
-                    concepts.add(str(c))
+                    key = str(c)
+                    concepts.add(key)
                     if (nd.id in eligible_ids and m is not None
-                            and (outcomes.get(c) is None or _better(m, outcomes[c]))):
-                        outcomes[str(c)] = m
+                            and (outcomes.get(key) is None or _better(m, outcomes[key]))):
+                        outcomes[key] = m
             run_id = final.run_id or final.task_id
             requires_existing_capsule = (
                 not concepts and evidence_nodes_incomplete == 0 and not classifier_observed)

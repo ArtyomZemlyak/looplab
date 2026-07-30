@@ -350,3 +350,43 @@ def test_lessons_engine_level_off_when_flag_not_passed(tmp_path):
                      sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3),
                      memory_dir=str(mem)).run)
     assert not (mem / "lessons.jsonl").exists()
+
+
+def test_concept_outcome_keys_are_one_spelling(tmp_path, monkeypatch):
+    """The per-concept outcome must be the BEST metric, not the last node's.
+
+    `store_concept_capsule` read `outcomes.get(c)` with the RAW concept value while writing under
+    `str(c)`. For any non-str concept — which the surrounding coercions exist because it is possible
+    — the read always missed, so the `_better` comparison was skipped and a later, WORSE node
+    silently overwrote the best one. The capsule then advertised a worse outcome for that concept to
+    every future run that retrieves it."""
+    from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER, Idea, Node, NodeStatus, RunState
+    from looplab.engine import memory as memory_module
+
+    final = RunState(run_id="r", task_id="t", direction="min")   # min: smaller is better
+    for nid, metric in ((0, 0.1), (1, 0.9)):                     # BEST first, worse last
+        final.nodes[nid] = Node(id=nid, operator="draft", idea=Idea(operator="draft", params={}),
+                                metric=metric, status=NodeStatus.evaluated)
+        final.node_concepts[nid] = [7]                           # a NON-str concept value
+        final.node_concept_provenance[nid] = NODE_CONCEPT_PROVENANCE_CLASSIFIER
+
+    captured = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop before the store write")        # swallowed: best-effort by contract
+
+    monkeypatch.setattr(memory_module, "build_concept_capsule", _capture)
+
+    class _Engine:
+        memory_dir = str(tmp_path)
+
+    lm = LessonMemory(_Engine())
+    # `task_fingerprint` reads engine attributes this bare shim does not carry; the capsule's
+    # fingerprint is not what this test is about.
+    monkeypatch.setattr(type(lm), "task_fingerprint", lambda self, state, best: ["k"], raising=False)
+    lm.store_concept_capsule(final)
+
+    assert captured, "the capsule builder was never reached"
+    assert captured["concept_outcomes"] == {"7": 0.1}   # the BEST metric, not node 1's 0.9
+    assert captured["concepts"] == {"7"}
