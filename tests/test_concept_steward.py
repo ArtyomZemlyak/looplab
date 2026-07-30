@@ -166,6 +166,42 @@ def test_partial_source_receipt_changes_paid_digest_and_prompt_envelope():
     assert "RETAINED LOWER BOUND" in partial_client.messages[0]["content"]
 
 
+def test_quarantined_durable_row_is_a_known_receipt_not_an_unreadable_one(tmp_path):
+    """A store that lost a row to quarantine is READABLE and says the source is INCOMPLETE.
+
+    `_capsule_source_summary` derives source_complete from BOTH axes (no partial capsules AND a
+    healthy store), so a receipt check that reads only `partial_capsules == 0` misfiles this
+    overview as malformed/unknown. Both verdicts fail closed for split/purge, but they tell the
+    steward two different facts and imply two different repairs (re-read the producer vs. repair
+    the durable file), so the receipt has to name the right one.
+    """
+    path = tmp_path / "concept_capsules.jsonl"
+    capsule = build_concept_capsule(run_id="r", fingerprint=["k"], direction="max",
+                                    concepts=["data/augmentation"], concept_outcomes={})
+    path.write_text(json.dumps(capsule) + "\n" + "{not json\n", encoding="utf-8")
+    rows = ConceptCapsuleStore(path).all()
+    # the surviving capsule is complete; only the FILE lost a row.
+    assert rows.source_health["source_store_complete"] is False
+    overview = portfolio_concept_overview(rows)
+    assert overview["partial_capsules"] == 0 and overview["source_complete"] is False
+
+    class _Capture(_Client):
+        messages = None
+
+        def complete_tool(self, messages, json_schema):
+            self.messages = messages
+            return self._c
+
+    client = _Capture({"merges": [], "splits": [],
+                       "purges": ["data/augmentation"]})
+    proposals = propose_concept_curation(overview, client)
+    receipt = json.loads(client.messages[1]["content"].split("\n", 1)[1])["source_receipt"]
+
+    assert receipt["receipt_known"] is True          # readable receipt...
+    assert receipt["source_complete"] is False       # ...that reports an incomplete source
+    assert proposals["purges"] == []                 # absence claims still fail closed
+
+
 def test_partial_source_cannot_propose_absence_based_split_or_purge():
     complete, _caps = _overview(["data/augmentation"], ["data/aug"])
     partial = dict(complete)
