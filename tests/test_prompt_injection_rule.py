@@ -80,3 +80,39 @@ def test_tool_using_researcher_mirrors_the_rule():
     finally:
         agent_module.drive_tool_loop = real
     assert _UNTRUSTED_MEMORY_RULE.strip() in _system_of(captured["messages"])
+
+
+def test_the_documented_tool_loop_patch_seam_reaches_every_consumer():
+    """`looplab.agents.agent.drive_tool_loop` is THE documented monkeypatch seam (CLAUDE.md).
+
+    `unified_agent` and `deep_research` imported it at MODULE level, which early-binds the function
+    object: ~13 existing test sites patch that path, and for these two consumers the patch silently
+    did not apply — an offline test drove the REAL loop against the real client instead of the stub.
+    Every other consumer (`strategist.py`, `search/foresight.py`, `serve/assistant.py`,
+    `serve/scope_report.py`) imports it inside the function for exactly this reason.
+    """
+    import importlib
+    from pathlib import Path
+
+    import looplab.agents.agent as agent_module
+
+    root = Path(__file__).parents[1] / "looplab" / "agents"
+    for name in ("unified_agent", "deep_research"):
+        source = (root / f"{name}.py").read_text(encoding="utf-8")
+        module_level = [line for line in source.splitlines()
+                        if line.startswith("from looplab.agents.agent import")]
+        assert not module_level, (
+            f"{name}.py early-binds the seam at module level: {module_level}")
+        # The call sites must still import it — just at call time.
+        assert "from looplab.agents.agent import drive_tool_loop" in source, name
+        importlib.import_module(f"looplab.agents.{name}")     # the module must still import
+
+    # A patch on the seam is what a call-time import resolves to.
+    sentinel = object()
+    real = agent_module.drive_tool_loop
+    agent_module.drive_tool_loop = sentinel
+    try:
+        from looplab.agents.agent import drive_tool_loop as resolved
+        assert resolved is sentinel
+    finally:
+        agent_module.drive_tool_loop = real

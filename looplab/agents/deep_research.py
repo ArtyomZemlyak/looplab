@@ -20,13 +20,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-# CLAUDE REVIEW: [ARCH] Module-level `from ... import drive_tool_loop` EARLY-BINDS the loop: a
-# monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (the path CLAUDE.md and
-# many tests use) never reaches DeepResearcher.research, because this module keeps its own captured
-# binding. The sibling call sites (strategist.py, foresight.py, serve/assistant.py,
-# serve/scope_report.py) all import it lazily inside the function for exactly this reason — do the
-# same here (see also the identical issue in unified_agent.py).
-from looplab.agents.agent import drive_tool_loop
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
@@ -168,6 +161,12 @@ class DeepResearcher:
                 "snippet": redact_persisted_text(result, max_chars=4_000)[:200],
             })
 
+        # Resolve through `agent.py`'s module global at CALL time, not at import time: a
+        # module-level `from ... import drive_tool_loop` early-binds the function object, so a
+        # monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (CLAUDE.md;
+        # `agent.py` states the contract) never reached this call and an offline test silently
+        # drove the REAL loop against the real client. `strategist.py` already imports it here.
+        from looplab.agents.agent import drive_tool_loop
         try:
             # The shared loop owns the mechanics this stage used to reimplement (prose-stall
             # force-emit + bounded nudge, malformed-args guard, B1 stuck detection, C2 history

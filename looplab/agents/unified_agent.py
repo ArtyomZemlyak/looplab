@@ -19,14 +19,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-# CLAUDE REVIEW: [ARCH] This module-level `from ... import drive_tool_loop` EARLY-BINDS the loop:
-# tests that monkeypatch the documented seam `looplab.agents.agent.drive_tool_loop` (CLAUDE.md;
-# ~15 existing test sites patch that path) will NOT intercept the pilot's choose_action or
-# triage_crash loops, because this module holds its own captured binding. Every sibling call site
-# (strategist.py:766, search/foresight.py, serve/assistant.py, serve/scope_report.py) deliberately
-# imports it INSIDE the function so the patched module attribute resolves at call time — this file
-# (and deep_research.py) should do the same, or the seam silently splits per-consumer.
-from looplab.agents.agent import drive_tool_loop
 from looplab.agents.roles import WrapsDeveloper, forward_hints
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
@@ -243,6 +235,12 @@ class UnifiedAgent(WrapsDeveloper):
 
         if self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)
+        # Resolve through `agent.py`'s module global at CALL time, not at import time: a
+        # module-level `from ... import drive_tool_loop` early-binds the function object, so a
+        # monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (CLAUDE.md;
+        # `agent.py` states the contract) never reached this call and an offline test silently
+        # drove the REAL loop against the real client. `strategist.py` already imports it here.
+        from looplab.agents.agent import drive_tool_loop
         try:
             return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
                                    max_turns=self._agent_max_turns,
@@ -315,6 +313,7 @@ class UnifiedAgent(WrapsDeveloper):
 
         if state is not None and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)   # enable read_code / find_analogous on the run
+        from looplab.agents.agent import drive_tool_loop   # call-time seam, see above
         try:
             return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
                                    max_turns=self._agent_max_turns,
