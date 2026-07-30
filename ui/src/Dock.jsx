@@ -714,13 +714,10 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
     ? e.data.generation : (e.type === 'node_repaired' ? e.data?.attempt : 0)
   const traceGeneration = Number.isInteger(rawTraceGeneration) && rawTraceGeneration >= 0
     ? rawTraceGeneration : null
-  // `liveBuilding` is a Map<nodeId, generation> of every concurrent build; this row live-polls its trace
-  // only when it IS one of those exact building lifecycles (right node AND right generation).
-  // CLAUDE REVIEW: [READABILITY] Doc drift: buildingGenerations() returns a plain object (and the
-  // comments here and at the Dock call site both say "Map<nodeId, generation>"). The bracket read
-  // below works only because it is NOT a Map — a future reader "fixing" this to .get() or actually
-  // constructing a Map would silently disable every live trace poll. Align the comments with the
-  // real plain-object contract (or return a real Map from buildingModel.js consistently).
+  // `liveBuilding` is a plain object {nodeId: generation} of every concurrent build
+  // (`buildingGenerations()` builds it with `const generations = {}`), so it is read with
+  // BRACKETS, never `.get()`. This row live-polls its trace only when it IS one of those
+  // exact building lifecycles (right node AND right generation).
   const exactBuilding = liveBuilding != null && traceNid != null && traceGeneration != null
     && liveBuilding[traceNid] === traceGeneration
   // Clear the error flag only on a SUCCESSFUL exact-attempt load (not eagerly at each poll tick).
@@ -937,8 +934,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // expanded ("thinking") until it resolves. null on a finished/replayed run — AND on a STALLED/zombie
   // run (engine_running===false): a run whose engine died mid-eval leaves a node stuck 'pending', and
   // without this guard its node_created row would auto-expand the retained span projection forever.
-  // A Map<nodeId, generation> of EVERY node building right now (parallel_build>1 builds several at
-  // once), so each concurrent build's feed row live-polls its own trace — not just the singular
+  // A plain object {nodeId: generation} of EVERY node building right now (parallel_build>1 builds
+  // several at once), so each concurrent build's feed row live-polls its own trace — not just the
+  // singular
   // last-appended one. `buildings` is a node_id->marker object; fall back to the singular `building`
   // for a serial-build / old server. null when nothing is live-building (keeps the poll disabled).
   // The marker bag is bounded by parallel_build; projecting it directly is cheaper than memo state

@@ -370,16 +370,12 @@ def _normalize_span(value) -> Optional[dict]:
                 budget.omit("omitted_attributes")
             else:
                 attributes[key] = normalized
-    # CLAUDE REVIEW: [READABILITY] The note below describes the hash-order nondeterminism in the
-    # present tense ("insert ... in string-hash order", "is therefore not byte-stable"), but the four
-    # loops beneath already iterate sorted(...) — the instruction at its end was applied. As written
-    # it reads as a live defect; reword it into a why-comment for the sorted() iteration.
-    # _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS / _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS
-    # are SETS, so these four loops insert into `attributes` in string-hash order — randomized per
-    # process via PYTHONHASHSEED. The serialized projection (and any persisted index record built from
-    # it) is therefore not byte-stable across two server runs, the same raw-set-iteration defect this
-    # change series fixed in project_hierarchy/project_lens/concept_graph. Iterate sorted(...) (or
-    # make the field groups tuples) so identical spans serialize identically everywhere.
+    # WHY the four loops below iterate `sorted(...)`: _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS /
+    # _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS are SETS, so inserting into `attributes` in raw set order
+    # is string-hash order — randomized per process via PYTHONHASHSEED. That made the serialized
+    # projection (and any persisted index record built from it) not byte-stable across two server
+    # runs, the same raw-set-iteration defect this change series fixed in
+    # project_hierarchy/project_lens/concept_graph. Keep the sort (or make the groups tuples).
     for key in sorted(_ATTR_TEXT_FIELDS):
         if key in raw_attributes:
             attributes[key] = budget.text(

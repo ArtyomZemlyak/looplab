@@ -1002,17 +1002,15 @@ class EventStore:
             self.read_all()
         return events
 
-    # CLAUDE REVIEW: [DOCS-MISMATCH] The docstring below claims "Historical sequence gaps are
-    # preserved", but the incremental loop enforces DENSE continuation via event_sequence_continues —
-    # a forward seq jump fails closed (see its docstring restoring the 5f011a2 fence, and
-    # tests/test_events_replay.py::test_monotonic_logical_sequence_gap_fails_closed). Gaps are
-    # rejected, not preserved; only this stale sentence claims otherwise.
     def read_all(self) -> list[Event]:
         """Return every Event on disk (up to the first torn/corrupt line), served from an incremental
         cache. Only bytes appended since the previous call are read+parsed; the returned sequence is
         identical to a full event-aware scan, including its monotonic-sequence boundary. Falls back to
         a full rescan if the file shrank/was replaced (a heal-truncate or a fresh file) so the cache can
-        never go stale. Historical sequence gaps are preserved; duplicate/backward rows fail closed."""
+        never go stale. A historical sequence GAP fails closed — `event_sequence_continues` wants a
+        dense prefix (the 5f011a2 fence), so the returned prefix ends AT the gap; duplicate/backward
+        rows fail closed the same way. See
+        tests/test_events_replay.py::test_monotonic_logical_sequence_gap_fails_closed."""
         with self._read_lock:
             try:
                 st = self.path.stat() if self.path.exists() else None
