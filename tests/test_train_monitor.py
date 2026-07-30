@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 import anyio
 import pytest
@@ -272,8 +273,17 @@ class _FakeStore:
                 for index, (event_type, data) in enumerate(self.events)]
 
 
+# Wall-clock ceiling for "the monitor produced what this test is waiting for". It bounds only the
+# FAILURE case: with `until` the loop cancels the instant the predicate holds, so a passing test never
+# waits it out. `hold_s` alone is a FIXED window (0.22s at a 0.05s cadence), which a loaded full-suite
+# host can miss entirely — the monitor then emitted nothing and the test read an empty list while
+# passing in isolation. Tests asserting an artifact is ABSENT must still wait the fixed window; only a
+# test waiting FOR something can poll.
+_MONITOR_SETTLE_TIMEOUT_S = 15.0
+
+
 def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None,
-                         kill=False, kill_confidence=0.8, prior_events=()):
+                         kill=False, kill_confidence=0.8, prior_events=(), until=None):
     tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
     host = _VerdictHost(tracer, developer, interval=0.05, redact=redact,
                         kill=kill, kill_confidence=kill_confidence)
@@ -282,7 +292,12 @@ def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=No
     async def drive():
         async with anyio.create_task_group() as tg:
             tg.start_soon(host._monitor_training, 0, 0, str(workdir), host.cancel, "ctx", host.kill_signal)
-            await anyio.sleep(hold_s)
+            if until is None:
+                await anyio.sleep(hold_s)
+            else:
+                deadline = time.monotonic() + _MONITOR_SETTLE_TIMEOUT_S
+                while not until(host) and time.monotonic() < deadline:
+                    await anyio.sleep(0.005)
             tg.cancel_scope.cancel()
 
     anyio.run(drive)
@@ -337,8 +352,11 @@ def test_healthy_transition_records_explicit_recovery_event(tmp_path):
                 return {"status": "broken", "reason": "loss is nan", "confidence": 0.9}
             return {"status": "healthy", "reason": "finite loss is decreasing", "confidence": 0.9}
 
+    # Two ticks are needed (broken, then the recovery). A FIXED 0.3s window at a 0.05s cadence is
+    # not enough on a loaded host — wait for the pair instead of for the clock.
     host, _spans = _run_verdict_monitor(
-        tmp_path, workdir=wd, developer=_FakeDeveloper(_RecoveringClient()), hold_s=0.3)
+        tmp_path, workdir=wd, developer=_FakeDeveloper(_RecoveringClient()), hold_s=0.3,
+        until=lambda h: sum(1 for (t, _d) in h.store.events if t == EV_TRAIN_MONITOR_ALERT) >= 2)
     alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
     assert [event["status"] for event in alerts[:2]] == ["broken", "healthy"]
 

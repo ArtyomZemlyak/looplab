@@ -2,6 +2,7 @@
 advisory-only unless `_asha_live_kill`, appends only the fold-IGNORED EV_ASHA_RANK, and reuses the
 training monitor's kill_signal — so none of this touches folded selection or replay."""
 import threading
+import time
 
 import anyio
 
@@ -370,8 +371,16 @@ def _fake_state(finals, self_id=0, tails=None, curves=None):
     return RunState(nodes=nodes)
 
 
+# Wall-clock ceiling for "the loop produced what this test is waiting for". Bounds only the FAILURE
+# case: with `until` the loop cancels the instant the predicate holds, so a passing test never waits it
+# out. `window` alone is a FIXED budget (0.08-0.2s at a 0.01-0.05s cadence) that a loaded full-suite
+# host can miss entirely, leaving the test reading an empty alert list while passing in isolation.
+# A test asserting an alert is ABSENT must still wait the fixed window; only waiting FOR one can poll.
+_LOOP_SETTLE_TIMEOUT_S = 15.0
+
+
 def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, *,
-              tails=None, curves=None, log_snapshot=None, window=0.12):
+              tails=None, curves=None, log_snapshot=None, window=0.12, until=None):
     monkeypatch.setattr(
         "looplab.events.replay.fold", lambda events: _fake_state(finals, tails=tails, curves=curves))
 
@@ -380,7 +389,12 @@ def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, 
         async with anyio.create_task_group() as tg:
             tg.start_soon(AshaMonitorMixin._monitor_asha, stub, 0, 0, str(workdir), cancel,
                           spec, direction, kill_signal, log_snapshot)
-            await anyio.sleep(window)
+            if until is None:
+                await anyio.sleep(window)
+            else:
+                deadline = time.monotonic() + _LOOP_SETTLE_TIMEOUT_S
+                while not until(stub) and time.monotonic() < deadline:
+                    await anyio.sleep(0.005)
             tg.cancel_scope.cancel()
 
     anyio.run(drive)
@@ -468,8 +482,11 @@ def test_loop_opt_in_kill_requires_comparable_resource_evidence(tmp_path, monkey
     # Keep the endpoint rank as an audit signal, but never invent a resource and kill from it.
     endpoint_only = {}
     endpoint_stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01)
+    # Wait for the audit alert rather than for the clock: a FIXED 0.2s budget is not enough on a
+    # loaded host, and the empty list then read as "no alert was recorded".
     _run_loop(endpoint_stub, wd, {"kind": "stdout_json", "key": "recall"}, "max",
-              endpoint_only, monkeypatch, finals=[0.8, 0.7, 0.6], window=0.2)
+              endpoint_only, monkeypatch, finals=[0.8, 0.7, 0.6], window=0.2,
+              until=lambda s: any(t == EV_ASHA_RANK for t, _d in s.store.events))
     assert endpoint_only.get("kill") is not True
     endpoint_alerts = [d for event, d in endpoint_stub.store.events if event == EV_ASHA_RANK]
     assert endpoint_alerts and endpoint_alerts[0]["kill_comparable"] is False
