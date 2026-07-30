@@ -389,6 +389,86 @@ def test_old_full_input_logs_still_work(tmp_path):
     assert len(reqs) == 1                                 # legacy len-drop heuristic still de-duplicates
 
 
+def test_a_shared_trace_splits_its_turns_by_each_span_s_own_node(tmp_path):
+    """node_id is stamped PER SPAN, so one long-lived tool-loop trace can serve several nodes in
+    sequence. Keying the whole trace off its ROOT span gave every turn to the node that OPENED the
+    trace and left the other node an EMPTY conversation — reported as generic truncation, because
+    the selection predicate (`_bounded_node_trace_tail`) had already counted those spans in. Attribute
+    per span, matching `build_trace_view`'s effective-node rule."""
+    def _gen(span_id, node_id, start, text):
+        return {"name": "llm", "kind": "generation", "trace_id": "t0", "span_id": span_id,
+                "parent_id": "r0", "run_id": "demo", "events": [], "status": "OK",
+                "start": start, "duration_s": 1.0,
+                "attributes": {"node_id": node_id, "output": text,
+                               "input": [{"role": "user", "content": text}]}}
+
+    spans = [
+        {"name": "tool_loop", "kind": "operation", "trace_id": "t0", "span_id": "r0",
+         "parent_id": None, "run_id": "demo", "attributes": {"node_id": 0}, "events": [],
+         "status": "OK", "start": 0.0, "duration_s": 9.0},
+        _gen("g0", 0, 1.0, "for node 0"),
+        _gen("g1", 1, 2.0, "for node 1"),
+    ]
+    st = RunState(run_id="demo", task_id="t", goal="g", direction="min")
+
+    def _outputs(node_id):
+        convo = build_conversation(st, spans, node_id)
+        return [turn.get("output") for stage in convo["stages"]
+                for turn in stage["turns"] if turn["type"] == "generation"]
+
+    assert _outputs(0) == ["for node 0"]        # the opener no longer absorbs its successor's turns
+    assert _outputs(1) == ["for node 1"]        # ...and the successor is no longer blank
+
+
+def test_legacy_root_only_logs_still_attribute_the_whole_trace(tmp_path):
+    """The per-span rule must not regress a pre-stamping log: children carry no node_id of their own
+    and fall back to their trace's root, so the whole trace stays with that node."""
+    spans = [
+        {"name": "create_node", "kind": "operation", "trace_id": "t0", "span_id": "r0",
+         "parent_id": None, "run_id": "demo", "attributes": {"node_id": 3}, "events": [],
+         "status": "OK", "start": 0.0, "duration_s": 5.0},
+        {"name": "llm", "kind": "generation", "trace_id": "t0", "span_id": "g0", "parent_id": "r0",
+         "run_id": "demo", "attributes": {"input": [dict(SYS), dict(USER)], "output": "o"},
+         "events": [], "status": "OK", "start": 1.0, "duration_s": 1.0},
+    ]
+    st = RunState(run_id="demo", task_id="t", goal="g", direction="min")
+    convo = build_conversation(st, spans, 3)
+    assert [turn["output"] for stage in convo["stages"]
+            for turn in stage["turns"] if turn["type"] == "generation"] == ["o"]
+    assert build_conversation(st, spans, 4)["stages"] == []
+
+
+def test_legacy_heuristic_survives_the_message_cap_plateau(tmp_path):
+    """A LONG old full log must still show ONE request. `_project_messages` caps a generation's
+    `input` at 10 messages, so every generation past the cap reports the same count — reading that
+    plateau as a context reset re-emitted the request on EVERY turn, which is exactly the
+    re-duplication the projection exists to remove. The capped span says so (`input_partial`)."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    full = [dict(SYS), dict(USER)]
+    spans = [{"name": "create_node", "kind": "operation", "trace_id": "t0", "span_id": "r0",
+              "parent_id": None, "run_id": "demo", "attributes": {"node_id": 0}, "events": [],
+              "status": "OK", "start": 0.0, "duration_s": 1.0}]
+    for k in range(8):                       # 4, 6, 8, 10, then four generations past the cap
+        full = full + [{"role": "assistant", "content": f"a{k}"}, {"role": "user", "content": f"u{k}"}]
+        spans.append({"name": "llm", "kind": "generation", "trace_id": "t0", "span_id": f"g{k}",
+                      "parent_id": "r0", "run_id": "demo",
+                      "attributes": {"node_id": 0, "input": [dict(m) for m in full], "output": "o"},
+                      "events": [], "status": "OK", "start": float(k + 1), "duration_s": 1.0})
+    (rd / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
+    loaded = load_spans(rd / "spans.jsonl")
+    gens = sorted((s for s in loaded if s.get("kind") == "generation"), key=lambda s: s["start"])
+    # the premise: the projection really does plateau, and marks the spans it capped
+    assert [len(g["attributes"]["input"]) for g in gens] == [4, 6, 8, 10, 10, 10, 10, 10]
+    assert [g["attributes"].get("input_partial") is True for g in gens] == [
+        False, False, False, False, True, True, True, True]
+
+    st = RunState(run_id="demo", task_id="t", goal="g", direction="min")
+    convo = build_conversation(st, loaded, 0)
+    reqs = [t for t in convo["stages"][0]["turns"] if t["type"] == "request"]
+    assert len(reqs) == 1
+
+
 def test_trace_tree_tolerates_a_deep_span_chain_without_recursionerror():
     # A crafted/corrupt spans.jsonl with a pathologically deep parent_id chain must not blow Python's
     # recursion limit when the tree is sorted — the "trace view never crashes on corrupt spans" contract

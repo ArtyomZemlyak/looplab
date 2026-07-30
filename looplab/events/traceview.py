@@ -721,15 +721,16 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
             # `input_from is None`) matches `hydrate_inputs`, which likewise treats carry=0 as
             # self-contained, so a degenerate carry=0-with-back-ref span is still read as a base.
             # Old full logs have no `input_carry` → fall back to the message-count-drop heuristic.
-            # CLAUDE REVIEW: [LOGIC] The legacy fallback treats an EQUAL message count as a sub-loop
-            # boundary (`n <= prev_in`), but the docstring says a request is re-emitted only when the
-            # count DROPS. Normalization caps a generation's `input` at _MSGS_CAP (10) messages, so on
-            # an old full log (no `input_carry`) every generation past 10 messages plateaus at
-            # n == prev_in == 10 and re-emits the "request" turn on EVERY turn — exactly the
-            # re-duplication this projection exists to remove. The heuristic needs a strict drop
-            # (n < prev_in) to survive the capture-time cap.
+            # A DROP is always a reset. EQUALITY is only evidence when this generation's count is the
+            # TRUE one: `_project_messages` caps `input` at _MSGS_CAP and marks the capped span
+            # `input_partial`, so on a long old log every generation past the cap plateaus at
+            # n == prev_in == _MSGS_CAP — reading that as a boundary re-emitted the "request" turn on
+            # EVERY turn, exactly the re-duplication this projection exists to remove. (A capped
+            # PREVIOUS against an uncapped equal current is a real drop — true prev > cap == n — so
+            # only the current span's capping is disqualifying.)
             is_base = (a.get("input_carry") == 0) if ("input_carry" in a) \
-                else (prev_in is None or n <= prev_in)
+                else (prev_in is None or n < prev_in
+                      or (n == prev_in and a.get("input_partial") is not True))
             if is_base:                              # first call / context reset → new sub-loop
                 turns.append({"type": "request", "label": _seg_label(s, by_id),
                               "messages": [{"role": m.get("role", "user"),
@@ -895,24 +896,30 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
         # Researcher block" bug). Grouping below never needs the root, only its ABSENCE handled.
         root = next((s for s in ss_sorted if s.get("parent_id") is None), None)
         first = root or (ss_sorted[0] if ss_sorted else None)
-        nid = _node_id_of(first) if first else None
-        # CLAUDE REVIEW: [LOGIC] Trace attribution here is asymmetric with the selection predicate:
-        # _bounded_node_trace_tail and SpanIndex.node_tids select a trace when ANY of its spans
-        # carries this node_id, but this filter keeps a trace only when its ROOT/first span does.
-        # With per-span node_id stamping (a long-lived tool-loop trace serving several nodes in
-        # sequence — the case build_trace_view's effective-node comment describes), the target
-        # node's turns in such a shared trace are silently dropped from its conversation, while the
-        # trace's spans still count toward _observed_total/reported_total — the gap surfaces as
-        # generic truncation instead of the missing attribution it actually is.
-        if nid is None or str(nid) != str(node_id):
+        trace_nid = _node_id_of(first) if first else None
+        # Attribute PER SPAN, exactly as `build_trace_view` does: a span's own stamped node_id, else
+        # its trace's root node (NOT a full ancestor walk, which would bleed one node's id over a
+        # shared trace). node_id is stamped per-span, so one long-lived Developer tool-loop trace can
+        # serve several nodes in sequence — keying the whole trace off its ROOT then dropped the
+        # target node's turns from its own conversation while handing them to the root's node, and
+        # the selection predicate (`_bounded_node_trace_tail` / `SpanIndex.node_tids`, both ANY-span)
+        # still counted them, so the loss surfaced as generic truncation rather than as the missing
+        # attribution it was. Root-only legacy logs are unaffected: their spans have no own id and
+        # all fall back to the same trace node.
+        mine = [s for s in ss_sorted
+                if (nid := (own if (own := _node_id_of(s)) is not None else trace_nid)) is not None
+                and str(nid) == str(node_id)]
+        if not mine:
             continue
-        matching_span_count += len(ss)
-        matching_spans.extend(ss)
+        matching_span_count += len(mine)
+        matching_spans.extend(mine)
         # Split EVERY trace into its sub-loop bands (propose / stages / plan / implement / repair /
         # inline_repair / …) so the conversation reads as ordered role blocks. Wrapper roots
         # (`create_node` = "Author node", `seed_workspace` around an inline repair) are structure the
         # reader doesn't care about; a trace that IS one meaningful stage (foresight_rank, lessons)
         # naturally yields a single band with that label.
+        # Band resolution walks the WHOLE trace (`by_sid`/`root_sid`), not just this node's spans: the
+        # enclosing operation that names a band may itself belong to the node that opened the trace.
         by_sid = {s.get("span_id"): s for s in ss_sorted}
         root_sid = root["span_id"] if root else None
 
@@ -947,7 +954,7 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
                                       "start": s.get("start", 0.0)}
 
         groups: dict = {}
-        for s in ss_sorted:
+        for s in mine:
             if root_sid is not None and s.get("span_id") == root_sid:
                 continue
             stg = _stage_of(s)
