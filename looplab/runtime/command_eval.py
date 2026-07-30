@@ -69,6 +69,19 @@ def _stall_window(timeout: float, cap: Optional[float] = None) -> Optional[float
     return min(float(cap), float(timeout))
 
 
+def _salvageable_stall(signals: dict) -> bool:
+    """The authenticated STALL verdict, minus the case DIVERGED already condemned.
+
+    `RunResult.stalled` exists to let evaluate.py's gate (`metric is not None and not timed_out and
+    (exit == 0 or stalled)`) rescue a train+eval that printed its metric and then hung on teardown.
+    But BOTH watchdogs can fire on one stage: a run that logs non-finite records and then goes silent
+    is stall-killed first, and the drain's final decoder flush confirms the divergence afterwards.
+    Reporting that as a plain stall handed the salvage gate a self-reported metric from a training the
+    DIVERGE watchdog deliberately failed closed on. Divergence is the stronger, fail-closed verdict,
+    so it wins — `RunResult` carries no `diverged` field, which is why the pair is resolved here."""
+    return bool(signals.get("stalled")) and not signals.get("diverged")
+
+
 def safe_stage_name(name: str) -> bool:
     """True when `name` is a filesystem-safe stage slug (see `_STAGE_NAME_RE`): rejects separators,
     drives, control/NUL bytes, and `.`/`..` dot segments that would escape the log directory."""
@@ -835,7 +848,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         # `start_stage`, or a stage whose command expands to `[]` (`if not _scmd: continue`, reachable
         # from `["%params%"]` with empty params and from the unvalidated `score` stage
         # `engine/eval_stages.py` appends) — the loop never binds it, and the closing
-        # `RunResult(..., stalled=bool(_sig.get("stalled")))` raised UnboundLocalError out of the eval
+        # `RunResult(..., stalled=_salvageable_stall(_sig))` raised UnboundLocalError out of the eval
         # worker, so the node got no terminal event at all.
         rc, out, err, to, _sig = 0, "", "", False, {}
         for _i, _stg in enumerate(stages):
@@ -899,7 +912,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                              if (_i == len(stages) - 1 and not to) else None)
                 return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
                                  metric=_salvaged, timed_out=to, stages=stage_results,
-                                 failed_stage=_sname, stalled=bool(_sig.get("stalled")))
+                                 failed_stage=_sname, stalled=_salvageable_stall(_sig))
             # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
             # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
             # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)
@@ -988,6 +1001,6 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials,
-                     stages=stage_results, stalled=bool(_sig.get("stalled")))
+                     stages=stage_results, stalled=_salvageable_stall(_sig))
 
 

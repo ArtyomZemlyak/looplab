@@ -810,13 +810,13 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     stall_marker = (f"\n‼ LOOPLAB health-check: stage STALLED — no output for "
                     f"{int(stall_timeout or 0)}s while the process stayed alive (likely a hung "
                     "distributed finalize / wedged CUDA op / deadlock); aborting the stage early.\n")
-    # CLAUDE REVIEW: [LOGIC] When BOTH watchdogs fire (stall kill first, then divergence confirmed by
-    # the decoder's final flush via _observe_health(final=True)), the stall verdict wins everywhere the
-    # callers look: active_marker is the STALL marker and command_eval reads only signals["stalled"]
-    # (RunResult has no `diverged` field). The salvage gate `metric is not None and (exit==0 or
-    # stalled)` then ACCEPTS a metric from a training the DIVERGE watchdog meant to fail closed.
-    # Narrow window, but the fail-closed intent of DIVERGED should take precedence over stall-salvage.
-    active_marker = stall_marker if stalled.is_set() else marker
+    # BOTH watchdogs can fire: a stage that logs non-finite records and then goes SILENT is stall-killed
+    # first, and the drain's final decoder flush (`_observe_health(final=True)`) then confirms the
+    # divergence from the trailing unterminated record. DIVERGED takes precedence — it is a fail-closed
+    # verdict, while STALLED exists precisely to SALVAGE a metric printed before the hang, so reporting
+    # the stall would hand the salvage gate a metric from a training this watchdog meant to reject.
+    # (`signals` carries both flags; `command_eval` reads the pair — see `_salvageable_stall`.)
+    active_marker = marker if diverged.is_set() else stall_marker
     if (diverged.is_set() or stalled.is_set()) and logf is not None:
         try:
             logf.write(active_marker)

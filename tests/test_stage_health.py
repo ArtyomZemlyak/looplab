@@ -155,6 +155,41 @@ def test_pair_does_not_strand_one_stream_s_hits_across_the_other_s_recovery():
     assert not pair.observe("out", "loss: 0.3\n")
 
 
+def test_a_diverged_run_that_also_stalled_is_not_salvaged_as_a_stall():
+    # BOTH watchdogs fire when a stage logs non-finite records and then goes SILENT: the stall kill
+    # lands first and the drain's final decoder flush confirms the divergence from the trailing
+    # unterminated record. STALLED exists to SALVAGE a metric printed before a hang, so reporting the
+    # stall handed evaluate.py's gate (`metric is not None and not timed_out and (exit==0 or stalled)`)
+    # a self-reported score from a training the DIVERGE watchdog deliberately failed closed on — and
+    # the agent read a STALLED marker instead of the real cause.
+    from looplab.runtime.command_eval import _salvageable_stall
+
+    prog = ("import sys, time\n"
+            "print('RECALL@100: 0.5', flush=True)\n"          # a metric the stall path would salvage
+            "for _ in range(4):\n"
+            "    print('loss: nan', flush=True)\n"
+            "sys.stdout.write('loss: nan'); sys.stdout.flush()\n"   # 5th record, UNTERMINATED
+            "time.sleep(120)\n")                                     # ...then total silence
+    signals: dict = {}
+    t0 = time.time()
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, "-c", prog], "/tmp", timeout=60,
+        health_check=True, stall_timeout=2, signals=signals)
+
+    assert time.time() - t0 < 20 and rc != 0 and not timed_out
+    assert signals == {"stalled": True, "diverged": True}     # both watchdogs really did fire
+    assert _salvageable_stall(signals) is False               # ...and DIVERGED wins the verdict
+    assert "DIVERGED" in err and "STALLED" not in err         # the agent reads the real cause
+
+    # a PLAIN stall keeps its salvage: nothing about this run diverged.
+    plain: dict = {}
+    rc2, out2, err2, timed_out2 = run_argv(
+        [sys.executable, "-c", "import time\nprint('RECALL@100: 0.5', flush=True)\ntime.sleep(120)\n"],
+        "/tmp", timeout=60, health_check=True, stall_timeout=2, signals=plain)
+    assert _salvageable_stall(plain) is True and "STALLED" in err2
+    assert "RECALL@100: 0.5" in out2
+
+
 def test_pair_still_fires_on_divergence_straddling_both_streams():
     # The cross-stream reset must not blunt the shared threshold: with NO finite metric anywhere, an
     # alternating stdout/stderr nan stream still reaches it. (`test_run_argv_combines_stdout_and_
