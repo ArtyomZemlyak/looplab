@@ -2281,12 +2281,21 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .assistant-history-lock { margin-bottom: 7px; padding: 6px 8px; border: 1px solid var(--accent-dim);
   border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 9%, var(--bg-1)); }
 .route-state-notice, .copy-link-fallback {
-  display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 12px;
+  display: flex; align-items: center; gap: 8px; min-height: 36px;
+  padding: 6px calc(72px + env(safe-area-inset-right, 0px)) 6px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--working) 45%, var(--line));
   background: color-mix(in srgb, var(--working) 9%, var(--bg-1)); color: var(--fg-dim); font-size: 12px;
 }
 .route-state-notice > span { min-width: 0; flex: 1; }
 .route-state-notice .btn, .copy-link-fallback .btn { margin-left: auto; }
+.run-config-notice.error {
+  border-bottom-color: color-mix(in srgb, var(--fail) 52%, var(--line));
+  background: color-mix(in srgb, var(--fail) 9%, var(--bg-1));
+}
+.run-config-notice.stale, .run-config-notice.retrying {
+  border-bottom-color: color-mix(in srgb, var(--working) 52%, var(--line));
+  background: color-mix(in srgb, var(--working) 9%, var(--bg-1));
+}
 .copy-link-fallback label { white-space: nowrap; }
 .copy-link-fallback input { min-width: 0; flex: 1; height: 28px; padding: 3px 7px; border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: 11px ui-monospace, Consolas, monospace; }
@@ -2436,6 +2445,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .grp-pill, .grp-tab, .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go,
   .cmdbar-drawer-btn, .asst-mode, .asst-side-panel .btn.sm, .asst-sess-open, .asst-sess-x { min-height: 44px; }
   .grp-pill { height: 44px; }
+  .route-state-notice .btn, .copy-link-fallback .btn { min-width: 44px; min-height: 44px; }
   .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go, .cmdbar-drawer-btn, .asst-sess-x { min-width: 44px; }
   .metric-group-grid { grid-template-columns: minmax(0, 1fr) !important; }
   .react-flow__controls button { width: 44px; height: 44px; }

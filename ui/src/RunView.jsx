@@ -3,7 +3,7 @@ import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
 import { useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
-import { get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
+import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
@@ -90,6 +90,7 @@ const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
 // Expanded Timeline controls + pager + transport need enough room to leave a usable event viewport.
 // Heal old persisted splitter values instead of allowing a technically scrollable ~15 px sliver.
 const MIN_DOCK_HEIGHT = 200
+const RUN_CONFIG_REQUEST_TIMEOUT_MS = 15_000
 const hubMenuId = label => `panel-hub-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 
 function DagEmptyOverlay({ presentation, transport, onAction }) {
@@ -387,14 +388,52 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const dragCleanupRef = useRef(null)
   useEffect(() => () => dragCleanupRef.current?.(), [])
-  const [cfg, setCfg] = useState(null)
+  const configAuthority = reviewMode
+    ? `review:${reviewMeta?.id || runId}`
+    : `owner:${runId}`
+  const configKey = runStatus === 'ready' && !routeFenceBlocked
+    ? `${configAuthority}:${generation || 'pending'}`
+    : null
+  const [configResource, setConfigResource] = useState({
+    key: null, status: 'idle', data: null, retrying: false,
+  })
+  const [configRetry, setConfigRetry] = useState(0)
   useEffect(() => {
-    if (routeFenceBlocked) { setCfg(null); return }
+    if (!configKey) {
+      setConfigResource({ key: null, status: 'idle', data: null, retrying: false })
+      return undefined
+    }
     let active = true
-    get(`/api/runs/${encodeURIComponent(runId)}/config`)
-      .then(value => { if (active) setCfg(value) }).catch(() => { if (active) setCfg(null) })
-    return () => { active = false }
-  }, [runId, routeFenceBlocked])
+    const request = deadlineGet(
+      `/api/runs/${encodeURIComponent(runId)}/config`,
+      RUN_CONFIG_REQUEST_TIMEOUT_MS,
+    )
+    setConfigResource(current => {
+      const sameResource = current.key === configKey
+      return {
+        key: configKey,
+        status: 'loading',
+        data: sameResource ? current.data : null,
+        retrying: sameResource && ['error', 'stale'].includes(current.status),
+      }
+    })
+    request.promise.then(value => {
+      if (!active) return
+      setConfigResource({ key: configKey, status: 'ready', data: value, retrying: false })
+    }).catch(error => {
+      if (!active || error?.name === 'AbortError') return
+      setConfigResource(current => {
+        if (current.key !== configKey) return current
+        return current.data
+          ? { ...current, status: 'stale', retrying: false }
+          : { key: configKey, status: 'error', data: null, retrying: false }
+      })
+    })
+    return () => {
+      active = false
+      request.controller.abort()
+    }
+  }, [configKey, configRetry, runId])
   // Auto-land only after terminal write-out genuinely completed. A run_finished(error) during an
   // explicit finalize is recovery state, not a completed report, and a still-live engine may still be
   // writing report/lessons/cost after the terminal event appeared.
@@ -928,7 +967,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const state = historyActive ? hist : live
   const displayedPhase = historyActive ? phaseLabel(state) : lifecyclePhaseLabel(live)
   const evalSec = state.total_eval_seconds || 0
-  const maxEval = cfg?.max_eval_seconds
+  const activeConfigResource = configResource.key === configKey ? configResource : null
+  const maxEval = activeConfigResource?.data?.max_eval_seconds
+  const configNoticeStatus = activeConfigResource?.status === 'loading' && activeConfigResource.retrying
+    ? 'retrying'
+    : ['error', 'stale'].includes(activeConfigResource?.status) ? activeConfigResource.status : null
   const cost = state.llm_cost
   const hasInspectorContext = selectedId != null || selectedGroup != null
   const showInspector = compactWorkspace ? (compactInspectorOpen && hasInspectorContext) : (!sideC && hasInspectorContext)
@@ -1043,6 +1086,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           : live.paused && <span className="chip warn"><OpIcon name="pause" size={11} /> paused</span>}
       </div>
 
+      {configNoticeStatus && <div
+        className={`route-state-notice run-config-notice ${configNoticeStatus}`}
+        role={configNoticeStatus === 'error' ? 'alert' : 'status'}>
+        <OpIcon name="alert" size={13} />
+        <span>{configNoticeStatus === 'retrying'
+          ? 'Retrying run budget…'
+          : configNoticeStatus === 'stale'
+            ? 'Run budget may be stale. Showing the last loaded limit.'
+            : 'Run budget unavailable. Current eval time is visible, but its limit could not be loaded.'}</span>
+        <button type="button" className="btn xs"
+          disabled={configNoticeStatus === 'retrying'}
+          onClick={() => setConfigRetry(value => value + 1)}>
+          {configNoticeStatus === 'retrying' ? 'Retrying…' : 'Retry'}
+        </button>
+      </div>}
       {(routeNotice || route.issues.length > 0) && <div className="route-state-notice" role="status">
         <OpIcon name="info" size={13} />
         <span>{[...route.issues, routeNotice].filter(Boolean).join(' ')}</span>
