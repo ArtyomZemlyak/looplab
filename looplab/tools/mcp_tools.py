@@ -31,6 +31,29 @@ def _prefixed(server: str, tool: str) -> str:
     return f"mcp__{server}__{tool}"
 
 
+# Honest truncation, the ToolProvider convention (env_inspect._clamp, reposcout._paginate). `{n}` =
+# exact number of characters cut, matching tool_loop._TRUNC_NOTE's shape so a model that has learned
+# one marker reads the other. An MCP reply is opaque (JSON, prose, a diff), so unlike env_inspect
+# there is no line boundary worth preserving — say how much went missing and let the caller narrow.
+_TRUNC_NOTE = "\n…[mcp reply truncated — {n} chars omitted; re-request a narrower query]"
+# Headroom reserved for that marker, comfortably above its longest realistic rendering (~80 chars),
+# so the note itself never pushes the reply back over the cap it is reporting.
+_TRUNC_HEADROOM = 160
+
+
+def _clip(reply: str, cap: int) -> str:
+    """Bound one MCP reply to `cap` chars, saying so when it actually cuts.
+
+    A bare `reply[:cap]` appended no marker AND landed EXACTLY on the cap, so the loop's own
+    `_cap_tool_result` — which only marks results LONGER than the cap — added none either: a cut
+    reply was byte-indistinguishable from a complete one, and the model acted on a silently
+    amputated answer."""
+    if len(reply) <= cap:
+        return reply
+    keep = max(0, cap - _TRUNC_HEADROOM)
+    return reply[:keep] + _TRUNC_NOTE.format(n=len(reply) - keep)
+
+
 def load_config() -> dict:
     """Return {server_name: config} from the first configured source, else {}."""
     raw = None
@@ -88,13 +111,7 @@ class McpTools:
             # Cap at the loop's RESULT_CAP (the ToolProvider convention: derive budgets FROM it, not a
             # free-standing 8000 that the loop's own 4000 tail-cut always dominates anyway).
             from looplab.tools._base import RESULT_CAP
-            # CLAUDE REVIEW: [LOGIC] Silent truncation: a bare [:RESULT_CAP] slice appends no marker,
-            # and because the result is then EXACTLY cap-length the loop's _cap_tool_result (which
-            # only marks results LONGER than the cap) adds none either — so a cut MCP reply is
-            # indistinguishable from a complete one, against the codebase's honest-truncation
-            # convention (env_inspect._clamp, reposcout._paginate). Clip to RESULT_CAP minus marker
-            # headroom and append an explicit truncation note.
-            return str(server.call(tool, args or {}))[:RESULT_CAP]
+            return _clip(str(server.call(tool, args or {})), RESULT_CAP)
         except Exception as e:  # noqa: BLE001 - a tool error is data for the model, never a crash
             return f"(mcp error calling {name}: {e})"
 

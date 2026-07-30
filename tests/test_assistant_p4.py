@@ -64,6 +64,40 @@ def test_mcp_specs_and_routing():
     assert "unknown tool" in m.execute("mcp__fs__missing", {})
 
 
+def test_mcp_reply_truncation_is_never_silent():
+    """A cut MCP reply must not be byte-indistinguishable from a complete one.
+
+    `reply[:RESULT_CAP]` appended no marker AND landed EXACTLY on the cap, so the loop's own
+    `_cap_tool_result` — which only marks results LONGER than the cap — added none either. The model
+    then acted on a silently amputated answer, against the convention env_inspect._clamp and
+    reposcout._paginate already follow."""
+    from looplab.agents.tool_loop import _cap_tool_result
+    from looplab.tools._base import RESULT_CAP
+
+    def _server(name, reply):
+        class _S:
+            def tools(self):
+                return [{"name": "reply", "description": "d",
+                         "input_schema": {"type": "object", "properties": {}}}]
+
+            def call(self, tool, args):
+                return reply
+        _S.name = name
+        return _S()
+
+    over = McpTools([_server("big", "x" * (RESULT_CAP * 3))]).execute("mcp__big__reply", {})
+    assert len(over) <= RESULT_CAP                       # still bounded
+    assert "mcp reply truncated" in over                 # ...and it SAYS it was cut
+    assert "chars omitted" in over
+    # The loop's later belt-and-braces bound must not eat the marker we just added.
+    assert _cap_tool_result(over) == over
+
+    # An at-or-under-cap reply is passed through byte-identically — the note must not become noise.
+    exact = "y" * RESULT_CAP
+    assert McpTools([_server("e", exact)]).execute("mcp__e__reply", {}) == exact
+    assert McpTools([_server("s", "short")]).execute("mcp__s__reply", {}) == "short"
+
+
 def test_gated_mcp_enforces_permission_policy():
     """arch-review §3 P0-6: MCP dispatch must pass the permission policy — ask in default, deny in
     plan, inline only in auto."""
