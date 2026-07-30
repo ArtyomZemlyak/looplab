@@ -2788,3 +2788,41 @@ def test_a_malformed_reward_hack_signal_can_neither_brick_the_fold_nor_gate_an_h
     assert _fold([{"signal": "perfect_metric"}]).best_node_id == 1
     # The retained list stays bounded, so a forged event cannot park an unbounded array in RunState.
     assert len(_fold([{"signal": "s"}] * 500).reward_hacks[0]["signals"]) == 64
+
+
+def test_conflicting_card_merges_resolve_the_same_way_in_any_order():
+    """Invariant 5: `fold(perm(events))` must be byte-identical, including for conflicting merges.
+
+    Two receipts naming the same alias with DIFFERENT canonicals (X->A and X->B) resolved by
+    last-event-wins, so X folded into A or into B purely by byte order — reproduced. The section
+    header above the reducer already claimed "order-tolerant", and the sibling reducer
+    `_on_card_concept_consolidation` had been hardened for exactly this with a commutative
+    `min()` winner; this one had not.
+    """
+    def _fold(order):
+        rows = [
+            ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+            ("card_added", {"id": "card-A", "statement": "a", "source": "engine"}),
+            ("card_added", {"id": "card-B", "statement": "b", "source": "engine"}),
+            ("card_added", {"id": "card-X", "statement": "x", "source": "engine"}),
+        ]
+        merges = [("card_merged", {"canonical": "card-A", "aliases": ["card-X"]}),
+                  ("card_merged", {"canonical": "card-B", "aliases": ["card-X"]})]
+        rows += [merges[i] for i in order]
+        state = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(rows)])
+        return {cid: list(card.aliases) for cid, card in sorted(state.cards.items())}
+
+    forward, reversed_ = _fold([0, 1]), _fold([1, 0])
+    assert forward == reversed_, (
+        f"conflicting merges are order-dependent: {forward} vs {reversed_}")
+    # The commutative winner is the lexicographically smallest canonical, matching the sibling.
+    assert forward == {"card-A": ["card-X"], "card-B": []}
+
+    # An ordinary single merge is untouched by the hardening.
+    plain = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-A", "statement": "a", "source": "engine"}),
+        ("card_added", {"id": "card-X", "statement": "x", "source": "engine"}),
+        ("card_merged", {"canonical": "card-A", "aliases": ["card-X"]}),
+    ])])
+    assert list(plain.cards["card-A"].aliases) == ["card-X"] and "card-X" not in plain.cards

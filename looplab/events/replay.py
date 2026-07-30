@@ -4903,6 +4903,10 @@ def _derive_cards(st: RunState) -> None:
         if seed_id != owner:
             alias[seed_id] = owner
     identity_bridge_ids = frozenset(alias)
+    # Edges written by the merge loop below, kept apart from the hash->native bridge seeding above so
+    # a conflict can be resolved WITHOUT changing what a bridge means. See the `min()` note at the
+    # write site: last-write-wins there made `fold(perm(events))` differ, breaking invariant 5.
+    merge_alias: dict[str, str] = {}
     merged_stmt: dict[str, str] = {}
     for native_merge, d in (
             [(True, row) for row in st.cards_merged]
@@ -4927,12 +4931,20 @@ def _derive_cards(st: RunState) -> None:
                 resolved_alias = seed_owner.get(a, a)
                 if resolved_alias != canon and resolved_alias not in seen_aliases:
                     seen_aliases.add(resolved_alias)
-                    # CODEX AGENT: conflicting merge receipts remap the same immutable alias by
-                    # last-event-wins, redirecting evidence and control authority. Reject a second
-                    # target or choose a commutative winner while surfacing a durable conflict.
-                    # Preserve hash -> native ownership and compose native -> canonical. Overwriting the
-                    # first edge would strand the stable card beside its merged hypothesis shadow.
-                    alias[resolved_alias] = canon
+                    # Two receipts naming the same alias with DIFFERENT canonicals (X->A and X->B)
+                    # used to resolve by last-event-wins, so `fold(perm(events))` sent X to A or to B
+                    # depending on byte order — reproduced, and a direct violation of invariant 5 that
+                    # the section header three comments up already claims to hold. Pick a COMMUTATIVE
+                    # winner instead: the lexicographically smallest canonical, exactly the hardening
+                    # `_on_card_concept_consolidation` applies to its own rename map and for the same
+                    # stated reason. The engine records each merge once, so a conflict only arises in
+                    # an adversarial or spliced log; this just makes the fold total on one. Resolving
+                    # inside `merge_alias` keeps hash -> native ownership intact: a bridge edge is
+                    # still retargeted by a merge exactly as before, but the merge decision itself no
+                    # longer depends on order.
+                    prior = merge_alias.get(resolved_alias)
+                    merge_alias[resolved_alias] = canon if prior is None else min(prior, canon)
+                    alias[resolved_alias] = merge_alias[resolved_alias]
         except Exception:  # noqa: BLE001 — one bad merge record must not brick the fold
             continue
 
