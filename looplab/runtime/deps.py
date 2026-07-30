@@ -19,11 +19,14 @@ auto-install is fast and predictable and can never chase a name that isn't a rea
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Optional
+
+from looplab.runtime.sandbox import SECRET_ENV
 
 # "No module named 'X'" / 'X.Y' — the canonical ModuleNotFoundError / ImportError text. Captures
 # the dotted path; callers reduce it to the TOP-LEVEL package (the unit pip installs).
@@ -167,16 +170,20 @@ def install(package: str, *, python: Optional[str] = None, timeout: float = 900.
                              timed_out=True)
     py = python or sys.executable
     argv = [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", package]
+    # `pip install` of an sdist executes the package's setup.py/build backend — ARBITRARY CODE — so
+    # this child gets the same secret scrub as every other spawn (sandbox.run_argv,
+    # bg_tasks._child_env); inheriting the full os.environ handed it the operator's LLM_API_KEY and
+    # cloud creds. The curated allowlist keeps the risk low, but `install()` itself does not enforce
+    # `is_installable` (that guard is caller-side in crash_repair), so a future caller bypassing it
+    # would otherwise hand a typosquatted sdist the secrets.
+    # NAME-based only, deliberately: pip's own configuration is credential-bearing by design
+    # (`PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL` carry inline tokens for a private index), and stripping
+    # it would break exactly the installs an operator configured. `SECRET_ENV` does not match those
+    # names, so pip keeps its index while the LLM/cloud keys are gone.
+    env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
     try:
-        # CLAUDE REVIEW: [SECURITY] Unlike every other child spawn (sandbox.run_argv,
-        # bg_tasks._child_env), the pip child inherits the FULL os.environ un-scrubbed. `pip install`
-        # of an sdist executes the package's setup.py/build backend — arbitrary code — with the
-        # operator's LLM_API_KEY / cloud creds in its environment. The curated allowlist keeps the
-        # risk low (well-known packages, wheels), but install() itself does not enforce
-        # `is_installable` (that guard is caller-side in crash_repair), so a future caller bypassing
-        # it would hand a typosquatted sdist the secrets. Scrub with SECRET_ENV here for parity.
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=timeout)
+                              errors="replace", timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         _consecutive_install_timeouts += 1   # latch only after several in a row (true no-egress signal)
         return InstallResult(package=package, ok=False, returncode=-1,

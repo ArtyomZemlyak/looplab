@@ -228,3 +228,36 @@ def test_timeout_is_repaired_by_reducing_compute(tmp_path):
     assert "timeout" in dev.last_error.lower()       # the cost-reduction directive reached the Developer
     st = fold(evs)
     assert st.nodes[0].status.name == "evaluated"    # recovered, not left dead
+
+
+def test_pip_child_does_not_inherit_the_operator_secrets(monkeypatch):
+    """`pip install` of an sdist runs the package's setup.py/build backend — ARBITRARY CODE — so this
+    child needs the same scrub every other spawn applies. It used to inherit the full os.environ, so a
+    typosquatted sdist reaching a caller that skipped `is_installable` got the operator's keys.
+
+    The scrub is NAME-based on purpose: pip's own index configuration is credential-bearing by design
+    (`PIP_INDEX_URL` with an inline token for a private index), and stripping it would break exactly
+    the installs an operator set up.
+    """
+    monkeypatch.setenv("LOOPLAB_LLM_API_KEY", "sk-must-not-leak")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-must-not-leak")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://user:tok@pypi.internal/simple")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    seen: dict = {}
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "ok", ""
+
+    def _fake_run(argv, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.setattr(deps.subprocess, "run", _fake_run)
+    assert deps.install("numpy").ok
+
+    env = seen["env"]
+    assert env is not None, "the pip child inherited the parent environment wholesale"
+    assert "LOOPLAB_LLM_API_KEY" not in env and "AWS_SECRET_ACCESS_KEY" not in env
+    assert env.get("PATH") == "/usr/bin"                      # ...but pip can still find things
+    assert env.get("PIP_INDEX_URL") == "https://user:tok@pypi.internal/simple"   # ...and its index
