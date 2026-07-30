@@ -830,14 +830,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                     _run_from = _i
                     break
         stage_results = []
-        # CLAUDE REVIEW: [BUG] `_sig` is missing from this defensive pre-binding. When every stage is
-        # skipped (all reused via start_stage, or an unvalidated stage list whose commands are empty —
-        # `if not _scmd: continue`), the loop never binds `_sig`, and the final
-        # `RunResult(..., stalled=bool(_sig.get("stalled")))` below raises
-        # `NameError: cannot access local variable '_sig'` (reproduced: stages=[{"name":"a",
-        # "command":[]}]). rc/out/err/to were pre-bound for exactly this case; `_sig` needs the same
-        # (`_sig: dict = {}` here).
-        rc, out, err, to = 0, "", "", False      # bound even if every stage is reused/empty (defensive)
+        # Bound even if every stage is reused/empty (defensive). `_sig` belongs here for the same
+        # reason as rc/out/err/to and was missing: when no stage actually runs — all reused via
+        # `start_stage`, or a stage whose command expands to `[]` (`if not _scmd: continue`, reachable
+        # from `["%params%"]` with empty params and from the unvalidated `score` stage
+        # `engine/eval_stages.py` appends) — the loop never binds it, and the closing
+        # `RunResult(..., stalled=bool(_sig.get("stalled")))` raised UnboundLocalError out of the eval
+        # worker, so the node got no terminal event at all.
+        rc, out, err, to, _sig = 0, "", "", False, {}
         for _i, _stg in enumerate(stages):
             _sname = str(_stg.get("name") or f"stage{_i}")
             _scmd = list(_stg.get("command") or [])

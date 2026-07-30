@@ -2736,3 +2736,65 @@ def test_command_and_lock_sidecar_symlinks_are_rejected(monkeypatch, tmp_path):
     response = _post(client, "hint", {"text": "lock must stay in root"}, key="lock-link")
     assert response.status_code == 409
     assert list(lock_target.iterdir()) == []
+
+
+def test_operator_stage_name_cache_survives_concurrent_polls(tmp_path):
+    """`node_logs` is a sync `def`, so FastAPI serves polls on threadpool threads.
+
+    The prune-before-insert ITERATED this module-global dict while another run's poll inserted into
+    it — `RuntimeError: dictionary changed size during iteration`, i.e. a 500 on the live log panel —
+    and two same-run misses after a snapshot rewrite both `del`'d the same key for a `KeyError`.
+    `routers/attention.py` and `AppState._trace_view_cache` lock their identical caches; this one did
+    not. A short switch interval plus a pre-loaded cache makes the interleaving reliable instead of
+    depending on the scheduler happening to preempt inside a short comprehension.
+    """
+    import json
+    import sys
+    import threading
+
+    from looplab.serve.routers.runs import _OP_STAGE_NAMES, _operator_stage_names
+
+    _OP_STAGE_NAMES.clear()
+    # Long enough that the prune comprehension spans many bytecodes and can be preempted mid-walk.
+    for index in range(4000):
+        _OP_STAGE_NAMES[(f"/filler/{index}", index, index)] = ()
+
+    run_dirs = []
+    for index in range(8):
+        rd = tmp_path / f"run{index}"
+        rd.mkdir()
+        (rd / "task.snapshot.json").write_text(json.dumps({
+            "kind": "command", "id": f"t{index}", "goal": "g", "direction": "min",
+            "eval": {"cmd": ["true"], "metric": {"kind": "stdout_json", "key": "metric"}},
+        }), encoding="utf-8")
+        run_dirs.append(rd)
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(len(run_dirs))
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    def _hammer(rd) -> None:
+        snap = rd / "task.snapshot.json"
+        try:
+            barrier.wait(timeout=10)
+            for _ in range(60):
+                _operator_stage_names(rd)
+                # Rewrite so the next poll MISSES and re-enters the prune/insert path.
+                snap.write_text(snap.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        except BaseException as exc:  # noqa: BLE001 - the point is to surface it on the main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_hammer, args=(rd,)) for rd in run_dirs]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+    finally:
+        sys.setswitchinterval(previous_interval)
+    assert not errors, f"concurrent stage-name polls raised: {errors[:3]}"
+    # Still bounded: the prune keeps at most one live entry per polled run dir.
+    live = [key for key in _OP_STAGE_NAMES if not key[0].startswith("/filler/")]
+    assert len(live) <= len(run_dirs)
+    _OP_STAGE_NAMES.clear()

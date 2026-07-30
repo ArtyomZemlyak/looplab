@@ -613,3 +613,32 @@ def test_single_command_stall_verdict_cannot_be_forged_from_candidate_stderr(tmp
     # The engine-side gate must therefore refuse to salvage it.
     assert not (res.metric is not None and not res.timed_out
                 and (res.exit_code == 0 or res.stalled))
+
+
+def test_no_stage_actually_running_still_returns_a_result(tmp_path):
+    """`_sig` was bound only INSIDE the stage loop, so a run where no stage executes crashed.
+
+    `rc/out/err/to` were pre-bound for exactly this case; `_sig` was not, and the closing
+    `RunResult(..., stalled=bool(_sig.get("stalled")))` then raised UnboundLocalError straight out of
+    the eval worker — the node got no terminal event at all. Both ways in are reachable: a stage whose
+    command expands to `[]` (`["%params%"]` with empty params, or the unvalidated `score` stage
+    `engine/eval_stages.py` appends), and every stage reused via `start_stage`.
+    """
+    metric = {"kind": "stdout_json", "key": "metric"}
+    argv = [sys.executable, "-c", 'print(\'{"metric": 1.0}\')']
+
+    empty = run_command_eval(argv, str(tmp_path), 5.0, metric,
+                             stages=[{"name": "a", "command": []}])
+    assert empty.stalled is False and empty.stages == []
+
+    # Several empty stages in a row is the same hole, and is what an unvalidated operator list plus
+    # the `score` stage `engine/eval_stages.py` appends can produce together.
+    several = run_command_eval(argv, str(tmp_path), 5.0, metric,
+                               stages=[{"name": "train", "command": []},
+                                       {"name": "score", "command": []}])
+    assert several.stalled is False and several.stages == []
+
+    # A stage that DOES run still reports its real signal, so the pre-binding is a floor, not a mask.
+    ran = run_command_eval(argv, str(tmp_path), 5.0, metric,
+                           stages=[{"name": "a", "command": argv}])
+    assert [s["status"] for s in (ran.stages or [])] == ["ok"]

@@ -77,6 +77,13 @@ from looplab.serve.run_commands import run_generation_token
 # fallback in node_logs deliberately stays per-poll: looplab_stages.json is written mid-node by the
 # Developer's STAGES phase, so it can appear between polls and differs node to node.
 _OP_STAGE_NAMES: dict[tuple[str, int, int], tuple] = {}
+# `node_logs` is a sync `def`, so FastAPI serves concurrent polls on threadpool threads.
+# The prune below ITERATES this dict while another run's poll inserts into it, which raises
+# RuntimeError('dictionary changed size during iteration') -> 500 on the live log panel; two
+# same-run misses after a snapshot rewrite also both `del` the same key -> KeyError. Guard the
+# read-modify-write exactly like routers/attention.py and AppState._trace_view_cache do; the
+# single `.get()` hit path stays lock-free.
+_OP_STAGE_NAMES_LOCK = threading.Lock()
 
 
 _CONCEPT_CORE_CACHE_MAX_ENTRIES = 16
@@ -674,14 +681,10 @@ def _operator_stage_names(rd: Path) -> tuple:
         names = ()
     # Prune this run dir's entries for OLDER snapshot versions before inserting, so the dict stays
     # bounded per run (a rewrite would otherwise leave one dead entry behind per version).
-    # CLAUDE REVIEW: [RACE] _OP_STAGE_NAMES is a module-global dict mutated from FastAPI threadpool
-    # threads with no lock: this comprehension iterates the dict while a concurrent node_logs poll
-    # for another run inserts into it, which raises RuntimeError("dictionary changed size during
-    # iteration") -> 500. routers/attention.py and AppState._trace_view_cache guard their identical
-    # caches with a threading.Lock for exactly this reason — this cache should too.
-    for stale in [k for k in _OP_STAGE_NAMES if k[0] == key[0]]:
-        del _OP_STAGE_NAMES[stale]
-    _OP_STAGE_NAMES[key] = names
+    with _OP_STAGE_NAMES_LOCK:
+        for stale in [k for k in _OP_STAGE_NAMES if k[0] == key[0]]:
+            _OP_STAGE_NAMES.pop(stale, None)
+        _OP_STAGE_NAMES[key] = names
     return names
 
 
