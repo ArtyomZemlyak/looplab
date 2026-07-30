@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings, settings_from_snapshot)
-from looplab.core.node_evidence import metrics_attempt_receipt
+from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
@@ -1758,16 +1758,11 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ node detail
     def _node_attempt(st, nid: int) -> Optional[int]:
-        """Current lifecycle for a folded node or its pre-create building marker."""
-        node = st.nodes.get(nid)
-        if node is not None:
-            attempt = getattr(node, "attempt", 0)
-            return attempt if type(attempt) is int and attempt >= 0 else 0
-        marker = st.buildings.get(nid)
-        if marker is None and st.building and st.building.get("node_id") == nid:
-            marker = st.building
-        raw = marker.get("generation") if isinstance(marker, dict) else None
-        return raw if type(raw) is int and raw >= 0 else (0 if marker is not None else None)
+        """Current lifecycle for a folded node or its pre-create building marker.
+
+        Kept as a local seam over the shared `core.node_evidence.node_attempt`, which the reviewer
+        route reads too — both metric-sidecar readers must fence on the SAME attempt."""
+        return node_attempt(st, nid)
 
     @router.get("/api/runs/{run_id}/nodes/{nid}")
     def node_detail(run_id: str, nid: int, seq: Optional[int] = None,

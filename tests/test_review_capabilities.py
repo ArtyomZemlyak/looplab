@@ -597,3 +597,42 @@ def test_no_cross_run_carrier_reaches_a_review_bearer(tmp_path, monkeypatch):
         assert response.status_code == 200, (path, response.text)
         assert marker not in json.dumps(response.json(), ensure_ascii=False), (
             f"{path} disclosed a sibling run id to a one-run review capability")
+
+
+def test_reviewer_metrics_are_attempt_fenced_like_the_owner_route(tmp_path, monkeypatch):
+    """A reviewer must never be served a superseded attempt's metric series.
+
+    A reset REUSES `nodes/node_<id>`, so its metric sidecar still holds the previous attempt's
+    points. The owner route (runs.py node_metrics) fences that with `metrics_attempt_receipt`; this
+    read did not, so the reviewer — the one party who cannot cross-check against the live run — got
+    exactly the known-stale evidence the owner endpoint refuses to serve."""
+    from looplab.core.node_evidence import begin_metrics_attempt
+
+    rd = _seed_run(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    windows = []
+
+    def _read(path, since_wall_time=None):
+        windows.append(since_wall_time)
+        return {"loss": [{"step": 1, "value": 0.5, "wall_time": 7.0}]}
+
+    monkeypatch.setattr(reviews_router, "read_node_metrics", _read)
+    client = TestClient(make_app(tmp_path))
+    headers = {"X-LoopLab-Review": _create(client)["token"]}
+    url = "/api/review/nodes/0/metrics"
+
+    # No receipt at attempt 0: a legacy run predating receipts stays readable.
+    assert client.get(url, headers=headers).json()["metrics"]["loss"]
+    assert windows == [None]
+
+    node_dir = rd / "nodes" / "node_0"
+    node_dir.mkdir(parents=True, exist_ok=True)
+
+    # A receipt for the CURRENT attempt: served, windowed from that attempt's start.
+    begin_metrics_attempt(node_dir, 0, started_at=1234.0)
+    assert client.get(url, headers=headers).json()["metrics"]["loss"]
+    assert windows[-1] == 1234.0
+
+    # A receipt from a DIFFERENT attempt — the reset case — yields NO series, not old points.
+    begin_metrics_attempt(node_dir, 1, started_at=5678.0)
+    assert client.get(url, headers=headers).json()["metrics"] == {}

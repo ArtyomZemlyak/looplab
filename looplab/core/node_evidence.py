@@ -49,3 +49,23 @@ def metrics_attempt_receipt(node_dir: str | Path) -> Optional[tuple[int, float]]
         return attempt, float(started_at)
     except (OSError, ValueError, TypeError, AttributeError):
         return None
+
+
+def node_attempt(state, nid: int) -> Optional[int]:
+    """Current lifecycle generation for a folded node or its pre-create building marker.
+
+    Lives here rather than in one router because BOTH readers of a node's metric sidecar need it to
+    fence the receipt above: the owner route and the reviewer route must agree on which attempt the
+    on-disk series is allowed to belong to, or a reset serves superseded evidence to whichever of
+    them forgot. Duck-typed on `state` (a folded `RunState`) so `core` gains no new dependency.
+
+    `None` means the node is neither folded nor building — there is no attempt to fence against."""
+    node = state.nodes.get(nid)
+    if node is not None:
+        attempt = getattr(node, "attempt", 0)
+        return attempt if type(attempt) is int and attempt >= 0 else 0
+    marker = state.buildings.get(nid)
+    if marker is None and state.building and state.building.get("node_id") == nid:
+        marker = state.building
+    raw = marker.get("generation") if isinstance(marker, dict) else None
+    return raw if type(raw) is int and raw >= 0 else (0 if marker is not None else None)

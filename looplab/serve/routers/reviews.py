@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, StrictBool
 
+from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
 from looplab.serve.metrics_adapters import read_node_metrics
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
@@ -384,13 +385,25 @@ def build_router(srv) -> APIRouter:
             node_dir = (rd / "nodes" / f"node_{nid}").resolve()
             if rd not in node_dir.parents:
                 raise HTTPException(404, "node metrics are unavailable")
-            # CLAUDE REVIEW: [LOGIC] Unlike the owner route (runs.py node_metrics), this read skips
-            # the metrics_attempt_receipt fencing, so after a node_reset a reviewer receives the
-            # PREVIOUS attempt's series mixed with (or instead of) the current one — exactly the
-            # known-stale data the owner endpoint deliberately refuses to serve. Apply the same
-            # receipt/attempt gate (empty series when the receipt doesn't match) here.
+            # Fence on the attempt receipt exactly as the owner route (runs.py node_metrics) does.
+            # A reset REUSES the node directory, so its metric sidecar still holds the previous
+            # attempt's points; without this gate a reviewer got the superseded series mixed with
+            # (or instead of) the current one — the known-stale data the owner endpoint already
+            # refuses to serve. Legacy attempt-zero runs predate receipts and stay readable; a later
+            # attempt whose exact marker is missing yields NO series rather than old evidence.
+            # Unlike the owner route this does not 409 on a concurrent reset: a reviewer is a
+            # read-only observer, so the honest answer to "which attempt is this?" is an empty
+            # series, not an error the review UI has no way to resolve.
+            current_attempt = node_attempt(srv.state(rd), nid)
+            receipt = metrics_attempt_receipt(node_dir)
             try:
-                metrics = _review_metrics(read_node_metrics(str(node_dir)))
+                if receipt is None:
+                    raw = read_node_metrics(str(node_dir)) if current_attempt == 0 else {}
+                elif receipt[0] == current_attempt:
+                    raw = read_node_metrics(str(node_dir), since_wall_time=receipt[1])
+                else:
+                    raw = {}
+                metrics = _review_metrics(raw)
             except Exception:  # noqa: BLE001 - observability must not take down a review
                 metrics = {}
             return {"metrics": metrics}
