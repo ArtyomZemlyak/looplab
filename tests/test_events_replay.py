@@ -2826,3 +2826,52 @@ def test_conflicting_card_merges_resolve_the_same_way_in_any_order():
         ("card_merged", {"canonical": "card-A", "aliases": ["card-X"]}),
     ])])
     assert list(plain.cards["card-A"].aliases) == ["card-X"] and "card-X" not in plain.cards
+
+
+def test_fold_stays_total_against_malformed_container_fields():
+    """`fold` must never raise: one bad row bricks replay/resume/UI for the whole run, forever.
+
+    Found by fuzzing every registered event type's handler-read fields. Three handlers read a
+    container without checking its shape, and all three sit OUTSIDE (or before) the try/except that
+    exists to make a corrupt row survivable:
+      * `node_created.parent_ids` — `d.get("parent_ids", [])` defaults only when the KEY is absent,
+        so an explicit `null` (the natural JSON spelling for a root) reached the comprehension.
+      * `hypothesis_ranked.order` — stored verbatim, then iterated unguarded in `_derive_cards`;
+        its native twin `_on_card_ranked` had already been bounded for exactly this.
+      * `run_setup_started/finished.command` — joined by `run_setup_key`.
+    Each is the same class as the `reward_hack_suspected.signals` hole, which is locked separately.
+    """
+    base = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "min"}),
+        ("node_created", {"node_id": 1, "operator": "draft", "idea": {"operator": "draft"}}),
+    ]
+
+    def _fold(row):
+        rows = [*base, row]
+        return fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(rows)])
+
+    malformed = [
+        ("node_created", {"node_id": 2, "parent_ids": None, "operator": "seed",
+                          "idea": {"operator": "draft"}}),
+        ("node_created", {"node_id": 2, "parent_ids": "1", "operator": "seed",
+                          "idea": {"operator": "draft"}}),
+        ("node_created", {"node_id": 2, "parent_ids": 7, "operator": "seed",
+                          "idea": {"operator": "draft"}}),
+        ("hypothesis_ranked", {"node_id": 1, "order": 3}),
+        ("hypothesis_ranked", {"node_id": 1, "order": "card-a"}),
+        ("run_setup_started", {"command": 5}),
+        ("run_setup_finished", {"command": 5, "exit_code": 0}),
+    ]
+    for row in malformed:
+        _fold(row)                                  # must not raise
+
+    # ...and the well-formed spellings still fold exactly as before.
+    kept = _fold(("node_created", {"node_id": 2, "parent_ids": [1], "operator": "improve",
+                                   "idea": {"operator": "improve"}}))
+    assert kept.nodes[2].parent_ids == [1]
+    setup = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate([
+        *base,
+        ("run_setup_started", {"command": ["pip", "install", "x"]}),
+        ("run_setup_finished", {"command": ["pip", "install", "x"], "exit_code": 0}),
+    ])])
+    assert len(setup.run_setup_done) == 1 and not setup.run_setup_open

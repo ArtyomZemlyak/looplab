@@ -449,9 +449,16 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     if current is not None and generation != current.attempt:
         return                       # a late rebuild from a superseded lifecycle
+    # `d.get("parent_ids", [])` defaults only when the KEY IS ABSENT, so an explicit
+    # `"parent_ids": null` — the natural JSON spelling for a root node — reached the comprehension as
+    # None and raised TypeError. This runs BEFORE the `try:` that exists to make one corrupt node row
+    # survivable, so it bricked every later fold/replay/resume/view of the run instead of skipping
+    # that event. Guard the type like `_on_node_repaired` and `_parent_generation_map_matches`
+    # already do (fold must stay total).
+    raw_parent_ids = d.get("parent_ids")
     parent_ids = [
         parent_id
-        for raw_parent_id in d.get("parent_ids", [])
+        for raw_parent_id in (raw_parent_ids if isinstance(raw_parent_ids, list) else [])
         if (parent_id := _coerce_node_id({"node_id": raw_parent_id})) is not None
     ]
     speculative = d.get("speculative") is True
@@ -1500,7 +1507,10 @@ def _on_run_setup_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # tell "never started" from "died halfway through the install", so record the open attempt; the
     # finish below closes it. Old logs whose started row carried no `command` simply add nothing —
     # they fold exactly as before.
-    if d.get("command"):
+    # `run_setup_key` joins over the command, so a truthy SCALAR raised TypeError out of the fold.
+    # An unusable shape is not a setup attempt we can key — treat it like the old logs that carried
+    # no `command` at all and add nothing (fold must stay total).
+    if isinstance(d.get("command"), (list, tuple)) and d.get("command"):
         st.run_setup_open.add(run_setup_key(d.get("command")))
 
 def _on_run_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1508,8 +1518,8 @@ def _on_run_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # command) so a resume skips it instead of re-installing every time — crash-safe exactly-once. A
     # failed/timed-out setup is NOT recorded (the command must actually re-run). Old logs whose
     # run_setup_finished carried no `command` just don't populate the set (setup runs as before).
-    if not d.get("command"):
-        return
+    if not isinstance(d.get("command"), (list, tuple)) or not d.get("command"):
+        return                       # same shape guard as the started handler above
     key = run_setup_key(d.get("command"))
     # ANY finish closes the open attempt — a failed/timed-out command reported its outcome, so the
     # next process is not resuming through an unknown one. Only exit 0 marks it done.
@@ -2248,7 +2258,13 @@ def _on_hypothesis_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     if generation is not _MISSING and (
             n is None or n.id in st.aborted_nodes or not _generation_matches(n, d)):
         return
-    st.hypothesis_ranking = d
+    # `_derive_cards` iterates `(...).get("order") or []` unguarded, so a truthy SCALAR `order`
+    # raised TypeError out of the fold and bricked the run. The native twin `_on_card_ranked`
+    # already bounds this and says why: "a malformed/future order is an honest empty ranking, never
+    # an iterable assumption that can brick replay". Same treatment here.
+    raw_order = d.get("order")
+    st.hypothesis_ranking = ({**d, "order": raw_order} if isinstance(raw_order, list)
+                             else {**d, "order": []})
 
 def _on_rung_promoted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.rungs.append({"rung": d.get("rung"), "survivors": d.get("survivors", [])})
