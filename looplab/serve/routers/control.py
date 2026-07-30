@@ -640,21 +640,24 @@ def build_router(srv) -> APIRouter:
         stop the run first. Non-destructive to the event log (events.jsonl, the source of truth, is
         untouched) — only the diagnostics trace is dropped."""
         rd = _run_dir(run_id)
-        # CLAUDE REVIEW: [RACE] Unlike reset_run, this destructive rewrite takes neither the
-        # run_lifecycle_lock nor any pending-resume fence (_fresh_resume_launch_pending /
-        # resume_pending). The resume reconciler (reconcile_pending_resume — fired from the runs-list
-        # poll and the startup timers) spawns engines under the LIFECYCLE lock only, not the command
-        # sequencer destructive_guard holds, so on a dead-engine run with an unserved resume intent
-        # older than the grace window it can Popen a new engine between the liveness check below and
-        # the whole-file rewrite — the fresh engine then appends spans while write_jsonl_atomic
-        # replaces spans.jsonl (lost spans / index divergence). Hold run_lifecycle_lock_http and
-        # refuse when state.resume_pending(), as reset_run does.
-        with srv.commands.destructive_guard(rd, "clear node trace") as rd:
-            # Re-check inside the command sequencer: a pending worker must not Popen between the
-            # liveness probe and the whole-file atomic rewrite.
+        # Both locks, in the same order reset_run uses (command -> lifecycle), because this is the
+        # same shape of destructive whole-file rewrite. The command sequencer alone is not enough:
+        # the resume reconciler (`reconcile_pending_resume`, fired from the runs-list poll and the
+        # startup timers) spawns engines under the LIFECYCLE lock only, so on a dead-engine run with
+        # an unserved resume intent it could Popen a new engine between the liveness probe below and
+        # `write_jsonl_atomic` — the fresh engine appending spans into a file being replaced under
+        # it (lost spans, span-index divergence).
+        with srv.commands.destructive_guard(rd, "clear node trace") as rd, run_lifecycle_lock_http(rd):
+            # Re-check inside BOTH locks: a pending worker must not Popen between the liveness probe
+            # and the whole-file atomic rewrite. An unserved resume intent is refused for the same
+            # reason reset_run refuses it — the launch it will cause is not visible to a liveness
+            # probe yet, so "not running right now" does not mean "no engine is about to write".
             known_alive = _known_engine_liveness(rd, "clear the node trace")
-            if known_alive or _engine_alive(rd):
+            if known_alive or _engine_alive(rd) or _fresh_resume_launch_pending(rd):
                 raise HTTPException(409, "run is live — stop it first (the engine is writing spans.jsonl)")
+            if srv.state(rd).resume_pending():
+                raise HTTPException(409, "run has an unserved resume — stop it first "
+                                         "(an engine is about to write spans.jsonl)")
             sp = rd / "spans.jsonl"
             if not sp.exists():
                 return {"ok": True, "removed": 0, "kept": 0}

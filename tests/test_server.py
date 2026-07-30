@@ -3502,3 +3502,32 @@ def test_runs_list_started_date_is_the_runs_start_not_its_last_append(tmp_path):
     assert row["created"] == started                          # ...from run_started.ts
     assert row["created"] < log.stat().st_ctime - 86_400      # ...NOT from the inode-change stat
     assert row["mtime"] == pytest.approx(log.stat().st_mtime)  # "updated" still tracks the file
+
+
+def test_clear_trace_refuses_a_run_with_an_unserved_resume(tmp_path):
+    """A destructive whole-file rewrite must fence the ENGINE THAT IS ABOUT TO START, not just a
+    running one.
+
+    `clear_node_trace` held only the command sequencer, but `reconcile_pending_resume` — fired from
+    the runs-list poll and the startup timers — spawns engines under the LIFECYCLE lock, which the
+    sequencer does not exclude. On a dead-engine run carrying an unserved `resume_requested`, that
+    reconciler could Popen a fresh engine between the liveness probe and `write_jsonl_atomic`, and
+    the new engine would append spans into a file being replaced under it. `reset_run` already
+    refuses on exactly this signal."""
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    spans = [{"span_id": "a", "kind": "operation", "name": "n", "attributes": {"node_id": 0}}]
+    (rd / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
+    before = (rd / "spans.jsonl").read_bytes()
+    client = TestClient(make_app(tmp_path))
+
+    # A durable resume intent that no engine has served yet: not alive, but about to be.
+    EventStore(rd / "events.jsonl").append("resume_requested", {})
+    blocked = client.post("/api/runs/demo/nodes/0/clear_trace")
+    assert blocked.status_code == 409
+    assert (rd / "spans.jsonl").read_bytes() == before      # nothing rewritten under the launch
+
+    # Once an engine has SERVED it, the run is quiet again and the rewrite proceeds.
+    EventStore(rd / "events.jsonl").append("resume_served", {})
+    cleared = client.post("/api/runs/demo/nodes/0/clear_trace")
+    assert cleared.status_code == 200 and cleared.json()["removed"] == 1
