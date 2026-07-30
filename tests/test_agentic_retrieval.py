@@ -101,6 +101,39 @@ def test_agent_loop_emit_after_nudges_to_commit(tmp_path):
                for m in third), "emit_after should have injected a commit nudge"
 
 
+def test_bounced_emits_do_not_burn_the_investigation_budget(tmp_path):
+    """A turn whose only call was a REJECTED emit retrieved nothing, so it must not advance the
+    emit_after nudge — which counts investigation and states the count back to the model. Counting
+    it fired the nudge ("You have investigated enough (2 tool turns)") after ONE real search plus a
+    validation bounce, cutting the investigation short over work the model never did."""
+    _seed_kb(tmp_path)
+    client = _FakeChatClient([
+        _tool_call("kb_search", {"query": "a"}),                       # turn 1: one REAL search
+        _tool_call("emit", {"operator": "draft", "params": {},          # turn 2: bounced, nothing read
+                            "rationale": ""}),
+        _tool_call("kb_search", {"query": "b"}),                       # turn 3: the 2nd real search
+        _tool_call("emit", {"operator": "draft", "params": {"degree": 2.0},
+                            "rationale": "commit", "concept_mode": "full"}),
+    ])
+    r = ToolUsingResearcher(client, KnowledgeTools(str(tmp_path)),
+                            bounds={"degree": (0.0, 6.0), "lam": (0.0, 100.0)},
+                            loop_opts={"emit_after": 2, "self_plan": False,
+                                       "stuck_detection": False, "auto_summary": False})
+    idea = r.propose(RunState(goal="g"), None)
+
+    assert idea.params.get("degree") == 2.0
+
+    def _nudged(turn):
+        return any(m.get("role") == "user" and "investigated enough" in (m.get("content") or "").lower()
+                   for m in turn)
+
+    assert not _nudged(client.turns[2])          # the bounce did not count as investigation...
+    assert _nudged(client.turns[3])              # ...the nudge lands after the SECOND real search
+    nudge = next(m for m in client.turns[3]
+                 if m.get("role") == "user" and "investigated enough" in (m.get("content") or "").lower())
+    assert "(2 tool turns)" in nudge["content"]  # and the count it states is the real one
+
+
 def test_agent_loop_rejects_empty_emit_and_reprompts(tmp_path):
     _seed_kb(tmp_path)
     client = _FakeChatClient([

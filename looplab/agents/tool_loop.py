@@ -312,6 +312,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
+    # ...and every turn that CALLED a tool, investigation or not. The two differ: a turn whose only
+    # call was a bounced emit or an `update_plan` retrieved nothing. The nudge measures investigation
+    # (its wording states the count); the emit_force ceiling measures turns, because it is the hard
+    # termination guarantee for an unlimited-`max_turns` loop and must advance even when the model is
+    # bouncing on emit validation or only updating its plan.
+    call_turns = 0
     emit_nudged = False
     exhausted = False                    # ran out of turns/time (vs stalled/stuck/cancelled)
 
@@ -403,6 +409,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         messages.append({"role": "assistant", "content": msg.get("content") or "",
                          "tool_calls": calls})
         stuck_reason = None
+        investigated = False            # did any call this turn actually RUN a tool (see call_turns)
         for tc in calls:
             repeat_note = ""            # per-call: set only when an executed call is a 3rd+ repeat
             fn = tc.get("function", {})
@@ -468,6 +475,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # note below covers the 3+-call round-robins B1's 1-/2-cycle window can't see.
                 # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
                 # live progress view advances turn-by-turn instead of jumping only at the end.
+                investigated = True     # a real retrieval — this turn counts as investigation
                 _step(turn=turn_idx, tool=name,
                       arg=next((str(v) for v in (args or {}).values() if v), ""))
                 # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
@@ -505,14 +513,16 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # nudge at `emit_after` tool turns; FORCE the emit at `emit_force` if it still hasn't committed.
         # The nudge wording is ROLE-NEUTRAL: this loop also drives the strategist/pilot/triage emits
         # (via loop_opts_from_settings), where "your best idea / next node" would be nonsense.
-        # CLAUDE REVIEW: [LOGIC] `tool_turns` counts every turn that carried ANY tool_call, including
-        # turns whose only call was a rejected emit or an update_plan — no retrieval actually ran,
-        # yet the emit_after nudge ("You have investigated enough (N tool turns)") and the emit_force
-        # ceiling still advance, so a model bouncing on emit validation burns "investigation" budget
-        # and the nudge's stated count overstates the real investigation.
+        # The nudge counts only turns that actually RETRIEVED something: a turn whose only call was a
+        # bounced emit or an `update_plan` investigated nothing, so counting it both fired the nudge
+        # early and made its stated number ("You have investigated enough (N tool turns)") a lie about
+        # work the model never did. The FORCE ceiling deliberately keeps counting every tool-calling
+        # turn — it is the termination guarantee for an unlimited-`max_turns` loop, and a model that
+        # only ever updates its plan must still be forced to emit.
         if (emit_after or emit_force) and tools is not None:
-            tool_turns += 1
-            if emit_force and tool_turns >= emit_force:
+            call_turns += 1
+            tool_turns += int(investigated)
+            if emit_force and call_turns >= emit_force:
                 if _cancelled():        # paid call — see the prose-reply force above
                     break
                 ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
