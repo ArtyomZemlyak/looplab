@@ -593,12 +593,13 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     # always-on context must hide them too, or a deleted dead-end keeps steering the Researcher (the
     # winners path already excludes them through top_nodes → feasible_nodes; the failure/theme paths
     # below did not).
-    n_fail = sum(1 for n in nodes.values() if n.status is NodeStatus.failed and not n.tombstoned)
-    # CLAUDE REVIEW: [LOGIC] The headline count uses len(nodes), which still includes tombstoned
-    # (and aborted) nodes, while n_fail and every listing below exclude them — after a §6.3 delete
-    # the "N experiment(s)" total overstates the live search that the rest of this digest (and the
-    # hide-tombstoned rationale above) describes. Count non-tombstoned nodes for consistency.
-    lines = [f"\nSearch so far — {len(nodes)} experiment(s), {n_fail} failed:"]
+    live = [n for n in nodes.values() if not n.tombstoned]
+    n_fail = sum(1 for n in live if n.status is NodeStatus.failed)
+    # The headline counts LIVE nodes for the same reason: it used `len(nodes)`, which still includes
+    # tombstoned ones, while n_fail and every listing below exclude them — so right after a §6.3
+    # delete the "N experiment(s)" total described a larger search than anything else in this digest,
+    # and the model was told it had already tried more than it could see.
+    lines = [f"\nSearch so far — {len(live)} experiment(s), {n_fail} failed:"]
 
     winners = top_nodes(state, top_k)
     if winners:

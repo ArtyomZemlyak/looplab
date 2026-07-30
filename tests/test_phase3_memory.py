@@ -171,7 +171,11 @@ def test_experiments_digest_excludes_tombstoned_nodes():
     st.best_node_id = 0
     st.nodes[1].idea.theme = "beta"
     st.nodes[2].idea.theme = "beta"          # tombstoned -> must NOT add to the 'beta' rollup
-    assert "1 failed" in experiments_digest(st).splitlines()[1]     # only the live failure counted
+    headline = experiments_digest(st).splitlines()[1]
+    assert "1 failed" in headline                                   # only the live failure counted
+    # ...and the TOTAL is the live search too. It used len(state.nodes), so a deleted dead-end kept
+    # inflating "N experiment(s)" past everything else the digest showed.
+    assert "2 experiment(s)" in headline
     assert theme_rollup(st).get("beta", {}).get("count") == 1       # tombstoned 'beta' node excluded
 
 
