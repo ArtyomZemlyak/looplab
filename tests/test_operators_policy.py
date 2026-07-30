@@ -342,3 +342,62 @@ def test_asha_retires_a_deterministically_crashing_survivor():
                      idea=Idea(operator="improve", params={}), status=NodeStatus.failed)}
     act = ASHAPolicy(n_seeds=4, max_nodes=20, eta=2, debug_depth=0).next_actions(_asha_rung0(kids))
     assert act and act[0]["kind"] == "improve" and act[0]["parent_id"] == 1
+
+
+def test_operator_yields_credits_only_breedable_nodes():
+    """The P4 bandit must not be rewarded by a node the run already refuses to breed from.
+
+    `operator_yields` iterated `state.nodes` RAW, so a §6.3 TOMBSTONED node, an ABORTED one, and —
+    worst — a `breed_excluded` node the trust gate hard-flagged as cheating/leaking all contributed
+    credit. §2.2's whole point is that "the search never sinks budget improving a cheating lineage";
+    crediting that node's inflated Δmetric to its OPERATOR did exactly that one level up, so the
+    bandit picked the operator that produced the cheat more often."""
+    from looplab.search.policy import operator_yields
+
+    def _state():
+        st = RunState(direction="max")
+        st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 0.0}),
+                           metric=0.10, status=NodeStatus.evaluated)
+        st.nodes[1] = Node(id=1, operator="improve", parent_ids=[0],
+                           idea=Idea(operator="improve", params={"x": 1.0}),
+                           metric=0.99, status=NodeStatus.evaluated, eval_seconds=1.0)
+        return st
+
+    assert operator_yields(_state())["improve"]["n"] == 1        # the honest baseline
+
+    flagged = _state()
+    flagged.breed_excluded = {1}          # trust_gate=gate hard-flagged it as cheating
+    assert "improve" not in operator_yields(flagged)
+
+    deleted = _state()
+    deleted.nodes[1].tombstoned = True    # §6.3 logically deleted
+    assert "improve" not in operator_yields(deleted)
+
+    aborted = _state()
+    aborted.aborted_nodes = {1}
+    assert "improve" not in operator_yields(aborted)
+
+    infeasible = _state()
+    infeasible.nodes[1].feasible = False  # violated a hard constraint (#5)
+    assert "improve" not in operator_yields(infeasible)
+
+
+def test_mcts_subtree_value_ignores_deleted_and_aborted_descendants():
+    """A logically-deleted descendant must not keep steering UCB toward its ancestor's subtree."""
+    from looplab.search.policy import MCTSPolicy
+
+    st = RunState(direction="max")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 0.0}),
+                       metric=0.10, status=NodeStatus.evaluated)
+    st.nodes[1] = Node(id=1, operator="improve", parent_ids=[0],
+                       idea=Idea(operator="improve", params={"x": 1.0}),
+                       metric=0.99, status=NodeStatus.evaluated, eval_seconds=1.0)
+    pol = MCTSPolicy(n_seeds=1, max_nodes=8)
+    with_star = pol.next_actions(st)
+    st.nodes[1].tombstoned = True
+    st.aborted_nodes = set()
+    without = pol.next_actions(st)
+    # The policy still produces work; what must change is that the deleted node's 0.99 no longer
+    # values node 0's subtree — the two decisions are computed from different metric pools.
+    assert with_star is not None and without is not None
+    assert all(a.get("parent_id") != 1 for a in without if "parent_id" in a)

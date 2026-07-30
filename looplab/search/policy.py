@@ -106,14 +106,19 @@ def operator_yields(state: RunState) -> dict[str, dict]:
     Strategist's rule table becomes priors, not hard-coded cadences). Draft nodes have no
     parent, so 'draft' yield is not defined here (drafts are the exploration baseline)."""
     out: dict[str, dict] = {}
-    # CLAUDE REVIEW: [LOGIC] This yield fold iterates state.nodes RAW: tombstoned, aborted and
-    # gate-flagged (breed_excluded) evaluated nodes all contribute credit, so a hard-flagged cheating
-    # node's inflated Δmetric rewards its operator in the P4 bandit — unlike MCTSPolicy's subtree
-    # valuation below, which explicitly excludes breed_excluded/infeasible "matching breedable_nodes".
+    # CREDIT ONLY BREEDABLE NODES — the same pool `breedable_nodes()` defines, not `state.nodes` raw.
+    # A tombstoned node is §6.3 logically deleted and `evaluated_nodes()` gates it out of every other
+    # selection path; an aborted one never finished on its own terms; and a `breed_excluded` node is
+    # one the trust gate hard-flagged as cheating/leaking, whose whole point (§2.2) is that "the
+    # search never sinks budget improving a cheating lineage". Crediting its inflated Δmetric to its
+    # OPERATOR did exactly that one level up: the P4 bandit then picked that operator more often.
     # (NaN metrics are NOT a concern here: replay's `_finite_metric` nulls non-finite values at fold
     # time, so folded state never carries a NaN metric.)
     for n in state.nodes.values():
         if not n.parent_ids or n.status is not NodeStatus.evaluated or n.metric is None:
+            continue
+        if (n.tombstoned or not n.feasible
+                or n.id in state.aborted_nodes or n.id in state.breed_excluded):
             continue
         pm = [state.nodes[p].metric for p in n.parent_ids
               if p in state.nodes and state.nodes[p].metric is not None]
@@ -453,13 +458,15 @@ class MCTSPolicy:
             # Value the subtree by its feasible descendants' metrics, EXCLUDING gate-flagged (cheating)
             # nodes: their inflated metric must not make an ancestor's subtree look good and pull MCTS
             # exploration toward a cheating lineage (§2.2, matching breedable_nodes for direct targets).
-            # CLAUDE REVIEW: [EDGE-CASE] The descendant filter does not exclude tombstoned/aborted
-            # descendants (the §6.3 lifecycle gate the candidate pool honors) — a logically-deleted
-            # descendant's metric still steers UCB toward its ancestor's subtree here. (NaN metrics
-            # are not reachable: replay's `_finite_metric` nulls non-finite values at fold time, so
-            # the `metric is not None` check already excludes them.)
+            # Tombstoned/aborted descendants are excluded too: a §6.3 logically-deleted descendant
+            # is invisible to the candidate pool, so letting its metric keep steering UCB toward its
+            # ancestor's subtree meant deleting a node changed what the operator could pick but not
+            # where the search wanted to go. (NaN metrics are not reachable: replay's
+            # `_finite_metric` nulls non-finite values at fold time, so the `metric is not None`
+            # check already excludes them.)
             metrics = [state.nodes[i].metric for i in tree
                        if state.nodes[i].metric is not None and state.nodes[i].feasible
+                       and not state.nodes[i].tombstoned and i not in state.aborted_nodes
                        and i not in state.breed_excluded]  # #5
             if not metrics:
                 continue
