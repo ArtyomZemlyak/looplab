@@ -21,7 +21,8 @@ from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.agents.roles import (
-    _CONCEPT_AUTHORING_GUIDANCE, _OPERATOR_NOTE, _attention_points, _clamp_fill,
+    _CONCEPT_AUTHORING_GUIDANCE, _OPERATOR_NOTE, _UNTRUSTED_MEMORY_RULE,
+    _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, collect_hint_cues)
 # The tool-loop machinery was split into `agents.tool_loop`. Every moved name is RE-IMPORTED here
@@ -251,6 +252,9 @@ class ToolUsingResearcher:
                         + "\n" + _CONCEPT_AUTHORING_GUIDANCE
                         + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
                         + self.space_hint + hyp
+                        # Mirror of LLMResearcher's rule — this variant splices the same untrusted
+                        # cross-run cues into its user turn, so it needs the same code-owned guard.
+                        + _UNTRUSTED_MEMORY_RULE
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
