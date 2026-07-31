@@ -121,15 +121,15 @@ class LLMEmbedder:
             vecs = self._call(texts)
             if vecs is not None:
                 self._live = True
-                # CLAUDE REVIEW: [EDGE-CASE] Only vecs[0]'s dimension is checked against the committed
-                # dim. A malformed batch whose ROWS disagree with each other (row 0 at the committed
-                # dim, later rows at another) passes this guard whole; the off-dim vectors are stored
-                # and then silently score 0.0 in `cosine`, making those items permanently unreachable.
-                # Validate every row's length (the docstring claims `_cosine` never sees a mismatch).
+                # EVERY row's length, not just vecs[0]'s. A batch whose rows disagree with each
+                # OTHER (row 0 at the committed dim, a later row at another) used to pass this guard
+                # whole; the off-dim vectors were stored and then scored 0.0 forever in `_cosine`,
+                # making those items permanently unreachable with no error anywhere. The docstring
+                # promises `_cosine` never sees a mismatch — this is what makes that true.
                 dim = len(vecs[0])
                 if self._dim is None:
                     self._dim = dim
-                if dim == self._dim:                     # guard against a model that changes dim
+                if dim == self._dim and all(len(v) == dim for v in vecs):
                     return vecs
             elif self._live is None:                     # first-ever call failed -> degrade for good
                 self._live = False

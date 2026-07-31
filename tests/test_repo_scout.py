@@ -7,6 +7,7 @@ is covered here too."""
 from __future__ import annotations
 
 from looplab.tools.env_inspect import EnvInspectTools, _suggest
+from looplab.tools._base import RESULT_CAP
 from looplab.tools.reposcout import RepoScoutTools
 
 
@@ -307,11 +308,18 @@ def test_find_files_reports_its_own_cap_and_bounds_its_walk(tmp_path):
         (tmp_path / f"f{i:04d}.py").write_text("x", encoding="utf-8")
     s = RepoScoutTools(roots=[str(tmp_path)])
 
-    out = s.execute("find_files", {"root": str(tmp_path), "pattern": "**/*.py"}).splitlines()
-    assert len(out) == 201                      # 200 entries + one receipt line
+    raw = s.execute("find_files", {"root": str(tmp_path), "pattern": "**/*.py"})
+    out = raw.splitlines()
+    # The _MAX_ENTRIES cap is reported, and the RESULT_CAP budget keeps that receipt reachable: the
+    # agent loop cuts an over-cap result from the head, so a 201-line answer would have arrived with
+    # its own "showing 200 of 250" line eaten and looked complete. Rows are dropped, never the note.
+    assert len(raw) <= RESULT_CAP
     assert "showing 200 of 250 matches" in out[-1]
-    # The 200 shown are still the deterministic alphabetically-first ones, not walk order.
-    assert out[0].endswith("f0000.py") and out[199].endswith("f0199.py")
+    assert "omitted to fit the result cap" in out[-1]
+    # What IS shown is still the deterministic alphabetically-first prefix, not walk order.
+    assert out[0].endswith("f0000.py")
+    assert [line.rsplit("/", 1)[-1] for line in out[:-1]] == sorted(
+        line.rsplit("/", 1)[-1] for line in out[:-1])
 
     # The walk itself is bounded, and says so when the bound bites.
     budget = rs._FIND_SCAN_BUDGET
@@ -322,7 +330,7 @@ def test_find_files_reports_its_own_cap_and_bounds_its_walk(tmp_path):
     finally:
         rs._FIND_SCAN_BUDGET = budget
     assert len(stopped) == 11
-    assert "stopped after scanning 10 paths" in stopped[-1]
+    assert "stopped after scanning 10 paths" in stopped[-1]   # 10 rows fit, so no cap note here
 
     # An UNCAPPED answer carries no receipt at all — the note must not become noise on every call.
     (tmp_path / "only").mkdir()

@@ -237,3 +237,30 @@ def test_char_cap_cut_drops_the_partial_trailing_line(tmp_path):
     assert f"\nline {shown_to}:" not in out                   # the next line's fragment is dropped
     nxt = t.execute("read_file", {"path": "long.py", "start_line": int(mm.group(1)), "lines": 2})
     assert f"line {shown_to}: " + "y" * 90 in nxt             # re-served IN FULL on the next page
+
+
+def test_a_long_listing_keeps_its_partial_receipt_under_the_result_cap(tmp_path):
+    """The agent loop cuts an over-cap tool result from the HEAD, so whatever sits at the END is what
+    disappears — and for these listings the end is exactly the receipt saying the result is partial.
+    A capped `list_dir`/`find_files`/`grep` then arrives byte-indistinguishable from a complete one,
+    and the model reads the first N entries as the whole set."""
+    from looplab.tools._base import RESULT_CAP
+    from looplab.tools.reposcout import RepoScoutTools
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    for i in range(400):                       # far past _MAX_ENTRIES and far past RESULT_CAP
+        (root / f"module_with_a_longish_name_{i:04d}.py").write_text("needle = 1\n", encoding="utf-8")
+    tools = RepoScoutTools(roots=[str(root)], default_root=str(root))
+
+    listing = tools.execute("list_dir", {"path": str(root)})
+    assert len(listing) <= RESULT_CAP
+    assert "more" in listing.splitlines()[-1], listing.splitlines()[-1]
+
+    found = tools.execute("find_files", {"pattern": "*.py", "root": str(root)})
+    assert len(found) <= RESULT_CAP
+    assert "showing" in found.splitlines()[-1] or "omitted" in found.splitlines()[-1]
+
+    grepped = tools.execute("grep", {"pattern": "needle", "root": str(root), "max_hits": 200})
+    assert len(grepped) <= RESULT_CAP
+    assert "capped at" in grepped.splitlines()[-1] or "omitted" in grepped.splitlines()[-1]

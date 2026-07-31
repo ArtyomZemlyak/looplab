@@ -162,14 +162,13 @@ class RunTools:
             if name == "read_research_memo":
                 return self._research_memo(st)
             return f"(unknown tool: {name})"
-        # CLAUDE REVIEW: [EDGE-CASE] The module/provider contract says execute "soft-fails (never
-        # raises)", and drive_tool_loop does NOT guard tools.execute (cross_run_tools.py documents
-        # this explicitly) — but this catch tuple misses AttributeError / RecursionError / anything
-        # raised inside the concept-projection / digest helpers, so an unexpected shape in folded
-        # state propagates and can kill the whole agent phase. cross_run_tools/memory_tools catch
-        # Exception broadly for exactly this reason; the same applies to SiblingRunTools and
-        # AllRunsTools below.
-        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+        # BROAD on purpose. The provider contract is that `execute` soft-fails and never raises,
+        # and `drive_tool_loop` does NOT guard this call (cross_run_tools.py documents that
+        # explicitly) — so anything escaping here kills the whole agent phase, not just the tool
+        # call. A narrower tuple missed AttributeError and everything else the concept-projection /
+        # digest helpers can raise on an unexpected shape in folded state. Same rule in
+        # SiblingRunTools and AllRunsTools below, and in cross_run_tools/memory_tools already.
+        except Exception as e:  # noqa: BLE001 - a tool must not be able to end the phase
             return f"(tool error: {e})"
 
     # --- implementations ----------------------------------------------------
@@ -710,10 +709,7 @@ class SiblingRunTools:
             if name == "find_analogous_across_runs":
                 return self._analogous(args)
             return f"(unknown tool: {name})"
-        # CLAUDE REVIEW: [EDGE-CASE] Same too-narrow catch as RunTools.execute (see comment there):
-        # AttributeError and other unexpected exceptions from folding foreign logs / projections
-        # escape the "never raises" contract.
-        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+        except Exception as e:  # noqa: BLE001 - never-raise contract; see RunTools.execute
             return f"(tool error: {e})"
 
     # --- internals -----------------------------------------------------------
@@ -874,8 +870,7 @@ class AllRunsTools:
             if name == "read_run_experiment":
                 return self._read(args.get("run_id"), int(args.get("node_id")), args.get("trials"))
             return f"(unknown tool: {name})"
-        # CLAUDE REVIEW: [EDGE-CASE] Same too-narrow catch as RunTools.execute (see comment there).
-        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+        except Exception as e:  # noqa: BLE001 - never-raise contract; see RunTools.execute
             return f"(tool error: {e})"
 
     # --- internals -----------------------------------------------------------

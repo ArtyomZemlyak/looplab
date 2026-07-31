@@ -1025,3 +1025,30 @@ def test_every_cross_run_read_carries_the_partial_source_receipt(tmp_path):
     for name in ("read_run_code", "read_run_experiment"):
         out = machine.execute(name, {"run_id": "sib", "node_id": 9})
         assert "PARTIAL SOURCE" in out, (name, out)
+
+
+def test_a_tool_that_raises_an_unexpected_error_returns_it_instead_of_ending_the_phase(tmp_path):
+    """`drive_tool_loop` does NOT guard `tools.execute` — the provider contract is that it soft-fails
+    and never raises — so anything escaping here kills the whole agent phase, not just the call. The
+    catch tuple used to miss AttributeError and everything else the projection/digest helpers can
+    raise on an unexpected shape in folded state."""
+    from types import SimpleNamespace
+
+    from looplab.tools.run_tools import AllRunsTools, RunTools, SiblingRunTools
+
+    def _boom(*_a, **_k):
+        raise AttributeError("folded state had an unexpected shape")
+
+    tools = RunTools()
+    tools.bind_state(SimpleNamespace(task_id="t", goal="g", direction="max", nodes={}), None)
+    tools._experiments = _boom                      # any internal that a bad projection could break
+    out = tools.execute("list_experiments", {})
+    assert isinstance(out, str)
+
+    for cls in (SiblingRunTools, AllRunsTools):
+        provider = cls(tmp_path, "self")
+        provider.bind_state(SimpleNamespace(task_id="t", goal="g", direction="max"), None)
+        provider._state = _boom
+        for name in [s["function"]["name"] for s in provider.specs()]:
+            result = provider.execute(name, {"run_id": "other", "node_id": 1, "params": {"x": 1}})
+            assert isinstance(result, str), (cls.__name__, name, result)

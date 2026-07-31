@@ -33,6 +33,20 @@ def test_live_then_failure_keeps_dimension():
     assert len(b) == 768                                     # fallback padded to the committed dim
 
 
+def test_a_ragged_batch_is_rejected_not_stored_row_by_row():
+    """Only row 0's length was checked against the committed dim, so a batch whose rows disagree with
+    EACH OTHER passed whole. The off-dim vectors were then stored and scored 0.0 forever in
+    `_cosine` — those items became permanently unreachable, with no error anywhere."""
+    e = LLMEmbedder("m", "http://x/v1")
+    e._call = lambda texts: [[0.1] * 768 for _ in texts]
+    e.embed_many(["x"])                                      # commit the dimension
+    assert e._dim == 768
+
+    e._call = lambda texts: [[0.1] * 768, [0.1] * 512]       # row 0 fine, row 1 ragged
+    out = e.embed_many(["x", "y"])
+    assert {len(v) for v in out} == {768}, [len(v) for v in out]
+
+
 def test_first_call_failure_commits_to_lexical():
     e = LLMEmbedder("m", "http://x/v1", dim_fallback=32)
     e._call = lambda texts: None                             # never works

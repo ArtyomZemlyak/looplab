@@ -45,6 +45,32 @@ _MAX_FILE_BYTES = 64 * 1024 * 1024   # 64 MiB
 _MAX_ENTRIES = 200         # entries per list_dir / find_files
 
 
+def _fit_rows(header: str, rows: list[str], receipt: str = "") -> str:
+    """Assemble `header` + `rows` + a trailing `receipt` so the whole result fits under RESULT_CAP.
+
+    The agent loop cuts an over-cap tool result from the HEAD, which silently eats whatever is at the
+    END — and for these listings the end is exactly the receipt that says the result is partial
+    ("… (+K more)", "capped at N hits"). `read_file` already sizes its page to avoid that; list_dir,
+    find_files and grep did not, so a long listing arrived looking complete. Drop ROWS instead, and
+    say in the receipt how many the cap itself removed.
+    """
+    receipt_line = f"\n{receipt}" if receipt else ""
+    body = "\n".join(rows)
+    if len(header) + len(body) + len(receipt_line) <= RESULT_CAP:
+        return header + body + receipt_line
+    # Reserve room for the amended receipt before deciding how many rows survive.
+    dropped, kept = 0, list(rows)
+    while kept:
+        note = f"{receipt}; " if receipt else ""
+        amended = f"\n... ({note}{dropped} more omitted to fit the result cap)"
+        body = "\n".join(kept)
+        if len(header) + len(body) + len(amended) <= RESULT_CAP:
+            return header + body + amended
+        kept.pop()
+        dropped += 1
+    return header + (f"({receipt})" if receipt else "(nothing fits the result cap)")
+
+
 # Directories that are never worth walking for a content grep — model weights / checkpoints / caches
 # that a trainer repo carries by the GB (walking them stalls a grep on a FUSE mount).
 _SKIP_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", "node_modules", ".mypy_cache",
@@ -214,13 +240,10 @@ class RepoScoutTools:
                 except OSError:
                     sz = "?"
                 rows.append(f"FILE {c.name}  ({sz}b)")
-        if len(children) > _MAX_ENTRIES:
-            rows.append(f"… (+{len(children) - _MAX_ENTRIES} more)")
-        # CLAUDE REVIEW: [EDGE-CASE] 200 rows of "FILE <name> (size)" easily exceeds RESULT_CAP
-        # (4000 chars), and the loop's head-cut then drops the trailing "… (+K more)" receipt — the
-        # module's own header comment calls that silent-tail loss a bug for read_file, but list_dir
-        # (and find_files) have no equivalent under-cap budget.
-        return f"{p}:\n" + ("\n".join(rows) if rows else "(empty)")
+        if not rows:
+            return f"{p}:\n(empty)"
+        over = len(children) - _MAX_ENTRIES
+        return _fit_rows(f"{p}:\n", rows, f"… (+{over} more)" if over > 0 else "")
 
     def _overlay_get(self, path: str):
         """The staged content for a path, if the caller has one overlaid (else None). Matches by exact
@@ -461,9 +484,9 @@ class RepoScoutTools:
             shown = shown[:_MAX_ENTRIES]
         if stopped:
             notes.append(f"stopped after scanning {_FIND_SCAN_BUDGET} paths")
-        if not notes:
-            return "\n".join(shown)
-        return "\n".join(shown) + f"\n... ({'; '.join(notes)} — narrow `pattern`/`root` for the rest)"
+        return _fit_rows("", shown,
+                         f"... ({'; '.join(notes)} — narrow `pattern`/`root` for the rest)"
+                         if notes else "")
 
     def _grep(self, pattern: str, root: str, glob: str, max_hits) -> str:
         import os as _os
@@ -480,12 +503,6 @@ class RepoScoutTools:
         except _re.error:
             rx = _re.compile(_re.escape(pattern))   # not a valid regex -> treat as a literal substring
         cap = max(1, min(int(max_hits) if max_hits else 40, 200))   # clamp: a model-supplied max can't disable the cap
-        # CLAUDE REVIEW: [EDGE-CASE] Even the default 40 hits (each path + 200-char snippet) can far
-        # exceed RESULT_CAP, and unlike env_inspect's `_clamp` there is no provider-side line-boundary
-        # clamp here — the loop's head-cut then drops the trailing "(capped at N hits)" /
-        # "(stopped after N files…)" receipts. The loop's generic "[truncated by the tool-result
-        # cap…]" marker does still tell the model the result was cut, but the specific hit-cap /
-        # file-budget receipts (how much was searched, how much omitted) are exactly what gets lost.
         hits: list[str] = []
         # STAGED overlay first — the code the caller is EDITING wins over disk, and its paths dedup the
         # disk walk (so a patched file isn't grepped in both its edited and pristine form).
@@ -498,13 +515,13 @@ class RepoScoutTools:
                 if rx.search(line):
                     hits.append(f"{rel}:{i}: {line.strip()[:200]}")
                     if len(hits) >= cap:
-                        return "\n".join(hits) + f"\n(capped at {cap} hits)"
+                        return _fit_rows("", hits, f"(capped at {cap} hits)")
         scanned = 0
         for dp, dirs, files in _os.walk(base):
             dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
             for fn in sorted(files):
                 if scanned >= 4000:                 # file budget so a huge repo can't stall the grep
-                    return "\n".join(hits) + "\n(stopped after 4000 files; narrow `root`/`glob`)"
+                    return _fit_rows("", hits, "(stopped after 4000 files; narrow `root`/`glob`)")
                 if not _fnmatch(fn, glob):
                     continue
                 fp = Path(dp) / fn
@@ -537,7 +554,7 @@ class RepoScoutTools:
                                 # above + write_file's path shape, so a hit round-trips into an edit).
                                 hits.append(f"{self._disp(fp)}:{i}: {line.strip()[:200]}")
                                 if len(hits) >= cap:
-                                    return "\n".join(hits) + f"\n(capped at {cap} hits)"
+                                    return _fit_rows("", hits, f"(capped at {cap} hits)")
                 except OSError:
                     continue
-        return "\n".join(hits) if hits else f"(grep: {pattern!r} not found)"
+        return _fit_rows("", hits) if hits else f"(grep: {pattern!r} not found)"
