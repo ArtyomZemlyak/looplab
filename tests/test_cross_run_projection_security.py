@@ -264,3 +264,15 @@ def test_steward_nested_payload_is_redacted_before_receipt_persistence(
     assert response.json()["proposals"]["reviews"][0]["api_key"] == "***"
     assert response.json()["receipt"]["nested"]["access_token"] == "***"
     assert _SECRET not in rendered and "short-secret" not in rendered and "tiny-secret" not in rendered
+
+
+def test_one_non_string_key_does_not_erase_the_rest_of_the_mapping():
+    """`key.casefold()` assumed a str key. Int node-ids are ordinary keys in Python-side projections,
+    and the AttributeError landed in the broad fail-closed except — collapsing the WHOLE mapping to
+    "<mapping unavailable>", so one odd key erased every sibling field in the row."""
+    from looplab.trust.cross_run import sanitize_cross_run_projection
+
+    out = sanitize_cross_run_projection({7: "node seven", "note": "kept", None: "odd"})
+    assert isinstance(out, dict), out
+    assert out.get("note") == "kept"
+    assert "node seven" in out.values()

@@ -44,11 +44,20 @@ def _pearson(a: Sequence[float], b: Sequence[float]) -> float:
 
 def train_test_contamination(train_rows: list, test_rows: list) -> dict:
     """Detect identical rows shared between train and test splits."""
-    # CLAUDE REVIEW: [EDGE-CASE] `tuple(r)` on a row containing an unhashable cell (a nested
-    # list/dict from a JSON-shaped dataset) raises TypeError out of the detector instead of
-    # abstaining — every other detector in this module degrades gracefully on malformed input.
-    train = {tuple(r) for r in train_rows}
-    dups = [r for r in test_rows if tuple(r) in train]
+    # ABSTAIN on rows this comparison cannot express, rather than raising out of the detector: a
+    # JSON-shaped dataset has nested list/dict cells, which are unhashable, and every other detector
+    # here degrades gracefully on input it cannot read. Abstaining is also the honest answer — an
+    # un-comparable row is not evidence of no contamination, so it reports `checked=False`.
+    def _key(row):
+        return tuple(x if x.__hash__ is not None else repr(x) for x in row)
+
+    try:
+        train = {_key(r) for r in train_rows}
+        dups = [r for r in test_rows if _key(r) in train]
+    except TypeError:                     # a row that is not even iterable into cells
+        return {"detector": "train_test_contamination", "leak": False, "duplicates": 0,
+                "fraction": 0.0, "checked": False,
+                "reason": "rows are not comparable as tuples of cells"}
     frac = len(dups) / len(test_rows) if test_rows else 0.0
     return {"detector": "train_test_contamination",
             "leak": len(dups) > 0, "duplicates": len(dups), "fraction": round(frac, 6)}
@@ -193,12 +202,19 @@ def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]
     cutoff — i.e. training on future information."""
     if not train_timestamps or not test_timestamps:
         return {"detector": "temporal_leakage", "leak": False, "overlap": 0}
-    # CLAUDE REVIEW: [EDGE-CASE] A NaN in `test_timestamps` can poison `min()` (NaN comparisons are
-    # False, so if the FIRST element is NaN the min stays NaN) and then every `t >= cutoff` below is
-    # False — the detector silently reports leak=False on data that genuinely overlaps. This is the
-    # same NaN-poisoning false-negative class `_pearson` explicitly guards against (arch-review §4
-    # P1-7); filter non-finite timestamps before taking the cutoff.
-    cutoff = min(test_timestamps)
-    overlap = sum(1 for t in train_timestamps if t >= cutoff)
+    # Drop non-finite stamps BEFORE the cutoff. A NaN poisons `min()` — every NaN comparison is
+    # False, so a leading NaN keeps the min at NaN — and then every `t >= cutoff` is False too: the
+    # detector reports leak=False on data that genuinely overlaps. That silent false negative is the
+    # same class `_pearson` guards against above (arch-review §4 P1-7), and it is the dangerous
+    # direction for a trust gate. NaN train stamps are dropped for the same reason: they can never
+    # satisfy the comparison, so counting them would understate nothing but confuse the total.
+    import math
+    test_finite = [t for t in test_timestamps if isinstance(t, (int, float)) and math.isfinite(t)]
+    train_finite = [t for t in train_timestamps if isinstance(t, (int, float)) and math.isfinite(t)]
+    if not test_finite or not train_finite:
+        return {"detector": "temporal_leakage", "leak": False, "overlap": 0, "checked": False,
+                "reason": "no finite timestamps to compare"}
+    cutoff = min(test_finite)
+    overlap = sum(1 for t in train_finite if t >= cutoff)
     return {"detector": "temporal_leakage", "leak": overlap > 0,
             "cutoff": cutoff, "overlap": overlap}

@@ -31,6 +31,30 @@ def test_temporal_leakage():
     assert not clean["leak"]
 
 
+def test_a_nan_timestamp_cannot_hide_a_real_temporal_leak():
+    """NaN comparisons are all False, so a LEADING NaN keeps `min()` at NaN and then every
+    `t >= cutoff` is False — the detector reports leak=False on data that genuinely overlaps. A
+    false negative is the dangerous direction for a trust gate; non-finite stamps are dropped first,
+    and a set with nothing finite left ABSTAINS (checked=False) instead of claiming clean."""
+    poisoned = temporal_leakage(train_timestamps=[1, 2, 9], test_timestamps=[float("nan"), 5, 6, 7])
+    assert poisoned["leak"] is True and poisoned["overlap"] == 1 and poisoned["cutoff"] == 5
+
+    abstained = temporal_leakage(train_timestamps=[1, 2, 9], test_timestamps=[float("nan")])
+    assert abstained["leak"] is False and abstained["checked"] is False
+
+
+def test_contamination_abstains_on_rows_it_cannot_compare_instead_of_raising():
+    """A JSON-shaped dataset has nested list/dict cells, which are unhashable — `tuple(row)` in a set
+    raised TypeError straight out of the detector, where every sibling degrades gracefully."""
+    nested_leak = train_test_contamination([[1, {"a": 2}]], test_rows=[[1, {"a": 2}]])
+    assert nested_leak["leak"] is True and nested_leak["duplicates"] == 1
+    nested_clean = train_test_contamination([[1, {"a": 2}]], test_rows=[[1, {"a": 3}]])
+    assert nested_clean["leak"] is False
+
+    unreadable = train_test_contamination([1, 2], test_rows=[3])   # rows that are not cell sequences
+    assert unreadable["leak"] is False and unreadable["checked"] is False
+
+
 # ----------------------------- I16 profiler -------------------------------- #
 def test_profiler_stats_and_flags():
     p = profile_dataset({

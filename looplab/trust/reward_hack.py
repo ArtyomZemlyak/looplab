@@ -11,6 +11,7 @@ adds nothing to the event log on a clean node. OFF by default (`reward_hack_dete
 from __future__ import annotations
 
 import ast
+import posixpath
 import re
 
 # Tokens that, appearing in a solution's code, suggest it is reaching for the held-out answer key
@@ -240,6 +241,22 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
     """
     code = code or ""
     protected = {str(p).replace("\\", "/").lower() for p in (protected_names or set())}
+    # Match a NORMALIZED spelling too, plus the bare basename: an exact-string compare let the
+    # cheapest evasions through — `./grader.py`, `x/../grader.py`, `sub/dir/../../grader.py` are the
+    # same file and used to read as unprotected. The runtime `_audit_workdir_writes` /
+    # `protected_missing` audits stay the authoritative catch; this is the STATIC tell an
+    # audit-mode operator reads, and it should not be defeated by a leading "./".
+    protected_norm = {posixpath.normpath(p) for p in protected}
+    protected_base = {posixpath.basename(p) for p in protected_norm if posixpath.basename(p)}
+
+    def _touches_protected(raw: str) -> bool:
+        if not raw:
+            return False
+        name = raw.replace("\\", "/").lower()
+        if name in protected:
+            return True
+        norm = posixpath.normpath(name)
+        return norm in protected_norm or posixpath.basename(norm) in protected_base
     if grader_import_ok is None:
         grader_import_ok = "grader.py" in protected
     signals: list[dict] = []
@@ -271,12 +288,7 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
             # `_WRITE_RE` has several alternatives, so findall always yields a tuple of groups (most
             # empty); the written filename is whichever group matched.
             w = next((g for g in groups if g), "")
-            # CLAUDE REVIEW: [EDGE-CASE] The protected-name comparison is an EXACT string match, so a
-            # trivial respelling of the same path — `./grader.py`, `x/../grader.py` — evades this
-            # static tell (and the _DELETE_RE one below). The runtime `_audit_workdir_writes` is the
-            # documented authoritative catch, but a posixpath.normpath / basename fallback here would
-            # close the cheapest evasion for the audit-mode operator view too.
-            if w and w.replace("\\", "/").lower() in protected:
+            if _touches_protected(w):
                 signals.append({"signal": "protected_write",
                                 "detail": f"runtime write to a protected/frozen file: {w!r}"})
                 break
@@ -287,7 +299,7 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
         if not any(s["signal"] == "protected_delete" for s in signals):
             for groups in _DELETE_RE.findall(code):
                 d = next((g for g in groups if g), "")
-                if d and d.replace("\\", "/").lower() in protected:
+                if _touches_protected(d):
                     signals.append({"signal": "protected_delete",
                                     "detail": f"runtime delete/rename of a protected/frozen file: {d!r}"})
                     break

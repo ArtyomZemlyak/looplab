@@ -62,3 +62,24 @@ def test_confirm_top_k_skips_scoreless_node():
                   status=NodeStatus.evaluated)]
     res = confirm_top_k(nodes, lambda n, s: 0.0, k=1, seeds=[], direction="min")
     assert res["best_node_id"] is None                             # no seeds -> no fabricated 0.0 winner
+
+
+def test_confirm_top_k_ignores_unscored_nodes_instead_of_raising():
+    """`None` is unorderable, so a single unevaluated node in the input made `sorted` raise TypeError
+    out of this public helper. An unscored node has no claim on a top-k slot anyway — the same rule
+    the zero-usable-seeds guard already applies further down."""
+    from looplab.core.models import Idea, Node
+    from looplab.trust.confirm import confirm_top_k
+
+    def _node(nid, metric):
+        return Node(id=nid, parent_ids=[], operator="draft",
+                    idea=Idea(operator="draft", params={}, rationale=""), metric=metric)
+
+    nodes = [_node(0, 0.5), _node(1, None), _node(2, 0.1)]
+    out = confirm_top_k(nodes, lambda n, s: n.metric + 0.01 * s, k=2, seeds=[0, 1], direction="min")
+    assert out["best_node_id"] == 2
+    assert [row["node_id"] for row in out["summaries"]] == [2, 0]     # the unscored node is absent
+
+    # Nothing scored at all is "nothing to confirm", not a crash.
+    empty = confirm_top_k([_node(3, None)], lambda n, s: 0.0, k=2, seeds=[0], direction="min")
+    assert empty["best_node_id"] is None and empty["summaries"] == []
