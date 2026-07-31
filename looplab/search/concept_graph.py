@@ -203,13 +203,25 @@ class ConceptGraph:
 
     def depth_of(self, concept_id: str) -> int:
         """Longest root->concept path length (0 for a top-level root). Reflects the id nesting."""
-        # CLAUDE REVIEW: [EDGE-CASE] Unlike ancestors_of/descendants_of (which carry a `seen` set),
-        # this recursion has no cycle guard and no memoization: a curated cross-link cycle between
-        # two concepts (parents_of only filters the DIRECT self-reference) recurses until
-        # RecursionError, and a dense multi-parent DAG re-walks shared ancestors exponentially.
-        # Currently only exercised by tests, so this is latent — but it is a public read helper.
-        parents = [p for p in self.parents_of(concept_id) if p != concept_id]
-        return 0 if not parents else 1 + max(self.depth_of(p) for p in parents)
+        # CYCLE-GUARDED and MEMOIZED, like its `ancestors_of`/`descendants_of` siblings. Curated
+        # cross-links are operator data, so a cycle between two concepts is reachable — `parents_of`
+        # only drops the DIRECT self-reference — and the bare recursion ran to RecursionError on one.
+        # A dense multi-parent DAG also re-walked shared ancestors exponentially. A node currently on
+        # the stack contributes no depth (following it would be the cycle), so the answer stays the
+        # longest ACYCLIC root path.
+        memo: dict[str, int] = {}
+
+        def _depth(cid: str, on_path: frozenset) -> int:
+            if cid in memo:
+                return memo[cid]
+            parents = [p for p in self.parents_of(cid) if p != cid and p not in on_path]
+            depth = 0 if not parents else 1 + max(
+                _depth(p, on_path | {cid}) for p in parents)
+            if not on_path:                  # only the cycle-free root call is safely cacheable
+                memo[cid] = depth
+            return depth
+
+        return _depth(concept_id, frozenset())
 
     def key_concepts(self) -> list[str]:
         return [c.id for c in self.concepts() if c.key]

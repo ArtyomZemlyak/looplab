@@ -946,3 +946,37 @@ def test_arbitrary_depth_hierarchy_and_crosslinks():
     assert g.parents_of("loss/margin-mse") == ("loss", "distillation")
     assert g.axes_of("loss/margin-mse") == ("distillation", "loss")
     assert "distillation" in g.axes()
+
+
+def test_depth_of_survives_a_curated_cross_link_cycle_and_a_dense_dag():
+    """`parents_of` is built from `axes`, which is CURATED operator data — a cross-link cycle between
+    two concepts is reachable, and it only filters the DIRECT self-reference. The bare recursion ran
+    to RecursionError on one, and a dense multi-parent DAG re-walked shared ancestors exponentially.
+    Guarded and memoized like its `ancestors_of`/`descendants_of` siblings."""
+    from looplab.search.concept_graph import ConceptGraph
+
+    g = ConceptGraph(task_type="dense-retrieval")
+    g.ensure("a", axes=("b",))
+    g.ensure("b", axes=("a",))                     # a <-> b: a two-node cycle
+    assert g.depth_of("a") == 1 and g.depth_of("b") == 1     # terminates, longest ACYCLIC path
+
+    g.ensure("c", axes=("a", "b"))                 # and a node under both sides of the cycle
+    assert g.depth_of("c") == 2
+
+    # A dense diamond DAG: every layer's node has BOTH nodes of the layer above as parents. Without
+    # memoization this is 2**depth walks; with it, linear.
+    wide = ConceptGraph(task_type="dense-retrieval")
+    wide.ensure("l0a")
+    wide.ensure("l0b")
+    prev = ("l0a", "l0b")
+    for layer in range(1, 22):
+        names = (f"l{layer}a", f"l{layer}b")
+        for nm in names:
+            wide.ensure(nm, axes=prev)
+        prev = names
+    assert wide.depth_of("l21a") == 21             # would not finish unmemoized
+
+    # The ordinary id-nesting answer is unchanged.
+    plain = ConceptGraph(task_type="dense-retrieval")
+    plain.ensure("loss/contrastive/dcl/dclx")
+    assert plain.depth_of("loss/contrastive/dcl/dclx") == 3 and plain.depth_of("loss") == 0

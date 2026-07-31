@@ -388,15 +388,7 @@ class AshaMonitorMixin:
                 # ADVISORY record — only when the verdict CHANGES (no log/feed spam), kept separate from
                 # the kill decision below so a persistent-underperform streak still reaches the kill check.
                 previous_flag = last_flag
-                # CLAUDE REVIEW: [EDGE-CASE] `last_flag` is committed BEFORE the EV_ASHA_RANK append
-                # below; if that append (or the tracer span) raises, the per-tick handler swallows it
-                # and the transition is permanently deduped away — the warning/recovery edge this
-                # block exists to publish is lost until the NEXT verdict change, so projections/
-                # Attention keep the stale flag. The sibling train monitor got this right: it updates
-                # its dedup state (`last_event_status`) only AFTER a successful append, so a failed
-                # append retries on the next tick. Move this assignment after the append.
                 if diagnostic_key != previous_flag:
-                    last_flag = diagnostic_key
                     underperforming = bool(endpoint_under) or comparable_under is True
                     previous_underperforming = bool(
                         previous_flag
@@ -430,6 +422,12 @@ class AshaMonitorMixin:
                                               "resource": sample.resource})
                             async with self._write_lock:
                                 self.store.append(EV_ASHA_RANK, event)
+                    # Dedup state moves only AFTER the edge is durably published, like the sibling
+                    # train monitor's `last_event_status`. Committing it first meant a raising append
+                    # (or tracer span) — swallowed by the per-tick handler — permanently deduped the
+                    # transition away: the warning/recovery edge this block exists to publish was lost
+                    # until the NEXT verdict change, leaving projections and Attention on a stale flag.
+                    last_flag = diagnostic_key
                 # OPT-IN kill — independent of the advisory dedup: fires once the underperformance has
                 # PERSISTED past the grace window (a transient early dip that recovers resets the streak
                 # to 0 and is never stopped). Reuses the monitor's kill_signal + cancel; `_evaluate`
