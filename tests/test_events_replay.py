@@ -2898,3 +2898,65 @@ def test_fold_stays_total_against_malformed_container_fields():
         ("run_setup_finished", {"command": ["pip", "install", "x"], "exit_code": 0}),
     ])])
     assert len(setup.run_setup_done) == 1 and not setup.run_setup_open
+
+
+def test_a_stale_approval_request_is_rejected_and_a_current_one_is_not(tmp_path):
+    """The HITL gate's compare-and-set: `approval_requested` carries `after_seq`, the seq it believes
+    it follows, and the fold accepts it only when it lands exactly there.
+
+    Covered from the direction that can actually SEE a wrong accept — with nothing pending, accepting
+    flips `awaiting_approval` and rejecting leaves it alone. (The existing coverage folds a stale
+    request while a request for the same subject/generation is ALREADY pending, where both outcomes
+    look identical.) A wrong accept would re-open the approval gate after an intervening abort/reset;
+    a wrong reject would strand every modern request, so both directions are pinned here.
+    """
+    def _fresh():
+        s = EventStore(tmp_path / f"e{next(_counter)}.jsonl")
+        _seed(s)
+        return s
+
+    _counter = iter(range(100))
+
+    # CURRENT: after_seq names the event immediately before it -> accepted.
+    s = _fresh()
+    last = s.read_all()[-1].seq
+    s.append("approval_requested", {"node_id": 0, "after_seq": last})
+    assert fold(s.read_all()).awaiting_approval is True
+
+    # STALE: the log moved on, so the request no longer follows the seq it claims -> rejected.
+    s = _fresh()
+    stale = s.read_all()[-1].seq
+    s.append("budget_extend", {"add_nodes": 1})          # something lands in between
+    s.append("approval_requested", {"node_id": 0, "after_seq": stale})
+    st = fold(s.read_all())
+    assert st.awaiting_approval is False, "a stale request re-opened the approval gate"
+    assert st.approval_subject is None
+
+    # A bool is not a seq (`isinstance(True, int)` is True in Python — the guard is explicit for it),
+    # and neither is garbage. Both fail closed rather than folding as seq 0/1.
+    for bad in (True, False, "3", None, 1.5, [], {}, "not-a-seq"):   # JSON-representable only: a
+        # non-serializable value can never reach a real log, so pinning it would test an unreachable
+        # state rather than the guard.
+        s = _fresh()
+        s.append("approval_requested", {"node_id": 0, "after_seq": bad})
+        assert fold(s.read_all()).awaiting_approval is False, f"after_seq={bad!r} was accepted"
+
+    # The bool guard specifically: `isinstance(True, int)` is True in Python, so without the explicit
+    # check `after_seq=True` would coerce to 1. Place the request where that coerced value SATISFIES
+    # the CAS (seq 2 == 1 + 1) — anywhere else it is rejected by the seq test and the guard is
+    # invisible. Same for False at seq 1.
+    for flag, prior in ((True, 2), (False, 1)):
+        s = EventStore(tmp_path / f"bool{int(flag)}.jsonl")
+        s.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+        if prior == 2:
+            s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {}}, "code": ""})
+        s.append("approval_requested", {"node_id": 0, "after_seq": flag})
+        assert s.read_all()[-1].seq == prior, "fixture: the request must land where the bool coerces"
+        assert fold(s.read_all()).awaiting_approval is False, (
+            f"after_seq={flag!r} was coerced to {int(flag)} and satisfied the CAS")
+
+    # A request with NO after_seq at all is a legacy row and still folds (old logs keep working).
+    s = _fresh()
+    s.append("approval_requested", {"node_id": 0})
+    assert fold(s.read_all()).awaiting_approval is True

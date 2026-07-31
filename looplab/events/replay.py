@@ -1531,12 +1531,12 @@ def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.leakage = d
 
 def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # CLAUDE REVIEW: [TEST-GAP] The stale-CAS REJECT branch below is only PARTIALLY covered:
-    # test_attention folds a stale after_seq through it, but its assertion (notification identity
-    # stable) cannot detect a wrong-ACCEPT (the same subject/generation is already pending either
-    # way), and the bool/garbage after_seq sub-branches are untested. A regression that wrongly
-    # accepts a stale request could re-open/rebind the HITL approval gate after an intervening
-    # abort/reset; one that wrongly rejects would strand every modern approval request.
+    # Compare-and-set: the request carries the seq it believes it follows and is honoured only when it
+    # lands exactly there, so a stale one cannot re-open the gate after an intervening abort/reset.
+    # `isinstance(raw_after, bool)` is explicit because `isinstance(True, int)` is True — without it a
+    # `after_seq=True` request placed at seq 2 would coerce to 1 and SATISFY the CAS. Pinned (both
+    # directions, and that exact bool placement) by tests/test_events_replay.py::
+    # test_a_stale_approval_request_is_rejected_and_a_current_one_is_not.
     if "after_seq" in d:
         raw_after = d.get("after_seq")
         if isinstance(raw_after, bool):
