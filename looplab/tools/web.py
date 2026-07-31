@@ -34,12 +34,22 @@ def _ssrf_blocked(url: str) -> str | None:
         return None
     return None
 
-# CLAUDE REVIEW: [EDGE-CASE] IF an env-configured HTTP(S) proxy is present (urllib honors
-# HTTPS_PROXY by default), the connected peer is the PROXY, not the target: a proxy on a
-# private/loopback address makes this block EVERY fetch (false positive), while a public-address
-# proxy means the DNS-rebind TOCTOU this check exists to close is silently NOT covered (the proxy
-# does the target connect). Consider detecting urllib.request.getproxies() and
-# adjusting/annotating behavior in the proxied case.
+def _proxied(url: str) -> bool:
+    """Will urllib send THIS url through an env-configured proxy?
+
+    Mirrors urllib's own decision (`getproxies()` for the scheme, `proxy_bypass()` for NO_PROXY),
+    because the peer check below is only meaningful when we connected to the TARGET ourselves.
+    """
+    try:
+        scheme = urllib.parse.urlparse(url).scheme.lower()
+        host = urllib.parse.urlparse(url).hostname or ""
+        if scheme not in urllib.request.getproxies():
+            return False
+        return not urllib.request.proxy_bypass(host)
+    except Exception:  # noqa: BLE001 — an unreadable proxy env must not decide the fetch either way
+        return False
+
+
 def _peer_blocked(response) -> str | None:
     """Verify the address we ACTUALLY connected to, after the socket is open.
 
@@ -153,7 +163,13 @@ class WebTools:
             # rebind can hand the check a public address and the connect a loopback/RFC1918/metadata one.
             # Verify the peer we actually reached before reading: no internal body ever reaches the
             # caller (or the model). This runs on the final hop, after the opener followed any redirects.
-            landed = _peer_blocked(r)
+            # SKIPPED under a proxy. `_peer_blocked` verifies the address we actually connected to,
+            # which closes the DNS-rebind TOCTOU a preflight `getaddrinfo` cannot. Behind an
+            # env-configured proxy that peer is the PROXY, so the check answers a different question
+            # entirely: on the common loopback/RFC1918 proxy it refused EVERY fetch — a total false
+            # positive — and on a public one it passed everything while the rebind window was owned
+            # by the proxy either way. The preflight and the per-redirect re-check are unchanged.
+            landed = None if _proxied(url) else _peer_blocked(r)
             if landed:
                 return f"(blocked: {landed})"
             # Bounded read (see _MAX_DOWNLOAD_BYTES): `read(n)` returns AT MOST n bytes, so a multi-GB /

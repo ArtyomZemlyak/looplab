@@ -65,3 +65,38 @@ def test_legacy_flat_import_aliases_canonical_module(name):
         raise
     canonical = importlib.import_module(f"looplab.{_LAYOUT[name]}.{name}")
     assert legacy is canonical, f"looplab.{name} is not the canonical module object"
+
+
+@pytest.mark.parametrize("name", sorted(_LAYOUT))
+def test_the_alias_import_leaves_the_canonical_modules_identity_intact(name):
+    """`module_from_spec` STAMPS the alias spec onto whatever `create_module` returns — and it
+    returns the canonical module itself. So importing the legacy name used to rewrite
+    `looplab.runtime.sandbox.__spec__.name` to "looplab.sandbox", which then made
+    `importlib.reload()` of the canonical module resolve back through the alias loader (whose
+    `exec_module` is a no-op — the reload silently did nothing) and showed the wrong identity to
+    anything reading `__spec__`."""
+    canonical_path = f"looplab.{_LAYOUT[name]}.{name}"
+    try:
+        importlib.import_module(f"looplab.{name}")          # the ALIAS, which does the stamping
+        canonical = importlib.import_module(canonical_path)
+    except ModuleNotFoundError as e:
+        if e.name and e.name.split(".")[0] not in ("looplab",):
+            pytest.skip(f"optional third-party dep absent: {e.name}")
+        raise
+
+    assert canonical.__name__ == canonical_path
+    spec = getattr(canonical, "__spec__", None)
+    assert spec is not None and spec.name == canonical_path, spec
+    # …and the spec still names the loader that would RE-EXECUTE the source, which is the whole
+    # reason `__spec__` has to survive the stamping: `importlib.reload` dispatches to
+    # `module.__spec__.loader.exec_module`, and the alias loader's is a no-op.
+    #
+    # Asserted structurally — this deliberately does NOT call `importlib.reload`. Reloading a live
+    # production module inside the test session rebinds its globals while every reference bound
+    # earlier (default arguments, `from x import y`, class attributes) keeps pointing at the OLD
+    # objects. That is not hypothetical: an actual reload here desynchronized
+    # `engine.node_build._OMIT` from the sentinel already captured in `_emit_node_created`'s
+    # defaults, so a "no expectation" append started passing the sentinel as a real
+    # `expected_last_seq` and every later engine test in the session failed or hung.
+    assert isinstance(spec.loader, importlib.machinery.SourceFileLoader), spec.loader
+    assert spec.origin and spec.origin.endswith(f"{name}.py"), spec.origin

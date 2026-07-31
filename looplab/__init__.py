@@ -241,19 +241,23 @@ class _CompatLoader(importlib.abc.Loader):
 
     def __init__(self, canonical: str):
         self._canonical = canonical
+        self._canonical_spec = None
 
-    # CLAUDE REVIEW: [EDGE-CASE] Returning the canonical module from create_module makes
-    # module_from_spec overwrite its __spec__ with the ALIAS spec (verified: after `import
-    # looplab.sandbox`, looplab.runtime.sandbox.__spec__.name == "looplab.sandbox"; __name__ is
-    # preserved). Consequence: importlib.reload() of the canonical module afterwards resolves
-    # through this loader, whose exec_module is a no-op — the reload silently does nothing — and
-    # tooling that trusts __spec__.name sees the wrong canonical identity. Restoring __spec__ in
-    # exec_module would keep the alias while leaving the canonical module's metadata intact.
     def create_module(self, spec):
-        return importlib.import_module(self._canonical)
+        # `module_from_spec` STAMPS the alias spec onto whatever we return, and we return the
+        # canonical module itself — so importing `looplab.sandbox` used to leave
+        # `looplab.runtime.sandbox.__spec__.name == "looplab.sandbox"`. Two things then broke:
+        # `importlib.reload()` of the canonical module resolved back through THIS loader, whose
+        # `exec_module` is a no-op (the reload silently did nothing), and anything reading
+        # `__spec__.name` saw the wrong canonical identity. Remember the real spec here and put it
+        # back in `exec_module`, which runs after the stamping.
+        module = importlib.import_module(self._canonical)
+        self._canonical_spec = getattr(module, "__spec__", None)
+        return module
 
     def exec_module(self, module):  # already executed under its canonical name
-        pass
+        if self._canonical_spec is not None:
+            module.__spec__ = self._canonical_spec
 
 
 class _CompatFinder(importlib.abc.MetaPathFinder):
