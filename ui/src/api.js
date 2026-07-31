@@ -1137,7 +1137,9 @@ export const CONTROL = {
     rid, 'approval_granted', { node_id: id, generation }),
   ratify: (rid) => runCommand(rid, 'spec_approved', {}),
   hint: (rid, text) => runCommand(rid, 'hint', { text }),
-  budget: (rid, sec) => runCommand(rid, 'budget_extend', { max_eval_seconds: sec }),
+  // `max_eval_seconds` is the absolute cumulative ceiling (durable LWW), not an additive delta.
+  setEvalCeiling: (rid, seconds) =>
+    runCommand(rid, 'budget_extend', { max_eval_seconds: seconds }),
   forceConfirm: (rid, id, generation) => runCommand(
     rid, 'force_confirm', { node_id: id, generation }),
   forceAblate: (rid, id, generation) => runCommand(

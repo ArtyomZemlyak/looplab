@@ -216,6 +216,9 @@ button { font: inherit; }
 .btn.danger { border-color: color-mix(in srgb, var(--fail) 62%, var(--line-2));
   color: color-mix(in srgb, var(--fail) 52%, var(--fg)); }
 .btn.sm { padding: 2px 8px; font-size: 12px; min-height: 24px; }   /* a11y: WCAG 2.5.8 min 24×24 target (was 23px tall) */
+.budget-ceiling-help { color: var(--fg-mut); font-size: 12px; }
+.budget-ceiling-help.warning { color: var(--working-text); font-weight: 600; }
+.budget-ceiling-help.error { color: var(--fail-text); font-weight: 600; }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--fg-dim); }
 .btn.ghost:hover { background: var(--bg-3); color: var(--fg); }
 

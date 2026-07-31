@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { deadlineGet, get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
   saveRunConfig, operatorMeta, commandFeedback, runApiPath, runNodeApiPath,
 } from './util.js'
@@ -575,9 +575,12 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
   const [raw, setRaw] = useState(false)
   const [configMutationUnknown, setConfigMutationUnknown] = useState(null)
   const [invalidFocus, setInvalidFocus] = useState({ key: '', request: 0 })
+  const budgetHelpId = useId()
+  const budgetInputId = `${budgetHelpId}-input`
   const loadGenerationRef = useRef(0)
   const mutationRef = useRef(null)
   const allowConfigNavigationRef = useRef(false)
+  useEffect(() => setSec(''), [runId])
   useEffect(() => {
     const generation = ++loadGenerationRef.current
     const configRequest = deadlineGet(runApiPath(runId, '/config'), PANEL_REQUEST_TIMEOUT_MS)
@@ -609,7 +612,60 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
   // A live engine keeps its in-memory settings until it restarts; gate on `live` (not the possibly
   // historical `state`) so time-travel doesn't misreport liveness.
   const engineLive = live?.engine_running === true
+  const engineStopped = live?.engine_running === false
   const controlBusy = busy || !!configMutationUnknown
+  const liveEvalSeconds = Number(live?.total_eval_seconds ?? state?.total_eval_seconds)
+  const runtimeEvalCeiling = Number(
+    live?.budget_overrides?.max_eval_seconds ?? state?.budget_overrides?.max_eval_seconds)
+  const configuredEvalCeiling = Number(cfg?.max_eval_seconds)
+  const hasRuntimeEvalCeiling = Number.isFinite(runtimeEvalCeiling) && runtimeEvalCeiling > 0
+  const snapshotEvalCeilingKnown = engineStopped && cfg !== null
+  // The snapshot can be edited while an engine is live, but that engine keeps the settings it
+  // launched with until restart. Without a folded runtime override the active ceiling is therefore
+  // unknown here; presenting the mutable snapshot as current would make lowering warnings dishonest.
+  const currentEvalCeiling = hasRuntimeEvalCeiling
+    ? runtimeEvalCeiling
+    : snapshotEvalCeilingKnown && Number.isFinite(configuredEvalCeiling) && configuredEvalCeiling > 0
+      ? configuredEvalCeiling : null
+  const currentEvalCeilingUnknown = !snapshotEvalCeilingKnown && !hasRuntimeEvalCeiling
+  const requestedEvalCeiling = Number(sec)
+  const knownEvalSeconds = Number.isFinite(liveEvalSeconds) && liveEvalSeconds >= 0
+    ? liveEvalSeconds : null
+  const hasCeilingInput = sec.trim() !== ''
+  const validEvalCeiling = hasCeilingInput
+    && Number.isFinite(requestedEvalCeiling)
+    && requestedEvalCeiling > 0
+    && requestedEvalCeiling <= 1_000_000_000_000
+  const unchangedEvalCeiling = validEvalCeiling
+    && currentEvalCeiling != null && requestedEvalCeiling === currentEvalCeiling
+  const exhaustedEvalCeiling = validEvalCeiling
+    && knownEvalSeconds != null && requestedEvalCeiling <= knownEvalSeconds
+  const loweringEvalCeiling = validEvalCeiling
+    && currentEvalCeiling != null && requestedEvalCeiling < currentEvalCeiling
+  const replacingUnknownEvalCeiling = validEvalCeiling && currentEvalCeilingUnknown
+  let budgetHelp = currentEvalCeilingUnknown
+    ? 'The applied engine ceiling is not available in the latest state. '
+      + 'Setting a cumulative total replaces it immediately.'
+    : currentEvalCeiling == null
+      ? 'Current ceiling is unbounded. Enter a cumulative total to create a finite limit.'
+    : `Current ceiling ${fmtElapsedSeconds(currentEvalCeiling)}. Setting a value replaces this limit.`
+  if (knownEvalSeconds != null) {
+    budgetHelp += ` ${fmtElapsedSeconds(knownEvalSeconds)} spent in the latest state.`
+  }
+  if (hasCeilingInput && !validEvalCeiling) {
+    budgetHelp = 'Enter a finite positive ceiling no greater than 1,000,000,000,000 seconds.'
+  } else if (unchangedEvalCeiling) {
+    budgetHelp = `The eval ceiling is already ${fmtElapsedSeconds(requestedEvalCeiling)}.`
+  } else if (exhaustedEvalCeiling) {
+    budgetHelp = `The latest state has already spent ${fmtElapsedSeconds(knownEvalSeconds)}; `
+      + 'this ceiling will stop new evaluations at the next budget check.'
+  } else if (loweringEvalCeiling) {
+    budgetHelp = `Based on the latest loaded state, this lowers the ceiling by `
+      + `${fmtElapsedSeconds(currentEvalCeiling - requestedEvalCeiling)}.`
+  }
+  const budgetHelpTone = hasCeilingInput && !validEvalCeiling
+    ? ' error'
+    : loweringEvalCeiling || exhaustedEvalCeiling || replacingUnknownEvalCeiling ? ' warning' : ''
   const resumeLabels = { success: 'Resumed with the saved settings', noop: 'Run was already running',
     executing: 'Resume requested — waiting for the engine to load the saved settings', failure: 'Resume failed' }
   const restartLabels = { success: 'Restarted with the saved settings', noop: 'Restart was already satisfied',
@@ -809,21 +865,28 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
     }
     finally { finishMutation(mutation) }
   }
-  const extendBudget = async () => {
-    if (!sec || controlBusy) return
+  const setEvalCeiling = async () => {
+    if (!validEvalCeiling || unchangedEvalCeiling || controlBusy) return
     const mutation = beginMutation()
     if (!mutation) return
     const submittedRunId = runId
-    const submittedSeconds = sec
+    const submittedInput = sec
+    const submittedCeiling = requestedEvalCeiling
     try {
-      const record = await CONTROL.budget(submittedRunId, Number(submittedSeconds))
+      const record = await CONTROL.setEvalCeiling(submittedRunId, submittedCeiling)
       if (mutation.generation !== loadGenerationRef.current) return
       const feedback = commandFeedback(record, {
-        success: `Budget extended +${submittedSeconds}s`, noop: 'That budget extension was already applied',
-        executing: `Budget extension +${submittedSeconds}s requested — waiting for the run`, failure: 'Budget extension failed',
-      }); onToast(feedback.message)
+        success: `Eval ceiling set to ${submittedCeiling}s`,
+        noop: `Eval ceiling is already ${submittedCeiling}s`,
+        executing: `Eval ceiling change to ${submittedCeiling}s requested`,
+        failure: 'Eval ceiling change failed',
+      })
+      if (feedback.kind === 'success') {
+        setSec(current => current === submittedInput ? '' : current)
+      }
+      onToast(feedback.message)
     } catch (error) {
-      if (mutation.generation === loadGenerationRef.current) onToast(`Budget extension failed: ${error.message || error}`)
+      if (mutation.generation === loadGenerationRef.current) onToast(`Eval ceiling change failed: ${error.message || error}`)
     }
     finally { finishMutation(mutation) }
   }
@@ -846,13 +909,28 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
     <tr key={k}><th scope="row" className="muted">{k}</th><td>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table></DataTable>
 
   return (
-    <Panel title="Run settings" sub={engineLive ? 'live · applies on restart' : 'edit · applies on resume'} onClose={onClose} wide>
-      <div className="toolbar" style={{ marginBottom: 12 }}>
-        <span className="muted">extend eval budget:</span>
-        <input className="text" style={{ width: 120 }} aria-label="Additional evaluation budget in seconds"
-          placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />
-        <button className="btn sm primary" disabled={!sec || controlBusy} onClick={extendBudget}>apply</button>
-      </div>
+    <Panel title="Run settings" sub={engineLive ? 'live · applies on restart'
+      : engineStopped ? 'edit · applies on resume' : 'engine status unknown'} onClose={onClose} wide>
+      <form className="toolbar" style={{ marginBottom: 12 }}
+        onSubmit={event => { event.preventDefault(); setEvalCeiling() }}>
+        <label className="muted" htmlFor={budgetInputId}>set eval ceiling:</label>
+        <input id={budgetInputId} className="text" style={{ width: 140 }} type="number"
+          max="1000000000000" step="any" inputMode="decimal"
+          aria-label="Cumulative evaluation budget ceiling in seconds"
+          aria-describedby={budgetHelpId}
+          aria-invalid={hasCeilingInput && !validEvalCeiling ? 'true' : undefined}
+          placeholder="total seconds" value={sec} disabled={controlBusy}
+          onChange={e => setSec(e.target.value)} />
+        <button className={'btn sm primary'
+          + (loweringEvalCeiling || exhaustedEvalCeiling || replacingUnknownEvalCeiling ? ' warn' : '')}
+          type="submit"
+          disabled={!validEvalCeiling || unchangedEvalCeiling || controlBusy}
+        >set ceiling</button>
+        <span id={budgetHelpId} className={'budget-ceiling-help' + budgetHelpTone}
+          role={hasCeilingInput ? 'status' : undefined}>
+          {budgetHelp}
+        </span>
+      </form>
       {configMutationUnknown && <div className="report-inline-state error" role="alert" style={{ marginBottom: 12 }}>
         <OpIcon name="alert" size={14} />
         {configMutationUnknown.stage === 'conflict'
