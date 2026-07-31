@@ -1194,6 +1194,20 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .trace-head { position: sticky; top: -9px; z-index: 5; background: var(--bg-1);
   margin: -9px -12px 8px; padding: 9px 12px 2px; border-bottom: 1px solid var(--line-2); }
 .trace-head .conv-toggle, .trace-head .trace-live-status { margin-bottom: 6px; }
+.trace-head .conv-toggle {
+  display: flex; width: 100%; flex-wrap: wrap; align-items: center; gap: 4px;
+  border: 0; border-radius: 0; overflow: visible;
+}
+.trace-head .conv-toggle .seg {
+  justify-content: center; white-space: nowrap;
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+}
+.trace-head .conv-toggle .seg + .seg { border-left: 1px solid var(--line-2); }
+.trace-head .conv-toggle > .spacer { display: none; }
+.trace-head .trace-clear {
+  max-width: 100%; margin-left: auto; margin-right: 0; flex-wrap: wrap;
+}
+.trace-head .trace-clear-status { max-width: 100%; white-space: normal; }
 .conv .stage .conv-turns { padding: 4px 8px; }
 /* Memory & knowledge cards (lessons / meta-notes / KB notes). */
 .mem-card { border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px;
@@ -2448,6 +2462,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .data-table.cardable tbody td::before, .data-table.cardable tbody th[scope="row"]::before {
     content: attr(data-label); color: var(--fg-mut); font-weight: 500;
   }
+  .trace-head .conv-toggle .seg { min-height: 44px; padding-inline: 10px; }
+  .trace-head .trace-nav .seg { min-width: 44px; }
   /* Primary narrow-screen actions meet the 44px touch recommendation; dense desktop controls keep
      their 24px WCAG 2.5.8 minimum. */
   .run-head .btn, .view-toggle .vt, .panel-bar .btn, .run-menu .mi, .tabs .tab,
@@ -2459,7 +2475,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .cmdbar-drawer-btn, .asst-mode, .asst-side-panel .btn.sm, .asst-sess-open, .asst-sess-x,
   .asst-session-resource .btn { min-height: 44px; }
   .grp-pill { height: 44px; }
-  .route-state-notice .btn, .copy-link-fallback .btn { min-width: 44px; min-height: 44px; }
+  .route-state-notice .btn, .copy-link-fallback .btn,
+  .detail-resource-notice .btn { min-width: 44px; min-height: 44px; }
   .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go, .cmdbar-drawer-btn, .asst-sess-x,
   .asst-session-resource .btn { min-width: 44px; }
   .metric-group-grid { grid-template-columns: minmax(0, 1fr) !important; }

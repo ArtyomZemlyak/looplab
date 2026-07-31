@@ -23,6 +23,10 @@ import { deadlineRequest } from './requestDeadline.js'
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
 const CommentsThread = React.lazy(() => import('./CommentsThread.jsx'))
 
+const withoutNodeTrace = value => value && typeof value === 'object'
+  ? { ...value, trace: { nodes: [] } }
+  : value
+
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
 // and confirmed), so we show that whole story in one place — each stage with its sub-steps, inline
@@ -109,7 +113,9 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const nodeAttempt = state?.nodes?.[nodeId]?.attempt
   const detailScope = `${runId}@${expectedGeneration || '?'}:${nodeId ?? '-'}:${nodeAttempt ?? '?'}:${readOnly
     ? historySeq ?? readOnlyReason : 'live'}:${evidenceAvailable ? 1 : 0}`
-  const [detailResource, setDetailResource] = useState({ scope: null, data: null })
+  const [detailResource, setDetailResource] = useState({
+    scope: null, status: 'idle', data: null, error: '', pending: null,
+  })
   const detailCurrent = detailResource.scope === detailScope
   const detail = detailCurrent ? detailResource.data : null
   // Accept a detail payload whose attempt is >= the summary's: the /nodes endpoint is often FRESHER
@@ -124,56 +130,160 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
   const detailMatchesGeneration = value => !expectedGeneration
     || value?.run_generation === expectedGeneration
-  const [detailStatus, setDetailStatus] = useState('idle')
-  const [detailError, setDetailError] = useState('')
-  const [detailNonce, setDetailNonce] = useState(0)
+  const detailStatus = detailCurrent ? detailResource.status
+    : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : 'loading'
+  const detailError = detailCurrent ? detailResource.error : ''
+  const detailPending = detailCurrent ? detailResource.pending : null
+  const detailPendingLabel = detailPending === 'retry' ? 'Retrying…'
+    : ['refresh', 'reconcile'].includes(detailPending) ? 'Refreshing…' : 'Loading…'
+  const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
+  const detailFlightRef = useRef(null)
+  const detailStartRef = useRef(null)
   const detailSurfaceRef = useRef(null)
   const detailFocusScopeRef = useRef(null)
+  const requestDetail = (intent = 'refresh', options) => {
+    const current = detailStartRef.current
+    return current?.scope === detailScope ? current.start(intent, options) : false
+  }
   const retryDetail = () => {
     detailFocusScopeRef.current = detailScope
-    setDetailNonce(value => value + 1)
+    // An explicit user retry owns freshness over an invisible background refresh. Superseding it
+    // guarantees immediate busy feedback and prevents that older response from removing the focused
+    // retry control without passing through the focus-restoration state.
+    return requestDetail('retry', { supersede: true })
   }
   useEffect(() => {
-    setDetailResource({ scope: detailScope, data: null })
-    setDetailError('')
-    if (nodeId == null) { setDetailStatus('idle'); return } // payload under node B while B's fetch is in flight (or failed)
-    if (readOnlyReason === 'review' && !evidenceAvailable) { setDetailStatus('restricted'); return }
-    setDetailStatus('loading')
-    let on = true
+    let alive = true
+    const owner = {}
+    if (nodeId == null) {
+      setDetailResource({ scope: detailScope, status: 'idle', data: null, error: '', pending: null })
+      detailStartRef.current = null
+      return () => { alive = false }
+    }
+    if (readOnlyReason === 'review' && !evidenceAvailable) {
+      setDetailResource({
+        scope: detailScope, status: 'restricted', data: null, error: '', pending: null,
+      })
+      detailStartRef.current = null
+      return () => { alive = false }
+    }
     const query = []
     if (readOnly && historySeq != null) query.push(`seq=${historySeq}`)
-    if (expectedGeneration) query.push(`expected_generation=${expectedGeneration}`)
+    if (expectedGeneration) query.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)
     const at = query.length ? `?${query.join('&')}` : ''
-    const timed = deadlineGet(runNodeApiPath(runId, nodeId, at))
-    timed.promise
-      .then(d => {
-        const valid = detailMatchesNode(d)
-        if (on && valid && detailMatchesGeneration(d) && detailMatchesAttempt(d)) {
-          setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready')
-        } else if (on) {
-          setDetailStatus('error')
-          setDetailError(valid
-            ? 'The experiment attempt changed while details were loading.'
-            : 'Full node details returned an invalid response.')
+    const start = (intent = 'refresh', { supersede = false, mapLastGood = null } = {}) => {
+      if (supersede && detailFlightRef.current) {
+        const obsolete = detailFlightRef.current
+        detailFlightRef.current = null
+        obsolete.controller.abort()
+      }
+      if (detailFlightRef.current) return false
+      const timed = deadlineGet(runNodeApiPath(runId, nodeId, at))
+      const request = { owner, controller: timed.controller, promise: timed.promise }
+      detailFlightRef.current = request
+      setDetailResource(previous => {
+        const sameScope = previous.scope === detailScope
+        const loaded = sameScope ? previous.data : null
+        const lastGood = typeof mapLastGood === 'function'
+          ? mapLastGood(loaded)
+          : loaded
+        if (lastGood != null && previous.status === 'ready' && intent === 'refresh') return previous
+        return {
+          scope: detailScope,
+          status: lastGood == null ? (sameScope && previous.status === 'error' ? 'error' : 'loading')
+            : previous.status === 'stale' ? 'stale' : 'ready',
+          data: lastGood,
+          error: sameScope ? previous.error : '',
+          pending: intent,
         }
       })
-      .catch(() => { if (on) { setDetailStatus('error'); setDetailError('Full node details could not be loaded.') } })
-    return () => { on = false; timed.controller.abort() }
+      const cancel = () => {
+        if (detailFlightRef.current !== request) return
+        detailFlightRef.current = null
+        if (!alive) return
+        setDetailResource(previous => previous.scope === detailScope
+          ? { ...previous, pending: null }
+          : previous)
+      }
+      const finish = (ok, data = null, error = '') => {
+        if (detailFlightRef.current !== request) return
+        detailFlightRef.current = null
+        if (!alive) return
+        if (ok) {
+          setTraceClearedScopes(current => {
+            if (!current.has(detailScope)) return current
+            const next = new Set(current)
+            next.delete(detailScope)
+            return next
+          })
+        }
+        setDetailResource(previous => {
+          const lastGood = previous.scope === detailScope ? previous.data : null
+          const resourceError = intent === 'reconcile'
+            ? error === 'transport'
+              ? 'Trace was cleared, but the remaining experiment details could not be refreshed.'
+              : String(error).startsWith('The experiment attempt')
+                ? 'Trace was cleared, but the experiment attempt changed before details could be refreshed.'
+                : 'Trace was cleared, but the detail refresh returned an invalid response.'
+            : error === 'transport'
+              ? lastGood == null
+                ? 'Full node details could not be loaded.'
+                : 'Experiment details could not be refreshed.'
+              : error
+          return ok
+            ? { scope: detailScope, status: 'ready', data, error: '', pending: null }
+            : {
+              scope: detailScope,
+              status: lastGood == null ? 'error' : 'stale',
+              data: lastGood,
+              error: resourceError,
+              pending: null,
+            }
+        })
+      }
+      timed.promise.then(value => {
+        const valid = detailMatchesNode(value)
+        if (valid && detailMatchesGeneration(value) && detailMatchesAttempt(value)) {
+          finish(true, value)
+          return
+        }
+        finish(false, null, valid
+          ? 'The experiment attempt changed while details were loading.'
+          : 'Full node details returned an invalid response.')
+      }, error => {
+        if (error?.name === 'AbortError') cancel()
+        else finish(false, null, 'transport')
+      })
+      return request
+    }
+    detailStartRef.current = { scope: detailScope, start }
+    start('load')
+    return () => {
+      alive = false
+      if (detailStartRef.current?.start === start) detailStartRef.current = null
+      if (detailFlightRef.current?.owner === owner) {
+        detailFlightRef.current.controller.abort()
+        detailFlightRef.current = null
+      }
+    }
   }, [runId, nodeId, nodeAttempt, state?.nodes?.[nodeId]?.status, readOnly, historySeq,
-    expectedGeneration, readOnlyReason, evidenceAvailable, detailScope, detailNonce])
+    expectedGeneration, readOnlyReason, evidenceAvailable, detailScope])
   useEffect(() => {
     if (detailFocusScopeRef.current == null) return
     if (detailFocusScopeRef.current !== detailScope) {
       detailFocusScopeRef.current = null
       return
     }
-    if (detailStatus !== 'ready' && detailStatus !== 'error' && detailStatus !== 'restricted') return
-    detailFocusScopeRef.current = null
+    if (detailPending || !['ready', 'stale', 'error', 'restricted'].includes(detailStatus)) return
     const frame = requestAnimationFrame(() => {
-      if (document.activeElement === document.body) detailSurfaceRef.current?.focus({ preventScroll: true })
+      const active = document.activeElement
+      if (active === document.body || !active?.isConnected) {
+        detailSurfaceRef.current?.focus({ preventScroll: true })
+      }
+      detailFocusScopeRef.current = null
     })
     return () => cancelAnimationFrame(frame)
-  }, [detailScope, detailStatus])
+  }, [detailScope, detailStatus, detailPending])
   // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
   // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
   // engine-alive & not-finished (stops at terminal / engine death):
@@ -198,32 +308,24 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // never showed writing/repairing during the rebuild.
   const buildingThis = buildingMarkers(live).some(m => Number(m?.node_id) === Number(nodeId))
   const nodeWorking = engineActive && (buildingThis || evaluatingThis)
-  usePoll((alive) => {
-    // alive() gates the async resolution: if the user selects a different node (or the poll is
-    // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
-    // the newly-selected node's detail — otherwise node A's Code/Trace/Metrics render (stuck) under B.
-    const at = expectedGeneration
-      ? `?expected_generation=${encodeURIComponent(expectedGeneration)}` : ''
-    const timed = deadlineGet(runNodeApiPath(runId, nodeId, at))
-    timed.promise.then(d => {
-      if (alive() && detailMatchesNode(d) && detailMatchesGeneration(d)
-          && detailMatchesAttempt(d)) {
-        setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready'); setDetailError('')
-      }
-    }).catch(() => {})
-    return timed
-  }, 4000, [runId, nodeId, nodeWorking, detailScope],
-  { enabled: !readOnly && nodeWorking, immediate: false })
+  // Initial load, polling, and manual retries share one scope-owned request. A rejected or invalid
+  // refresh therefore keeps last-good detail visible but explicitly stale instead of silently
+  // presenting it as current. Returning the owned request lets usePoll abort it during cleanup.
+  usePoll(() => requestDetail('refresh'), 4000,
+    [runId, nodeId, nodeWorking, detailScope, detailStatus],
+    { enabled: !readOnly && nodeWorking && detailStatus === 'ready', immediate: false })
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
-  const n = detail || state?.nodes?.[nodeId]
-  const visibleDetailStatus = detailCurrent ? detailStatus
-    : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : 'loading'
+  const baseNode = detail || state?.nodes?.[nodeId]
+  const n = traceClearedScopes.has(detailScope) ? withoutNodeTrace(baseNode) : baseNode
+  const visibleDetailStatus = detailStatus
   if (!n) {
     if (visibleDetailStatus === 'error') return <div ref={detailSurfaceRef}
-      className="notice resource-error" role="alert" tabIndex={-1}>
+      className="notice resource-error detail-resource-notice" role="alert" tabIndex={-1}>
       <span>{detailError || 'Full node details could not be loaded.'}</span>
-      <button type="button" className="btn sm" onClick={retryDetail}>Retry</button>
+      <button type="button" className="btn sm" onClick={retryDetail} disabled={!!detailPending}>
+        {detailPending ? detailPendingLabel : 'Retry'}
+      </button>
     </div>
     if (visibleDetailStatus === 'restricted') return <div ref={detailSurfaceRef}
       className="insp-empty" role="status" tabIndex={-1}>
@@ -271,7 +373,24 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       <div ref={detailSurfaceRef} className="insp-body" id={panelId(activeTab)} role="tabpanel"
         aria-labelledby={tabId(activeTab)} tabIndex={0}>
         {visibleDetailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
-        {visibleDetailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button type="button" className="btn sm" onClick={retryDetail}>Retry</button></div>}
+        {visibleDetailStatus === 'stale' && <div
+          className="notice resource-warning detail-resource-notice" role="status">
+          <span>{detailPending
+            ? detailPending === 'reconcile'
+              ? 'Trace cleared. Refreshing the remaining experiment details…'
+              : 'Retrying experiment details… Last loaded details remain visible.'
+            : `${detailError || 'Experiment details could not be refreshed.'} Last loaded details remain visible.`}</span>
+          <button type="button" className="btn sm" onClick={retryDetail} disabled={!!detailPending}>
+            {detailPending ? detailPendingLabel : 'Retry'}
+          </button>
+        </div>}
+        {visibleDetailStatus === 'error' && <div
+          className="notice resource-error detail-resource-notice" role="alert">
+          <span>{detailError || 'Full node details could not be loaded.'} The summary below may be incomplete.</span>
+          <button type="button" className="btn sm" onClick={retryDetail} disabled={!!detailPending}>
+            {detailPending ? detailPendingLabel : 'Retry'}
+          </button>
+        </div>}
         {readOnly
           ? <div className="insp-hint history-inline">{readOnlyReason === 'review'
               ? evidenceAvailable
@@ -285,9 +404,25 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
-        {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking}
-          onReload={() => setDetailNonce(value => value + 1)} />}
-        {activeTab === 'Code' && (visibleDetailStatus === 'ready'
+        {activeTab === 'Trace' && <Trace key={`${runId}:${n.id}:${n.attempt ?? '?'}`}
+          n={n} runId={runId} live={live} working={nodeWorking}
+          reloadPending={detailPending === 'retry'}
+          onReload={reason => {
+            if (reason === 'trace-cleared') {
+              setTraceClearedScopes(current => {
+                if (current.has(detailScope)) return current
+                const next = new Set(current)
+                next.add(detailScope)
+                return next
+              })
+              return requestDetail('reconcile', {
+                supersede: true,
+                mapLastGood: withoutNodeTrace,
+              })
+            }
+            return reason === 'retry' ? retryDetail() : requestDetail('refresh')
+          }} />}
+        {activeTab === 'Code' && (['ready', 'stale'].includes(visibleDetailStatus)
           ? <Code n={n} />
           : visibleDetailStatus === 'error'
             ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
@@ -632,10 +767,12 @@ function GenBody({ c }) {
 //    This local reveal remains subject to the server's bounded/redacted projection and omission receipt.
 const SPAN_CAP = 60
 
-export function TraceUnavailable({ label = 'Trace unavailable.', onRetry }) {
+export function TraceUnavailable({ label = 'Trace unavailable.', onRetry, pending = false }) {
   return <div className="notice resource-error compact" role="alert">
     <span>{label}</span>
-    {onRetry && <button type="button" className="btn sm" onClick={onRetry}>Retry trace</button>}
+    {onRetry && <button type="button" className="btn sm" onClick={onRetry} disabled={pending}>
+      {pending ? 'Retrying…' : 'Retry trace'}
+    </button>}
   </div>
 }
 
@@ -1011,12 +1148,15 @@ function RunSetupLog({ text }) {
   </div>
 }
 
-function Trace({ n, runId, live, working, onReload }) {
+function Trace({ n, runId, live, working, onReload, reloadPending = false }) {
   const [view, setView] = useState('conversation')   // linear reading by default; span tree on demand
   const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
-  const [clearing, setClearing] = useState('')        // '' | 'confirm' | 'busy' | error message
+  const [clearing, setClearing] = useState('')        // '' | 'confirm' | 'busy'
+  const [clearMessage, setClearMessage] = useState(null)
   const bodyRef = useRef(null)
+  const clearTriggerRef = useRef(null)
+  const clearConfirmRef = useRef(null)
   const spans = n.trace?.nodes || []
   const unavailable = traceUnavailable(n.trace?.projection)
   const partial = tracePartial(n.trace?.projection)
@@ -1037,31 +1177,80 @@ function Trace({ n, runId, live, working, onReload }) {
       : '🏋️ training / evaluating…'
   const status = statusLabel && <div className="trace-live-status" role="status"><span className="tls-dot" />{statusLabel}
     <span className="muted trace-live-note">live · auto-updates</span></div>
+  const retryParentTrace = () => onReload?.('retry')
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
+  useEffect(() => {
+    if (!['confirm', 'busy'].includes(clearing)) return
+    const frame = requestAnimationFrame(() => {
+      if (clearing === 'confirm') {
+        clearConfirmRef.current?.focus({ preventScroll: true })
+        return
+      }
+      const active = document.activeElement
+      if (active === document.body || !active?.isConnected) {
+        clearConfirmRef.current?.focus({ preventScroll: true })
+      }
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [clearing])
+  useEffect(() => {
+    if (!clearMessage) return
+    const timer = setTimeout(() => setClearMessage(null), 4000)
+    return () => clearTimeout(timer)
+  }, [clearMessage])
+  const finishClear = message => {
+    setClearing('')
+    setClearMessage(message)
+    requestAnimationFrame(() => {
+      const active = document.activeElement
+      if (active === document.body || !active?.isConnected) {
+        clearTriggerRef.current?.focus({ preventScroll: true })
+      }
+    })
+  }
   const doClear = async () => {
     setClearing('busy')
     try {
       await clearNodeTrace(runId, n.id)
       setNonce(x => x + 1)          // reload the Conversation bands (now empty until a rebuild re-traces)
-      onReload?.()                  // refresh the parent-owned span tree and rollup as well
-      setClearing('')
+      // The acknowledged rewrite invalidates every pre-clear detail response. Optimistically remove
+      // the deleted spans, supersede an older read, and guarantee one post-mutation reconciliation.
+      onReload?.('trace-cleared')
+      finishClear({ kind: 'success', text: 'Trace cleared.' })
     } catch (e) {
       // 409 while the engine is live is the common case. Keep server free text out of the UI.
-      setClearing(e?.status === 409 ? 'stop the run first' : 'clear failed — try again')
-      setTimeout(() => setClearing(''), 4000)
+      finishClear({
+        kind: 'error',
+        text: e?.status === 409 ? 'Stop the run before clearing its trace.' : 'Trace clear failed. Try again.',
+      })
     }
   }
   // "Clear trace" erases this node's spans (spans.jsonl is append-only, so a reset+rebuild would else
   // STACK new bands on the old attempt's). Two-click confirm; disabled while THIS node is being worked.
+  const clearPrimaryBusy = clearing === 'busy'
+  const clearPrimaryConfirm = clearing === 'confirm'
   const clearBtn = <span className="trace-clear">
-    {clearing === '' && <button className="seg" title="erase this node's captured trace (spans) — useful before re-running the node so the new trace replaces the old"
-      onClick={() => setClearing('confirm')} disabled={working}>✕ clear trace</button>}
-    {clearing === 'confirm' && <>
-      <button className="seg on" title="confirm: erase this node's spans" onClick={doClear}>✕ confirm clear</button>
-      <button className="seg" onClick={() => setClearing('')}>cancel</button></>}
-    {clearing === 'busy' && <span className="muted trace-clear-status">clearing…</span>}
-    {clearing && clearing !== 'confirm' && clearing !== 'busy' &&
-      <span className="muted trace-clear-status trace-clear-error">{clearing}</span>}
+    <button type="button" ref={clearing === '' ? clearTriggerRef : clearConfirmRef}
+      className={'seg' + (clearing ? ' on' : '')}
+      title={clearPrimaryConfirm ? 'confirm: erase this node’s spans'
+        : clearing === '' ? 'erase this node’s captured trace (spans) — useful before re-running the node so the new trace replaces the old'
+          : undefined}
+      disabled={clearing === '' && working}
+      aria-disabled={clearPrimaryBusy || undefined} aria-busy={clearPrimaryBusy || undefined}
+      onClick={clearing === ''
+        ? () => { setClearMessage(null); setClearing('confirm') }
+        : clearPrimaryConfirm ? doClear : undefined}>
+      {clearPrimaryBusy ? 'Clearing…' : clearPrimaryConfirm ? '✕ confirm clear' : '✕ clear trace'}
+    </button>
+    {clearPrimaryConfirm && <>
+      <button className="seg" onClick={() => {
+        setClearing('')
+        requestAnimationFrame(() => clearTriggerRef.current?.focus({ preventScroll: true }))
+      }}>cancel</button></>}
+    {clearPrimaryBusy && <span className="sr-only" role="status">Clearing trace…</span>}
+    {clearMessage && <span className={'muted trace-clear-status'
+      + (clearMessage.kind === 'error' ? ' trace-clear-error' : '')}
+      role={clearMessage.kind === 'error' ? 'alert' : 'status'}>{clearMessage.text}</span>}
   </span>
   const nav = <span className="trace-nav">
     <button className="seg" aria-label="Scroll trace to top" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
@@ -1086,13 +1275,15 @@ function Trace({ n, runId, live, working, onReload }) {
       {agent && <AgentReport r={agent} />}</div>
   if (!spans.length && !agent) {
     if (unavailable)
-      return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable onRetry={onReload} /></div>
+      return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable
+        onRetry={retryParentTrace} pending={reloadPending} /></div>
     if (partial)
       return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div></div>
     return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans yet. Offline nodes may have none; active nodes update here as they run.</div></div>
   }
   if (unavailable)
-    return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable onRetry={onReload} />
+    return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable
+      onRetry={retryParentTrace} pending={reloadPending} />
       {agent && <AgentReport r={agent} />}</div>
   if (!spans.length && partial)
     return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
