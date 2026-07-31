@@ -448,13 +448,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                                                     "and call it again with a valid, COMPLETE idea — "
                                                     "never an empty one."})
                         continue
-                # CLAUDE REVIEW: [EDGE-CASE] An accepted emit returns immediately: the emit's own
-                # tool_call_id — and any sibling tool_calls listed AFTER the emit in this same
-                # assistant turn — never get a role:"tool" answer, leaving dangling tool_call_ids in
-                # `messages`. The rejected-emit branch above deliberately `continue`s to avoid exactly
-                # that, and serve/assistant.py must strip unanswered ids before re-calling the LLM
-                # over this trace (strict OpenAI-compatible backends 400 on it). Any new caller that
-                # reuses `messages` after an accepted emit inherits that footgun, undocumented here.
+                # `messages` IS LEFT INCONSISTENT HERE, deliberately: an accepted emit returns at
+                # once, so the emit's own tool_call_id — and any sibling tool_calls listed AFTER it in
+                # the same assistant turn — never receive their role:"tool" answer. Finishing them
+                # would mean paying for tool calls whose result nobody will read. (The rejected-emit
+                # branch above `continue`s precisely because it does NOT return, so it must not leave
+                # a dangling id.) The consequence is a caller obligation: anything that RE-SENDS this
+                # transcript to a provider must first strip unanswered tool_call_ids, or a strict
+                # OpenAI-compatible backend 400s on it — `serve/assistant.py` does exactly that.
                 return finalize(args)
             if _cancelled():
                 # Stop pressed while this turn's calls were executing: do NOT run the remaining

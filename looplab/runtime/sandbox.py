@@ -448,13 +448,14 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
             # runs in a FRESH single-threaded interpreter where no such lock can be inherited, applies
             # the same caps, and `execvp`s the real argv (same pid, so `_kill_tree`/pgid are
             # unaffected). It is passed as `-c` source rather than `-m` so it needs nothing importable.
-            # CLAUDE REVIEW: [EDGE-CASE] Latent interaction with the docker-cidfile branch above: if a
-            # `docker run` argv is ever passed together with mem_bytes/fsize_bytes on POSIX, this
-            # rewrite (a) applies RLIMIT_AS/FSIZE to the docker CLI client, not the container, and
-            # (b) replaces argv[0] with sys.executable, so the post-kill cleanup below calls
-            # `_remove_docker_container(str(argv[0]), ...)` == `<python> rm -f <cid>` — a silent no-op
-            # that leaks the daemon-owned container. No current caller mixes the two, but this is the
-            # universal choke point; capturing the docker binary before this rewrite would close it.
+            # DO NOT combine this with a `docker run` argv. The rewrite would apply RLIMIT_AS/FSIZE
+            # to the docker CLI CLIENT (the container is unbounded), and — worse — it replaces
+            # argv[0] with sys.executable, so the post-kill `_remove_docker_container(str(argv[0]),
+            # ...)` below becomes `<python> rm -f <cid>`: a silent no-op that leaks the daemon-owned
+            # container. No caller mixes them today (the Docker tier bounds the container itself, via
+            # --memory/--ulimit, which is where those limits belong), so this stays a documented
+            # precondition rather than a guard on the universal choke point. A future caller that
+            # needs both must capture the docker binary BEFORE this rewrite.
             argv = [sys.executable, "-c", _RLIMIT_LAUNCHER,
                     str(_mem or 0), str(_fsize or 0), "--", *argv]
     # Don't hand the child code the host's secrets (review C2): a `print(os.environ)` or a stack

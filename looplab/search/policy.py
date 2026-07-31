@@ -185,14 +185,14 @@ def debug_action(state: RunState, debug_depth: int) -> Optional[dict]:
     has_child: set[int] = set()
     for n in state.nodes.values():
         has_child.update(n.parent_ids)
-    # CLAUDE REVIEW: [EDGE-CASE] Excludes aborted failed leaves but NOT tombstoned ones: a failed leaf
-    # whose subtree was logically deleted (§6.3 — models.py gates ALL downstream selection on
-    # `not tombstoned`) is still returned here, so plain policies breed a debug child from a deleted
-    # node. card_selection deliberately masks this via `_effective_policy_state` ("a tombstoned/gated
-    # failed node cannot be rediscovered forever as a bare debug action"), but the legacy
-    # `next_actions` path calls debug_action on the raw state and keeps the hazard.
+    # TOMBSTONED leaves are excluded alongside aborted ones. §6.3 gates ALL downstream selection on
+    # `not tombstoned`, so a failed leaf whose subtree was logically deleted must not be rediscovered
+    # here either — plain policies were breeding a debug child from a deleted node forever.
+    # `card_selection` masks this on its own path via `_effective_policy_state`; the legacy
+    # `next_actions` path calls this on the RAW state, so the rule has to hold here too.
     for n in sorted(state.nodes.values(), key=lambda n: n.id):
         if (n.status is NodeStatus.failed and n.id not in state.aborted_nodes
+                and not n.tombstoned
                 and n.id not in has_child
                 # Governance terminals are intentional, not implementation crashes to repair.
                 and n.error_reason not in {"idea_rejected", "card_dropped"}

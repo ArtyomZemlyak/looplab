@@ -144,13 +144,13 @@ def normalize_task(data: dict) -> dict:
             raise ValueError(
                 f"conflicting task aliases: repo={_repo!r} and editable_path={d['editable_path']!r} "
                 "name different codebases — set exactly one.")
-        # CLAUDE REVIEW: [EDGE-CASE] When `repo` and `editable_path` name the SAME path, the guard
-        # below skips the assignment branch, so the composable edit_surface default ["**/*"] is
-        # never applied and RepoTask's narrower ["**/*.py"] default wins — the same task spelled
-        # with both (equal) aliases silently gets a different, narrower surface than `repo` alone.
-        if not d.get("editable_path"):
-            d["editable_path"] = _repo
-            d.setdefault("edit_surface", ["**/*"])   # composable-repo default: full freedom (protect=exceptions)
+        # Spelling the SAME path under BOTH aliases is not a conflict (the check above passed), and
+        # it must mean what `repo` alone means. Keying the composable default off "editable_path was
+        # absent" made `{repo: p}` and `{repo: p, editable_path: p}` differ: the second skipped this
+        # branch entirely and fell through to RepoTask's much narrower `["**/*.py"]`, so the same
+        # task silently got a smaller edit surface for naming its repo twice.
+        d["editable_path"] = _repo
+        d.setdefault("edit_surface", ["**/*"])   # composable-repo default: full freedom (protect=exceptions)
 
     # --- dataset: read-only mounts. A bare path -> one mount named "dataset"; a dict -> merged ---
     if "dataset" in d:

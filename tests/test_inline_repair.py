@@ -378,6 +378,25 @@ def test_idea_rejected_lineage_skipped_by_debug_action():
     assert act and act["parent_id"] == 0
 
 
+def test_a_tombstoned_failed_leaf_is_not_rediscovered_as_debug_work():
+    """§6.3 gates ALL downstream selection on `not tombstoned`, and `card_selection` masks this on
+    its own path via `_effective_policy_state` — but the legacy `next_actions` path calls
+    `debug_action` on the RAW state, so a failed leaf whose subtree was logically deleted was bred
+    into a debug child anyway, forever."""
+    st = RunState(run_id="r", task_id="t", direction="min")
+    st.nodes[0] = Node(id=0, parent_ids=[], operator="draft",
+                       idea=Idea(operator="draft", params={}),
+                       status=NodeStatus.failed, error="boom", error_reason="crash")
+    assert debug_action(st, debug_depth=1)["parent_id"] == 0     # live crash leaf: debugged
+
+    st.nodes[0].tombstoned = True
+    assert debug_action(st, debug_depth=1) is None               # deleted subtree: not rediscovered
+
+    st.nodes[0].tombstoned = False
+    st.aborted_nodes.append(0)
+    assert debug_action(st, debug_depth=1) is None               # the sibling rule, unchanged
+
+
 # ------------------------------------------------- loop wiring: reuse start_stage / retrain cap (D13)
 # The static predicate above is only half the feature — these drive the REAL repair loop in
 # `_evaluate` (with `run_command_eval` stubbed) and assert what actually reaches the eval call:

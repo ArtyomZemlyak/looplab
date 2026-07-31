@@ -31,10 +31,22 @@ def test_conflicting_repo_editable_path_aliases_error():
     with pytest.raises(ValueError, match="conflicting task aliases"):
         normalize_task({"goal": "g", "direction": "max", "repo": "/new", "editable_path": "/old",
                         "cmd": ["python", "t.py"]})
-    # equal aliases are fine (redundant but not conflicting)
-    n = normalize_task({"goal": "g", "direction": "max", "repo": "/same", "editable_path": "/same",
-                        "cmd": ["python", "t.py"]})
-    assert n["editable_path"] == "/same"
+    # equal aliases are fine (redundant but not conflicting) — and must mean EXACTLY what `repo`
+    # alone means. Keying the composable defaults off "editable_path was absent" made the redundant
+    # spelling skip them and fall through to RepoTask's much narrower ["**/*.py"], so naming the
+    # same repo twice silently shrank the Developer's edit surface.
+    once = normalize_task({"goal": "g", "direction": "max", "repo": "/same",
+                           "cmd": ["python", "t.py"]})
+    twice = normalize_task({"goal": "g", "direction": "max", "repo": "/same",
+                            "editable_path": "/same", "cmd": ["python", "t.py"]})
+    assert twice["editable_path"] == "/same"
+    assert twice["edit_surface"] == once["edit_surface"] == ["**/*"]
+
+    # An EXPLICIT edit_surface still wins over the composable default, either spelling.
+    pinned = normalize_task({"goal": "g", "direction": "max", "repo": "/same",
+                             "editable_path": "/same", "edit_surface": ["*.py"],
+                             "cmd": ["python", "t.py"]})
+    assert pinned["edit_surface"] == ["*.py"]
 
 
 def test_cmd_bare_list_and_dataset_bare_path():
