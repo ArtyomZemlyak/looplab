@@ -1401,6 +1401,31 @@ def test_historical_node_detail_rejects_replaced_run_generation(tmp_path):
     assert current["code"] == "GENERATION_B_MUST_NOT_APPEAR_UNDER_A"
 
 
+def _clear_trace(client, run_id: str, nid: int, *, rd, op: str = "0" * 32):
+    """POST clear_trace with the identities it now requires, computed straight from the run dir.
+
+    `clear_node_trace` refuses without the exact run generation, trace revision, node generation and
+    a client-minted operation id: a destructive whole-file rewrite must not be issuable from a stale
+    view, and the idempotency receipt is keyed on that operation id. A test that POSTs an empty body
+    gets 428 before any lifecycle check runs, so it says nothing about the behaviour it means to pin.
+
+    Read from DISK, never through `GET /api/runs`: that handler runs the durable-resume reconciler,
+    which would serve — and therefore destroy — the "unserved resume" precondition the lifecycle
+    test below sets up."""
+    from looplab.events.traceview import trace_file_revision
+    from looplab.serve.run_commands import run_generation_token
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    state = fold(events)
+    node = state.nodes.get(nid)
+    return client.post(f"/api/runs/{run_id}/nodes/{nid}/clear_trace", json={
+        "expected_generation": run_generation_token(events),
+        "expected_trace_revision": trace_file_revision(rd / "spans.jsonl"),
+        "node_generation": getattr(node, "attempt", 0) if node is not None else 0,
+        "operation_id": f"tc_{op}",
+    })
+
+
 def test_clear_node_trace_removes_only_that_nodes_spans(tmp_path):
     """The 'clear trace' button: erase ONE node's spans from spans.jsonl (append-only, so a reset+
     rebuild would otherwise stack fresh bands on the old attempt's) while leaving other nodes' spans
@@ -1422,19 +1447,19 @@ def test_clear_node_trace_removes_only_that_nodes_spans(tmp_path):
     # live engine -> refused, spans untouched
     with _engine_singleton(rd) as ok:
         assert ok
-        r = client.post("/api/runs/demo/nodes/0/clear_trace")
+        r = _clear_trace(client, "demo", 0, rd=rd, op="a" * 32)
         assert r.status_code == 409
     assert len(list(iter_jsonl(rd / "spans.jsonl"))) == 4      # nothing removed while live
 
     # not live -> node 0's two spans gone, node 1 + unscoped kept, event log untouched
-    r = client.post("/api/runs/demo/nodes/0/clear_trace")
+    r = _clear_trace(client, "demo", 0, rd=rd, op="b" * 32)
     assert r.status_code == 200 and r.json()["removed"] == 2 and r.json()["kept"] == 2
     left = list(iter_jsonl(rd / "spans.jsonl"))
     assert {s["span_id"] for s in left} == {"c", "d"}
     assert (rd / "events.jsonl").read_bytes() == events_before
 
-    # idempotent: clearing again removes nothing
-    assert client.post("/api/runs/demo/nodes/0/clear_trace").json()["removed"] == 0
+    # idempotent: a NEW operation over the already-cleared trace removes nothing
+    assert _clear_trace(client, "demo", 0, rd=rd, op="c" * 32).json()["removed"] == 0
 
 
 def test_trace_tail_survives_a_huge_recent_span_line(tmp_path):
@@ -3573,13 +3598,13 @@ def test_clear_trace_refuses_a_run_with_an_unserved_resume(tmp_path):
 
     # A durable resume intent that no engine has served yet: not alive, but about to be.
     EventStore(rd / "events.jsonl").append("resume_requested", {})
-    blocked = client.post("/api/runs/demo/nodes/0/clear_trace")
+    blocked = _clear_trace(client, "demo", 0, rd=rd, op="d" * 32)
     assert blocked.status_code == 409
     assert (rd / "spans.jsonl").read_bytes() == before      # nothing rewritten under the launch
 
     # Once an engine has SERVED it, the run is quiet again and the rewrite proceeds.
     EventStore(rd / "events.jsonl").append("resume_served", {})
-    cleared = client.post("/api/runs/demo/nodes/0/clear_trace")
+    cleared = _clear_trace(client, "demo", 0, rd=rd, op="e" * 32)
     assert cleared.status_code == 200 and cleared.json()["removed"] == 1
 
 

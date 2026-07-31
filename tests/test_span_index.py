@@ -572,7 +572,18 @@ def test_endpoints_serve_through_the_index(tmp_path):
 
     # clear_trace rewrites spans.jsonl (invalidating byte offsets) → the index is dropped and the next
     # read rebuilds cleanly against the shrunk file (node 0 gone, node 1 kept).
-    assert client.post("/api/runs/demo/nodes/0/clear_trace").json()["removed"] == len(_spans_for(0, "tr0"))
+    # clear_trace requires the exact run/node/trace identities (a destructive whole-file rewrite must
+    # not be issuable from a stale view), so submit them the way a real client does.
+    _generation = next(r for r in client.get("/api/runs").json()
+                       if r["run_id"] == "demo")["generation"]
+    _node = client.get("/api/runs/demo/nodes/0").json()
+    _cleared = client.post("/api/runs/demo/nodes/0/clear_trace", json={
+        "expected_generation": _generation,
+        "expected_trace_revision": _node.get("trace_revision"),
+        "node_generation": _node.get("attempt", 0),
+        "operation_id": "tc_" + "f" * 32,
+    })
+    assert _cleared.json()["removed"] == len(_spans_for(0, "tr0"))
     tv2 = client.get("/api/runs/demo/trace").json()
     assert set(tv2["nodes"].keys()) == {"1"}
     assert client.get("/api/runs/demo/spans/g0_1").json()["attributes"] == {}   # node 0's span is gone
