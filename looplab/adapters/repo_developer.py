@@ -276,6 +276,9 @@ class LLMRepoDeveloper:
     # `EditableSpec.preload_priority` knob if a task ever needs to override the order.
     _PRELOAD_PRIORITY = ("test.py", "settings.py", "train.py", "to_stf.py", "model.py", "loss.py",
                          "dataset.py", "tokenizing.py", "metrics.py", "inference.py", "README.md")
+    # Ceiling on the recursive "files:" listing. Generous for a real project, small enough that a
+    # data-heavy or vendored tree cannot crowd out the previews the same prompt block is for.
+    _MAX_LISTED_FILES = 400
 
     def _repo_context(self, per_file: int = 3000, total_budget: int = 30000) -> str:
         """Embed the repo's key source files VERBATIM in the prompt so the agent can author the eval
@@ -285,24 +288,47 @@ class LLMRepoDeveloper:
         from pathlib import Path as _P
         parts: list[str] = []
         used = 0
-        # CLAUDE REVIEW: [EDGE-CASE] Only TOP-LEVEL files of each editable root are listed and
-        # previewed (root.iterdir(), non-recursive) — a src/-layout repo yields an empty preview AND
-        # a "files:" listing that omits every source file, while the system prompt still asserts
-        # "The repository's key source files are PREVIEWED below". (_recipes and _results_context
-        # share the same top-level-only limitation.) The scout tools compensate at runtime, but the
-        # prompt's claim is misleading for nested layouts.
+        # RECURSIVE, because the system prompt promises "The repository's key source files are
+        # PREVIEWED below" and a src/-layout repo has none of them at the top level: the old
+        # `root.iterdir()` gave that repo an EMPTY preview and a "files:" line naming no source at
+        # all. Bounded so a large tree can't flood the prompt — noise directories are skipped (the
+        # same set the repo scout uses) and the walk stops at `_MAX_LISTED_FILES`, with the
+        # truncation disclosed rather than silently narrowing what the agent believes exists.
+        import os
+        from looplab.tools.reposcout import _SKIP_DIRS
+
         for ed in self._editables:
             root = _P(ed["path"])
             if not root.is_dir():
                 continue
+            names, truncated = [], False
             try:
-                names = sorted(p.name for p in root.iterdir() if p.is_file())
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = sorted(d for d in dirnames
+                                         if d not in _SKIP_DIRS and not d.startswith("."))
+                    base = _P(dirpath)
+                    for fn in sorted(filenames):
+                        if len(names) >= self._MAX_LISTED_FILES:
+                            truncated = True
+                            break
+                        names.append((base / fn).relative_to(root).as_posix())
+                    if truncated:
+                        break
             except OSError:
                 names = []
-            parts.append(f"# Repository `{ed['name']}` at {root} — files:\n" + ", ".join(names))
-            ordered = [n for n in self._PRELOAD_PRIORITY if n in names] + \
+            listing = ", ".join(names) + (
+                f" … (+more, listing capped at {self._MAX_LISTED_FILES})" if truncated else "")
+            parts.append(f"# Repository `{ed['name']}` at {root} — files:\n" + listing)
+            # Priority is matched by BASENAME (train.py counts wherever it lives) but still spends the
+            # budget in _PRELOAD_PRIORITY order, exactly as the top-level-only version did; the path
+            # breaks ties so two same-named files in different packages stay deterministic. Everything
+            # else keeps the walk order, which is itself sorted, so the preview is stable across runs.
+            _rank = {name: i for i, name in enumerate(self._PRELOAD_PRIORITY)}
+            _base = lambda n: n.rsplit("/", 1)[-1]                       # noqa: E731 — local key fn
+            ordered = sorted((n for n in names if _base(n) in _rank),
+                             key=lambda n: (_rank[_base(n)], n)) + \
                       [n for n in names if n.endswith((".py", ".yaml", ".yml", ".json"))
-                       and n not in self._PRELOAD_PRIORITY]
+                       and _base(n) not in _rank]
             for n in ordered:
                 if used >= total_budget:
                     break

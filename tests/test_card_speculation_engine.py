@@ -2369,3 +2369,49 @@ def test_every_speculative_spawn_rolls_back_its_inflight_marker_on_a_failed_star
     assert not unguarded, (
         "speculative start_soon with no BaseException rollback of its inflight marker at "
         f"line(s) {unguarded} — a failed spawn would strand the marker and wedge the next session")
+
+
+def test_a_paid_result_survives_a_close_that_exhausts_its_cas_retries(tmp_path, monkeypatch):
+    """The in-memory result must outlive a FAILED close, or the paid producer work is lost.
+
+    `_append_card_build_done` gives up after 64 CAS attempts against a tail that keeps moving; it
+    returns False and the durable head stays OPEN. If the result were discarded before that close,
+    the next service turn would find a head with an unreconciled attempt row and no owning
+    producer, and close it as "producer_failed" — permanently barring a Card whose producer had in
+    fact SUCCEEDED. Keeping the result until the close is durable lets the retry commit the exact
+    paid work instead.
+    """
+    engine, _producer = _engine(tmp_path / "cas-exhausted")
+    _start(engine)
+    _add_ready_draft(engine)
+    request = _request(engine)
+    result = _build_result(engine, request)
+    assert result.success is True
+    engine._ensure_speculation_state()
+    engine._spec_builds[result.key] = result
+
+    original_append = engine.store.append
+
+    def _always_race_the_close(event_type, data=None, **kwargs):
+        # Move the tail immediately before every DONE append so its `expected_last_seq` is stale.
+        if event_type == EV_CARD_BUILD_DONE:
+            original_append("test_tail_moved", {"at": "done"})
+        return original_append(event_type, data, **kwargs)
+
+    monkeypatch.setattr(engine.store, "append", _always_race_the_close)
+
+    assert engine._serve_card_builds() is False          # the close never landed
+    state = fold(engine.store.read_all())
+    assert state.card_builds_done < len(state.card_build_requests)   # head still open
+    assert result.key in engine._spec_builds, (
+        "the paid producer result was discarded even though its close failed — the next service "
+        "turn would quarantine a head whose producer had succeeded")
+
+    # With the tail settled, the retry commits the SAME result: one node, one close, no rebuild.
+    monkeypatch.setattr(engine.store, "append", original_append)
+    assert engine._serve_card_builds() is True
+    assert result.key not in engine._spec_builds
+    events = engine.store.read_all()
+    assert len([event for event in events if event.type == EV_CARD_BUILD_DONE]) == 1
+    assert len([event for event in events if event.type == EV_NODE_CREATED]) == 1
+    assert fold(events).card_builds_done == 1

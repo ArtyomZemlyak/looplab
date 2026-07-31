@@ -695,3 +695,30 @@ def test_resume_wins_if_it_lands_after_finalize_decision(tmp_path):
     state = anyio.run(eng.run)
     assert raced and state.finished and state.stop_reason != "aborted"
     assert state.evaluated_nodes()
+
+
+def test_an_unknown_inject_parent_is_rejected_rather_than_silently_dropped(tmp_path):
+    """An unknown parent id used to be DROPPED, so the operator got a rootless node with its lineage
+    silently lost — while the comparable tombstoned/aborted cases both raise. A typo in a parent id
+    must fail the request, not quietly change what was asked for."""
+    rd = tmp_path / "run"
+    eng = _engine(rd)
+    eng.store.append("run_started", {
+        "run_id": "run", "task_id": "toy", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 0.0}}, "code": "c"})
+    eng.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0})
+
+    with pytest.raises(ValueError, match="no such parent node"):
+        eng._create_injected_node({
+            "idea": {"operator": "improve", "params": {"x": 0.1}}, "parent_id": 99})
+    with pytest.raises(ValueError, match="no such parent node"):
+        eng._create_injected_node({
+            "idea": {"operator": "improve", "params": {"x": 0.1}}, "parent_ids": [0, 99]})
+
+    # A deliberately parentless inject is untouched — it never reaches the check.
+    eng._create_injected_node({"idea": {"operator": "draft", "params": {"x": 0.2}}})
+    state = fold(eng.store.read_all())
+    injected = [n for n in state.nodes.values() if n.id != 0]
+    assert len(injected) == 1 and injected[0].parent_ids == []

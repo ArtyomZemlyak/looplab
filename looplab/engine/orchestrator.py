@@ -5416,17 +5416,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         idea_d["params"] = params
 
         raw_parents = req.get("parent_ids")
-        # CLAUDE REVIEW: [EDGE-CASE] Unknown parent ids are silently DROPPED (the inject proceeds as
-        # a parentless draft) while a tombstoned/aborted parent raises below — asymmetric: an
-        # operator typo'ing a parent id gets a rootless node with lost lineage and no error, whereas
-        # the comparable stale/unavailable cases fail the request loudly. Rejecting unknown ids like
-        # `unavailable` does would surface the mistake instead. (Only the explicit
-        # parent_generations snapshot catches the drop, and only when the caller supplied one.)
         if isinstance(raw_parents, list):
-            parents = [parent_id for parent_id in raw_parents if parent_id in state.nodes]
+            parents = [parent_id for parent_id in raw_parents if parent_id is not None]
         else:
             parent_id = req.get("parent_id")
-            parents = [parent_id] if parent_id is not None and parent_id in state.nodes else []
+            parents = [parent_id] if parent_id is not None else []
+        # REJECT an unknown id instead of dropping it. Dropping left the operator with a ROOTLESS
+        # node and no error — lineage silently lost to a typo — while the comparable stale and
+        # tombstoned/aborted cases both fail the request loudly. (`parent_generations` caught the
+        # drop only when the caller happened to supply a snapshot.) An explicitly parentless inject
+        # still works: it passes no parent_id / an empty list, which never reaches this check.
+        missing = [parent_id for parent_id in parents if parent_id not in state.nodes]
+        if missing:
+            raise ValueError(f"no such parent node(s): {missing}")
         unavailable = [
             parent_id for parent_id in parents
             if state.nodes[parent_id].tombstoned or parent_id in state.aborted_nodes

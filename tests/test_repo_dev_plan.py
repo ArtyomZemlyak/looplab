@@ -377,3 +377,53 @@ def test_a_failed_plan_step_is_recorded_on_the_trace_not_silently_swallowed(monk
     attrs = failed[0].get("attributes") or failed[0].get("attrs") or failed[0]
     assert attrs.get("failed") == 1 and attrs.get("total") == 2
     assert "unparseable edit" in str(attrs.get("detail"))
+
+
+def _nested_task(root: Path):
+    return RepoTask(id="r", goal="g", direction="max", editable_path=str(root),
+                    edit_surface=["*.py"], protect=[],
+                    eval=EvalSpec(command=[sys.executable, "src/train.py"], metric=_M))
+
+
+def test_repo_context_previews_a_src_layout_repo_and_discloses_its_listing_cap(tmp_path):
+    """The system prompt asserts "The repository's key source files are PREVIEWED below", so a
+    src/-layout repo must not get an empty preview and a source-free "files:" line."""
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+
+    root = tmp_path / "srclayout"
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "train.py").write_text("TRAIN_MARKER = 1\n", encoding="utf-8")
+    (root / "src" / "pkg" / "model.py").write_text("MODEL_MARKER = 1\n", encoding="utf-8")
+    (root / "README.md").write_text("readme\n", encoding="utf-8")
+    # Noise directories the repo scout already skips must stay out of both listing and preview.
+    (root / ".git").mkdir()
+    (root / ".git" / "config.py").write_text("GIT_MARKER = 1\n", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "vendored.py").write_text("VENDOR_MARKER = 1\n", encoding="utf-8")
+
+    out = LLMRepoDeveloper(object(), _nested_task(root))._repo_context()
+
+    assert "src/train.py" in out and "src/pkg/model.py" in out          # listed, not just the root
+    assert "TRAIN_MARKER = 1" in out and "MODEL_MARKER = 1" in out      # and actually PREVIEWED
+    assert "GIT_MARKER" not in out and "VENDOR_MARKER" not in out
+    assert ".git/config.py" not in out and "node_modules/vendored.py" not in out
+    # train.py outranks model.py in _PRELOAD_PRIORITY, so it spends the budget first regardless of
+    # where the walk found it.
+    assert out.index("TRAIN_MARKER = 1") < out.index("MODEL_MARKER = 1")
+
+
+def test_repo_context_discloses_truncation_instead_of_silently_narrowing_the_repo(tmp_path):
+    """A capped listing that reads as complete would tell the agent files it must edit don't exist."""
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+
+    root = tmp_path / "wide"
+    (root / "many").mkdir(parents=True)
+    for i in range(LLMRepoDeveloper._MAX_LISTED_FILES + 25):
+        (root / "many" / f"f{i:04d}.txt").write_text("x", encoding="utf-8")
+
+    out = LLMRepoDeveloper(object(), _nested_task(root))._repo_context()
+
+    listing = out.split("files:\n", 1)[1].split("\n", 1)[0]
+    listed, _, disclosure = listing.partition(" … ")
+    assert len(listed.split(", ")) == LLMRepoDeveloper._MAX_LISTED_FILES
+    assert f"listing capped at {LLMRepoDeveloper._MAX_LISTED_FILES}" in disclosure

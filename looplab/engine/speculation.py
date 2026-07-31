@@ -1114,17 +1114,20 @@ class SpeculationMixin:
             # Keep both the durable head and its isolated result alive. A later add_nodes extension can
             # commit the exact paid result without rebuilding it or acknowledging the request as stale.
             return False
-        # CLAUDE REVIEW: [EDGE-CASE] The result is popped BEFORE the durable close. For the "stale"
-        # outcome, if `_append_card_build_done` exhausts all 64 CAS retries (returns False) the head
-        # stays open with no in-memory result and no inflight marker; the next service turn then hits
-        # `_head_has_unreconciled_attempt` and closes the head as "producer_failed" — permanently
-        # barring the Card from speculative election even though this process's producer actually
-        # succeeded and the claim was merely stale. Popping only after a successful close (or keeping
-        # a "reconciled" marker per attempt) would preserve the intended "stale" disposition.
-        self._discard_spec_result(self._spec_builds.pop(key, None))
+        # The result is dropped only AFTER the close is durable. Popping first meant that when
+        # `_append_card_build_done` exhausted its CAS retries the head was left open with no
+        # in-memory result and no inflight marker — so the next service turn saw
+        # `_head_has_unreconciled_attempt` and closed it as "producer_failed", permanently barring
+        # the Card from speculative election even though this process's producer had SUCCEEDED and
+        # the claim was merely stale. Keeping the result until the close lands preserves the
+        # intended disposition and lets the retry reuse the paid work.
         if outcome == "created" and node_id is not None:
-            return self._append_card_build_done(request, node_id=node_id)
-        return self._append_card_build_done(request, skipped="stale")
+            closed = self._append_card_build_done(request, node_id=node_id)
+        else:
+            closed = self._append_card_build_done(request, skipped="stale")
+        if closed:
+            self._discard_spec_result(self._spec_builds.pop(key, None))
+        return closed
 
     def _close_card_build_before_terminal_gate(
         self,
