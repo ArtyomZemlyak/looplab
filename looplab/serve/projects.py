@@ -101,6 +101,14 @@ class ProjectStore:
         for k, v in self._empty().items():       # backfill missing keys AND coerce wrong-typed ones
             cur = data.get(k)
             data[k] = cur if isinstance(cur, type(v)) else v
+        # PER-ROW shape too, not just the top-level containers. A hand-edited row missing "id" made
+        # `_index` KeyError (and `Project(**p)` ValidationError) inside every mutator that traverses
+        # the rows — rename/reparent/delete/assign surfaced a 500 instead of the documented
+        # ProjectError->400, and stayed broken until someone fixed the file by hand. Same
+        # drop-the-malformed policy the top-level coercion above already applies.
+        for key in ("projects", "supertasks"):
+            data[key] = [row for row in data[key]
+                         if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]]
         return data
 
     def _save(self, data: dict) -> None:
@@ -109,14 +117,8 @@ class ProjectStore:
         atomic_write_text(self.path, json.dumps(data, indent=2))
 
     # ------------------------------------------------------------------ queries
-    # CLAUDE REVIEW: [EDGE-CASE] load() shape-checks only the top-level containers, not per-item
-    # shape: a hand-edited projects.json row missing "id" makes this KeyError (and Project(**p) in
-    # rename/reparent can ValidationError) in every mutator that traverses the rows —
-    # rename/reparent/delete/assign-to-project/create-with-parent surface a 500 instead of the
-    # documented ProjectError->400 path until the file is fixed by hand (create/assign(None)/
-    # set_label/forget and the supertask methods keep working). Consider dropping malformed rows in
-    # load() like the top-level coercion already does.
     def _index(self, data: dict) -> dict[str, dict]:
+        # Safe to index by "id" unconditionally: `load` drops rows that lack one (see there).
         return {p["id"]: p for p in data["projects"]}
 
     def _require(self, data: dict, pid: str) -> dict:

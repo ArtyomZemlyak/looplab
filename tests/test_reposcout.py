@@ -264,3 +264,38 @@ def test_a_long_listing_keeps_its_partial_receipt_under_the_result_cap(tmp_path)
     grepped = tools.execute("grep", {"pattern": "needle", "root": str(root), "max_hits": 200})
     assert len(grepped) <= RESULT_CAP
     assert "capped at" in grepped.splitlines()[-1] or "omitted" in grepped.splitlines()[-1]
+
+
+def test_a_one_line_parenthesized_file_is_content_not_a_refusal():
+    """`_read_file` answers a refusal as a parenthesized REASON so the agent learns why instead of
+    seeing an empty result — but a caller cannot recover that fact by shape. A genuine one-line stub
+    `(placeholder)` looked identical, and the assistant's `@file` expansion dropped it silently: no
+    grounding in the prompt and no signal to the user. `read_file_checked` answers structurally."""
+    import ast
+    import tempfile
+    from pathlib import Path as _Path
+
+    from looplab.tools.reposcout import REFUSAL_PREFIXES, RepoScoutTools
+
+    with tempfile.TemporaryDirectory() as d:
+        stub = _Path(d) / "stub.py"
+        stub.write_text("(placeholder)", encoding="utf-8")
+        tools = RepoScoutTools(roots=[d])
+
+        ok, body = tools.read_file_checked(str(stub))
+        assert ok is True and body.strip() == "(placeholder)"
+
+        refused, reason = tools.read_file_checked(str(_Path(d) / "nope.py"))
+        assert refused is False and reason.startswith("(no such file:")
+
+    # The vocabulary is CLOSED: every literal `_read_file` can return in place of content must be in
+    # REFUSAL_PREFIXES, or `read_file_checked` would call a refusal content again.
+    src = _Path(RepoScoutTools.__module__.replace(".", "/") + ".py")
+    tree = ast.parse(_Path(__file__).resolve().parents[1].joinpath(src).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_read_file")
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.JoinedStr):
+            head = node.value.values[0]
+            if isinstance(head, ast.Constant) and str(head.value).startswith("("):
+                assert str(head.value).startswith(REFUSAL_PREFIXES), head.value

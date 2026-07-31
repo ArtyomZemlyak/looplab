@@ -437,3 +437,41 @@ def test_a_late_worker_write_never_resurrects_a_retired_receipt():
     registry.put(job_id, status=JOB_DONE, result={"ok": True})
     assert registry.get(job_id) is None, "a retired receipt was resurrected by a late write"
     assert registry._jobs == {}
+
+
+def test_a_non_dict_job_result_is_returned_rather_than_500ing_every_poll(monkeypatch):
+    """`{**j["result"], ...}` assumed every publisher stored a dict. A compute callable that returns
+    None (or a list, or a bare string) on success is published verbatim, and that spread raises
+    TypeError — a 500 on every poll of that job for its whole retention window. Worse for a
+    consume_on_poll job: its receipt is retired BEFORE this line, so the crash destroys the single
+    answer the client would ever get."""
+    pytest.importorskip("fastapi")
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")   # always async, so every result is POLLED
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.jobs import JOB_DONE, build_router
+
+    registry = JobRegistry()
+    srv = SimpleNamespace(jobs=registry)
+    app = FastAPI()
+    app.include_router(build_router(srv))
+    client = TestClient(app)
+
+    for value in (None, ["a", "b"], "plain text", 7):
+        job_id = _run(registry, lambda v=value: v)["job_id"]
+        for _ in range(200):                       # the worker publishes asynchronously
+            body = client.get(f"/api/jobs/{job_id}").json()
+            if body.get("status") == JOB_DONE:
+                break
+            time.sleep(0.01)
+        assert body["status"] == JOB_DONE, (value, body)
+        assert body["result"] == value, (value, body)
+
+    dict_job = _run(registry, lambda: {"answer": 42})["job_id"]
+    for _ in range(200):
+        body = client.get(f"/api/jobs/{dict_job}").json()
+        if body.get("status") == JOB_DONE:
+            break
+        time.sleep(0.01)
+    assert body == {"answer": 42, "status": JOB_DONE}      # a dict still spreads, unchanged

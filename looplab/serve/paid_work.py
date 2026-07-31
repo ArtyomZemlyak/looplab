@@ -92,27 +92,31 @@ def flush_pending_run_costs(srv, run_dir) -> bool:
         if not entries:
             return True
 
-        retained = []
-        for entry in entries:
-            try:
-                same_generation = srv.commands.run_generation(run_dir) == entry["generation"]
-                durable = same_generation and reconcile_cost_accountants(entry["ledger"])
-            except Exception:  # noqa: BLE001 - preserve known usage and its lease
-                durable = False
-            if not durable:
-                retained.append(entry)
-                continue
-            # CLAUDE REVIEW: [EDGE-CASE] If this __exit__ raises, the exception escapes the loop and
-            # the `with flush_lock` block before the re-insert below runs — every entry already
-            # collected in `retained` AND every not-yet-examined entry was popped from `pending` at
-            # the top and is silently lost (their leases/ledgers are dropped from the retry
-            # registry). Wrap the release, or re-insert `retained` + the unprocessed tail in a
-            # try/finally.
-            entry["activity_ctx"].__exit__(None, None, None)
-
-        if retained:
-            with lock:
-                pending.setdefault(key, []).extend(retained)
+        retained: list = []
+        index = 0
+        try:
+            for index, entry in enumerate(entries):
+                try:
+                    same_generation = srv.commands.run_generation(run_dir) == entry["generation"]
+                    durable = same_generation and reconcile_cost_accountants(entry["ledger"])
+                except Exception:  # noqa: BLE001 - preserve known usage and its lease
+                    durable = False
+                if not durable:
+                    retained.append(entry)
+                    continue
+                entry["activity_ctx"].__exit__(None, None, None)
+            index = len(entries)
+        finally:
+            # A release that RAISES must not take the registry with it. `entries` was POPPED from
+            # `pending` at the top, so an exception escaping this loop used to drop every
+            # already-`retained` entry AND every not-yet-examined one — their leases and ledgers
+            # gone from the retry registry, silently. `entries[index + 1:]` is the unprocessed tail
+            # (the raising entry itself is released-or-failed, not retryable), so what goes back is
+            # exactly what still needs a later flush.
+            unprocessed = entries[index + 1:] if index < len(entries) else []
+            if retained or unprocessed:
+                with lock:
+                    pending.setdefault(key, []).extend(retained + unprocessed)
         with lock:
             return not pending.get(key)
 

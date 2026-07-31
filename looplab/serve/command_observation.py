@@ -343,19 +343,22 @@ class CommandObservationIndex:
         metadata = _metadata(stat)
         probe_before = _probe_signature(handle, size)
         index = self._indexes.get(key)
-        # CLAUDE REVIEW: [EDGE-CASE] The metadata/probe rebuild fences apply only at EQUAL size. An
-        # in-place rewrite that also GROWS the file (same inode, prefix bytes changed) is never
-        # detected: the scan resumes from valid_end over foreign bytes, the seq-continuity check
-        # merely stops the tail, and the already-indexed intents/acks/finishes from the OLD image are
-        # then re-certified against the NEW image's probe signature and trusted indefinitely. Safe
-        # only while every writer honors the append-only contract; a repair tool or manual edit that
-        # rewrites-and-appends silently poisons this cache until identity/shrink changes.
+        # A rewrite that also GROWS the file used to slip every fence: same inode, size larger, so
+        # the equal-size metadata/probe checks never ran, the scan resumed from valid_end over
+        # foreign bytes, and the intents/acks/finishes cached from the OLD image were re-certified
+        # against the NEW image and trusted indefinitely. Re-probing the PREVIOUSLY OBSERVED PREFIX
+        # closes it: `_probe_signature` samples spans determined by the size it is given, so asking
+        # for `index.observed_size` reads exactly the byte windows the stored signature covered.
+        # Unchanged prefix -> identical digest; a rewritten one -> a rebuild. Still O(1).
+        grew = index is not None and size > index.observed_size
+        prefix_probe = _probe_signature(handle, index.observed_size) if grew else None
         rebuild = (
             index is None
             or index.identity != identity
             or size < index.observed_size
             or (size == index.observed_size and metadata != index.metadata)
             or (size == index.observed_size and probe_before != index.probe_signature)
+            or (prefix_probe is not None and prefix_probe != index.probe_signature)
         )
         if rebuild:
             index = self._new_index(stat)

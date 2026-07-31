@@ -499,18 +499,14 @@ def expand_mentions(text: str, run_root, *, alive_fn: Optional[Callable] = None,
                 refs.append({"type": "run", "id": raw})
         elif kind == "file":
             from looplab.tools.reposcout import RepoScoutTools
-            body = RepoScoutTools(list(roots) or [Path.home(), REPO_ROOT, Path(run_root)])._read_file(raw)
-            # Skip refused/unreadable files (outside roots, secret, missing) instead of embedding the
-            # refusal string in the prompt — mirrors the @run branch and the docstring's promise. The
-            # scout returns a single-line "(…reason…)" on refusal; a real file is multi-line or not so
-            # wrapped, so this only drops genuine refusals.
-            # CLAUDE REVIEW: [EDGE-CASE] The claim above is not airtight: a genuine one-line file
-            # whose entire content is parenthesized (e.g. a stub "(placeholder)") is
-            # indistinguishable from a refusal and is silently dropped — the user gets no grounding
-            # and no signal why. A structured (ok, text) return from the scout would remove the
-            # sniffing entirely.
-            _b = body.strip()
-            if not (_b.startswith("(") and _b.endswith(")") and "\n" not in _b):
+            # Skip refused/unreadable files (outside roots, secret, missing) instead of embedding
+            # the refusal string in the prompt — mirrors the @run branch and the docstring's promise.
+            # ASK the scout rather than sniffing its output: the old shape test ("one parenthesized
+            # line") also matched a genuine one-line stub like `(placeholder)`, which then vanished
+            # with no grounding and no reason shown.
+            ok, body = RepoScoutTools(
+                list(roots) or [Path.home(), REPO_ROOT, Path(run_root)]).read_file_checked(raw)
+            if ok:
                 blocks.append(f"[@file:{raw}]\n```\n{body}\n```")
                 refs.append({"type": "file", "path": raw})
     expanded = text if not blocks else (text + "\n\n--- Referenced context ---\n" + "\n\n".join(blocks))

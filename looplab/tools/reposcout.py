@@ -43,6 +43,12 @@ _MAX_READ = RESULT_CAP - 400   # chars of file content returned per read_file pa
 # (twice, counting the splitlines copy) into the shared engine process before any page bound.
 _MAX_FILE_BYTES = 64 * 1024 * 1024   # 64 MiB
 _MAX_ENTRIES = 200         # entries per list_dir / find_files
+# Every way `_read_file` can decline to return content. It answers with a parenthesized REASON (so
+# the agent learns why instead of seeing an empty result), and `read_file_checked` recognizes one by
+# this closed vocabulary — never by "looks parenthesized", which a real one-line file can also be.
+REFUSAL_PREFIXES = (
+    "(deleted this session:", "(path not allowed", "(no such file:", "(refused:",
+    "(unsupported/binary type", "(file too large to page:", "(could not read:")
 
 
 def _fit_rows(header: str, rows: list[str], receipt: str = "") -> str:
@@ -289,6 +295,17 @@ class RepoScoutTools:
                     best_key, best_value = kk, v
             return best_value
         return None
+
+    def read_file_checked(self, path: str, start_line=0, lines=0) -> tuple[bool, str]:
+        """`(ok, text)` — the STRUCTURED form of `_read_file` for callers that must tell a refusal
+        from content. `_read_file` renders a refusal as a parenthesized line so the AGENT reads a
+        reason rather than an empty result, but a caller cannot recover that fact by shape: a
+        genuine one-line file whose whole content is parenthesized — a stub `(placeholder)` — looks
+        identical, and the assistant's `@file` expansion silently dropped it with no grounding and
+        no reason shown. Matched against the CLOSED refusal vocabulary below instead
+        (`tests/test_reposcout.py` pins that every refusal return in `_read_file` is in it)."""
+        text = self._read_file(path, start_line, lines)
+        return (not text.startswith(REFUSAL_PREFIXES), text)
 
     def _read_file(self, path: str, start_line=0, lines=0) -> str:
         staged = self._overlay_get(path)

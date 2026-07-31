@@ -324,3 +324,39 @@ def test_lru_evicts_ninth_run_and_evicted_run_is_cold_again(tmp_path):
     assert index.metrics.last_bytes_read == paths[0].stat().st_size
     assert str(paths[1]) not in index.cached_paths
     assert len(index.cached_paths) == 8
+
+
+def test_a_rewrite_that_also_grows_the_log_is_detected_and_rebuilt(tmp_path):
+    """Every fence but identity/shrink applied only at EQUAL size, so a rewrite that also APPENDED
+    slipped through: same inode, larger file, the scan resumed from valid_end over foreign bytes,
+    and the intents/acks cached from the OLD image were re-certified against the NEW one and trusted
+    indefinitely. Re-probing the previously observed PREFIX catches it in O(1)."""
+    import os as _os
+
+    from looplab.serve.command_observation import CommandObservationIndex
+
+    path = tmp_path / "events.jsonl"
+
+    def _write(rows):
+        path.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+        # Pin mtime/size metadata so ONLY the prefix-probe fence can notice the difference.
+        _os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    original = [{"v": 1, "seq": i, "ts": 0.0, "type": "run_started" if i == 0 else "pause",
+                 "data": {"run_id": "r", "task_id": "t", "direction": "min"} if i == 0 else {}}
+                for i in range(6)]
+    _write(original)
+
+    observers = CommandObservationIndex()
+    first = observers.observe(path)
+    rebuilds_before = observers.metrics.rebuilds
+
+    # Same inode, LARGER file, but the prefix bytes are different.
+    rewritten = [dict(row, data={**row["data"], "poisoned": True}) for row in original]
+    _write(rewritten + [{"v": 1, "seq": 6, "ts": 0.0, "type": "pause", "data": {}}])
+    assert path.stat().st_size > len(
+        b"".join(orjson.dumps(r) + b"\n" for r in original))
+
+    observers.observe(path)
+    assert observers.metrics.rebuilds > rebuilds_before, "the rewritten prefix was trusted"
+    assert first is not None
