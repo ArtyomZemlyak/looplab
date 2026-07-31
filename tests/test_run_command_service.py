@@ -111,8 +111,13 @@ def _post(client, event_type, data=None, key="key-1", *, generation=None):
 # this bounds only the FAILURE case: the loop polls every 10ms and returns the instant a terminal
 # appears, so a passing test never waits. 1.0s was marginal on a loaded full-suite host — the worker
 # had observed neither the `run_finished` append nor the dead process yet, so this asserted on a
-# still-'executing' record while passing in isolation.
-_TERMINAL_SETTLE_TIMEOUT_S = 15.0
+# still-'executing' record while passing in isolation. 15s then flaked the same way twice more.
+# Size it against the thing being waited ON rather than by guesswork: the worker's own
+# `max_observation_timeout` is `max(0.30, command_timeout * 4)`, i.e. 120s for the staged-finish
+# tests, so any ceiling below that can expire while the command is still legitimately 'executing'
+# and reports a hang the system does not consider one. 60s keeps a real hang bounded well inside
+# that window while leaving 4x headroom over the 15s that kept failing.
+_TERMINAL_SETTLE_TIMEOUT_S = 60.0
 
 
 def _terminal(client, record, timeout=_TERMINAL_SETTLE_TIMEOUT_S, run_id="demo"):
@@ -127,8 +132,9 @@ def _terminal(client, record, timeout=_TERMINAL_SETTLE_TIMEOUT_S, run_id="demo")
 
 # Wall-clock ceiling for "a background command worker got scheduled". The waits below poll every 5ms
 # and exit the instant the work appears, so this only bounds the FAILURE case — 1s was marginal under
-# a loaded full-suite run and flaked there while passing in isolation.
-_WORKER_START_TIMEOUT_S = 15.0
+# a loaded full-suite run and flaked there while passing in isolation. Raised alongside its sibling
+# above: thread scheduling is subject to the same contention that made 15s too tight there.
+_WORKER_START_TIMEOUT_S = 60.0
 
 # `command_timeout` for a test that lets its worker RUN and only then stages the run's finish.
 # `_client` derives `max_observation_timeout` from it as max(0.30, timeout * 4), and that is an
