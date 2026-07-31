@@ -214,6 +214,34 @@ def test_delete_node_purge_physically_rewrites_and_backs_up(tmp_path):
     assert (rd / "events.jsonl.bak-del1").exists()                  # recoverable backup
 
 
+def test_a_second_purge_of_the_same_node_id_never_overwrites_the_first_backup(tmp_path):
+    """The backup IS the safety receipt for an irreversible operation. Keyed only by the root node
+    id, a second purge of the same nid — a scope-change retry, or an id reused after a purge on
+    resume — silently overwrote it, so the state you might want back was gone."""
+    rd = tmp_path / "twice"
+    _run(rd, nodes=(0, 1, 2)).append("pause", {})
+    tool = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                           approver=lambda _action: "allow_once",
+                           command_service=_RecordingCommands(tmp_path))
+    before_first = (rd / "events.jsonl").read_bytes()
+    assert "deleted node(s) [2]" in tool.execute(
+        "delete_node", {"run_id": "twice", "node_id": 2, "purge": True})
+    first = rd / "events.jsonl.bak-del2"
+    assert first.read_bytes() == before_first
+
+    # The same node id comes back — a scope-change retry, or an id reused after a purge on resume.
+    # (Written fresh rather than appended: a purge leaves a rewritten log the store won't extend.)
+    (rd / "events.jsonl").unlink()
+    _run(rd, nodes=(0, 1, 2)).append("pause", {})     # stopped again, so the purge is allowed
+    before_second = (rd / "events.jsonl").read_bytes()
+    assert before_second != before_first
+    assert "deleted node(s) [2]" in tool.execute(
+        "delete_node", {"run_id": "twice", "node_id": 2, "purge": True})
+
+    assert first.read_bytes() == before_first, "the first purge's backup was overwritten"
+    assert (rd / "events.jsonl.bak-del2.2").read_bytes() == before_second
+
+
 def test_delete_node_purge_filters_logical_members_inside_atomic_batch(tmp_path):
     rd = tmp_path / "batched-purge"
     rd.mkdir()

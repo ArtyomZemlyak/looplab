@@ -2433,13 +2433,15 @@ def build_router(srv) -> APIRouter:
     def run_config(run_id: str):
         rd = _run_dir(run_id)
         snap = rd / "config.snapshot.json"
-        # CLAUDE REVIEW: [EDGE-CASE] A corrupt/truncated config.snapshot.json (torn write on a
-        # crash, hand-edited file) raises json.JSONDecodeError here and surfaces as an unhandled
-        # 500. _put_run_config_locked has the same unguarded json.loads. Other snapshot readers in
-        # this package fail closed with an explicit error; this GET should 500 with a clear
-        # "snapshot unreadable" detail (or 409) instead of a bare traceback.
-        current = (json.loads(snap.read_text(encoding="utf-8"))
-                   if snap.exists() else Settings().masked_snapshot())
+        # A torn write (crash mid-save) or a hand-edited snapshot is UNREADABLE, not an internal
+        # fault: it used to raise JSONDecodeError into a bare 500 traceback that named neither the
+        # file nor the problem. Every other snapshot reader in this package fails closed with an
+        # explicit message; so does this one now.
+        try:
+            current = (json.loads(snap.read_text(encoding="utf-8"))
+                       if snap.exists() else Settings().masked_snapshot())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
         if not isinstance(current, dict):
             raise HTTPException(500, "the run configuration snapshot is not a JSON object")
         return _run_config_payload(rd, current)
@@ -2500,7 +2502,10 @@ def build_router(srv) -> APIRouter:
         if not snap.exists():
             raise HTTPException(
                 404, "run has no config.snapshot.json (it predates self-describing runs)")
-        current = json.loads(snap.read_text(encoding="utf-8"))
+        try:                                     # same unreadable-vs-fault distinction as the GET
+            current = json.loads(snap.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
         if not isinstance(current, dict):
             raise HTTPException(500, "the run configuration snapshot is not a JSON object")
         current_revision = _run_config_revision(current)
