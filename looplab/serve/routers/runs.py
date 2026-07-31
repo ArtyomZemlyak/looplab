@@ -28,7 +28,8 @@ from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
     iter_event_jsonl, iter_jsonl)
 from looplab.events.replay import FoldCursor, fold
-from looplab.events.traceview import TRACE_PROJECTION_SCHEMA, unavailable_projection
+from looplab.events.traceview import (
+    TRACE_PROJECTION_SCHEMA, trace_file_revision, unavailable_projection)
 from looplab.events.types import (
     EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED, EV_CONCEPT_LENS_STARTED,
     EV_TRUST_GATE_CHANGED,
@@ -1764,6 +1765,13 @@ def build_router(srv) -> APIRouter:
         route reads too — both metric-sidecar readers must fence on the SAME attempt."""
         return node_attempt(st, nid)
 
+    def _node_trace_snapshot(rd: Path, nid: int, *, attempt: int) -> tuple[dict, Optional[str]]:
+        """Project one node trace only when its cheap file CAS is stable across the read."""
+        before = trace_file_revision(rd / "spans.jsonl")
+        trace = _node_trace(rd, nid, attempt=attempt)
+        after = trace_file_revision(rd / "spans.jsonl")
+        return trace, before if before is not None and before == after else None
+
     @router.get("/api/runs/{run_id}/nodes/{nid}")
     def node_detail(run_id: str, nid: int, seq: Optional[int] = None,
                     expected_generation: Optional[str] = None):
@@ -1796,7 +1804,7 @@ def build_router(srv) -> APIRouter:
             if b is None and st.building and st.building.get("node_id") == nid:
                 b = st.building
             attempt = _node_attempt(st, nid)
-            trace = _node_trace(rd, nid, attempt=attempt or 0)
+            trace, trace_revision = _node_trace_snapshot(rd, nid, attempt=attempt or 0)
             building = bool(b)
             if building or trace.get("nodes"):
                 b = b or {}
@@ -1805,7 +1813,8 @@ def build_router(srv) -> APIRouter:
                 return {"id": nid, "status": "building",
                         "attempt": attempt or 0, "run_generation": request_generation,
                         "operator": b.get("operator"), "parent_ids": b.get("parent_ids", []),
-                        "idea": None, "code": "", "annotations": [], "trace": trace}
+                        "idea": None, "code": "", "annotations": [], "trace": trace,
+                        "trace_revision": trace_revision}
             raise HTTPException(404, "no such node")
         out = n.model_dump(mode="json")
         out["annotations"] = st.annotations.get(nid, [])
@@ -1818,8 +1827,11 @@ def build_router(srv) -> APIRouter:
                 out["parent_id_diffed"] = p.id
         # spans.jsonl is a current sidecar rather than an event-versioned projection. Never label its
         # future contents as historical; the UI explains that trace is unavailable in History.
-        out["trace"] = (_node_trace(rd, nid, attempt=n.attempt)
-                        if seq is None else {"nodes": []})
+        if seq is None:
+            out["trace"], out["trace_revision"] = _node_trace_snapshot(
+                rd, nid, attempt=n.attempt)
+        else:
+            out["trace"], out["trace_revision"] = {"nodes": []}, None
         if request_generation is not None:
             request_generation = _assert_historical_generation(rd, expected_generation)
         out["run_generation"] = request_generation

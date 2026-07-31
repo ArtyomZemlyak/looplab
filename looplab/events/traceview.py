@@ -7,6 +7,7 @@ with node_id (see tracing.py), so we group traces by node_id and build a child t
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -39,6 +40,28 @@ TRACE_NODE_SPAN_CAP = 512
 TRACE_NODE_SPAN_CAP_MAX = 4096
 TRACE_DETAIL_SPAN_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
+
+
+def trace_file_revision(path: str | os.PathLike) -> Optional[str]:
+    """Cheap CAS token for the exact ``spans.jsonl`` file snapshot.
+
+    Node-detail reads compare this token before and after projection; destructive trace operations
+    compare it again while owning ``engine.lock``. File identity plus content metadata catches both
+    append-in-place writers and atomic replacements without hashing a diagnostics file that may be
+    gigabytes large.
+    """
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return hashlib.sha256(b"looplab:spans:missing:v1").hexdigest()
+    except OSError:
+        return None
+    identity = (
+        int(stat.st_dev), int(stat.st_ino), int(stat.st_ctime_ns),
+        int(stat.st_size), int(stat.st_mtime_ns),
+    )
+    return hashlib.sha256(
+        json.dumps(identity, separators=(",", ":")).encode("ascii")).hexdigest()
 
 _SPAN_TEXT_BUDGET = 8192
 _META_TEXT_CAP = 256

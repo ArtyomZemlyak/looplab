@@ -9,6 +9,7 @@ locking and durability at their call sites.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import threading
@@ -224,12 +225,22 @@ class EventStoreLockError(RuntimeError):
         super().__init__(f"cross-process event append lock is unavailable for {path}: {cause}")
 
 
+class InterprocessLockContended(RuntimeError):
+    """A requested non-blocking cross-process lock is held by another process."""
+
+    def __init__(self, path: "str | os.PathLike"):
+        self.path = str(path)
+        super().__init__(f"cross-process lock is already held for {path}")
+
+
 @contextmanager
-def _interprocess_lock(lock_path: Path, *, required: bool = False):
+def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: bool = True):
     """Best-effort exclusive cross-process lock (msvcrt on Windows, fcntl on POSIX). The live UI
     server appends control events to the SAME events.jsonl the engine subprocess writes; without
     serialization their appends can interleave into a torn line (which `iter_jsonl` truncates at,
-    silently dropping later events). Degrades to a no-op if locking is unavailable."""
+    silently dropping later events). Degrades to a no-op if locking is unavailable unless
+    ``required`` is set. A non-blocking caller gets ``InterprocessLockContended`` when another owner
+    holds the byte/inode instead of waiting behind it."""
     f = None
     locked = False
     try:
@@ -243,16 +254,25 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False):
             if os.name == "nt":
                 import msvcrt
                 f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                msvcrt.locking(
+                    f.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+                fcntl.flock(f.fileno(), operation)
             locked = True
         # Some filesystems/runtimes expose the module but report an unsupported advisory-lock
         # operation as ValueError/NotImplementedError rather than OSError.  A strict caller must
         # receive one stable failure type for every such capability gap; otherwise the command
         # worker would turn it into a generic 200/command_worker_failed response.
         except (OSError, ImportError, AttributeError, NotImplementedError, ValueError) as exc:
+            contended = not blocking and (
+                isinstance(exc, BlockingIOError)
+                or (os.name == "nt" and getattr(exc, "errno", None) in {
+                    errno.EACCES, getattr(errno, "EDEADLOCK", 36)})
+            )
+            if contended:
+                raise InterprocessLockContended(lock_path) from exc
             if required:
                 raise EventStoreLockError(lock_path, exc) from exc
             pass  # ordinary engine writer: retain the historical single-writer degradation

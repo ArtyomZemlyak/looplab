@@ -42,7 +42,7 @@ from looplab.serve.settings_store import SettingsStore
 # start record and then either fail late at mkdir or, when the file did not exist yet, OCCUPY the path
 # and wedge the later store_secret/os.replace. Names only: the not-yet-created case has nothing on disk
 # to test. `safe_run_dir` additionally rejects any run_id that names an existing non-directory, which
-# covers server-owned files added later, and the digest-suffixed `.looplab-lifecycle-*.lock` fences by
+# covers server-owned files added later, and the digest-suffixed lifecycle/trace-clear receipts by
 # prefix (they cannot be enumerated).
 _RESERVED_RUN_IDS = {
     "reports", "assistant", ".reviews", ".command-locks",
@@ -52,6 +52,9 @@ _RESERVED_RUN_IDS = {
 }
 # `engine_proc._lifecycle_lock_path` builds `<run-root>/.looplab-lifecycle-<digest>.lock`.
 _LIFECYCLE_LOCK_PREFIX = ".looplab-lifecycle-"
+# `control._trace_clear_receipt_path` builds
+# `<run-root>/.trace-clear.<run-digest>.tc_<operation-id>.json`.
+_TRACE_CLEAR_RECEIPT_PREFIX = ".trace-clear."
 
 # Fields that can contain verbatim source, captured process output, private host paths, or an internal
 # model-facing prompt. `state_payload` feeds both the public /state GET and headerless EventSource SSE,

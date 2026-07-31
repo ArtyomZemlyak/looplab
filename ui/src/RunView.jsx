@@ -1,4 +1,6 @@
-import React, { lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, {
+  lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
+} from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
 import { useRunRouteState } from './useRunRouteState.js'
@@ -39,6 +41,30 @@ let inspectorPromise
 const loadInspector = () => inspectorPromise || (inspectorPromise = import('./Inspector.jsx'))
 const Inspector = lazyNamed(loadInspector, 'default')
 const GroupSummary = lazyNamed(loadInspector, 'GroupSummary')
+
+// Trace clear can outlive the conditionally mounted Inspector (drawer close, pane collapse, route
+// change). Keep only client-owned lifecycle state here so a late POST outcome still fences a newly
+// mounted Inspector and orders its next detail read after the mutation.
+const traceClearRecoveryRegistry = new Map()
+let traceClearRecoveryRevision = 0
+let traceClearRecoverySnapshot = { revision: 0, signals: new Map() }
+const traceClearRecoveryListeners = new Set()
+const subscribeTraceClearRecovery = listener => {
+  traceClearRecoveryListeners.add(listener)
+  return () => traceClearRecoveryListeners.delete(listener)
+}
+const readTraceClearRecoverySnapshot = () => traceClearRecoverySnapshot
+const publishTraceClearRecovery = (scope, kind) => {
+  const signal = {
+    scope, kind, revision: ++traceClearRecoveryRevision,
+  }
+  const signals = new Map(traceClearRecoverySnapshot.signals)
+  signals.delete(scope)
+  signals.set(scope, signal)
+  while (signals.size > 64) signals.delete(signals.keys().next().value)
+  traceClearRecoverySnapshot = { revision: signal.revision, signals }
+  for (const listener of traceClearRecoveryListeners) listener()
+}
 
 // All optional panels intentionally share one deferred module request. The first opened panel pays
 // the cost once; list/settings/report-only routes cannot reach this owner-only hub statically.
@@ -136,6 +162,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const gen = generation?.slice(0, 8) || 'unknown'
   const route = useRunRouteState({ generation, reviewMode })
   const { state: routeState, generationMismatch, generationPending } = route
+  const traceClearRecoveryStore = useRef(traceClearRecoveryRegistry)
+  // useSyncExternalStore closes the render→effect subscription gap: a clear POST may settle while
+  // RunView is being remounted, and that outcome must never be missed by the replacement Inspector.
+  const traceClearRecoverySnapshot = useSyncExternalStore(
+    subscribeTraceClearRecovery, readTraceClearRecoverySnapshot, readTraceClearRecoverySnapshot)
   const viewSeq = routeState.sequence
   const selectedId = routeState.nodeId
   const inspectTab = routeState.inspectTab
@@ -1309,6 +1340,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                         onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
                     : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
                         tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
+                        traceClearRecoveryStore={traceClearRecoveryStore}
+                        traceClearRecoverySnapshot={traceClearRecoverySnapshot}
+                        publishTraceClearRecovery={publishTraceClearRecovery}
                         readOnly={readOnlyMode} historySeq={history.resolvedSeq}
                         expectedGeneration={generation} commentsRevision={state?.comments_revision}
                         focusCommentId={commentAttemptMatches ? routeState.commentId : null}

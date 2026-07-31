@@ -1265,10 +1265,41 @@ export const resetRun = (rid, expectedGeneration) =>
     expected_generation: expectedGeneration,
   })
 
-// Clear ONE node's trace: erase its spans from spans.jsonl so a reset+rebuild's fresh bands don't
-// stack on top of the old attempt's. Server refuses (409) while the engine is live (sole writer).
-export const clearNodeTrace = (rid, id) =>
-  post(runNodeApiPath(rid, id, '/clear_trace'), {})
+// Clear ONE node's trace only for the exact run + node lifecycle the operator inspected. Never
+// substitute a later observed generation here: the confirmation belongs to the rendered snapshot,
+// and a stale tab must fail closed instead of deleting a replacement run/attempt's diagnostics.
+export const clearNodeTrace = (
+  rid, id, {
+    expectedGeneration, expectedTraceRevision, nodeGeneration, operationId, signal,
+  } = {},
+) => {
+  if (!validRunGeneration(expectedGeneration)) {
+    const error = new Error('An exact run generation is required to clear trace data.')
+    error.code = 'run_generation_unavailable'
+    throw error
+  }
+  if (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0) {
+    const error = new Error('An exact experiment attempt is required to clear trace data.')
+    error.code = 'node_generation_unavailable'
+    throw error
+  }
+  if (!validRunGeneration(expectedTraceRevision)) {
+    const error = new Error('An exact trace snapshot is required to clear trace data.')
+    error.code = 'trace_revision_unavailable'
+    throw error
+  }
+  if (!/^tc_[0-9a-f]{32}$/.test(operationId || '')) {
+    const error = new Error('A stable trace clear operation id is required.')
+    error.code = 'trace_clear_operation_unavailable'
+    throw error
+  }
+  return post(runNodeApiPath(rid, id, '/clear_trace'), {
+    expected_generation: expectedGeneration,
+    expected_trace_revision: expectedTraceRevision,
+    node_generation: nodeGeneration,
+    operation_id: operationId,
+  }, { signal })
+}
 
 export const llmHealth = (options = {}) => get('/api/llm/health', options)
 

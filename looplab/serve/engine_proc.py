@@ -288,6 +288,36 @@ def run_lifecycle_lock_http(rd: Path):
         }) from exc
 
 
+@contextmanager
+def engine_write_lock_http(rd: Path):
+    """Own ``engine.lock`` for an offline HTTP rewrite without waiting on a racing CLI.
+
+    The lifecycle lock serializes server launches, but a direct ``looplab run/resume`` acquires only
+    ``engine.lock``. A liveness probe followed by a whole-file rewrite therefore still has a race
+    unless the route itself owns that writer lock for the rewrite. Contention is an immediate 409,
+    while an unsupported lock backend is a 503; neither condition authorizes an unlocked mutation.
+    """
+    from fastapi import HTTPException
+    from looplab.events.eventstore import (
+        EventStoreLockError, InterprocessLockContended, _interprocess_lock)
+
+    try:
+        with _interprocess_lock(rd / "engine.lock", required=True, blocking=False):
+            yield
+    except InterprocessLockContended as exc:
+        raise HTTPException(409, {
+            "code": "engine_running",
+            "message": "The run engine acquired write ownership before this operation.",
+            "remediation": "Wait for the run to stop, refresh, and try again.",
+        }) from exc
+    except EventStoreLockError as exc:
+        raise HTTPException(503, {
+            "code": "engine_lock_unavailable",
+            "message": "Engine write locking is unavailable; the run was not modified.",
+            "remediation": "Inspect engine.lock and storage locking before retrying.",
+        }) from exc
+
+
 def sweep_stale_lifecycle_locks(root: Path, *, max_age_s: float = 3600.0) -> int:
     """Best-effort startup GC of orphaned per-run lifecycle lock files (F22). These live in the runs
     root and are deliberately never deleted inline (their inode is the fence during a run's own delete),

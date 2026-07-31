@@ -22,7 +22,8 @@ from looplab.core.appconfig import load_document
 from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
-from looplab.serve.appstate import _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS
+from looplab.serve.appstate import (
+    _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
 
@@ -71,8 +72,9 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
     if resolved == root or resolved.parent != root:
         _reject(400, "invalid_run_id", "run_id must be a plain name, not a path", "run_id")
     if (resolved.name.lower() in _RESERVED_RUN_IDS
-            or resolved.name.lower().startswith(_LIFECYCLE_LOCK_PREFIX)):
-        # The lifecycle fences are `.looplab-lifecycle-<digest>.lock`, so only the PREFIX is knowable.
+            or resolved.name.lower().startswith((
+                _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX))):
+        # Digest/operation-suffixed lifecycle and trace-clear files reserve their whole prefixes.
         _reject(400, "reserved_run_id", f"run_id {resolved.name!r} is reserved", "run_id")
     if requested.is_symlink():
         _reject(409, "run_path_conflict", "run path is a symbolic link", "run_id")
