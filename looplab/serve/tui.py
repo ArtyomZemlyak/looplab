@@ -929,15 +929,15 @@ class Tui:
                 unresolved = True
             else:
                 unresolved = True
-                # CLAUDE REVIEW: [QUALITY] `status` is interpolated into rich markup WITHOUT `_esc`,
-                # unlike the analogous defensive branch in `_control` (which escapes it). Today the
-                # branch is unreachable — `Api._command_record` rejects any status outside
-                # _COMMAND_DONE|_COMMAND_FAILED|_COMMAND_PENDING — but if the client-side validation
-                # ever loosens, a markup-bearing status ("[/x]") raises rich MarkupError inside
-                # _reconcile_pending, which re-runs on every reopen of the run view (the exact
-                # re-crash loop the _esc docstring warns about).
+                # `status` is escaped like every other server-supplied value here. The branch is
+                # unreachable today (`Api._command_record` rejects any status outside
+                # _COMMAND_DONE|_COMMAND_FAILED|_COMMAND_PENDING) — but this is the defensive arm,
+                # and a markup-bearing status reaching it raises MarkupError inside
+                # `_reconcile_pending`, which re-runs on EVERY reopen of the run view: the exact
+                # re-crash loop `_esc` exists to prevent.
                 self.console.print(
-                    f"  [yellow]…[/yellow] {_esc(label)} — unexpected command status {status or 'missing'}")
+                    f"  [yellow]…[/yellow] {_esc(label)} — unexpected command status "
+                    f"{_esc(status) if status else 'missing'}")
         return not unresolved
 
     def _persist_command_status(self, run_id: str, turn: dict, *, action_index: Optional[int] = None) -> None:

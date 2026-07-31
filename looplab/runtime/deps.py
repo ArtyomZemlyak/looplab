@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -140,11 +141,12 @@ class InstallResult:
 # whole run; ANY pip RESPONSE (a success, or a clean "no matching distribution" failure — both prove
 # egress works) resets the count. The clean fix for a true no-egress pod is a pre-baked image with
 # auto_install_deps off. A connection-REFUSED fails fast and is handled per-package by the caller.
-# CLAUDE REVIEW: [QUALITY] `_consecutive_install_timeouts` is an unsynchronized module global.
-# Today every install() caller reaches it via crash_repair._prepare_env, which serializes under the
-# engine's `_dep_lock`, so no live race exists — but nothing at THIS definition documents or enforces
-# that; a future caller that skips `_dep_lock` silently makes the latch lossy. Worth a lock or an
-# explicit "callers must hold _dep_lock" note here.
+# The latch counter carries its OWN lock rather than relying on a caller-side one. Today every
+# install() reaches this through crash_repair._prepare_env, which serializes under the engine's
+# `_dep_lock` — but that is an invariant nothing here can enforce, and a future caller that skips it
+# would make the latch lossy in exactly the situation it exists for: several eval threads all hanging
+# on pip at once, each losing the other's increment, so the breaker never trips.
+_latch_lock = threading.Lock()
 _consecutive_install_timeouts = 0
 _EGRESS_TIMEOUT_LATCH = 2
 
@@ -154,7 +156,8 @@ def reset_install_latch() -> None:
     process-lifetime global: in the long-lived `looplab ui` server a run that latched (egress blip)
     otherwise leaves auto-install disabled for the NEXT run in the same process."""
     global _consecutive_install_timeouts
-    _consecutive_install_timeouts = 0
+    with _latch_lock:
+        _consecutive_install_timeouts = 0
 
 
 def install(package: str, *, python: Optional[str] = None, timeout: float = 900.0) -> InstallResult:
@@ -163,9 +166,11 @@ def install(package: str, *, python: Optional[str] = None, timeout: float = 900.
     Best-effort and self-contained: any launch failure is returned as ``ok=False`` (never raises),
     so a missing-pip / offline box degrades to the normal triage/repair path."""
     global _consecutive_install_timeouts
-    if _consecutive_install_timeouts >= _EGRESS_TIMEOUT_LATCH:
+    with _latch_lock:
+        latched = _consecutive_install_timeouts
+    if latched >= _EGRESS_TIMEOUT_LATCH:
         return InstallResult(package=package, ok=False, returncode=-1,
-                             output=f"skipped: pip timed out {_consecutive_install_timeouts}× in a row "
+                             output=f"skipped: pip timed out {latched}× in a row "
                                     "(egress looks blocked); pre-bake deps or set auto_install_deps=false",
                              timed_out=True)
     py = python or sys.executable
@@ -185,11 +190,13 @@ def install(package: str, *, python: Optional[str] = None, timeout: float = 900.
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
-        _consecutive_install_timeouts += 1   # latch only after several in a row (true no-egress signal)
+        with _latch_lock:                    # latch only after several in a row (true no-egress signal)
+            _consecutive_install_timeouts += 1
         return InstallResult(package=package, ok=False, returncode=-1,
                              output="pip install timed out", timed_out=True)
     except OSError as e:
         return InstallResult(package=package, ok=False, returncode=-1, output=f"failed to launch pip: {e}")
     tail = ((proc.stdout or "") + (proc.stderr or ""))[-2000:]
-    _consecutive_install_timeouts = 0   # pip RESPONDED (success or clean fail) → egress works → reset latch
+    with _latch_lock:                   # pip RESPONDED (success or clean fail) → egress works → reset
+        _consecutive_install_timeouts = 0
     return InstallResult(package=package, ok=proc.returncode == 0, returncode=proc.returncode, output=tail)

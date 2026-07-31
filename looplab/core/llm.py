@@ -1491,10 +1491,10 @@ def make_llm_client(settings, *, model: str | None = None,
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
-        # CLAUDE REVIEW: [QUALITY] the 45.0 fallback literals duplicate DEFAULT_HEADER_TIMEOUT_S,
-        # which this module declares (and config.py imports) as "the single source" of this default —
-        # change the constant and this getattr fallback silently drifts.
-        header_timeout=float(getattr(settings, "llm_header_timeout", 45.0) or 45.0),
+        # Fall back to the CONSTANT this module declares as the single source of the default (which
+        # config.py imports for its own field default) — a literal here would drift the moment it moved.
+        header_timeout=float(getattr(settings, "llm_header_timeout", DEFAULT_HEADER_TIMEOUT_S)
+                             or DEFAULT_HEADER_TIMEOUT_S),
         trust_env=bool(getattr(settings, "llm_trust_env", False)),  # direct-connect by default (bypass proxy)
         cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache
         **extra,

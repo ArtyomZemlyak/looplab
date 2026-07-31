@@ -770,7 +770,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             from looplab.tools.vectorstore import hash_embed as _he
             embedder = _he
         self._embedder = embedder
-        self._idea_vecs: dict[int, list] = {}   # hash(idea text) -> embedding (lazy in-memory cache)
+        self._idea_vecs: dict[tuple, list] = {}  # (len, prefix) of idea text -> embedding (in-memory)
         self._debug_depth = max(1, int(debug_depth))
         self._operator_bandit = bool(operator_bandit)
         # M5: the Researcher's always-on digest budget (0 = auto-scale with run size).

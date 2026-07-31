@@ -37,6 +37,19 @@ _IDEA_IDENTITY_MAX_SOURCE_CHARS = 16_384
 _IDEA_IDENTITY_MAX_NORMALIZED_CHARS = 32_768
 _IDEA_IDENTITY_MAX_TOKENS = 2_048
 _IDEA_IDENTITY_CACHE_MAX = 1_024
+_IDEA_VEC_KEY_CHARS = 4_096
+
+
+def _idea_vec_key(text: str) -> tuple[int, str]:
+    """Cache key for one idea text's embedding — CONTENT, never `hash(text)`.
+
+    A hash is not identity: two distinct idea texts colliding on it would silently share a single
+    embedding, and the semantic-novelty gate would then score a proposal against the wrong neighbour
+    — no error, just a wrong verdict. The pair below CARRIES the content, so it cannot alias: texts
+    at or under the cap are distinguished by their exact characters, longer ones by their length as
+    well. Same shape `_cached_prior_idea_identity` already uses for the same reason.
+    """
+    return (len(text), text[:_IDEA_VEC_KEY_CHARS + 1])
 _IDEA_PROMPT_ATOM_CHARS = 80
 _IDEA_PROMPT_MAPPING_CHARS = 1_200
 _IDEA_PROMPT_PRIOR_CHARS = 24_000
@@ -287,15 +300,11 @@ class NoveltyGateMixin:
         # `node_reset` re-creates the SAME id with a NEW idea — a node_id-keyed cache then returned the
         # OLD vector and the semantic-novelty gate compared future proposals against a stale idea. The
         # cache is in-memory only (never persisted/replayed), so a per-process `hash(text)` key is safe.
-        # CLAUDE REVIEW: [QUALITY] "safe" above covers staleness, not COLLISIONS: `hash(text)` is not
-        # content identity, so two distinct idea texts colliding on the 64-bit hash silently share one
-        # embedding and corrupt the semantic-dup verdict (no error, just a wrong nearest-node score).
-        # Vanishingly rare per-run, but keying by the text itself (or a real digest, as the sibling
-        # `_cached_prior_idea_identity` cache does) removes the failure mode; note also this cache has
-        # no size bound, unlike `_idea_identity_cache`'s `_IDEA_IDENTITY_CACHE_MAX` clear-on-full.
-        key = hash(text)
+        key = _idea_vec_key(text)
         v = self._idea_vecs.get(key)
         if v is None:
+            if len(self._idea_vecs) >= _IDEA_IDENTITY_CACHE_MAX:
+                self._idea_vecs.clear()
             v = self._embedder(text)
             self._idea_vecs[key] = v
         return v

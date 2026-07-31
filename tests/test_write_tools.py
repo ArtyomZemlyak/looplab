@@ -254,3 +254,15 @@ def test_failed_snapshot_midway_rolls_back_earlier_snapshots(tmp_path, monkeypat
     # a.txt got a phantom snapshot that was rolled back: reverting it now finds nothing to pop.
     assert "no snapshot to revert" in w.revert(str(tmp_path / "a.txt"))
     assert (tmp_path / "a.txt").read_text() == "a0\n"
+
+
+def test_every_xlsx_cell_is_pipe_safe_not_just_the_notes_column():
+    """The xlsx->markdown brief is built from whatever the operator's spreadsheet contains, so a `|`
+    in a label or a non-numeric value is ordinary. Emitted verbatim it closes the cell early and
+    shifts every column after it, silently misattributing the numbers the agent then reads."""
+    from looplab.adapters.repo_write_tools import _md_cell
+
+    assert _md_cell("run|A", 60) == "run/A"                 # label
+    assert _md_cell("n/a | see note", 200) == "n/a / see note"   # non-numeric value cell
+    assert _md_cell(0.5, 200) == "0.5"                      # numbers pass through unchanged
+    assert _md_cell("x" * 99, 5) == "xxxxx"                 # still truncated

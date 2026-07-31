@@ -208,3 +208,39 @@ def test_novelty_gate_engages_under_explore_even_with_gate_off(tmp_path):
     eng._novelty_stance = "explore"
     nudged = eng._apply_novelty_gate(st, dup.model_copy())
     assert nudged.params != {"x": 1.0}          # engaged -> nudged off the near-duplicate
+
+
+def test_idea_embedding_cache_is_keyed_by_content_and_stays_bounded():
+    """`_idea_vec` memoizes the embedding of an idea's text. Keyed on `hash(text)`, two distinct
+    ideas that collide would silently share one vector — no error, just a wrong nearest-node score
+    and therefore a wrong semantic-dup verdict. And an unbounded cache grows for the whole run."""
+    from types import SimpleNamespace
+
+    from looplab.engine import novelty
+
+    calls: list[str] = []
+    eng = SimpleNamespace(
+        _idea_vecs={},
+        _embedder=lambda text: (calls.append(text), [float(len(text))])[1],
+    )
+    vec = novelty.NoveltyGateMixin._idea_vec
+
+    a, b = "sparse attention over long docs", "distil the teacher with r-drop"
+    assert vec(eng, a) == vec(eng, a) and calls == [a]          # memoized on the second read
+    vec(eng, b)
+    assert calls == [a, b]                                      # a DIFFERENT text is not served `a`'s
+    assert len(eng._idea_vecs) == 2
+    # The key CARRIES the content, so it cannot alias two texts — the property a hash cannot give.
+    for text in (a, b, "", "z" * (novelty._IDEA_VEC_KEY_CHARS + 500)):
+        length, prefix = novelty._idea_vec_key(text)
+        assert length == len(text)
+        assert prefix == text[:novelty._IDEA_VEC_KEY_CHARS + 1]
+    # Texts differing only past the prefix are still distinguished (by the length half).
+    long_a = "z" * novelty._IDEA_VEC_KEY_CHARS + "tail-one"
+    long_b = "z" * novelty._IDEA_VEC_KEY_CHARS + "tail-two-longer"
+    assert novelty._idea_vec_key(long_a) != novelty._idea_vec_key(long_b)
+
+    # Bounded: crossing the cap clears rather than growing without limit.
+    eng._idea_vecs = {("k", i): [0.0] for i in range(novelty._IDEA_IDENTITY_CACHE_MAX)}
+    vec(eng, "fresh idea")
+    assert len(eng._idea_vecs) == 1

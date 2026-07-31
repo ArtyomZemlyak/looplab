@@ -390,6 +390,13 @@ class RepoWriteTools:
         return f"deleted {p}"
 
 
+def _md_cell(value: object, limit: int) -> str:
+    """One markdown table cell: truncated, and with `|` neutralized. EVERY cell goes through this,
+    not just the notes column — a single pipe in a spreadsheet label or a non-numeric value shifts
+    every column after it, and this content is whatever the operator's xlsx happens to contain."""
+    return str(value)[:limit].replace("|", "/")
+
+
 def _xlsx_to_markdown(path: str, *, max_rows: int = 120, cap: int = 9000) -> Optional[str]:
     """Best-effort render of a results spreadsheet to a compact markdown table so an agent can read
     it (an .xlsx is opaque binary otherwise). Rows with numeric cells become table rows; free-text
@@ -434,10 +441,9 @@ def _xlsx_to_markdown(path: str, *, max_rows: int = 120, cap: int = 9000) -> Opt
     header = "| label | " + " | ".join(f"c{i+1}" for i in range(ncol)) + " | notes |"
     sep = "|" + "---|" * (ncol + 2)
     lines = [header, sep]
-    # CLAUDE REVIEW: [QUALITY] Only `notes` escapes "|" — a pipe inside a label or a non-numeric
-    # cell value is emitted verbatim into the markdown row and shifts every column after it.
     for r in rows:
         vals = r["vals"] + [""] * (ncol - len(r["vals"]))
-        notes = ("; ".join(r["notes"])[:200]).replace("|", "/")
-        lines.append(f"| {r['label'][:60]} | " + " | ".join(str(v) for v in vals) + f" | {notes} |")
+        notes = _md_cell("; ".join(r["notes"]), 200)
+        lines.append(f"| {_md_cell(r['label'], 60)} | "
+                     + " | ".join(_md_cell(v, 200) for v in vals) + f" | {notes} |")
     return "\n".join(lines)[:cap]

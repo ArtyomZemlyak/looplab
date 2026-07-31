@@ -1338,6 +1338,13 @@ class Settings(BaseSettings):
             raise ValueError(f"seed_mode must be auto|tracked|all, got {self.seed_mode!r}")
         if self.backend not in ("toy", "llm"):
             raise ValueError(f"backend must be toy|llm, got {self.backend!r}")
+        # `parse_structured` resolves an unknown name to the DEFAULT fallback order, so a typo'd
+        # llm_parser is indistinguishable from asking for the default. Validate against the parser
+        # registry itself (imported here, not at module scope, to keep config import-light).
+        from looplab.core.parse import _ORDER as _PARSER_ORDER
+        if self.llm_parser not in _PARSER_ORDER:
+            raise ValueError(f"llm_parser must be one of {'|'.join(sorted(_PARSER_ORDER))}, "
+                             f"got {self.llm_parser!r}")
         self._check_llm_profiles()
         return self
 

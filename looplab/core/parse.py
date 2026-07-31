@@ -185,11 +185,10 @@ def _coerce_to_model(obj: dict, model: Type[T]) -> dict:
     return out
 
 
-# CLAUDE REVIEW: [QUALITY] an unknown `parser` name silently falls back to the default order via
-# `_ORDER.get(parser, ["tool_call", "baml"])` in parse_structured, and `Settings.llm_parser` (the
-# value that feeds it) is NOT validated by config._check_trust_gate unlike the other enum-ish
-# strings — so a typo'd llm_parser is indistinguishable from the default instead of failing loudly
-# the way trust_gate/novelty_mode/backend now do.
+# The parser vocabulary. `Settings.llm_parser` is validated against these keys at construction
+# (config.py::_check_trust_gate), so a typo fails loudly instead of silently resolving to the default
+# order below — which is otherwise indistinguishable from asking for the default. Adding a key here
+# widens what the setting accepts; `tests/test_parse_llm.py` pins the two together.
 _ORDER = {
     "tool_call": ["tool_call", "baml"],
     # Paid durable jobs must not hide a second provider call behind parser fallback. Their caller has
