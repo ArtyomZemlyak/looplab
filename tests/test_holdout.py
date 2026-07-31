@@ -370,3 +370,45 @@ def test_holdout_phase_refuses_a_symlinked_predictions_file(tmp_path):
     # ...and the escape/absolute-name refusals the same helper owns.
     assert _candidate_output(workdir, "../../etc/passwd", "predictions.json") is None
     assert _candidate_output(workdir, "/etc/passwd", "predictions.json") is None
+
+
+def test_a_resume_honours_the_recorded_split_not_a_changed_live_setting(tmp_path):
+    """Engine invariant #6: settings recorded in `run_started` win over live config on resume.
+
+    Nothing tested it for the scoring-shape settings, and those are the ones where a regression is
+    silent rather than loud: nodes evaluated before and after a config change would be scored on
+    DIFFERENT holdout splits, and the champion pick would then compare incomparable metrics. The
+    verifier tie-break re-pin just above it has the same shape — the fold applies the RECORDED rule,
+    so a live-value engine would rank ties differently than the state it is reading.
+    """
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    def _engine(**over):
+        return Engine(
+            tmp_path / "run", task=_HostGradedTask(),
+            researcher=_PredsResearcher(), developer=_PredsDeveloper(),
+            sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+            n_seeds=1, max_nodes=2, timeout=30.0, holdout_top_k=2, **over)
+
+    first = _engine(holdout_fraction=0.25, holdout_select=True,
+                    select_verifier=True, verifier_ci_tie=True)
+    recorded_idx = set(first._holdout_idx)
+    anyio.run(first.run)
+
+    started = next(e for e in first.store.read_all() if e.type == "run_started")
+    assert started.data["holdout_fraction"] == pytest.approx(0.25)
+    assert started.data["holdout_select"] is True and started.data["select_verifier"] is True
+
+    # Reopen the SAME run directory with every one of those settings changed underneath it.
+    resumed = _engine(holdout_fraction=0.5, holdout_select=False,
+                      select_verifier=False, verifier_ci_tie=False)
+    assert resumed._holdout_fraction == pytest.approx(0.5)      # live value, before the re-pin
+    anyio.run(resumed.run)
+
+    assert resumed._holdout_fraction == pytest.approx(0.25), (
+        "the resumed engine scored on a DIFFERENT holdout split than the run committed to")
+    assert resumed._holdout_select is True
+    assert set(resumed._holdout_idx) == recorded_idx, "the held-out rows themselves changed"
+    assert resumed._select_verifier is True and resumed._verifier_ci_tie is True, (
+        "the engine's live tie-break gate disagrees with the rule the fold applies")

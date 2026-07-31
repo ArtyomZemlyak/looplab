@@ -2534,11 +2534,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._select_verifier = _entry.select_verifier_tiebreak
             self._verifier_ci_tie = _entry.verifier_ci_tie   # R1-d: re-pin the recorded CI-tie rule
             self._select_verifier_samples = _entry.select_verifier_samples
-        # CLAUDE REVIEW: [TEST-GAP] This resume re-pin block (recorded holdout_fraction/holdout_select
-        # — and the select_verifier/verifier_ci_tie re-pin just above — winning over LIVE config,
-        # engine-side invariant #6) has no test that resumes with a CHANGED live setting and asserts
-        # the recorded value wins; a regression would score pre- vs post-resume nodes on different
-        # holdout splits and silently crown a champion from incomparable metrics.
+        # Pinned by tests/test_holdout.py::test_a_resume_honours_the_recorded_split_not_a_changed_live
+        # _setting, which resumes with every one of these settings CHANGED and asserts the recorded
+        # values win (both this block and the verifier re-pin above).
         # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
         # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
         # before vs. after a config change would be scored on different splits and the champion pick
