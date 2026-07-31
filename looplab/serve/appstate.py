@@ -45,7 +45,7 @@ from looplab.serve.settings_store import SettingsStore
 # covers server-owned files added later, and the digest-suffixed lifecycle/trace-clear receipts by
 # prefix (they cannot be enumerated).
 _RESERVED_RUN_IDS = {
-    "reports", "assistant", ".reviews", ".command-locks",
+    "reports", "assistant", ".reviews", ".reviews.lock", ".command-locks",
     "ui_settings.json", "ui_settings.json.lock",
     "secrets.json", "secrets.json.lock",
     "projects.json", "projects.json.lock",

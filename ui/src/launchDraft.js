@@ -19,7 +19,7 @@ export const LAUNCH_RUNTIME_FIELDS = Object.freeze([
   { key: 'max_eval_seconds', label: 'Eval budget (s)', type: 'float', min: 0 },
 ])
 
-const RESERVED_RUN_IDS = new Set(['assistant', 'reports', '.reviews', '.command-locks'])
+const RESERVED_RUN_IDS = new Set(['assistant', 'reports', '.reviews', '.reviews.lock', '.command-locks'])
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
 
 const clone = value => {

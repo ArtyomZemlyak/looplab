@@ -2599,12 +2599,18 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .review-link-options select,.review-created input{min-height:34px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-1);color:var(--fg)}
 .review-evidence-option{display:flex!important;grid-template-columns:auto 1fr;align-items:center!important}.review-evidence-option input{width:16px;height:16px}
 .review-created{display:grid;gap:5px}.review-created>div{display:flex;gap:6px}.review-created input{min-width:0;flex:1;font-family:ui-monospace,Consolas,monospace}
+.review-created>div.muted{display:block;overflow-wrap:anywhere}.review-recovery{display:grid;gap:8px;justify-items:start}
+.review-recovery>span{line-height:1.45}.review-recovery-actions{display:flex!important;gap:8px;flex-wrap:wrap}
 .review-link-list{display:grid;gap:6px}.review-link-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 10px;border:1px solid var(--border);border-radius:7px}
 .review-links-error{display:flex;align-items:center;gap:8px}
 @media(max-width:600px){
   .auth-gate{padding:16px}.auth-card{padding:22px 18px}
   .review-mode .run-head>.pill,.review-mode .run-head>.live{display:none}
   .review-mode .run-head .view-toggle{width:100%;margin:0}.review-mode .run-head .view-toggle .vt{flex:1}
+  .review-link-builder .btn,.review-link-options select,.review-created input{min-height:44px}
+  .review-evidence-option{min-height:44px}.review-evidence-option input{width:20px;height:20px}
+  .review-created>div:first-of-type{flex-wrap:wrap}.review-created>div:first-of-type>.btn{width:100%}
+  .review-recovery-actions>.btn{flex:1 1 120px}
   .review-link-row{align-items:flex-start;flex-wrap:wrap}.review-link-row>.btn{width:100%}
 }
 

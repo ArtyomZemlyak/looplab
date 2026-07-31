@@ -8,25 +8,33 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, SecretStr, StrictBool
 
 from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
 from looplab.serve.metrics_adapters import read_node_metrics
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
 from looplab.serve.reviews import (
-    DEFAULT_TTL_SECONDS, REVIEW_HEADER, ReviewError, exact_review_generation)
+    DEFAULT_TTL_SECONDS, REVIEW_HEADER, ReviewError, exact_review_generation,
+    exact_review_request_id, exact_review_token_secret)
 from looplab.serve.run_commands import run_generation_token
 from looplab.core.redact import redact_secrets
 
 
 class ReviewCreate(BaseModel):
-    ttl_seconds: int = DEFAULT_TTL_SECONDS
+    # Keep legacy coercion in ReviewStore.create(), but retain the raw JSON type so the recovery
+    # contract can require an exact integer and reject bool/string aliases before fingerprinting.
+    ttl_seconds: object = DEFAULT_TTL_SECONDS
     # StrictBool, not bool: this flag EXPANDS a public capability boundary (it mints an
     # evidence-scoped bearer), and pydantic's lax coercion accepted "yes"/"on"/"1"/"true" — verified
     # live — so a client that never sent JSON `true` still got the wider token. Only the boolean
     # itself may widen the share.
     include_evidence: StrictBool = False
+    # These are manually validated as one envelope. In particular token_secret stays outside a
+    # regex-constrained pydantic field: validation errors can echo their offending input.
+    expected_generation: object = None
+    request_id: object = None
+    token_secret: object = None
 
 
 # Config is a reproducibility file, not automatically a public document.  The review UI consumes
@@ -200,6 +208,75 @@ def _http_error(exc: ReviewError) -> HTTPException:
     if exc.kind in {"expired", "revoked", "generation"}:
         return HTTPException(410, str(exc))
     return HTTPException(401, str(exc))
+
+
+def _create_error(code: str, message: str, *, status: int, **safe) -> HTTPException:
+    return HTTPException(status, {"code": code, "message": message, **safe})
+
+
+def _recovery_envelope(body: ReviewCreate) -> dict | None:
+    names = ("expected_generation", "request_id", "token_secret")
+    # Presence, not value, selects the recovery contract: three explicit JSON nulls must be rejected
+    # below and can never silently downgrade into the legacy random-create path.
+    fields_set = getattr(body, "model_fields_set", getattr(body, "__fields_set__", set()))
+    supplied = tuple(name in fields_set for name in names)
+    if not any(supplied):
+        return None
+    if not all(supplied):
+        raise _create_error(
+            "invalid_review_create_envelope",
+            "Review-link recovery fields must be supplied together.", status=400)
+    if type(body.ttl_seconds) is not int or type(body.include_evidence) is not bool:
+        raise _create_error(
+            "invalid_review_create_envelope",
+            "Review-link recovery settings are invalid.", status=400)
+    generation = exact_review_generation(body.expected_generation)
+    request_id = exact_review_request_id(body.request_id)
+    if generation is None or request_id is None or type(body.token_secret) is not str:
+        raise _create_error(
+            "invalid_review_create_envelope",
+            "Review-link recovery fields are invalid.", status=400)
+    # SecretStr prevents accidental repr/log interpolation below. Parsing remains manual so malformed
+    # secret material is never reflected through FastAPI's validation-error payload.
+    protected_secret = SecretStr(body.token_secret)
+    token_secret = exact_review_token_secret(protected_secret.get_secret_value())
+    if token_secret is None:
+        raise _create_error(
+            "invalid_review_create_envelope",
+            "Review-link recovery fields are invalid.", status=400)
+    return {
+        "expected_generation": generation,
+        "request_id": request_id,
+        "token_secret": token_secret,
+    }
+
+
+def _recovery_store_error(exc: ReviewError) -> HTTPException:
+    if exc.kind == "conflict":
+        safe = {}
+        link_id = exc.metadata.get("link_id")
+        if isinstance(link_id, str):
+            safe["existing_link_id"] = link_id
+        return _create_error(
+            "review_idempotency_conflict",
+            "This review create identity is already bound to another request.",
+            status=409, **safe)
+    if exc.kind == "generation_conflict":
+        safe = {}
+        for key in ("expected_generation", "current_generation"):
+            value = exact_review_generation(exc.metadata.get(key))
+            if value is not None:
+                safe[key] = value
+        return _create_error(
+            "review_generation_changed",
+            "The run changed before the review link could be created.", status=409, **safe)
+    if exc.kind == "storage":
+        return _create_error(
+            "review_store_unavailable",
+            "Review-link storage is temporarily unavailable.", status=503)
+    return _create_error(
+        "invalid_review_create_envelope",
+        "Review-link recovery settings are invalid.", status=400)
 
 
 def build_router(srv) -> APIRouter:
@@ -448,22 +525,60 @@ def build_router(srv) -> APIRouter:
             return _scrub_json(out)
 
     @router.post("/api/runs/{run_id}/reviews")
-    def create_review(run_id: str, body: ReviewCreate):
+    def create_review(run_id: str, body: ReviewCreate, response: Response):
         if not getattr(srv, "owner_auth_enabled", False):
             raise HTTPException(
                 409, "read-only sharing requires LOOPLAB_UI_TOKEN so the owner control plane is not anonymous")
+        recovery = _recovery_envelope(body)
         # Validate existence and traversal before persisting a capability.
         rd = srv.run_dir(run_id)
         try:
             with srv.commands.sequence(rd):
                 rd = srv.commands.validate_paths(rd)
-                token, record = srv.reviews.create(
-                    rd.name, generation=srv.commands.run_generation(rd),
-                    ttl_seconds=body.ttl_seconds, include_evidence=body.include_evidence)
+                current_generation = srv.commands.run_generation(rd)
+                if recovery is None:
+                    token, record = srv.reviews.create(
+                        rd.name, generation=current_generation,
+                        ttl_seconds=body.ttl_seconds, include_evidence=body.include_evidence)
+                    replayed = False
+                    status = None
+                else:
+                    token, record, replayed = srv.reviews.create_or_replay(
+                        rd.name, generation=current_generation,
+                        ttl_seconds=body.ttl_seconds,
+                        include_evidence=body.include_evidence,
+                        **recovery)
+                    status = srv.reviews.status(
+                        record, current_generation=current_generation)
         except ReviewError as exc:
+            if recovery is not None:
+                raise _recovery_store_error(exc) from exc
+            if exc.kind == "storage":
+                raise _create_error(
+                    "review_store_unavailable",
+                    "Review-link storage is temporarily unavailable.", status=503) from exc
             raise HTTPException(409 if exc.kind == "generation" else 400, str(exc)) from exc
-        # The bearer is returned exactly once.  reviews.json contains only its digest.
-        return {"ok": True, "token": token, "path": f"review#/{token}", **record}
+        if recovery is None:
+            # Preserve the legacy body and 200 response for callers without a recovery envelope.
+            return {"ok": True, "token": token, "path": f"review#/{token}", **record}
+        if replayed and status != "active":
+            # The exact operation is immutable: expiry, revocation, and generation replacement never
+            # mint or reveal a fresh bearer. A generic success handler therefore cannot copy a dead URL.
+            raise _create_error(
+                "review_replay_terminal",
+                "The original review link is no longer active.", status=410,
+                kind=status, existing_link_id=record["id"],
+                generation=record["generation"], expires_at=record["expires_at"],
+                revoked_at=record["revoked_at"])
+        response.status_code = 200 if replayed else 201
+        return {
+            "ok": True,
+            "token": token,
+            "path": f"review#/{token}",
+            **record,
+            "status": status,
+            "replayed": replayed,
+        }
 
     @router.get("/api/runs/{run_id}/reviews")
     def list_reviews(run_id: str):
@@ -479,8 +594,14 @@ def build_router(srv) -> APIRouter:
     def revoke_review(run_id: str, link_id: str):
         rd = srv.run_dir(run_id)
         try:
-            record = srv.reviews.revoke(rd.name, link_id)
+            with srv.commands.sequence(rd):
+                rd = srv.commands.validate_paths(rd)
+                record = srv.reviews.revoke(rd.name, link_id)
         except ReviewError as exc:
+            if exc.kind == "storage":
+                raise _create_error(
+                    "review_store_unavailable",
+                    "Review-link storage is temporarily unavailable.", status=503) from exc
             raise _http_error(exc) from exc
         return {"ok": True, **record}
 

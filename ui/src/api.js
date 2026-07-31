@@ -1572,10 +1572,10 @@ export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURICompo
 export const renameRun = (runId, label) => send(`/api/runs/${encodeURIComponent(runId)}`, 'PATCH', { label })
 export const deleteRun = (runId) => send(`/api/runs/${encodeURIComponent(runId)}`, 'DELETE')
 export const createRunReview = (runId, {
-  ttl_seconds, include_evidence = false,
+  ttl_seconds, include_evidence = false, expected_generation, request_id, token_secret,
 } = {}, options) =>
   post(`/api/runs/${encodeURIComponent(runId)}/reviews`,
-    { ttl_seconds, include_evidence }, options)
+    { ttl_seconds, include_evidence, expected_generation, request_id, token_secret }, options)
 export const listRunReviews = (runId, options) =>
   get(`/api/runs/${encodeURIComponent(runId)}/reviews`, options)
 export const revokeRunReview = (runId, linkId, options) =>
