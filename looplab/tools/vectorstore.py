@@ -62,6 +62,11 @@ class LLMEmbedder:
     quietly loses semantic quality. A single embedder instance must build AND query one index (same
     dim)."""
 
+    # Consecutive `_call` failures tolerated before this embedder stops trying the endpoint at all.
+    # >1 so a single blip doesn't cost the whole run its semantic retrieval; small enough that a dead
+    # endpoint costs a bounded number of `timeout`-length stalls rather than one per embed.
+    _BREAKER_MISSES = 3
+
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "x", timeout: float = 30.0, dim_fallback: int = 64):
         self.model = model
@@ -71,6 +76,7 @@ class LLMEmbedder:
         self.dim_fallback = dim_fallback
         self._dim: Optional[int] = None     # committed on first success (or first fallback)
         self._live: Optional[bool] = None    # None=untried, True=endpoint works, False=degraded to hash
+        self._misses = 0                     # CONSECUTIVE `_call` failures; reset by any success
 
     def _call(self, texts: list[str]) -> Optional[list[Vector]]:
         """One batched POST /embeddings. Returns per-text vectors, or None on ANY failure (network,
@@ -112,15 +118,11 @@ class LLMEmbedder:
     def embed_many(self, texts: list[str]) -> list[Vector]:
         if not texts:
             return []
-        # CLAUDE REVIEW: [PERF] `_live` only degrades to False on a FIRST-call failure. If the
-        # endpoint dies AFTER one success, `_live` stays True forever and every subsequent embed
-        # blocks up to `timeout` (30s default) before falling back — a rebuild that embeds hundreds
-        # of notes one-by-one then stalls ~30s per note. Consider a consecutive-failure breaker
-        # (e.g. degrade after N failures) instead of only pinning the first call's outcome.
         if self._live is not False:                      # untried or known-live -> try the endpoint
             vecs = self._call(texts)
             if vecs is not None:
                 self._live = True
+                self._misses = 0
                 # EVERY row's length, not just vecs[0]'s. A batch whose rows disagree with each
                 # OTHER (row 0 at the committed dim, a later row at another) used to pass this guard
                 # whole; the off-dim vectors were stored and then scored 0.0 forever in `_cosine`,
@@ -131,8 +133,17 @@ class LLMEmbedder:
                     self._dim = dim
                 if dim == self._dim and all(len(v) == dim for v in vecs):
                     return vecs
-            elif self._live is None:                     # first-ever call failed -> degrade for good
-                self._live = False
+            else:
+                # A breaker, not just a first-call verdict. `_live` used to pin only the FIRST call's
+                # outcome, so an endpoint that died after one success left `_live` True forever and
+                # every later embed paid the full `timeout` (30s by default) before falling back — a
+                # memory rebuild embedding hundreds of notes one at a time stalled 30s per note.
+                # Degrading is permanent on purpose, same as the first-call rule it generalizes:
+                # mixing real and hash vectors in ONE index makes their cosines meaningless, so once
+                # the endpoint has proven unreliable, consistency beats a half-populated index.
+                self._misses += 1
+                if self._live is None or self._misses >= self._BREAKER_MISSES:
+                    self._live = False
         return self._fallback(texts)
 
     def embed(self, text: str) -> Vector:

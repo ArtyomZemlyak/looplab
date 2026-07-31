@@ -45,3 +45,51 @@ def test_corrupt_complete_tail_is_marked_partial_not_silently_complete(tmp_path)
     assert cache.state("runX") is not None
     assert cache.partial("runX") is not None
     assert "PARTIAL SOURCE" in cache.source_note("runX")
+
+
+def _seed_run(root, name: str, *, corrupt: bool = False):
+    from looplab.events.eventstore import EventStore
+
+    rd = root / name
+    rd.mkdir()
+    path = rd / "events.jsonl"
+    EventStore(path).append("run_started", {
+        "run_id": name, "task_id": "task", "goal": "goal", "direction": "max",
+    })
+    if corrupt:
+        with path.open("ab") as stream:
+            stream.write(b"{complete corrupt record}\n")
+    return rd
+
+
+def test_the_fold_cache_is_lru_bounded_so_listing_a_run_root_cannot_pin_every_state(tmp_path):
+    """A folded RunState carries every node's code, logs and trials, and `list_runs` folds EVERY run
+    under the root — an unbounded map kept all of them alive for a server's whole lifetime."""
+    cache = RunStateCache(tmp_path)
+    cache._cache_max = 4
+    for i in range(10):
+        _seed_run(tmp_path, f"run{i}")
+        assert cache.state(f"run{i}") is not None
+    assert len(cache._cache) == 4, len(cache._cache)
+    assert set(cache._cache) == {f"run{i}" for i in range(6, 10)}     # the LEAST recent were dropped
+
+
+def test_eviction_never_forgets_that_a_run_was_read_only_in_part(tmp_path):
+    """`_list_runs` folds every run first and asks about completeness afterwards, so a receipt tied
+    to the LRU entry would let a truncated log read as a whole run — the one claim source_note
+    exists to prevent."""
+    cache = RunStateCache(tmp_path)
+    cache._cache_max = 2
+    _seed_run(tmp_path, "torn", corrupt=True)
+    assert cache.state("torn") is not None
+    assert "PARTIAL SOURCE" in cache.source_note("torn")
+
+    for i in range(5):                                    # push "torn" out of the LRU entirely
+        _seed_run(tmp_path, f"other{i}")
+        cache.state(f"other{i}")
+    assert "torn" not in cache._cache
+
+    assert cache.partial("torn") is not None
+    assert "PARTIAL SOURCE" in cache.source_note("torn"), (
+        "the completeness receipt was evicted with the folded state — a truncated log now reads "
+        "as a complete run")

@@ -54,6 +54,48 @@ def test_first_call_failure_commits_to_lexical():
     assert len(v) == 32 and e._live is False                 # sticky degrade, no repeated attempts
 
 
+def test_an_endpoint_that_dies_after_a_success_trips_the_breaker_instead_of_stalling_forever():
+    """`_live` used to pin only the FIRST call's outcome, so an endpoint that died after one success
+    stayed "live" and every later embed paid the full 30s timeout before falling back — a memory
+    rebuild of hundreds of notes stalled ~30s per note."""
+    e = LLMEmbedder("m", "http://x/v1")
+    attempts = []
+
+    def _dead(texts):
+        attempts.append(len(texts))
+        return None
+
+    e._call = lambda texts: [[0.1] * 8 for _ in texts]
+    e.embed("warm")                                          # one success -> _live is True
+    assert e._live is True
+
+    e._call = _dead
+    for _ in range(12):
+        assert len(e.embed("z")) == 8                        # still answers, padded to the live dim
+    assert len(attempts) <= 5, (
+        f"the dead endpoint was called {len(attempts)} times over 12 embeds — the breaker never "
+        "tripped, so every embed pays the full network timeout")
+    assert e._live is False
+
+
+def test_the_breaker_counts_CONSECUTIVE_failures_not_lifetime_ones():
+    """A single blip must not cost the whole run its semantic retrieval."""
+    e = LLMEmbedder("m", "http://x/v1")
+    live = [[0.1] * 8]
+    calls = []
+
+    def _flaky(texts):
+        calls.append(1)
+        return None if len(calls) % 2 else live * len(texts)   # fail, ok, fail, ok, ...
+
+    e._call = lambda texts: live * len(texts)
+    e.embed("warm")                                           # the FIRST-call rule is separate
+    e._call = _flaky
+    for _ in range(12):
+        e.embed("z")
+    assert e._live is True and len(calls) == 12               # never tripped: no 3 in a row
+
+
 def test_knowledge_tools_build_and_query_share_one_embedder(tmp_path):
     (tmp_path / "cv.md").write_text(
         "Cross validation: use k-fold to estimate generalization error.", encoding="utf-8")

@@ -248,6 +248,47 @@ def test_openrouter_cached_response_is_not_recharged_or_retraced(monkeypatch):
     }
 
 
+def test_deterministic_cache_evicts_least_recently_used_instead_of_growing_forever(monkeypatch):
+    """One client is shared for a whole run, so an unbounded map of deep-copied response bodies is a
+    leak: code-gen bodies are tens of KB and nothing ever dropped them. The bound must be LRU, not
+    "clear when full" — the entries a retry/verify pass is about to re-ask for are the recent ones."""
+    import looplab.core.llm as llm
+
+    @contextmanager
+    def generation(**_kwargs):
+        yield _CostTrace([])
+
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", temperature=0,
+                                   stream=False, cache=True)
+    c._cache_max = 4
+    calls = []
+
+    def request(payload, _use_stream):
+        calls.append(payload["messages"][0]["content"])
+        return {"choices": [{"message": {"role": "assistant", "content": "r"},
+                             "finish_reason": "stop"}], "usage": {"total_tokens": 1}}
+
+    monkeypatch.setattr(c, "_sdk_chat", request)
+    monkeypatch.setattr(llm.tracing, "generation", generation)
+
+    def ask(text):
+        return c.complete_text([{"role": "user", "content": text}])
+
+    for i in range(4):
+        ask(f"q{i}")
+    assert len(c._cache) == 4 and len(calls) == 4
+    ask("q0")                                   # a HIT that also refreshes q0's recency
+    assert len(calls) == 4
+
+    ask("q4")                                   # overflows: q1 (now the oldest) is evicted, not q0
+    assert len(c._cache) == 4, len(c._cache)
+    calls.clear()
+    ask("q0")
+    assert calls == [], "the most recently used entry was evicted — the bound is not LRU"
+    ask("q1")
+    assert calls == ["q1"], "the least recently used entry survived — nothing was evicted"
+
+
 def test_cost_accountant_keeps_decimal_gateway_costs():
     """LiteLLM and similar internal gateways may expose Decimal rather than a raw JSON float."""
     import looplab.core.llm as llm

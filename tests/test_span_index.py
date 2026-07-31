@@ -779,3 +779,34 @@ def test_the_chunked_scan_is_indistinguishable_from_one_that_reads_it_all(tmp_pa
     idx = get_index(tmp_path / "corrupt_middle.jsonl")
     assert [s["span_id"] for s in idx.light_spans()] == ["s0", "s1", "s2"]
     span_index._CACHE.clear()
+
+
+def test_a_span_line_far_larger_than_one_chunk_is_scanned_linearly(tmp_path, monkeypatch):
+    """Multi-MB generation spans are the norm in the files this module targets. Re-joining and
+    re-scanning the growing carry at every chunk boundary made ONE such line cost O(L^2 / chunk) —
+    a cold rebuild of a big trace paying quadratically for the largest span in it."""
+    chunk = 4096
+    big = "x" * (200 * chunk)                       # one line spanning ~200 chunks
+    rows = [json.dumps({"span_id": "s0", "trace_id": "t", "parent_id": None, "kind": "span",
+                        "name": big, "t0": 0.0, "t1": 1.0, "attrs": {"node_id": "0"}}),
+            json.dumps({"span_id": "s1", "trace_id": "t", "parent_id": None, "kind": "span",
+                        "name": "n", "t0": 0.0, "t1": 1.0, "attrs": {"node_id": "0"}})]
+    source = tmp_path / "spans.jsonl"
+    source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    size = source.stat().st_size
+
+    scanned = []
+    real_scan = span_index._scan_light
+    monkeypatch.setattr(span_index, "_scan_light",
+                        lambda window, base: (scanned.append(len(window)), real_scan(window, base))[1])
+    monkeypatch.setattr(span_index, "_SCAN_CHUNK_BYTES", chunk)
+    span_index._CACHE.clear()
+    (tmp_path / "spans.index.jsonl").unlink(missing_ok=True)
+
+    idx = get_index(source)
+    span_index._CACHE.clear()
+
+    assert [s["span_id"] for s in idx.light_spans()] == ["s0", "s1"]      # still fully indexed
+    assert sum(scanned) <= 2 * size, (
+        f"scanned {sum(scanned)} bytes over {len(scanned)} calls for a {size}-byte file — the "
+        "over-chunk line is being re-scanned at every chunk boundary")

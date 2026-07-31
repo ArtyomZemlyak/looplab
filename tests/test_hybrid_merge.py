@@ -160,3 +160,43 @@ def test_merge_system_legacy_brace_kind_override_still_substituted(monkeypatch, 
     agent_merge(object(), ["aa", "ab"], kind="research lessons",
                 prompts=PromptStore(str(tmp_path)))
     assert captured["sys"] == "Adjudicate these research lessons."
+
+
+def test_bm25_counts_term_frequencies_once_per_corpus_not_once_per_query(monkeypatch):
+    """cluster_near_duplicates scores() once per corpus member, so a per-QUERY re-count of every
+    doc's term frequencies makes consolidation quadratic in the corpus for no reason. The counting
+    belongs to construction; queries must only walk the postings of the terms they ask for."""
+    import collections
+
+    corpus = [f"doc {i} shares the common word and has rare{i}" for i in range(40)]
+    docs = [_tokens(c) for c in corpus]
+
+    built = []
+    real_counter = collections.Counter
+    monkeypatch.setattr(hm, "Counter", lambda *a, **kw: (built.append(1), real_counter(*a, **kw))[1])
+
+    index = BM25(docs)
+    built_at_construction = len(built)
+    built.clear()
+    for i in range(len(docs)):
+        index.scores(docs[i])
+    assert built == [], (
+        f"scores() rebuilt {len(built)} Counters over {len(docs)} queries — term frequencies are "
+        "fixed at construction and must not be recomputed per query")
+    assert built_at_construction <= len(docs) + 1     # one pass over the corpus, not one per query
+
+    # And the fast path must be numerically identical to the plain definition it replaces.
+    import math
+    query = _tokens("common rare7")
+    expected = []
+    for d in docs:
+        tf, dl, s = real_counter(d), len(d), 0.0
+        for t in set(query):
+            f = tf.get(t, 0)
+            if not f:
+                continue
+            idf = math.log(1 + (index.N - index.df[t] + 0.5) / (index.df[t] + 0.5))
+            s += idf * (f * (index.k1 + 1)) / (
+                f + index.k1 * (1 - index.b + index.b * dl / index.avgdl))
+        expected.append(s)
+    assert index.scores(query) == expected

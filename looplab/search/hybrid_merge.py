@@ -54,8 +54,17 @@ class BM25:
         self.k1, self.b = k1, b
         self.avgdl = (sum(len(d) for d in docs_tokens) / self.N) if self.N else 0.0
         self.df: Counter = Counter()
-        for d in docs_tokens:
-            for t in set(d):
+        # The corpus is FIXED at construction, so term frequencies and doc lengths are counted once
+        # here rather than per query. `_postings` additionally inverts them (term -> [(doc, tf)]), so
+        # a query touches only the docs that actually contain a query term instead of all N. This
+        # matters because cluster_near_duplicates calls scores() once per corpus member: the old
+        # per-query `Counter(d)` over every doc made consolidation O(n^2 * doc_len) in re-counting
+        # alone. Scores are bit-identical — each doc still accumulates its terms in `q` order.
+        self._dl: list[int] = [len(d) for d in docs_tokens]
+        self._postings: dict[str, list[tuple[int, int]]] = {}
+        for i, d in enumerate(docs_tokens):
+            for t, f in Counter(d).items():
+                self._postings.setdefault(t, []).append((i, f))
                 self.df[t] += 1
 
     def scores(self, query_tokens: list[str]) -> list[float]:
@@ -63,23 +72,15 @@ class BM25:
         if not self.avgdl:
             return out
         q = set(query_tokens)
-        # CLAUDE REVIEW: [PERF] `Counter(d)` is rebuilt for EVERY doc on EVERY query even though the
-        # corpus is fixed at construction. cluster_near_duplicates calls scores() once per corpus
-        # member, so consolidation pays O(n^2 * doc_len) just re-counting term frequencies; hoisting
-        # the per-doc Counter (and doc length) into __init__ makes each query O(n * |q|).
-        for i, d in enumerate(self.docs):
-            if not d:
+        for t in q:
+            postings = self._postings.get(t)
+            if not postings:
                 continue
-            tf = Counter(d)
-            dl = len(d)
-            s = 0.0
-            for t in q:
-                f = tf.get(t, 0)
-                if not f:
-                    continue
-                idf = math.log(1 + (self.N - self.df[t] + 0.5) / (self.df[t] + 0.5))
-                s += idf * (f * (self.k1 + 1)) / (f + self.k1 * (1 - self.b + self.b * dl / self.avgdl))
-            out[i] = s
+            idf = math.log(1 + (self.N - self.df[t] + 0.5) / (self.df[t] + 0.5))
+            for i, f in postings:
+                dl = self._dl[i]
+                out[i] += idf * (f * (self.k1 + 1)) / (
+                    f + self.k1 * (1 - self.b + self.b * dl / self.avgdl))
         return out
 
 

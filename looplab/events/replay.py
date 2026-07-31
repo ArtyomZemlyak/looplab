@@ -310,14 +310,17 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         and all(ch in "0123456789abcdef" for ch in _calibration_profile[7:])
         else ""
     )
-    # CLAUDE REVIEW: [PERF] Row COUNT is capped at 256 but each row dict is copied with unbounded
-    # size — unlike every other fold boundary in this file (the card/concept handlers bound both
-    # count and per-item size). A hand-edited/foreign run_started can park megabytes in RunState,
-    # which FoldCursor then deep-copies on EVERY snapshot — the exact amplification the card
-    # handlers' bounding comments warn about.
+    # Bound the row CONTENTS, not just the row count: `dict(row)` copied each row whole, so a
+    # hand-edited/foreign run_started could park megabytes in RunState — which FoldCursor then
+    # deep-copies on EVERY snapshot. That is the amplification the card handlers' bounding comments
+    # warn about, and this was the one fold boundary here without it. The bound is deliberately far
+    # above the real schema (`speculation_quality._GPU_IDENTITY_FIELDS` is 7 fields of short
+    # scalars, and that consumer REJECTS anything else), so no legitimate log changes shape;
+    # oversized keys/values are dropped rather than truncated, because a silently shortened uuid or
+    # pci_bus_id would be a different GPU, and the consumer must see the row fail its schema.
     _calibration_inventory = d.get("speculation_calibration_gpu_inventory", [])
     st.speculation_calibration_gpu_inventory = (
-        [dict(row) for row in _calibration_inventory]
+        [_bounded_gpu_inventory_row(row) for row in _calibration_inventory]
         if isinstance(_calibration_inventory, list)
         and len(_calibration_inventory) <= 256
         and all(isinstance(row, dict) for row in _calibration_inventory)
@@ -2376,6 +2379,27 @@ def _card_replay_text(
 def _card_replay_node_id(value) -> int | None:
     node_id = _coerce_node_id({"node_id": value})
     return node_id if node_id is not None and 0 <= node_id <= _CARD_REPLAY_NODE_ID_MAX else None
+
+
+_GPU_INVENTORY_ROW_KEYS_MAX = 32          # the real schema has 7; this only stops a fat foreign row
+_GPU_INVENTORY_SCALAR_CHARS_MAX = 256     # uuid / pci_bus_id / name / driver strings are far shorter
+
+
+def _bounded_gpu_inventory_row(row: dict) -> dict:
+    """Copy one GPU-inventory row with both its key count and its scalar sizes bounded."""
+    out: dict = {}
+    for key in sorted(row):
+        if len(out) >= _GPU_INVENTORY_ROW_KEYS_MAX:
+            break
+        if not isinstance(key, str) or len(key) > _GPU_INVENTORY_SCALAR_CHARS_MAX:
+            continue
+        value = row[key]
+        if isinstance(value, str) and len(value) > _GPU_INVENTORY_SCALAR_CHARS_MAX:
+            continue                      # dropped, not truncated — a shortened uuid is another GPU
+        if not isinstance(value, (str, int, float, bool)) and value is not None:
+            continue                      # nested containers are unbounded by construction
+        out[key] = value
+    return out
 
 
 def _bounded_card_action_map(value) -> dict[str, float]:

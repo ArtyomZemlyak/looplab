@@ -1,6 +1,9 @@
 """I9 leakage, I16 profiler, I17 vector store + retrieval, I19 cross-run memory."""
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 from looplab.engine.memory import CaseLibrary
 from looplab.core.profile import profile_column, profile_dataset
@@ -86,6 +89,29 @@ def test_grep_and_glob(tmp_path):
     hits = grep(r"def \w+", str(tmp_path), glob="*.py")
     assert len(hits) == 1 and hits[0].lineno == 1
     assert any(p.endswith("a.py") for p in glob_files("*.py", str(tmp_path)))
+
+
+def test_grep_and_glob_prune_the_noise_dirs_instead_of_walking_them(tmp_path, monkeypatch):
+    """RepoTools.repo_grep points these at whole task repos. Descending into .git/node_modules/.venv
+    is both the slow part of the walk and how VCS internals leak into an agent-facing result."""
+    (tmp_path / "keep.py").write_text("def train():\n    pass\n", encoding="utf-8")
+    for noise in (".git", "node_modules", ".venv", "__pycache__", "checkpoints"):
+        (tmp_path / noise).mkdir()
+        (tmp_path / noise / "buried.py").write_text("def train():\n    pass\n", encoding="utf-8")
+    (tmp_path / "src" / "pkg").mkdir(parents=True)          # a REAL nested dir still gets walked
+    (tmp_path / "src" / "pkg" / "deep.py").write_text("def train():\n    pass\n", encoding="utf-8")
+
+    visited = []
+    real_walk = os.walk
+    monkeypatch.setattr(os, "walk", lambda *a, **kw: (visited.append(a[0]), real_walk(*a, **kw))[1])
+
+    found = {Path(h.path).name for h in grep(r"def train", str(tmp_path), glob="*.py")}
+    globbed = {Path(p).parent.name for p in glob_files("*.py", str(tmp_path))}
+
+    assert found == {"keep.py", "deep.py"}, found
+    assert globbed == {tmp_path.name, "pkg"}, globbed
+    assert not [d for d in visited if Path(d).name in
+                {".git", "node_modules", ".venv", "__pycache__", "checkpoints"}], visited
 
 
 # --------------------------- I19 cross-run memory -------------------------- #

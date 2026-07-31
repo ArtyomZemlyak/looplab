@@ -2983,3 +2983,26 @@ def test_fork_and_inject_requests_are_copies_so_a_consumer_cannot_rewrite_the_lo
     again = fold(store.read_all())          # same cached Events, re-folded
     assert again.fork_requests[0].get("note") == "try a wider sweep"
     assert again.inject_requests[0].get("rationale") == "operator idea"
+
+
+def test_a_fat_gpu_inventory_row_is_bounded_not_parked_whole_in_run_state(tmp_path):
+    """Row COUNT was capped but row CONTENTS were copied whole, so a hand-edited or foreign
+    run_started could park megabytes in RunState — which FoldCursor then deep-copies on EVERY
+    snapshot. Every other fold boundary here bounds both count and per-item size."""
+    store = EventStore(tmp_path / "events.jsonl")
+    real = {"index": 0, "uuid": "GPU-0", "pci_bus_id": "0000:00:04.0", "name": "L4",
+            "mem_total_mib": 23034, "driver_version": "550.90.07", "cuda_driver_version": "12.4"}
+    fat = dict(real)
+    fat["uuid"] = "G" * 2_000_000                       # one oversized scalar
+    fat["blob"] = {"nested": ["x"] * 100_000}           # and one unbounded container
+    fat.update({f"pad{i}": "v" for i in range(500)})    # and a flood of keys
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min",
+                                 "speculation_calibration_gpu_inventory": [real, fat]})
+
+    rows = fold(store.read_all()).speculation_calibration_gpu_inventory
+    assert len(rows) == 2
+    assert rows[0] == real, "a legitimate row must survive the bound unchanged"
+    assert len(rows[1]) <= 32, len(rows[1])
+    assert "uuid" not in rows[1], "an oversized uuid must be DROPPED, not truncated to another GPU"
+    assert "blob" not in rows[1]
+    assert max(len(str(v)) for v in rows[1].values()) <= 256

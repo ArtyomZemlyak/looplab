@@ -19,6 +19,7 @@ import json
 import math
 import os
 import sys
+from collections import OrderedDict
 from contextlib import contextmanager
 import threading
 import time
@@ -274,10 +275,17 @@ class OpenAICompatibleClient:
         self.guided_json = guided_json
         # T7: in-process content-addressed response cache for DETERMINISTIC (temperature 0) calls
         # only. None = disabled (default). Never caches sampling calls (temp>0) — those must vary.
-        # CLAUDE REVIEW: [PERF] the cache is unbounded: every distinct deterministic request stores a
-        # deep-copied response body for the client's lifetime (clients are shared/reused across a
-        # run), so a long run of temp-0 calls grows memory without limit — no LRU/size cap.
-        self._cache: Optional[dict] = {} if cache else None
+        # LRU-BOUNDED: a client is shared across a whole run (researcher+developer+monitors), so an
+        # unbounded map of deep-copied response bodies grew for the process's lifetime — code-gen
+        # bodies are tens of KB each, and nothing ever evicted them. The cache exists to catch the
+        # NEAR-TERM repeats (a retry, a panel re-ask, a verify pass re-issuing the same prompt);
+        # those all land well inside a few hundred entries, so a recency bound costs no realistic
+        # hit rate. `_cache_lock` guards the read-modify-write (hit -> move_to_end, put -> evict):
+        # worker threads share one client, and OrderedDict's individual ops being atomic does not
+        # make that pair atomic.
+        self._cache: Optional["OrderedDict[str, dict]"] = OrderedDict() if cache else None
+        self._cache_max = 256
+        self._cache_lock = threading.Lock()
         # Transport: the openai SDK over an httpx client. `connect` bounds TCP/TLS establishment
         # (=header_timeout); `read` = the inter-read idle limit (a long-but-alive generation keeps
         # resetting it, so it's never cut off). httpx's `read` timeout can't catch an SSE
@@ -638,8 +646,14 @@ class OpenAICompatibleClient:
         # are never cached (see _cache_key). Replay itself never calls the model (Ideas are recorded
         # in events), so this is a within-run/live cost saver, not a correctness dependency.
         ck = self._cache_key(payload)
-        if ck is not None and ck in self._cache:
-            cached = copy.deepcopy(self._cache[ck])
+        entry = None
+        if ck is not None:
+            with self._cache_lock:
+                entry = self._cache.get(ck)
+                if entry is not None:
+                    self._cache.move_to_end(ck)       # recency: this key survives the next eviction
+        if entry is not None:
+            cached = copy.deepcopy(entry)
             # A cache hit performs no provider work. Zero every billed usage counter in this call's
             # copy: otherwise trace aggregation would duplicate both tokens and paid cost even though
             # CostAccountant correctly skips cache hits. The original cached body remains untouched.
@@ -818,7 +832,12 @@ class OpenAICompatibleClient:
             # Ollama/vLLM emit {"error": ...} envelopes on a bad request — don't index [0] blind.
             raise LLMError(f"LLM response had no choices: {str(body)[:200]}")
         if ck is not None:                       # T7: cache a COPY (the returned body is mutated
-            self._cache[ck] = copy.deepcopy(body)  # in place by callers — keep the cached entry clean)
+            copied = copy.deepcopy(body)         # in place by callers — keep the cached entry clean)
+            with self._cache_lock:
+                self._cache[ck] = copied
+                self._cache.move_to_end(ck)
+                while len(self._cache) > self._cache_max:
+                    self._cache.popitem(last=False)   # drop the least recently used
         return body
 
     def _model_params(self) -> dict:

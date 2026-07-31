@@ -8,6 +8,7 @@ Every reader soft-fails (returns None / []) — a junk run_id or a torn log must
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -19,11 +20,22 @@ class RunStateCache:
 
     def __init__(self, run_root):
         self.run_root = Path(run_root)
-        # CLAUDE REVIEW: [PERF] Unbounded, never-evicted cache of FULL RunStates (every node's code,
-        # logs, trials). A long-lived assistant/server process whose MachineRunsTools lists many runs
-        # (list_runs folds every run under the root) accumulates all of them in memory for the
-        # process lifetime; a stale-run eviction or LRU bound would cap this.
-        self._cache: dict[str, tuple] = {}     # run_id -> (sig, RunState, divergence|None)
+        # LRU-BOUNDED. A folded `RunState` holds every node's code, logs and trials, and
+        # `AllRunsTools.list_runs` folds EVERY run under the root — so an unbounded map pinned all
+        # of them in a long-lived assistant/server process for its whole lifetime. The bound is on
+        # entry COUNT because the expensive thing here is the number of retained run states; a miss
+        # only costs the re-fold this cache was already willing to pay on a signature change.
+        self._cache: "OrderedDict[str, tuple]" = OrderedDict()  # run_id -> (sig, RunState)
+        # Small on purpose: cross-run tools reason over a handful of runs per turn (a sibling, the
+        # best few), while `list_runs` sweeps every run once and must not evict what the turn is
+        # actually working with — 32 covers the working set without pinning a whole run-root.
+        self._cache_max = 32
+        # Divergence receipts live OUTSIDE the LRU, deliberately. `_list_runs` folds every run under
+        # the root and only then asks each one whether its log was complete, so an evicted receipt
+        # would silently drop the PARTIAL SOURCE marker and let a truncated log read as a whole run —
+        # the exact claim `source_note` exists to prevent. A receipt is a handful of counters, so
+        # keeping one per run seen costs nothing next to the RunStates the bound is actually for.
+        self._partial: dict[str, dict] = {}
 
     def safe_dir(self, run_id: Optional[str]) -> Optional[Path]:
         """Resolve <run_root>/<run_id>, with the same path-traversal guard as server._run_dir: the
@@ -59,6 +71,7 @@ class RunStateCache:
         sig = self.sig(rd)
         hit = self._cache.get(str(run_id))
         if hit and hit[0] == sig:
+            self._cache.move_to_end(str(run_id))     # recency: survive the next eviction
             return hit[1]
         from looplab.events.eventstore import iter_event_jsonl, log_divergence
         from looplab.core.models import Event
@@ -77,7 +90,11 @@ class RunStateCache:
             divergence = log_divergence(rd / "events.jsonl")
         except (OSError, ValueError, TypeError):
             divergence = {"unreadable": True}
-        self._cache[str(run_id)] = (sig, st, divergence)
+        self._partial[str(run_id)] = divergence
+        self._cache[str(run_id)] = (sig, st)
+        self._cache.move_to_end(str(run_id))
+        while len(self._cache) > self._cache_max:
+            self._cache.popitem(last=False)          # drop the least recently used run state
         return st
 
     def partial(self, run_id: Optional[str]) -> Optional[dict]:
@@ -85,9 +102,10 @@ class RunStateCache:
 
         `state()` must be called first (it is, at every consumer: this answers "was what I just read
         the whole run?"). None also covers a run that was never read, which is honest — nothing was
-        claimed about it either."""
-        hit = self._cache.get(str(run_id))
-        return hit[2] if hit and len(hit) > 2 and hit[2] else None
+        claimed about it either. Survives eviction of the run's folded state: the receipt describes
+        the READ that happened, and forgetting it would turn a partial read into a silent whole."""
+        d = self._partial.get(str(run_id))
+        return d if d else None
 
     def source_note(self, run_id: Optional[str]) -> str:
         """A bounded line for tool output when the source log is incomplete, else "".

@@ -82,7 +82,7 @@ def _scan_light_stream(stream, base: int, size: int, *,
     """
     records: list[tuple[dict, int, int]] = []
     consumed = base
-    carry = b""
+    pending: list[bytes] = []        # the partial line carried across chunk boundaries, unjoined
     remaining = max(0, int(size))
     while remaining:
         chunk = stream.read(min(_SCAN_CHUNK_BYTES, remaining))
@@ -90,21 +90,27 @@ def _scan_light_stream(stream, base: int, size: int, *,
             got = size - remaining
             raise OSError(f"short read of {label}: expected {size} bytes, got {got}")
         remaining -= len(chunk)
+        # A chunk with no newline cannot complete a line, so BUFFER it and read on. Joining and
+        # re-scanning at every chunk boundary is what made a single over-chunk span line quadratic:
+        # each iteration copied the growing carry AND re-scanned it from offset 0 for a newline it
+        # had already failed to find — ~O(L^2 / chunk) for an L-byte line, and multi-MB generation
+        # spans are the norm in exactly the files this module targets. Deferring costs one join and
+        # one scan per LINE instead of per chunk, which is linear.
+        if b"\n" not in chunk:
+            pending.append(chunk)
+            continue
         # Concatenate only when a partial line is actually pending: the common case is a chunk that
-        # ends on a newline, and `carry + chunk` would otherwise copy every byte of the file twice.
-        # CLAUDE REVIEW: [PERF] A single span line larger than _SCAN_CHUNK_BYTES makes this loop
-        # quadratic in that line's length: every iteration copies the growing carry (`carry + chunk`)
-        # AND _scan_light re-scans the whole window from offset 0 for a newline it already failed to
-        # find — ~O(L^2 / chunk) byte copies + scans for an L-byte line. Multi-MB generation spans
-        # are the norm in exactly the files this module targets; remembering the no-newline scan
-        # position (or accumulating chunks in a list until a newline appears) keeps it linear.
-        window = chunk if not carry else carry + chunk
+        # ends on a newline, and joining would otherwise copy every byte of the file twice.
+        window = chunk if not pending else b"".join((*pending, chunk))
+        pending = []
         found, end = _scan_light(window, consumed)
         records.extend(found)
         carry = window[end - consumed:]
         consumed = end
         if b"\n" in carry:
             break                    # corrupt line, not a chunk boundary — stop like iter_jsonl does
+        if carry:
+            pending.append(carry)
     return records, consumed
 
 
