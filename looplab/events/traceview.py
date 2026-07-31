@@ -599,14 +599,6 @@ def _cap_str(v, n: int = _IO_CAP):
     return redact_persisted_text(v, max_chars=max(0, int(n)), entropy=True)
 
 
-# CLAUDE REVIEW: [DEAD-CODE] _cap_msgs has no callers anywhere in the repo (serve/routers/runs.py
-# imports only _cap_str; message capping goes through _project_messages/_normalize_span directly).
-def _cap_msgs(msgs: list) -> list:
-    if not isinstance(msgs, list):
-        return msgs
-    return _project_messages(msgs, _ProjectionBudget())
-
-
 def _cap_span_io(s: dict) -> dict:
     """Return one already-normalized span with bounded/redacted I/O and updated omission truth."""
     a = s.get("attributes")

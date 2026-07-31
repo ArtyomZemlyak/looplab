@@ -1108,44 +1108,6 @@ class RunControlTools:
                 rd, etype, data, idempotency_key=key, expected_generation=generation)
         return _render_command_result(record, name=name, run_id=rid, completed=verb)
 
-    # CLAUDE REVIEW: [DEAD-CODE] `_resume_run` is unreachable: `execute` routes "resume_run" through
-    # `_control` (which submits EV_RESUME via the command service), and nothing else in the repo
-    # calls this method. Its lifecycle-lock/spawn logic now duplicates the command service's resume
-    # path and will silently rot; delete it or wire it back in deliberately.
-    def _resume_run(self, rid: str, rd: Path) -> str:
-        """Durably hand resume to the singleton owner/claim funnel; never reopen before lock ownership."""
-        from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
-        from looplab.events.types import EV_RESUME_REQUESTED
-        from looplab.serve.engine_proc import (
-            _claim_and_spawn_resume, _engine_alive, _resolve_task_file, _run_lifecycle_lock)
-
-        with _run_lifecycle_lock(rd):
-            task_file = _resolve_task_file(rd)
-            if task_file is None:
-                return (f"(run {rid} is not self-describing; no task.snapshot.json/ui_meta task file — "
-                        "resume it from the UI with its task definition)")
-            store = EventStore(rd / "events.jsonl")
-            for _attempt in range(8):
-                events = store.read_all()
-                tail = events[-1].seq if events else -1
-                try:
-                    store.append(
-                        EV_RESUME_REQUESTED, {"mode": "resume"},
-                        expected_last_seq=tail)
-                    break
-                except EventStoreConcurrencyError:
-                    continue
-            else:
-                return f"(run {rid} changed repeatedly — retry resume)"
-
-        cli_args = ["resume", str(rd), "--task-file", str(task_file)]
-        was_alive = _engine_alive(rd)
-        spawned = _claim_and_spawn_resume(rd, cli_args, wait_on_alive=True)
-        if was_alive and not spawned:
-            return f"(resume recorded for {rid} — current owner will serve it or hand off after exit)"
-        return (f"(resume recorded for {rid} — "
-                f"{'engine launched' if spawned else 'durable launch pending'})")
-
     def _settings(self, name: str, rid: str, rd: Path, args: dict) -> str:
         """Change an allow-listed LIVE run setting by appending the matching control/config event the UI
         writes (budget extension, a standing directive, or the trust gate). Gated exactly like the other

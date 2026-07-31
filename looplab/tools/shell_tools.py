@@ -38,11 +38,8 @@ _MAX_TIMEOUT = 600.0
 # gets ~the whole cap for its traceback, not half — the fixed 50/50 split truncated exactly the
 # frames the repair needed). Headroom (-400) covers the exit-code head + section labels + notes.
 _STDOUT_TAIL = RESULT_CAP // 2 - 200
-# CLAUDE REVIEW: [DEAD-CODE] `_STDERR_TAIL` is never read — `_stream_tails` derives stderr's
-# guaranteed minimum as `avail - _STDOUT_TAIL` (= RESULT_CAP//2 - 200), not this constant, and no
-# other module imports it. Either use it in `_stream_tails` or remove it so the two documented
-# minimums can't silently drift apart.
-_STDERR_TAIL = RESULT_CAP // 2 - 100
+# stderr's own guaranteed minimum is DERIVED in `_stream_tails` as `avail - _STDOUT_TAIL`,
+# deliberately not a second constant that could drift away from it.
 
 
 def _stream_tails(out: str, err: str) -> tuple[int, int]:

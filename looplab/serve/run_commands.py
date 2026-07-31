@@ -3346,15 +3346,6 @@ class RunCommandService:
             return None
         return event
 
-    # CLAUDE REVIEW: [DEAD-CODE] _domain_progress has no callers anywhere in the codebase (only
-    # CommandObservation.has_domain_progress is exercised, and only by tests). Either wire it into
-    # the monitor loop it was written for or remove it before it drifts from the observation API.
-    def _domain_progress(
-            self, rd: Path, after_seq: int,
-            observation: Optional[CommandObservation] = None) -> bool:
-        observation = observation or self._observe(rd)
-        return observation.has_domain_progress(after_seq)
-
     @staticmethod
     def _observe_after(record: dict) -> int:
         return int(record.get(
@@ -3470,16 +3461,6 @@ class RunCommandService:
             event_seq = record.get("event_seq")
             return observation.has_ack(command_id, event_seq)
         return False
-
-    # CLAUDE REVIEW: [DEAD-CODE] _driver_or_progress is never called (grep: no call sites in
-    # looplab/ or tests/). Dead recovery logic on this safety-critical class invites misuse or
-    # bit-rot; remove it or add the caller it was intended for.
-    def _driver_or_progress(
-            self, rd: Path, record: dict,
-            observation: Optional[CommandObservation] = None) -> bool:
-        if record.get("spawned_by_command") and self._engine_state(rd) is True:
-            return True
-        return self._postcondition(rd, record, observation)
 
     def _execute(self, rd: Path, path: Path, initial: dict, *, claimed: bool) -> None:
         record = self._load(path) or dict(initial)
