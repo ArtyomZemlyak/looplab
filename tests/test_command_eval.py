@@ -642,3 +642,44 @@ def test_no_stage_actually_running_still_returns_a_result(tmp_path):
     ran = run_command_eval(argv, str(tmp_path), 5.0, metric,
                            stages=[{"name": "a", "command": argv}])
     assert [s["status"] for s in (ran.stages or [])] == ["ok"]
+
+
+def test_start_stage_reuses_earlier_stages_instead_of_paying_for_them_again(tmp_path):
+    """Stage-scoped re-run: `start_stage` resumes the pipeline FROM that stage and REUSES the earlier
+    stages' on-disk artifacts (the checkpoint `train` wrote is still there), so a crashed `eval` is
+    fixed without paying to re-`train`.
+
+    Only stubs exercised this before — `test_inline_repair` fakes the eval to capture the kwarg — so
+    nothing checked the real behaviour. A regression that re-runs an already-paid stage costs a full
+    training run, and one that resumes from the WRONG stage clobbers the artifacts the repair meant
+    to reuse. Both are silent: the eval still returns a metric either way.
+    """
+    # `train` APPENDS a line every time it runs, so a re-run is visible in the artifact itself.
+    (tmp_path / "train.py").write_text(
+        "open('ckpt.txt', 'a').write('trained\\n')\nprint('trained')\n", encoding="utf-8")
+    (tmp_path / "evaluate.py").write_text(
+        "import json\n"
+        "runs = len(open('ckpt.txt').read().strip().splitlines())\n"
+        "print(json.dumps({'metric': runs}))\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "train.py"]},
+              {"name": "eval", "command": [sys.executable, "evaluate.py"]}]
+
+    first = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M, stages=stages)
+    assert first.metric == 1.0                       # trained once
+    assert [s["status"] for s in first.stages] == ["ok", "ok"]
+
+    # Re-run FROM eval: train must not execute again, so the checkpoint still has one line.
+    reused = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M,
+                              stages=stages, start_stage="eval")
+    assert reused.metric == 1.0, "train re-ran and was paid for twice"
+    assert (tmp_path / "ckpt.txt").read_text().count("trained") == 1
+    assert [s["name"] for s in reused.stages] == ["train", "eval"]
+    assert reused.stages[0]["status"] == "reused"    # shown in the trace as zero-work, not skipped
+    assert reused.stages[1]["status"] == "ok"
+
+    # An UNKNOWN stage name falls back to a FULL re-run rather than silently reusing everything —
+    # the fail-safe direction, since reusing on a typo would score a stale artifact.
+    full = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M,
+                            stages=stages, start_stage="no-such-stage")
+    assert full.metric == 2.0, "an unknown start_stage skipped work instead of re-running"
+    assert [s["status"] for s in full.stages] == ["ok", "ok"]

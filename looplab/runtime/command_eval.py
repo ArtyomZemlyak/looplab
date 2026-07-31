@@ -831,11 +831,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         # Stage-scoped re-run (Phase 2): `start_stage` re-runs the pipeline FROM that stage, reusing the
         # earlier stages' on-disk artifacts (the checkpoint `train` wrote survives in the workdir). So a
         # crashed `eval` is fixed without paying to re-`train`. Stages before it are marked "reused".
-        # CLAUDE REVIEW: [TEST-GAP] No test calls run_command_eval with start_stage — the reuse path
-        # below (_run_from skip, zero-work "reused" markers, unknown-name fallback to a FULL re-run)
-        # is exercised only through stubs (test_inline_repair fakes the eval to capture the kwarg);
-        # a regression could silently re-run an expensive already-paid stage or resume from the wrong
-        # stage and clobber the artifacts a repair meant to reuse.
+        # An UNKNOWN name leaves `_run_from` at 0 — a FULL re-run, the fail-safe direction, since
+        # reusing on a typo would score a stale artifact. Pinned end-to-end (reuse, the zero-work
+        # markers, and that fallback) by tests/test_command_eval.py::
+        # test_start_stage_reuses_earlier_stages_instead_of_paying_for_them_again.
         _run_from = 0
         if start_stage:
             for _i, _s in enumerate(stages):
