@@ -3933,14 +3933,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return data == expected
 
     @staticmethod
-    def _card_score_snapshot(state: RunState, requested: Optional[int]):
+    def _card_score_snapshot(
+            state: RunState,
+            requested: Optional[int]) -> Optional[tuple[Optional[int], Optional[int], bool]]:
+        """Identity of the node a card is scored against: `(id, attempt, empty)`, or None to REFUSE.
+
+        The two falsy-looking outcomes are different answers and both are load-bearing. A bare
+        ``None`` means the request is not scorable (out-of-range id, or a tombstoned/aborted node) —
+        callers must abandon the reservation. The ``(None, None, True)`` triple means there is
+        legitimately nothing to score against yet (no best node); that is a valid snapshot and it
+        compares equal across two folds, which is what the pre-launch freshness fence needs.
+        Every caller therefore checks ``is None`` BEFORE unpacking.
+        """
         score_id = state.best_node_id if requested is None else requested
         if score_id is None:
             return None, None, True
-        # CLAUDE REVIEW: [READABILITY] Mixed return arity: the valid-but-empty case above returns
-        # the 3-tuple (None, None, True) while an INVALID id returns bare None below — a caller that
-        # unpacks without the exact `is None` check gets a TypeError, and the two falsy-looking
-        # shapes are easy to conflate in review. A single Optional[NamedTuple] would be safer.
         if type(score_id) is not int or not 0 <= score_id <= (1 << 31) - 1:
             return None
         node = state.nodes.get(score_id)

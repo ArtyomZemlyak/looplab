@@ -670,10 +670,8 @@ class OpenAICompatibleClient:
             # to a single blocking read for the attempt right after a stream stall, and permanently
             # once this client has stalled STREAM_STALL_DEGRADE_AFTER times — a flaky proxied endpoint
             # often answers the SAME request fine without SSE while its stream wedges mid-generation.
-            # CLAUDE REVIEW: [READABILITY] the `"stream": False` field that complete_text/chat/
-            # complete_tool put in `payload` is IGNORED — streaming is decided solely by self.stream
-            # + the stall-degrade state here. The dead payload field misleads readers into thinking
-            # those calls are non-streaming; drop it or honor it.
+            # Streaming is decided HERE, per attempt — never by the caller's payload (`_sdk_chat`
+            # reads no `stream` key from it), so every call site gets the same degrade behaviour.
             use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
                           and not _stalled_prev)
             try:
@@ -833,7 +831,7 @@ class OpenAICompatibleClient:
         with tracing.generation(op="complete_text", model=self.model, messages=messages,
                                 model_parameters=self._model_params()) as gen:
             body = self._post({"model": self.model, "messages": messages,
-                               "temperature": self.temperature, "stream": False})
+                               "temperature": self.temperature})
             msg = body["choices"][0]["message"]
             _apply_native_tool_calls(msg)   # strip a leaked native tool-call block from the text
             out = msg.get("content") or ""
@@ -972,7 +970,7 @@ class OpenAICompatibleClient:
                                 model_parameters=self._model_params()) as gen:
             body = self._post({
                 "model": self.model, "messages": messages, "tools": tools,
-                "tool_choice": tool_choice, "temperature": self.temperature, "stream": False,
+                "tool_choice": tool_choice, "temperature": self.temperature,
             })
             msg = body["choices"][0]["message"]
             _apply_native_tool_calls(msg)   # recover a leaked native tool-call block (glm/DeepSeek)
@@ -995,7 +993,7 @@ class OpenAICompatibleClient:
         payload = {
             "model": self.model, "messages": messages, "tools": [tool],
             "tool_choice": {"type": "function", "function": {"name": "emit"}},
-            "temperature": self.temperature, "stream": False,
+            "temperature": self.temperature,
         }
         if self.guided_json:   # H1 constrained decoding (vLLM/SGLang); Ollama ignores when off
             payload["response_format"] = {"type": "json_schema",
@@ -1203,9 +1201,9 @@ class LiteLLMClient:
                     time.sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"litellm completion for {self.model} failed: {e}") from e
-        # CLAUDE REVIEW: [DEAD-CODE] unreachable: every loop iteration either returns or raises (on
-        # the final attempt `transient and attempt < 3` is False, so the except re-raises), so the
-        # loop can never fall through to this line.
+        # Not reachable today — every iteration returns or raises, since `attempt < 3` is False on
+        # the last of `range(4)`. It stays as the fallthrough guard: if those two bounds ever drift
+        # apart, this raises instead of silently returning None into `_completion`'s callers.
         raise LLMError(f"litellm completion for {self.model} failed: {last}")
 
     def _account(self, resp) -> None:

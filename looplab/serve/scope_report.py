@@ -605,22 +605,6 @@ def build_digest(scope_label: str, briefs: list) -> str:
     return digest
 
 
-# CLAUDE REVIEW: [DEAD-CODE] Under schema v1 `_comparison_projection` initializes winner=None and
-# never assigns it (and `_sanitize_content` forces winner back to None), so the `groups[0]["winner"]
-# is None` guard below is ALWAYS true: this function unconditionally returns [] and the by_id
-# reconstruction on the last two lines is unreachable. No production caller exists; the tests pin
-# only the empty result. Either delete it or leave an explicit "reserved for a future outcome-policy
-# schema" marker on the unreachable tail.
-def _ranked(briefs: list) -> list:
-    """Rank only one exact explicit cohort; never manufacture a portfolio-wide total order."""
-    projected, _coverage = _project_briefs(briefs)
-    groups, _observations = _comparison_projection(projected)
-    if len(groups) != 1 or groups[0]["winner"] is None:
-        return []
-    by_id = {brief["run_id"]: brief for brief in projected}
-    return [by_id[row["run_id"]] for row in groups[0]["measurements"]]
-
-
 def _deterministic(scope_label: str, briefs: list, coverage: dict | None = None) -> dict:
     """Offline / no-model fallback: an honest metrics-only rollup so the panel still shows something."""
     n_rep = sum(1 for b in briefs if isinstance(b.get("report"), dict) and b["report"])
@@ -719,25 +703,23 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
         source_coverage["source_runs"], declared_source_runs)
     source_coverage["unavailable_runs"] = max(
         0, source_coverage["source_runs"] - len(projected_briefs))
-    # CLAUDE REVIEW: [READABILITY] This rebinds the `briefs` PARAMETER to the prompt-included
-    # subset; every later use of `briefs` (the empty-projection return below, _deterministic,
-    # _CrossRunTools, _sanitize_content) silently means "included briefs", not the caller's
-    # argument. Rename to `included_briefs` — a future edit that means the original list will
-    # get the wrong one without any error.
-    digest, briefs, coverage = _build_digest_projection(
+    # Named apart from the `briefs` PARAMETER on purpose: this is the prompt-INCLUDED subset (the
+    # rest were dropped by the digest cap), and everything downstream — the tools the model can
+    # drill, the deterministic rollup, the sanitizer — must see exactly what the prompt saw.
+    digest, included_briefs, coverage = _build_digest_projection(
         label, projected_briefs, source_coverage)
     if not projected_briefs:
         return _sanitize_content(
             _AggReport(headline=f"No runs in {label}",
                        verdict="nothing to summarize yet").model_dump(),
-            briefs, coverage,
+            included_briefs, coverage,
         )
-    if not briefs:
+    if not included_briefs:
         # never spend provider budget when the exact evidence receipt proves that no run
         # survived the prompt cap; the deterministic response still exposes the incomplete coverage.
-        return _deterministic(label, briefs, coverage)
+        return _deterministic(label, included_briefs, coverage)
     if client is None:
-        return _deterministic(label, briefs, coverage)
+        return _deterministic(label, included_briefs, coverage)
     try:
         from looplab.agents.agent import drive_tool_loop
         emit_spec = {"type": "function", "function": {
@@ -778,7 +760,7 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                                      MAX_SCOPE_REPORT_TIME_S))
         except (TypeError, ValueError):
             safe_time = DEFAULT_SCOPE_REPORT_TIME_S
-        result = drive_tool_loop(client, _CrossRunTools(briefs, drill), messages, emit_spec,
+        result = drive_tool_loop(client, _CrossRunTools(included_briefs, drill), messages, emit_spec,
                                  max_turns=safe_turns, time_budget_s=safe_time,
                                  context_budget_chars=MAX_SCOPE_REPORT_PROMPT_CHARS,
                                  finalize=_fin, fallback=_force)
@@ -789,7 +771,7 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                 # every model path stays raw until this single persisted-content boundary.
                 # Copies/wrappers can no longer turn object identity into a second sanitize pass that
                 # duplicates structural caveats and crowds model caveats out of the bounded receipt.
-                return _sanitize_content(cand, briefs, coverage)
-        return _deterministic(label, briefs, coverage)
+                return _sanitize_content(cand, included_briefs, coverage)
+        return _deterministic(label, included_briefs, coverage)
     except Exception:  # noqa: BLE001 - any model/loop failure -> deterministic, still useful
-        return _deterministic(label, briefs, coverage)
+        return _deterministic(label, included_briefs, coverage)

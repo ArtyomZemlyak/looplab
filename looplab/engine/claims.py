@@ -1922,14 +1922,12 @@ def _structured_assessments(lessons, research_claims, decisions, *,
     raw_contra: dict[str, dict[int, list]] = {}
     contra: dict[str, dict[int, list]] = {}
     for item in prepared:
+        # Bound once per item: both maps key off the SAME group, and leaking `g` out of the first
+        # branch would silently carry the previous item's group the moment either condition is
+        # relaxed independently of the other.
+        g = item["group"]
         if item["support"]:
-            g = item["group"]
             raw_contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(item)
-        # CLAUDE REVIEW: [READABILITY] `g` is only bound inside the FIRST `if` above; this second `if`
-        # silently reuses it. It is correct today only because both conditions require item["support"],
-        # so the first branch always ran for the same item — but reordering/editing either condition
-        # (e.g. relaxing the support requirement on the live map) turns this into a stale-`g` bug or a
-        # NameError on the first item. Bind `g = item["group"]` once at the top of the loop.
         if item["maturity"] != "operator-rejected" and item["support"]:
             contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(item)
 

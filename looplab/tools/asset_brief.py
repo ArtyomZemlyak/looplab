@@ -537,10 +537,10 @@ _ASSET_SYSTEM = (
 )
 
 
-# CLAUDE REVIEW: [DEAD-CODE] The `parser` parameter is accepted (and threaded through by
-# `asset_brief` below) but never used in this function's body — `agentic_text` is called without it.
-# Either pass it through or drop it from both signatures so callers don't believe it has effect.
-def agentic_asset_brief(repo_root, *, client=None, parser: str = "tool_call",
+# No `parser` knob here on purpose: this brief is FREE TEXT via `agentic_text`, and `parser` only
+# selects a structured-output strategy (`agentic_struct`). Accepting one would imply an effect it
+# cannot have.
+def agentic_asset_brief(repo_root, *, client=None,
                         loop_opts: Optional[dict] = None, task_type: Optional[str] = None,
                         seed_scan: bool = True) -> str:
     """The PRIMARY D1 brief: an LLM agent explores the task repo with read-only tools (RepoScoutTools)
@@ -576,8 +576,7 @@ def asset_brief(repo_root, *, client=None, task_type: Optional[str] = None, **kw
     given (the primary, grounded route), else the deterministic offline scan."""
     if client is not None:
         return agentic_asset_brief(repo_root, client=client, task_type=task_type,
-                                   loop_opts=kwargs.get("loop_opts"),
-                                   parser=kwargs.get("parser", "tool_call"))
+                                   loop_opts=kwargs.get("loop_opts"))
     scan_kwargs = {k: v for k, v in kwargs.items()
                    if k in ("max_files", "max_read_files", "max_bytes", "lexicon")}
     return format_brief(scan_assets(repo_root, task_type=task_type, **scan_kwargs))

@@ -75,11 +75,7 @@ def llm_settings(store: SettingsStore, rd: Optional[Path] = None) -> "Settings":
     return Settings(**over)
 
 
-# CLAUDE REVIEW: [DEAD-CODE] The `full` parameter is never read in this function body; both
-# callers (boss.py and _boss_context_parts) still pass a run-dir Path for it. Either drop the
-# parameter or note why the signature is kept — as written it implies per-run-dir grounding that
-# does not happen.
-def _node_context(st, nid: Optional[int], full: "Path") -> str:
+def _node_context(st, nid: Optional[int]) -> str:
     """A compact textual brief of the run (+ one focused experiment) to ground an LLM chat:
     goal, direction, best-so-far, and — when a node is selected — its idea/metric/code/error."""
     best = st.best()
@@ -238,7 +234,7 @@ def _boss_context_parts(st, nid: Optional[int], full: "Path", *, advisory: bool 
     # so the untrusted half travels as a labelled user message instead of being concatenated into
     # the Boss system prompt, where an embedded "ignore previous instructions" would inherit the
     # authority to raise budgets and route commands. Same shape genesis already uses.
-    untrusted = [_node_context(st, nid, full)]
+    untrusted = [_node_context(st, nid)]
     dg = experiments_digest(st)
     if dg:
         untrusted.append(dg)

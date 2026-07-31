@@ -2236,12 +2236,19 @@ def test_scope_report_rejects_out_of_scope_drill_before_callback(monkeypatch):
 
 
 def test_scope_report_never_ranks_incompatible_or_uncontracted_metrics():
-    """Direction is not a comparison contract: accuracy, RMSE and loss have no shared rank."""
-    from looplab.serve.scope_report import _ranked
+    """Direction is not a comparison contract: accuracy, RMSE and loss have no shared rank. And even
+    an EXACT shared contract yields no winner under schema v1 — it proves shared semantics but
+    declares no minimum effect and no machine-evaluable decision policy, so a rank would be invented.
+
+    Asserted on `_comparison_projection` itself: it is the only place a winner could ever be set, so
+    pinning it here covers every consumer (digest, sanitized content, the published groups).
+    """
+    from looplab.serve.scope_report import _comparison_projection, _project_briefs
     briefs = [{"run_id": "loss1", "direction": "min", "best_metric": 0.10},
               {"run_id": "loss2", "direction": "min", "best_metric": 0.50},
               {"run_id": "acc", "direction": "max", "best_metric": 0.95}]
-    assert _ranked(briefs) == []
+    projected, _coverage = _project_briefs(briefs)
+    assert _comparison_projection(projected)[0] == []       # no contract => no cohort at all
 
     shared = _comparison_contract("min")
     comparable = [
@@ -2250,7 +2257,13 @@ def test_scope_report_never_ranks_incompatible_or_uncontracted_metrics():
         {**briefs[1], "phase": "finished", "comparison_contract": shared,
          "comparison_measurement": _comparison_measurement(shared, briefs[1]["best_metric"])},
     ]
-    assert _ranked(comparable) == []
+    projected, _coverage = _project_briefs(comparable)
+    groups, _observations = _comparison_projection(projected)
+    assert len(groups) == 1                                 # one exact cohort, both runs measured
+    assert [row["run_id"] for row in groups[0]["measurements"]] == ["loss1", "loss2"]
+    assert groups[0]["winner"] is None and groups[0]["tied_winners"] == []
+    assert groups[0]["outcome_policy"] == "observations-only-v1"
+    assert groups[0]["indeterminate"] == "point_estimates_only"
 
 
 def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):

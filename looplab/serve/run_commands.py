@@ -2467,9 +2467,11 @@ class RunCommandService:
             observation: Optional[CommandObservation] = None) -> dict:
         """Promote a failed/timed-out record if its durable postcondition arrived later.
 
-        GET is observation-only: it never appends or spawns.  A same-key POST may explicitly retry
-        the existing command below; it reuses the marked intent and therefore cannot double-apply an
-        additive budget/fork/inject request.
+        RECONCILIATION is observation-only: promoting or failing a TERMINAL record never appends or
+        spawns.  (`get` itself is not: a nonterminal record whose worker died is restarted from here —
+        see its own note — which is the crash-recovery path, and that worker does append/Popen.)  A
+        same-key POST may explicitly retry the existing command below; it reuses the marked intent and
+        therefore cannot double-apply an additive budget/fork/inject request.
         """
         observation = observation or self._observe(rd)
         marked_invalid = (not record.get("attached") and record.get("event_seq") is not None
@@ -3129,13 +3131,12 @@ class RunCommandService:
             raise HTTPException(503, detail)
         return result
 
-    # CLAUDE REVIEW: [READABILITY] The docstrings above (_reconcile_observation: "GET is
-    # observation-only: it never appends or spawns") describe only TERMINAL-record reconciliation,
-    # but this method restarts a worker for any nonterminal record — and that worker DOES append the
-    # marked intent and may Popen an engine. That is the intended crash-recovery path (an accepted
-    # record whose worker died must be drivable again by polling), but the blanket "never
-    # appends or spawns" claim is misleading to a reader auditing GET side effects; scope the claim
-    # to terminal records where it is stated.
+    # NOT side-effect-free, despite being a GET: a NONTERMINAL record here gets its worker
+    # restarted, and that worker DOES append the marked intent and may Popen an engine. This is the
+    # deliberate crash-recovery path — an accepted record whose worker died must become drivable
+    # again by polling — and it is safe because the intent is marked (so the append cannot
+    # double-apply) and the spawn claim serializes the Popen. Only TERMINAL-record reconciliation
+    # (`_reconcile_observation`) is genuinely observation-only.
     def get(self, rd: Path, command_id: str) -> dict:
         path = self._path(rd, command_id)
         with self.sequence(rd):

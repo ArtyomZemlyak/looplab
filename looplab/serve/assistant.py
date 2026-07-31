@@ -32,15 +32,14 @@ from looplab.events.eventstore import iter_jsonl
 # provider mode sets cannot drift.
 from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa: F401
 
-# The LoopLab source tree (…/looplab/looplab/assistant.py -> repo root two levels up). The assistant
-# may read (and, in later phases, edit) the code that runs it — this is what "fix LoopLab itself"
-# needs — so the repo root is always an allowed root alongside the run-root and the user's home.
-# CLAUDE REVIEW: [READABILITY] Stale comment: the path above is the pre-split flat location and
-# "two levels up" no longer matches parents[2] (three levels up from serve/assistant.py — correct
-# only because the module moved one directory deeper). Note also that under a pip install
-# parents[2] resolves to site-packages itself, not a repo root, which silently widens the
-# assistant's always-allowed root to the whole site-packages tree.
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# The LoopLab source tree (…/<repo>/looplab/serve/assistant.py -> the repo root is parents[2]). The
+# assistant may read (and, in later phases, edit) the code that runs it — this is what "fix LoopLab
+# itself" needs — so the repo root is always an allowed root alongside the run-root and the user's
+# home. Under a NON-editable pip install there is no repo root: parents[2] is site-packages itself,
+# and handing the assistant every installed package as an always-allowed root is not what this is
+# for. Detect the checkout by its pyproject and otherwise fall back to the package directory.
+_PKG_ROOT = Path(__file__).resolve().parents[1]                       # …/looplab
+REPO_ROOT = (_PKG_ROOT.parent if (_PKG_ROOT.parent / "pyproject.toml").is_file() else _PKG_ROOT)
 
 
 def safe_assistant_failure(exc: Exception) -> dict:

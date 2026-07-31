@@ -655,7 +655,7 @@ def build_router(srv) -> APIRouter:
         prompt = ("Propose ONE next experiment as a structured Idea (operator one of "
                   "draft/improve/debug/merge; numeric params; a short rationale). "
                   + _CONCEPT_AUTHORING_GUIDANCE + "Base it on the "
-                  "run context and this discussion.\n\n" + _node_context(st, nid, rd)
+                  "run context and this discussion.\n\n" + _node_context(st, nid)
                   + (f"\n\nDiscussion so far:\n{convo}" if convo else "")
                   + (f"\n\nInstruction: {instruction}" if instruction else ""))
         s = _llm_settings(rd)

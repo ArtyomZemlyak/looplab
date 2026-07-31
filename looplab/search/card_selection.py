@@ -144,10 +144,7 @@ def card_fits_resource_envelope(
         memory = envelope.gpu_memory_mib
         if len(memory) != envelope.gpu_count:
             return True
-        # CLAUDE REVIEW: [DEAD-CODE] Unreachable: `required == 0` already returned True four lines
-        # above (`if not isinstance(requested_memory, int) or required == 0: return True`).
-        if required == 0:
-            return True
+        # `required >= 1` here: the guard above returned True for a 0 requirement.
         effective_memory = min(requested_memory, sorted(memory, reverse=True)[required - 1])
         return sum(available >= effective_memory for available in memory) >= required
 
