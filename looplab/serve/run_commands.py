@@ -59,7 +59,7 @@ from looplab.events.types import (
     EV_SPEC_APPROVED)
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.engine_proc import (
-    _claim_and_spawn_resume, _engine_alive, _engine_liveness, _spawn_engine)
+    _claim_and_spawn_resume, _engine_alive, _engine_liveness, _resolve_task_file, _spawn_engine)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.core.redact import redact_secrets
 
@@ -387,25 +387,16 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
     return None
 
 
-# CLAUDE REVIEW: [QUALITY] Near-duplicate of engine_proc._resolve_task_file (same snapshot->ui_meta
-# fallback logic, independently maintained). The two can drift silently — e.g. one gaining a new
-# fallback or validation the other lacks; routers/control.py already aliases the engine_proc one.
-# Consider one shared helper.
 def task_file_for(rd: Path) -> Optional[str]:
-    """Resolve the immutable run snapshot, with a safe existing-file legacy fallback."""
-    snapshot = rd / "task.snapshot.json"
-    if snapshot.is_file():
-        return str(snapshot)
-    meta = rd / "ui_meta.json"
-    if meta.is_file():
-        try:
-            row = json.loads(meta.read_text(encoding="utf-8"))
-            raw = row.get("task_file") if isinstance(row, dict) else None
-            if raw and Path(raw).is_file():
-                return str(raw)
-        except (OSError, ValueError, TypeError):
-            pass
-    return None
+    """Resolve the immutable run snapshot, with a safe existing-file legacy fallback.
+
+    ONE implementation, in `engine_proc`, deliberately: this used to be a hand-maintained copy of the
+    same snapshot->ui_meta fallback, and two copies of a resolution rule drift the moment one gains a
+    validation the other lacks — while the spawn path and the command path would then disagree about
+    which task a run is. `routers/control.py` already aliases the engine_proc one; this name stays as
+    the public re-export the command layer and its tests import.
+    """
+    return _resolve_task_file(rd)
 
 
 def _normalize_finalize_data(data: dict) -> dict:

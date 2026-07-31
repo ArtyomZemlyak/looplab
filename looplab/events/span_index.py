@@ -206,12 +206,13 @@ class SpanIndex:
 
     # -- construction --------------------------------------------------------------------------
     def _append(self, light: dict, off: int, length: int) -> bool:
-        # CLAUDE REVIEW: [QUALITY] Records arriving via _extend from _scan_light were already
-        # normalized (and I/O-stripped) during the scan, so this re-normalization is redundant work —
-        # though modest in cost: the expensive redaction/entropy fields (input/output/thinking) were
-        # already stripped, so the second pass runs only over the small light records. Only
-        # _load_persisted's records are untrusted input — validating those at that call site (or a
-        # pre-validated flag) would make the trust boundary explicit and drop the redundant pass.
+        # Normalizes UNCONDITIONALLY, including records `_extend` already normalized during
+        # `_scan_light`. That second pass is deliberate: this is the ONE gate every row passes
+        # through, and `_load_persisted` feeds it untrusted on-disk records that must be validated
+        # here or not at all. The redundancy is cheap by construction — the expensive
+        # redaction/entropy fields (input/output/thinking) were stripped on the first pass, so the
+        # repeat runs only over the small light record. A pre-validated flag would save that pass at
+        # the cost of making the trust boundary opt-in, which is the wrong default for a parser.
         normalized = _normalize_span(light)
         if normalized is None:
             return False

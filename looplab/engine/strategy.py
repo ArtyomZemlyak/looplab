@@ -684,18 +684,15 @@ class StrategyCadenceMixin:
                and snapshot_matches_analytics_projection(state, c)
                for c in state.concept_coverage_snapshots):
             return state
-        # ``_concept_coverage_snapshot`` can issue several paid tagging/consolidation calls
-        # before any durable invocation claim exists. A crash after provider success but before the event
-        # append purchases the same semantic work again on resume. Claim the bounded input digest before
-        # dispatch and persist terminal/ambiguous receipts; an eventual snapshot is not a payment fence.
-        # CLAUDE REVIEW: [QUALITY] The comment above is an accurate but UNACTIONED TODO: the
-        # claim-before-dispatch protocol it prescribes is not implemented on this path —
-        # `_concept_coverage_snapshot` dispatches the paid tagging/consolidation calls directly with
-        # no durable claim (contrast the finalize stewards' `_paid_curation_attempt` in lessons.py,
-        # which do implement it). A crash between the provider calls and the
-        # EV_NODE_CONCEPTS/EV_CONCEPT_COVERAGE_SNAPSHOT appends still re-purchases the un-recorded
-        # tagging on resume — only bounded by _RETAG_CAP/_HYP_TAG_CAP and per-node incremental
-        # reuse, not prevented. Implement the claim (or track the TODO) so the gap doesn't linger.
+        # KNOWN GAP (not a claim-fenced path, unlike the finalize stewards): this cadence dispatches
+        # `_concept_coverage_snapshot`'s paid tagging/consolidation calls DIRECTLY, with no durable
+        # invocation claim taken before the provider call. A crash between provider success and the
+        # EV_NODE_CONCEPTS / EV_CONCEPT_COVERAGE_SNAPSHOT appends therefore re-purchases the
+        # un-recorded tagging on resume. It is BOUNDED, not prevented: `_RETAG_CAP`/`_HYP_TAG_CAP`
+        # limit each pass and per-node incremental reuse skips already-tagged nodes, so the repeat is
+        # a small re-spend rather than the whole snapshot. Closing it means the claim-before-dispatch
+        # protocol `lessons.py::_paid_curation_attempt` implements — claim the bounded input digest,
+        # persist terminal/ambiguous receipts — since an eventual snapshot is not a payment fence.
         snap = self._concept_coverage_snapshot(state)
         if snap is None:
             return state

@@ -2960,3 +2960,26 @@ def test_a_stale_approval_request_is_rejected_and_a_current_one_is_not(tmp_path)
     s = _fresh()
     s.append("approval_requested", {"node_id": 0})
     assert fold(s.read_all()).awaiting_approval is True
+
+
+def test_fork_and_inject_requests_are_copies_so_a_consumer_cannot_rewrite_the_log(tmp_path):
+    """`EventStore` caches parsed `Event`s across `read_all()`, so aliasing a request dict into folded
+    state lets one in-place edit change what EVERY later fold in the process sees — folded state
+    silently diverging from the bytes on disk. Projections may alias (they are read-only, and copying
+    on every loop iteration is real cost); REQUEST records the engine consumes must not."""
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": ""}})
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    store.append("fork", {"from_node_id": 0, "note": "try a wider sweep"})
+    store.append("inject_node", {"params": {"x": 2.0}, "rationale": "operator idea"})
+
+    st = fold(store.read_all())
+    assert st.fork_requests and st.inject_requests
+    st.fork_requests[0]["note"] = "MUTATED"
+    st.inject_requests[0]["rationale"] = "MUTATED"
+
+    again = fold(store.read_all())          # same cached Events, re-folded
+    assert again.fork_requests[0].get("note") == "try a wider sweep"
+    assert again.inject_requests[0].get("rationale") == "operator idea"

@@ -1480,13 +1480,14 @@ def _on_data_profiled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.data_profile = d.get("columns")
 
 def _on_data_provenance(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # CLAUDE REVIEW: [QUALITY] Stores the LIVE Event.data reference (likewise host_grading, leakage,
-    # archive, spec_proposed, hypothesis_ranking, the many `append(d)` audit journals, and
-    # Node.files/deleted in _on_node_created/_on_node_repaired). `_on_inject_node` documents exactly
-    # why that is hazardous — EventStore caches parsed Events across read_all(), so a consumer that
-    # mutates folded state in place silently diverges every later fold from the bytes on disk — and
-    # copies for that reason; these handlers alias anyway, so the no-mutation guarantee holds only
-    # by convention, not by construction.
+    # ALIASES the live `Event.data` (as do host_grading, leakage, archive, spec_proposed,
+    # hypothesis_ranking, the `append(d)` audit journals, and Node.files/deleted). The fold runs on
+    # EVERY loop iteration over the whole log, so copying each of these would be real per-iteration
+    # cost for a hazard none of them carry: they are read-only PROJECTIONS — no consumer writes back
+    # through them. `_on_fork`/`_on_inject_node` are the exception and DO copy, because those dicts
+    # are REQUEST records the engine consumes, and `EventStore` caches parsed Events across
+    # `read_all()`, so an in-place edit there would silently diverge every later fold in the process
+    # from the bytes on disk. The rule for a new handler: alias a projection, copy a request.
     st.data_provenance = d   # D4: pinned dataset/asset content hashes
 
 def _on_host_grading(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

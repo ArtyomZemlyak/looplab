@@ -556,15 +556,16 @@ def build_router(srv) -> APIRouter:
                 "concept_capsules.jsonl", "lessons.jsonl", "research_claims.jsonl"),
         ))
         _assert_portfolio_current(memory_dir, portfolio_id)
-        # CLAUDE REVIEW: [QUALITY] These caps are bounds in name only: 128,000,000 chars per string
-        # and 500,000 total items dwarf every other cross-run cap in this module (rows use 640_000
-        # chars / 4_096 items) and would let a single atlas response serialize hundreds of MB to
-        # the browser, contradicting the docstring's "bounded per section" promise. If the payload
-        # is already bounded upstream, say so and drop the misleading numbers; otherwise use a
-        # realistic ceiling.
+        # A BACKSTOP, not the primary bound: `atlas_for_memory(max_items=limit)` already caps each
+        # section at `limit` (<=100), and every text field it emits is bounded by its own projection.
+        # This is the second layer that keeps a malformed legacy row from expanding without bound —
+        # so it has to be a real ceiling. It was 128,000,000 total chars / 500,000 items, three
+        # orders of magnitude above the paged rows' 640,000 / 4,096 and enough to serialize hundreds
+        # of MB to a browser, which is not a bound at all. Sized instead with roughly 2x headroom
+        # over the worst reachable payload (~100 sectioned items x their 4,000-char field cap).
         return sanitize_cross_run_projection(
-            payload, max_chars=128_000_000, max_items=256,
-            max_total_items=500_000)
+            payload, max_chars=8_000_000, max_items=256,
+            max_total_items=65_536)
 
     @router.get("/api/cross-run/claims", response_model=CrossRunClaimsResponse)
     def claims(contested: bool = False,

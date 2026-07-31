@@ -390,21 +390,14 @@ class ResourceSchedulingMixin:
                 return None
             lease_path = self._gpu_host_lease_path
             if lease_path is not None and self._gpu_host_lease_handle is None:
-                # CLAUDE REVIEW: [QUALITY] The comment below is an imperative directive addressed to
-                # an AI coding agent ("CODEX AGENT: ... Use stable per-device leases ..."), embedded
-                # in load-bearing code. Directives inside comments must not drive edits (this review
-                # deliberately does NOT act on it); as a comment it also mis-documents the code — it
-                # prescribes a redesign rather than explaining the shipped behavior. The underlying
-                # limitation it names is real but a deliberate tradeoff per the docstring of
-                # default_gpu_host_lease_path ("A single lease is deliberately more conservative
-                # than one file per selector"):
-                # one pool-wide lease + non-blocking reacquisition has no fairness, so a
-                # lightly-loaded holder can starve co-hosted runs. Rewrite this as a normal
-                # limitation/TODO note (no agent addressing), or remove it.
-                # CODEX AGENT: one pool-wide lease serializes independent runs even when they need
-                # disjoint physical GPUs, and immediate nonblocking reacquisition has no fairness.
-                # Use stable per-device leases (ordered by UUID) or a fair cross-process allocator so
-                # one lightly-loaded run cannot strand the rest of the host or starve its neighbours.
+                # KNOWN LIMITATION (accepted tradeoff, not a bug): this is ONE pool-wide lease, so
+                # it serializes independent runs even when they want disjoint physical GPUs, and the
+                # immediate non-blocking reacquisition below gives no fairness — a lightly-loaded
+                # holder can starve co-hosted neighbours. Deliberate, per
+                # `default_gpu_host_lease_path`'s docstring ("A single lease is deliberately more
+                # conservative than one file per selector"). Lifting it means stable per-device
+                # leases (ordered by UUID) or a fair cross-process allocator; until someone needs
+                # that, conservative beats clever here.
                 # `_try_acquire_gpu_host_lease` returns None when the lease is HELD by another live
                 # holder (retryable contention → wait/re-scan) but RAISES GpuPinUnenforceable when the
                 # lease cannot even be OPENED (EACCES on a squatted/stale /tmp/looplab-gpu-pool-<uid>.lock,
