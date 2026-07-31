@@ -756,13 +756,14 @@ class EventStore:
                 continue
             if isinstance(obj, dict) and "seq" in obj:
                 return int(obj["seq"])
-        # CLAUDE REVIEW: [TEST-GAP] This >64KB-tail fallback IS exercised incidentally (e.g.
-        # test_card_public_projection appends ~400KB lines), but no test asserts its cross-process
-        # guarantee: a regression to `return -1` here would be masked by the same-store `self._seq`
-        # while letting a concurrent SECOND writer mint a duplicate seq after one huge final record,
-        # which the duplicate-sequence fence then fails closed for the entire log.
         # Tail window missed the last seq (e.g. a >64KB final line with no newline in the window):
-        # fall back to a full scan so a concurrent writer can't mint a duplicate seq. Non-recursive.
+        # fall back to a full scan. Non-recursive.
+        # DEFENSIVE, not load-bearing: `_scan_last_seq` is `for e in self.read_all(): last = e.seq` —
+        # the same source that sets `self._seq` — and every `append` calls `read_all()` under the
+        # append lock immediately before `max(self._seq, self._disk_last_seq())`. So this can never
+        # exceed `self._seq`, and returning -1 here is observationally identical (verified by
+        # mutation). Keep it anyway: it makes the helper correct on its own terms for any future
+        # caller that has NOT just refreshed, which is the only way it could ever matter.
         return self._scan_last_seq()
 
     def _heal_torn_tail(self) -> None:
