@@ -2549,6 +2549,26 @@ def test_spawn_stderr_close_failure_cannot_turn_successful_popen_into_failure(mo
     assert engine_proc._spawn_engine(["resume", str(rd)], run_dir=rd) == 8877
 
 
+def _clear_trace(client, rd, nid: int = 0, *, run_id: str = "demo", op: str = "0" * 32):
+    """POST clear_trace with the identities it now requires, computed from the run directory.
+
+    The route refuses without the exact run generation, trace revision, node generation and a
+    client-minted operation id, so an empty body returns 428 before the command-exclusion behaviour
+    this test pins is ever reached. Identities are read off disk rather than through `GET /api/runs`,
+    whose durable-resume reconciler has side effects on the very run under test."""
+    from looplab.events.traceview import trace_file_revision
+    from looplab.serve.run_commands import run_generation_token
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    node = fold(events).nodes.get(nid)
+    return client.post(f"/api/runs/{run_id}/nodes/{nid}/clear_trace", json={
+        "expected_generation": run_generation_token(events),
+        "expected_trace_revision": trace_file_revision(rd / "spans.jsonl"),
+        "node_generation": getattr(node, "attempt", 0) if node is not None else 0,
+        "operation_id": f"tc_{op}",
+    })
+
+
 def test_clear_trace_is_excluded_by_active_command_and_does_not_rewrite(tmp_path):
     rd = _seed(tmp_path)
     spans = rd / "spans.jsonl"
@@ -2561,14 +2581,14 @@ def test_clear_trace_is_excluded_by_active_command_and_does_not_rewrite(tmp_path
     active = _post(client, "budget_extend", {"add_nodes": 1}, key="trace-active").json()
     assert active["status"] == "accepted"
 
-    blocked = client.post("/api/runs/demo/nodes/0/clear_trace")
+    blocked = _clear_trace(client, rd, op="a" * 32)
     assert blocked.status_code == 409 and active["id"] in blocked.json()["detail"]
     assert spans.read_bytes() == before
     path = rd / ".commands" / f"{active['id']}.json"
     row = json.loads(path.read_text(encoding="utf-8"))
     row["status"] = "rejected"
     path.write_text(json.dumps(row), encoding="utf-8")
-    cleared = client.post("/api/runs/demo/nodes/0/clear_trace")
+    cleared = _clear_trace(client, rd, op="b" * 32)
     assert cleared.status_code == 200 and cleared.json()["removed"] == 1
     assert b'"node_id":0' not in spans.read_bytes() and b'"node_id":1' in spans.read_bytes()
 
