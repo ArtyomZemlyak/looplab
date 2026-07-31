@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
+import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
 
 function highlighted(text, query) {
   if (!query) return text || ' '
@@ -13,9 +14,18 @@ function highlighted(text, query) {
   return parts.length ? parts : (text || ' ')
 }
 
-export default function CodeViewer({ code = '', diff = null, label = 'Code', maxHeight = 420, copyText = null }) {
-  const [query, setQuery] = useState('')
-  const [wrap, setWrap] = useState(false)
+export default function CodeViewer({
+  code = '', diff = null, label = 'Code', maxHeight = 420, copyText = null,
+  draftStore: sharedDraftStore = null, draftScope = null,
+}) {
+  const fallbackDraftStoreRef = useRef(null)
+  if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
+  const draftStore = sharedDraftStore || fallbackDraftStoreRef.current
+  const scope = draftScope || `code-viewer:${label}`
+  const [query, setQuery] = useInspectorDraftField(
+    draftStore, scope, 'query', '', { disposable: true })
+  const [wrap, setWrap] = useInspectorDraftField(
+    draftStore, scope, 'wrap', false, { disposable: true })
   const [copied, setCopied] = useState(false)
   const rows = useMemo(() => diff || String(code || '').split('\n').map((line, index) => ({
     line, l: line, kind: 'same', cls: '', oldNo: null, newNo: index + 1,

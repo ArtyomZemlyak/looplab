@@ -26,7 +26,7 @@ const reviewLinkFailure = error => error?.status === 409
 export default function CollabPanel({
   runId, onSelect, onOpenComment, onClose, onToast, reviewRouteState = null,
   reviewMode = false, expectedGeneration = null, refreshKey = null,
-  PanelComponent = PanelShell,
+  PanelComponent = PanelShell, draftStore = null,
 }) {
   const [ttl, setTtl] = useState(7 * 24 * 60 * 60)
   const [includeEvidence, setIncludeEvidence] = useState(false)
@@ -152,6 +152,7 @@ export default function CollabPanel({
     </div>}
     <CommentsThread runId={runId} expectedGeneration={expectedGeneration} refreshKey={refreshKey}
       readOnly={reviewMode} reviewMode={reviewMode} global
+      draftStore={draftStore} draftSurface="collab"
       onOpenComment={comment => {
         if (onOpenComment) { onOpenComment(comment); return }
         onSelect?.(comment.nodeId)

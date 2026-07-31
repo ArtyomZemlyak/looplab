@@ -26,6 +26,7 @@ import {
   captureMergeIntent, mergeIntentCommand, mergeIntentMatches, selectMergeTarget,
 } from './mergeIntent.js'
 import { nodeIsActive } from './nodeProjection.js'
+import { createInspectorDraftStore } from './inspectorDraftStore.js'
 
 const lazyNamed = (load, name) => lazy(() => load().then(module => ({
   default: name === 'default' ? module.default : module[name],
@@ -163,6 +164,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const route = useRunRouteState({ generation, reviewMode })
   const { state: routeState, generationMismatch, generationPending } = route
   const traceClearRecoveryStore = useRef(traceClearRecoveryRegistry)
+  const inspectorDraftStoreRef = useRef(null)
+  if (!inspectorDraftStoreRef.current) inspectorDraftStoreRef.current = createInspectorDraftStore()
   // useSyncExternalStore closes the render→effect subscription gap: a clear POST may settle while
   // RunView is being remounted, and that outcome must never be missed by the replacement Inspector.
   const traceClearRecoverySnapshot = useSyncExternalStore(
@@ -1423,8 +1426,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                         onSelectNode={focusNode}
                         onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
                     : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                        tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
-                        traceClearRecoveryStore={traceClearRecoveryStore}
+                         tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
+                         draftStore={inspectorDraftStoreRef.current}
+                         traceClearRecoveryStore={traceClearRecoveryStore}
                         traceClearRecoverySnapshot={traceClearRecoverySnapshot}
                         publishTraceClearRecovery={publishTraceClearRecovery}
                         readOnly={readOnlyMode} historySeq={history.resolvedSeq}
@@ -1499,6 +1503,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'collab' && panelAllowed('collab') && <CollabPanel state={state} runId={runId}
         onSelect={selectNode} onOpenComment={openComment} onToast={showToast} onClose={closePanel}
         reviewRouteState={routeState} reviewMode={reviewMode}
+        draftStore={inspectorDraftStoreRef.current}
         expectedGeneration={generation} refreshKey={state?.comments_revision} />}
       {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={closePanel} />}
       {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}

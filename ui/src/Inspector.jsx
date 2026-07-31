@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { deadlineGet, get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL,
-  clearNodeTrace, commandFeedback, runNodeApiPath } from './util.js'
+  clearNodeTrace, commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
+  retryRunCommand, runNodeApiPath } from './util.js'
 import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
@@ -18,6 +19,7 @@ import { nodeCanonicalConcepts, parseConceptTagsInput } from './conceptChips.js'
 import { conceptMaterializationStatus } from './nodeProjection.js'
 import { buildingMarkers } from './buildingModel.js'
 import { deadlineRequest } from './requestDeadline.js'
+import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
 
 // Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
@@ -121,7 +123,10 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
-  publishTraceClearRecovery: publishSharedClearRecovery = null }) {
+  publishTraceClearRecovery: publishSharedClearRecovery = null, draftStore: sharedDraftStore = null }) {
+  const fallbackDraftStoreRef = useRef(null)
+  if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
+  const draftStore = sharedDraftStore || fallbackDraftStoreRef.current
   const nodeAttempt = state?.nodes?.[nodeId]?.attempt
   const detailScope = `${runId}@${expectedGeneration || '?'}:${nodeId ?? '-'}:${nodeAttempt ?? '?'}:${readOnly
     ? historySeq ?? readOnlyReason : 'live'}:${evidenceAvailable ? 1 : 0}`
@@ -432,10 +437,12 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
               : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
           : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) stay in chat. Use Comments for review, or attach <button className="ctx-chip ctx-chip-action" title="attach this node to assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
 
-        {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId} onToast={onToast} />}
+        {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
+          onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
-          readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId} />}
+          readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId}
+          draftStore={draftStore} draftSurface="inspector" />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace key={`trace:${detailScope}:${n.attempt ?? 'pending'}`}
           n={n} runId={runId} expectedGeneration={expectedGeneration}
@@ -496,7 +503,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
             return reason === 'retry' ? retryDetail() : requestDetail('refresh')
           }} />}
         {activeTab === 'Code' && (['ready', 'stale'].includes(visibleDetailStatus)
-          ? <Code n={n} />
+          ? <Code n={n} draftStore={draftStore}
+              draftScope={`code:${runId}@${expectedGeneration || '?'}:${n.id}:${n.attempt ?? '?'}`} />
           : visibleDetailStatus === 'error'
             ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
             : <div className="insp-empty">Loading code…</div>)}
@@ -598,50 +606,123 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
 // classifier re-tag cadence must not clobber (docs/guide/concepts.md). Read-only history (runId null),
 // a partial/unavailable projection, and a still-building node stay display-only — a fabricated "current"
 // set must never be presented as something to overwrite.
-function ConceptTags({ n, state, runId, onToast }) {
-  const [editing, setEditing] = useState(false)
-  const [text, setText] = useState('')
-  const [busy, setBusy] = useState(false)
+const commandRecordPending = record =>
+  record?.status === 'accepted' || record?.status === 'executing'
+const recoveryCommandRecord = (error, boundRecord) => {
+  const observed = error?.commandRecord
+  if (!observed || error?.code === 'COMMAND_PROTOCOL_ERROR') return boundRecord
+  if (boundRecord?.id && observed.id !== boundRecord.id) return boundRecord
+  return observed
+}
+
+function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration }) {
+  const draftScope = `concept-tags:${runId}@${expectedGeneration || '?'}:${n.id}:${n.attempt ?? '?'}`
+  const [editing, setEditing] = useInspectorDraftField(draftStore, draftScope, 'editing', false)
+  const [text, setText] = useInspectorDraftField(draftStore, draftScope, 'text', '')
+  const [busy, setBusy] = useInspectorDraftField(draftStore, draftScope, 'busy', false)
+  const [baseline, setBaseline] = useInspectorDraftField(draftStore, draftScope, 'baseline', null)
+  const [intent, setIntent] = useInspectorDraftField(draftStore, draftScope, 'intent', null)
+  const [error, setError] = useInspectorDraftField(draftStore, draftScope, 'error', '')
+  const [messageKind, setMessageKind] = useInspectorDraftField(
+    draftStore, draftScope, 'messageKind', '')
   const areaRef = useRef(null)
   const triggerRef = useRef(null)
-  // The editor's draft/busy state is per-mount; the CALL SITE keys <ConceptTags> on the complete
-  // `${runId}:${n.id}:${n.attempt}` identity so React REMOUNTS it (fresh editing/text/busy) when the
-  // selection changes — an editor opened on A can no longer survive onto B and Save submit A's text
-  // with B's id/generation (a `save()` already in flight keeps A's id, captured in its closure).
+  const focusEditorRef = useRef(false)
+  // The editor is keyed and stored on the complete run-generation/node-attempt identity. Temporary
+  // Inspector unmounts resume that exact scope; a replacement run or reset node starts clean.
   const current = useMemo(
     () => nodeCanonicalConcepts(state?.node_concepts || {}, n.id, state?.concept_consolidation || {}),
     [state?.node_concepts, state?.concept_consolidation, n.id])
+  const currentKey = current.join('\n')
   const status = conceptMaterializationStatus(state, n.id)
   // Editable only for a SETTLED experiment (terminal lifecycle) with an authoritative complete concept
   // projection. `status === 'complete'` is concept-PROJECTION completeness, NOT node lifecycle — a
   // still-building or reset-rebuilding node folds back to `pending` yet can keep a prior 'complete'
   // projection, so gating on the projection alone would wrongly expose Edit on a node whose concepts
   // aren't settled. Require a terminal node status too; read-only history (runId null) stays display-only.
-  const canEdit = !!runId && status === 'complete'
+  const canEdit = !!runId && /^[0-9a-f]{64}$/.test(expectedGeneration || '') && status === 'complete'
     && (n.status === 'evaluated' || n.status === 'failed')
-  useEffect(() => { if (editing) requestAnimationFrame(() => areaRef.current?.focus()) }, [editing])
-  const open = () => { setText(current.join('\n')); setEditing(true) }
-  const cancel = () => {
-    setEditing(false)
-    requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
+  const baselineChanged = editing && baseline != null && baseline !== currentKey
+  const exactIntent = intent?.text === text && intent?.baseline === baseline
+  const operationFenced = !!intent && (intent.unknown === true || commandRecordPending(intent.record))
+  const exactRetry = exactIntent && commandCanRetry(intent?.record)
+  useEffect(() => {
+    // Restoring a conditional Inspector must not steal focus from the control that remounted it.
+    if (!editing || !focusEditorRef.current) return
+    focusEditorRef.current = false
+    requestAnimationFrame(() => areaRef.current?.focus())
+  }, [editing])
+  const open = () => {
+    focusEditorRef.current = true
+    setText(currentKey); setBaseline(currentKey); setIntent(null); setError('')
+    setMessageKind(''); setEditing(true)
   }
-  const save = async () => {
-    if (busy) return
-    const { concepts, dropped } = parseConceptTagsInput(text)
-    // "The operator cleared the tags" and "every token they typed was rejected" are NOT the same
-    // intent, and submitting `[]` for the second WIPES the node's concepts under `operator-edited`
-    // provenance the classifier re-tag cadence deliberately never clobbers — permanently orphaning the
-    // node from every lens/chip/DAG grouping, while the toast reports success. Paste a markdown bullet
-    // list and every token normalizes to `*-…`, which fails the concept-id segment gate. An explicit
-    // clear is blank input; a fully-rejected input is a typo to correct, so refuse and keep the editor.
-    if (concepts.length === 0 && dropped > 0) {
-      onToast?.('No valid concept IDs — fix the input, or clear it to remove every tag.')
+  const cancel = () => {
+    // A pending/unknown full replacement can still apply; keep its identity until terminal state.
+    if (busy || operationFenced) {
+      onToast?.('Check the re-tag command before closing this draft.')
       return
     }
+    draftStore.clear(draftScope)
+    requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
+  }
+  const copyPendingInput = async () => {
+    try {
+      await navigator.clipboard.writeText(intent?.text || '')
+      onToast?.('Pending re-tag input copied.')
+    } catch {
+      onToast?.('Clipboard is unavailable. The submitted tags remain visible in the editor.')
+    }
+  }
+  const save = async () => {
+    if (busy || (!canEdit && !operationFenced)) return
+    let submission
+    let concepts, dropped
+    if (operationFenced) {
+      // Check the exact earlier operation even if the operator edited the visible next draft.
+      submission = intent
+      concepts = submission.concepts
+      dropped = submission.dropped || 0
+    } else {
+      if (baselineChanged) return
+      const parsed = parseConceptTagsInput(text)
+      concepts = parsed.concepts
+      dropped = parsed.dropped
+      // "The operator cleared the tags" and "every token they typed was rejected" are NOT the same
+      // intent. An explicit clear is blank input; a fully-rejected input is a typo to correct.
+      if (concepts.length === 0 && dropped > 0) {
+        onToast?.('No valid concept IDs — fix the input, or clear it to remove every tag.')
+        return
+      }
+      submission = exactRetry ? intent : {
+        text, baseline, concepts, dropped, idempotencyKey: createIdempotencyKey(),
+        record: null, unknown: false,
+      }
+    }
+    const checking = operationFenced
+    const retrying = !checking && commandCanRetry(submission.record)
+    const observing = checking && submission.record?.id && commandRecordPending(submission.record)
+    let closeAfterSuccess = false
+    setIntent(submission)
+    setError('')
+    setMessageKind('')
     setBusy(true)
     try {
+      const record = observing
+        ? await getRunCommand(runId, submission.record.id)
+        : retrying
+          ? await retryRunCommand(runId, submission.record.id, { waitMs: 12_000 })
+          : await CONTROL.retagConcepts(
+          runId,
+          { nodeId: n.id, nodeGeneration: n.attempt, concepts: submission.concepts },
+          {
+            expectedGeneration,
+            idempotencyKey: submission.idempotencyKey,
+            waitMs: 12_000,
+          },
+        )
       const feedback = commandFeedback(
-        await CONTROL.retagConcepts(runId, { nodeId: n.id, nodeGeneration: n.attempt, concepts }), {
+        record, {
           success: `Re-tagged #${n.id} → ${concepts.length} concept${concepts.length === 1 ? '' : 's'}`
             + `${dropped ? ` (${dropped} invalid dropped)` : ''} — the engine is processing it`,
           noop: `#${n.id} already carries exactly those concepts`,
@@ -649,9 +730,54 @@ function ConceptTags({ n, state, runId, onToast }) {
           failure: `Re-tag of #${n.id} failed`,
         })
       onToast?.(feedback.message)
-      if (feedback.kind !== 'error') cancel()   // keep the editor + typed set on failure so it can retry
-    } catch { onToast?.(`Re-tag of #${n.id} could not be submitted. Try again.`) }
-    finally { setBusy(false) }
+      if (feedback.kind === 'pending') {
+        setIntent({ ...submission, record, unknown: false })
+        setError(feedback.message)
+        setMessageKind('status')
+      } else if (feedback.kind === 'success') {
+        if (text === submission.text) {
+          closeAfterSuccess = true
+          requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
+        } else {
+          setIntent(null)
+          setError('The earlier re-tag completed. Review the current tags before saving this newer draft.')
+          setMessageKind('status')
+        }
+      } else {
+        const sameDraft = text === submission.text && baseline === submission.baseline
+        setIntent(commandCanRetry(record) && sameDraft
+          ? { ...submission, record, unknown: false }
+          : null)
+        setError(feedback.message)
+        setMessageKind('error')
+      }
+    } catch (caught) {
+      const record = recoveryCommandRecord(caught, submission.record)
+      const pending = commandRecordPending(record)
+      const unknown = caught?.commandUnknown === true
+        // A read error cannot prove that the already-observed write did not apply. Preserve its
+        // identity across access, abort, missing and protocol failures until a valid terminal record.
+        // The same applies to an id-less exact-key replay: a rejected recovery request says nothing
+        // about whether the original request reached the durable command store.
+        || pending || checking
+      const sameDraft = text === submission.text && baseline === submission.baseline
+      setIntent(unknown
+        ? { ...submission, record, unknown: !pending }
+        : commandCanRetry(record) && sameDraft
+          ? { ...submission, record, unknown: false }
+          : null)
+      const message = unknown
+        ? `Re-tag of #${n.id} has an uncertain outcome. Retry will reuse the same command identity.`
+        : `Re-tag of #${n.id} could not be submitted. Your draft is preserved.`
+      setError(message)
+      setMessageKind('error')
+      onToast?.(message)
+    }
+    finally {
+      // Avoid recreating an empty entry by writing busy=false after clearing a completed scope.
+      if (closeAfterSuccess) draftStore.clear(draftScope)
+      else setBusy(false)
+    }
   }
   return <>
     <div className="section-h">Concepts{status === 'partial' ? ' · partial (display-only)' : ''}
@@ -668,18 +794,74 @@ function ConceptTags({ n, state, runId, onToast }) {
       <label className="muted" htmlFor={`ct-${n.id}`}>One concept id per line (or comma-separated),
         e.g. <code>loss/contrastive</code>. Invalid ids are dropped.</label>
       <textarea id={`ct-${n.id}`} ref={areaRef} className="concept-tag-input" rows={4} value={text}
-        disabled={busy} onChange={event => setText(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); cancel() } }} />
+        disabled={busy}
+        aria-describedby={operationFenced ? `ct-${n.id}-command-hint` : undefined}
+        onChange={event => {
+          const next = event.target.value
+          setText(next)
+          if (intent && !operationFenced && next !== intent.text) setIntent(null)
+          if (error && !operationFenced) { setError(''); setMessageKind('') }
+        }}
+        onKeyDown={event => {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          cancel()
+        }} />
+      {baselineChanged && <div className="notice warn compact concept-tag-recovery">
+        <span role="status">Concept tags changed after this draft started. Review the latest set before replacing it.</span>
+        <div className="concept-tag-latest"><b>Latest tags:</b> {current.length ? current.join(', ') : 'none'}</div>
+        {operationFenced && <span className="muted">
+          Check the earlier command before choosing a baseline for this next draft.
+        </span>}
+        <div className="concept-tag-recovery-actions">
+          <button type="button" className="btn xs" disabled={busy || operationFenced} onClick={() => {
+            setText(currentKey)
+            setBaseline(currentKey)
+            setIntent(null)
+            setError('')
+            setMessageKind('')
+            onToast?.('Latest tags loaded into the editor.')
+          }}>Use latest</button>
+          <button type="button" className="btn xs" disabled={busy || operationFenced} onClick={() => {
+            setBaseline(currentKey)
+            setIntent(null)
+            setError('')
+            setMessageKind('')
+            onToast?.('Latest tags acknowledged. Your draft remains in the editor.')
+          }}>Continue with my draft</button>
+        </div>
+      </div>}
+      {error && <div className={`notice compact ${messageKind === 'status' ? 'warn' : 'resource-error'}`}
+        role={messageKind === 'status' ? 'status' : 'alert'}>{error}</div>}
+      {operationFenced && <div className="concept-command-recovery"
+        aria-label="Pending concept command recovery">
+        <span id={`ct-${n.id}-command-hint`} className="muted">
+          The earlier re-tag is still unresolved. Check that command before closing this draft.
+        </span>
+        <div className="concept-tag-latest"><b>Submitted tags:</b>{' '}
+          {intent.concepts?.length ? intent.concepts.join(', ') : 'none (clear all)'}
+        </div>
+        <button type="button" className="btn xs" onClick={copyPendingInput}>
+          Copy pending input
+        </button>
+      </div>}
       <div className="concept-tag-actions">
-        <button type="button" className="btn sm" disabled={busy} onClick={save}>
-          {busy ? 'Saving…' : 'Save tags'}</button>
-        <button type="button" className="btn sm ghost" disabled={busy} onClick={cancel}>Cancel</button>
+        <button type="button" className="btn sm"
+          disabled={busy || (!operationFenced && (baselineChanged || !canEdit))}
+          aria-describedby={operationFenced ? `ct-${n.id}-command-hint` : undefined}
+          onClick={save}>
+          {busy ? (operationFenced ? 'Checking…' : exactRetry ? 'Retrying…' : 'Saving…')
+            : operationFenced ? 'Check command' : exactRetry ? 'Retry same command' : 'Save tags'}</button>
+        <button type="button" className="btn sm ghost" disabled={busy || operationFenced}
+          aria-describedby={operationFenced ? `ct-${n.id}-command-hint` : undefined}
+          title={operationFenced ? 'Check the pending re-tag before closing this draft' : undefined}
+          onClick={cancel}>Cancel</button>
       </div>
     </div>}
   </>
 }
 
-function Overview({ n, state, runId, onToast }) {
+function Overview({ n, state, runId, onToast, draftStore, expectedGeneration }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
@@ -694,7 +876,8 @@ function Overview({ n, state, runId, onToast }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
-    <ConceptTags key={`${runId}:${n.id}:${n.attempt}`} n={n} state={state} runId={runId} onToast={onToast} />
+    <ConceptTags key={`${runId}:${expectedGeneration || '?'}:${n.id}:${n.attempt}`} n={n} state={state} runId={runId}
+      onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />
     <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
@@ -1732,8 +1915,9 @@ function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, work
   </div>
 }
 
-function Code({ n }) {
-  const [diff, setDiff] = useState(false)
+function Code({ n, draftStore, draftScope }) {
+  const [diff, setDiff] = useInspectorDraftField(
+    draftStore, draftScope, 'diff', false, { disposable: true })
   const files = n.files || {}
   const codeDiff = useMemo(
     () => diff && n.parent_code != null ? diffLines(n.parent_code, n.code) : null,
@@ -1743,11 +1927,15 @@ function Code({ n }) {
       {n.parent_code != null && <button className={'btn sm' + (diff ? ' primary' : '')} onClick={() => setDiff(d => !d)}>diff vs parent #{n.parent_id_diffed}</button>}
     </div>
     {codeDiff
-      ? <CodeViewer diff={codeDiff} copyText={n.code || ''} label={`Node ${n.id} diff`} />
-      : <CodeViewer code={n.code || '(no solution.py — repo task or no code)'} label={`Node ${n.id} code`} />}
+      ? <CodeViewer diff={codeDiff} copyText={n.code || ''} label={`Node ${n.id} diff`}
+          draftStore={draftStore} draftScope={`${draftScope}:main`} />
+      : <CodeViewer code={n.code || '(no solution.py — repo task or no code)'} label={`Node ${n.id} code`}
+          draftStore={draftStore} draftScope={`${draftScope}:main`} />}
     {Object.keys(files).length > 0 && <>
       <div className="section-h">Helper files <span className="pill">{Object.keys(files).length}</span></div>
-      {Object.entries(files).map(([fn, c]) => <div key={fn}><div className="muted helper-file-label">{fn}</div><CodeViewer code={c} label={fn} maxHeight={300} /></div>)}
+      {Object.entries(files).map(([fn, c]) => <div key={fn}><div className="muted helper-file-label">{fn}</div>
+        <CodeViewer code={c} label={fn} maxHeight={300}
+          draftStore={draftStore} draftScope={`${draftScope}:file:${fn}`} /></div>)}
     </>}
   </>
 }

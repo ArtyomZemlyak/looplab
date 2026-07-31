@@ -905,7 +905,27 @@ table.tbl tr.best-row td { color: var(--best); }
   font-size: 12px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg-1); color: var(--fg); }
 .concept-tag-input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
-.concept-tag-actions { display: flex; gap: 8px; }
+.concept-tag-actions,
+.concept-tag-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.concept-tag-recovery,
+.concept-command-recovery { min-width: 0; overflow: hidden; }
+.concept-command-recovery {
+  display: grid;
+  gap: 7px;
+  padding: 9px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.concept-tag-latest {
+  max-height: 144px;
+  min-width: 0;
+  overflow: auto;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .eval-pipeline { margin: 8px 0; }
 .eval-pipeline-label { margin-bottom: 3px; font-size: 10px; }
 .eval-pipeline-stages { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
