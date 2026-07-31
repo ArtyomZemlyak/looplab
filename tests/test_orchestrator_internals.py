@@ -146,3 +146,25 @@ def test_create_node_id_is_gap_safe(tmp_path):
     after = fold(eng.store.read_all())
     assert 2 in after.nodes and after.nodes[2].idea.params["x"] == 9.0   # node 2 NOT overwritten
     assert 3 in after.nodes                                              # new node took max+1, not len(=2)
+
+
+def test_a_binary_task_asset_materializes_instead_of_crashing_every_node(tmp_path):
+    """The setup-provenance hash already handles bytes assets (`c.encode(...) if isinstance(c, str)
+    else bytes(c)`), so a task exposing a BINARY asset — a pickled encoder, a parquet shard — passes
+    setup cleanly. `write_assets` then called `write_text` on it, which raises TypeError on bytes:
+    every node materialization crashed, after setup had already declared the asset fine."""
+    from types import SimpleNamespace
+
+    from looplab.engine.workspace import WorkspaceSeeder
+
+    ws = WorkspaceSeeder(SimpleNamespace(_assets={
+        "notes.txt": "plain text\n",
+        "encoder.pkl": b"\x80\x04\x95binary",
+        "shard.bin": bytearray(b"\x00\x01\x02"),
+    }))
+    wd = tmp_path / "node"
+    ws.write_assets(wd)
+
+    assert (wd / "notes.txt").read_text(encoding="utf-8") == "plain text\n"
+    assert (wd / "encoder.pkl").read_bytes() == b"\x80\x04\x95binary"
+    assert (wd / "shard.bin").read_bytes() == b"\x00\x01\x02"

@@ -1543,15 +1543,19 @@ class CaseLibrary:
         prev = Abstraction(str(target.payload.get("abstraction", "")),
                            list(target.payload.get("anchors", [])))
         merged_ab = prev.merge(ab)
-        # CLAUDE REVIEW: [EDGE-CASE] Consolidation is triggered by embedding similarity alone, but the
-        # merged "better metric" below is judged under the NEW payload's direction. Two near-duplicate
-        # cases from tasks with opposite directions (min vs max) merge under one direction, so the
-        # kept `metric` can be the worse of the two for the target case's own task. Guard the merge
-        # (or the metric fold) on matching directions.
-        direction = payload.get("direction") or target.payload.get("direction") or "min"
+        # Consolidation fires on embedding similarity alone, which says nothing about the two
+        # cases' OBJECTIVES. Folding a min-task metric and a max-task metric under one direction
+        # keeps the WORSE number for whichever case disagrees — silently, and the merged case then
+        # advises future runs with it. When the directions differ (or one is unknown) keep the
+        # TARGET's own metric instead of picking a winner across incomparable scales.
+        old_dir, new_dir = target.payload.get("direction"), payload.get("direction")
+        direction = new_dir or old_dir or "min"
+        comparable = (old_dir or direction) == (new_dir or direction)
         p = {**target.payload, **payload}               # newer content wins for scalar fields
         om, nm = target.payload.get("metric"), payload.get("metric")
-        if om is not None and nm is not None:
+        if om is not None and nm is not None and not comparable:
+            p["metric"] = om                            # incomparable objectives -> keep the target's
+        elif om is not None and nm is not None:
             p["metric"] = min(om, nm) if direction == "min" else max(om, nm)
         elif om is not None:
             p["metric"] = om

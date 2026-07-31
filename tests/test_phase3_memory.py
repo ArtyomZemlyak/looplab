@@ -498,3 +498,33 @@ def test_auto_skill_write_serializes_on_the_shared_memory_lock(tmp_path):
     assert done.is_set()
     # ...and once it does run, it sees the FIRST fingerprint and promotes on the second distinct task.
     assert "status: promoted" in first.read_text(encoding="utf-8")
+
+
+def test_consolidation_never_folds_metrics_across_opposite_objectives():
+    """Consolidation fires on embedding similarity alone, which says nothing about the two cases'
+    OBJECTIVES. Folding a min-task metric and a max-task metric under one direction keeps the WORSE
+    number for whichever case disagrees — silently — and the merged case then advises future runs
+    with it. Incomparable directions keep the target's own metric instead."""
+    from looplab.engine.memory import CaseLibrary
+    from looplab.tools.memora import Abstraction
+    from looplab.tools.vectorstore import InMemoryVectorStore
+
+    def _library():
+        # `abstract` makes the library HARMONIC (consolidation only exists in that mode); one shared
+        # abstraction for every case means the second add always lands on the first as a duplicate.
+        return CaseLibrary(InMemoryVectorStore(), embed=lambda _t: [1.0, 0.0, 0.0],
+                           abstract=lambda _t: Abstraction("shared", ["anchor"]))
+
+    def _metrics(lib):
+        return [h.payload.get("metric")
+                for h in lib.store.search(lib.index, [1.0, 0.0, 0.0], 10)]
+
+    opposed = _library()
+    opposed.add("case-a", "shared idea text", {"direction": "min", "metric": 0.10})
+    opposed.add("case-b", "shared idea text", {"direction": "max", "metric": 0.95})
+    assert _metrics(opposed) == [0.10]         # consolidated, and kept the min-task target's own
+
+    same = _library()                          # matching directions still fold to the better one
+    same.add("case-a", "shared idea text", {"direction": "min", "metric": 0.10})
+    same.add("case-b", "shared idea text", {"direction": "min", "metric": 0.04})
+    assert _metrics(same) == [0.04]

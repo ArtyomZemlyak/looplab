@@ -227,25 +227,29 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if stamp == self.seen_stamp:
             self._e.store.append(EV_LESSONS_REFRESHED, {"at_node": n, "skipped": "unchanged"})
             return fold(self._e.store.read_all())
-        # CLAUDE REVIEW: [EDGE-CASE] The priors rebuild below is UNGUARDED, unlike every sibling
-        # advisory path in this cluster ("best-effort — never raises"). The embedder side is safe
-        # (`retrieve_lessons_harmonic` guards per-item and per-query internally), but
-        # `_load_reflection_priors_both` reads the store via `read_jsonl_lenient`, which raises
-        # OSError on an UNREADABLE lessons.jsonl/meta_notes.jsonl (permissions, transient FS fault);
-        # that propagates out of `_run_cadences` into the run() spine and errors the run — and since
-        # the EV_LESSONS_REFRESHED gate only advances on success, a persistently unreadable shared
-        # store crash-loops the run at the same cadence on every resume. Also `seen_stamp` is
-        # committed BEFORE the load succeeds; harmless today only because the raise aborts the
-        # process, but a future caller that catches would silently skip re-reading a changed store.
-        self.seen_stamp = stamp
         before = (self.prior_note_text, self.dev_prior_note_text)
         rid = state.run_id or None
+        # BEST-EFFORT, like every sibling advisory path here — priors are a hint, never a
+        # correctness input. `_load_reflection_priors_both` reads the shared store through
+        # `read_jsonl_lenient`, which RAISES OSError on an unreadable lessons.jsonl/meta_notes.jsonl
+        # (permissions, a transient FS fault). Unguarded that propagated through `_run_cadences`
+        # into the run() spine and errored the run — and because the EV_LESSONS_REFRESHED gate only
+        # advances on success, a persistently unreadable shared store crash-looped the run at the
+        # same cadence on every resume.
         # ONE scan for BOTH role priors (see load_reflection_priors_both). `changed` must reflect
         # EITHER prior moving — a concurrent run distilling only developer-tagged code-fix lessons
         # updates just dev_prior_note_text, and the refresh audit signal must not report that as
         # unchanged. `chars` sums both priors so the size delta is likewise visible for either role.
-        self.prior_note_text, self.dev_prior_note_text = \
-            self._e._load_reflection_priors_both(exclude_run_id=rid)
+        try:
+            self.prior_note_text, self.dev_prior_note_text = \
+                self._e._load_reflection_priors_both(exclude_run_id=rid)
+        except (OSError, ValueError) as e:  # noqa: BLE001 - an advisory refresh cannot fail the run
+            # The stamp is NOT advanced: the next cadence retries the same (still-changed) store
+            # instead of treating an unread store as read. The skip is disclosed, not silent.
+            self._e.store.append(EV_LESSONS_REFRESHED, {
+                "at_node": n, "skipped": "unreadable", "error": str(e)[:300]})
+            return fold(self._e.store.read_all())
+        self.seen_stamp = stamp        # committed only once the load actually succeeded
         self._e.store.append(EV_LESSONS_REFRESHED, {
             "at_node": n, "chars": len(self.prior_note_text) + len(self.dev_prior_note_text),
             "changed": (self.prior_note_text, self.dev_prior_note_text) != before})

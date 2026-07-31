@@ -437,17 +437,16 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
     if resolved is not None:
         return resolved
     if not writer_available:
-        # CLAUDE REVIEW: [EDGE-CASE] A scope that planned a finish report (`finish_report_planned`)
-        # but never reached `report_begun` returns False here on every pass when no report_writer is
-        # available — the report step can never be dispatched NOR closed. The reachable population
-        # (crash inside `_finish_with_report_if_quiescent` before the report lands) is not a
-        # permanent wedge: on resume the engine re-finishes under a NEW scope (report unplanned) and
-        # `incomplete_finalize_scope` tracks that newer candidate — but the old scope is silently
-        # ORPHANED and the planned report is lost with no disclosed degradation. This is the same
-        # never-self-healing shape the llm_cost step bounds with `_COST_REFRESH_MAX_ATTEMPTS` + a
-        # disclosed `degraded` marker; consider an analogous disclosed close
-        # (e.g. `outcome="writer_unavailable"`) instead of a silent orphan.
         if not _scope_has_step(current, scope, "report_begun"):
+            # PLANNED but never dispatched, and THIS process has no writer. Deliberately unresolved
+            # (False) rather than closed: a writer-less process must not retire a paid step it
+            # cannot perform, because the reachable population is "a writer-equipped process planned
+            # the report and crashed before `report_begun`" — and a later writer-equipped resume can
+            # still produce it. Closing it here would make that loss permanent to save an orphan
+            # that is already bounded: on resume the engine re-finishes under a NEW scope (report
+            # unplanned) and `incomplete_finalize_scope` tracks that newer candidate, so the run
+            # completes either way. Pinned by tests/test_finalize_paid_claims.py::
+            # test_finish_report_no_writer_preflight_never_requires_paid_lock.
             return False
         # A differently configured process may currently own this attempt.  An optional guard waits
         # for it on a normal filesystem; where locks are unsupported, a required paid dispatcher

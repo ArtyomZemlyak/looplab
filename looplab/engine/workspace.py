@@ -38,13 +38,15 @@ class WorkspaceSeeder:
             return
         wd = Path(workdir)
         wd.mkdir(parents=True, exist_ok=True)
-        # CLAUDE REVIEW: [EDGE-CASE] Assumes every asset value is str: the orchestrator's setup
-        # provenance explicitly hashes bytes assets too (`c.encode(...) if isinstance(c, str) else
-        # bytes(c)`), but write_text raises TypeError on bytes — a task exposing a binary asset
-        # passes setup cleanly, then crashes every node materialization. Mirror the str/bytes
-        # branch here (write_bytes for non-str content).
+        # str OR bytes, mirroring the str/bytes branch the setup-provenance hash already uses
+        # (`c.encode(...) if isinstance(c, str) else bytes(c)`). `write_text` raises TypeError on
+        # bytes, so a task exposing a BINARY asset passed setup cleanly and then crashed every
+        # single node materialization.
         for name, content in self._e._assets.items():
-            (wd / name).write_text(content, encoding="utf-8")
+            if isinstance(content, str):
+                (wd / name).write_text(content, encoding="utf-8")
+            else:
+                (wd / name).write_bytes(bytes(content))
 
     def write_node_files(self, node, workdir) -> None:
         """Materialize a multi-file solution's helper files (ADR-7 patch-gated agent)
