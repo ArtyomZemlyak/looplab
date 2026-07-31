@@ -24,16 +24,34 @@ def test_slash_command_expansion():
     assert {c["name"] for c in list_commands()} >= {"init", "review", "commit", "test"}
 
 
+def _poll_read(mgr, tid, *, until, timeout=15.0):
+    """Accumulate `read()` output until `until(text, status)` holds. Polling, not a fixed sleep: a
+    loaded host can spend longer than any hard-coded window just starting the interpreter, and the
+    test then read an empty string and reported the child as producing nothing. `read()` ADVANCES the
+    cursor, so each poll's chunk has to be accumulated — that is the very property under test."""
+    seen, status, deadline = "", "running", time.time() + timeout
+    while True:
+        row = mgr.read(tid)
+        seen += row["new_output"]
+        status = row["status"]
+        if until(seen, status) or time.time() >= deadline:
+            return seen, status, row
+        time.sleep(0.01)
+
+
 def test_background_manager_reads_incrementally(tmp_path):
     mgr = BackgroundManager()
-    tid = mgr.start([sys.executable, "-c", "print('a'); import time; time.sleep(0.3); print('b')"], str(tmp_path))
-    time.sleep(0.15)
-    r1 = mgr.read(tid)
-    assert r1["status"] == "running" and "a" in r1["new_output"]
-    time.sleep(0.4)
-    r2 = mgr.read(tid)
-    assert r2["status"] == "exited" and r2["exit_code"] == 0 and "b" in r2["new_output"]
-    assert "a" not in r2["new_output"]                 # cursor advanced — only NEW output
+    # The child holds between its two lines for far longer than the poll needs, so "still running when
+    # the first line arrives" stays true even on a slow host.
+    tid = mgr.start([sys.executable, "-c",
+                     "import time; print('a', flush=True); time.sleep(3); print('b', flush=True)"],
+                    str(tmp_path))
+    first, status, _row = _poll_read(mgr, tid, until=lambda text, _s: "a" in text)
+    assert status == "running" and "a" in first
+
+    rest, status, row = _poll_read(mgr, tid, until=lambda text, s: "b" in text and s == "exited")
+    assert status == "exited" and row["exit_code"] == 0 and "b" in rest
+    assert "a" not in rest                             # cursor advanced — only NEW output
 
 
 def test_background_read_backpressure_nothing_lost(tmp_path):
