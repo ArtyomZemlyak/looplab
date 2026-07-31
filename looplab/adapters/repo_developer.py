@@ -852,14 +852,18 @@ class LLMRepoDeveloper:
                     with tracing.operation("plan"):
                         steps = self._propose_plan(system, idea, write)
                 if len(steps) >= getattr(self, "_plan_min_steps", 2):
-                    for i, step in enumerate(steps, 1):
-                        # CLAUDE REVIEW: [QUALITY] _run_step's "(step N error: …)" return value is
-                        # discarded here, so a step session that raised is swallowed with no
-                        # log/trace record of WHICH plan steps failed — the eval then runs on
-                        # whatever was written, and a later failure can't be attributed to the
-                        # broken step.
-                        self._run_step(idea, step, i, len(steps), write, system,
-                                       stage_note=stage_note)  # a step error can't abort the plan
+                    # A step error deliberately can't abort the plan — later steps and the eval still
+                    # run on whatever got written. But it must not vanish either: discarded, a later
+                    # eval failure could never be attributed to the step that broke. Collect them and
+                    # stamp ONE span so the trace says which steps failed and why.
+                    step_errors = [note for i, step in enumerate(steps, 1)
+                                   if (note := self._run_step(idea, step, i, len(steps), write,
+                                                              system, stage_note=stage_note))]
+                    if step_errors:
+                        with tracing.operation("plan_steps_failed", failed=len(step_errors),
+                                               total=len(steps),
+                                               detail="; ".join(step_errors)[:600]):
+                            pass
                 else:
                     # single-session implement is TERMINAL (evaluation reads no brief) → consume the
                     # briefs + read-cache, but no wasted summary call (handoff=False).

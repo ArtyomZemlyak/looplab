@@ -4,6 +4,7 @@ files); a repair stays a single focused session; every session gets a finite tur
 non-converging model can't run away (the 10k-call / multi-hour spin this fixes)."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -342,3 +343,37 @@ def test_repair_on_operator_stages_task_notes_pipeline_and_refuses_declare_stage
     msg = cap[0]["tools"].execute(
         "declare_stages", {"stages": [{"name": "train", "command": ["python", "t.py"]}]})
     assert msg.startswith("(refused") and "OPERATOR-declared" in msg
+
+
+def test_a_failed_plan_step_is_recorded_on_the_trace_not_silently_swallowed(monkeypatch, tmp_path):
+    """A step error deliberately does NOT abort the plan — later steps and the eval still run on
+    whatever got written. Discarding the error too meant a later eval failure could never be
+    attributed to the step that broke it; the trace must name which steps failed and why."""
+    import looplab.agents.agent as agent_mod
+    from looplab.core import tracing
+
+    def loop_with_a_broken_middle_step(client, tools, messages, emit_spec, *, finalize, fallback,
+                                       **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+        if name == "propose_plan":
+            return finalize({"steps": [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}]})
+        if any("STEP 2 of 2" in str(m.get("content") or "") for m in messages):
+            raise RuntimeError("model returned an unparseable edit")
+        return finalize({"summary": "ok"})
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", loop_with_a_broken_middle_step)
+
+    spans = tmp_path / "spans.jsonl"
+    tracer = tracing.Tracer(tracing.JsonlSpanExporter(spans), run_id="r")
+    with tracer.span("build", new_trace=True, node_id=1):
+        _dev(plan_decompose=True, plan_min_steps=2).implement(
+            Idea(operator="draft", params={}, rationale="a big multi-part change"))
+
+    rows = [json.loads(line) for line in spans.read_text(encoding="utf-8").splitlines() if line.strip()]
+    failed = [r for r in rows if r.get("name") == "plan_steps_failed"]
+    assert failed, [r.get("name") for r in rows]
+    attrs = failed[0].get("attributes") or failed[0].get("attrs") or failed[0]
+    assert attrs.get("failed") == 1 and attrs.get("total") == 2
+    assert "unparseable edit" in str(attrs.get("detail"))

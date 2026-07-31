@@ -1001,3 +1001,27 @@ def test_a_complete_sibling_log_carries_no_partial_label(tmp_path):
     tools = SiblingRunTools(tmp_path, "self")
     tools.bind_state(SimpleNamespace(task_id="t", goal="g", direction="max"), None)
     assert "PARTIAL SOURCE" not in tools.execute("list_sibling_runs", {})
+
+
+def test_every_cross_run_read_carries_the_partial_source_receipt(tmp_path):
+    """The listing labelled a torn log, but the per-node reads did not — so an agent that drilled
+    into a node saw authoritative-looking code/results from a prefix nobody could read past. Every
+    read from a partial source must carry the receipt, not just the one that first surfaces the run."""
+    from types import SimpleNamespace
+
+    from looplab.tools.run_tools import AllRunsTools, SiblingRunTools
+
+    _truncated_run(tmp_path)
+    bound = SimpleNamespace(task_id="t", goal="g", direction="max")
+
+    sib = SiblingRunTools(tmp_path, "self")
+    sib.bind_state(bound, None)
+    for name in ("read_sibling_experiment", "read_sibling_code"):
+        out = sib.execute(name, {"run_id": "sib", "node_id": 9})
+        assert "PARTIAL SOURCE" in out, (name, out)
+
+    machine = AllRunsTools(tmp_path, "self")
+    machine.bind_state(bound, None)
+    for name in ("read_run_code", "read_run_experiment"):
+        out = machine.execute(name, {"run_id": "sib", "node_id": 9})
+        assert "PARTIAL SOURCE" in out, (name, out)

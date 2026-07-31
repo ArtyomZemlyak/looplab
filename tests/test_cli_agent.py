@@ -244,3 +244,26 @@ def test_batch_shim_never_carries_the_prompt_on_its_command_line(tmp_path):
     pmsg, pvia = plain._prompt_delivery(hostile, pbase)
     assert pvia is False and pmsg == hostile
     assert hostile in plain._argv(pmsg, "solution.py", pbase)
+
+
+def test_a_timed_out_agent_keeps_what_it_printed_before_it_hung(tmp_path):
+    """A hung agent usually says where it got stuck right before it stops making progress. Recording
+    only `str(TimeoutExpired)` threw that away, so validation and the repair loop saw a bare
+    "timed out" for a run that had already explained itself."""
+    child = tmp_path / "chatty_hang.py"
+    child.write_text(
+        "import sys, time\n"
+        "print('resolving workspace deps')\n"
+        "print('ERROR: language server never became ready', file=sys.stderr)\n"
+        "sys.stdout.flush(); sys.stderr.flush()\n"
+        "time.sleep(120)\n",
+        encoding="utf-8")
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=[sys.executable, str(child)], timeout=1.5)
+    dev.implement(Idea(operator="draft", params={}))
+
+    run = dev.last_run
+    assert run is not None and run.timed_out is True
+    assert "resolving workspace deps" in (run.stdout_tail or "")
+    assert "language server never became ready" in (run.stderr_tail or "")
+    assert "timed out" in (run.stderr_tail or "").lower()      # the notice is kept too

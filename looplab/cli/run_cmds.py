@@ -36,6 +36,14 @@ from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine
                          _require_run_dir, app)
 
 
+# How long `resume` waits for a stopped run's previous owner to release engine.lock, and how often
+# it says so while waiting. Generous: a legitimate finalization tail (report + cross-run lessons +
+# cost roll-up) can take minutes. The point is that a WEDGED owner ends in an actionable message
+# instead of a terminal that hangs with no output at all.
+_HANDOFF_WAIT_S = 600.0
+_HANDOFF_ECHO_EVERY_S = 15.0
+
+
 def _engine(*args, **kwargs):
     """Late-bound through the package module: tests patch `looplab.cli._engine`
     (test_cli.py::_capture_backend) and the command bodies here must see that patch at call time —
@@ -203,6 +211,16 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
         raise typer.BadParameter(
             f"task.snapshot.json belongs to task {recovery_task.id!r}, but the event log belongs "
             f"to {task_id!r}; refusing to finalize with mismatched inputs")
+    return recovery_task, _settings_from_config_snapshot(config_snap)
+
+
+def _settings_from_config_snapshot(config_snap: Path):
+    """Load `config.snapshot.json` into Settings, mapping every failure to a one-line BadParameter.
+
+    A corrupt or hand-edited snapshot is an operator-facing input error, not an internal fault: raw
+    JSONDecodeError/ValidationError tracebacks tell the operator nothing about WHICH file to fix.
+    Shared by `run`'s finalization recovery and by `resume`/`finalize`, which read the same file.
+    """
     try:
         config_data = json.loads(config_snap.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -212,11 +230,10 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
         raise typer.BadParameter(
             f"cannot load original config snapshot {config_snap}: expected a JSON object")
     try:
-        recovery_settings = settings_from_snapshot(config_data)
+        return settings_from_snapshot(config_data)
     except ValidationError as exc:
         raise typer.BadParameter(
             f"cannot load original config snapshot {config_snap}: {exc}") from exc
-    return recovery_task, recovery_settings
 
 
 def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
@@ -637,12 +654,7 @@ def resume(
     settings = Settings()
     snap = run_dir / "config.snapshot.json"
     if snap.exists():
-        # CLAUDE REVIEW: [QUALITY] Unguarded json.loads/settings_from_snapshot: a corrupt or
-        # hand-edited config.snapshot.json dumps a raw JSONDecodeError/ValidationError traceback at
-        # the user, while the `run` path maps the same failure to a one-line BadParameter
-        # (_pending_finalization_inputs). Same gap in `finalize` below.
-        data = json.loads(snap.read_text(encoding="utf-8"))
-        settings = settings_from_snapshot(data)
+        settings = _settings_from_config_snapshot(snap)
     # Settings.max_nodes carries ge=1, but assignment validation is disabled (flat-settings/snapshot
     # design), so a direct override would silently accept 0/negative and then append resume/reopen work
     # that can only finish immediately. Enforce the field's own floor here, before `_engine` and before
@@ -673,11 +685,13 @@ def resume(
         initial.paused or initial.finished or initial.stop_requested
         or incomplete_finalize_scope(initial_events) is not None
         or initial.finalization_pending())
-    # CLAUDE REVIEW: [QUALITY] Unbounded, silent wait: when wait_for_handoff is True and the old
-    # owner is wedged (crashed while holding engine.lock on a platform/filesystem that doesn't
-    # release it, or stuck in a hung finalization tail), this loop spins at 20 Hz forever with no
-    # message and no timeout — the operator sees `resume` hang with zero output. A periodic
-    # "waiting for engine.lock held by ..." echo and/or a deadline would make the stall diagnosable.
+    # The handoff wait is DIAGNOSABLE, not silent. The old owner can be wedged — crashed while
+    # holding engine.lock on a filesystem that doesn't release it, or stuck in a hung finalization
+    # tail — and this loop would then spin forever with no output at all, so `resume` just looks
+    # hung. Echo periodically while waiting, and give up with an actionable message rather than
+    # blocking the operator's terminal indefinitely.
+    _handoff_deadline = time.time() + _HANDOFF_WAIT_S
+    _handoff_next_echo = time.time() + _HANDOFF_ECHO_EVERY_S
     while True:
         with _engine_singleton(run_dir) as ok:
             if ok:
@@ -718,6 +732,17 @@ def resume(
         if not (current.paused or current.finished or current.stop_requested):
             typer.echo(f"run {run_dir} was already resumed by the active engine")
             return
+        now = time.time()
+        if now >= _handoff_deadline:
+            typer.echo(
+                f"gave up after {_HANDOFF_WAIT_S:g}s waiting for the engine lock on {run_dir}; the "
+                "previous owner still holds it (a wedged finalization tail, or a stale lock left by "
+                "a crash). Check for a live engine process, then retry `looplab resume`.")
+            raise typer.Exit(code=1)
+        if now >= _handoff_next_echo:
+            _handoff_next_echo = now + _HANDOFF_ECHO_EVERY_S
+            typer.echo(f"waiting for the engine lock on {run_dir} "
+                       f"({_handoff_deadline - now:.0f}s left) — the previous owner is finishing up")
         time.sleep(0.05)
     _print_result(state)
 
@@ -788,10 +813,7 @@ def finalize(
     settings = Settings()
     csnap = run_dir / "config.snapshot.json"
     if csnap.exists():
-        # CLAUDE REVIEW: [QUALITY] Same unguarded snapshot load as `resume` above — a corrupt
-        # config.snapshot.json aborts finalize with a raw traceback instead of a BadParameter.
-        data = json.loads(csnap.read_text(encoding="utf-8"))
-        settings = settings_from_snapshot(data)
+        settings = _settings_from_config_snapshot(csnap)
     eng = _engine(run_dir, _load_task(snap), settings, crash_after=None)
     _preflight_speculation_authority(eng)
     with _engine_singleton(run_dir) as ok:

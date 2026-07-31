@@ -765,3 +765,32 @@ def test_inspect_model_override_targets_llm_model_field():
     assert s.llm_model == "my-override-model"
     # the old buggy form wrote a phantom attr and left llm_model at the default
     assert Settings().model_copy(update={"model": "x"}).llm_model == Settings().llm_model
+
+
+def test_resume_reports_a_wedged_engine_lock_instead_of_hanging_forever(tmp_path, monkeypatch):
+    """A stopped run whose previous owner never releases engine.lock (crashed holding it, or stuck in
+    a hung finalization tail) used to spin this loop at 20 Hz with no output and no deadline — the
+    operator just sees `resume` hang. It must say what it is waiting on and eventually give up."""
+    from contextlib import contextmanager
+
+    from looplab.cli import run_cmds
+
+    out = tmp_path / "r"
+    assert runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
+        "--set", "max_nodes=2", "--out", str(out),
+    ]).exit_code == 0
+
+    @contextmanager
+    def never_acquired(_run_dir):
+        yield False                                    # the previous owner never lets go
+
+    monkeypatch.setattr(run_cmds, "_engine_singleton", never_acquired)
+    monkeypatch.setattr(run_cmds, "_HANDOFF_WAIT_S", 0.4)
+    monkeypatch.setattr(run_cmds, "_HANDOFF_ECHO_EVERY_S", 0.1)
+
+    result = runner.invoke(app, ["resume", str(out)])
+    assert result.exit_code == 1, result.output
+    assert "waiting for the engine lock" in result.output      # narrated while it waited
+    assert "gave up after" in result.output                    # and bounded, with a next step
+    assert "retry `looplab resume`" in result.output

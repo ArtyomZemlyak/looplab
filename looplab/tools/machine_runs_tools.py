@@ -700,15 +700,14 @@ class MachineRunsTools:
         return (f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
             "read_experiment", {"node_id": nid, "trials": trials_arg})
 
-    # CLAUDE REVIEW: [QUALITY] `_read_run`/`_read_experiment` prepend the PARTIAL-SOURCE
-    # `source_note`, but `_read_logs` and `_read_trace` don't — logs/trace read from a truncated
-    # log look complete, the exact absence-inference hazard the note exists to prevent.
     def _read_logs(self, run_id, nid: int) -> str:
         st = self._state(run_id)
         if st is None:
             return f"(no such run: {run_id!r})"
+        note = self._runs.source_note(run_id)   # a truncated log must not read as complete
         self._reader.bind_state(st, None)
-        return f"run {run_id} · " + self._reader.execute("read_logs", {"node_id": nid})
+        return ((f"{note}\n" if note else "") + f"run {run_id} · "
+                + self._reader.execute("read_logs", {"node_id": nid}))
 
     def _read_trace(self, run_id, nid: int, stage: Optional[str] = None) -> str:
         """The node's agent trace as a linear, de-duplicated conversation. Reuses the SAME
@@ -718,6 +717,7 @@ class MachineRunsTools:
         st = self._state(run_id)
         if rd is None or st is None:
             return f"(no such run: {run_id!r})"
+        note = self._runs.source_note(run_id)   # a truncated log must not read as complete
         from looplab.events.traceview import build_conversation, load_spans
         spans_path = rd / "spans.jsonl"
         if not spans_path.exists():
@@ -727,7 +727,8 @@ class MachineRunsTools:
             convo = build_conversation(st, load_spans(spans_path), nid)
         except Exception as e:  # noqa: BLE001 — an unexpected hand-edited/I/O failure must soft-fail
             return f"(could not read trace: {e})"  # and never terminate the agent tool loop
-        return _render_conversation(convo, run_id, nid, stage, self.max_chars)
+        return ((f"{note}\n" if note else "")
+                + _render_conversation(convo, run_id, nid, stage, self.max_chars))
 
 
 class RunLauncherTools:

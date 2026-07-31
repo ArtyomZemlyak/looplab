@@ -262,16 +262,24 @@ class CliAgentDeveloper:
                     except subprocess.TimeoutExpired as e:
                         _kill_tree(p)                  # the WHOLE tree, not just the direct child
                         try:
-                            p.communicate(timeout=10)  # reap the signalled group; drain/free the pipes
+                            drained = p.communicate(timeout=10)  # reap the group; drain/free the pipes
                         except Exception:  # noqa: BLE001 — SIGKILL'd tree; __exit__ still closes the fds
-                            pass
-                        # CLAUDE REVIEW: [QUALITY] The partial stdout/stderr captured before the
-                        # timeout (available on e.stdout/e.stderr, and whatever the reap
-                        # communicate() above drained — its return value is discarded) is thrown
-                        # away: AgentRun records only str(e), so validation/triage loses everything
-                        # the agent printed before it hung.
-                        self.last_run = AgentRun(launched=True, timed_out=True,
-                                                 stderr_tail=str(e)[-2000:])
+                            drained = (None, None)
+                        # KEEP what the agent printed before it hung. `TimeoutExpired` carries the
+                        # output captured up to the deadline, and the reap above drains whatever
+                        # landed after it; recording only `str(e)` threw both away, so the operator
+                        # and the repair loop saw a bare "timed out" for a run that may have said
+                        # exactly where it got stuck. The timeout notice stays, appended to stderr.
+                        def _tail(*parts) -> str:
+                            text = "".join(
+                                (x.decode("utf-8", "replace") if isinstance(x, bytes) else str(x))
+                                for x in parts if x)
+                            return text[-2000:]
+
+                        self.last_run = AgentRun(
+                            launched=True, timed_out=True,
+                            stdout_tail=_tail(e.stdout, drained[0]),
+                            stderr_tail=_tail(e.stderr, drained[1], "\n", str(e)))
                     except BaseException:
                         # ANY other error (KeyboardInterrupt / MemoryError / an OSError raised mid-
                         # communicate) must NOT leave a detached tree: with start_new_session the child is

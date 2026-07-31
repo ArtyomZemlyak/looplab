@@ -788,10 +788,9 @@ class SiblingRunTools:
         if not self.task_id or getattr(st, "task_id", "") != self.task_id:  # same-task boundary (see `_read`)
             return f"(run {run_id!r} is not a sibling of task {self.task_id!r})"
         self._reader.bind_state(st, None)
-        # CLAUDE REVIEW: [QUALITY] Unlike `_read` above, this omits `self._runs.source_note(run_id)`:
-        # code read from a torn/partial sibling log carries no PARTIAL-SOURCE receipt, so the agent
-        # can't tell it may be looking at a stale prefix of that run.
-        return f"# from run {run_id}\n" + self._reader.execute("read_code", {"node_id": nid})
+        note = self._runs.source_note(run_id)   # same receipt `_read` carries — see `source_note`
+        return ((f"{note}\n" if note else "") + f"# from run {run_id}\n"
+                + self._reader.execute("read_code", {"node_id": nid}))
 
     def _analogous(self, args: dict) -> str:
         target = args.get("params")
@@ -903,24 +902,26 @@ class AllRunsTools:
         return (f"{len(lines)} run(s) on this machine (across all tasks):\n" + "\n".join(lines)
                 ) if lines else "(no other runs on this machine)"
 
-    # CLAUDE REVIEW: [QUALITY] `_list_runs` above marks partial sources, but neither `_code` nor
-    # `_read` prepends `self._runs.source_note(run_id)` the way SiblingRunTools._read /
-    # MachineRunsTools._read_experiment do — a node read from a truncated foreign log looks
-    # authoritative here.
+    # Every per-node read here carries the same PARTIAL-SOURCE receipt `_list_runs` puts on the
+    # listing: without it a node read from a truncated foreign log looks authoritative, which is
+    # exactly how a prefix read becomes an "no later run beat this" absence claim.
     def _code(self, run_id, nid: int) -> str:
         st = self._state(run_id)
         if st is None:
             return f"(no such run: {run_id!r})"
         self._reader.bind_state(st, None)
-        return f"# from run {run_id}\n" + self._reader.execute("read_code", {"node_id": nid})
+        note = self._runs.source_note(run_id)
+        return ((f"{note}\n" if note else "") + f"# from run {run_id}\n"
+                + self._reader.execute("read_code", {"node_id": nid}))
 
     def _read(self, run_id, nid: int, trials_arg=None) -> str:
         st = self._state(run_id)
         if st is None:
             return f"(no such run: {run_id!r})"
         self._reader.bind_state(st, None)
-        return f"run {run_id} · " + self._reader.execute(
-            "read_experiment", {"node_id": nid, "trials": trials_arg})
+        note = self._runs.source_note(run_id)
+        return ((f"{note}\n" if note else "") + f"run {run_id} · " + self._reader.execute(
+            "read_experiment", {"node_id": nid, "trials": trials_arg}))
 
 
 class DataTools:
