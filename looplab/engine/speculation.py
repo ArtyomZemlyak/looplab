@@ -1884,25 +1884,29 @@ class SpeculationMixin:
                                         proposal_node_ceiling = self._node_id_ceiling(
                                             proposal_events, proposal_state,
                                         )
-                                        # CLAUDE REVIEW: [EDGE-CASE] Asymmetric with `_start_head_producer`,
-                                        # which wraps its `start_soon` in try/except BaseException to roll back
-                                        # the inflight marker. Here, if `start_soon` raises (task group already
-                                        # closing), `_spec_raw_stage_inflight` stays True forever: the finally in
-                                        # `_produce_raw_card_stage` never runs, `_ensure_speculation_state` only
-                                        # initializes MISSING attrs, and every session-exit gate below includes it
-                                        # in `memory_pending` — so the NEXT `_run_card_session` can never reach its
-                                        # break conditions and polls indefinitely. Mirror the producer's rollback.
+                                        # Rolled back on a failed spawn, exactly like
+                                        # `_start_head_producer` does with its inflight key. If
+                                        # `start_soon` raises (the task group is already closing) the
+                                        # `finally` in `_produce_raw_card_stage` never runs, and
+                                        # `_ensure_speculation_state` only initializes MISSING attrs —
+                                        # so this flag would stay True forever, every session-exit gate
+                                        # below would keep counting it in `memory_pending`, and the
+                                        # NEXT `_run_card_session` could never reach a break condition.
                                         self._spec_raw_stage_inflight = True
-                                        task_group.start_soon(
-                                            self._produce_raw_card_stage,
-                                            dict(raw_actions[0]),
-                                            proposal_events,
-                                            proposal_state,
-                                            proposal_node_ceiling,
-                                            self._proposal_cue_fence(proposal_state),
-                                            roles,
-                                            send,
-                                        )
+                                        try:
+                                            task_group.start_soon(
+                                                self._produce_raw_card_stage,
+                                                dict(raw_actions[0]),
+                                                proposal_events,
+                                                proposal_state,
+                                                proposal_node_ceiling,
+                                                self._proposal_cue_fence(proposal_state),
+                                                roles,
+                                                send,
+                                            )
+                                        except BaseException:
+                                            self._spec_raw_stage_inflight = False
+                                            raise
                                         progressed = True
                                     else:
                                         # Unsupported raw interception (or no isolated pair) must

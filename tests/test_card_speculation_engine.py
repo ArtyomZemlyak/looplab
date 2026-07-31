@@ -2332,3 +2332,40 @@ def test_request_and_claim_tail_cas_retries_do_not_duplicate_lifecycle(
     assert len([event for event in events if event.type == EV_NODE_CREATED]) == 1
     assert len([event for event in events if event.type == EV_CARD_BUILD_DONE]) == 1
     assert fold(events).card_builds_done == 1
+
+
+def test_every_speculative_spawn_rolls_back_its_inflight_marker_on_a_failed_start():
+    """Both speculative spawns set an inflight marker BEFORE `start_soon`, and the marker is only
+    cleared by the spawned coroutine's own `finally`. If `start_soon` raises — the task group is
+    already closing — that `finally` never runs, `_ensure_speculation_state` only initializes MISSING
+    attrs, and the stuck marker keeps every session-exit gate counting it in `memory_pending`: the
+    next `_run_card_session` can never reach a break condition and polls forever. Structural pin,
+    because reaching a raising `start_soon` through a live card session is not unit-drivable."""
+    import ast
+    from pathlib import Path
+
+    import looplab.engine.speculation as speculation
+
+    tree = ast.parse(Path(speculation.__file__).read_text(encoding="utf-8"))
+    spawns = [node for node in ast.walk(tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "start_soon"]
+    assert len(spawns) >= 2, len(spawns)
+
+    def _guarded(call: ast.Call) -> bool:
+        """True when `call` sits inside a `try` whose handler catches BaseException."""
+        for candidate in ast.walk(tree):
+            if not isinstance(candidate, ast.Try):
+                continue
+            if not any(child is call for child in ast.walk(candidate)):
+                continue
+            for handler in candidate.handlers:
+                name = getattr(handler.type, "id", None)
+                if name in ("BaseException", "Exception"):
+                    return True
+        return False
+
+    unguarded = [call.lineno for call in spawns if not _guarded(call)]
+    assert not unguarded, (
+        "speculative start_soon with no BaseException rollback of its inflight marker at "
+        f"line(s) {unguarded} — a failed spawn would strand the marker and wedge the next session")

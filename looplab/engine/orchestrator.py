@@ -3160,10 +3160,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # DeepResearcher owns a paid client and mutable run-bound tools. Its worker
                 # must be joined before the eval window closes; abandoning it permits post-finalization
                 # usage events and lets the next research pass rebind the same tools under a live call.
+                # Counted as an ATTEMPT, before the call rather than after it returns. Incrementing
+                # only on success meant a provider that consistently RAISES (broken auth, endpoint
+                # down, or a failure after tokens were already charged) never touched
+                # `concurrent_research_max_calls` and was re-called every `base` seconds for the whole
+                # eval window — the one budget backstop, blind to exactly the failure mode that can
+                # spend money without producing anything.
+                calls += 1
                 memo = await anyio.to_thread.run_sync(
                     functools.partial(self._compute_deep_research, snap, trig, trace=False),
                     abandon_on_cancel=False)
-                calls += 1
                 if memo is None:
                     next_sleep = base
                     continue
@@ -3191,12 +3197,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation (evals joined) — must propagate
-            # CLAUDE REVIEW: [EDGE-CASE] `calls` is only incremented after a SUCCESSFUL
-            # _compute_deep_research, and this blanket handler retries every `base` seconds — so a
-            # provider that consistently raises (broken auth, endpoint down, or failing AFTER tokens
-            # were partially charged) is re-called indefinitely for the whole eval window and never
-            # counts against the `concurrent_research_max_calls` backstop. Count attempts (or bound
-            # consecutive failures) so the per-window LLM cap also bounds failed paid attempts.
             except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
                 next_sleep = base
                 continue

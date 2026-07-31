@@ -202,6 +202,22 @@ def test_loop_stops_calling_the_llm_past_the_per_window_cap():
     assert len(stub.recorded) == 3                              # all three were distinct -> all recorded
 
 
+def test_a_provider_that_always_raises_still_spends_the_per_window_cap():
+    """`calls` counted SUCCESSES, so a provider that consistently raises — broken auth, endpoint
+    down, or a failure after tokens were already charged — never touched
+    `concurrent_research_max_calls` and was re-called every cadence tick for the whole eval window.
+    The one budget backstop was blind to exactly the failure mode that can spend without producing."""
+    class _AlwaysRaises(_LoopStub):
+        def _compute_deep_research(self, state, trig, *, trace=True):
+            self.compute_calls += 1
+            raise RuntimeError("provider is down")
+
+    stub = _AlwaysRaises([_memo("unused")], cap=3, cadence=0.001)
+    anyio.run(Engine._research_overlap_loop, stub, "cadence")
+    assert stub.compute_calls == 3, stub.compute_calls   # attempts are bounded, not just successes
+    assert stub.recorded == []                           # and nothing was recorded from a failure
+
+
 def test_loop_first_trigger_label_then_repeat():
     a, b = _memo("A"), _memo("B")
     stub = _LoopStub([a, b], cap=2)
