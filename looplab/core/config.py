@@ -900,11 +900,10 @@ class Settings(BaseSettings):
     # choice. 0.0 (default) = OFF (act on every pick, the historical behavior); raise toward ~0.5 to
     # make the world model defer when it isn't sure. Pairs with the foresight track record (§1) the
     # predictor is now primed with. Range 0.0-1.0.
-    # CLAUDE REVIEW: [EDGE-CASE] the field comment says "Range 0.0-1.0" but unlike the sibling
-    # confidence/fraction knobs (train_monitor_kill_confidence, asha_live_quantile, ...) there is no
-    # Field(ge=0.0, le=1.0) bound, so e.g. 5.0 validates silently — a gate that can never pass, so
-    # every foresight pick permanently abstains with nothing in the snapshot to show why.
-    foresight_min_confidence: float = 0.0
+    # BOUNDED like its confidence/fraction siblings (train_monitor_kill_confidence,
+    # asha_live_quantile). Unbounded, a typo'd 5.0 validated silently into a gate no score can ever
+    # clear, so every foresight pick abstained forever with nothing in the snapshot to say why.
+    foresight_min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     # PART IV Phase 2c — replace the world model's SELF-REPORTED confidence (measured Pearson≈0 with the
     # realized outcome, §21.12) with a CALIBRATED §12-verifier score. When on and a client is available,
     # after the K-idea ranker picks the predicted-best candidate the §12 verifier scores it (grounded +

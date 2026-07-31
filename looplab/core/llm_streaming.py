@@ -131,11 +131,23 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
         stop = threading.Event()
         fb = first_byte_limit if first_byte_limit and first_byte_limit > 0 else idle_limit
 
-        # CLAUDE REVIEW: [EDGE-CASE] the idle clock also ticks while this GENERATOR is suspended at
-        # `yield`: a slow CONSUMER (e.g. a UI client draining complete_text_stream's SSE relay slower
-        # than idle_limit) draws no events, `last` never resets, and the watchdog shuts down a
-        # perfectly healthy provider connection — a consumer stall is indistinguishable from a
-        # provider stall here, and the resulting APITimeoutError is misattributed to the endpoint.
+        # The idle clock measures the PROVIDER only. This is a generator, so wall time also passes
+        # while it is suspended at `yield` — and a slow CONSUMER (a UI client draining
+        # complete_text_stream's SSE relay slower than idle_limit) drew no events, never reset
+        # `last`, and got a healthy connection shut down with an APITimeoutError blaming the
+        # endpoint. Time spent inside the consumer is tracked and excluded: `spent` accumulates
+        # completed yields, `suspended` marks one in flight (the case that matters — a consumer
+        # blocked at a single yield adds nothing to `spent` while it blocks).
+        spent = [0.0]                                 # consumer time already returned from
+        spent_at_last = [0.0]                         # `spent` when `last` was set
+        suspended = [0.0]                             # monotonic start of the in-flight yield, else 0
+
+        def _consumer_gap(now: float) -> float:
+            """Consumer time since `last` was set — subtract it before judging the provider."""
+            done = spent[0] - spent_at_last[0]
+            live = suspended[0]
+            return max(0.0, done + ((now - live) if live else 0.0))
+
         def _wd():
             while not stop.wait(min(5.0, min(fb, idle_limit) / 4)):
                 now = time.monotonic()
@@ -145,7 +157,9 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
                 # can no longer mask a stalled generation, because empties don't reset `last` (the
                 # bug: a 74-min live hang where the watchdog never fired because every keepalive chunk
                 # reset the idle timer).
-                stalled = (now - start > fb) if not conn[0] else (now - last[0] > idle_limit)
+                gap = _consumer_gap(now)
+                stalled = ((now - start - gap > fb) if not conn[0]
+                           else (now - last[0] - gap > idle_limit))
                 if stalled:
                     killed[0] = True
                     try:
@@ -164,7 +178,14 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
                 conn[0] = True                    # connection is producing (even an empty keepalive)
                 if _chunk_has_content(ev):        # only REAL content resets the idle timer
                     last[0] = time.monotonic()
-                yield ev
+                    spent_at_last[0] = spent[0]
+                _y0 = time.monotonic()
+                suspended[0] = _y0                # the watchdog must not blame the provider for this
+                try:
+                    yield ev
+                finally:
+                    suspended[0] = 0.0
+                    spent[0] += time.monotonic() - _y0
         except Exception:
             if killed[0]:
                 raise openai.APITimeoutError(request=getattr(resp, "request", None)) from None

@@ -869,6 +869,57 @@ def test_stream_idle_guard_kills_keepalive_trickle():
     assert shot.is_set()               # the watchdog reached the socket and shut it down
 
 
+def test_stream_idle_guard_does_not_blame_the_provider_for_a_slow_consumer():
+    """This is a GENERATOR, so wall time also passes while it is suspended at `yield`. A consumer
+    that draws slower than idle_limit (a UI client relaying SSE) drew no events, never reset the idle
+    clock, and got a perfectly healthy connection shut down — with an APITimeoutError blaming the
+    endpoint for the client's own backpressure."""
+    import threading
+    import time as _time
+    from looplab.core.llm import _stream_with_idle_guard
+    shot = threading.Event()
+
+    class _Sock:
+        def shutdown(self, _how):
+            shot.set()
+
+    class _NS:
+        def get_extra_info(self, _k):
+            return _Sock()
+
+    class _Resp:
+        request = None
+        extensions = {"network_stream": _NS()}
+        def close(self):
+            pass
+
+    _Delta = type("_Delta", (), {"content": "tok", "tool_calls": None})
+    _Choice = type("_Choice", (), {"delta": _Delta(), "finish_reason": None})
+
+    class _Chunk:                      # a real-content chunk, so it resets the idle clock
+        choices = [_Choice()]
+        usage = None
+
+    class _Stream:                     # the PROVIDER is fast: three chunks, no delay
+        response = _Resp()
+        def __init__(self):
+            self._left = 3
+        def __iter__(self):
+            return self
+        def __next__(self):
+            if self._left <= 0:
+                raise StopIteration
+            self._left -= 1
+            return _Chunk()
+
+    got = []
+    for ev in _stream_with_idle_guard(_Stream(), idle_limit=0.3):
+        _time.sleep(0.5)               # the CONSUMER is slow — well past idle_limit
+        got.append(ev)
+    assert len(got) == 3
+    assert not shot.is_set(), "the watchdog killed a healthy connection over consumer backpressure"
+
+
 def test_stream_idle_guard_disabled_passes_through():
     """idle_limit<=0 (tests / plain iterators) just passes events through, no watchdog."""
     from looplab.core.llm import _stream_with_idle_guard
@@ -1180,3 +1231,37 @@ def test_litellm_complete_tool_requires_the_forced_emit_call(monkeypatch):
     # A real emit is selected BY NAME even when another call is listed first.
     monkeypatch.setattr(c, "_completion", lambda **_kw: _resp("search_web", "emit"))
     assert c.complete_tool([{"role": "user", "content": "go"}], {"type": "object"}) == {"x": 1}
+
+
+def test_a_plain_dict_usage_on_the_final_stream_chunk_does_not_abort_the_call():
+    """`ev.usage.model_dump()` assumed a pydantic object. A provider — or a test mock — whose final
+    chunk carries `usage` as a plain dict has no `.model_dump()`, and the AttributeError aborted the
+    WHOLE call over optional telemetry. `complete_text_stream` already tolerated that shape."""
+    from looplab.core.llm import _stream_usage
+
+    assert _stream_usage({"prompt_tokens": 3, "completion_tokens": 4}) == {
+        "prompt_tokens": 3, "completion_tokens": 4}
+    assert _stream_usage(object()) == {}                      # neither dict nor pydantic -> no telemetry
+
+    class _Pydanticish:
+        def model_dump(self):
+            return {"prompt_tokens": 5}
+
+    assert _stream_usage(_Pydanticish()) == {"prompt_tokens": 5}
+
+
+def test_trailing_prose_after_a_leaked_tool_call_is_not_discarded():
+    """Only the text BEFORE the first opener used to survive, so a model that answers, leaks a call
+    in its own template, then keeps talking lost everything after the closing tag — and in
+    `_apply_native_tool_calls`' FINAL-answer recovery that trailing text can BE the answer."""
+    from looplab.core.llm_toolcall import _extract_native_tool_calls
+
+    content = ('Before the call.\n'
+               '<|DSML|invoke name="emit"><|DSML|parameter name="arguments">{"a": 1}'
+               '</|DSML|parameter></|DSML|invoke>\n'
+               'After the call — this is the actual answer.')
+    calls, clean = _extract_native_tool_calls(content)
+    assert calls and calls[0]["function"]["name"] == "emit"
+    assert "Before the call." in clean
+    assert "After the call — this is the actual answer." in clean
+    assert "invoke name=" not in clean                        # the markup itself is still stripped

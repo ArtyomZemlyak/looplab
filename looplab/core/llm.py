@@ -494,11 +494,10 @@ class OpenAICompatibleClient:
         usage: dict = {}
         for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
             if getattr(ev, "usage", None):
-                # CLAUDE REVIEW: [EDGE-CASE] `ev.usage.model_dump()` assumes a pydantic object; a
-                # provider/mock chunk whose `usage` is a plain dict raises AttributeError here and
-                # aborts the whole call, while the sibling path (complete_text_stream) tolerates that
-                # shape via _stream_usage(). Use the same tolerant extractor.
-                usage = ev.usage.model_dump()
+                # Same tolerant extractor `complete_text_stream` uses: a provider (or a test mock)
+                # whose final chunk carries `usage` as a PLAIN DICT has no `.model_dump()`, and the
+                # AttributeError aborted the entire call over optional telemetry.
+                usage = _stream_usage(ev.usage)
             if not ev.choices:
                 continue
             ch = ev.choices[0]

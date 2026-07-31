@@ -742,3 +742,17 @@ def test_capture_policy_follows_its_run_across_a_worker_thread_hop(tmp_path):
         assert "PAYLOAD" not in off_text and "OUT" not in off_text
     finally:
         tracing.set_llm_capture(saved)
+
+
+def test_a_non_numeric_provider_token_count_cannot_take_down_the_traced_call():
+    """Tracing must never perturb the operation it observes. A provider is free to report "n/a" (or
+    None, or a float) where the schema says a number, and a bare `int()` on that raised straight out
+    of the tracer — taking the traced call with it."""
+    from looplab.core.tracing import _norm_usage, _token_int
+
+    assert _token_int("n/a") == 0 and _token_int(None) == 0
+    assert _token_int(12.7) == 12 and _token_int(-5) == 0      # no negative token counts
+    assert _norm_usage({"prompt_tokens": "n/a", "completion_tokens": 3}) == {
+        "prompt": 0, "completion": 3, "total": 3}
+    assert _norm_usage({"prompt": 2, "completion": 2, "total": "?"}) == {
+        "prompt": 2, "completion": 2, "total": 0}

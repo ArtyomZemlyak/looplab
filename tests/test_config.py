@@ -358,3 +358,17 @@ def test_legacy_snapshot_resume_does_not_switch_on_paid_work_the_run_never_did()
     # Deliberate omissions: guessing these would REMOVE behaviour an old run really had.
     assert "debug_depth" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS
     assert "foresight_panel" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS
+
+
+def test_foresight_min_confidence_is_bounded_like_its_siblings():
+    """The field is a 0..1 confidence, but was declared without a bound while every sibling knob
+    (train_monitor_kill_confidence, asha_live_quantile) carries one. A typo'd 5.0 validated silently
+    into a gate no score can ever clear, so every foresight pick abstained forever — with nothing in
+    the config snapshot to say why."""
+    from looplab.core.config import Settings
+
+    assert Settings(foresight_min_confidence=0.0).foresight_min_confidence == 0.0
+    assert Settings(foresight_min_confidence=1.0).foresight_min_confidence == 1.0
+    for bad in (5.0, -0.1, 1.5):
+        with pytest.raises(Exception):
+            Settings(foresight_min_confidence=bad)

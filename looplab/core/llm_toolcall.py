@@ -47,6 +47,9 @@ def _clean_thinking(content: str, reasoning: str = "") -> tuple[str, str]:
 _NATIVE_INVOKE_RE = re.compile(r'<(?!/)[^>]*?invoke\s+name="([^"]+)"(.*?)</[^>]*?invoke>', re.DOTALL)
 _NATIVE_PARAM_RE = re.compile(r'parameter\s+name="([^"]+)"[^>]*?>(.*?)</[^>]*?parameter>', re.DOTALL)
 _NATIVE_OPEN_RE = re.compile(r'<(?!/)[^>]*?(?:DSML|tool_calls|\binvoke\b)')
+# Markup left over AFTER the last recovered invoke block — the wrapper's closing tag, and any
+# further leaked tags. Only leading tags/whitespace are stripped, so real prose after them survives.
+_TRAILING_MARKUP_RE = re.compile(r'\A(?:\s*<[^>]*>)+')
 
 
 _CODE_SPAN_RE = re.compile(r"```.*?(?:```|$)|`[^`\n]*`", re.DOTALL)
@@ -70,9 +73,11 @@ def _extract_native_tool_calls(content: str):
         return any(a <= pos < b for a, b in spans)
 
     calls = []
+    last_end = None                     # end of the LAST recovered block, for the trailing prose
     for m in _NATIVE_INVOKE_RE.finditer(content):
         if _quoted(m.start()):
             continue
+        last_end = m.end()
         name, body = m.group(1), m.group(2)
         params = {p.group(1): p.group(2).strip() for p in _NATIVE_PARAM_RE.finditer(body)}
         args = params.get("arguments")
@@ -90,11 +95,14 @@ def _extract_native_tool_calls(content: str):
     m0 = next((m for m in _NATIVE_OPEN_RE.finditer(content) if not _quoted(m.start())), None)
     if m0 is None:                # invoke text without any tag-anchored opener — quoted, not leaked
         return None, content
-    # CLAUDE REVIEW: [EDGE-CASE] only the text BEFORE the first opener survives: any assistant text
-    # AFTER the closing invoke tag (a model that keeps talking after its leaked call) is silently
-    # discarded from the cleaned content — for a FINAL-answer recovery in _apply_native_tool_calls
-    # that trailing prose is simply lost.
-    clean = content[:m0.start()].strip()
+    # Keep the prose on BOTH sides of the leaked call. Only the text before the first opener used
+    # to survive, so a model that answers, leaks a call, then keeps talking lost everything after —
+    # and in `_apply_native_tool_calls`' FINAL-answer recovery that trailing text can BE the answer.
+    # The invoke block is usually WRAPPED (`<tool_calls>…</tool_calls>`), so the tail starts with
+    # that wrapper's closer plus any further leaked blocks: strip leading markup before keeping it,
+    # or the recovered "prose" would just be the rest of the template.
+    tail = _TRAILING_MARKUP_RE.sub("", content[last_end:]) if last_end is not None else ""
+    clean = "\n".join(part for part in (content[:m0.start()].strip(), tail.strip()) if part)
     return calls, clean
 
 

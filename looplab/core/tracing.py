@@ -273,17 +273,14 @@ def record_llm_call(*, op: str, model: str, messages: list[dict], completion: st
     if not st:
         return
     rec = st[-1]
-    # CLAUDE REVIEW: [EDGE-CASE] LATENT: int() on a non-numeric usage value (e.g.
-    # {"prompt_tokens": "n/a"}) raises ValueError/TypeError, violating this module's own "tracing
-    # must never perturb the operation" rule. Not reachable today — record_llm_call has no
-    # production caller, and llm.py's ObservationHandle.usage() callers pass usage already
-    # sanitized to plain ints by `_safe_token_count` — but the guard belongs here so a future
-    # caller with raw provider usage can't crash the traced call. `_norm_usage` below shares the
-    # same unguarded int() pattern.
+    # Coerced, never raw `int()`: a provider that reports {"prompt_tokens": "n/a"} would otherwise
+    # raise out of the TRACER and take the traced operation with it, which is exactly what this
+    # module promises never to do. Today's callers hand over ints already sanitized by
+    # `_safe_token_count`, so this is the guard for the next caller, not a live fix.
     tokens = {
-        "prompt": int((usage or {}).get("prompt_tokens") or 0),
-        "completion": int((usage or {}).get("completion_tokens") or 0),
-        "total": int((usage or {}).get("total_tokens") or 0),
+        "prompt": _token_int((usage or {}).get("prompt_tokens")),
+        "completion": _token_int((usage or {}).get("completion_tokens")),
+        "total": _token_int((usage or {}).get("total_tokens")),
     }
     ev = {
         "name": "llm_call",
@@ -320,12 +317,23 @@ def _as_text(content) -> str:
     return "" if content is None else str(content)
 
 
+def _token_int(value) -> int:
+    """A token count as a plain non-negative int, never a raise. Tracing must not be able to perturb
+    the operation it observes, and a provider is free to report "n/a" (or None, or a float) where the
+    schema says a number — a bare `int()` on that would take the traced call down with it."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _norm_usage(tokens) -> dict:
     """Accept either OpenAI usage ({prompt_tokens,…}) or our short form ({prompt,…})."""
     t = tokens or {}
-    p = int(t.get("prompt_tokens") or t.get("prompt") or 0)
-    c = int(t.get("completion_tokens") or t.get("completion") or 0)
-    return {"prompt": p, "completion": c, "total": int(t.get("total_tokens") or t.get("total") or (p + c))}
+    p = _token_int(t.get("prompt_tokens") or t.get("prompt"))
+    c = _token_int(t.get("completion_tokens") or t.get("completion"))
+    return {"prompt": p, "completion": c,
+            "total": _token_int(t.get("total_tokens") or t.get("total") or (p + c))}
 
 
 def _redacted_error(value) -> str:

@@ -65,3 +65,27 @@ def test_prompt_vars_named_name_or_default_do_not_collide(tmp_path):
     assert render(store, "researcher_system", "unused", name="Ada", default="D") == "Hi Ada (D)"
     assert store.get("researcher_system", "unused", name="Ada", default="D") == "Hi Ada (D)"
     assert render(None, "k", "Hi $name", name="Bob") == "Hi Bob"
+
+
+def test_an_unreadable_override_falls_back_to_the_default_instead_of_crashing_the_role():
+    """The override is re-read on EVERY call so edits hot-reload — which invites live editing, so the
+    file can vanish between an exists() check and the open, and the read itself can fail
+    (permissions, a transient FUSE error). Either used to propagate out of `get` and take down the
+    calling role, where the documented behaviour for a missing override is the built-in default."""
+    import tempfile
+
+    from looplab.core.prompts import PromptStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = PromptStore(d)
+        assert store.get("researcher_system", "BUILT-IN") == "BUILT-IN"     # no override file at all
+
+        path = Path(d) / "researcher_system.md"
+        path.write_text("OVERRIDE", encoding="utf-8")
+        assert store.get("researcher_system", "BUILT-IN") == "OVERRIDE"
+
+        path.unlink()                                   # deleted between calls, as hot reload invites
+        assert store.get("researcher_system", "BUILT-IN") == "BUILT-IN"
+
+        Path(d, "researcher_system.md").mkdir()         # a DIRECTORY where a file is expected
+        assert store.get("researcher_system", "BUILT-IN") == "BUILT-IN"
