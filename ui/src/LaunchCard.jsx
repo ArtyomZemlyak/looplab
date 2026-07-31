@@ -52,6 +52,22 @@ function EnumOptions({ field, value }) {
   </>
 }
 
+const BOOL_CHOICE = Object.freeze({
+  inherit: 'inherit',
+  enabled: 'enabled',
+  disabled: 'disabled',
+  invalid: 'invalid',
+})
+
+const booleanChoice = (parsedSettings, key) => {
+  if (!parsedSettings.ok) return BOOL_CHOICE.invalid
+  const settings = parsedSettings.value
+  if (!Object.hasOwn(settings, key) || settings[key] == null) return BOOL_CHOICE.inherit
+  if (settings[key] === true) return BOOL_CHOICE.enabled
+  if (settings[key] === false) return BOOL_CHOICE.disabled
+  return BOOL_CHOICE.invalid
+}
+
 export default function LaunchCard({
   spec, chat = [], onStarted, retainedDraft = null, onDraftChange, launchIdentity = '',
 }) {
@@ -108,11 +124,14 @@ export default function LaunchCard({
 
   const focusFirstError = next => requestAnimationFrame(() => {
     const first = Object.keys(next || {})[0]
+    const nestedSetting = first?.startsWith('settings.')
     const owner = first?.startsWith('task.') ? 'task'
-      : first?.startsWith('settings.') ? 'settings' : first
+      : nestedSetting ? first.replace('.', '-') : first
     const field = owner === 'run_id' ? runIdRef.current
       : document.getElementById(`launch-${reactId}-${owner?.replace(/[^a-zA-Z0-9_-]/g, '-')}`)
-    ;(field || errorRef.current)?.focus()
+    const settingsJson = nestedSetting
+      ? document.getElementById(`launch-${reactId}-settings`) : null
+    ;(field || settingsJson || errorRef.current)?.focus()
   })
 
   // The stable Assistant owner retains only the editable draft in memory.  Validation and its token
@@ -400,9 +419,16 @@ export default function LaunchCard({
         {LAUNCH_RUNTIME_FIELDS.map(field => {
           const id = `launch-${reactId}-settings-${field.key}`
           const fieldError = errors[`settings.${field.key}`]
-          const value = runtimeValue(draft, field.key)
-          const helpId = field.help ? `${id}-help` : undefined
+          const value = field.type === 'bool'
+            ? booleanChoice(settingsParsed, field.key)
+            : runtimeValue(draft, field.key)
+          const hasHelp = !!field.help || field.type === 'bool'
+          const helpId = hasHelp ? `${id}-help` : undefined
           const describedBy = [helpId, fieldError ? errorId : null].filter(Boolean).join(' ') || undefined
+          const resolvedBoolean = field.type === 'bool' && value === BOOL_CHOICE.inherit
+            && validatedCurrent && typeof preview?.settings?.[field.key] === 'boolean'
+              ? preview.settings[field.key] : null
+          const booleanInvalid = field.type === 'bool' && value === BOOL_CHOICE.invalid
           return <div className="asst-launch-field" key={field.key}>
             <label htmlFor={id}>{field.label}</label>
             {field.type === 'enum'
@@ -412,17 +438,31 @@ export default function LaunchCard({
                   <EnumOptions field={field} value={value} />
                 </select>
               : field.type === 'bool'
-                ? <input id={id} checked={value === true} disabled={locked || !settingsParsed.ok}
-                    type="checkbox" aria-invalid={fieldError ? 'true' : undefined}
+                ? <select id={id} className="text" value={value} disabled={locked || !settingsParsed.ok}
+                    aria-invalid={fieldError || booleanInvalid ? 'true' : undefined}
                     aria-describedby={describedBy}
-                    onChange={event => changeRuntime(field, event.target.checked)} />
+                    onChange={event => changeRuntime(field,
+                      event.target.value === BOOL_CHOICE.enabled ? true
+                        : event.target.value === BOOL_CHOICE.disabled ? false : '')}>
+                    {booleanInvalid &&
+                      <option value={BOOL_CHOICE.invalid} disabled>Invalid value — edit Advanced JSON</option>}
+                    <option value={BOOL_CHOICE.inherit}>Use inherited value</option>
+                    <option value={BOOL_CHOICE.enabled}>Override: Enabled</option>
+                    <option value={BOOL_CHOICE.disabled}>Override: Disabled</option>
+                  </select>
               : <input id={id} className="text" value={value} disabled={locked || !settingsParsed.ok}
                   type={field.type === 'text' ? 'text' : 'number'} min={field.min}
                   step={field.type === 'int' ? 1 : field.type === 'float' ? 'any' : undefined}
                   placeholder={field.placeholder || 'inherit'} aria-invalid={fieldError ? 'true' : undefined}
                   aria-describedby={describedBy}
                   onChange={event => changeRuntime(field, event.target.value)} />}
-            {field.help && <span className="asst-launch-help" id={helpId}>{field.help}</span>}
+            {hasHelp && <span className="asst-launch-help" id={helpId}>
+              {field.help}{field.help && field.type === 'bool' ? ' ' : ''}
+              {field.type === 'bool' && <>Inherit resolves from task-file, saved, environment, profile,
+                or default settings. Validate for free to see the effective value.
+                {resolvedBoolean != null &&
+                  <> <strong>Validated inherited value: {resolvedBoolean ? 'Enabled' : 'Disabled'}.</strong></>}</>}
+            </span>}
           </div>
         })}
       </div>

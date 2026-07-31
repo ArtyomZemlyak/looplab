@@ -91,7 +91,7 @@ export function validateLaunchDraft(draft) {
   if (settings) {
     for (const field of LAUNCH_RUNTIME_FIELDS) {
       const value = settings[field.key]
-      if (value == null || value === '') continue
+      if (value == null || (value === '' && field.type !== 'bool')) continue
       if (field.type === 'int' && (!Number.isInteger(value)
           || (field.min != null && value < field.min)
           || (field.max != null && value > field.max))) {

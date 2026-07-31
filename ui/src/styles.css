@@ -2191,6 +2191,7 @@ pre.code.event-json { max-height: 220px; }
 @media (max-width: 720px) {
   .asst-launch { padding: 10px; }
   .asst-launch-runtime { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .asst-launch-section input.text, .asst-launch-section select.text { min-height: 44px; }
   .asst-launch-actions .btn { min-height: 44px; flex: 1 1 auto; }
 }
 @media (max-width: 440px) {
