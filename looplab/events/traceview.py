@@ -791,7 +791,7 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
     return turns
 
 
-def hydrate_inputs(spans: list[dict]) -> list[dict]:
+def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict]:
     """Reconstruct the complete retained `input` of every delta-encoded generation in `spans` from its
     `input_from` chain (see `tracing.generation`): full = reconstruct(input_from)[:input_carry] + delta.
     Returns spans with `input` expanded and the `input_carry`/`input_from` bookkeeping dropped, so a
@@ -803,14 +803,16 @@ def hydrate_inputs(spans: list[dict]) -> list[dict]:
     If an ANCESTOR span is absent (a torn/offset-skipped line — `span_index._read_full` drops one) the
     chain can't bottom out at its real base, so the reconstruction is a TRUNCATED prefix; such spans are
     stamped `input_partial=True` so a reader never presents a short input as a complete retained
-    prompt projection."""
-    # CLAUDE REVIEW: [PERF] Triple normalization on the finalize path: load_spans already normalized
-    # every span, this re-normalizes them, and build_trace_view then normalizes a third time
-    # (build_conversation similarly re-normalizes spans the index's _read_full already normalized).
-    # _normalize_span runs redaction/entropy analysis over every text field, so a large run pays the
-    # most expensive pass up to 3x; an already-normalized marker (like _tree's `_normalized` flag)
-    # would keep this idempotent without the repeated work.
-    spans = _normalize_spans(spans)
+    prompt projection.
+
+    `_normalized` is the same internal contract as `_tree`'s: pass it ONLY when every span provably
+    came straight from `load_spans` or `SpanIndex._read_full`, both of which already ran
+    `_normalize_span`. Normalization runs redaction/entropy analysis over every text field, and the
+    finalize path used to pay that pass three times over (load_spans, here, then build_trace_view).
+    The pass AFTER hydration is not redundant and is never skipped: a reconstructed `input` is new
+    content that has not been through the projection budget."""
+    if not _normalized:
+        spans = _normalize_spans(spans)
     by_sid = {s.get("span_id"): s for s in spans if s.get("span_id")}
     memo: dict = {}
     partial: dict = {}                    # sid -> True when its chain bottomed out at a missing ref/cycle

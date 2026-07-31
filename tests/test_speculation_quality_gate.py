@@ -1675,3 +1675,32 @@ def test_published_pair_threshold_is_the_one_the_gate_enforces():
     # The source says so too: the gate must READ that row, not re-derive the count beside it.
     src = Path(quality.__file__).read_text(encoding="utf-8")
     assert 'exact_pair_count = SPECULATION_QUALITY_THRESHOLDS["min_pairs"]' in src
+
+
+def test_the_calibration_prefix_snapshots_only_at_the_authority_events():
+    """`FoldCursor.snapshot()` deep-copies the accumulated RunState and reruns every fold finalizer.
+    The stage scan consumes that prefix ONLY in its two authority branches, so snapshotting on every
+    row made the scan quadratic at the admitted 100k-event bound for nothing. Pinned on the source
+    because the cost is per-event and a behavioural assertion would need a 100k-event fixture."""
+    import ast
+    import inspect
+
+    import looplab.search.speculation_quality as sq
+
+    fn = next(f for f in ast.walk(ast.parse(inspect.getsource(sq)))
+              if isinstance(f, ast.FunctionDef) and f.name == "_validate_calibration_greedy_authority")
+    loop = next(n for n in ast.walk(fn)
+                if isinstance(n, ast.For) and getattr(n.target, "id", None) == "event")
+
+    def _snapshots(node):
+        return [c for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "snapshot"
+                and getattr(c.func.value, "id", None) == "cursor"]
+
+    # every snapshot in the loop must sit inside an `if event.type == ...` branch, never at its top
+    top_level = [s for stmt in loop.body if not isinstance(stmt, ast.If) for s in _snapshots(stmt)]
+    assert not top_level, (
+        "cursor.snapshot() runs unconditionally on every event — the prefix is consumed only by the "
+        "authority branches, so this deep-copies the whole RunState once per row for nothing")
+    assert _snapshots(loop), "the authority branches must still take their prefix snapshot"

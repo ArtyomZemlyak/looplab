@@ -930,7 +930,8 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     try:
         trace_view = build_trace_view(
             final,
-            hydrate_inputs(load_spans(engine.run_dir / "spans.jsonl")),
+            # load_spans already normalized every span — see hydrate_inputs' `_normalized` contract.
+        hydrate_inputs(load_spans(engine.run_dir / "spans.jsonl"), _normalized=True),
         )
     except Exception:
         if modern_protocol:

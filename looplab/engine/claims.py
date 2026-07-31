@@ -1336,6 +1336,12 @@ def load_claim_decisions(memory_dir) -> dict:
     path = Path(memory_dir) / "claim_decisions.jsonl"
     from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
     out: dict = {}
+    # claim_uid -> every key currently indexed at it. A SUPERSET index: entries are added on write
+    # and pruned lazily when the retirement scan finds the key no longer carries that uid, which is
+    # exactly the predicate the old full `out.items()` walk evaluated. That walk ran once per row,
+    # so a portfolio with thousands of appended decisions paid a quadratic re-index on EVERY
+    # claims_for_memory / retrieval / governance read.
+    by_uid: dict[str, set] = {}
     rows = _read_claim_decision_rows(path)
     for r in _logical_decision_rows(rows):
         statement = _claim_text(r.get("statement"), _MAX_DECISION_STATEMENT)
@@ -1362,20 +1368,20 @@ def load_claim_decisions(memory_dir) -> dict:
         # One semantic UID may have several historical display spellings. Retire every index that points
         # at the same namespace before applying its newest row, so ``clear`` cannot be bypassed through an
         # older legacy statement key.
-        # CLAUDE REVIEW: [PERF] This retirement scan is O(rows^2) over the decision ledger (a full
-        # `out.items()` walk per row). `load_claim_decisions` runs on every claims_for_memory /
-        # retrieval / governance read, so a long-lived portfolio with thousands of appended decisions
-        # pays a quadratic re-index on each read. A uid -> keys reverse index built alongside `out`
-        # makes this linear.
         if uid:
-            for old_key, old in list(out.items()):
-                if str(old.get("claim_uid") or "") == uid:
+            indexed = by_uid.get(uid)
+            for old_key in tuple(indexed or ()):
+                old = out.get(old_key)
+                if old is not None and str(old.get("claim_uid") or "") == uid:
                     out.pop(old_key, None)
+                indexed.discard(old_key)     # the key no longer points here either way
         for key in keys:
             if r.get("decision") == "clear":
                 out.pop(key, None)
             else:
                 out[key] = current
+                if uid:
+                    by_uid.setdefault(uid, set()).add(key)
     return out
 
 

@@ -1490,3 +1490,69 @@ def test_claim_readers_quarantine_malformed_persisted_rows(tmp_path):
     assert by_statement["usable research"]["support"] == ["rr:8"]
     assert rows.claim_source["source_complete"] is False
     assert rows.claim_source["lessons"]["invalid_rows"] == 3
+
+
+def test_decision_reindex_is_linear_not_a_full_scan_per_row(tmp_path):
+    """`load_claim_decisions` runs on every claims_for_memory / retrieval / governance read, and it
+    re-derived the whole overlay each time by walking `out.items()` once per row. A portfolio with
+    thousands of appended decisions therefore paid a QUADRATIC re-index on every read."""
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
+    from looplab.engine.memory import normalize_statement
+
+    rows = 400
+    for i in range(rows):
+        record_claim_decision(str(tmp_path), statement=f"claim {i}", decision="ratified")
+
+    # Same UID re-decided under several historical spellings: the retirement scan's whole purpose.
+    for spelling in ("hard-neg helps", "hard-neg  helps", "HARD-NEG HELPS"):
+        record_claim_decision(str(tmp_path), statement=spelling, decision="ratified")
+    record_claim_decision(str(tmp_path), statement="hard-neg helps", decision="rejected")
+
+    out = load_claim_decisions(str(tmp_path))
+    assert out[normalize_statement("claim 7")]["decision"] == "ratified"
+    # the newest verdict wins at every spelling of the same semantic claim
+    assert out[normalize_statement("hard-neg helps")]["decision"] == "rejected"
+    assert not [k for k, v in out.items()
+                if v.get("claim_uid") and v["claim_uid"] == out[
+                    normalize_statement("hard-neg helps")]["claim_uid"]
+                and v["decision"] != "rejected"], "a stale spelling survived the retirement scan"
+
+
+def test_a_reused_uid_retires_every_older_key_that_still_points_at_it(tmp_path):
+    """The reverse index is a SUPERSET that is pruned lazily, so it must never retire a key whose
+    row no longer carries that uid — the predicate is checked, not assumed."""
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
+    from looplab.engine.memory import normalize_statement
+
+    record_claim_decision(str(tmp_path), statement="alpha beta", decision="ratified")
+    record_claim_decision(str(tmp_path), statement="beta alpha", decision="ratified")
+    # A DIFFERENT claim lands on one of those plain keys, so its row's uid changes.
+    record_claim_decision(str(tmp_path), statement="alpha beta", decision="rejected")
+
+    out = load_claim_decisions(str(tmp_path))
+    assert out[normalize_statement("alpha beta")]["decision"] == "rejected"
+    assert normalize_statement("beta alpha") in out          # an unrelated key must not be retired
+
+
+def test_the_uid_retirement_scan_does_not_walk_the_whole_overlay_per_row():
+    """The scan ran `for old_key, old in list(out.items())` once per decision row, so a portfolio
+    with thousands of appended decisions paid a quadratic re-index on EVERY governance read. A
+    uid -> keys reverse index makes it linear. Pinned on the source: the cost is per-row, and a
+    behavioural assertion would have to time a very large ledger to see it."""
+    import ast
+    import inspect
+
+    import looplab.engine.claims as claims
+
+    fn = next(f for f in ast.walk(ast.parse(inspect.getsource(claims)))
+              if isinstance(f, ast.FunctionDef) and f.name == "load_claim_decisions")
+    loop = next(n for n in ast.walk(fn)
+                if isinstance(n, ast.For) and isinstance(n.iter, ast.Call)
+                and getattr(n.iter.func, "id", None) == "_logical_decision_rows")
+
+    walks = [c for c in ast.walk(loop)
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+             and c.func.attr == "items" and getattr(c.func.value, "id", None) == "out"]
+    assert not walks, (
+        "the per-row body walks `out.items()` — that is the quadratic re-index the reverse index "
+        "was added to remove")

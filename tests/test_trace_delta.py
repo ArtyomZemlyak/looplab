@@ -478,3 +478,34 @@ def test_trace_tree_tolerates_a_deep_span_chain_without_recursionerror():
               "kind": "operation", "name": "op"} for i in range(6000)]
     roots = _tree(spans, _normalized=True)          # must not raise RecursionError
     assert len(roots) == 1 and roots[0]["span_id"] == "s0"
+
+
+def test_already_normalized_spans_are_not_re_redacted_by_hydrate_inputs(monkeypatch, tmp_path):
+    """`_normalize_span` runs redaction and entropy analysis over every text field. The finalize path
+    is load_spans -> hydrate_inputs -> build_trace_view, and each of those normalized independently,
+    so a large run paid the most expensive pass three times over."""
+    import looplab.events.traceview as tv
+
+    rows = [{"span_id": f"s{i}", "trace_id": "t", "parent_id": None, "kind": "generation",
+             "name": "gen", "t0": 0.0, "t1": 1.0, "attrs": {"node_id": "0"},
+             "input": [{"role": "user", "content": f"turn {i}"}]}
+            for i in range(20)]
+    path = tmp_path / "spans.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    spans = load_spans(path)                       # normalized ONCE, on the way off disk
+    calls = []
+    real = tv._normalize_span
+    monkeypatch.setattr(tv, "_normalize_span", lambda v: (calls.append(1), real(v))[1])
+
+    hydrated = tv.hydrate_inputs(spans, _normalized=True)
+    assert calls == [], (
+        f"hydrate_inputs re-normalized {len(calls)} already-normalized spans — load_spans and "
+        "SpanIndex._read_full both run _normalize_span before handing them over")
+    assert len(hydrated) == len(spans)
+    assert [h["span_id"] for h in hydrated] == [s["span_id"] for s in spans]
+
+    # …and the DEFAULT still normalizes, so an untrusted caller is never silently trusted.
+    calls.clear()
+    tv.hydrate_inputs([dict(r) for r in rows])
+    assert len(calls) == len(rows)

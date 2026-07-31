@@ -2386,7 +2386,8 @@ def build_router(srv) -> APIRouter:
                      if s.get("trace_id") == safe_tid), TRACE_DETAIL_SPAN_CAP)
             # Reconstruct the retained delta-encoded input before applying browser caps, so the per-op
             # tree does not mistake a delta for a complete diagnostic projection.
-            spans = [_cap_span_io(s) for s in hydrate_inputs(raw)]
+            # Both `raw` branches above are already normalized (SpanIndex._read_full / load_spans).
+            spans = [_cap_span_io(s) for s in hydrate_inputs(raw, _normalized=True)]
             total = max(len(spans), _projection_counter(total) if total is not None else len(raw))
             projection = _response_projection(
                 total_spans=total, visible_spans=len(spans),

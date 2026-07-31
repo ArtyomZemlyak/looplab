@@ -983,13 +983,11 @@ def _validate_calibration_greedy_authority(
         # snapshot() deep-copies accumulated RunState and reruns all fold finalizers, yet
         # this prefix is consumed only for card_added/card_build_requested. At the admitted 100k-event
         # bound this approaches quadratic work. Extend on every row, but snapshot only immediately
-        # before the authority event types that actually consult the prefix.
-        # CLAUDE REVIEW: [PERF] The code does NOT implement the note above: snapshot() still runs
-        # UNCONDITIONALLY on every event, so the quadratic deep-copy cost the comment prescribes
-        # avoiding is fully incurred (contrast _validate_calibration_card_owners, which snapshots
-        # only inside its EV_CARD_ADDED branch). Move this line into the two authority branches.
-        prefix = cursor.snapshot()
+        # before the authority event types that actually consult the prefix — the same shape as
+        # `_validate_calibration_card_owners`. The cursor still advances on EVERY row, so the prefix
+        # each branch observes is byte-identical to the unconditional version.
         if event.type == EV_CARD_ADDED:
+            prefix = cursor.snapshot()
             data = event.data if isinstance(event.data, Mapping) else {}
             idea = data.get("idea")
             if not isinstance(idea, Mapping):
@@ -1063,6 +1061,7 @@ def _validate_calibration_greedy_authority(
                 )
 
         if event.type == EV_CARD_BUILD_REQUESTED and depth > 0:
+            prefix = cursor.snapshot()
             data = event.data if isinstance(event.data, Mapping) else {}
             card_id = data.get("card_id")
             pending = list(prefix.pending_nodes())
