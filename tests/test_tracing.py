@@ -756,3 +756,26 @@ def test_a_non_numeric_provider_token_count_cannot_take_down_the_traced_call():
         "prompt": 0, "completion": 3, "total": 3}
     assert _norm_usage({"prompt": 2, "completion": 2, "total": "?"}) == {
         "prompt": 2, "completion": 2, "total": 0}
+
+
+def test_a_pathologically_deep_span_chain_still_renders_a_tree(tmp_path):
+    """`traceview._tree` was made ITERATIVE because a crafted or corrupt spans.jsonl can carry a
+    pathologically deep parent chain. The HTML renderer still recurses, so without a cap it raised
+    RecursionError — and finalize swallows that, losing the ENTIRE tree.html rather than one deep
+    branch, which is the opposite of the 'tolerate corrupt spans' contract."""
+    from looplab.events.htmlview import _MAX_SPAN_DEPTH, _span_forest_html
+
+    root = {"name": "root", "children": []}
+    cursor = root
+    for i in range(_MAX_SPAN_DEPTH * 10):
+        child = {"name": f"n{i}", "children": []}
+        cursor["children"].append(child)
+        cursor = child
+
+    out = _span_forest_html([root])          # no RecursionError
+    assert out.startswith("<ul") and "root" in out
+    assert f"deeper than {_MAX_SPAN_DEPTH} levels" in out    # and it SAYS it stopped
+    assert "<li>" in out
+
+    shallow = _span_forest_html([{"name": "a", "children": [{"name": "b", "children": []}]}])
+    assert "deeper than" not in shallow      # a real trace is untouched

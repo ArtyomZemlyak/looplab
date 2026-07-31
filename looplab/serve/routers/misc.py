@@ -681,13 +681,14 @@ def build_router(srv) -> APIRouter:
         for p in names[:_AUTHOR_MAX_FILES]:
             if p.is_symlink() or not p.is_file():
                 continue
-            # CLAUDE REVIEW: [EDGE-CASE] knowledge_dir is agent-writable (as the comment above
-            # says), so a file can be deleted/renamed between the glob and this open — the
-            # resulting FileNotFoundError/OSError surfaces as a 500 for the whole listing instead
-            # of skipping the one vanished file. Wrap the open/read in a try/except OSError:
-            # continue.
-            with open(p, "rb") as fh:
-                head = fh.read(_AUTHOR_MAX_BYTES + 1)
+            # knowledge_dir is AGENT-WRITABLE (see above), so a file can be deleted or renamed
+            # between the glob and this open. Skip the one that vanished rather than 500-ing the
+            # whole listing over a race that is normal here.
+            try:
+                with open(p, "rb") as fh:
+                    head = fh.read(_AUTHOR_MAX_BYTES + 1)
+            except OSError:
+                continue
             text = head[:_AUTHOR_MAX_BYTES].decode("utf-8", errors="replace")
             files.append({"name": p.name, "text": text,
                           "truncated": len(head) > _AUTHOR_MAX_BYTES})
@@ -711,14 +712,20 @@ def build_router(srv) -> APIRouter:
         target = (d / name).resolve()
         if d.resolve() not in target.parents:    # path-traversal guard
             raise HTTPException(400, "bad name")
-        # CLAUDE REVIEW: [EDGE-CASE] Two gaps vs the read side: (1) a non-UTF-8 body raises
-        # UnicodeDecodeError here -> unhandled 500 (should be a 400); (2) the write bound is only
-        # the server-wide 2 MB API body cap while list_author caps reads at _AUTHOR_MAX_BYTES
-        # (256 KiB) — a 256 KiB..2 MB PUT is persisted whole, then silently shown truncated forever,
-        # and the oversized file is hot-reloaded into agent context. Reject bodies over the read cap
-        # and return 400 on undecodable bytes.
+        # BOUNDED BY THE READ CAP, not the server-wide 2 MB body cap: `list_author` only ever shows
+        # the first `_AUTHOR_MAX_BYTES`, so a larger PUT was persisted whole and then displayed
+        # truncated forever — while the oversized file still got hot-reloaded into agent context in
+        # full. And an undecodable body raised UnicodeDecodeError into an unhandled 500; a client
+        # sending non-UTF-8 made a bad REQUEST, so say so.
         body = await request.body()
-        target.write_text(body.decode("utf-8"), encoding="utf-8")  # engine hot-reloads on next run
+        if len(body) > _AUTHOR_MAX_BYTES:
+            raise HTTPException(400, f"file too large: {len(body)}b > {_AUTHOR_MAX_BYTES}b "
+                                     "(the editor only displays the first that many bytes)")
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(400, f"file must be UTF-8 text: {exc}") from exc
+        target.write_text(text, encoding="utf-8")  # engine hot-reloads on next run
         return {"ok": True, "name": name}
 
     return router

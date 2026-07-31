@@ -8,13 +8,19 @@ import html
 from looplab.core.models import NodeStatus, RunState
 
 
-# CLAUDE REVIEW: [EDGE-CASE] _span_li recurses into span children, so a pathologically deep
-# parent_id chain in a crafted/corrupt spans.jsonl (the exact case traceview._tree was made
-# iterative for — see its why-comment) raises RecursionError here; at finalize the caller
-# swallows the exception and the whole tree.html is silently lost. Render the forest
-# iteratively or depth-cap the recursion to honor the "tolerate corrupt spans" contract.
-def _span_li(span: dict) -> str:
+# How deep the nested <li> rendering will follow a parent chain. `traceview._tree` was made
+# ITERATIVE because a crafted or corrupt spans.jsonl can carry a pathologically deep chain; this
+# renderer still recurses, so without a cap it raises RecursionError — and at finalize the caller
+# swallows that, losing the ENTIRE tree.html rather than one deep branch. Far past any real trace
+# (a node build nests ~6 levels), so a truncation here means the file is not a real trace.
+_MAX_SPAN_DEPTH = 200
+
+
+def _span_li(span: dict, depth: int = 0) -> str:
     """One span as a nested <li>: name · duration · status, recursing into children."""
+    if depth >= _MAX_SPAN_DEPTH:
+        return ("<li><span style='color:#888'>… span nesting deeper than "
+                f"{_MAX_SPAN_DEPTH} levels — not rendered</span></li>")
     status = span.get("status", "OK")
     color = "#b42318" if status == "ERROR" else "#555"
     dur = span.get("duration_s")
@@ -30,7 +36,7 @@ def _span_li(span: dict) -> str:
     for ev in span.get("events", []):
         if ev.get("name") == "exception":
             err = f"<div style='color:#b42318;font-size:11px'>{html.escape(str(ev.get('error',''))[:200])}</div>"
-    kids = "".join(_span_li(c) for c in span.get("children", []))
+    kids = "".join(_span_li(c, depth + 1) for c in span.get("children", []))
     kids_ul = f"<ul>{kids}</ul>" if kids else ""
     return (f"<li><span style='color:{color}'>{html.escape(span.get('name',''))}</span>"
             f"{dur_s}{extra_s}{err}{kids_ul}</li>")

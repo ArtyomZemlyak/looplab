@@ -16,6 +16,8 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
+import builtins  # noqa: E402
+
 from looplab.engine.orchestrator import Engine  # noqa: E402
 from looplab.search.policy import GreedyTree  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
@@ -3579,3 +3581,44 @@ def test_clear_trace_refuses_a_run_with_an_unserved_resume(tmp_path):
     EventStore(rd / "events.jsonl").append("resume_served", {})
     cleared = client.post("/api/runs/demo/nodes/0/clear_trace")
     assert cleared.status_code == 200 and cleared.json()["removed"] == 1
+
+
+def test_authoring_writes_are_bounded_and_utf8_and_a_vanished_file_is_skipped(tmp_path, monkeypatch):
+    """Three ways this pair could fail on ordinary input. The dirs are hot-reloaded into agent
+    context, and `knowledge_dir` is AGENT-writable, so all three are reachable in a live run."""
+    from looplab.serve.routers.misc import _AUTHOR_MAX_BYTES
+
+    kdir = tmp_path / "knowledge"
+    kdir.mkdir()
+    monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(kdir))
+    client = TestClient(make_app(tmp_path))
+
+    # (1) A body larger than what the listing will ever DISPLAY was persisted whole and then shown
+    # truncated forever — while the full oversized file still reached agent context.
+    too_big = client.put("/api/knowledge/big.md", content=b"x" * (_AUTHOR_MAX_BYTES + 1))
+    assert too_big.status_code == 400 and "too large" in too_big.text
+    assert not (kdir / "big.md").exists()
+
+    # (2) A non-UTF-8 body is a bad REQUEST, not an unhandled 500.
+    bad_bytes = client.put("/api/knowledge/bad.md", content=b"\xff\xfe not utf-8")
+    assert bad_bytes.status_code == 400 and "UTF-8" in bad_bytes.text
+
+    ok = client.put("/api/knowledge/good.md", content="# notes\n".encode("utf-8"))
+    assert ok.status_code == 200
+    assert (kdir / "good.md").read_text(encoding="utf-8") == "# notes\n"
+
+    # (3) A file that vanishes between the glob and the open (the agent deleting its own note) must
+    # skip that entry, not 500 the whole listing.
+    (kdir / "ghost.md").write_text("gone soon", encoding="utf-8")
+    real_open = builtins.open
+
+    def vanishing_open(file, *args, **kwargs):
+        if str(file).endswith("ghost.md"):
+            raise FileNotFoundError(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", vanishing_open)
+    listing = client.get("/api/knowledge")
+    monkeypatch.setattr(builtins, "open", real_open)
+    assert listing.status_code == 200
+    assert [f["name"] for f in listing.json()["files"]] == ["good.md"]
