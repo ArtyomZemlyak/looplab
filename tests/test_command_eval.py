@@ -683,3 +683,49 @@ def test_start_stage_reuses_earlier_stages_instead_of_paying_for_them_again(tmp_
                             stages=stages, start_stage="no-such-stage")
     assert full.metric == 2.0, "an unknown start_stage skipped work instead of re-running"
     assert [s["status"] for s in full.stages] == ["ok", "ok"]
+
+
+def test_a_reused_stages_artifact_still_feeds_the_secondary_readers_but_only_under_start_stage(tmp_path):
+    """F13: on a stage-scoped re-run the earlier stages are DELIBERATELY not re-executed, so the files
+    they wrote keep their prior-eval mtime. The constraint / extra-metric readers that point at them
+    must therefore drop the freshness gate in that mode — and ONLY in that mode.
+
+    Both directions are silent failures. Keeping the gate on marks a repaired node's constraint
+    unverifiable, which is a violation (fail-closed), so the node is wrongly excluded from best.
+    Dropping it unconditionally lets a stale prior-attempt file corroborate or gate a fresh metric.
+    """
+    # `train` writes the budget artifact ONCE — a second full run leaves the old file in place, which
+    # is exactly the stale-artifact-in-a-reused-workdir shape the freshness gate exists to catch.
+    (tmp_path / "train.py").write_text(
+        "import os\n"
+        "if not os.path.exists('stats.json'):\n"
+        "    open('stats.json', 'w').write('{\"budget\": 3}')\n", encoding="utf-8")
+    (tmp_path / "evaluate.py").write_text(
+        "import json\nprint(json.dumps({'metric': 1}))\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "train.py"]},
+              {"name": "eval", "command": [sys.executable, "evaluate.py"]}]
+    budget = {"kind": "file_json", "path": "stats.json", "key": "budget"}
+    kw = dict(stages=stages, metrics={"budget": budget},
+              constraints=[{"name": "budget", "max": 5, **budget}])
+
+    first = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M, **kw)
+    assert first.metric == 1.0 and first.violations is None   # written by THIS eval -> fresh
+    assert first.extra_metrics == {"budget": 3.0}
+
+    # Age the artifact past _FRESH_EPS so "reused" is distinguishable from "just written".
+    old = os.path.getmtime(tmp_path / "stats.json") - 60
+    os.utime(tmp_path / "stats.json", (old, old))
+
+    reused = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M,
+                              start_stage="eval", **kw)
+    assert reused.stages[0]["status"] == "reused"
+    assert reused.violations is None, "a reused stage's artifact was rejected as stale (fake violation)"
+    assert reused.extra_metrics == {"budget": 3.0}
+
+    # Same on-disk state, but a FULL run: `train` re-executed and did NOT rewrite the file, so it is a
+    # stale prior-attempt artifact and must not corroborate this eval — unreadable => violation.
+    stale = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M, **kw)
+    assert [s["status"] for s in stale.stages] == ["ok", "ok"]
+    assert stale.metric == 1.0                                # the fresh stdout metric is untouched
+    assert stale.extra_metrics is None, "a stale artifact was reported as this eval's metric"
+    assert stale.violations == [{"name": "budget", "value": None, "max": 5, "min": None}]

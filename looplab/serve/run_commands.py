@@ -3223,14 +3223,13 @@ class RunCommandService:
                 except OSError:
                     if lock.exists():
                         return False
-                    # CLAUDE REVIEW: [TEST-GAP] This no-hardlink O_EXCL fallback (and its unlink-on-
-                    # failure cleanup) has no test coverage — every claim test publishes through
-                    # os.link; a regression here on network/FAT mounts could leave a partial or
-                    # orphaned .executing claim that deadlocks the run's command lane, or let two
-                    # workers execute the same command.
                     # Some network/FAT filesystems cannot hard-link. Preserve functionality with a
                     # short O_EXCL write; any kill inside this fallback is recoverable through the
                     # explicit active-claim resolver rather than becoming a permanent deadlock.
+                    # Its two load-bearing properties — exclusivity under a genuine create race, and
+                    # no orphaned claim after a failed write — are pinned by
+                    # tests/test_run_command_service.py::
+                    # test_execution_claim_falls_back_to_o_excl_where_hard_links_are_unsupported.
                     try:
                         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                     except FileExistsError:

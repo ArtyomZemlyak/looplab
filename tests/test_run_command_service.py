@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import builtins
+import errno
 import hashlib
 import json
 import os
@@ -2013,6 +2014,68 @@ def test_execution_claim_publishes_complete_owner_before_exclusive_link(tmp_path
     claim = srv.commands._exec_path(rd, command_id)
     assert json.loads(claim.read_text(encoding="utf-8")) == observed[0]
     assert not list(claim.parent.glob(f".{claim.name}.*.tmp"))
+    srv.commands._release_execution(rd, command_id)
+
+
+def test_execution_claim_falls_back_to_o_excl_where_hard_links_are_unsupported(tmp_path, monkeypatch):
+    """Every other claim test publishes through `os.link`, so the network/FAT fallback below it was
+    never exercised. It has to keep both properties the hard-link CAS gives us: exactly one winner
+    (or two workers run the same command), and no partial/orphaned claim left behind on failure (or
+    the run's command lane deadlocks forever behind a claim nobody owns)."""
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+
+    def unsupported_link(_source, _target, *args, **kwargs):
+        raise OSError(errno.EPERM, "hard links not supported on this filesystem")
+
+    monkeypatch.setattr(os, "link", unsupported_link)
+    command_id = "cmd_" + "b" * 32
+    claim = srv.commands._exec_path(rd, command_id)
+
+    assert srv.commands._claim_execution(rd, command_id) is True
+    assert json.loads(claim.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    assert not list(claim.parent.glob(f".{claim.name}.*.tmp"))   # temp cleaned on this path too
+
+    # An already-published claim is refused before the fallback even runs.
+    assert srv.commands._claim_execution(rd, command_id) is False
+    srv.commands._release_execution(rd, command_id)
+
+    # The O_EXCL itself only decides a genuine RACE: a rival that publishes between our `lock.exists()`
+    # check and our own create. Stage exactly that — this claim must lose, and the winner's owner file
+    # must survive untouched (a plain O_CREAT would truncate it and let both workers run the command).
+    rival = {"pid": os.getpid(), "process_identity": "child-generation", "created_at": time.time()}
+    real_open, racing = os.open, {"armed": True}
+
+    def racing_open(path, flags, *args, **kwargs):
+        if racing["armed"] and os.fspath(path) == str(claim):
+            racing["armed"] = False                      # the rival wins the create, exactly once
+            claim.write_text(json.dumps(rival), encoding="utf-8")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    assert srv.commands._claim_execution(rd, command_id) is False
+    assert json.loads(claim.read_text(encoding="utf-8")) == rival, "the race winner was overwritten"
+    monkeypatch.setattr(os, "open", real_open)
+    srv.commands._release_execution(rd, command_id)
+
+    # A write that dies mid-claim (ENOSPC, a kill) must not publish a half-written owner file. Only
+    # the explicit `os.write` inside the fallback goes through this stub — `_save` writes its temp
+    # through buffered io, whose raw write is not the `os.write` Python function.
+    real_write, failing = os.write, {"on": True}
+
+    def guarded_write(fd, data):
+        if failing["on"]:
+            raise OSError(errno.ENOSPC, "no space left on device")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", guarded_write)
+    with pytest.raises(OSError):
+        srv.commands._claim_execution(rd, command_id)
+    assert not claim.exists(), "a failed fallback write left an orphaned .executing claim behind"
+    assert not list(claim.parent.glob(f".{claim.name}.*.tmp"))
+
+    failing["on"] = False                                # the lane is still claimable, not deadlocked
+    assert srv.commands._claim_execution(rd, command_id) is True
     srv.commands._release_execution(rd, command_id)
 
 

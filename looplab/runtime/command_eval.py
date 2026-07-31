@@ -963,11 +963,9 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # falsely reject it (a spurious violation → the node is wrongly excluded from best). Relax those
     # secondary readers to no freshness gate in that mode. The PRIMARY metric stays strict: it comes from
     # the final (re-RUN) stage, so it MUST be freshly produced — a no-op stage can't promote an old value.
-    # CLAUDE REVIEW: [TEST-GAP] The F13 secondary-reader relaxation below (start_stage -> since=None
-    # for constraint/extra/cross-check readers) has no test coverage — regressing it one way
-    # spuriously marks repaired nodes infeasible (reused-stage artifacts rejected as stale, node
-    # wrongly excluded from best), and the other way lets a stale prior-attempt artifact corroborate
-    # or gate a fresh metric.
+    # Pinned in BOTH directions (relaxed under start_stage, strict without it) by
+    # tests/test_command_eval.py::
+    # test_a_reused_stages_artifact_still_feeds_the_secondary_readers_but_only_under_start_stage.
     _reader_since = None if start_stage else _eval_started
     drift = None
     if enforce_drift and cross_check and m is not None:
