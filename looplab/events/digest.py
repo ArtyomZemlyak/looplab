@@ -29,7 +29,7 @@ def _numeric(params: dict) -> dict:   # param_distance's pre-rename local shorth
 
 def knn_idw(pairs, k: int):
     """Inverse-distance-weighted k-NN over pre-computed `(distance, value)` pairs — the shared CORE
-    of the three empirical predictors (search/surrogate, serve/panel, runtime/proxy). The callers
+    of the three empirical predictors (search/surrogate, search/panel, runtime/proxy). The callers
     keep their own (deliberately different) neighbour-eligibility and distance computations; only
     the rank / zero-distance short-circuit / weighting steps are unified here, so those can't
     silently drift apart again.

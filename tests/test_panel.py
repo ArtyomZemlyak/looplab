@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from looplab.core.models import Idea, Node, NodeStatus, RunState
-from looplab.serve.panel import PanelResearcher, _predict
+from looplab.search.panel import PanelResearcher, _predict
 
 BOUNDS = {"x": (-5.0, 5.0), "y": (-5.0, 5.0)}
 

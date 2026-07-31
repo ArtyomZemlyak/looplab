@@ -261,7 +261,7 @@ registry (plus the non-hint `track_hypotheses` knob) onto its delegate. The forw
 the foresight panel (`search/foresight.py::ForesightPanelResearcher._forward_hints`), the
 `UnifiedAgent` facade (`agents/unified_agent.py::UnifiedAgent.propose`), the surrogate wrapper
 (`search/surrogate.py::SurrogateResearcher.propose`), and the empirical panel
-(`serve/panel.py::PanelResearcher.propose`). An attribute missing here silently dies at the
+(`search/panel.py::PanelResearcher.propose`). An attribute missing here silently dies at the
 first wrapper — exactly how board prioritization was dead in the default config. Keep it in
 sync with every `setattr(self.researcher, "...")` / `setattr(self.base, "...")` site;
 tests/test_hint_forwarding.py scans those sites AND wires the real wrapper chains to enforce it.

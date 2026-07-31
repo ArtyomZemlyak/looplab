@@ -13,7 +13,7 @@ COMPOSES with what's here instead of replacing it:
   candidates, upgrading from an execution-free STATIC score (+ a tie-break) into a real predictive
   ranker; the static score stays a cheap validity PRE-FILTER.
 * hypotheses / ideas — `ForesightPanelResearcher` ranks K candidate ideas the numeric k-NN
-  surrogate (serve/panel.py) is BLIND to (structural / text ideas), priming the predictor with the
+  surrogate (search/panel.py) is BLIND to (structural / text ideas), priming the predictor with the
   data profile AND the accumulated experiment memory (the EvoScientist-style synergy: memory feeds
   the world model, the world model turns memory into a pre-execution prediction). It ALSO
   prioritizes the OPEN-hypothesis board — the batch of untested beliefs that arrives from deep
@@ -313,7 +313,7 @@ class ForesightPanelResearcher:
     ideas from the wrapped Researcher, then predict — WITHOUT executing — which will most improve the
     objective, using the LLM as an implicit world model primed with a Verified Data Analysis Report
     (`state.data_profile`) AND the accumulated experiment memory (the synergy). This ranks the
-    STRUCTURAL / text ideas the numeric k-NN surrogate (serve/panel.py) cannot compare; on abstain
+    STRUCTURAL / text ideas the numeric k-NN surrogate (search/panel.py) cannot compare; on abstain
     (no client / malformed output / no signal) it returns the first proposal, so it degrades to a
     plain proposer rather than blocking the search.
 

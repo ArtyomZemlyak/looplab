@@ -339,7 +339,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             verify_samples=getattr(settings, "foresight_verify_samples", 3))
         # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
         elif settings.researcher_panel > 1:
-            from looplab.serve.panel import PanelResearcher
+            from looplab.search.panel import PanelResearcher
             researcher = PanelResearcher(researcher, k=settings.researcher_panel)
     elif (getattr(settings, "foresight", True) and getattr(settings, "foresight_panel", 2) > 1
           and settings.researcher_panel <= 1

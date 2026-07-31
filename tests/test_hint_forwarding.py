@@ -178,7 +178,7 @@ def test_surrogate_wrapper_forwards_hints_to_its_fallback():
 
 def test_serve_panel_wrapper_forwards_hints_to_its_base():
     # Same for the empirical PanelResearcher: hints must reach the base before the K-way fan-out.
-    from looplab.serve.panel import PanelResearcher
+    from looplab.search.panel import PanelResearcher
     inner = _RecordingResearcher()
     _assert_registry_delivery(PanelResearcher(inner, k=2), inner)
 

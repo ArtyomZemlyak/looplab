@@ -287,7 +287,7 @@ def test_merge_prompt_opts_reads_through_panel_and_unified_facade():
     # of silently falling back to the (None, "tool_call") defaults.
     from looplab.agents.unified_agent import UnifiedAgent
     from looplab.engine.lessons import LessonMemory
-    from looplab.serve.panel import PanelResearcher
+    from looplab.search.panel import PanelResearcher
 
     class Inner:
         parser = "json"

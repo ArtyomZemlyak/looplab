@@ -158,7 +158,7 @@ _LAYOUT = {
     "operators": "search",
     "options": "engine",
     "orchestrator": "engine",
-    "panel": "serve",
+    "panel": "search",   # a Researcher wrapper (search policy), not a UI component — see ADR layering
     "parse": "core",
     "patch": "tools",
     "perm_modes": "tools",

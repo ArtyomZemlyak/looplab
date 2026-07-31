@@ -11,13 +11,6 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-# CLAUDE REVIEW: [ARCH] This is a SEARCH-policy component (a Researcher wrapper that runs inside
-# the engine loop; the CLI imports it to build the run's researcher), yet it is homed in
-# looplab/serve — the package documented as the UI layer the engine must never depend on. Its
-# siblings (ForesightPanelResearcher, the surrogate) live in looplab/search, and search/foresight.py
-# even refers to this file as "serve/panel.py". It only avoids pulling UI deps because
-# serve/__init__.py happens to be empty; moving it to looplab/search (with a _LAYOUT alias for the
-# old path) would remove the accidental serve->engine coupling hazard.
 from looplab.agents.roles import forward_hints
 from looplab.core.models import Idea, Node, RunState
 from looplab.events.digest import knn_idw, numeric_params
