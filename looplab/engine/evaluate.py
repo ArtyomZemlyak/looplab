@@ -771,13 +771,10 @@ class EvaluateMixin:
                         # of the exact scanned surface (provenance — which bytes produced these signals),
                         # so a stored flag isn't a bare {node_id, signals}. Additive; the fold reads the
                         # new fields with defaults, so old logs are unaffected.
-                        # CLAUDE REVIEW: [QUALITY] This function-local `import hashlib` shadows the
-                        # MODULE-level import and makes `hashlib` a function-local name for ALL of
-                        # _evaluate — the exact unbound-local trap _workdir_manifest_digest's
-                        # docstring documents having to dodge by moving out of this method. It is
-                        # redundant (hashlib is imported at module top); any future `hashlib` use
-                        # earlier in this method would raise UnboundLocalError at runtime. Delete it.
-                        import hashlib
+                        # (No local `import hashlib` here: it would make `hashlib` a function-local
+                        # name for ALL of _evaluate, so any earlier use in this method would raise
+                        # UnboundLocalError — the exact trap _workdir_manifest_digest's docstring
+                        # records having to move out of this method to dodge. Module-level import.)
                         self.store.append(EV_REWARD_HACK_SUSPECTED,
                                           {"node_id": node_id, "generation": generation,
                                            "signals": sigs,

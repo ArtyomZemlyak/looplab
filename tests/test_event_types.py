@@ -14,6 +14,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from looplab.events import types as event_types
 from looplab.events.types import ALL_EVENT_TYPES
 
@@ -127,6 +129,17 @@ def test_control_events_subset_of_registry():
     """The UI's allowed control-event vocabulary must be registered event types."""
     from looplab.serve.server import CONTROL_EVENTS
     assert CONTROL_EVENTS <= ALL_EVENT_TYPES
+
+
+def test_control_events_cannot_be_widened_at_runtime():
+    """This allow-list IS the append boundary: routers/control.py refuses any type not in it, and
+    run_commands asserts a ControlSpec for every member. As a mutable set, one stray
+    `CONTROL_EVENTS.add(...)` — from an import cycle or a careless test — would authorize a new
+    appendable type process-wide with nothing failing. Adding one must be an edit to the literal."""
+    from looplab.serve.server import CONTROL_EVENTS
+    assert isinstance(CONTROL_EVENTS, frozenset)
+    with pytest.raises(AttributeError):
+        CONTROL_EVENTS.add("smuggled_control_event")     # type: ignore[attr-defined]
 
 
 def test_server_reexports_and_cli_stay_friendly_without_ui_extra():

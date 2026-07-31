@@ -158,6 +158,27 @@ def test_windows_build_lock_wait_is_bounded(monkeypatch):
         uibuild._acquire_windows_lock(SimpleNamespace(fileno=lambda: 7))
 
 
+def test_posix_build_lock_wait_is_bounded_like_windows(monkeypatch):
+    """A blocking LOCK_EX would wait forever behind a wedged sibling builder — `looplab ui` would
+    simply never start and print nothing. POSIX must fail on the same deadline Windows does."""
+    attempted = []
+
+    def always_contended(fd, mode):
+        attempted.append((fd, mode))
+        raise OSError(errno.EAGAIN, "held by another builder")
+
+    fake_fcntl = SimpleNamespace(LOCK_EX=2, LOCK_NB=4, LOCK_UN=8, flock=always_contended)
+    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+    ticks = iter([10.0, 310.1])
+    monkeypatch.setattr(uibuild.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(uibuild.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(TimeoutError, match="waiting for the UI build lock"):
+        uibuild._acquire_posix_lock(SimpleNamespace(fileno=lambda: 9))
+    # NON-blocking, or the call above never returns to raise anything at all.
+    assert attempted and all(mode & fake_fcntl.LOCK_NB for _fd, mode in attempted)
+
+
 def test_build_lock_capability_failure_is_fail_closed(tmp_path, monkeypatch):
     src = _src_with_sources(tmp_path)
     monkeypatch.setenv("LOOPLAB_UI_SRC", str(src))

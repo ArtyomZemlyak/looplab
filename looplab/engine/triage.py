@@ -12,6 +12,11 @@ import hashlib
 import os
 from pathlib import Path
 
+# Both fingerprinters shell out to `git rev-parse` and both run on setup AND on every resume, so
+# neither may block the run on a wedged mount. Short on purpose: a healthy repo answers in
+# milliseconds, and the fallback (stat/scandir) is a fine fingerprint on its own.
+_GIT_TIMEOUT_S = 10.0
+
 
 def _dir_fingerprint(path) -> str:
     """git HEAD SHA if `path` is (inside) a git repo, else a sha256 over sorted
@@ -21,16 +26,15 @@ def _dir_fingerprint(path) -> str:
     p = Path(path)
     if not p.exists():
         return "absent"
-    # CLAUDE REVIEW: [QUALITY] No timeout on this git call (every other git invocation in the
-    # engine passes one — 10s/15s/120s): on a wedged FUSE/network mount `git rev-parse` can hang
-    # forever, blocking setup and every resume with no diagnostic. Same gap in
-    # _shallow_fingerprint below.
+    # BOUNDED like every other git call in the engine: a `rev-parse` on a wedged FUSE/network mount
+    # hangs forever otherwise, and this runs on setup AND on every resume, so it would block the run
+    # with no diagnostic. A timeout just falls through to the stat-based fingerprint below.
     try:
-        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"],
+        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"], timeout=_GIT_TIMEOUT_S,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode == 0 and r.stdout.strip():
             return "git:" + r.stdout.strip()
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     if p.is_file():
         st = p.stat()
@@ -53,12 +57,12 @@ def _shallow_fingerprint(path) -> str:
     p = Path(path)
     if not p.exists():
         return "absent"
-    try:
-        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"],
+    try:                                              # bounded — see _dir_fingerprint
+        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"], timeout=_GIT_TIMEOUT_S,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode == 0 and r.stdout.strip():
             return "git:" + r.stdout.strip()
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     if p.is_file():
         st = p.stat()

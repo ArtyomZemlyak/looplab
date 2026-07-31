@@ -93,10 +93,27 @@ def _run(args: Sequence[str], *, cwd: Path, log: Callable[[str], None]) -> bool:
 def _acquire_windows_lock(handle: BinaryIO, *, timeout_s: float = _BUILD_LOCK_TIMEOUT_S) -> None:
     import msvcrt
 
+    _acquire_with_deadline(
+        lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1), timeout_s=timeout_s)
+
+
+def _acquire_posix_lock(handle: BinaryIO, *, timeout_s: float = _BUILD_LOCK_TIMEOUT_S) -> None:
+    import fcntl
+
+    # NON-blocking + the same deadline the Windows path uses. A plain blocking LOCK_EX would wait
+    # forever behind a wedged sibling builder (a hung npm still holding the lock), so `looplab ui`
+    # would just never start and say nothing — where Windows failed after five minutes with a clear
+    # TimeoutError. Both platforms now give the same diagnostic on the same schedule.
+    _acquire_with_deadline(
+        lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB), timeout_s=timeout_s)
+
+
+def _acquire_with_deadline(attempt, *, timeout_s: float) -> None:
+    """Poll a NON-blocking lock `attempt` until it succeeds or `timeout_s` elapses."""
     deadline = time.monotonic() + timeout_s
     while True:
         try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            attempt()
             return
         except OSError as exc:
             if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
@@ -128,15 +145,7 @@ def _ui_build_lock(src: Path) -> Iterator[None]:
             _acquire_windows_lock(handle)
             locked = True
         else:
-            import fcntl
-
-            # CLAUDE REVIEW: [QUALITY] Asymmetric with Windows: the POSIX path takes a BLOCKING
-            # LOCK_EX with no deadline, while _acquire_windows_lock enforces the 300s
-            # _BUILD_LOCK_TIMEOUT_S. A wedged sibling builder (hung npm under the lock) therefore
-            # blocks `looplab ui` startup indefinitely on POSIX with no diagnostic, where Windows
-            # fails after five minutes with a clear TimeoutError. Use LOCK_NB + the same
-            # deadline/poll loop.
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _acquire_posix_lock(handle)
             locked = True
         yield
     finally:

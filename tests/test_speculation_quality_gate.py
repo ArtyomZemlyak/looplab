@@ -1661,3 +1661,17 @@ def test_validator_recomputes_source_self_current_environment_and_implementation
 
     oversized = {"schema": quality.SPECULATION_QUALITY_GATE_SCHEMA, "x": "z" * (1024 * 1024)}
     assert not _validate(oversized)
+
+
+def test_published_pair_threshold_is_the_one_the_gate_enforces():
+    """`min_pairs` rides in every stored receipt as a published threshold. It used to be a hand-typed
+    3 while the gate independently checked `len(SPECULATION_CALIBRATION_SEEDS)` — the same number by
+    coincidence. Resize the seed set and the receipt would keep advertising a bound no code applies,
+    which is exactly the kind of untruthful receipt this gate exists to prevent."""
+    from looplab.search.speculation_calibration import SPECULATION_CALIBRATION_SEEDS
+
+    published = quality.SPECULATION_QUALITY_THRESHOLDS["min_pairs"]
+    assert published == len(SPECULATION_CALIBRATION_SEEDS)
+    # The source says so too: the gate must READ that row, not re-derive the count beside it.
+    src = Path(quality.__file__).read_text(encoding="utf-8")
+    assert 'exact_pair_count = SPECULATION_QUALITY_THRESHOLDS["min_pairs"]' in src

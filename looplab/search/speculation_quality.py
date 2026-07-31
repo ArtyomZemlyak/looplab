@@ -105,12 +105,11 @@ SPECULATION_QUALITY_GATE_SCHEMA = "looplab.speculation-quality-gate/v1"
 
 # These values are source-owned.  There is deliberately no thresholds argument on any public API.
 SPECULATION_QUALITY_THRESHOLDS: Mapping[str, int | float] = MappingProxyType({
-    # CLAUDE REVIEW: [QUALITY] "min_pairs" is published in every receipt but never enforced by name:
-    # the gate checks `len(pair_reports) == len(SPECULATION_CALIBRATION_SEEDS)` (exactly 3), which
-    # only coincidentally matches. If the seed set ever changes size, the receipt would keep
-    # advertising a min_pairs=3 threshold that no code path applies — bind the check to this
-    # constant (or drop the row) so the published thresholds stay truthful.
-    "min_pairs": 3,
+    # DERIVED from the calibration seed set, and the gate reads it back (`exact_pair_count`), so the
+    # published number is by construction the one enforced — a receipt can never advertise a pair
+    # threshold no code path applies. Under v1 the bound is EXACT, not a floor: the gate requires
+    # this many pairs and refuses more. The key keeps its v1 name so stored receipts stay readable.
+    "min_pairs": len(SPECULATION_CALIBRATION_SEEDS),
     "scorer_mismatches": 0,
     "max_mean_normalized_regret": 0.05,
     "max_pair_normalized_regret": 0.10,
@@ -2140,7 +2139,9 @@ def speculation_quality_gate(
         environment_sha256 = ""
         errors.append(f"environment fingerprint unavailable: {_bounded_error(exc)}")
 
-    exact_pair_count = len(SPECULATION_CALIBRATION_SEEDS)
+    # Read the PUBLISHED threshold, not the seed set directly, so the receipt's `min_pairs` row and
+    # this check can never disagree.
+    exact_pair_count = SPECULATION_QUALITY_THRESHOLDS["min_pairs"]
     if not isinstance(pairs, Sequence) or isinstance(pairs, (str, bytes)):
         pair_values: list[object] = []
         errors.append("pairs must be the exact bounded calibration sequence")

@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.core.atomicio import atomic_write_text, best_effort_fsync
 from looplab.core.config import Settings
 
 _SECRET_FIELDS = {"llm_api_key"}
@@ -226,14 +226,15 @@ class SettingsStore:
             fd, tmp = tempfile.mkstemp(
                 dir=str(self._secrets_path.parent), prefix=".secrets-", suffix=".tmp")
             try:
-                # CLAUDE REVIEW: [QUALITY] No flush+fsync before os.replace (unlike atomic_write_text,
-                # which the module otherwise uses precisely for its "unique temp + safe fsync"). On a
-                # crash/power loss the rename can survive while the data blocks do not, publishing an
-                # empty/truncated secrets.json — i.e. silently losing the stored credential (and the
-                # CAS revision falls back to the initial token). fsync the fd before replace, and
-                # ideally fsync the directory after, matching the atomic-write contract used elsewhere.
+                # Same durability contract atomic_write_text gives every other file here: the bytes
+                # must reach disk BEFORE the rename publishes the name. Without it a crash can leave
+                # the rename applied and the data blocks lost — an empty secrets.json, i.e. the
+                # stored credential silently gone and the CAS revision reset to the initial token.
+                # `best_effort_fsync` degrades (and cannot block) on mounts where fsync misbehaves.
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(json.dumps(d))
+                    f.flush()
+                    best_effort_fsync(f.fileno())
                 os.replace(tmp, self._secrets_path)    # the 0600 mode rides along from the temp inode
             finally:
                 try:

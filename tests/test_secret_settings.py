@@ -191,3 +191,31 @@ def test_dotenv_key_wins_over_stored_secret(tmp_path, _restore_key, monkeypatch)
     TestClient(make_app(tmp_path))
     # os.environ is NOT primed from the store (so pydantic reads sk-from-dotenv from .env, not the store)
     assert os.environ.get("LOOPLAB_LLM_API_KEY") != "sk-from-store"
+
+
+def test_stored_secret_reaches_disk_before_the_rename_publishes_it(tmp_path, _restore_key, monkeypatch):
+    """The write is a temp + os.replace, so the rename is only atomic if the DATA is already durable.
+    Without the sync a crash can land the rename while the blocks are lost, publishing an empty
+    secrets.json — the credential silently gone and the CAS revision reset to its initial token."""
+    from looplab.serve import settings_store as store_module
+
+    order: list[str] = []
+    real_sync, real_replace = store_module.best_effort_fsync, os.replace
+
+    def watched_sync(fileno):
+        order.append("sync")
+        return real_sync(fileno)
+
+    def watched_replace(src, dst, *args, **kwargs):
+        if str(dst).endswith("secrets.json"):
+            order.append("replace")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(store_module, "best_effort_fsync", watched_sync)
+    monkeypatch.setattr(store_module.os, "replace", watched_replace)
+
+    store = SettingsStore(tmp_path)
+    store.store_secret("llm_api_key", "sk-durable")
+
+    assert order == ["sync", "replace"], order
+    assert store.load_secrets()["llm_api_key"] == "sk-durable"

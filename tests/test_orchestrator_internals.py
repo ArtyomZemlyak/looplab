@@ -73,6 +73,30 @@ def test_dir_fingerprint_changes_with_content(tmp_path):
     assert _dir_fingerprint(str(tmp_path / "missing")) == "absent"
 
 
+def test_workspace_fingerprints_survive_a_wedged_git(tmp_path, monkeypatch):
+    """Both fingerprinters shell out to `git rev-parse`, and both run at setup AND on every resume.
+    On a wedged FUSE/network mount an unbounded call hangs the run with no diagnostic — so the call
+    must be bounded, and a timeout must fall through to the stat/scandir signature, not propagate."""
+    import subprocess
+
+    from looplab.engine import triage
+
+    d = tmp_path / "r"; d.mkdir()
+    (d / "a.py").write_text("x=1\n", encoding="utf-8")
+    seen: list[object] = []
+
+    def wedged_run(argv, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+
+    monkeypatch.setattr(subprocess, "run", wedged_run)   # both fingerprinters import it locally
+
+    assert _dir_fingerprint(str(d)).startswith("hash:")          # fell back, did not raise
+    assert triage._shallow_fingerprint(str(d)).startswith("dir:")
+    # A deadline was actually passed — without one the hang is what the test could never observe.
+    assert seen and all(t == triage._GIT_TIMEOUT_S for t in seen), seen
+
+
 def test_run_records_workspace_and_resume_detects_change(tmp_path):
     repo = _repo(tmp_path, 'import json; print(json.dumps({"metric": 1.0}))\n')
     t = RepoTask(id="w", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
