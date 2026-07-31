@@ -1545,6 +1545,7 @@ pre.code.event-json { max-height: 220px; }
 .hist-tag-mini:disabled { cursor: default; opacity: 1; }
 .hist-tag-mini:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hist-tag-mini.hist { color: var(--working); }
+.dock-tabs .filters-active { color: var(--working-text); border-color: var(--working); }
 .transport { display: inline-flex; gap: 4px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
 .transport .btn { padding: 3px 7px; }
 .transport-message { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px;
@@ -2360,12 +2361,17 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   }
   .topbar.run-head { gap: 6px; flex-wrap: wrap; align-items: stretch; }
   .run-head .brand, .run-head > .phase, .run-head > .chip,
-  .run-head > .spacer, .run-head > .fx-switch { display: none; }
+  .run-head > .spacer { display: none; }
   .run-head .view-toggle { flex: 1 1 180px; min-width: 0; margin-right: 0; }
-  .run-head .view-toggle .vt { flex: 1; min-width: 0; padding-inline: 4px; }
-  .run-head > .muted { display: block; order: 2; flex: 1 1 calc(100% - 110px); max-width: none; overflow: visible;
+  .run-head .view-toggle .vt { flex: 1; min-width: 0; padding-inline: 4px; white-space: nowrap; }
+  .run-head > .fx-switch { display: inline-flex; }
+  .run-head > .fx-switch > button { min-width: 44px; justify-content: center; padding-inline: 8px; }
+  .run-head > .fx-switch .fx-switch-label { display: none; }
+  .topbar.run-head > .muted {
+    display: block; order: 2; flex: 1 0 calc(100% - 110px);
+    min-width: min(100%, calc(100% - 110px)); max-width: none; overflow: visible;
     white-space: normal; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.35; }
-  .run-head > .live { order: 2; align-self: flex-start; max-width: 100%; white-space: normal; }
+  .topbar.run-head > .live { order: 2; flex: 0 0 auto; align-self: flex-start; max-width: 100%; white-space: normal; }
   .topbar.run-head > .muted b { display: block; color: var(--fg); }
   .run-head button, .history-banner .btn, .run-resource-state .btn { min-height: 44px; }
   .copy-view-label { display: none; }
@@ -2374,16 +2380,27 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .cb-chips { flex-wrap: nowrap; max-height: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
   .cb-chip { flex: 0 0 auto; max-width: min(78vw, 320px); min-height: 44px; }
   .cb-chip-main, .cb-drill { min-height: 44px; }
-  .panel-bar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
+  .panel-bar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .panel-bar::-webkit-scrollbar { display: none; }
   .panel-bar.hub-open { overflow: visible; }
   .panel-bar .menu { flex-wrap: nowrap; min-width: max-content; }
   /* Dropdowns become viewport-clamped bottom sheets on compact screens. They cannot be clipped by
      the horizontal panel bar or a scrolling run list, and long menus remain reachable in landscape. */
-  .run-menu, .more-menu { position: fixed; inset: auto 8px 8px 8px; width: auto; min-width: 0;
+  .run-menu, .more-menu, .run-head > .fx-switch .fx-menu {
+    position: fixed; inset: auto 8px 8px 8px; width: auto; min-width: 0;
     max-height: min(72dvh, 520px); overflow-y: auto; z-index: 96; }
   .menu-backdrop { background: color-mix(in srgb, var(--bg) 44%, transparent); z-index: 95; }
-  .workspace-pane-toggle { display: inline-flex; }
+  .run-head > .fx-switch .th-backdrop {
+    background: color-mix(in srgb, var(--bg) 44%, transparent); z-index: 95;
+  }
+  .workspace-pane-toggle { display: inline-flex; top: auto; bottom: 52px; }
+  .side.compact-drawer .pane-grip .btn {
+    min-width: 44px; min-height: 44px; justify-content: center; padding: 8px;
+  }
   .dock-tabs .dock-collapse { min-width: 44px; min-height: 44px; justify-content: center; padding: 8px; }
+  /* Compact panes use desktop geometry as a preference only; never let a tall desktop dock consume
+     the tablet workspace, and never write this render-only cap back to the desktop setting. */
+  .dock-body.chat-body { max-height: min(42dvh, 320px); }
 
   .home-head { gap: 6px; }
   .home-actions { min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
@@ -2483,6 +2500,11 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .react-flow__controls button { width: 44px; height: 44px; }
 }
 
+@media (max-width: 480px) {
+  /* Keep all four workspace destinations legible after Back, Copy and Energy claim the first row. */
+  .run-head .view-toggle { flex: 1 0 100%; width: 100%; max-width: 100%; }
+}
+
 /* Optional reading-first density. Compact remains the default for power users; this mode raises
    critical metadata/help to 12px and gives repeated controls/rows more breathing room. */
 :root[data-comfortable] body { font-size: 14px; line-height: 1.55; }
@@ -2502,6 +2524,15 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 :root[data-comfortable] .card-control-help, :root[data-comfortable] .card-control-feedback,
 :root[data-comfortable] .card-control-form .text, :root[data-comfortable] .card-control-resource .text {
   font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  :root[data-comfortable] .run-head .btn.sm,
+  :root[data-comfortable] .side.compact-drawer .pane-grip .btn.sm,
+  :root[data-comfortable] .dock-tabs .btn.sm { min-height: 44px; }
+}
+@media (max-width: 600px) {
+  :root[data-comfortable] .btn.sm { min-height: 44px; }
 }
 
 .merge-destination-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 44px;

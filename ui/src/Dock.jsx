@@ -852,9 +852,15 @@ const observationKind = error => {
 export default function Dock({ runId, live, liveSeq, expectedGeneration, timeline, viewSeq, setViewSeq,
   onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false,
   publishTransport = null, filter = '', onFilterChange = null, kindFilters = [],
-  onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null }) {
+  onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null,
+  collapseControlRef = null }) {
   const log = timeline.rows
   const collapseButtonRef = useRef(null)
+  const setCollapseButtonRef = element => {
+    collapseButtonRef.current = element
+    if (typeof collapseControlRef === 'function') collapseControlRef(element)
+    else if (collapseControlRef) collapseControlRef.current = element
+  }
   useEffect(() => {
     if (!focusOnMount) return
     collapseButtonRef.current?.focus({ preventScroll: true })
@@ -921,7 +927,20 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   }, [runId])
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
   const [showControls, setShowControls] = useState(() => storageGet('ll.dock.controls') === '1')
-  const toggleControls = () => setShowControls(v => { const n = !v; storageSet('ll.dock.controls', n ? '1' : '0'); return n })
+  const filtersActive = !!(filter.trim() || kinds.size > 0)
+  const toggleControls = () => {
+    // "Controls" is also a reveal action: never announce an expanded disclosure whose controlled
+    // region is still hidden inside a collapsed timeline.
+    if (collapsed) {
+      if (!showControls) {
+        storageSet('ll.dock.controls', '1')
+        setShowControls(true)
+      }
+      onToggleCollapse?.()
+      return
+    }
+    setShowControls(v => { const n = !v; storageSet('ll.dock.controls', n ? '1' : '0'); return n })
+  }
   useEffect(() => {
     if (filter.trim() || kinds.size > 0) setShowControls(true)
   }, [filter, kinds.size])
@@ -1334,20 +1353,20 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
           {atLiveView
             ? visiblyLive ? `live · ${liveSeq}` : 'reading · jump latest'
             : `replay ${sliderVal}/${liveSeq} → live`}</button>
-        {/* a left-over filter is invisible once controls collapse — surface it so the feed never looks empty for no reason */}
-        {!showControls && (filter.trim() || kinds.size > 0) &&
-          <button type="button" className="hist-tag-mini hist"
-                title="Open active filters" onClick={toggleControls}>⌕ filtered</button>}
         <span className="spacer" />
-        <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="Timeline filters"
+        <button className={'btn sm ghost' + (!collapsed && showControls ? ' on' : '')
+                  + (filtersActive ? ' filters-active' : '')}
+                title={filtersActive ? 'Timeline filters — active filters applied' : 'Timeline filters'}
+                aria-label={filtersActive ? 'Timeline filters, active filters applied' : 'Timeline filters'}
+                aria-expanded={!collapsed && showControls} aria-controls="run-timeline-controls"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
-        <button ref={collapseButtonRef} className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
+        <button ref={setCollapseButtonRef} className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
                 aria-label={collapsed ? 'Expand events and timeline' : 'Collapse events and timeline'}
                 aria-expanded={!collapsed} aria-controls="run-events-timeline"
                 onClick={onToggleCollapse}><OpIcon name={collapsed ? 'chevron-up' : 'chevron-down'} size={13} /></button>
       </div>
       {!collapsed && <div id="run-events-timeline" className="dock-body chat-body" style={{ height }}>
-        {showControls && <div className="dock-controls">
+        {showControls && <div id="run-timeline-controls" className="dock-controls">
           <div className="scrubber inline">
             <button className="btn sm" onClick={returnToLive} disabled={drag == null && visiblyLive}><OpIcon name="play" size={11} /> Live</button>
             <input type="range" min={0} max={Math.max(0, liveSeq)} value={sliderVal}

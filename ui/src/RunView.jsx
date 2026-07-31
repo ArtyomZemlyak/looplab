@@ -361,9 +361,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // persisted: every narrow-screen visit starts with the canvas unobstructed.
   const [compactInspectorOpen, setCompactInspectorOpen] = useState(false)
   const [compactTimelineOpen, setCompactTimelineOpen] = useState(false)
+  const overlayPanelOpen = !!(panel && panelAllowed(panel))
+  const timelineCollapsed = compactWorkspace ? !compactTimelineOpen : dockC
+  const previousCompactWorkspaceRef = useRef(compactWorkspace)
   const compactInspectorCloseRef = useRef(null)
   const compactInspectorTriggerRef = useRef(null)
   const compactInspectorRef = useRef(null)
+  const sideRailRef = useRef(null)
+  const timelineCollapseRef = useRef(null)
+  const workspaceFocusOwnerRef = useRef(null)
   const closeCompactInspector = () => {
     setCompactInspectorOpen(false)
     requestAnimationFrame(() => {
@@ -373,20 +379,94 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       target?.focus({ preventScroll: true })
     })
   }
-  useDialogFocus(compactInspectorRef, closeCompactInspector, compactWorkspace && compactInspectorOpen)
+  // This drawer intentionally coexists with the header and timeline. Give it dialog navigation
+  // (initial focus, Escape, focus restoration) without claiming or enforcing modal containment.
+  useDialogFocus(compactInspectorRef, closeCompactInspector,
+    compactWorkspace && compactInspectorOpen && !overlayPanelOpen, { modal: false })
+  useLayoutEffect(() => {
+    if (!compactWorkspace || !compactInspectorOpen || overlayPanelOpen) return
+    // Route hydration can schedule main-focus before the drawer commit. Reassert the explicit
+    // destination after that commit without turning this coexisting surface back into a modal.
+    const frame = requestAnimationFrame(() => {
+      const surface = compactInspectorRef.current
+      if (!surface || surface.contains(document.activeElement)) return
+      const trueModal = document.querySelector('[aria-modal="true"]')
+      if (trueModal && !surface.contains(trueModal)) return
+      ;(surface.querySelector('[data-dialog-initial-focus]') || surface)
+        .focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [compactWorkspace, compactInspectorOpen, overlayPanelOpen, route.navigationRevision])
   useEffect(() => {
+    const rememberWorkspaceFocus = event => {
+      const target = event.target
+      if (compactInspectorTriggerRef.current?.contains(target)) {
+        workspaceFocusOwnerRef.current = 'compact-inspector-trigger'
+      } else if (sideRailRef.current?.contains(target)) {
+        workspaceFocusOwnerRef.current = 'desktop-side-rail'
+      } else if (target.closest?.('.workspace-scrim')) {
+        workspaceFocusOwnerRef.current = 'inspector-surface'
+      } else if (target.closest?.('.splitter.v')) {
+        workspaceFocusOwnerRef.current = 'side-splitter'
+      } else if (target.closest?.('.splitter.h')) {
+        workspaceFocusOwnerRef.current = 'timeline-splitter'
+      } else if (compactInspectorRef.current?.contains(target)) {
+        workspaceFocusOwnerRef.current = 'inspector-surface'
+      } else if (target.closest?.('#run-events-timeline')) {
+        workspaceFocusOwnerRef.current = 'timeline-body'
+      } else if (timelineCollapseRef.current?.contains(target)) {
+        workspaceFocusOwnerRef.current = 'timeline-collapse'
+      } else {
+        workspaceFocusOwnerRef.current = null
+      }
+    }
+    document.addEventListener('focusin', rememberWorkspaceFocus)
+    return () => document.removeEventListener('focusin', rememberWorkspaceFocus)
+  }, [])
+  useEffect(() => {
+    if (previousCompactWorkspaceRef.current === compactWorkspace) return
+    const wasCompact = previousCompactWorkspaceRef.current
+    previousCompactWorkspaceRef.current = compactWorkspace
+    const focusOwner = workspaceFocusOwnerRef.current
+    requestAnimationFrame(() => {
+      if (overlayPanelOpen || document.querySelector('[aria-modal="true"]')) return
+      const selectedNode = [...(document.querySelectorAll('[data-node-select-id]') || [])]
+        .find(element => element.dataset.nodeSelectId === String(selectedId))
+      let target = null
+      if (focusOwner === 'timeline-splitter' || (focusOwner === 'timeline-body' && timelineCollapsed)) {
+        target = timelineCollapseRef.current
+      } else if (wasCompact && ['compact-inspector-trigger', 'inspector-surface'].includes(focusOwner)) {
+        target = sideC
+          ? sideRailRef.current
+          : compactInspectorCloseRef.current || compactInspectorRef.current
+      } else if (!wasCompact && ['desktop-side-rail', 'inspector-surface', 'side-splitter'].includes(focusOwner)) {
+        target = compactInspectorTriggerRef.current || selectedNode
+      }
+      target?.focus({ preventScroll: true })
+    })
+    // Compact surfaces are temporary. Never replay stale open state after crossing the breakpoint.
+    setCompactInspectorOpen(false)
+    setCompactTimelineOpen(false)
+  }, [compactWorkspace, overlayPanelOpen, selectedGroup, selectedId, sideC, timelineCollapsed])
+  useEffect(() => {
+    if (compactWorkspace) return
     storageSet('ll.sideW', sideW); storageSet('ll.dockH', dockH)
     storageSet('ll.sideC', sideC ? '1' : '0'); storageSet('ll.dockC', dockC ? '1' : '0')
-  }, [sideW, dockH, sideC, dockC])
+  }, [sideW, dockH, sideC, dockC, compactWorkspace])
   const clampSide = (value) => Math.max(280, Math.min(Math.max(280, window.innerWidth - 486), value))
   const clampDock = (value) => Math.max(MIN_DOCK_HEIGHT,
     Math.min(Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470), value))
   useEffect(() => {
-    const clampPanes = () => { setSideW(w => clampSide(w)); setDockH(h => clampDock(h)) }
+    if (compactWorkspace) return
+    const clampPanes = () => {
+      // A phone-sized resize must not overwrite the user's persisted desktop pane geometry.
+      if (window.matchMedia?.('(max-width: 900px)').matches) return
+      setSideW(w => clampSide(w)); setDockH(h => clampDock(h))
+    }
     clampPanes()
     window.addEventListener('resize', clampPanes)
     return () => window.removeEventListener('resize', clampPanes)
-  }, [])
+  }, [compactWorkspace])
   // Drag a splitter: the side panel grows when dragged left, the dock when dragged up.
   const startDrag = (axis) => (e) => {
     e.preventDefault()
@@ -892,7 +972,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     view === 'concepts' ? 'Concepts' : view === 'report' ? 'Report' : 'Search'}`
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
-      if (!document.querySelector('[aria-modal="true"]')) {
+      if (!document.querySelector('[aria-modal="true"], [data-route-focus-guard="true"]')) {
         ;(routeMainRef.current || document.querySelector('[data-route-main]'))
           ?.focus({ preventScroll: true })
       }
@@ -1006,7 +1086,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const cost = state.llm_cost
   const hasInspectorContext = selectedId != null || selectedGroup != null
   const showInspector = compactWorkspace ? (compactInspectorOpen && hasInspectorContext) : (!sideC && hasInspectorContext)
-  const timelineCollapsed = compactWorkspace ? !compactTimelineOpen : dockC
   const activateReportTimeline = () => {
     if (reportTimelineActivated) return
     setTimelineActivation({ runId, active: true, focusPending: true })
@@ -1043,7 +1122,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     exactController.invoke(action)
   }
 
-
   return (
     <main ref={routeMainRef} className={'app' + (reviewMode ? ' review-mode' : '')}
       data-route-main tabIndex={-1} aria-label={workspaceRouteLabel}>
@@ -1052,6 +1130,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
         {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
           : <span className="pill">read-only review</span>}
+        <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
+          aria-label={reviewMode ? 'Copy read-only review context' : 'Copy shareable run context'}
+          title={reviewMode
+            ? 'Copy this read-only capability and route context; local visual filters are not included'
+            : 'Copy the run route, selected evidence and snapshot; local graph filters are not included and recipients still need owner access'}>
+          <OpIcon name="link" size={12} /> <span className="copy-view-label">Copy context</span>
+        </button>
+        <EnergyToggle />
         <div ref={workspaceToolbarRef} className="view-toggle" role="toolbar"
           aria-label="Run workspace controls" aria-orientation="horizontal"
           onKeyDown={onWorkspaceToolbarKeyDown} onFocus={onWorkspaceToolbarFocus}>
@@ -1074,14 +1160,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             }}
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
-        <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
-          aria-label={reviewMode ? 'Copy read-only review context' : 'Copy shareable run context'}
-          title={reviewMode
-            ? 'Copy this read-only capability and route context; local visual filters are not included'
-            : 'Copy the run route, selected evidence and snapshot; local graph filters are not included and recipients still need owner access'}>
-          <OpIcon name="link" size={12} /> <span className="copy-view-label">Copy context</span>
-        </button>
-        <EnergyToggle />
         <span className="pill phase">{displayedPhase}</span>
         <span className="muted" title={state.goal}>
           <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>{state.goal || state.task_id}
@@ -1291,10 +1369,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       </LazyBoundary>
       <WhyStrip state={state} onSelect={selectNode} />
       <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
-        <div className={'canvas-wrap' + (emptyPresentation ? ' dag-empty' : '')}>
+        <div className={'canvas-wrap' + (emptyPresentation ? ' dag-empty' : '')}
+          inert={compactWorkspace && showInspector ? '' : undefined}
+          aria-hidden={compactWorkspace && showInspector ? 'true' : undefined}>
           <LazyBoundary label="experiment graph" resetKey={`${runId}:${generation || 'pending'}`}>
             <Dag key={`experiment-graph:${runId}:${generation || 'pending'}`}
               state={state} selectedId={selectedId} onSelect={onCanvasSelect}
+              compact={compactWorkspace}
               groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
               onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}
               onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
@@ -1314,7 +1395,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           <button className="workspace-scrim" onClick={closeCompactInspector}
                   aria-label="Close inspector panel" />}
         {!compactWorkspace && hasInspectorContext && !showInspector
-          ? <button className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</button>
+          ? <button ref={sideRailRef} className="side-rail" title="show panel"
+              onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</button>
           : showInspector && <>
               {!compactWorkspace && <div className="splitter v" onPointerDown={startDrag('side')} onKeyDown={resizeWithKeys('side')}
                 role="separator" tabIndex={0} aria-orientation="vertical" aria-label="Resize inspector"
@@ -1323,11 +1405,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                      ref={compactInspectorRef} tabIndex={compactWorkspace ? -1 : undefined}
                      aria-label={selectedGroup != null ? 'Group details' : 'Experiment inspector'}
                      role={compactWorkspace ? 'dialog' : 'complementary'}
-                     aria-modal={compactWorkspace ? 'true' : undefined}>
+                     data-route-focus-guard={compactWorkspace ? 'true' : undefined}>
                 <div className="pane-grip">
                   <span className="muted">{selectedGroup != null ? 'group' : 'inspector'}</span>
                   <span className="spacer" style={{ flex: 1 }} />
-                  <button ref={compactInspectorCloseRef} className="btn sm ghost" title={compactWorkspace ? 'close panel' : 'collapse panel'}
+                  <button ref={compactInspectorCloseRef} className="btn sm ghost"
+                          data-dialog-initial-focus={compactWorkspace ? true : undefined}
+                          title={compactWorkspace ? 'close panel' : 'collapse panel'}
                           aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${selectedGroup != null ? 'group details' : 'experiment inspector'}`}
                           onClick={() => compactWorkspace ? closeCompactInspector() : setSideC(true)}>⟩</button>
                 </div>
@@ -1381,6 +1465,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           readOnly={historyActive}
           publishTransport={setTransportController}
           collapsed={timelineCollapsed}
+          collapseControlRef={timelineCollapseRef}
           focusOnMount={reportTimelineFocusPending}
           onInitialFocus={() => setTimelineActivation(current => current.runId === runId
             ? { ...current, focusPending: false } : current)}

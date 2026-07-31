@@ -26,8 +26,11 @@ export default function EnergyToggle() {
   return <div className="fx-switch">
     <button type="button" ref={triggerRef} className={'btn sm ghost' + (on ? ' primary' : '')}
       title="Energy / Reactor FX — animated graph" aria-haspopup="menu" aria-expanded={open}
-      aria-controls="energy-switcher-menu" onClick={() => setOpen(!open)}>
-      <OpIcon name="bolt" size={12} /> Energy{on ? `: ${cur.name}` : ''}</button>
+      aria-controls="energy-switcher-menu" aria-label={`Energy effects: ${cur.name}`}
+      onClick={() => setOpen(!open)}>
+      <OpIcon name="bolt" size={12} />
+      <span className="fx-switch-label">Energy{on ? `: ${cur.name}` : ''}</span>
+    </button>
     {open && <>
       <div className="th-backdrop" aria-hidden="true" onClick={() => close(true)} />
       <div ref={menuRef} id="energy-switcher-menu" className="th-menu fx-menu" role="menu" aria-label="Energy effects"

@@ -340,7 +340,8 @@ function visibleViewportBounds() {
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
-                             themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null }) {
+                             themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null,
+                             compact = false }) {
   const workId = workingId(state)
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const [groupActionKey, setGroupActionKey] = useState('')
@@ -706,11 +707,18 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       </Panel>
       {/* lift the toggles above the overview map when it's open — otherwise the minimap (also
           bottom-right) covers this row and you can't click 🗺 again to hide it. */}
-      <Panel position="bottom-right" className="map-toggles" style={{ marginBottom: showMap ? 152 : 0 }}>
+      <Panel position="bottom-right" className="map-toggles"
+        style={{ marginBottom: showMap && !compact ? 152 : 0 }}>
         <button aria-pressed={showLegend} className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
                 onClick={() => setShowLegend(v => !v)}>ⓘ ops</button>
-        <button aria-pressed={showMap} className={'btn sm ghost' + (showMap ? ' primary' : '')} title={showMap ? 'hide overview map' : 'show overview map'}
-                onClick={toggleMap}><OpIcon name="map" className="t-ic" /> map{showMap ? ' ✕' : ''}</button>
+        <button aria-pressed={!compact && showMap} disabled={compact}
+                aria-label={compact ? 'Overview map unavailable on compact screens'
+                  : showMap ? 'Hide overview map' : 'Show overview map'}
+                className={'btn sm ghost' + (!compact && showMap ? ' primary' : '')}
+                title={compact ? 'Overview map is available on wider screens'
+                  : showMap ? 'hide overview map' : 'show overview map'}
+                onClick={toggleMap}><OpIcon name="map" className="t-ic" />
+          map{!compact && showMap ? ' ✕' : ''}</button>
       </Panel>
       {showLegend && <Panel position="top-left" className="op-legend">
         <div className="legend-h">Operators</div>
@@ -719,7 +727,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
             <span className="op-icon"><OpIcon name={m.icon} /></span><span>{m.label}</span>
           </div>) })}
       </Panel>}
-      {showMap && <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => {
+      {showMap && !compact && <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => {
         if (n.data?.dim || (n.data?.filterActive && n.data?.count === 0)) return 'var(--line-2)'
         const nd = n.data?.node; if (!nd) return 'var(--bg-3)'
         if (nd.id === state.best_node_id) return 'var(--best)'
