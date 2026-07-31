@@ -2530,19 +2530,42 @@ def test_a_rewritten_prefix_plus_append_is_not_topped_up_onto_stale_events(tmp_p
 
 
 def test_an_unchanged_log_costs_no_reads_so_the_sse_hot_path_stays_cheap(tmp_path, monkeypatch):
-    """The anchor check is gated on the file having changed. Without that gate every SSE tick would
-    re-read the log's head and tail — the O(new bytes) property this cache exists for."""
-    from looplab.events import eventstore as es
+    """Re-reading is gated on the file having CHANGED. Without that gate every SSE tick would re-read
+    the log, losing the O(new bytes) property this cache exists for.
+
+    Probe the real thing — opening the log — rather than a helper: this test used to spy on
+    `_prefix_anchor`, a helper `read_all` never called, so `calls == []` held no matter what the store
+    did and the assertion guarded nothing at all.
+    """
+    import builtins
+
     p = tmp_path / "events.jsonl"
-    store = es.EventStore(p)
+    store = EventStore(p)
     store.append("a", {})
     store.read_all()
-    calls = []
-    monkeypatch.setattr(es, "_prefix_anchor",
-                        lambda path, consumed: calls.append(consumed) or None)
+
+    opened = []
+    real_open = builtins.open
+
+    def _spy(file, *args, **kwargs):
+        if str(file) == str(p):
+            opened.append(str(args[0]) if args else "r")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _spy)
     store.read_all()
     store.read_all()
-    assert calls == [], "an unchanged log must not be re-read"
+    assert opened == [], f"an unchanged log must not be re-opened, got {opened}"
+
+    # ...and the gate really is "changed", not "never". Growth from THIS store is served from cache
+    # (its own append updated it — the trusted-growth path), so the writer here has to be EXTERNAL,
+    # which is the case the SSE reader actually faces: the engine appending while the server tails.
+    monkeypatch.setattr(builtins, "open", real_open)
+    with real_open(p, "ab") as fh:
+        fh.write(b'{"v":1,"seq":1,"ts":1.0,"type":"b","data":{}}\n')   # seq 1 continues the dense prefix
+    monkeypatch.setattr(builtins, "open", _spy)
+    assert [e.type for e in store.read_all()] == ["a", "b"]
+    assert opened, "a log an external writer grew must be read"
 
 
 def test_an_interrupted_run_setup_survives_the_crash_as_an_open_attempt(tmp_path):

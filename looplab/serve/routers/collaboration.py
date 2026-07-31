@@ -46,7 +46,7 @@ def _assert_still_current(srv, rd, generation: str) -> None:
         including the anchor — is outside the recoverable prefix, so the same rejection applies.
     The residual is an in-place edit that preserves BOTH dense seq numbering and the anchor row. No path
     here produces that (it needs events.jsonl edited underneath the server), and it is the same
-    middle-of-prefix case `eventstore._prefix_anchor` already documents its head/tail byte windows
+    middle-of-prefix case `eventstore.prefix_anchor_from_handle` already documents its head/tail windows
     cannot catch. Binding cursors to a byte revision here would advertise an integrity guarantee the
     event store itself declines to make, so this stays a generation check.
     `tests/test_collaboration.py::test_same_generation_log_rewrites_cannot_split_a_comment_page`

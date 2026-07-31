@@ -532,12 +532,14 @@ class OpenAICompatibleClient:
                 for i, s in sorted(tcs.items())]
         return {"choices": [{"message": msg, "finish_reason": finish}], "usage": usage}
 
-    # CLAUDE REVIEW: [DEAD-CODE] _read_stream (and the urllib-era helpers only it drives:
-    # _sse_chunks, _socket_watchdog, _SSETail, _raw_socket) has no production caller since the
-    # openai-SDK migration — _sdk_chat streams via _accumulate_stream. Only tests exercise this
-    # path, yet its docstring still reads as if it were the live one.
     def _read_stream(self, resp) -> dict:
-        """Reassemble an OpenAI SSE stream into the non-streaming response body shape
+        """LEGACY (urllib-era) SSE reassembly. NOT the live streaming path: since the openai-SDK
+        migration `_sdk_chat` streams through `_accumulate_stream`, and nothing in production calls
+        this — only tests do, which is why it and the helpers it alone drives (`_sse_chunks`,
+        `_socket_watchdog`, `_SSETail`, `_raw_socket`) are still here rather than deleted. Read the
+        contract below as a description of the OLD transport, not of what runs today.
+
+        Reassembles an OpenAI SSE stream into the non-streaming response body shape
         ({"choices":[{"message":{content,reasoning?,tool_calls?}, "finish_reason"}], "usage"}). Each
         `for raw in resp` line is bounded by the socket `timeout`, so with streaming that timeout is an
         INTER-TOKEN idle timeout: a stall (no line for `timeout` s) raises socket.timeout here and

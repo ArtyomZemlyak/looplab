@@ -588,12 +588,10 @@ def repair_log(path: str | os.PathLike) -> dict:
 _CACHE_ANCHOR_BYTES = 64 * 1024
 
 
-# CLAUDE REVIEW: [DEAD-CODE] `_prefix_anchor` has no callers — every consumer (serve/log_pages)
-# uses `prefix_anchor_from_handle` directly, and EventStore.read_all validates external growth with
-# a FULL prefix sha256 instead of this bounded anchor. Either wire it into read_all (see the PERF
-# note there) or drop it; as-is it documents a strategy the store itself does not use.
-def _prefix_anchor(path: Path, consumed: int) -> Optional[tuple[bytes, bytes]]:
-    """A bounded fingerprint of the first and last `_CACHE_ANCHOR_BYTES` of a consumed prefix.
+def prefix_anchor_from_handle(handle, consumed: int) -> Optional[tuple[bytes, bytes]]:
+    """A bounded fingerprint of the first and last `_CACHE_ANCHOR_BYTES` of a consumed prefix, for a
+    caller that already holds an open handle (the UI's log pager). Restores the handle's position so
+    it composes with an in-progress scan.
 
     WHAT THIS PROVES, exactly: that the head and the tail of the bytes we already parsed are still the
     bytes we parsed. It is a detector, not a proof of whole-prefix continuity — a surgical edit that
@@ -605,20 +603,10 @@ def _prefix_anchor(path: Path, consumed: int) -> Optional[tuple[bytes, bytes]]:
     rebuilt from the start (head moves) or edited up to the append point (tail moves). Growth alone
     proved neither, so a rewrite-then-append landed a fresh tail on stale cached Events and the
     process silently diverged from disk.
-    """
-    if consumed <= 0:
-        return None
-    try:
-        with open(path, "rb") as f:
-            return prefix_anchor_from_handle(f, consumed)
-    except OSError:
-        return None
 
-
-def prefix_anchor_from_handle(handle, consumed: int) -> Optional[tuple[bytes, bytes]]:
-    """`_prefix_anchor` for a caller that already holds an open handle (the UI's log pager).
-
-    Restores the handle's position so it composes with an in-progress scan."""
+    NOTE: `EventStore.read_all` does NOT use this — it validates external growth with a full-prefix
+    sha256 (a proof, not a detector). Swapping it for these windows is the fix the PERF note there
+    proposes; it trades that proof for O(1) validation and is a deliberate call, not a cleanup."""
     if consumed <= 0:
         return None
     where = handle.tell()
@@ -1040,7 +1028,7 @@ class EventStore:
             # engine at POLL_SECONDS, or the engine observing UI control appends) re-reads AND
             # re-hashes the ENTIRE consumed prefix on every read_all that observes new bytes —
             # O(log size) per external append, i.e. O(n^2) over a run for a reader-only process:
-            # the exact quadratic cost this cache exists to avoid. `_prefix_anchor`'s bounded
+            # the exact quadratic cost this cache exists to avoid. `prefix_anchor_from_handle`'s bounded
             # head/tail windows were designed for this check (its docstring argues a full-prefix
             # digest defeats the cache) but are not used here. Correctness is preserved; the cost
             # for cross-process readers of large logs is not.
