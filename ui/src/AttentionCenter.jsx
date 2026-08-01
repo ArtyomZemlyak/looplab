@@ -130,7 +130,10 @@ export default function AttentionCenter() {
   const [capability, setCapability] = useState(() => notificationCapability())
   const [notificationBusy, setNotificationBusy] = useState(false)
   const [notificationFeedback, setNotificationFeedback] = useState('')
-  const [liveMessage, setLiveMessage] = useState('')
+  const [liveMessage, setLiveMessageState] = useState({ text: '', revision: 0 })
+  const setLiveMessage = useCallback(text => {
+    setLiveMessageState(previous => ({ text, revision: previous.revision + 1 }))
+  }, [])
   const dialogRef = useRef(null)
   const channelRef = useRef(null)
   const seenItemIdsRef = useRef(new Set())
@@ -203,14 +206,17 @@ export default function AttentionCenter() {
         continue
       }
       for (const item of sourceItems) {
+        // Do not consume the in-tab occurrence identity from a stale/partial snapshot. The same
+        // episode must still receive its one live announcement when this source is verified again.
+        if (sourceStale || item.stale) continue
         if (!seenItemIdsRef.current.has(item.id)) {
           seenItemIdsRef.current.add(item.id)
-          if (!dismissedIds.has(item.id) && !item.stale) fresh.push(item)
+          if (!dismissedIds.has(item.id)) fresh.push(item)
         }
       }
     }
     if (fresh.length) setLiveMessage(`${fresh.length} new attention ${fresh.length === 1 ? 'item' : 'items'}.`)
-  }, [initialized, currentItems, dismissedIds, runStale, permissionsStale, partial])
+  }, [initialized, currentItems, dismissedIds, runStale, permissionsStale, partial, setLiveMessage])
 
   const broadcastInvalidation = useCallback(value => {
     // Cross-tab messages are deliberately payload-free. The receiving tab reloads its own bounded,
@@ -231,7 +237,7 @@ export default function AttentionCenter() {
     setPreferences({ state: result.state, available: true, valid: true })
     if (message) setLiveMessage(message)
     return true
-  }, [broadcastInvalidation])
+  }, [broadcastInvalidation, setLiveMessage])
 
   const acknowledge = useCallback(async id => {
     await persistIds('acknowledged', [id], '')
@@ -390,7 +396,9 @@ export default function AttentionCenter() {
       <OpIcon name="bell" size={22} className="attention-bell-icon" />
       {unreadCount > 0 && <span className="attention-badge" aria-hidden="true">{badge}</span>}
     </button>
-    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{liveMessage}</div>
+    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {liveMessage.text && <span key={liveMessage.revision}>{liveMessage.text}</span>}
+    </div>
 
     {open && <div className="attention-layer">
       <div className="attention-backdrop" aria-hidden="true" onMouseDown={close} />

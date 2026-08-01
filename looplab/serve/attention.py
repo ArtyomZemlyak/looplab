@@ -4,9 +4,10 @@ The append-only run logs remain the source of truth.  This module deliberately e
 allow-listed envelope instead of forwarding event ``data``: goals, errors, paths, code, prompts and
 provider material never enter the attention feed.  Stable opaque ids are generation + seq + kind
 derived, so polling/replay does not duplicate a signal and reset/replacement cannot alias the old one.
-(The training-monitor item deliberately keys its id on the NODE + node-generation instead of the alert
-seq, so a training's repeated per-tick 'broken' alerts collapse to one inbox item that updates in place
-rather than a fresh notification each tick; a genuinely new episode after a reset still re-notifies.)
+(The training-monitor and ASHA items keep their historical NODE + node-generation id for the first bad
+episode, avoiding identity churn for lifecycles without an earlier recovery. Later bad episodes in the
+same lifecycle add the durable post-recovery anchor seq, while repeated bad ticks keep the same causal
+position.)
 """
 from __future__ import annotations
 
@@ -205,46 +206,96 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         if item:
             items.append(item)
 
+    def open_alert_episodes(event_type: str, classify) -> dict[tuple[int, int], tuple[int, Event]]:
+        """Visible open episode per node lifecycle: (episode number, causal anchor event)."""
+        ordered: list[tuple[int, int, int, int, Event]] = []
+        for position, event in enumerate(rows):
+            if event.type != event_type:
+                continue
+            seq = _integer(event.seq)
+            data = event.data or {}
+            nid = _integer(data.get("node_id"))
+            gen = _integer(data.get("generation"))
+            if seq is None or nid is None or gen is None:
+                continue
+            ordered.append((seq, position, nid, gen, event))
+
+        # (identity remains open, currently safe to show, episode number, causal anchor). An invalid
+        # row hides the card but preserves the open identity so a later valid bad verdict resumes the
+        # same episode; only an explicit recovery rotates the next bad verdict to a new episode.
+        episode_state: dict[tuple[int, int], tuple[bool, bool, int, Event | None]] = {}
+        for _seq, _position, nid, gen, event in sorted(
+                ordered, key=lambda row: (row[0], row[1])):
+            key = (nid, gen)
+            current = episode_state.get(key)
+            episode_number = current[2] if current is not None else 0
+            verdict = classify(event.data or {})
+            if verdict == "bad":
+                if current is None or not current[0]:
+                    episode_state[key] = (True, True, episode_number + 1, event)
+                else:
+                    episode_state[key] = (True, True, episode_number, current[3])
+            elif verdict == "recovery":
+                episode_state[key] = (False, False, episode_number, None)
+            else:  # malformed/unknown: suppress without granting authority to rotate identity
+                if current is None:
+                    episode_state[key] = (False, False, episode_number, None)
+                else:
+                    episode_state[key] = (current[0], False, episode_number, current[3])
+        return {
+            key: (episode_number, anchor)
+            for key, (opened, visible, episode_number, anchor) in episode_state.items()
+            if opened and visible and anchor is not None
+        }
+
+    def classify_train_monitor(data: dict) -> str:
+        status = str(data.get("status") or "").strip().lower()
+        if status == "broken":
+            return "bad"
+        if status in {"watch", "healthy"}:
+            return "recovery"
+        return "invalid"
+
+    def classify_asha(data: dict) -> str:
+        if "underperforming" not in data:
+            return "bad"  # legacy rows predate the explicit edge bit and represented warnings
+        value = data.get("underperforming")
+        if value is True:
+            return "bad"
+        if value is False:
+            return "recovery"
+        return "invalid"
+
     # Training-log monitor: surface a CONFIDENT 'broken' verdict (the live-log observer judged the
     # training likely wasted) as an owner signal while the node is still evaluating. EV_TRAIN_MONITOR_ALERT
-    # is a DIAGNOSTIC event (fold-ignored), so we read it off the raw rows, keep only the LATEST 'broken'
-    # per (node, generation), and give it a node-keyed STABLE opaque id so repeated ticks update one item
-    # instead of spamming the inbox / re-firing the browser alert. 'watch'/'healthy' stay in the event
-    # feed + trace — only the actionable 'broken' enters attention.
-    monitor_latest: dict[tuple[int, int], Event] = {}
-    for event in rows:
-        if event.type != EV_TRAIN_MONITOR_ALERT:
-            continue
-        d = event.data or {}
-        nid = _integer(d.get("node_id"))
-        gen = _integer(d.get("generation"))
-        if nid is None or gen is None:
-            continue
-        prev = monitor_latest.get((nid, gen))
-        if prev is None or (_integer(event.seq) or -1) > (_integer(prev.seq) or -1):
-            monitor_latest[(nid, gen)] = event
+    # is a DIAGNOSTIC event (fold-ignored), so we read it off the raw rows. Consecutive 'broken' ticks
+    # keep one anchor; 'watch'/'healthy' close it, while malformed rows hide without rotating identity.
+    monitor_episodes = open_alert_episodes(
+        EV_TRAIN_MONITOR_ALERT, classify_train_monitor,
+    )
     rid = _run_id(run_id)
-    for (nid, gen), event in sorted(monitor_latest.items()):
-        # select the latest lifecycle verdict before filtering. Filtering to broken while
-        # scanning made a later healthy recovery invisible and left the old warning permanently active.
-        if str((event.data or {}).get("status") or "").strip().lower() != "broken":
-            continue
+    for (nid, gen), (episode_number, anchor) in sorted(monitor_episodes.items()):
         # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
         # node's broken alert is stale and not actionable. Mirrors the failure-spike lifecycle guard.
         cur = state.nodes.get(nid)
         if (cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
                 or cur.tombstoned or nid in state.aborted_nodes):
             continue
-        if not rid or len(generation) != 64 or _integer(event.seq) is None:
+        anchor_seq = _integer(anchor.seq)
+        if not rid or len(generation) != 64 or anchor_seq is None:
             continue
         # Deliberately NO reason text in the envelope: like failure_spike, the feed points to the run
         # rather than embedding LLM-derived log prose (the redaction contract — the full verdict lives
         # in the event feed / trace, which ARE redacted-at-source but are the place for detail).
         items.append({
-            # (node, generation)-keyed via the kind slot: stable across a lifecycle's repeated ticks
-            # (no inbox/notify spam), but a genuinely NEW broken episode after a reset/re-run (bumped
-            # generation) gets a fresh id and re-notifies. `kind` (the item field) stays "train_monitor".
-            "id": _opaque_id(rid, generation, nid, f"train_monitor:{gen}"),
+            # Episode one deliberately keeps the exact legacy hash so an upgrade cannot re-notify an
+            # already-visible card. Only post-recovery episodes add their durable anchor seq; the first
+            # three opaque-id arguments stay unchanged for migration safety.
+            "id": _opaque_id(
+                rid, generation, nid,
+                (f"train_monitor:{gen}" if episode_number == 1
+                 else f"train_monitor:{gen}:episode:{anchor_seq}"),
+            ),
             "kind": "train_monitor",
             "severity": "warning",
             "title": "Training looks broken",
@@ -252,8 +303,8 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
                        "Open the run to inspect the training log and the monitor verdict."),
             "run_id": rid,
             "generation": generation,
-            "seq": _integer(event.seq),
-            "created": _timestamp(event.ts),
+            "seq": anchor_seq,
+            "created": _timestamp(anchor.ts),
             "browser": True,
             # derived=False: this item IS backed by a real appended EV_TRAIN_MONITOR_ALERT (a real
             # seq), unlike the synthesized-liveness signals. It must be False for `notifyEligible`
@@ -268,41 +319,34 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
     # same-resource rank warning as an owner FYI while it is still evaluating. Endpoint comparison is
     # curve context, not sufficient stop evidence; automatic kill requires same-resource peers.
     # EV_ASHA_RANK is a DIAGNOSTIC event
-    # (fold-ignored), recorded once when the node FLIPS to underperforming (deduped at source); read it
-    # off the raw rows and keep the LATEST per (node, generation) with a node-keyed STABLE opaque id (a
-    # fresh underperform episode after a reset/rerun bumps the generation -> a new id). This is a SOFTER
+    # (fold-ignored), recorded on rank-state transitions; read its durable true/false episode edges from
+    # the raw rows. Consecutive true rows remain one episode, while recovery followed by true gets a new
+    # id even inside the same node lifecycle. This is a SOFTER
     # tier than the training-monitor 'broken' signal: below-median is common and may still recover, so
     # it is inbox-only (browser=False -> no desktop-notification spam) and not action-REQUIRED.
-    asha_latest: dict[tuple[int, int], Event] = {}
-    for event in rows:
-        if event.type != EV_ASHA_RANK:
-            continue
-        d = event.data or {}
-        nid = _integer(d.get("node_id"))
-        gen = _integer(d.get("generation"))
-        if nid is None or gen is None:
-            continue
-        prev = asha_latest.get((nid, gen))
-        if prev is None or (_integer(event.seq) or -1) > (_integer(prev.seq) or -1):
-            asha_latest[(nid, gen)] = event
-    for (nid, gen), event in sorted(asha_latest.items()):
-        # An absent bit is a legacy underperforming row; an explicit false is the modern recovery edge.
-        if (event.data or {}).get("underperforming", True) is not True:
-            continue
+    asha_episodes = open_alert_episodes(
+        EV_ASHA_RANK, classify_asha,
+    )
+    for (nid, gen), (episode_number, anchor) in sorted(asha_episodes.items()):
         # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
         # node's rank flag is stale. Mirrors the training-monitor + failure-spike lifecycle guard.
         cur = state.nodes.get(nid)
         if (cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
                 or cur.tombstoned or nid in state.aborted_nodes):
             continue
-        if not rid or len(generation) != 64 or _integer(event.seq) is None:
+        anchor_seq = _integer(anchor.seq)
+        if not rid or len(generation) != 64 or anchor_seq is None:
             continue
         # Simple #node-anchored sentence, mirroring the train-monitor item's shape. The owner-facing
         # display text comes from the CLIENT copy table (attentionModel.js::COPY[kind]) like every kind
         # — the web client deliberately never renders feed-supplied prose — so this backend `detail` is
         # the API-shape sentence, not the rendered string; keep it generic (no per-event numbers).
         items.append({
-            "id": _opaque_id(rid, generation, nid, f"asha:{gen}"),
+            "id": _opaque_id(
+                rid, generation, nid,
+                (f"asha:{gen}" if episode_number == 1
+                 else f"asha:{gen}:episode:{anchor_seq}"),
+            ),
             "kind": "asha",
             "severity": "warning",
             "title": "ASHA rank warning",
@@ -310,8 +354,8 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
                        "at the same declared progress."),
             "run_id": rid,
             "generation": generation,
-            "seq": _integer(event.seq),
-            "created": _timestamp(event.ts),
+            "seq": anchor_seq,
+            "created": _timestamp(anchor.ts),
             # Inbox-only advisory: browser=False -> not desktop-notified (notifyEligible is
             # browser && !derived && !stale). derived=False keeps it a real, event-backed item.
             "browser": False,
