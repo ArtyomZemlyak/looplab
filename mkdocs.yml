@@ -149,6 +149,7 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
+      - Structural-debt ledger (2026-08-01): 25-architecture-modularity-review-2026-08-01.md
       - Current finding ledger (2026-07-11): 16-architecture-code-review-2026-07-11.md
       - Current delivery plan (2026-07-11): 17-project-review-and-directions-2026-07-11.md
       - Current UI/UX audit (2026-07-11): 18-ui-ux-review-2026-07-11.md
