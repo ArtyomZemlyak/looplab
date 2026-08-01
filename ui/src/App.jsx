@@ -51,7 +51,7 @@ function ReviewRoute({ token }) {
       .then(data => { if (active) setResource({ status: 'ready', data, error: '' }) })
       .catch(error => {
         if (!active) return
-        const gone = error?.status === 401 || error?.status === 410
+        const gone = [401, 404, 410].includes(error?.status)
         setResource({ status: gone ? 'gone' : 'error',
           error: gone
             ? 'Review link invalid, expired, or revoked. Ask the owner for a new link.'

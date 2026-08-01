@@ -391,7 +391,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     })
   }
   const onHubKeyDown = event => {
-    if (event.key === 'Tab') { setOpenHub(null); return }
     if (event.key === 'Escape') { event.preventDefault(); closeHub(true); return }
     const items = [...(hubMenuRef.current?.querySelectorAll('[role="menuitem"]:not(:disabled)') || [])]
     const next = nextRovingIndex(event.key, Math.max(0, items.indexOf(document.activeElement)), items.length)
