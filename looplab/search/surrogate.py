@@ -16,6 +16,13 @@ from typing import Optional
 
 from looplab.agents.roles import forward_hints
 from looplab.core.models import Idea, Node, RunState
+# Module scope, like every other search module that needs the digest primitives
+# (`search/coverage.py`, `search/panel.py`). These three used to be function-local, annotated
+# "search stays digest-free at import time" — but that was never a package invariant and no longer
+# describes the code: `events/digest.py` imports only `core.models`, so there is no cycle to dodge
+# and nothing above `core` is pulled in. Keeping the claim in three places invited a future reader
+# to "restore" it in the modules that legitimately import at module scope.
+from looplab.events.digest import knn_idw, numeric_params
 
 
 def _fallback_telemetry(name: str) -> property:
@@ -74,8 +81,6 @@ class SurrogateResearcher:
         padded by 10% of their own width so the optimizer can step just outside what was tried; a key
         whose observed values never varied is dropped rather than padded into a fake interval.
         """
-        from looplab.events.digest import numeric_params
-
         points = [numeric_params(n.idea.params, keys=None) for n in state.breedable_nodes()
                   if n.metric is not None]
         points = [p for p in points if p]
@@ -105,7 +110,6 @@ class SurrogateResearcher:
         # (a hard-flagged node keeps its inflated metric — e.g. 0.99 from reading the answer key — AND
         # stays feasible under gate), so the predictor can't learn to propose near the cheated params.
         # audit / no flags -> identical to feasible_nodes(), a no-op in the default posture.
-        from looplab.events.digest import numeric_params   # local: search stays digest-free at import time
         bounds = self.bounds if bounds is None else bounds
         hist = []
         for n in state.breedable_nodes():
@@ -121,7 +125,6 @@ class SurrogateResearcher:
         """Inverse-distance-weighted k-NN prediction + distance to the nearest sample (the
         exploration signal). Returns (predicted_metric, nearest_distance). Eligibility here is
         "full bounds dimensionality" (enforced by _history); the IDW core is the shared knn_idw."""
-        from looplab.events.digest import knn_idw          # local: search stays digest-free at import time
         keys = self.bounds if bounds is None else bounds
         pairs = [(math.sqrt(sum((x[k] - p[k]) ** 2 for k in keys)), m) for p, m in hist]
         pred, nearest = knn_idw(pairs, self.k)    # hist is non-empty (propose() gates on warmup)

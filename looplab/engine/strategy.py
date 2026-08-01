@@ -400,16 +400,32 @@ class StrategyCadenceMixin:
         mid-run strategy switch turns BOHB on: BOHB is ASHA's racing schedule PLUS the surrogate
         proposer, and the proposer is only wired at startup for policy=bohb/surrogate_proposer — so a
         Strategist switching to bohb would otherwise run bare ASHA. Needs numeric bounds; if the
-        Researcher (or its inner/fallback) exposes none, this is a no-op (bohb degrades to ASHA)."""
+        Researcher (or anything it wraps) exposes none, this is a no-op (bohb degrades to ASHA)."""
         from looplab.search.surrogate import SurrogateResearcher
         # Unified mode: re-wrapping `self.researcher` here would desync it from `self.developer`
         # (the same agent object) — the cli already skips the startup surrogate wrap for the same
         # reason (R1). A mid-run switch to bohb degrades to bare ASHA, which is acceptable.
-        if self.unified_agent or isinstance(self.researcher, SurrogateResearcher):
+        if self.unified_agent:
             return
-        bounds = (getattr(self.researcher, "bounds", None)
-                  or getattr(getattr(self.researcher, "inner", None), "bounds", None)
-                  or getattr(getattr(self.researcher, "fallback", None), "bounds", None))
+        # "if it isn't already" has to mean the WHOLE wrapper chain, not just the outermost handle.
+        # The cli builds the surrogate FIRST and wraps a panel around it, so `researcher_panel > 1`
+        # (or foresight) combined with `surrogate_proposer`/`policy=bohb` starts the run as
+        # `Panel(Surrogate(base))` — and `_apply_strategy` calls this on EVERY strategy application
+        # whose policy is bohb, including a params-only change to a run that was already bohb. An
+        # outermost-only isinstance therefore re-wrapped into `Surrogate(Panel(Surrogate(base)))`,
+        # demoting the operator's configured panel to the outer surrogate's bootstrap path.
+        # The links carry different names — panels hold `.base`, SurrogateResearcher `.fallback`,
+        # the roles/unified wrappers `.inner` — so the walk follows all three (`seen` guards the
+        # self-referential `inner` unified_agent.py builds).
+        chain, seen, link = [], set(), self.researcher
+        while link is not None and id(link) not in seen:
+            seen.add(id(link))
+            chain.append(link)
+            link = (getattr(link, "base", None) or getattr(link, "inner", None)
+                    or getattr(link, "fallback", None))
+        if any(isinstance(r, SurrogateResearcher) for r in chain):
+            return
+        bounds = next((b for b in (getattr(r, "bounds", None) for r in chain) if b), None)
         if bounds:
             self.researcher = SurrogateResearcher(bounds, fallback=self.researcher,
                                                   explore=self._surrogate_explore)

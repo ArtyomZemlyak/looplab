@@ -667,6 +667,33 @@ def test_make_policy_registers_bohb():
     assert isinstance(make_policy("bohb", n_seeds=4, max_nodes=10, eta=2), ASHAPolicy)
 
 
+def test_a_bohb_reassert_does_not_stack_a_second_surrogate_under_the_panel(tmp_path):
+    """`_ensure_surrogate` promises "if it isn't already", but only checked the OUTERMOST handle.
+    The cli builds the surrogate first and wraps the panel around it, so `researcher_panel > 1`
+    combined with `surrogate_proposer`/`policy=bohb` starts as `Panel(Surrogate(base))` — and
+    `_apply_strategy` re-calls this on EVERY bohb application, including a params-only change to an
+    already-bohb run. That re-wrapped into `Surrogate(Panel(Surrogate(base)))`, demoting the
+    operator's configured panel to the outer surrogate's bootstrap path."""
+    from looplab.search.panel import PanelResearcher
+    from looplab.search.surrogate import SurrogateResearcher
+
+    eng = _engine(tmp_path / "r")
+    inner = SurrogateResearcher({"x": (-5.0, 5.0)}, fallback=eng.researcher)
+    eng.researcher = PanelResearcher(inner, k=3)
+    eng._ensure_surrogate()
+    assert isinstance(eng.researcher, PanelResearcher), type(eng.researcher)
+    assert eng.researcher.base is inner
+
+    # …and the method still does its actual job: a chain with NO surrogate gets wrapped exactly once.
+    eng2 = _engine(tmp_path / "r2")
+    eng2.researcher = PanelResearcher(eng2.researcher, k=3, bounds={"x": (-5.0, 5.0)})
+    eng2._ensure_surrogate()
+    assert isinstance(eng2.researcher, SurrogateResearcher)
+    first = eng2.researcher
+    eng2._ensure_surrogate()
+    assert eng2.researcher is first
+
+
 def test_asha_eta3_still_promotes_ceil_survivors():
     # Regression: with floor(4/3)=1 survivor ASHA could never halve and degenerated to greedy
     # exploit (caught in live testing). ceil(4/3)=2 must keep >=2 survivors so a rung promotes.

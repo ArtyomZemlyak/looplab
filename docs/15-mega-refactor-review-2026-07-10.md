@@ -197,7 +197,8 @@ Ordered by repetition count × drift risk. Homes chosen to respect layering
 (`core` importable everywhere; `events` imports only `core`).
 
 **P1.1 [HIGH] k-NN inverse-distance-weighted prediction — reimplemented 3×.**
-`search/surrogate.py:76`, `serve/panel.py:18`, `runtime/proxy.py:42-65` each re-implement "filter
+`search/surrogate.py:76`, `serve/panel.py:18` (moved to `search/panel.py` on 2026-07-31),
+`runtime/proxy.py:42-65` each re-implement "filter
 numeric params → L2 over shared keys → k nearest → zero-distance short-circuit else IDW-average".
 **[VERIFIED-AMENDED]** the zero-distance handling is textually different but *semantically
 identical* in all three; the REAL divergences a shared helper must expose as parameters are
@@ -216,7 +217,7 @@ the exact-match scan covers the whole top-k (a NaN distance must not hide a genu
 **P1.2 [HIGH] Numeric-param filter — reimplemented 5-6×** (couples with P1.1).
 `{k: float(v) for k,v in params.items() if isinstance(v,(int,float))}` inline at
 `events/digest.py:17` (canonical `_numeric`), `engine/novelty.py:207`, `search/surrogate.py:70`,
-`serve/panel.py:21,76`, `runtime/proxy.py:32`. → promote `digest._numeric` to public
+`serve/panel.py:21,76` (now `search/panel.py`), `runtime/proxy.py:32`. → promote `digest._numeric` to public
 `numeric_params(params, keys=None)`. *Safety:* `proxy.py` coerces numeric **strings** via
 `try/except float()` — NOT `isinstance`-equivalent; pick `isinstance` semantics for the shared
 helper and leave proxy's coercion only if a test needs string params (grep first).
