@@ -85,6 +85,27 @@ const mutationMessage = (error, timedOut = false) => timedOut
       ? 'Unavailable; current input or selection kept.'
       : 'Save failed; current input or selection kept.'
 
+// Resource reads intentionally resolve an explicit result so callers can keep their last good data.
+// A resolved reconciliation is therefore authoritative only when none of those results reports that
+// it failed or was superseded by a newer owner.
+const reconciliationStatus = settlement => {
+  if (settlement?.timeout) return 'timeout'
+  if (!settlement?.ok) return 'failed'
+  const results = Array.isArray(settlement.value) ? settlement.value : [settlement.value]
+  const failures = results.filter(result => result === false
+    || (result && typeof result === 'object' && result.ok === false))
+  if (!failures.length) return 'ok'
+  return failures.every(result => result?.superseded === true) ? 'superseded' : 'failed'
+}
+
+const mutationReconcileSuffix = status => status === 'ok'
+  ? ' Current data was refreshed; verify the current value before retrying.'
+  : status === 'timeout'
+    ? ' The follow-up refresh timed out; reload before retrying.'
+    : status === 'superseded'
+      ? ' The follow-up refresh was superseded before it could be verified; reload before retrying.'
+      : ' The follow-up refresh failed; reload before retrying.'
+
 // Prompt-local input and menu selection survive a failed mutation until the operator retries.
 
 function useMutation() {
@@ -105,11 +126,7 @@ function useMutation() {
         }
         if (typeof reconcile === 'function') {
           const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
-          message += check.ok
-            ? ' Current data was refreshed; verify the current value before retrying.'
-            : check.timeout
-              ? ' The follow-up refresh timed out; reload before retrying.'
-              : ' The follow-up refresh failed; reload before retrying.'
+          message += mutationReconcileSuffix(reconciliationStatus(check))
         } else {
           message += ' Reload this view before retrying.'
         }
@@ -128,11 +145,7 @@ function useMutation() {
       }
       if (typeof reconcile === 'function') {
         const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
-        message += check.ok
-          ? ' Current data was refreshed; verify the current value before retrying.'
-          : check.timeout
-            ? ' The follow-up refresh timed out; reload before retrying.'
-            : ' The follow-up refresh failed; reload before retrying.'
+        message += mutationReconcileSuffix(reconciliationStatus(check))
       } else {
         message += ' Reload this view before retrying.'
       }
@@ -148,13 +161,35 @@ const focusSoon = target => requestAnimationFrame(() => target?.isConnected && t
 const listMutationMessage = (kind, error) => {
   if (kind === 'delete-run') return error?.status === 409
     ? 'This run is still live. Pause or stop it before deleting.'
-    : 'Run deletion was not confirmed. Check the refreshed list before retrying.'
+    : 'Run deletion was not confirmed.'
   if (kind === 'delete-project') return error?.status === 409
-    ? 'This project changed elsewhere and was not deleted. Refresh before retrying.'
-    : 'Project deletion was not confirmed. Check the refreshed list before retrying.'
+    ? 'This project changed elsewhere and was not deleted.'
+    : 'Project deletion was not confirmed.'
   return error?.status === 409
-    ? 'This assignment changed elsewhere and the move was not applied. Refresh before retrying.'
-    : 'The move was not confirmed. Check the refreshed list before retrying.'
+    ? 'This assignment changed elsewhere and the move was not applied.'
+    : 'The move was not confirmed.'
+}
+
+const listReconcileSuffix = status => status === 'ok'
+  ? ' Current list was refreshed; verify it before retrying.'
+  : status === 'timeout'
+    ? ' The follow-up list check timed out; reload before retrying.'
+    : status === 'superseded'
+      ? ' The follow-up list check was superseded before it could be verified; reload before retrying.'
+      : ' The follow-up list check failed; reload before retrying.'
+
+const acknowledgedListMutationMessage = (kind, status) => {
+  const acknowledged = kind === 'delete-run'
+    ? 'Run deletion was confirmed'
+    : kind === 'delete-project'
+      ? 'Project deletion was confirmed'
+      : 'The move was confirmed'
+  const refresh = status === 'timeout'
+    ? 'the current-list refresh timed out.'
+    : status === 'superseded'
+      ? 'the follow-up refresh was superseded before it could be verified.'
+      : 'the current list could not be refreshed.'
+  return `${acknowledged}, but ${refresh} Reload before relying on the visible list.`
 }
 
 const LIST_WRITE_TIMEOUT_MS = 12_000
@@ -190,14 +225,24 @@ export function useListMutation({ actionTimeout = LIST_WRITE_TIMEOUT_MS, reconci
     lock.current = true; update({ busy: true, label })
     try {
       const outcome = await settleWithin(action, actionTimeout)
-      if (outcome.ok) { update(null); return true }
-      let message = listMutationMessage(kind, outcome.error)
-      if (reconcile) {
-        update({ busy: true, label: 'Checking the current list before retry…' })
-        const check = await settleWithin(reconcile, reconcileTimeout)
-        if (check.timeout) message += ' The follow-up list check timed out.'
-        else if (!check.ok) message += ' The follow-up list check failed.'
+      let check = null
+      if (typeof reconcile === 'function') {
+        update({ busy: true, label: outcome.ok
+          ? 'Refreshing current list…'
+          : 'Checking the current list before retry…' })
+        check = await settleWithin(reconcile, reconcileTimeout)
       }
+      const checkStatus = check ? reconciliationStatus(check) : null
+      if (outcome.ok) {
+        if (check && checkStatus !== 'ok') {
+          update({ busy: false, error: acknowledgedListMutationMessage(kind, checkStatus) })
+        } else {
+          update(null)
+        }
+        return true
+      }
+      let message = listMutationMessage(kind, outcome.error)
+      message += check ? listReconcileSuffix(checkStatus) : ' Reload before retrying.'
       update({ busy: false, error: message }); return false
     }
     finally { lock.current = false }
@@ -942,7 +987,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const removeProject = async (id, returnFocus) => {
     if (!confirm(`Delete project "${projName[id]}"? Sub-projects and runs move up to its parent.`)) return
     const removed = await mutateList('delete-project', `Deleting project “${projName[id]}”…`,
-      async () => { await deleteProject(id); await refresh() }, refresh)
+      () => deleteProject(id), refresh)
     if (removed && sel === id) setSel(ALL)
     if (removed) requestAnimationFrame(() => projectsAllRef.current?.focus({ preventScroll: true }))
     else focusSoon(returnFocus)
@@ -950,7 +995,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const moveRun = async (runId, project_id) => {
     const target = project_id === UNASSIGNED ? 'Unassigned' : (projName[project_id] || 'project')
     return mutateList('move-run', `Moving run to “${target}”…`,
-      async () => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }, refresh)
+      () => assignRun(runId, project_id === UNASSIGNED ? null : project_id), refresh)
   }
   const onDrop = async (project_id) => {
     const runId = dragRun
