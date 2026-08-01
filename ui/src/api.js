@@ -62,6 +62,10 @@ const ASSISTANT_TRANSPORT_STORAGE_PREFIX = 'll.assistant-command-transport.'
 const ASSISTANT_TRANSPORT_ACTIONS = new Set(['stop', 'finalize', 'resume', 'pause', 'abort', 'ratify', 'approve'])
 const RUN_COMMAND_LOCK_PREFIX = 'll.command-lock.'
 const LAUNCH_TRANSPORT_PREFIX = 'll.launch-transport.'
+const LAUNCH_PREFLIGHT_TIMEOUT_MS = 12_000
+const LAUNCH_SUBMISSION_TIMEOUT_MS = 12_000
+const LAUNCH_STATUS_TIMEOUT_MS = 5_000
+const MAX_LAUNCH_REQUEST_TIMEOUT_MS = 60_000
 const RUN_COMMAND_LOCK_EVENT = 'll:command-lock'
 const LAUNCH_TRANSPORT_EVENT = 'll:launch-transport'
 const COMMAND_ID_RE = /^cmd_[0-9a-f]{32}$/
@@ -272,6 +276,11 @@ const parsedLaunchTransport = (raw, identity) => {
   return payload
 }
 
+const launchTransportMatches = (record, identity, state) => !!record && !record.invalid
+  && record.identity === String(identity)
+  && record.runId === String(state?.runId || '')
+  && record.idempotencyKey === String(state?.idempotencyKey || '')
+
 const notifyLaunchTransports = () => {
   if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function'
       || typeof CustomEvent === 'undefined') return
@@ -289,8 +298,17 @@ export function saveLaunchTransport(identity, state, storage = undefined) {
     idempotencyKey: String(state.idempotencyKey), updatedAt: Date.now(),
   }
   try {
-    target.setItem(launchTransportKey(identity), JSON.stringify(payload))
-    const saved = target.getItem(launchTransportKey(identity)) === JSON.stringify(payload)
+    const key = launchTransportKey(identity)
+    const currentRaw = target.getItem(key)
+    if (currentRaw != null) {
+      // Once a paid Start owns this proposal, a second click/render must never replace the exact
+      // observation key. Re-saving the same identity is idempotent; every changed identity is blocked.
+      return launchTransportMatches(parsedLaunchTransport(currentRaw, identity), identity, payload)
+    }
+    const encoded = JSON.stringify(payload)
+    target.setItem(key, encoded)
+    const saved = launchTransportMatches(
+      parsedLaunchTransport(target.getItem(key), identity), identity, payload)
     if (saved && storage === undefined) notifyLaunchTransports()
     return saved
   } catch { return false }
@@ -321,7 +339,7 @@ export function listLaunchTransports(storage = undefined) {
       try { identity = decodeURIComponent(encoded) } catch { identity = encoded }
       const parsed = parsedLaunchTransport(target.getItem(key), identity)
       records.push(parsed.invalid
-        ? { identity, runId: '', updatedAt: 0, invalid: true }
+        ? { identity, storageKey: key, runId: '', updatedAt: 0, invalid: true }
         : { identity: parsed.identity, runId: parsed.runId, updatedAt: parsed.updatedAt, invalid: false })
     }
   } catch { return [] }
@@ -335,13 +353,42 @@ export function subscribeLaunchTransports(callback) {
   return () => window.removeEventListener(LAUNCH_TRANSPORT_EVENT, listener)
 }
 
-export function clearLaunchTransport(identity, storage = undefined) {
+export function clearLaunchTransport(identity, storage = undefined, expectedState = null) {
   const target = transportStorage(storage)
   if (!target || !safeLaunchText(identity, 300)) return false
   try {
     const key = launchTransportKey(identity)
+    const currentRaw = target.getItem(key)
+    if (expectedState && currentRaw != null
+        && !launchTransportMatches(
+          parsedLaunchTransport(currentRaw, identity), identity, expectedState)) return false
     target.removeItem(key)
     const cleared = target.getItem(key) == null
+    if (cleared && storage === undefined) notifyLaunchTransports()
+    return cleared
+  } catch { return false }
+}
+
+// A malformed record may contain an identity that the normal transport API intentionally refuses
+// to address. The global recovery surface can still release that one exact namespace key after an
+// explicit warning, but only while its current value remains malformed; a concurrently repaired
+// valid startup record is never removed.
+export function clearDamagedLaunchTransport(storageKey, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || typeof storageKey !== 'string'
+      || !storageKey.startsWith(LAUNCH_TRANSPORT_PREFIX)) return false
+  try {
+    const currentRaw = target.getItem(storageKey)
+    if (currentRaw == null) {
+      if (storage === undefined) notifyLaunchTransports()
+      return true
+    }
+    const encoded = storageKey.slice(LAUNCH_TRANSPORT_PREFIX.length)
+    let identity
+    try { identity = decodeURIComponent(encoded) } catch { identity = encoded }
+    if (!parsedLaunchTransport(currentRaw, identity).invalid) return false
+    target.removeItem(storageKey)
+    const cleared = target.getItem(storageKey) == null
     if (cleared && storage === undefined) notifyLaunchTransports()
     return cleared
   } catch { return false }
@@ -1569,8 +1616,22 @@ export const listProjects = options => get('/api/projects', options)
 export const createProject = (name, parent_id = null) => post('/api/projects', { name, parent_id })
 export const patchProject = (id, body) => send(`/api/projects/${encodeURIComponent(id)}`, 'PATCH', body)
 export const deleteProject = (id) => send(`/api/projects/${encodeURIComponent(id)}`, 'DELETE')
-export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURIComponent(runId)}/project`, { project_id })
-export const renameRun = (runId, label) => send(`/api/runs/${encodeURIComponent(runId)}`, 'PATCH', { label })
+const runOrganizationBody = (field, value, expectedGeneration) => {
+  if (!validRunGeneration(expectedGeneration)) {
+    throw runGenerationError(
+      'run_generation_unavailable',
+      'An exact observed run generation is required before changing run organization.',
+      'Refresh the Runs list and repeat the change on the intended run.',
+    )
+  }
+  return { [field]: value, expected_generation: expectedGeneration }
+}
+export const assignRun = (runId, project_id, expectedGeneration) => post(
+  `/api/runs/${encodeURIComponent(runId)}/project`,
+  runOrganizationBody('project_id', project_id, expectedGeneration))
+export const renameRun = (runId, label, expectedGeneration) => send(
+  `/api/runs/${encodeURIComponent(runId)}`, 'PATCH',
+  runOrganizationBody('label', label, expectedGeneration))
 export function submitRunDeletion(runId, expectedGeneration, expectedSeq, operationId, options = {}) {
   if (!validRunGeneration(expectedGeneration)) {
     throw Object.assign(new Error('An exact run generation is required to delete a run.'), {
@@ -1645,7 +1706,9 @@ export const listSupertasks = options => get('/api/supertasks', options)
 export const createSupertask = (name, task_id = null) => post('/api/supertasks', { name, task_id })
 export const renameSupertask = (id, name) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'PATCH', { name })
 export const deleteSupertask = (id) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'DELETE')
-export const assignSupertask = (runId, supertask_id) => post(`/api/runs/${encodeURIComponent(runId)}/supertask`, { supertask_id })
+export const assignSupertask = (runId, supertask_id, expectedGeneration) => post(
+  `/api/runs/${encodeURIComponent(runId)}/supertask`,
+  runOrganizationBody('supertask_id', supertask_id, expectedGeneration))
 
 export const gpuStat = () => get('/api/gpu')
 
@@ -1761,12 +1824,56 @@ export const getCrossRunClaimCurationLog = (limitOrOptions = 20, options) => {
 // New-run creation is propose -> edit -> validate -> start.  The preflight is non-billable and
 // side-effect free; its opaque token binds the exact payload the server checked.  An inconclusive
 // launch is observed by idempotency key instead of blindly POSTing a second engine start.
-export const preflightRunStart = (body) => post('/api/start/preflight', body)
-export const startRun = (body) => post('/api/start', body)
-export const getStartStatus = (runId, idempotencyKey) => get(
-  `/api/start/${encodeURIComponent(runId)}/status`, {
-    cache: 'no-store', headers: { 'Idempotency-Key': String(idempotencyKey || '') },
-  })
+const boundedLaunchTimeout = (value, fallback) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed)
+    ? Math.max(1, Math.min(MAX_LAUNCH_REQUEST_TIMEOUT_MS, Math.trunc(parsed)))
+    : fallback
+}
+
+const launchDeadline = async (read, timeoutMs, code, { submission = false } = {}) => {
+  try {
+    return await deadlineRequest(read, timeoutMs).promise
+  } catch (cause) {
+    const status = Number(cause?.status)
+    const ambiguous = cause?.name === 'TimeoutError' || cause?.status == null
+      || (Number.isFinite(status) && (status >= 500 || TRANSIENT_HTTP.has(status)))
+    if (cause?.name !== 'TimeoutError' && !(submission && ambiguous)) throw cause
+    const error = Object.assign(new Error(submission
+      ? 'Startup submission did not return before its deadline.'
+      : code === 'LAUNCH_PREFLIGHT_TIMEOUT'
+        ? 'Launch validation did not return before its deadline.'
+        : 'Startup status did not return before its deadline.'), {
+      name: cause?.name === 'TimeoutError' ? 'TimeoutError' : (cause?.name || 'Error'),
+      code, transient: true, cause,
+      ...(submission ? { submissionMayHaveSucceeded: true } : {}),
+    })
+    throw error
+  }
+}
+
+export const preflightRunStart = (body, { requestTimeoutMs = LAUNCH_PREFLIGHT_TIMEOUT_MS } = {}) =>
+  launchDeadline(
+    signal => post('/api/start/preflight', body, { signal }),
+    boundedLaunchTimeout(requestTimeoutMs, LAUNCH_PREFLIGHT_TIMEOUT_MS),
+    'LAUNCH_PREFLIGHT_TIMEOUT')
+
+// Exactly one POST leaves for a caller invocation. Any lost/late response is marked ambiguous and
+// recovered only through getStartStatus with the caller's already-durable idempotency key.
+export const startRun = (body, { requestTimeoutMs = LAUNCH_SUBMISSION_TIMEOUT_MS } = {}) =>
+  launchDeadline(
+    signal => post('/api/start', body, { signal }),
+    boundedLaunchTimeout(requestTimeoutMs, LAUNCH_SUBMISSION_TIMEOUT_MS),
+    'LAUNCH_SUBMISSION_UNKNOWN', { submission: true })
+
+export const getStartStatus = (runId, idempotencyKey, {
+  requestTimeoutMs = LAUNCH_STATUS_TIMEOUT_MS,
+} = {}) => launchDeadline(
+  signal => get(`/api/start/${encodeURIComponent(runId)}/status`, {
+    cache: 'no-store', signal, headers: { 'Idempotency-Key': String(idempotencyKey || '') },
+  }),
+  boundedLaunchTimeout(requestTimeoutMs, LAUNCH_STATUS_TIMEOUT_MS),
+  'LAUNCH_STATUS_TIMEOUT')
 
 // cross-run aggregate reports over a scope (project | task | supertask). GET returns the stored report
 // + staleness ({exists, content, generated_at, run_ids, stale, added, current_run_count}); generate

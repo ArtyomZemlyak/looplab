@@ -247,3 +247,95 @@ def test_event_sequence_continues_empty_is_not_a_continuation():
     assert event_sequence_continues([ev(5), ev(6), ev(7)], 5) is True   # dense prefix from expected
     assert event_sequence_continues([ev(5), ev(7)], 5) is False         # forward gap -> fail closed
     assert event_sequence_continues([ev("5")], 5) is False              # non-int seq -> fail closed
+
+
+def test_a_reader_only_store_does_not_re_read_the_whole_prefix_on_every_external_append(
+        tmp_path, monkeypatch):
+    """A store that only READS a log another process writes (the UI server tailing the engine, the
+    engine observing UI control appends) never gets a trusted-growth receipt, so every poll that sees
+    new bytes has to re-validate the cached prefix. Doing that with a full-prefix sha256 every time is
+    O(prefix) per external append — O(n^2) over a run, the exact quadratic cost this cache exists to
+    avoid. The steady-state poll must instead cost a bounded two windows plus the new bytes, no
+    matter how large the log has already grown."""
+    from looplab.events import eventstore
+
+    p = tmp_path / "events.jsonl"
+    writer = EventStore(p)
+    blob = "x" * 4096
+    while not p.exists() or p.stat().st_size < 12 * eventstore._CACHE_ANCHOR_BYTES:
+        writer.append("seed", {"blob": blob})
+
+    reader = EventStore(p)
+    assert len(reader.read_all()) == len(writer.read_all())
+    # One external append BEFORE counting: the first observation is the one that legitimately pays
+    # the full-prefix proof (and seeds the windows from it). What must not scale with the log is
+    # every poll AFTER that.
+    writer.append("warm", {})
+    reader.read_all()
+    prefix_bytes = p.stat().st_size
+
+    read_bytes = 0
+    counting = False                              # the WRITER shares this module-level `open`, and
+    real_open = open                              # its own append path reads too — count only polls
+
+    def counting_open(*a, **kw):
+        handle = real_open(*a, **kw)
+        real_read = handle.read
+
+        def read(*ra, **rkw):
+            nonlocal read_bytes
+            chunk = real_read(*ra, **rkw)
+            if counting:
+                read_bytes += len(chunk)
+            return chunk
+
+        handle.read = read
+        return handle
+
+    monkeypatch.setattr(eventstore, "open", counting_open, raising=False)
+    polls = 12
+    for _ in range(polls):
+        writer.append("tail", {})                 # the OTHER process appends…
+        counting = True
+        reader.read_all()                         # …and this one polls
+        counting = False
+    monkeypatch.undo()
+
+    # Two windows plus a handful of new bytes; the doubling proof cannot fire on growth this small.
+    # The quadratic version reads `prefix_bytes` (12 windows) per poll and blows straight past this.
+    assert read_bytes <= polls * 3 * eventstore._CACHE_ANCHOR_BYTES, (read_bytes, polls)
+    assert read_bytes < polls * prefix_bytes // 3, (read_bytes, polls, prefix_bytes)
+    # …and the reader still sees exactly what a fresh scan does.
+    assert _fresh_seqs(p) == [event.seq for event in reader.read_all()]
+
+
+def test_the_cheap_prefix_windows_still_catch_a_rewrite_at_either_end(tmp_path):
+    """The windows are the per-poll arm of the prefix check, so they must catch both shapes the full
+    digest caught: a file rebuilt from the start (the HEAD moves) and one edited up to the append
+    point (the TAIL moves). Each is followed by an external append, which is the only way a rewritten
+    prefix ever gets joined to a fresh tail."""
+    from looplab.events import eventstore
+
+    for edit_head in (True, False):
+        p = tmp_path / f"events-{edit_head}.jsonl"
+        writer = EventStore(p)
+        writer.append("head-marker", {"blob": "h" * 4096})
+        while p.stat().st_size < 3 * eventstore._CACHE_ANCHOR_BYTES:
+            writer.append("filler", {"blob": "f" * 4096})
+        writer.append("tail-marker", {"blob": "t" * 4096})
+
+        reader = EventStore(p)
+        reader.read_all()
+        # One external append first, so the windows are SEEDED and the next poll takes the cheap arm.
+        EventStore(p).append("warm", {})
+        assert [e.type for e in reader.read_all()][-1] == "warm"
+
+        raw = p.read_bytes()
+        target = b'"head-marker"' if edit_head else b'"tail-marker"'
+        p.write_bytes(raw.replace(target, b'"REWRITTEN___"', 1))   # same length -> size is unchanged
+        EventStore(p).append("after", {})
+
+        types = [e.type for e in reader.read_all()]
+        assert "REWRITTEN___" in types, (edit_head, types[:3], types[-3:])
+        assert types[-1] == "after"
+        assert _fresh_seqs(p) == [e.seq for e in reader.read_all()]

@@ -2031,3 +2031,57 @@ def test_a_node_budget_wait_backs_off_instead_of_refolding_twice_a_second(tmp_pa
     assert anyio.run(eng._serve_forced_requests, RunState(
         nodes=state.nodes, fork_requests=[{"from_node_id": 0, "generation": 0}])) is True
     assert sleeps == [_BUDGET_WAIT_MIN_S], sleeps
+
+
+def test_a_permanently_invalid_operator_pin_stops_rebuilding_the_strategy_context(tmp_path):
+    """`pin_drift` is computed from the RAW pin, before validation. A pin whose fields are all
+    out-of-whitelist (a free-text boss `policy`, say) can therefore never match the active strategy,
+    and `pending_strategy` is only replaced by another set_strategy — so it drifts for the rest of
+    the run. Validation drops it, making it a no-op for what gets RECORDED, but the context it forced
+    on the way there is not free: `_strategy_ctx` is O(nodes) in operator_yields and does cross-run
+    memory I/O under a governance lock. It must be built once, not on every loop pass."""
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / "invalid-pin"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "set_strategy", {"strategy": {"policy": "not-a-registered-policy"}})
+    eng = _engine(rd)                      # no strategist -> `consulting` is always False
+    builds = []
+    real_ctx = eng._strategy_ctx
+    eng._strategy_ctx = lambda state: (builds.append(1), real_ctx(state))[1]
+
+    state = fold(eng.store.read_all())
+    assert state.pending_strategy == {"policy": "not-a-registered-policy"}
+    for _ in range(6):
+        assert eng._maybe_consult_strategist(state) is state     # nothing recorded, ever
+    assert builds == [1], builds                                 # …and the context was built ONCE
+    assert state.active_strategy in (None, {}) or "policy" not in (state.active_strategy or {})
+
+
+def test_the_invalid_pin_memo_re_validates_when_the_pin_or_its_gate_changes(tmp_path):
+    """The memo is keyed on the pin AND the live inputs the whitelist consults, so it can only skip
+    re-deriving a verdict that cannot have changed. A NEW pin, or the same pin under a different
+    `card_driven_selection`, must be validated afresh — otherwise a pin that only becomes valid later
+    would stay dead for the rest of the run."""
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / "memo-key"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    scoring = {"stance": "explore", "novelty_weight": 0.8, "coverage_weight": 0.2}
+    store.append("set_strategy", {"strategy": {"card_scoring": scoring}})
+    eng = _engine(rd, card_driven_selection=False)     # card_scoring is gated OFF -> pin validates away
+    builds = []
+    real_ctx = eng._strategy_ctx
+    eng._strategy_ctx = lambda state: (builds.append(1), real_ctx(state))[1]
+
+    state = fold(eng.store.read_all())
+    for _ in range(3):
+        eng._maybe_consult_strategist(state)
+    assert builds == [1], builds                       # memoized while nothing that matters moved
+
+    eng.card_driven_selection = True                   # the gate flips -> the same pin is live again
+    eng._maybe_consult_strategist(fold(eng.store.read_all()))
+    assert len(builds) == 2, builds
+    assert fold(eng.store.read_all()).active_strategy["card_scoring"] == scoring

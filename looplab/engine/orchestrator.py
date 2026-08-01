@@ -673,6 +673,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._policy_name = policy_name
         self._ablate_every = ablate_every
         self.strategist = strategist
+        # In-process memo for `_maybe_consult_strategist`: the operator pin (plus the two live inputs
+        # its whitelist consults) that last validated down to NO surviving fields. An invalid pin
+        # "drifts" forever, and without this the strategy path rebuilt the whole StrategyContext on
+        # every loop pass to re-derive the same no-op. Nothing durable keys off it — see there.
+        self._invalid_pin_verdict: Optional[tuple] = None
         self.strategist_every = max(1, strategist_every)
         self.concept_retag_every = max(1, concept_retag_every)
         self.deep_researcher = deep_researcher

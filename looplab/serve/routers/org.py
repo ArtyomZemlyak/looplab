@@ -2,6 +2,8 @@
 bodies are verbatim moves from `serve/server.py::make_app` (BACKLOG §4)."""
 from __future__ import annotations
 
+import re
+
 import anyio
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -9,6 +11,10 @@ from fastapi.responses import JSONResponse
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, get_run_deletion, validate_deletion_request)
 from looplab.serve.projects import ProjectError, ProjectStoreLockError
+from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
+
+
+_RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def build_router(srv) -> APIRouter:
@@ -25,17 +31,15 @@ def build_router(srv) -> APIRouter:
         return body
 
     # ------------------------------------------------------------------ projects (ClearML-style)
-    # CLAUDE REVIEW: [PERF] Every project MUTATOR route that calls this (create_project,
-    # patch_project, assign_run, create_supertask, patch_supertask, assign_supertask, rename_run) is
-    # an `async def`, so `_project_call(fn)` runs `fn()` — `ProjectStore._transaction` ->
-    # `_interprocess_lock(required=True)` -> a BLOCKING `fcntl.flock(LOCK_EX)` with NO timeout, plus
-    # load/atomic-save disk I/O — directly on the ASGI event loop. If another UI worker/process holds
-    # `projects.json.lock` the flock waits UNBOUNDED, freezing every concurrent SSE tick/poll on this
-    # worker. The read routes and the destructive ones (delete_project/delete_supertask/delete_run)
-    # are sync `def` (threadpool) and are safe; only these async mutators block. They need the same
-    # `anyio.to_thread.run_sync` offload that /control and submit_command already use.
     def _project_call(fn):
-        """Map invalid mutations to 400 and an unavailable required durability lock to 503."""
+        """Map invalid mutations to 400 and an unavailable required durability lock to 503.
+
+        BLOCKING: `fn` reaches `ProjectStore._transaction` -> `_interprocess_lock(required=True)` ->
+        an unbounded `fcntl.flock(LOCK_EX)`, plus load/atomic-save disk I/O. A sync `def` route runs
+        in FastAPI's threadpool and may call this directly; an `async def` route must NOT — on the
+        ASGI event loop a lock another UI worker or process holds freezes every concurrent SSE tick
+        and poll on this worker until it is released. Async callers go through `_project_call_async`.
+        """
         try:
             return fn()
         except ProjectStoreLockError as e:
@@ -43,15 +47,46 @@ def build_router(srv) -> APIRouter:
         except ProjectError as e:
             raise HTTPException(400, str(e)) from e
 
-    def _run_project_call(run_id: str, operation: str, fn):
-        """Serialize run-id metadata with reset/delete so a stale request cannot resurrect it."""
+    async def _project_call_async(fn):
+        """`_project_call` off the event loop — the offload `assign_run` / `rename_run` already use."""
+        return await anyio.to_thread.run_sync(lambda: _project_call(fn))
+
+    def _expected_run_generation(body: dict) -> str:
+        generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
+        if (not isinstance(generation, str)
+                or _RUN_GENERATION_RE.fullmatch(generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": (
+                    "expected_generation must be the exact generation from the Runs list."),
+                "remediation": (
+                    "Refresh the Runs list before changing this run's organization."),
+            })
+        return generation
+
+    def _run_project_call(
+            run_id: str, expected_generation: str, operation: str, action: str, fn):
+        """Fence run-id metadata against a reset/replacement generation under its sequencer."""
         rd = _run_dir(run_id)
         with srv.commands.sequence(rd):
             # Re-enter the canonical helper after waiting: deletion can publish its root fence or
             # quarantine the directory between the route's first lookup and sequencer acquisition.
-            canonical = _run_dir(run_id)
-            if canonical.name != run_id:
-                raise HTTPException(409, f"cannot {operation}: run identity changed")
+            canonical = srv.commands.validate_paths(_run_dir(run_id))
+            current_generation = srv.commands.run_generation(canonical)
+            if current_generation != expected_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "run_id": run_id,
+                    "operation": operation,
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation or None,
+                    "message": (
+                        f"The run changed before {action}; "
+                        "no organization metadata was written."),
+                    "remediation": (
+                        "Refresh the Runs list and repeat the change on the intended "
+                        "current generation."),
+                })
             return _project_call(fn)
 
     @router.get("/api/projects")
@@ -61,7 +96,8 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/projects")
     async def create_project(request: Request):
         body = await _json_object(request)
-        p = _project_call(lambda: projects.create(body.get("name", ""), body.get("parent_id")))
+        p = await _project_call_async(
+            lambda: projects.create(body.get("name", ""), body.get("parent_id")))
         return p.model_dump()
 
     @router.patch("/api/projects/{pid}")
@@ -73,7 +109,7 @@ def build_router(srv) -> APIRouter:
                 projects.rename(pid, body["name"])
             if "parent_id" in body:
                 projects.reparent(pid, body["parent_id"])
-        _project_call(_apply)
+        await _project_call_async(_apply)
         return {"ok": True}
 
     @router.delete("/api/projects/{pid}")
@@ -84,8 +120,11 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/project")
     async def assign_run(run_id: str, request: Request):
         body = await _json_object(request)
+        expected_generation = _expected_run_generation(body)
         await anyio.to_thread.run_sync(lambda: _run_project_call(
-            run_id, "assign run", lambda: projects.assign(run_id, body.get("project_id"))))
+            run_id, expected_generation, "assign_project",
+            "its project assignment could be updated",
+            lambda: projects.assign(run_id, body.get("project_id"))))
         return {"ok": True}
 
     # ------------------------------------------------------------------ super-tasks (flat axis)
@@ -97,13 +136,14 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/supertasks")
     async def create_supertask(request: Request):
         body = await _json_object(request)
-        st = _project_call(lambda: projects.create_supertask(body.get("name", ""), body.get("task_id")))
+        st = await _project_call_async(
+            lambda: projects.create_supertask(body.get("name", ""), body.get("task_id")))
         return st
 
     @router.patch("/api/supertasks/{sid}")
     async def patch_supertask(sid: str, request: Request):
         body = await _json_object(request)
-        _project_call(lambda: projects.rename_supertask(sid, body.get("name", "")))
+        await _project_call_async(lambda: projects.rename_supertask(sid, body.get("name", "")))
         return {"ok": True}
 
     @router.delete("/api/supertasks/{sid}")
@@ -114,8 +154,10 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/supertask")
     async def assign_supertask(run_id: str, request: Request):
         body = await _json_object(request)
+        expected_generation = _expected_run_generation(body)
         await anyio.to_thread.run_sync(lambda: _run_project_call(
-            run_id, "assign super-task",
+            run_id, expected_generation, "assign_supertask",
+            "its super-task assignment could be updated",
             lambda: projects.assign_supertask(run_id, body.get("supertask_id"))))
         return {"ok": True}
 
@@ -123,8 +165,10 @@ def build_router(srv) -> APIRouter:
     async def rename_run(run_id: str, request: Request):
         """Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged."""
         body = await _json_object(request)
+        expected_generation = _expected_run_generation(body)
         await anyio.to_thread.run_sync(lambda: _run_project_call(
-            run_id, "rename run", lambda: projects.set_label(run_id, body.get("label"))))
+            run_id, expected_generation, "rename", "it could be renamed",
+            lambda: projects.set_label(run_id, body.get("label"))))
         return {"ok": True}
 
     @router.post("/api/runs/{run_id}/deletions")

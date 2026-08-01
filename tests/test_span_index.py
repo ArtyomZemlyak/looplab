@@ -821,3 +821,75 @@ def test_a_span_line_far_larger_than_one_chunk_is_scanned_linearly(tmp_path, mon
     assert sum(scanned) <= 2 * size, (
         f"scanned {sum(scanned)} bytes over {len(scanned)} calls for a {size}-byte file — the "
         "over-chunk line is being re-scanned at every chunk boundary")
+
+
+def test_an_unknown_span_id_does_not_re_walk_the_whole_spans_file(tmp_path, monkeypatch):
+    """`GET /api/runs/{id}/spans/{sid}` falls back to a scan when the index cannot resolve `sid`.
+    That fallback exists for a span appended PAST the indexed tail — a handful of lines — but `sid`
+    is an unvalidated path param, so a bogus id took the same path and read the ENTIRE (up to ~1 GB)
+    spans.jsonl from byte 0 to find nothing, pinning a threadpool thread per request. Everything
+    below the index's coverage boundary was already searched by `full_span`, so re-walking it can
+    only ever find nothing; the scan must start there."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.events import eventstore
+    from looplab.serve import routers
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    big = _spans_for(0, "tr0") + _spans_for(1, "tr1")
+    for i in range(400):                       # a spans.jsonl big enough for a full walk to show up
+        big.append(_gen(1, "tr1", f"pad{i}", "root1", i + 1))
+    _write_spans(rd, big)
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/api/runs/demo/trace").status_code == 200      # build + persist the index
+
+    read_bytes = [0]
+    real_open = open
+
+    class _CountingFile:
+        """Proxy, not attribute patching: `for line in f` resolves `__iter__` on the TYPE, so a
+        wrapper set on the file INSTANCE never sees a line-by-line walk at all."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def __iter__(self):
+            for line in self._inner:
+                read_bytes[0] += len(line)
+                yield line
+
+        def read(self, *a, **kw):
+            chunk = self._inner.read(*a, **kw)
+            read_bytes[0] += len(chunk)
+            return chunk
+
+    def counting_open(*a, **kw):
+        handle = real_open(*a, **kw)
+        if not str(a[0] if a else kw.get("file", "")).endswith("spans.jsonl"):
+            return handle                      # only spans.jsonl traffic is under test
+        return _CountingFile(handle)
+
+    # BOTH modules: the bounded scan lives in `routers.runs`, the whole-file walk it replaced ran
+    # through `iter_jsonl`, whose `open` resolves in `events.eventstore`.
+    monkeypatch.setattr(routers.runs, "open", counting_open, raising=False)
+    monkeypatch.setattr(eventstore, "open", counting_open, raising=False)
+    missing = client.get("/api/runs/demo/spans/no-such-span-id")
+    monkeypatch.undo()
+
+    # A span that is not there is reported as unavailable (200 with an empty projection), not 404.
+    assert missing.status_code == 200 and not missing.json().get("attributes"), missing.json()
+    assert read_bytes[0] < (rd / "spans.jsonl").stat().st_size // 4, (
+        read_bytes[0], (rd / "spans.jsonl").stat().st_size)
+    # …and a span that IS in the file is still served.
+    assert client.get("/api/runs/demo/spans/g0_1").json()["span_id"] == "g0_1"

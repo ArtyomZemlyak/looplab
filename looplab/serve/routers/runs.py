@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import anyio
+import orjson
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,7 +34,7 @@ from looplab.core.run_reset import (
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
-    iter_event_jsonl, iter_jsonl)
+    iter_event_jsonl)
 from looplab.events.replay import FoldCursor, fold
 from looplab.events.traceview import (
     TRACE_PROJECTION_SCHEMA, trace_file_revision, unavailable_projection)
@@ -106,6 +107,13 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONCEPT_LENS_KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")
 _CONCEPT_LENS_RECOVERY_SCHEMA = 1
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
+# `GET /api/runs/{id}/spans/{sid}` falls back to a scan when the light span index cannot resolve
+# `sid`. That fallback exists for a span appended PAST the indexed tail, which is a handful of lines
+# — but `sid` is an unvalidated path param, so every bogus id took the same path and walked the whole
+# (up to ~1 GB) spans.jsonl to find nothing, pinning a threadpool thread per request. The scan now
+# starts at the index's coverage boundary, and this cap bounds the remaining case where there is no
+# index at all (a foreign or unparseable file leaves nothing covered).
+_SPAN_FALLBACK_MAX_LINES = 20_000
 # Legacy /log returns the oldest-first envelopes past `since` as one flat array. Bound BOTH the row
 # count AND the aggregate serialized bytes it materializes, so neither 100k envelopes nor a handful of
 # very large ones can be read whole into one response (OOM). A row cap alone is not a memory cap: one
@@ -219,6 +227,35 @@ def _run_config_revision(snapshot: dict) -> str:
 def _run_config_thread_lock(snapshot_path: Path) -> threading.Lock:
     """Compatibility seam around the shared config writer stripe."""
     return _shared_run_config_thread_lock(snapshot_path)
+
+
+def _scan_span_tail(path: Path, sid: str, since: int) -> Optional[dict]:
+    """Find one span row by id in the bytes AFTER `since`, bounded by `_SPAN_FALLBACK_MAX_LINES`.
+
+    `since` must be a newline boundary — the span index's `covers` is exactly that (its scan reports
+    the last complete-record offset). Applies `iter_jsonl`'s torn-tail rules verbatim so the two
+    agree on where a damaged file stops; returns None when the id is not in the scanned window."""
+    try:
+        with open(path, "rb") as f:
+            if since > 0:
+                f.seek(since)
+            for seen, raw in enumerate(f):
+                if seen >= _SPAN_FALLBACK_MAX_LINES or not raw.endswith(b"\n"):
+                    break                       # cap reached, or a torn final write
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    break                       # corrupt tail — stop cleanly
+                if not isinstance(obj, dict):
+                    break
+                if obj.get("span_id") == sid:
+                    return obj
+    except OSError:
+        return None
+    return None
 
 
 def _concept_lens_idempotency_key(raw: str) -> str:
@@ -1226,146 +1263,160 @@ def build_router(srv) -> APIRouter:
         request_digest = _concept_lens_prompt_digest(raw_idempotency_key, prompt)
         reservation = None
         compute = None
-        # CLAUDE REVIEW: [PERF] This is an `async def` handler, yet everything inside this block is
-        # blocking work executed on the event loop: srv.commands.sequence() acquires a threading
-        # lock + OS file lock with bounded retries (can park for the full lock_acquire_timeout),
-        # and EventStore(...).read_all() re-reads the ENTIRE events.jsonl. While it runs, every SSE
-        # stream and other async handler on the server stalls. The two abandon endpoints below and
-        # the recovery GET share the same pattern (the GET at least runs on the threadpool). Wrap
-        # the sequenced section in anyio.to_thread.run_sync like chat/report workers do.
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current_generation = srv.commands.run_generation(rd)
-            if not current_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_unavailable",
-                    "message": "The run has no durable generation identity.",
-                })
-            if current_generation != expected_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation,
-                    "message": "The run changed before paid lens creation began.",
-                    "remediation": "Reload the Concepts view and submit a new request intentionally.",
-                })
-            if core[RUN_GENERATION_FIELD] != current_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation,
-                    "message": "The run changed while the concept frame was being prepared.",
-                    "remediation": "Reload the Concepts view and submit a new request intentionally.",
-                })
+        # OFF the event loop. `sequence()` takes the run command sequencer (a thread lock plus an OS
+        # file lock with a bounded-retry acquire, so it can park for the whole lock_acquire_timeout)
+        # and the paid-lens ledger reads the ENTIRE events.jsonl. Run inline on this `async def`
+        # handler's loop, all of that stalled every SSE stream and every other async handler on the
+        # server. The sequenced section still runs as ONE unit — only the thread it runs on changes.
+        # Every early exit inside it returns a response dict; `None` means "claimed, keep going", and
+        # what the caller then needs is handed back through `claimed`.
+        claimed: dict = {}
 
-            job_identity = _concept_lens_identity(
-                rd, current_generation, raw_idempotency_key)
-            store = EventStore(rd / "events.jsonl")
-            claims, terminals, unresolved, conflicts = _concept_lens_ledger(
-                store.read_all(), current_generation)
-            if job_identity in conflicts:
-                return _concept_lens_uncertain(
-                    base_frame, current_generation, job_identity,
-                    "This paid-lens identity has conflicting receipts and requires repair.")
-            if conflicts:
-                # Do not fabricate an ambiguous receipt for a fresh identity that has never claimed
-                # provider work.  The operator must repair the unrelated ledger conflict first.
-                raise HTTPException(409, {
-                    "code": "concept_lens_ledger_conflict",
-                    "message": "Another paid-lens identity has conflicting durable receipts.",
-                    "remediation": "Repair the conflicting receipts before creating new paid work.",
-                })
-            existing_digest = claims.get(job_identity)
-            if existing_digest is not None and existing_digest != request_digest:
-                raise HTTPException(409, {
-                    "code": "idempotency_key_reused",
-                    "message": "This Idempotency-Key already belongs to a different lens prompt.",
-                    "remediation": "Reuse it only for the exact request, or create a new key.",
-                })
-            terminal = terminals.get(job_identity)
-            if terminal is not None:
-                if not _confirm_concept_lens_terminal(store.path):
+        def _claim():
+            nonlocal rd
+            with srv.commands.sequence(rd):
+                rd = srv.commands.validate_paths(rd)
+                current_generation = srv.commands.run_generation(rd)
+                if not current_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_unavailable",
+                        "message": "The run has no durable generation identity.",
+                    })
+                if current_generation != expected_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected_generation,
+                        "current_generation": current_generation,
+                        "message": "The run changed before paid lens creation began.",
+                        "remediation": "Reload the Concepts view and submit a new request intentionally.",
+                    })
+                if core[RUN_GENERATION_FIELD] != current_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected_generation,
+                        "current_generation": current_generation,
+                        "message": "The run changed while the concept frame was being prepared.",
+                        "remediation": "Reload the Concepts view and submit a new request intentionally.",
+                    })
+
+                job_identity = _concept_lens_identity(
+                    rd, current_generation, raw_idempotency_key)
+                store = EventStore(rd / "events.jsonl")
+                claims, terminals, unresolved, conflicts = _concept_lens_ledger(
+                    store.read_all(), current_generation)
+                if job_identity in conflicts:
                     return _concept_lens_uncertain(
                         base_frame, current_generation, job_identity,
-                        "The saved lens terminal is visible but its durable receipt is unconfirmed. "
-                        "Resume only with this same request identity.")
-                return _concept_lens_terminal_response(
-                    terminal, core, lens_pack, job_identity)
-            if unresolved:
-                if unresolved != {job_identity}:
-                    if job_identity in unresolved:
+                        "This paid-lens identity has conflicting receipts and requires repair.")
+                if conflicts:
+                    # Do not fabricate an ambiguous receipt for a fresh identity that has never claimed
+                    # provider work.  The operator must repair the unrelated ledger conflict first.
+                    raise HTTPException(409, {
+                        "code": "concept_lens_ledger_conflict",
+                        "message": "Another paid-lens identity has conflicting durable receipts.",
+                        "remediation": "Repair the conflicting receipts before creating new paid work.",
+                    })
+                existing_digest = claims.get(job_identity)
+                if existing_digest is not None and existing_digest != request_digest:
+                    raise HTTPException(409, {
+                        "code": "idempotency_key_reused",
+                        "message": "This Idempotency-Key already belongs to a different lens prompt.",
+                        "remediation": "Reuse it only for the exact request, or create a new key.",
+                    })
+                terminal = terminals.get(job_identity)
+                if terminal is not None:
+                    if not _confirm_concept_lens_terminal(store.path):
                         return _concept_lens_uncertain(
                             base_frame, current_generation, job_identity,
-                            "Multiple paid-lens claims overlap this run generation and require repair.")
-                    raise HTTPException(409, {
-                        "code": "concept_lens_in_progress",
-                        "message": "Another concept lens already owns this run generation.",
-                        "remediation": "Wait for its receipt or reload before trying again.",
-                    })
-                reservation = srv.jobs.rejoin(job_identity)
-                if reservation is None:
-                    return _concept_lens_uncertain(
-                        base_frame, current_generation, job_identity,
-                        "The earlier paid lens attempt has no live process receipt.")
-                compute = lambda: _run_concept_lens_worker(  # noqa: E731
-                    srv.llm_settings(rd), rd, current_generation, job_identity,
-                    request_digest, prompt, core, lens_pack)
-            else:
-                # A bounded partial frame is the exact safe substrate already rendered by GET.  Only
-                # corruption-adjacent reasons block paid work; cap limitations remain in the eventual
-                # derived response so the operator sees precisely what the model received.
-                blocking = [reason for reason in base_frame["completeness"]["reasons"]
-                            if reason not in _TRUNCATION_CAP_REASONS]
-                if blocking:
-                    return {
-                        **base_frame,
-                        "ok": False,
-                        "reason": "concept_frame_partial",
-                        "blocking_reasons": blocking,
-                        "generation": current_generation,
-                        "request_id": job_identity,
-                    }
-                try:
-                    settings = srv.llm_settings(rd)
-                except Exception as exc:  # noqa: BLE001 - no claim/provider exists yet
-                    failure = safe_provider_failure(exc)
-                    return {
-                        **base_frame,
-                        "ok": False,
-                        "reason": "no_model",
-                        "error_kind": failure["error_kind"],
-                        "error": failure["message"],
-                        "generation": current_generation,
-                        "request_id": job_identity,
-                    }
-                reservation = srv.jobs.reserve(job_identity, consume_on_poll=False)
-                if reservation.get("status") != "running":
-                    return {
-                        **base_frame,
-                        **reservation,
-                        "reason": "capacity",
-                        "generation": current_generation,
-                        "request_id": job_identity,
-                    }
-                compute = lambda: _run_concept_lens_worker(  # noqa: E731
-                    settings, rd, current_generation, job_identity,
-                    request_digest, prompt, core, lens_pack)
-                try:
-                    store.append(
-                        EV_CONCEPT_LENS_STARTED,
-                        {
-                            "lens_request_id": job_identity,
+                            "The saved lens terminal is visible but its durable receipt is unconfirmed. "
+                            "Resume only with this same request identity.")
+                    return _concept_lens_terminal_response(
+                        terminal, core, lens_pack, job_identity)
+                if unresolved:
+                    if unresolved != {job_identity}:
+                        if job_identity in unresolved:
+                            return _concept_lens_uncertain(
+                                base_frame, current_generation, job_identity,
+                                "Multiple paid-lens claims overlap this run generation and require repair.")
+                        raise HTTPException(409, {
+                            "code": "concept_lens_in_progress",
+                            "message": "Another concept lens already owns this run generation.",
+                            "remediation": "Wait for its receipt or reload before trying again.",
+                        })
+                    reservation = srv.jobs.rejoin(job_identity)
+                    if reservation is None:
+                        return _concept_lens_uncertain(
+                            base_frame, current_generation, job_identity,
+                            "The earlier paid lens attempt has no live process receipt.")
+                    compute = lambda: _run_concept_lens_worker(  # noqa: E731
+                        srv.llm_settings(rd), rd, current_generation, job_identity,
+                        request_digest, prompt, core, lens_pack)
+                else:
+                    # A bounded partial frame is the exact safe substrate already rendered by GET.  Only
+                    # corruption-adjacent reasons block paid work; cap limitations remain in the eventual
+                    # derived response so the operator sees precisely what the model received.
+                    blocking = [reason for reason in base_frame["completeness"]["reasons"]
+                                if reason not in _TRUNCATION_CAP_REASONS]
+                    if blocking:
+                        return {
+                            **base_frame,
+                            "ok": False,
+                            "reason": "concept_frame_partial",
+                            "blocking_reasons": blocking,
                             "generation": current_generation,
-                            "request_digest": request_digest,
-                            "input_seq": core["captured_seq"],
-                        },
-                        require_lock=True,
-                        require_durable=True,
-                    )
-                    srv.jobs.start_reserved(reservation["job_id"], compute)
-                except Exception:
-                    srv.jobs.discard_reservation(str(reservation.get("job_id") or ""))
-                    raise
+                            "request_id": job_identity,
+                        }
+                    try:
+                        settings = srv.llm_settings(rd)
+                    except Exception as exc:  # noqa: BLE001 - no claim/provider exists yet
+                        failure = safe_provider_failure(exc)
+                        return {
+                            **base_frame,
+                            "ok": False,
+                            "reason": "no_model",
+                            "error_kind": failure["error_kind"],
+                            "error": failure["message"],
+                            "generation": current_generation,
+                            "request_id": job_identity,
+                        }
+                    reservation = srv.jobs.reserve(job_identity, consume_on_poll=False)
+                    if reservation.get("status") != "running":
+                        return {
+                            **base_frame,
+                            **reservation,
+                            "reason": "capacity",
+                            "generation": current_generation,
+                            "request_id": job_identity,
+                        }
+                    compute = lambda: _run_concept_lens_worker(  # noqa: E731
+                        settings, rd, current_generation, job_identity,
+                        request_digest, prompt, core, lens_pack)
+                    try:
+                        store.append(
+                            EV_CONCEPT_LENS_STARTED,
+                            {
+                                "lens_request_id": job_identity,
+                                "generation": current_generation,
+                                "request_digest": request_digest,
+                                "input_seq": core["captured_seq"],
+                            },
+                            require_lock=True,
+                            require_durable=True,
+                        )
+                        srv.jobs.start_reserved(reservation["job_id"], compute)
+                    except Exception:
+                        srv.jobs.discard_reservation(str(reservation.get("job_id") or ""))
+                        raise
+                claimed.update(compute=compute, reservation=reservation,
+                               job_identity=job_identity)
+                return None
+
+        early = await anyio.to_thread.run_sync(_claim)
+        if early is not None:
+            return early
+        compute = claimed["compute"]
+        reservation = claimed["reservation"]
+        job_identity = claimed["job_identity"]
 
         result = await srv.jobs.run_as_job(
             compute,
@@ -1533,97 +1584,105 @@ def build_router(srv) -> APIRouter:
         response.headers["Vary"] = (
             "X-LoopLab-Token, Authorization, Resolution-Idempotency-Key")
 
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current_generation = srv.commands.run_generation(rd)
-            if not current_generation or current_generation != expected_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation or None,
-                    "message": "The run changed before the recovered claim could be resolved.",
-                    "remediation": "Reload recovery; never resolve a claim from another generation.",
-                })
-            if generation != current_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation,
-                    "message": "The run changed while its recovery frame was prepared.",
-                })
+        # OFF the event loop, for the same reason as the paid-lens claim above: `sequence()` waits on
+        # a cross-process flock and this section then re-reads the log to resolve the claim. Every
+        # exit inside it produces this handler's response, so the whole thing is simply the offloaded
+        # body.
+        def _resolve():
+            nonlocal rd
+            with srv.commands.sequence(rd):
+                rd = srv.commands.validate_paths(rd)
+                current_generation = srv.commands.run_generation(rd)
+                if not current_generation or current_generation != expected_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected_generation,
+                        "current_generation": current_generation or None,
+                        "message": "The run changed before the recovered claim could be resolved.",
+                        "remediation": "Reload recovery; never resolve a claim from another generation.",
+                    })
+                if generation != current_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected_generation,
+                        "current_generation": current_generation,
+                        "message": "The run changed while its recovery frame was prepared.",
+                    })
 
-            store = EventStore(rd / "events.jsonl")
-            claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
-                store.read_all(), current_generation)
-            if conflict or len(unresolved) > 1:
-                raise HTTPException(409, {
-                    "code": "concept_lens_recovery_conflict",
-                    "message": "The paid-lens ledger is not safe for automatic recovery.",
-                })
-            claim = claims.get(request_id)
-            if claim is None:
-                raise HTTPException(409, {
-                    "code": "concept_lens_recovery_claim_missing",
-                    "message": "No paid-lens claim matches this run generation and request_id.",
-                })
-            if claim["started_seq"] != expected_started_seq:
-                raise HTTPException(409, {
-                    "code": "concept_lens_started_seq_mismatch",
-                    "expected_started_seq": expected_started_seq,
-                    "current_started_seq": claim["started_seq"],
-                    "message": "The durable claim does not match the inspected recovery receipt.",
-                })
+                store = EventStore(rd / "events.jsonl")
+                claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
+                    store.read_all(), current_generation)
+                if conflict or len(unresolved) > 1:
+                    raise HTTPException(409, {
+                        "code": "concept_lens_recovery_conflict",
+                        "message": "The paid-lens ledger is not safe for automatic recovery.",
+                    })
+                claim = claims.get(request_id)
+                if claim is None:
+                    raise HTTPException(409, {
+                        "code": "concept_lens_recovery_claim_missing",
+                        "message": "No paid-lens claim matches this run generation and request_id.",
+                    })
+                if claim["started_seq"] != expected_started_seq:
+                    raise HTTPException(409, {
+                        "code": "concept_lens_started_seq_mismatch",
+                        "expected_started_seq": expected_started_seq,
+                        "current_started_seq": claim["started_seq"],
+                        "message": "The durable claim does not match the inspected recovery receipt.",
+                    })
 
-            terminal = terminals.get(request_id)
-            if terminal is not None:
-                if not _confirm_concept_lens_terminal(store.path):
+                terminal = terminals.get(request_id)
+                if terminal is not None:
+                    if not _confirm_concept_lens_terminal(store.path):
+                        return _concept_lens_uncertain(
+                            base_frame, current_generation, request_id,
+                            "The recovered terminal is visible but its durability is unconfirmed.")
+                    return _concept_lens_terminal_response(
+                        terminal, core, lens_pack, request_id)
+                if unresolved != {request_id}:
+                    raise HTTPException(409, {
+                        "code": "concept_lens_recovery_claim_missing",
+                        "message": "The inspected claim is no longer the single unresolved paid request.",
+                    })
+
+                process_receipt = srv.jobs.rejoin(request_id)
+                process_job = (srv.jobs.get(process_receipt["job_id"])
+                               if process_receipt is not None else None)
+                if process_job is not None and process_job.get("status") == "running":
+                    raise HTTPException(409, {
+                        "code": "concept_lens_still_running",
+                        "message": "The original paid lens worker is still running in this process.",
+                        "remediation": "Poll its job receipt instead of resolving it as an orphan.",
+                    })
+
+                resolution_id = _concept_lens_resolution_identity(
+                    rd, current_generation, request_id, resolution_key)
+                try:
+                    terminal = store.append(
+                        EV_CONCEPT_LENS_COMPLETED,
+                        {
+                            "lens_request_id": request_id,
+                            "generation": current_generation,
+                            "request_digest": claim["request_digest"],
+                            "outcome": "abandoned",
+                            "reason": "operator_recovered_abandon",
+                            "resolution": "operator_recovery",
+                            "resolution_id": resolution_id,
+                        },
+                        require_lock=True,
+                        require_durable=True,
+                    )
+                except Exception:  # noqa: BLE001 - a possibly visible resolution must not be replayed
+                    terminal = None
+                if terminal is None or not _confirm_concept_lens_terminal(store.path):
                     return _concept_lens_uncertain(
                         base_frame, current_generation, request_id,
-                        "The recovered terminal is visible but its durability is unconfirmed.")
+                        "The recovery resolution could not be confirmed durable; no provider retry "
+                        "was sent. Inspect recovery again before retrying this resolution.")
                 return _concept_lens_terminal_response(
                     terminal, core, lens_pack, request_id)
-            if unresolved != {request_id}:
-                raise HTTPException(409, {
-                    "code": "concept_lens_recovery_claim_missing",
-                    "message": "The inspected claim is no longer the single unresolved paid request.",
-                })
 
-            process_receipt = srv.jobs.rejoin(request_id)
-            process_job = (srv.jobs.get(process_receipt["job_id"])
-                           if process_receipt is not None else None)
-            if process_job is not None and process_job.get("status") == "running":
-                raise HTTPException(409, {
-                    "code": "concept_lens_still_running",
-                    "message": "The original paid lens worker is still running in this process.",
-                    "remediation": "Poll its job receipt instead of resolving it as an orphan.",
-                })
-
-            resolution_id = _concept_lens_resolution_identity(
-                rd, current_generation, request_id, resolution_key)
-            try:
-                terminal = store.append(
-                    EV_CONCEPT_LENS_COMPLETED,
-                    {
-                        "lens_request_id": request_id,
-                        "generation": current_generation,
-                        "request_digest": claim["request_digest"],
-                        "outcome": "abandoned",
-                        "reason": "operator_recovered_abandon",
-                        "resolution": "operator_recovery",
-                        "resolution_id": resolution_id,
-                    },
-                    require_lock=True,
-                    require_durable=True,
-                )
-            except Exception:  # noqa: BLE001 - a possibly visible resolution must not be replayed
-                terminal = None
-            if terminal is None or not _confirm_concept_lens_terminal(store.path):
-                return _concept_lens_uncertain(
-                    base_frame, current_generation, request_id,
-                    "The recovery resolution could not be confirmed durable; no provider retry "
-                    "was sent. Inspect recovery again before retrying this resolution.")
-            return _concept_lens_terminal_response(
-                terminal, core, lens_pack, request_id)
+        return await anyio.to_thread.run_sync(_resolve)
 
     @router.post("/api/runs/{run_id}/concepts/lens/abandon")
     async def abandon_concept_lens(run_id: str, request: Request, response: Response):
@@ -1664,66 +1723,75 @@ def build_router(srv) -> APIRouter:
         request_digest = None
         store_path = rd / "events.jsonl"
 
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            current_generation = srv.commands.run_generation(rd)
-            if not current_generation or current_generation != expected_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation or None,
-                    "message": "The run changed before the paid claim could be abandoned.",
-                    "remediation": "Reload Concepts; never abandon a receipt from another generation.",
-                })
-            if generation != current_generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected_generation,
-                    "current_generation": current_generation,
-                    "message": "The run changed while the concept frame was being prepared.",
-                })
-            computed_id = _concept_lens_identity(rd, current_generation, idempotency_key)
-            if not hmac.compare_digest(request_id, computed_id):
-                raise HTTPException(409, {
-                    "code": "concept_lens_request_mismatch",
-                    "message": "request_id is not bound to this run, generation, and Idempotency-Key.",
-                })
+        # OFF the event loop, same as the paid-lens claim and the recovery resolution above:
+        # `sequence()` waits on a cross-process flock and this inspection re-reads the log. Every
+        # early exit inside raises, so `_inspect` only ever returns the names the tail below needs.
+        def _inspect():
+            nonlocal rd
+            with srv.commands.sequence(rd):
+                rd = srv.commands.validate_paths(rd)
+                current_generation = srv.commands.run_generation(rd)
+                if not current_generation or current_generation != expected_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected_generation,
+                        "current_generation": current_generation or None,
+                        "message": "The run changed before the paid claim could be abandoned.",
+                        "remediation": "Reload Concepts; never abandon a receipt from another generation.",
+                    })
+                if generation != current_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected_generation,
+                        "current_generation": current_generation,
+                        "message": "The run changed while the concept frame was being prepared.",
+                    })
+                computed_id = _concept_lens_identity(rd, current_generation, idempotency_key)
+                if not hmac.compare_digest(request_id, computed_id):
+                    raise HTTPException(409, {
+                        "code": "concept_lens_request_mismatch",
+                        "message": "request_id is not bound to this run, generation, and Idempotency-Key.",
+                    })
 
-            store = EventStore(rd / "events.jsonl")
-            store_path = store.path
-            claims, terminals, unresolved, conflicts = _concept_lens_ledger(
-                store.read_all(), current_generation)
-            if request_id in conflicts:
-                raise HTTPException(409, {
-                    "code": "concept_lens_ledger_conflict",
-                    "message": "The paid-lens claim has conflicting durable receipts and needs repair.",
-                })
-            terminal = terminals.get(request_id)
-            if terminal is not None:
-                if not _confirm_concept_lens_terminal(store.path):
-                    return _concept_lens_uncertain(
-                        base_frame, current_generation, request_id,
-                        "The saved lens terminal is visible but its durability is unconfirmed.")
-                return _concept_lens_terminal_response(
-                    terminal, core, lens_pack, request_id)
-            request_digest = claims.get(request_id)
-            if request_digest is None or request_id not in unresolved:
-                raise HTTPException(409, {
-                    "code": "concept_lens_claim_missing",
-                    "message": "No unresolved paid-lens claim matches this receipt.",
-                    "remediation": "Reload Concepts and keep the original request receipt.",
-                })
+                store = EventStore(rd / "events.jsonl")
+                store_path = store.path
+                claims, terminals, unresolved, conflicts = _concept_lens_ledger(
+                    store.read_all(), current_generation)
+                if request_id in conflicts:
+                    raise HTTPException(409, {
+                        "code": "concept_lens_ledger_conflict",
+                        "message": "The paid-lens claim has conflicting durable receipts and needs repair.",
+                    })
+                terminal = terminals.get(request_id)
+                if terminal is not None:
+                    if not _confirm_concept_lens_terminal(store.path):
+                        return _concept_lens_uncertain(
+                            base_frame, current_generation, request_id,
+                            "The saved lens terminal is visible but its durability is unconfirmed.")
+                    return _concept_lens_terminal_response(
+                        terminal, core, lens_pack, request_id)
+                request_digest = claims.get(request_id)
+                if request_digest is None or request_id not in unresolved:
+                    raise HTTPException(409, {
+                        "code": "concept_lens_claim_missing",
+                        "message": "No unresolved paid-lens claim matches this receipt.",
+                        "remediation": "Reload Concepts and keep the original request receipt.",
+                    })
 
-            process_receipt = srv.jobs.rejoin(request_id)
-            process_job = (srv.jobs.get(process_receipt["job_id"])
-                           if process_receipt is not None else None)
-            if process_job is not None and process_job.get("status") == "running":
-                raise HTTPException(409, {
-                    "code": "concept_lens_still_running",
-                    "message": "The original paid lens worker is still running in this process.",
-                    "remediation": "Wait for its terminal receipt before choosing abandonment.",
-                })
+                process_receipt = srv.jobs.rejoin(request_id)
+                process_job = (srv.jobs.get(process_receipt["job_id"])
+                               if process_receipt is not None else None)
+                if process_job is not None and process_job.get("status") == "running":
+                    raise HTTPException(409, {
+                        "code": "concept_lens_still_running",
+                        "message": "The original paid lens worker is still running in this process.",
+                        "remediation": "Wait for its terminal receipt before choosing abandonment.",
+                    })
 
+            # `rd` rides the `nonlocal` above; the tail below needs only these two.
+            return request_digest, store_path
+
+        request_digest, store_path = await anyio.to_thread.run_sync(_inspect)
         # Re-enter the cross-process sequencer at the single terminal commit helper.  A worker from an
         # older server process can win between the inspection above and this call; in that case the
         # helper returns its real terminal instead of overwriting it with abandonment.
@@ -2109,17 +2177,17 @@ def build_router(srv) -> APIRouter:
             idx = get_index(rd / "spans.jsonl")
             s = idx.full_span(sid) if idx is not None else None
             indexed_span = s is not None
-            # CLAUDE REVIEW: [PERF] `sid` is an unvalidated path param, and any sid the index lacks —
-            # a bogus/nonexistent id, not just the "span past the indexed tail" the comment above cites
-            # — falls into this fallback, which iter_jsonl-scans the ENTIRE (up to ~1 GB) spans.jsonl
-            # from the start and finds nothing. A client polling made-up span ids thus pins a threadpool
-            # thread on a full-file read per request. Bound the scan (e.g. cap lines / only scan the
-            # unindexed tail) or reject sids the index cannot resolve instead of a whole-file walk.
+            # Scan only what the index does NOT cover. Everything before `covers` was already
+            # searched by `full_span` above, so re-walking it can only ever find nothing — and `sid`
+            # is an unvalidated path param, so every bogus id used to walk the whole file. With an
+            # index the window is the few just-appended lines the fallback exists for; without one
+            # (a foreign or unparseable spans.jsonl) `_scan_span_tail`'s line cap bounds it.
             if s is None:
-                for cand in iter_jsonl(rd / "spans.jsonl"):
-                    if isinstance(cand, dict) and cand.get("span_id") == sid:
-                        s = _normalize_span(cand)
-                        break
+                raw_span = _scan_span_tail(
+                    rd / "spans.jsonl", sid,
+                    int(getattr(idx, "covers", 0) or 0) if idx is not None else 0)
+                if raw_span is not None:
+                    s = _normalize_span(raw_span)
             if s is not None:
                 a = s.get("attributes") or {}
                 trace_spans = []
@@ -2777,17 +2845,21 @@ def build_router(srv) -> APIRouter:
         try:
             # The required OS lock is the cross-process guarantee; the bounded stripe supplies the
             # same guarantee to multiple threads in this process on every supported platform.
-            # CLAUDE REVIEW: [PERF] `async def` handler blocking the event loop: a plain
-            # threading.Lock acquire (striped — unrelated runs can contend on the same stripe), an
-            # OS interprocess lock, and _put_run_config_locked's srv.state(rd) (a full event-log
-            # read + fold) all run inline on the loop. A contended stripe or a large run freezes
-            # every other client (including SSE) for the duration; offload to a worker thread.
-            with (_run_config_thread_lock(snap),
-                  _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
-                assert_run_reset_write_allowed(rd)
-                assert_run_deletion_write_allowed(rd)
-                return _put_run_config_locked(
-                    rd, snap, incoming, expected_revision, expected_generation)
+            # OFF the event loop. The striped `threading.Lock` (unrelated runs can share a stripe),
+            # the required OS interprocess lock, and `_put_run_config_locked`'s `srv.state(rd)` —
+            # a full event-log read + fold — are all blocking. Run inline on this `async def`
+            # handler's loop, a contended stripe or a large run froze every other client, SSE
+            # included, for the whole duration. Every exception below still propagates out of the
+            # worker to the same handlers; only the thread the section runs on changes.
+            def _write() -> dict:
+                with (_run_config_thread_lock(snap),
+                      _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
+                    assert_run_reset_write_allowed(rd)
+                    assert_run_deletion_write_allowed(rd)
+                    return _put_run_config_locked(
+                        rd, snap, incoming, expected_revision, expected_generation)
+
+            return await anyio.to_thread.run_sync(_write)
         except EventStoreLockError as exc:
             raise HTTPException(503, {
                 "code": "run_config_lock_unavailable",

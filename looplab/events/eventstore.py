@@ -641,9 +641,10 @@ def prefix_anchor_from_handle(handle, consumed: int) -> Optional[tuple[bytes, by
     proved neither, so a rewrite-then-append landed a fresh tail on stale cached Events and the
     process silently diverged from disk.
 
-    NOTE: `EventStore.read_all` does NOT use this — it validates external growth with a full-prefix
-    sha256 (a proof, not a detector). Swapping it for these windows is the fix the PERF note there
-    proposes; it trades that proof for O(1) validation and is a deliberate call, not a cleanup."""
+    `EventStore.read_all` keeps the same two windows (as raw bytes it can extend in memory, so a
+    poll costs one bounded read instead of a re-hash of the whole prefix) but does NOT rely on them
+    alone: it still runs the full-prefix sha256 proof whenever the prefix has doubled since that
+    proof last ran. See the comment on that check for why both arms are needed."""
     if consumed <= 0:
         return None
     where = handle.tell()
@@ -720,6 +721,16 @@ class EventStore:
         # extend the incremental cache without re-hashing its prefix; externally observed growth
         # must prove the cached prefix still matches disk before joining a new tail to it.
         self._trusted_growth_stat: Optional[tuple] = None
+        # Cheap arm of that check, for a store that only READS a log another process writes (the UI
+        # server tailing the engine, the engine observing UI control appends): the first and last
+        # `_CACHE_ANCHOR_BYTES` of the consumed prefix, kept as RAW bytes so an extension updates
+        # them in memory and a poll costs one bounded read instead of re-hashing the whole prefix.
+        # Seeded LAZILY from the full-prefix read the first external observation does anyway, so a
+        # writer — which never observes external growth — never allocates them. `_full_verified_bytes`
+        # records the prefix length that full-prefix proof last covered.
+        self._prefix_head: Optional[bytes] = None
+        self._prefix_tail: Optional[bytes] = None
+        self._full_verified_bytes = 0
         # Latch for `_publish_dir_entry`: the log's directory entry only needs a strict sync from the
         # append that CREATES the file, and `strict_fsync` is a process-wide single-flight.
         self._dir_entry_published = False
@@ -907,6 +918,11 @@ class EventStore:
             self._cache_identity = None
             self._cache_hasher = hashlib.sha256()
             self._trusted_growth_stat = None
+            # Both prefix witnesses describe the view we just discarded; keep them in step with
+            # `_cache_bytes` or the next external observation would compare against other bytes.
+            self._prefix_head = None
+            self._prefix_tail = None
+            self._full_verified_bytes = 0
             self._divergence = None
 
     def append(self, type: str, data: dict[str, Any], *,
@@ -1106,6 +1122,27 @@ class EventStore:
             self.read_all()
         return events
 
+    def _read_prefix_windows(self, consumed: int) -> Optional[tuple[bytes, bytes]]:
+        """The first and last `_CACHE_ANCHOR_BYTES` of the first `consumed` bytes on disk, or None if
+        they cannot be taken (the file is shorter than the prefix we claim to hold, or unreadable).
+        None fails CLOSED at the call site — it reads as "rewritten", which forces a full rescan."""
+        if consumed <= 0:
+            return None
+        window = min(_CACHE_ANCHOR_BYTES, consumed)
+        try:
+            with open(self.path, "rb") as f:
+                head = f.read(window)
+                if consumed > window:            # one read covers both windows on a short prefix
+                    f.seek(consumed - window)
+                    tail = f.read(window)
+                else:
+                    tail = head
+        except OSError:
+            return None
+        if len(head) < window or len(tail) < window:
+            return None
+        return (head, tail)
+
     def read_all(self) -> list[Event]:
         """Return every Event on disk (up to the first torn/corrupt line), served from an incremental
         cache. Only bytes appended since the previous call are read+parsed; the returned sequence is
@@ -1139,25 +1176,50 @@ class EventStore:
                 and current_stat is not None
                 and current_stat == self._trusted_growth_stat
             )
-            # CLAUDE REVIEW: [PERF] Growth is "trusted" only for THIS store's own immediately-preceding
-            # append, so a process reading a log another process writes (the UI server tailing the
-            # engine at POLL_SECONDS, or the engine observing UI control appends) re-reads AND
-            # re-hashes the ENTIRE consumed prefix on every read_all that observes new bytes —
-            # O(log size) per external append, i.e. O(n^2) over a run for a reader-only process:
-            # the exact quadratic cost this cache exists to avoid. `prefix_anchor_from_handle`'s bounded
-            # head/tail windows were designed for this check (its docstring argues a full-prefix
-            # digest defeats the cache) but are not used here. Correctness is preserved; the cost
-            # for cross-process readers of large logs is not.
-            if size > self._cache_bytes and self._cache_bytes > 0 and not trusted_growth and not replaced:
-                try:
-                    with open(self.path, "rb") as f:
-                        prefix = f.read(self._cache_bytes)
-                    prefix_rewritten = (
-                        len(prefix) != self._cache_bytes
-                        or hashlib.sha256(prefix).digest() != self._cache_hasher.digest()
-                    )
-                except OSError:
-                    prefix_rewritten = True
+            # Growth is "trusted" only for THIS store's own immediately-preceding append, so a store
+            # that merely READS a log another process writes (the UI server tailing the engine at
+            # POLL_SECONDS, the engine observing UI control appends) has to re-validate the cached
+            # prefix on every poll that sees new bytes. Doing that with a full-prefix sha256 EVERY
+            # time is O(log size) per external append — O(n^2) over a run, exactly the quadratic cost
+            # this cache exists to avoid. So the check has two arms:
+            #   * the bounded head/tail windows run on every poll. They catch the failure this guard
+            #     exists for — a prefix REWRITE, whether the file was rebuilt from the start (head
+            #     moves) or edited up to the append point (tail moves) — at a fixed cost, and the
+            #     comparison is over raw bytes, so it is exact for what it covers.
+            #   * the full-prefix digest, the actual PROOF, still runs on the first external
+            #     observation (nothing is seeded yet) and again whenever the prefix has DOUBLED since
+            #     that proof last ran.
+            # Doubling keeps total proof work at ~2*N bytes over a run that grows to N — amortized
+            # O(1) per appended byte — while bounding how long the one case the windows miss (a
+            # middle-only edit that also preserves dense seq numbering) could hide to one doubling.
+            # Below `_CACHE_ANCHOR_BYTES` the two windows ARE the whole prefix, so a short log is
+            # fully compared on every poll regardless.
+            external_growth = (size > self._cache_bytes and self._cache_bytes > 0
+                               and not trusted_growth and not replaced)
+            if external_growth:
+                windows_seeded = self._prefix_head is not None
+                proof_due = self._cache_bytes >= 2 * self._full_verified_bytes
+                if windows_seeded and not proof_due:
+                    observed = self._read_prefix_windows(self._cache_bytes)
+                    prefix_rewritten = (observed is None
+                                        or observed != (self._prefix_head, self._prefix_tail))
+                else:
+                    try:
+                        with open(self.path, "rb") as f:
+                            prefix = f.read(self._cache_bytes)
+                        prefix_rewritten = (
+                            len(prefix) != self._cache_bytes
+                            or hashlib.sha256(prefix).digest() != self._cache_hasher.digest()
+                        )
+                    except OSError:
+                        prefix_rewritten = True
+                    if not prefix_rewritten:
+                        # Seed (or re-seed) the windows from bytes the proof just validated, so the
+                        # cheap arm never has to read them separately.
+                        window = min(_CACHE_ANCHOR_BYTES, self._cache_bytes)
+                        self._prefix_head = prefix[:window]
+                        self._prefix_tail = prefix[len(prefix) - window:]
+                        self._full_verified_bytes = self._cache_bytes
             self._trusted_growth_stat = None
             cache_invalidated = (
                 size < self._cache_bytes or replaced or same_size_rewrite or prefix_rewritten)
@@ -1169,6 +1231,12 @@ class EventStore:
                 self._cache_bytes = 0
                 self._cache_hasher = hashlib.sha256()
                 self._divergence = None
+                # Both prefix witnesses describe bytes we just discarded. Dropping them also sends the
+                # next external observation to the proof arm, so a rescan is followed by a full
+                # digest rather than by a window comparison against a prefix that no longer exists.
+                self._prefix_head = None
+                self._prefix_tail = None
+                self._full_verified_bytes = 0
             if size > self._cache_bytes:
                 try:
                     with open(self.path, "rb") as f:
@@ -1199,6 +1267,15 @@ class EventStore:
                 self._cache.extend(evs)
                 self._cache_hasher.update(new[:ok_bytes])
                 self._cache_bytes += ok_bytes
+                if self._prefix_head is not None:
+                    # Extend the windows over the SAME bytes the digest just consumed, entirely in
+                    # memory — the head only grows until it fills, the tail slides. Both stay exact,
+                    # because the stored tail already covers the last `_CACHE_ANCHOR_BYTES` (or all)
+                    # of the old prefix, which is everything the new tail can reach back into.
+                    accepted = new[:ok_bytes]
+                    window = min(_CACHE_ANCHOR_BYTES, self._cache_bytes)
+                    self._prefix_head = (self._prefix_head + accepted)[:window]
+                    self._prefix_tail = (self._prefix_tail + accepted)[-window:]
                 remainder = new[ok_bytes:]
                 if b"\n" in remainder:
                     # An unconsumed newline means the first rejected record is COMPLETE, not a normal

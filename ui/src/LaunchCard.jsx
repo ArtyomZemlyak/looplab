@@ -7,6 +7,7 @@ import {
   LAUNCH_RUNTIME_FIELDS, buildLaunchBody, createLaunchDraft,
   launchFingerprint, parseObjectJson, runtimeValue, summarizeLaunchTask, updateRuntimeValue,
 } from './launchDraft.js'
+import { launchStatusOutcome, pollLaunchStatus } from './launchRecovery.js'
 
 const messageOf = error => String(error?.message || 'Could not validate this run')
 const structuredDetail = error => error?.detail && typeof error.detail === 'object' ? error.detail : null
@@ -18,7 +19,8 @@ const runExists = error => error?.status === 409 && ([
   'run_id_conflict', 'run_exists', 'external_start_in_progress', 'external_start_uncertain',
 ].includes(errorCode(error))
   || /already exists|pick another (?:id|name)/i.test(messageOf(error)))
-const launchAmbiguous = error => !error?.status || error.status >= 500
+const launchAmbiguous = error => error?.submissionMayHaveSucceeded === true
+  || !error?.status || error.status >= 500
   || [408, 425, 429].includes(Number(error.status))
   || (error.status === 409 && ['start_in_progress', 'start_uncertain', 'spawn_claim_unknown', 'engine_start_uncertain']
     .includes(errorCode(error)))
@@ -29,18 +31,6 @@ const fieldErrors = error => {
   const raw = detail?.field_errors || detail?.errors
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   return Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, String(value)]))
-}
-
-const statusStarted = result => {
-  const state = String(result?.status || result?.state || '').toLowerCase()
-  return result?.started === true || ['executing', 'succeeded'].includes(state)
-}
-
-const statusRetryable = result => {
-  const state = String(result?.status || result?.state || '').toLowerCase()
-  if (result?.can_retry === true) return true
-  if (result?.can_retry === false) return false
-  return ['not_started', 'failed', 'rejected'].includes(state)
 }
 
 function EnumOptions({ field, value }) {
@@ -97,12 +87,25 @@ export default function LaunchCard({
   const runIdRef = useRef(null)
   const errorRef = useRef(null)
   const validationRequestRef = useRef(0)
+  const startRequestRef = useRef(null)
+  const statusRequestRef = useRef(0)
+  const statusFlightRef = useRef(null)
+  const transportIdentityRef = useRef(transportIdentity)
+  transportIdentityRef.current = transportIdentity
+  useEffect(() => () => {
+    transportIdentityRef.current = ''
+    validationRequestRef.current += 1
+    statusRequestRef.current += 1
+    statusFlightRef.current = null
+  }, [])
 
   useEffect(() => {
+    validationRequestRef.current += 1
+    statusRequestRef.current += 1
+    statusFlightRef.current = null
+    setValidating(false); setValidation(null); setChecking(false)
     const saved = loadLaunchTransport(transportIdentity)
-    setStorageBlocked(false)
-    setUnknownStart(null)
-    setMissingStart(false)
+    setStorageBlocked(false); setUnknownStart(null); setMissingStart(false); setErrors({})
     if (saved?.invalid) {
       setStorageBlocked(true)
       setErrors({ form: 'Durable startup recovery storage is corrupt or unavailable. Reset this proposal before starting.' })
@@ -110,6 +113,8 @@ export default function LaunchCard({
     } else if (saved) {
       setUnknownStart({ runId: saved.runId, idempotencyKey: saved.idempotencyKey })
       setNotice(`Recovered unfinished startup “${saved.runId}” from this tab. Check it; no new launch will be sent.`)
+    } else {
+      setNotice('Review the proposal, then validate it before starting.')
     }
   }, [transportIdentity])
 
@@ -142,8 +147,9 @@ export default function LaunchCard({
     onDraftChange?.(value)
   }
 
-  const clearRecovery = () => {
-    if (clearLaunchTransport(transportIdentity)) {
+  const clearRecovery = (expectedState = null) => {
+    if (clearLaunchTransport(transportIdentity, undefined, expectedState)) {
+      statusRequestRef.current += 1
       setStorageBlocked(false)
       return true
     }
@@ -163,7 +169,7 @@ export default function LaunchCard({
 
   const reset = () => {
     const saved = loadLaunchTransport(transportIdentity)
-    if (saved && !clearRecovery()) return
+    if (saved && !clearRecovery(saved.invalid ? null : saved)) return
     validationRequestRef.current += 1
     setDraft(createLaunchDraft(spec)); setValidation(null); setErrors({}); setWarnings([])
     setPreview(null); setUnknownStart(null); setMissingStart(false); setStorageBlocked(false)
@@ -198,62 +204,98 @@ export default function LaunchCard({
     } catch (error) {
       if (validationRequestRef.current !== requestId || fingerprintRef.current !== requestFingerprint) return
       const serverFields = fieldErrors(error)
+      let failureNotice = 'Validation failed. Your edits are preserved.'
       if (serverFields) { setErrors(serverFields); focusFirstError(serverFields) }
       else if (runExists(error)) {
         setErrors({ run_id: 'A run with this name already exists' })
         requestAnimationFrame(() => { runIdRef.current?.focus(); runIdRef.current?.select() })
+      } else if (errorCode(error) === 'LAUNCH_PREFLIGHT_TIMEOUT' || error?.status == null
+          || Number(error.status) >= 500 || [408, 425, 429].includes(Number(error.status))) {
+        setErrors({ form: 'Validation could not be completed. No Start was sent; it is safe to validate again.' })
+        failureNotice = 'Validation stopped at its deadline. Your edits are preserved and no paid launch was sent.'
       } else setErrors({ form: messageOf(error) })
-      setValidation(null); setNotice('Validation failed. Your edits are preserved.')
+      setValidation(null); setNotice(failureNotice)
     } finally {
       if (validationRequestRef.current === requestId) setValidating(false)
     }
   }
 
+  const presentStartupResult = (result, operation, { checked = false, pollTimedOut = false } = {}) => {
+    const outcome = launchStatusOutcome(result, operation.runId)
+    if (outcome.kind === 'started') {
+      const cleared = clearRecovery(operation)
+      if (cleared) setUnknownStart(null)
+      setNotice(cleared
+        ? `Startup is proven for ${outcome.runId}. Opening the run…`
+        : `Startup is proven for ${outcome.runId}, but tab recovery storage could not be cleared. Opening the run…`)
+      onStarted?.(outcome.runId)
+      location.hash = `#/run/${encodeURIComponent(outcome.runId)}`
+      return
+    }
+    if (outcome.kind === 'unknown-paid') {
+      setUnknownStart({ ...operation, paidEffectUnknown: true })
+      setMissingStart(false); setErrors({})
+      setNotice('Startup is unresolved and provider work or cost cannot be ruled out. Inspect usage and keep checking this same identity; no second launch will be sent.')
+      return
+    }
+    if (outcome.kind === 'retryable') {
+      if (!clearRecovery(operation)) { setUnknownStart(operation); return }
+      setUnknownStart(null); setMissingStart(false); setValidation(null); setErrors({})
+      setNotice('The exact startup is proven not to have started. Review and validate again before sending a new Start.')
+      return
+    }
+    setUnknownStart(operation); setMissingStart(false)
+    if (outcome.kind === 'pending') {
+      setErrors({})
+      setNotice(checked && pollTimedOut
+        ? 'Startup is still pending after the bounded status check. Check again later; no new launch was sent.'
+        : 'The server accepted this startup identity but has not proved a running engine. Check this same startup; no second launch will be sent.')
+      return
+    }
+    setErrors({ form: 'The startup response could not be verified against this exact run identity.' })
+    setNotice('Startup remains unknown. Keep this recovery identity and Check again; do not send another Start.')
+  }
+
   const start = async () => {
+    if (startRequestRef.current || unknownStart) return
     const built = buildLaunchBody(draft, chat)
     if (!built.ok || !validatedCurrent) {
       setValidation(null); setErrors(built.errors || { form: 'Validate this exact proposal before starting' })
       setNotice('The proposal changed after validation. Validate it again.'); return
     }
-    const idempotencyKey = createIdempotencyKey()
-    if (!saveLaunchTransport(transportIdentity, { runId: draft.run_id, idempotencyKey })) {
-      setStorageBlocked(true)
-      setErrors({ form: 'Durable tab storage is unavailable; paid Start was not sent.' })
-      setNotice('Enable session storage or free browser storage, then Reset and validate again.')
-      requestAnimationFrame(() => errorRef.current?.focus())
-      return
+    const operation = {
+      transportIdentity, runId: String(draft.run_id), idempotencyKey: createIdempotencyKey(),
     }
-    setStarting(true); setErrors({}); setNotice('Starting this run. Do not submit another launch while this is pending…')
+    startRequestRef.current = operation
+    setStarting(true)
     try {
-      const result = await startRun({ ...built.body, validation_token: validation.token,
-        idempotency_key: idempotencyKey })
-      const runId = result?.run_id || draft.run_id
-      if (statusStarted(result)) {
-        const cleared = clearRecovery()
-        setNotice(cleared
-          ? `Started ${runId}. Opening the run…`
-          : `Started ${runId}, but tab recovery storage could not be cleared. Opening the proven run…`)
-        onStarted?.(runId)
-        location.hash = `#/run/${encodeURIComponent(runId)}`
-      } else if (result?.paid_effect_unknown) {
-        setUnknownStart({ runId, idempotencyKey, paidEffectUnknown: true })
-        setMissingStart(false)
-        setNotice('Startup is unresolved and provider work or cost cannot be ruled out. Inspect usage and keep checking this same identity; no second launch will be sent.')
-      } else if (statusRetryable(result)) {
-        if (!clearRecovery()) {
-          setUnknownStart({ runId, idempotencyKey })
-          return
+      if (!saveLaunchTransport(transportIdentity, operation)) {
+        const retained = loadLaunchTransport(transportIdentity)
+        if (retained && !retained.invalid) {
+          setUnknownStart({ runId: retained.runId, idempotencyKey: retained.idempotencyKey })
+          setStorageBlocked(false); setErrors({})
+          setNotice('An unfinished startup already owns this proposal. Check that exact startup; no new launch was sent.')
+        } else {
+          setStorageBlocked(true)
+          setErrors({ form: 'Durable tab storage is unavailable; paid Start was not sent.' })
+          setNotice('Enable session storage or free browser storage, then Reset and validate again.')
+          requestAnimationFrame(() => errorRef.current?.focus())
         }
-        setValidation(null)
-        setNotice('The engine process was not started. Review and validate again before retrying.')
-      } else {
-        setUnknownStart({ runId, idempotencyKey })
-        setMissingStart(false)
-        setNotice('The server accepted the startup identity but has not proved a running engine. Check this same startup; no second launch will be sent.')
+        return
       }
+      setUnknownStart(operation); setMissingStart(false); setErrors({})
+      setNotice('Starting this run. Do not submit another launch while this is pending…')
+      const result = await startRun({ ...built.body, validation_token: validation.token,
+        idempotency_key: operation.idempotencyKey })
+      if (startRequestRef.current !== operation
+          || transportIdentityRef.current !== operation.transportIdentity) return
+      presentStartupResult(result, operation)
     } catch (error) {
+      if (startRequestRef.current !== operation
+          || transportIdentityRef.current !== operation.transportIdentity) return
       if (runExists(error)) {
-        const cleared = clearRecovery()
+        const cleared = clearRecovery(operation)
+        if (cleared) setUnknownStart(null)
         const external = externalStartConflict(error)
         setErrors({ run_id: external
           ? 'This run name has an existing or unresolved startup; inspect it or choose another name.'
@@ -265,11 +307,11 @@ export default function LaunchCard({
           : 'Choose another run name; every other edit is preserved.')
         requestAnimationFrame(() => { runIdRef.current?.focus(); runIdRef.current?.select() })
       } else if (launchAmbiguous(error)) {
-        setUnknownStart({ runId: draft.run_id, idempotencyKey })
-        setMissingStart(false)
-        setNotice('The launch response was inconclusive. Check this same startup before doing anything else.')
+        setUnknownStart(operation); setMissingStart(false); setErrors({})
+        setNotice('The launch response was inconclusive. Check this same startup before doing anything else; no second Start will be sent.')
       } else {
-        const cleared = clearRecovery()
+        const cleared = clearRecovery(operation)
+        if (cleared) setUnknownStart(null)
         const serverFields = fieldErrors(error)
         setErrors({ ...(serverFields || { form: messageOf(error) }),
           ...(!cleared ? { recovery: 'Durable startup recovery could not be cleared; paid Start remains blocked.' } : {}) })
@@ -277,40 +319,47 @@ export default function LaunchCard({
         if (cleared) setNotice('The server rejected the launch. Your edits are preserved.')
         if (serverFields) focusFirstError(serverFields)
       }
-    } finally { setStarting(false) }
+    } finally {
+      if (startRequestRef.current === operation) startRequestRef.current = null
+      if (transportIdentityRef.current === operation.transportIdentity) setStarting(false)
+    }
   }
 
   const checkStartup = async () => {
-    if (!unknownStart) return
+    if (!unknownStart || statusFlightRef.current) return
+    const operation = { ...unknownStart, transportIdentity }
+    const requestId = statusRequestRef.current + 1
+    statusRequestRef.current = requestId; statusFlightRef.current = requestId
     setChecking(true); setMissingStart(false); setErrors({}); setNotice('Checking the same startup request…')
     try {
-      const result = await getStartStatus(unknownStart.runId, unknownStart.idempotencyKey)
-      if (statusStarted(result)) {
-        const runId = result?.run_id || unknownStart.runId
-        const cleared = clearRecovery()
-        setNotice(cleared
-          ? `Startup is proven for ${runId}. Opening the run…`
-          : `Startup is proven for ${runId}, but tab recovery storage could not be cleared. Opening the run…`)
-        onStarted?.(runId); location.hash = `#/run/${encodeURIComponent(runId)}`
-      } else if (result?.paid_effect_unknown) {
-        setUnknownStart(current => ({ ...current, paidEffectUnknown: true }))
-        setNotice('Startup is unresolved and provider work or cost cannot be ruled out. Inspect usage and keep checking this same identity; no second launch will be sent.')
-      } else if (statusRetryable(result)) {
-        if (!clearRecovery()) return
-        setUnknownStart(null); setValidation(null)
-        setNotice('The run did not start. Review and validate again before retrying.')
-      } else {
-        setNotice('Startup is still pending or cannot yet be proven. Check again; no new launch was sent.')
-      }
+      const observation = await pollLaunchStatus(
+        remainingMs => getStartStatus(operation.runId, operation.idempotencyKey, {
+          requestTimeoutMs: Math.min(5_000, remainingMs),
+        }),
+        { expectedRunId: operation.runId })
+      if (statusRequestRef.current !== requestId
+          || transportIdentityRef.current !== operation.transportIdentity) return
+      presentStartupResult(observation.result, operation, {
+        checked: true, pollTimedOut: observation.timedOut,
+      })
     } catch (error) {
+      if (statusRequestRef.current !== requestId
+          || transportIdentityRef.current !== operation.transportIdentity) return
       if (error?.status === 404 && errorCode(error) === 'start_not_found') {
         setMissingStart(true)
         setNotice('No durable record exists yet, but the original Start may still be preflighting. Wait and Check again; do not send another launch.')
       } else {
-        setErrors({ form: messageOf(error) })
-        setNotice('Startup is still unknown. No new launch was sent; check again later.')
+        setErrors({ form: errorCode(error) === 'LAUNCH_STATUS_TIMEOUT' || error?.name === 'TimeoutError'
+          ? 'The status check reached its deadline. The startup outcome is still unknown.'
+          : 'The exact startup status could not be read. Its recovery identity is still retained.' })
+        setNotice('Startup is still unknown. No new launch was sent; Check again later.')
       }
-    } finally { setChecking(false) }
+    } finally {
+      if (statusFlightRef.current === requestId) {
+        statusFlightRef.current = null
+        if (transportIdentityRef.current === operation.transportIdentity) setChecking(false)
+      }
+    }
   }
 
   const releaseStartupRecovery = () => {
@@ -321,7 +370,7 @@ export default function LaunchCard({
       : 'The original Start may still arrive. Release this recovery key only after checking the run list and provider activity. Any later Start is a separate paid action; only the observed run name is duplicate-fenced. Continue?'
     const confirmed = typeof window === 'undefined' || window.confirm(prompt)
     if (!confirmed) return
-    if (!clearRecovery()) return
+    if (!clearRecovery(unknownStart)) return
     setUnknownStart(null); setMissingStart(false); setValidation(null)
     if (paidUnknown) {
       setErrors({ run_id: 'This unresolved run name remains reserved. Choose a new run name before validating.' })
@@ -511,10 +560,10 @@ export default function LaunchCard({
       <button type="button" className="btn xs ghost" disabled={locked} onClick={reset}>Reset proposal</button>
       {unknownStart
         ? <>
-          <button type="button" className="btn xs primary" disabled={checking} onClick={checkStartup}>
-            {checking ? 'Checking…' : 'Check startup'}</button>
+          <button type="button" className="btn xs primary" disabled={operationBusy} onClick={checkStartup}>
+            {checking ? 'Checking…' : starting ? 'Waiting for Start…' : 'Check startup'}</button>
           {(missingStart || unknownStart.paidEffectUnknown) && <button type="button" className="btn xs ghost"
-            disabled={checking} onClick={releaseStartupRecovery}>Release after inspection</button>}
+            disabled={operationBusy} onClick={releaseStartupRecovery}>Release after inspection</button>}
         </>
         : <>
           <button type="button" className="btn xs" disabled={locked} onClick={validate}>

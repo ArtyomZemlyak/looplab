@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, Header, HTTPException
 
 from looplab.core.atomicio import atomic_write_text, strict_atomic_write_text
@@ -2581,68 +2582,79 @@ def build_router(srv) -> APIRouter:
         action_id = _scope_action_id(idempotency_key)
         if action_id is None:
             raise HTTPException(428 if idempotency_key is None else 400, _SCOPE_ACTION_REQUIRED)
-        # CLAUDE REVIEW: [PERF] `async def` handler doing heavy blocking preflight on the event
-        # loop before the job hand-off: _scope_store_lock holds a GLOBAL thread lock + interprocess
-        # file lock, _read_reconciled_action does strict lease/fence file I/O and re-publication,
-        # and below _scope_run_ids() re-runs the whole runs-list fold, _scope_sig/_scope_source_sizes
-        # stat every run, and _scope_context_digest reloads the project store — all inline. Any
-        # contention on the single store lock (another generation publishing) stalls the entire
-        # event loop, not just this request. Offload the preflight to a worker thread.
-        try:
-            with _scope_store_lock(_reports_dir):
-                existing_action = _read_reconciled_action(
-                    scope_type, scope_id, action_id)
-        except _ScopeReportActionConflict as exc:
-            raise HTTPException(409, _SCOPE_ACTION_CONFLICT) from exc
-        except _ScopeReportStorageConflict as exc:
-            raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
-        if existing_action is not None:
-            # Durable replay happens before current-scope preflight: an old action remains observable
-            # after its inputs change, its report is superseded, or its volatile job receipt is consumed.
-            return _action_response(existing_action)
-        run_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
-        if not run_ids:
-            raise HTTPException(400, "no runs in this scope")
-        if len(run_ids) > MAX_SCOPE_REPORT_RUNS:
-            raise HTTPException(413, {
-                "code": "scope_report_too_large",
-                "message": (
-                    f"This scope has {len(run_ids)} runs; paid synthesis is limited to "
-                    f"{MAX_SCOPE_REPORT_RUNS} model-visible runs."
-                ),
-                "run_count": len(run_ids),
-                "max_runs": MAX_SCOPE_REPORT_RUNS,
-                "remediation": "Generate reports for narrower child scopes.",
-            })
-        try:
-            requested_source_sizes = _scope_source_sizes(run_ids)
-        except ScopeSourceCapacityError as exc:
-            raise HTTPException(413, _SCOPE_SOURCE_TOO_LARGE) from exc
-        requested_scope_ids = list(run_ids)
-        requested_scope_sig = _scope_sig(requested_scope_ids)
-        requested_context_digest = _scope_context_digest(
-            scope_type, scope_id, requested_scope_ids)
-        requested_probe_receipts = {
-            run_id: _source_probe_receipt(run_id, row)[0]
-            for run_id, row in ((row[0], row) for row in requested_scope_sig)
-        }
-        generation_identity = "scope-report:" + hashlib.sha256(json.dumps(
-            {
-                "scope": _scope_identity(scope_type, scope_id),
-                "run_ids": requested_scope_ids,
-                "sig": requested_scope_sig,
-                "source_sizes": requested_source_sizes,
-                "context_digest": requested_context_digest,
-                "source_probes": requested_probe_receipts,
-            },
-            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")).hexdigest()
-        try:
-            with _scope_store_lock(_reports_dir):
-                _read_or_migrate_scope_record(_reports_dir, scope_type, scope_id)
-        except _ScopeReportStorageConflict as exc:
-            # Never enqueue paid work that cannot safely publish its result afterward.
-            raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
+        # OFF the event loop, ahead of the job hand-off. `_scope_store_lock` is a GLOBAL thread lock
+        # plus an interprocess file lock, `_read_reconciled_action` does strict lease/fence file I/O
+        # and re-publication, `_scope_run_ids` re-runs the whole runs-list fold, `_scope_sig` and
+        # `_scope_source_sizes` stat every run, and `_scope_context_digest` reloads the project store.
+        # Run inline on this `async def` handler's loop, contention on that single store lock — one
+        # other generation publishing — stalled the ENTIRE event loop, not just this request.
+        # Returns `(early_response, preflight)`; exactly one is non-None. HTTPExceptions raised inside
+        # propagate out of the worker unchanged.
+        def _preflight():
+            try:
+                with _scope_store_lock(_reports_dir):
+                    existing_action = _read_reconciled_action(
+                        scope_type, scope_id, action_id)
+            except _ScopeReportActionConflict as exc:
+                raise HTTPException(409, _SCOPE_ACTION_CONFLICT) from exc
+            except _ScopeReportStorageConflict as exc:
+                raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
+            if existing_action is not None:
+                # Durable replay happens before current-scope preflight: an old action remains observable
+                # after its inputs change, its report is superseded, or its volatile job receipt is consumed.
+                return _action_response(existing_action), None
+            run_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
+            if not run_ids:
+                raise HTTPException(400, "no runs in this scope")
+            if len(run_ids) > MAX_SCOPE_REPORT_RUNS:
+                raise HTTPException(413, {
+                    "code": "scope_report_too_large",
+                    "message": (
+                        f"This scope has {len(run_ids)} runs; paid synthesis is limited to "
+                        f"{MAX_SCOPE_REPORT_RUNS} model-visible runs."
+                    ),
+                    "run_count": len(run_ids),
+                    "max_runs": MAX_SCOPE_REPORT_RUNS,
+                    "remediation": "Generate reports for narrower child scopes.",
+                })
+            try:
+                requested_source_sizes = _scope_source_sizes(run_ids)
+            except ScopeSourceCapacityError as exc:
+                raise HTTPException(413, _SCOPE_SOURCE_TOO_LARGE) from exc
+            requested_scope_ids = list(run_ids)
+            requested_scope_sig = _scope_sig(requested_scope_ids)
+            requested_context_digest = _scope_context_digest(
+                scope_type, scope_id, requested_scope_ids)
+            requested_probe_receipts = {
+                run_id: _source_probe_receipt(run_id, row)[0]
+                for run_id, row in ((row[0], row) for row in requested_scope_sig)
+            }
+            generation_identity = "scope-report:" + hashlib.sha256(json.dumps(
+                {
+                    "scope": _scope_identity(scope_type, scope_id),
+                    "run_ids": requested_scope_ids,
+                    "sig": requested_scope_sig,
+                    "source_sizes": requested_source_sizes,
+                    "context_digest": requested_context_digest,
+                    "source_probes": requested_probe_receipts,
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            try:
+                with _scope_store_lock(_reports_dir):
+                    _read_or_migrate_scope_record(_reports_dir, scope_type, scope_id)
+            except _ScopeReportStorageConflict as exc:
+                # Never enqueue paid work that cannot safely publish its result afterward.
+                raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
+            return None, (run_ids, requested_scope_ids, requested_scope_sig,
+                          requested_source_sizes, requested_context_digest,
+                          requested_probe_receipts, generation_identity)
+
+        early, preflight = await anyio.to_thread.run_sync(_preflight)
+        if early is not None:
+            return early
+        (run_ids, requested_scope_ids, requested_scope_sig, requested_source_sizes,
+         requested_context_digest, requested_probe_receipts, generation_identity) = preflight
 
         def _stamp_scope_action_usage(usage: dict[str, Any]) -> bool:
             """Fold one paid-call observation into this worker's durable action receipt, in place.

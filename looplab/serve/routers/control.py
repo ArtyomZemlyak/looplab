@@ -1332,14 +1332,12 @@ def build_router(srv) -> APIRouter:
 
         # Lost-response replay is resolved before rereading mutable sources/defaults or rejecting the
         # now-owned run name. The request digest contains effects, never the raw idempotency key.
-        # CLAUDE REVIEW: [PERF] Async handler, blocking body: both this `with srv.commands.sequence`
-        # block and the main launch block below run directly on the event loop — cross-process flock
-        # acquisition (up to lock_acquire_timeout=60s under contention), start-record I/O,
-        # current_token's re-stat/Settings work, file materialization and the engine Popen. The
-        # preflight is carefully offloaded via anyio.to_thread.run_sync two lines down, but these
-        # heavier sections are not, so a contended or slow launch freezes every SSE/poll on this
-        # worker. Wrap the sequence-holding sections in to_thread like /control and submit_command.
-        if key:
+        # OFF the event loop, like the preflight two lines down already is. `sequence()` acquires a
+        # cross-process flock that can wait the full lock_acquire_timeout (60s) under contention, and
+        # the start-record read is file I/O. Run inline on this `async def` handler's loop, a
+        # contended launch froze every SSE stream and poll on this worker for that whole wait.
+        # `None` means "no replay to serve"; a response means the lost-response replay answered.
+        def _replay_keyed_start():
             with srv.commands.sequence(rd):
                 srv.commands._reject_unresolved_reset(rd, "replay this run start")
                 record, public, same_key = _inspect_keyed_start(rd, key_digest, request_digest)
@@ -1348,6 +1346,12 @@ def build_router(srv) -> APIRouter:
                         return JSONResponse(public)
                     if same_key or public["status"] not in {"not_started", "failed"}:
                         _raise_existing_start(public, same_key=same_key)
+            return None
+
+        if key:
+            replayed = await anyio.to_thread.run_sync(_replay_keyed_start)
+            if replayed is not None:
+                return replayed
 
         plan = await anyio.to_thread.run_sync(lambda: preflight_start(srv, body))
         submitted_token = body.get("validation_token") or ""
@@ -1377,139 +1381,154 @@ def build_router(srv) -> APIRouter:
             if base_settings.get(setting, object()) != value
         })
 
-        start_result = None
-        with srv.commands.sequence(rd):
-            srv.commands._reject_unresolved_reset(rd, "start a run with this id")
-            if key:
-                existing, public, same_key = _inspect_keyed_start(
-                    rd, key_digest, request_digest)
-                if existing is not None:
-                    if same_key and public["status"] in {"accepted", "executing", "succeeded"}:
-                        return JSONResponse(public)
-                    if same_key or public["status"] not in {"not_started", "failed"}:
-                        _raise_existing_start(public, same_key=same_key)
+        # OFF the event loop too, and for the same reason plus more: this section holds the run
+        # sequencer across start-record I/O, `current_token`'s re-stat + Settings work, task/chat
+        # file materialization, and the engine `Popen` itself. It is the single longest blocking
+        # stretch in the server. The whole sequenced section still runs as ONE unit — only its thread
+        # changes. `None` means "launched, fall through"; a response is the lost-response replay.
+        launched: dict = {}
 
-            # A crashed Replay can temporarily leave the direct run directory without events.jsonl.
-            # That absence is not an available run name: the durable marker still owns the namespace.
-            # Keep lost-response observation of an already-owned keyed start above, but fence every
-            # genuinely new reservation before it writes task/chat metadata or publishes a spawn claim.
-            current_rd = requested_rd.resolve()
-            if requested_rd.is_symlink() or current_rd != rd or current_rd.parent != root:
-                raise HTTPException(409, {
-                    "code": "run_path_changed",
-                    "message": "run path changed while start was being prepared",
-                    "field_errors": {"run_id": "choose a stable run name"},
-                })
-            current_token = plan.current_token(srv)
-            if current_token != plan.validation_token:
-                raise HTTPException(409, {
-                    "code": "launch_validation_changed",
-                    "message": "task, settings, run name, chat, or a referenced path changed before launch",
-                    "field_errors": {},
-                    "remediation": "Run preflight again and review the updated launch preview.",
-                })
-            if (rd / "events.jsonl").exists():
-                raise HTTPException(409, {
-                    "code": "run_id_conflict", "message": f"run {run_id!r} already exists",
-                    "field_errors": {"run_id": "choose another run name"},
-                })
-            known_alive = _known_engine_liveness(rd, "start the run")
-            if known_alive or _engine_alive(rd):
-                raise HTTPException(409, {
-                    "code": "external_start_in_progress" if key else "start_in_progress",
-                    "message": f"run {run_id!r} already has an engine starting",
-                })
-            if srv.commands.spawn_inflight(rd):
-                raise HTTPException(409, {
-                    "code": "external_start_uncertain" if key else "start_uncertain",
-                    "message": f"run {run_id!r} already has an unresolved startup",
-                    "remediation": "Observe or explicitly resolve the spawn claim; do not retry.",
-                })
-
-            start_id = f"start_{secrets.token_hex(16)}" if key else ""
-            created_at = time.time()
-            record = None
-            if key:
-                record = {
-                    "version": 1, "id": start_id, "run_id": run_id,
-                    "idempotency_key_digest": key_digest, "request_digest": request_digest,
-                    "validation_token": plan.validation_token,
-                    "status": "preparing", "phase": "reserved",
-                    "paid_effect_unknown": False,
-                    "created_at": created_at, "updated_at": created_at,
-                }
-                srv.commands.save_start_record(rd, record)
-
-            owner = f"start:{start_id}" if key else "start"
-            lease_started = False
-            popen_boundary_entered = False
-            try:
-                rd.mkdir(parents=True, exist_ok=True)
-                atomic_write_text(task_file, json.dumps(plan.canonical_document, indent=2))
-                meta = {"task_file": str(task_file)}
-                if plan.source_task_file:
-                    meta["source_task_file"] = plan.source_task_file
+        def _launch():
+            start_result = None
+            with srv.commands.sequence(rd):
+                srv.commands._reject_unresolved_reset(rd, "start a run with this id")
                 if key:
-                    meta["start_id"] = start_id
-                atomic_write_text(rd / "ui_meta.json", json.dumps(meta, indent=2))
+                    existing, public, same_key = _inspect_keyed_start(
+                        rd, key_digest, request_digest)
+                    if existing is not None:
+                        if same_key and public["status"] in {"accepted", "executing", "succeeded"}:
+                            return JSONResponse(public)
+                        if same_key or public["status"] not in {"not_started", "failed"}:
+                            _raise_existing_start(public, same_key=same_key)
 
-                chat_path = rd / "chat.jsonl"
-                if plan.seed_chat:
-                    chat_bytes = b"".join(orjson.dumps({
-                        "role": turn["role"], "content": turn["content"],
-                        "ts": created_at + i * 1e-3, "seq": GENESIS_CHAT_SEQ_BASE + i,
-                        "genesis": True,
-                    }) + b"\n" for i, turn in enumerate(plan.seed_chat))
-                    atomic_write_bytes(chat_path, chat_bytes)
-                elif chat_path.exists():
-                    atomic_write_bytes(chat_path, b"")
-                if record is not None:
-                    record.update(phase="materialized", updated_at=time.time())
+                # A crashed Replay can temporarily leave the direct run directory without events.jsonl.
+                # That absence is not an available run name: the durable marker still owns the namespace.
+                # Keep lost-response observation of an already-owned keyed start above, but fence every
+                # genuinely new reservation before it writes task/chat metadata or publishes a spawn claim.
+                current_rd = requested_rd.resolve()
+                if requested_rd.is_symlink() or current_rd != rd or current_rd.parent != root:
+                    raise HTTPException(409, {
+                        "code": "run_path_changed",
+                        "message": "run path changed while start was being prepared",
+                        "field_errors": {"run_id": "choose a stable run name"},
+                    })
+                current_token = plan.current_token(srv)
+                if current_token != plan.validation_token:
+                    raise HTTPException(409, {
+                        "code": "launch_validation_changed",
+                        "message": "task, settings, run name, chat, or a referenced path changed before launch",
+                        "field_errors": {},
+                        "remediation": "Run preflight again and review the updated launch preview.",
+                    })
+                if (rd / "events.jsonl").exists():
+                    raise HTTPException(409, {
+                        "code": "run_id_conflict", "message": f"run {run_id!r} already exists",
+                        "field_errors": {"run_id": "choose another run name"},
+                    })
+                known_alive = _known_engine_liveness(rd, "start the run")
+                if known_alive or _engine_alive(rd):
+                    raise HTTPException(409, {
+                        "code": "external_start_in_progress" if key else "start_in_progress",
+                        "message": f"run {run_id!r} already has an engine starting",
+                    })
+                if srv.commands.spawn_inflight(rd):
+                    raise HTTPException(409, {
+                        "code": "external_start_uncertain" if key else "start_uncertain",
+                        "message": f"run {run_id!r} already has an unresolved startup",
+                        "remediation": "Observe or explicitly resolve the spawn claim; do not retry.",
+                    })
+
+                start_id = f"start_{secrets.token_hex(16)}" if key else ""
+                created_at = time.time()
+                record = None
+                if key:
+                    record = {
+                        "version": 1, "id": start_id, "run_id": run_id,
+                        "idempotency_key_digest": key_digest, "request_digest": request_digest,
+                        "validation_token": plan.validation_token,
+                        "status": "preparing", "phase": "reserved",
+                        "paid_effect_unknown": False,
+                        "created_at": created_at, "updated_at": created_at,
+                    }
                     srv.commands.save_start_record(rd, record)
 
-                srv.commands.begin_external_spawn(rd, owner)
-                lease_started = True
-                if record is not None:
-                    # After this durable phase, crash-before-call and crash-after-Popen are
-                    # indistinguishable. The PID-less claim therefore remains fail-closed.
-                    record.update(status="executing", phase="popen_pending",
-                                  paid_effect_unknown=True, updated_at=time.time())
-                    srv.commands.save_start_record(rd, record)
-                # From this assignment onward, an exception cannot prove whether the helper failed
-                # before or after the OS accepted Popen. Retain the claim and report uncertainty.
-                popen_boundary_entered = True
-                pid = _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
-                srv.commands.record_external_spawn(rd, owner, pid)
-                if record is not None:
-                    record.update(status="accepted", phase="popen_returned",
-                                  paid_effect_unknown=False, updated_at=time.time())
-                    srv.commands.save_start_record(rd, record)
-                    # Fold immediately available positive evidence into the response: a known-live
-                    # PID becomes executing and a durable run_started becomes succeeded. PID-less or
-                    # uncorrelated evidence becomes uncertain, so clients never navigate on Popen alone.
-                    record, start_result = _reconcile_start(rd, record)
-            except BaseException as exc:
-                # Clear ownership only while we still know the Popen boundary was never entered.
-                if lease_started and not popen_boundary_entered:
-                    srv.commands.cancel_external_spawn(rd, owner)
-                if record is not None:
-                    detail = getattr(exc, "detail", None)
-                    code = (str(detail.get("code"))
-                            if isinstance(detail, dict) and detail.get("code")
-                            else "spawn_failed" if record.get("phase") == "popen_pending"
-                            else "start_materialization_failed")
-                    record.update(
-                        status="uncertain" if popen_boundary_entered else "failed",
-                        phase=("failed_after_spawn" if popen_boundary_entered
-                               else "failed_before_spawn"),
-                        error_code=code, paid_effect_unknown=popen_boundary_entered,
-                        updated_at=time.time(),
-                    )
-                    try:
+                owner = f"start:{start_id}" if key else "start"
+                lease_started = False
+                popen_boundary_entered = False
+                try:
+                    rd.mkdir(parents=True, exist_ok=True)
+                    atomic_write_text(task_file, json.dumps(plan.canonical_document, indent=2))
+                    meta = {"task_file": str(task_file)}
+                    if plan.source_task_file:
+                        meta["source_task_file"] = plan.source_task_file
+                    if key:
+                        meta["start_id"] = start_id
+                    atomic_write_text(rd / "ui_meta.json", json.dumps(meta, indent=2))
+
+                    chat_path = rd / "chat.jsonl"
+                    if plan.seed_chat:
+                        chat_bytes = b"".join(orjson.dumps({
+                            "role": turn["role"], "content": turn["content"],
+                            "ts": created_at + i * 1e-3, "seq": GENESIS_CHAT_SEQ_BASE + i,
+                            "genesis": True,
+                        }) + b"\n" for i, turn in enumerate(plan.seed_chat))
+                        atomic_write_bytes(chat_path, chat_bytes)
+                    elif chat_path.exists():
+                        atomic_write_bytes(chat_path, b"")
+                    if record is not None:
+                        record.update(phase="materialized", updated_at=time.time())
                         srv.commands.save_start_record(rd, record)
-                    except Exception:  # noqa: BLE001 - preserve original error + the spawn claim
-                        pass
-                raise
+
+                    srv.commands.begin_external_spawn(rd, owner)
+                    lease_started = True
+                    if record is not None:
+                        # After this durable phase, crash-before-call and crash-after-Popen are
+                        # indistinguishable. The PID-less claim therefore remains fail-closed.
+                        record.update(status="executing", phase="popen_pending",
+                                      paid_effect_unknown=True, updated_at=time.time())
+                        srv.commands.save_start_record(rd, record)
+                    # From this assignment onward, an exception cannot prove whether the helper failed
+                    # before or after the OS accepted Popen. Retain the claim and report uncertainty.
+                    popen_boundary_entered = True
+                    pid = _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
+                    srv.commands.record_external_spawn(rd, owner, pid)
+                    if record is not None:
+                        record.update(status="accepted", phase="popen_returned",
+                                      paid_effect_unknown=False, updated_at=time.time())
+                        srv.commands.save_start_record(rd, record)
+                        # Fold immediately available positive evidence into the response: a known-live
+                        # PID becomes executing and a durable run_started becomes succeeded. PID-less or
+                        # uncorrelated evidence becomes uncertain, so clients never navigate on Popen alone.
+                        record, start_result = _reconcile_start(rd, record)
+                except BaseException as exc:
+                    # Clear ownership only while we still know the Popen boundary was never entered.
+                    if lease_started and not popen_boundary_entered:
+                        srv.commands.cancel_external_spawn(rd, owner)
+                    if record is not None:
+                        detail = getattr(exc, "detail", None)
+                        code = (str(detail.get("code"))
+                                if isinstance(detail, dict) and detail.get("code")
+                                else "spawn_failed" if record.get("phase") == "popen_pending"
+                                else "start_materialization_failed")
+                        record.update(
+                            status="uncertain" if popen_boundary_entered else "failed",
+                            phase=("failed_after_spawn" if popen_boundary_entered
+                                   else "failed_before_spawn"),
+                            error_code=code, paid_effect_unknown=popen_boundary_entered,
+                            updated_at=time.time(),
+                        )
+                        try:
+                            srv.commands.save_start_record(rd, record)
+                        except Exception:  # noqa: BLE001 - preserve original error + the spawn claim
+                            pass
+                    raise
+            launched["start_result"] = start_result
+            return None
+
+        replayed = await anyio.to_thread.run_sync(_launch)
+        if replayed is not None:
+            return replayed
+        start_result = launched["start_result"]
 
         if start_result is not None:
             return start_result

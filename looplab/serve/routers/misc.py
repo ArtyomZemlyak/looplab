@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
+import anyio
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -463,67 +464,69 @@ def build_router(srv) -> APIRouter:
         # knob that happens to equal the bare default (breaking "explicit knob wins").
         # Atomic rename prevents torn JSON but cannot protect this larger load→merge→write cycle:
         # two concurrent disjoint PUTs must observe one another instead of losing the first rename.
-        # CLAUDE REVIEW: [PERF] `async def` put_settings (and put_secret below via secret_transaction)
-        # runs this transaction on the event loop: ui_settings_transaction() takes a threading.Lock
-        # plus _interprocess_lock(required=True) — a blocking fcntl.flock with NO timeout — then does
-        # load/merge/Settings() validation/atomic write inline. If another server process holds
-        # ui_settings.json.lock, the whole event loop (every SSE stream/poll) freezes indefinitely.
-        # Offload via anyio.to_thread.run_sync after the JSON parse, like /control does.
-        with store.ui_settings_transaction():
-            current_revision = store.ui_settings_revision()
-            if expected_revision is not None and expected_revision != current_revision:
-                raise _revision_conflict("settings", expected_revision, current_revision)
-            current = store.load_ui_settings()
-            prev = store.resolved_settings()
-            candidate = dict(current)
-            for k, v in incoming.items():
-                if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
-                    continue
-                if k == "agent_control" and isinstance(v, dict):
-                    # Governance is a nested sparse PATCH too. Start from the resolved map so
-                    # the first customization retains shipped defaults; sparse edits from stale tabs
-                    # then merge by governed setting instead of replacing one another wholesale.
-                    old_control = prev.get("agent_control")
-                    merged_control = dict(old_control) if isinstance(old_control, dict) else {}
-                    for setting_key, roles in v.items():
-                        if roles is None:
-                            merged_control.pop(setting_key, None)
-                        else:
-                            merged_control[setting_key] = roles
-                    candidate[k] = merged_control
-                elif v is None:
-                    candidate.pop(k, None)
-                else:
-                    candidate[k] = v
-            profile = candidate.get("profile") or "default"
-            try:
-                base = Settings(profile=profile).model_dump()
-            except Exception:  # noqa: BLE001 — unknown profile: fall back to bare defaults
-                base = Settings().model_dump()
-            # Fields the form merely ECHOES from the previous resolved snapshot are not user edits:
-            # when the profile changes, those echoes must fall away with the old profile, not stick.
-            overrides = {}
-            profile_changed = "profile" in incoming and profile != prev.get("profile")
-            for k, v in candidate.items():
-                if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
-                    continue
-                if k == "profile":
-                    if v != Settings.model_fields["profile"].default:
-                        overrides[k] = v
-                    continue
-                if base.get(k) == v:
-                    continue
-                if profile_changed and k in incoming and k not in current and prev.get(k) == v:
-                    continue                       # unchanged echo of the old profile's expansion
-                overrides[k] = v
-            try:
-                Settings(**overrides)
-            except Exception as exc:  # noqa: BLE001 - reject before persisting a poison configuration
-                raise HTTPException(422, f"invalid settings: {exc}") from exc
-            # PATCH-like contract: omission preserves opaque overrides; explicit null/default removes one.
-            revision = store.write_ui_settings(overrides)
-            return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides,
-                    "settings_revision": revision}
+        # OFF the event loop. `ui_settings_transaction()` takes a threading.Lock plus
+        # `_interprocess_lock(required=True)` — a blocking `fcntl.flock` with NO timeout — and then
+        # does load / merge / `Settings()` validation / atomic write inline. Run inline on the ASGI
+        # loop, a lock another server process holds froze every SSE stream and poll on this worker
+        # until it was released. Same offload `/control` and `submit_command` already use; the JSON
+        # parse and shape checks above stay on the loop because they are cheap and need `await`.
+        def _apply() -> dict:
+            with store.ui_settings_transaction():
+                current_revision = store.ui_settings_revision()
+                if expected_revision is not None and expected_revision != current_revision:
+                    raise _revision_conflict("settings", expected_revision, current_revision)
+                current = store.load_ui_settings()
+                prev = store.resolved_settings()
+                candidate = dict(current)
+                for k, v in incoming.items():
+                    if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
+                        continue
+                    if k == "agent_control" and isinstance(v, dict):
+                        # Governance is a nested sparse PATCH too. Start from the resolved map so
+                        # the first customization retains shipped defaults; sparse edits from stale tabs
+                        # then merge by governed setting instead of replacing one another wholesale.
+                        old_control = prev.get("agent_control")
+                        merged_control = dict(old_control) if isinstance(old_control, dict) else {}
+                        for setting_key, roles in v.items():
+                            if roles is None:
+                                merged_control.pop(setting_key, None)
+                            else:
+                                merged_control[setting_key] = roles
+                        candidate[k] = merged_control
+                    elif v is None:
+                        candidate.pop(k, None)
+                    else:
+                        candidate[k] = v
+                profile = candidate.get("profile") or "default"
+                try:
+                    base = Settings(profile=profile).model_dump()
+                except Exception:  # noqa: BLE001 — unknown profile: fall back to bare defaults
+                    base = Settings().model_dump()
+                # Fields the form merely ECHOES from the previous resolved snapshot are not user edits:
+                # when the profile changes, those echoes must fall away with the old profile, not stick.
+                overrides = {}
+                profile_changed = "profile" in incoming and profile != prev.get("profile")
+                for k, v in candidate.items():
+                    if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
+                        continue
+                    if k == "profile":
+                        if v != Settings.model_fields["profile"].default:
+                            overrides[k] = v
+                        continue
+                    if base.get(k) == v:
+                        continue
+                    if profile_changed and k in incoming and k not in current and prev.get(k) == v:
+                        continue                       # unchanged echo of the old profile's expansion
+                    overrides[k] = v
+                try:
+                    Settings(**overrides)
+                except Exception as exc:  # noqa: BLE001 - reject before persisting a poison configuration
+                    raise HTTPException(422, f"invalid settings: {exc}") from exc
+                # PATCH-like contract: omission preserves opaque overrides; explicit null/default removes one.
+                revision = store.write_ui_settings(overrides)
+                return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides,
+                        "settings_revision": revision}
+        return await anyio.to_thread.run_sync(_apply)
 
     @router.put(
         "/api/settings/secret",
@@ -547,9 +550,13 @@ def build_router(srv) -> APIRouter:
         value = body.get("value")
         if value is not None and not isinstance(value, str):
             raise HTTPException(400, "value must be a string (or null to clear)")
+        # OFF the event loop, same reason as put_settings: `store_secret` opens
+        # `secret_transaction()` -> `_interprocess_lock(required=True)` -> an unbounded blocking
+        # `fcntl.flock`, then does mkstemp/fsync/rename disk I/O inline.
         try:
-            revision = store.store_secret(
-                key, (value or "").strip(), expected_revision=expected_revision)
+            revision = await anyio.to_thread.run_sync(
+                lambda: store.store_secret(
+                    key, (value or "").strip(), expected_revision=expected_revision))
         except SettingsRevisionConflict as exc:
             raise _revision_conflict("secret", exc.expected, exc.current) from exc
         return {"ok": True, "key": key, "set": bool((value or "").strip()),
