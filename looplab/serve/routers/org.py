@@ -2,6 +2,8 @@
 bodies are verbatim moves from `serve/server.py::make_app` (BACKLOG §4)."""
 from __future__ import annotations
 
+import re
+
 import anyio
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -9,6 +11,10 @@ from fastapi.responses import JSONResponse
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, get_run_deletion, validate_deletion_request)
 from looplab.serve.projects import ProjectError, ProjectStoreLockError
+from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
+
+
+_RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def build_router(srv) -> APIRouter:
@@ -43,15 +49,42 @@ def build_router(srv) -> APIRouter:
         except ProjectError as e:
             raise HTTPException(400, str(e)) from e
 
-    def _run_project_call(run_id: str, operation: str, fn):
-        """Serialize run-id metadata with reset/delete so a stale request cannot resurrect it."""
+    def _expected_run_generation(body: dict) -> str:
+        generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
+        if (not isinstance(generation, str)
+                or _RUN_GENERATION_RE.fullmatch(generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": (
+                    "expected_generation must be the exact generation from the Runs list."),
+                "remediation": (
+                    "Refresh the Runs list before changing this run's organization."),
+            })
+        return generation
+
+    def _run_project_call(
+            run_id: str, expected_generation: str, operation: str, action: str, fn):
+        """Fence run-id metadata against a reset/replacement generation under its sequencer."""
         rd = _run_dir(run_id)
         with srv.commands.sequence(rd):
             # Re-enter the canonical helper after waiting: deletion can publish its root fence or
             # quarantine the directory between the route's first lookup and sequencer acquisition.
-            canonical = _run_dir(run_id)
-            if canonical.name != run_id:
-                raise HTTPException(409, f"cannot {operation}: run identity changed")
+            canonical = srv.commands.validate_paths(_run_dir(run_id))
+            current_generation = srv.commands.run_generation(canonical)
+            if current_generation != expected_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "run_id": run_id,
+                    "operation": operation,
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation or None,
+                    "message": (
+                        f"The run changed before {action}; "
+                        "no organization metadata was written."),
+                    "remediation": (
+                        "Refresh the Runs list and repeat the change on the intended "
+                        "current generation."),
+                })
             return _project_call(fn)
 
     @router.get("/api/projects")
@@ -84,8 +117,11 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/project")
     async def assign_run(run_id: str, request: Request):
         body = await _json_object(request)
+        expected_generation = _expected_run_generation(body)
         await anyio.to_thread.run_sync(lambda: _run_project_call(
-            run_id, "assign run", lambda: projects.assign(run_id, body.get("project_id"))))
+            run_id, expected_generation, "assign_project",
+            "its project assignment could be updated",
+            lambda: projects.assign(run_id, body.get("project_id"))))
         return {"ok": True}
 
     # ------------------------------------------------------------------ super-tasks (flat axis)
@@ -114,8 +150,10 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/supertask")
     async def assign_supertask(run_id: str, request: Request):
         body = await _json_object(request)
+        expected_generation = _expected_run_generation(body)
         await anyio.to_thread.run_sync(lambda: _run_project_call(
-            run_id, "assign super-task",
+            run_id, expected_generation, "assign_supertask",
+            "its super-task assignment could be updated",
             lambda: projects.assign_supertask(run_id, body.get("supertask_id"))))
         return {"ok": True}
 
@@ -123,8 +161,10 @@ def build_router(srv) -> APIRouter:
     async def rename_run(run_id: str, request: Request):
         """Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged."""
         body = await _json_object(request)
+        expected_generation = _expected_run_generation(body)
         await anyio.to_thread.run_sync(lambda: _run_project_call(
-            run_id, "rename run", lambda: projects.set_label(run_id, body.get("label"))))
+            run_id, expected_generation, "rename", "it could be renamed",
+            lambda: projects.set_label(run_id, body.get("label"))))
         return {"ok": True}
 
     @router.post("/api/runs/{run_id}/deletions")

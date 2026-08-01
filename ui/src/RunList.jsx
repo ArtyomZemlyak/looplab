@@ -1,4 +1,4 @@
-import React, { lazy, useEffect, useMemo, useRef, useState } from 'react'
+import React, { lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun,
   createIdempotencyKey, submitRunDeletion,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask,
@@ -79,6 +79,9 @@ const mutationMessage = (error, timedOut = false) => timedOut
     ? 'Use a view name of 1–48 characters without control characters.'
   : error?.storage
     ? 'Browser storage is blocked or full; this view was not saved.'
+  : error?.code === 'run_generation_changed' || error?.code === 'run_generation_unavailable'
+      || error?.code === 'invalid_run_generation'
+    ? [error.message, error.remediation].filter(Boolean).join(' ')
   : error?.status === 409
     ? 'Conflict; current input or selection kept.'
     : error?.status === 503
@@ -159,6 +162,10 @@ function useMutation() {
 const focusSoon = target => requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true }))
 
 const listMutationMessage = (kind, error) => {
+  if (error?.code === 'run_generation_changed' || error?.code === 'run_generation_unavailable'
+      || error?.code === 'invalid_run_generation') {
+    return [error.message, error.remediation].filter(Boolean).join(' ')
+  }
   if (kind === 'delete-run') return error?.status === 409
     ? 'This run is still live. Pause or stop it before deleting.'
     : 'Run deletion was not confirmed.'
@@ -318,19 +325,20 @@ function Modal({ title, onClose, children, busy = false }) {
 }
 
 function PromptModal({ title, label, placeholder, initial = '', confirm = 'Create', allowEmpty = false,
-  maxLength,
+  maxLength, blocked = false, blockedMessage = '',
   onSubmit, onReconcile, onClose }) {
   const [v, setV] = useState(initial)
   const [busy, error, mutate] = useMutation()
-  const ok = allowEmpty || !!v.trim()
+  const ok = !blocked && (allowEmpty || !!v.trim())
   const go = async () => {
     if (ok && await mutate(() => onSubmit(v.trim()), onReconcile)) onClose()
   }
   return <Modal title={title} onClose={onClose} busy={busy}>
     {label && <div className="muted" style={{ marginBottom: 8 }}>{label}</div>}
-    <input className="text" autoFocus readOnly={busy} aria-label={label || title}
+    <input className="text" autoFocus readOnly={busy || blocked} aria-label={label || title}
            placeholder={placeholder} maxLength={maxLength} value={v} onChange={e => setV(e.target.value)}
            onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape' && !busy) onClose() }} />
+    {blocked && blockedMessage && <div className="flag" role="alert">{blockedMessage}</div>}
     {error && <div className="flag" role="alert">{error}</div>}
     <div className="modal-actions">
       <button className="btn sm ghost" disabled={busy} onClick={onClose}>Cancel</button>
@@ -496,9 +504,42 @@ function RunDeletionCard({ run, recovery, busy, onRetry, setRef }) {
 // Per-run "⋮" dropdown: open / rename / move (project) / assign (super-task) / delete.
 function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename,
   onDelete, onReconcile, onClose, onBusyChange, mutationLocked = false,
-  mutationLockReason = 'Resolve the existing run operation before changing this run' }) {
+  mutationLockReason = 'Resolve the existing run operation before changing this run', anchor = null,
+  deleteLocked = mutationLocked, deleteLockReason = mutationLockReason }) {
   const menuRef = useRef(null)
+  const [menuStyle, setMenuStyle] = useState(null)
   const [busy, error, mutate] = useMutation()
+  useLayoutEffect(() => {
+    const positionMenu = () => {
+      const menu = menuRef.current
+      if (!menu || !anchor?.isConnected) return
+      if (window.matchMedia('(max-width: 900px)').matches) {
+        setMenuStyle(null)
+        return
+      }
+      const trigger = anchor.getBoundingClientRect()
+      const shell = document.querySelector('.app-shell-main')?.getBoundingClientRect()
+      const viewportWidth = document.documentElement.clientWidth || window.innerWidth
+      const margin = 8
+      const topLimit = Math.max(margin, (shell?.top || 0) + margin)
+      const bottomLimit = Math.min(window.innerHeight, shell?.bottom || window.innerHeight) - margin
+      const width = Math.min(menu.offsetWidth, viewportWidth - margin * 2)
+      const maxHeight = Math.max(80, bottomLimit - topLimit)
+      const height = Math.min(menu.scrollHeight, maxHeight)
+      const top = Math.max(topLimit, Math.min(trigger.bottom + 4, bottomLimit - height))
+      const left = Math.max(margin, Math.min(
+        trigger.right - width, viewportWidth - margin - width))
+      setMenuStyle({ position: 'fixed', top, left, right: 'auto', maxHeight,
+        overflowY: 'auto' })
+    }
+    positionMenu()
+    window.addEventListener('resize', positionMenu)
+    window.addEventListener('scroll', positionMenu, true)
+    return () => {
+      window.removeEventListener('resize', positionMenu)
+      window.removeEventListener('scroll', positionMenu, true)
+    }
+  }, [anchor, projects.length, supertasks.length, mutationLocked, deleteLocked, busy, error])
   useEffect(() => {
     menuRef.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus()
   }, [])
@@ -521,6 +562,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
   return <>
     <div className="menu-backdrop" onClick={() => close(true)} onDragStart={() => close(true)} />
     <div ref={menuRef} className="run-menu" role="menu" aria-label={`Actions for ${r.label || r.run_id}`}
+      style={menuStyle || undefined}
       aria-busy={busy} aria-disabled={busy}
       onClick={e => e.stopPropagation()} onClickCapture={e => { if (busy) { e.preventDefault(); e.stopPropagation() } }} onKeyDown={onKeyDown}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
@@ -535,27 +577,29 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       <div className="mi-label">Move to project</div>
       <div className="mi-scroll">
         <button type="button" role="menuitem" tabIndex={-1} disabled={mutationLocked}
-          className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => act(() => onMove(r.run_id, UNASSIGNED))}>○ — unassigned —</button>
+          className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => act(() => onMove(r, UNASSIGNED))}>○ — unassigned —</button>
         {projects.map(p => <button type="button" role="menuitem" tabIndex={-1} key={p.id} className={'mi' + (r.project_id === p.id ? ' on' : '')}
           disabled={mutationLocked}
-          onClick={() => act(() => onMove(r.run_id, p.id))}><OpIcon name="folder" className="t-ic" /> {p.name}</button>)}
+          onClick={() => act(() => onMove(r, p.id))}><OpIcon name="folder" className="t-ic" /> {p.name}</button>)}
         {!projects.length && <div className="mi-empty">no projects yet</div>}
       </div>
       <div className="mi-sep" />
       <div className="mi-label">Super-task</div>
       <div className="mi-scroll">
         <button type="button" role="menuitem" tabIndex={-1} disabled={mutationLocked}
-          className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => act(() => onSetSuper(r.run_id, UNASSIGNED))}>○ — none —</button>
+          className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => act(() => onSetSuper(r, UNASSIGNED))}>○ — none —</button>
         {supertasks.map(s => <button type="button" role="menuitem" tabIndex={-1} key={s.id} className={'mi' + (r.supertask_id === s.id ? ' on' : '')}
           disabled={mutationLocked}
-          onClick={() => act(() => onSetSuper(r.run_id, s.id))}><OpIcon name="target" className="t-ic" /> {s.name}</button>)}
+          onClick={() => act(() => onSetSuper(r, s.id))}><OpIcon name="target" className="t-ic" /> {s.name}</button>)}
         <button type="button" role="menuitem" tabIndex={-1} className="mi accent" onClick={() => { close(false); onManageSupers() }}>＋ New / manage…</button>
       </div>
       {busy && <div className="muted" role="status">Saving…</div>}
       {error && <div className="flag" role="alert">{error}</div>}
       <div className="mi-sep" />
+      {deleteLocked && (!mutationLocked || deleteLockReason !== mutationLockReason)
+        && <div className="mi-label" role="status">{deleteLockReason}</div>}
       <button type="button" role="menuitem" tabIndex={-1} className="mi danger"
-        disabled={mutationLocked} title={mutationLocked ? mutationLockReason : undefined}
+        disabled={deleteLocked} title={deleteLocked ? deleteLockReason : undefined}
         onClick={() => onDelete(r)}>✕ Delete run…</button>
     </div>
   </>
@@ -633,7 +677,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const [mapCollapseOverrides, setMapCollapseOverrides] = useState(() => new Map())
   const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
   const projectModalReturnRef = useRef(null)
-  const [runMenu, setRunMenu] = useState(null)     // run_id whose ⋮ menu is open
+  const [runMenu, setRunMenu] = useState(null)     // exact run-list snapshot whose ⋮ menu is open
   const runMenuTriggerRef = useRef(null)
   const runModalReturnFocusRef = useRef(null)
   const [runRename, setRunRename] = useState(null) // run object being renamed (popup)
@@ -687,6 +731,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const deleteDialogCurrentRun = deleteDialog
     ? (runs || []).find(run => run.run_id === deleteDialog.runId) || null
     : null
+  const runRenameCurrentRun = runRename
+    ? (runs || []).find(run => run.run_id === runRename.run_id) || null
+    : null
+  const runRenameBlocked = !!runRename && (!runRenameCurrentRun
+    || runRenameCurrentRun.generation !== runRename.generation)
   const closeRunMenu = (restore = false) => {
     setRunMenu(null)
     if (restore) focusSoon(runMenuTriggerRef.current)
@@ -804,7 +853,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   usePoll(() => Promise.all([loadProjects(), loadSupers()]), 15_000, [], { pauseHidden: true })
 
   const stName = useMemo(() => Object.fromEntries(superdata.supertasks.map(s => [s.id, s.name])), [superdata])
-  const assignToSuper = async (runId, sid) => { await assignSupertask(runId, sid === UNASSIGNED ? null : sid); await loadRuns() }
+  const assignToSuper = async (run, sid) => {
+    await assignSupertask(
+      run.run_id, sid === UNASSIGNED ? null : sid, run.generation)
+    await loadRuns()
+  }
 
   const { byParent, subtree } = useMemo(() => indexProjects(proj.projects), [proj.projects])
   const projName = useMemo(() => Object.fromEntries(proj.projects.map(p => [p.id, p.name])), [proj.projects])
@@ -992,19 +1045,20 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     if (removed) requestAnimationFrame(() => projectsAllRef.current?.focus({ preventScroll: true }))
     else focusSoon(returnFocus)
   }
-  const moveRun = async (runId, project_id) => {
+  const moveRun = async (run, project_id) => {
     const target = project_id === UNASSIGNED ? 'Unassigned' : (projName[project_id] || 'project')
     return mutateList('move-run', `Moving run to “${target}”…`,
-      () => assignRun(runId, project_id === UNASSIGNED ? null : project_id), refresh)
+      () => assignRun(
+        run.run_id, project_id === UNASSIGNED ? null : project_id, run.generation), refresh)
   }
   const onDrop = async (project_id) => {
-    const runId = dragRun
-    if (!runId || listBusy) return
+    const run = dragRun
+    if (!run || listBusy) return
     setDragRun(null)
-    await moveRun(runId, project_id)
+    await moveRun(run, project_id)
   }
   const submitRunRename = async (label) => {
-    await renameRun(runRename.run_id, label); await loadRuns()
+    await renameRun(runRename.run_id, label, runRename.generation); await loadRuns()
   }
   const openRunDeletion = (r) => {
     const returnFocus = runMenuTriggerRef.current
@@ -1435,9 +1489,37 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                 ? deletionRecoveryRefs.current.set(r.run_id, node)
                 : deletionRecoveryRefs.current.delete(r.run_id)} />
             const startOverLocked = getRunAccess(r.run_id).mode === 'start-over'
+            const runGenerationAvailable = RUN_GENERATION_RE.test(r.generation || '')
+            const openMenuRun = runMenu?.run_id === r.run_id ? runMenu : null
+            const menuGenerationChanged = !!openMenuRun
+              && openMenuRun.generation !== r.generation
+            const menuMutationLocked = startOverLocked || !runGenerationAvailable
+              || !RUN_GENERATION_RE.test(openMenuRun?.generation || '') || menuGenerationChanged
+            const menuMutationLockReason = startOverLocked
+              ? 'Start over is unresolved · open this run to recover it'
+              : !runGenerationAvailable || !RUN_GENERATION_RE.test(openMenuRun?.generation || '')
+                ? 'Rename and organization are unavailable without a current run generation'
+                : 'This run changed while the menu was open · close and reopen it'
+            const deletionGenerationAvailable = RUN_GENERATION_RE.test(deletionGenerationOf(r))
+              && Number.isSafeInteger(r.seq) && r.seq >= -1
+            const menuDeletionIdentityChanged = !!openMenuRun
+              && (deletionGenerationOf(openMenuRun) !== deletionGenerationOf(r)
+                || openMenuRun.seq !== r.seq)
+            const menuDeleteLocked = startOverLocked || !deletionGenerationAvailable
+              || !RUN_GENERATION_RE.test(deletionGenerationOf(openMenuRun))
+              || !Number.isSafeInteger(openMenuRun?.seq) || openMenuRun.seq < -1
+              || menuDeletionIdentityChanged
+            const menuDeleteLockReason = startOverLocked
+              ? 'Start over is unresolved · open this run to recover it'
+              : !deletionGenerationAvailable
+                  || !RUN_GENERATION_RE.test(deletionGenerationOf(openMenuRun))
+                  || !Number.isSafeInteger(openMenuRun?.seq) || openMenuRun.seq < -1
+                ? 'Refresh the Runs list before deleting this run'
+                : 'This run changed while the menu was open · close and reopen it before deleting'
             return (
             <div className={'run-card' + (compareIds.has(r.run_id) ? ' compare-selected' : '')}
-                 key={r.run_id} data-run-id={r.run_id} draggable={!navigationBusy && !startOverLocked}
+                 key={r.run_id} data-run-id={r.run_id}
+                 draggable={!navigationBusy && !startOverLocked && runGenerationAvailable}
                  onPointerDownCapture={() => { compareDragGuardRef.current = null }}
                  onPointerUp={() => { compareDragGuardRef.current = null }}
                  onPointerCancel={() => { compareDragGuardRef.current = null }}
@@ -1447,7 +1529,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                      compareDragGuardRef.current = null
                      return
                    }
-                   setDragRun(r.run_id)
+                   if (!runGenerationAvailable) { event.preventDefault(); return }
+                   setDragRun({ run_id: r.run_id, generation: r.generation })
                  }}
                  onDragEnd={() => {
                    compareDragGuardRef.current = null
@@ -1494,18 +1577,20 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               </div>
               <div className="run-actions">
                 <button className="ic dots" disabled={navigationBusy} aria-label={`Actions for run ${r.label || r.run_id}`}
-                        aria-haspopup="menu" aria-expanded={runMenu === r.run_id}
+                        aria-haspopup="menu" aria-expanded={!!openMenuRun}
                         onClick={e => {
                           e.stopPropagation()
-                          if (runMenu === r.run_id) closeRunMenu(false)
-                          else { runMenuTriggerRef.current = e.currentTarget; setRunMenu(r.run_id) }
+                          if (openMenuRun) closeRunMenu(false)
+                          else { runMenuTriggerRef.current = e.currentTarget; setRunMenu({ ...r }) }
                         }}>⋮</button>
-                {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects} supertasks={superdata.supertasks}
+                {openMenuRun && <RunMenu r={openMenuRun} projects={proj.projects} supertasks={superdata.supertasks}
+                  anchor={runMenuTriggerRef.current}
                   onOpen={onOpen} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
                   onRename={openRunRename} onDelete={openRunDeletion} onReconcile={reconcileAll}
                   onClose={closeRunMenu} onBusyChange={setMenuBusy}
-                  mutationLocked={startOverLocked}
-                  mutationLockReason="Start over is unresolved · open this run to recover it" />}
+                  mutationLocked={menuMutationLocked}
+                  mutationLockReason={menuMutationLockReason}
+                  deleteLocked={menuDeleteLocked} deleteLockReason={menuDeleteLockReason} />}
               </div>
             </div>
             )
@@ -1531,6 +1616,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
       {runRename && <PromptModal
         title="Rename run" label={`Display name for ${runRename.run_id} (clear it to fall back to the id).`}
         placeholder={runRename.run_id} initial={runRename.label || ''} confirm="Save" allowEmpty
+        blocked={runRenameBlocked}
+        blockedMessage="This run changed while Rename was open. Cancel and reopen Rename from the refreshed card."
         onSubmit={submitRunRename} onReconcile={loadRuns} onClose={closeRunRename} />}
 
       {viewModal && <PromptModal title="Save portfolio view"

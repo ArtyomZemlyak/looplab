@@ -33,7 +33,8 @@ import {
   COMMAND_SUCCEEDED, COMMAND_FAILED,
   createIdempotencyKey, saveAssistantRunTransport, loadAssistantRunTransport,
   clearAssistantRunTransport, clearRunCommandLock, loadRunCommandLock, saveRunCommandLock,
-  listLaunchTransports, subscribeLaunchTransports, subscribeRunCommandLock,
+  clearDamagedLaunchTransport, clearLaunchTransport, listLaunchTransports, loadLaunchTransport,
+  subscribeLaunchTransports, subscribeRunCommandLock,
   storageGet, storageSet, storageRemove,
 } from './util.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -651,11 +652,32 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const recoverySession = launchDraftSession(recovery.identity)
     if (!recoverySession) {
       openFull()
-      flash('Startup recovery exists, but its Assistant session cannot be identified. Reopen the proposal that created it.')
+      const stored = loadLaunchTransport(recovery.identity)
+      if (!stored && !recovery.invalid) {
+        flash('Startup recovery changed in another view. Open Check startup again if it remains visible.')
+        return
+      }
+      const damaged = recovery.invalid || stored?.invalid
+      const confirmed = typeof window === 'undefined' || window.confirm(damaged
+        ? 'This damaged startup recovery cannot be matched to a run or checked automatically. Removing it only releases this tab\'s local Start fence; it does not prove that no provider work or cost occurred. Inspect the run list and provider activity before any new Start. Remove this damaged recovery record?'
+        : `Startup recovery for “${stored.runId}” no longer has an Assistant proposal to reopen. Removing it only releases this tab's local Start fence; it does not prove that the original Start failed. Inspect that run and provider activity before any new Start. Remove this recovery record?`)
+      if (!confirmed) {
+        flash('Startup recovery retained. Inspect the run list and provider activity before any new Start.')
+        return
+      }
+      const cleared = damaged
+        ? clearDamagedLaunchTransport(recovery.storageKey)
+        : clearLaunchTransport(recovery.identity, undefined, stored)
+      flash(cleared
+        ? 'Local startup recovery released after explicit inspection acknowledgement. The original outcome is still not proven.'
+        : 'Startup recovery changed while it was being reviewed and was retained. Open it again.')
       return
     }
     if (sidRef.current !== recoverySession) await openSession(recoverySession)
-    if (sidRef.current === recoverySession) openSide()
+    if (sidRef.current === recoverySession) {
+      openSide()
+      if (recovery.invalid) flash('This startup recovery record is damaged. Review the proposal recovery warning before any new Start.')
+    }
     else flash('Could not reopen the Assistant session that owns this startup recovery.')
   }
   // Restore the last session on mount so a full page reload never loses the conversation — and if its
@@ -1522,14 +1544,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }, [busy, commandBusy, historical, readOnlyAction, input, onReady])
 
   useEffect(() => {
-    if (!Object.keys(launchDrafts).length) return
+    if (!Object.keys(launchDrafts).length && !launchRecoveries.length) return
     const warnBeforeUnload = event => {
       event.preventDefault()
       event.returnValue = ''
     }
     window.addEventListener('beforeunload', warnBeforeUnload)
     return () => window.removeEventListener('beforeunload', warnBeforeUnload)
-  }, [launchDrafts])
+  }, [launchDrafts, launchRecoveries.length])
 
   const stop = () => {
     runningRef.current = false                              // halt reattach/recover polling immediately
@@ -1567,10 +1589,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // Suppress an A-scoped toast during the very first render for B; the effect below then clears its
   // timer/state. This avoids a one-frame stale announcement between route commit and useEffect.
   const visibleToast = assistantRunChanged(toastRunIdRef.current, runId) ? null : toast
+  const nextLaunchRecovery = launchRecoveries[0]
   const launchRecoveryButton = launchRecoveries.length > 0
     ? <button type="button" className="btn sm asst-launch-global" onClick={openLaunchRecovery}
-        title="Reopen the Assistant proposal that owns this durable startup identity">
-        Check startup{launchRecoveries.length > 1 ? ` (${launchRecoveries.length})` : ''}
+        title={nextLaunchRecovery?.invalid
+          ? 'Review a damaged durable startup recovery record'
+          : 'Reopen the Assistant proposal that owns this durable startup identity'}>
+        {nextLaunchRecovery?.invalid ? 'Review startup recovery' : 'Check startup'}
+        {launchRecoveries.length > 1 ? ` (${launchRecoveries.length})` : ''}
       </button>
     : null
   useEffect(() => {
