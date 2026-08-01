@@ -22,11 +22,18 @@ const validSharedSession = value => record(value) && record(value.meta)
   && typeof value.meta.title === 'string' && Array.isArray(value.messages)
   && value.messages.every(validSharedMessage)
 
-const sharedLoadError = error => error?.status === 404
-  ? 'This shared chat is unavailable. It may have been removed or made private.'
-  : error?.name === 'TimeoutError'
-    ? 'Shared chat loading timed out. Check your connection and retry.'
-    : 'Shared chat could not be loaded. Retry when the service is reachable.'
+const sharedLoadFailure = error => {
+  if ([404, 410].includes(error?.status)) return {
+    terminal: true,
+    message: 'This shared chat is unavailable. It may have been removed or made private.',
+  }
+  return {
+    terminal: false,
+    message: error?.name === 'TimeoutError'
+      ? 'Shared chat loading timed out. Check your connection and retry.'
+      : 'Shared chat could not be loaded. Retry when the service is reachable.',
+  }
+}
 
 // Read-only view of a shared assistant session (opened via a share link). No composer, no tools —
 // just the transcript.
@@ -52,8 +59,15 @@ export default function SharedAssistant({ sid, onBack }) {
       setResource({ status: 'ready', data, error: '' })
     } catch (error) {
       if (!mountedRef.current || requestRef.current !== timed) return
-      const errorMessage = sharedLoadError(error)
-      setResource({ status: retained ? 'stale' : 'error', data: retained, error: errorMessage })
+      const failure = sharedLoadFailure(error)
+      if (failure.terminal) {
+        // Revocation/removal is authoritative. Do not keep rendering a transcript retained from an
+        // earlier refresh and do not offer a Retry that can only repeat the same invalid capability.
+        dataRef.current = null
+        setResource({ status: 'gone', data: null, error: failure.message })
+      } else {
+        setResource({ status: retained ? 'stale' : 'error', data: retained, error: failure.message })
+      }
     } finally {
       if (requestRef.current === timed) {
         requestRef.current = null
@@ -72,7 +86,7 @@ export default function SharedAssistant({ sid, onBack }) {
     }
   }, [load])
   useEffect(() => {
-    if (resource.status === 'error' || resource.status === 'stale') {
+    if (resource.status === 'error' || resource.status === 'stale' || resource.status === 'gone') {
       errorRef.current?.focus({ preventScroll: true })
     }
   }, [resource.status])
@@ -99,12 +113,13 @@ export default function SharedAssistant({ sid, onBack }) {
         aria-busy={resource.status === 'loading' || refreshing ? 'true' : undefined} tabIndex={0}>
         {resource.status === 'loading' && <div className="notice" role="status">Loading shared chat…</div>}
         {refreshing && <div className="notice" role="status">Refreshing shared chat…</div>}
-        {(resource.status === 'error' || resource.status === 'stale') && <div ref={errorRef}
+        {(resource.status === 'error' || resource.status === 'stale' || resource.status === 'gone') && <div ref={errorRef}
           className="notice" role="alert" tabIndex={-1}
           style={{ borderColor: 'var(--fail)', color: 'var(--fg)' }}>
           <p>{resource.status === 'stale'
             ? `${resource.error} Showing the last loaded transcript.` : resource.error}</p>
-          <button className="btn sm" type="button" onClick={retry}>Retry</button>
+          {resource.status !== 'gone'
+            && <button className="btn sm" type="button" onClick={retry}>Retry</button>}
         </div>}
         {sess && sess.messages.map((message, index) => <Turn key={index} m={message} readOnly />)}
         {sess && messageCount === 0 && <div className="muted">This shared chat has no messages.</div>}
