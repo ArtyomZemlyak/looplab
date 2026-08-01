@@ -79,6 +79,8 @@ const valueFor = (id, run, detail, names) => {
   return state?.best_node_id == null ? '—' : `#${state.best_node_id}`
 }
 
+const openComparisonRoute = href => { location.hash = href }
+
 export default function RunCompare({ runs, columns, names, onColumns, onRemove }) {
   const [resource, setResource] = useState({ status: 'loading', details: [], loadedAt: 0 })
   const [retry, setRetry] = useState(0)
@@ -144,15 +146,18 @@ export default function RunCompare({ runs, columns, names, onColumns, onRemove }
             const championHref = championRunHref(run, detail)
             return <tr key={run.run_id} className={isBest ? 'best-row' : ''}>
               <th scope="row" className="compare-pinned">
-                <a href={`#/run/${encodeURIComponent(run.run_id)}`}>{label}</a>
+                <button type="button" className="compare-link"
+                  onClick={() => openComparisonRoute(
+                    `#/run/${encodeURIComponent(run.run_id)}`)}>{label}</button>
                 {isBest && <span className="pill compare-best">Best</span>}
                 {run.label && <small>{run.run_id}</small>}
                 {detail?.partial && <small>partial detail</small>}
               </th>
               {columns.map(id => <td key={id}>{id === 'champion' && championHref
-                ? <a href={championHref}
+                ? <button type="button" className="compare-link"
+                    onClick={() => openComparisonRoute(championHref)}
                     aria-label={`Open champion experiment ${detail.state.best_node_id} in ${label}`}>
-                    #{detail.state.best_node_id}</a>
+                    #{detail.state.best_node_id}</button>
                 : valueFor(id, run, detail, names)}</td>)}
               <td><button className="btn xs ghost" onClick={() => onRemove(run.run_id)}
                 aria-label={`Remove ${label} from comparison`}>Remove</button></td>
