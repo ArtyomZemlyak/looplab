@@ -2895,3 +2895,30 @@ def test_operator_stage_name_cache_survives_concurrent_polls(tmp_path):
     live = [key for key in _OP_STAGE_NAMES if not key[0].startswith("/filler/")]
     assert len(live) <= len(run_dirs)
     _OP_STAGE_NAMES.clear()
+
+
+def test_the_finalize_pending_check_reads_the_incremental_index_not_the_whole_log(tmp_path,
+                                                                                  monkeypatch):
+    """`_finalize_incomplete` runs on every submit, every legacy /control POST and every
+    destructive_guard entry. It used to cost a fresh full `EventStore.read_all()` plus a second
+    full read+fold through `srv.state(rd)` each time — exactly the quadratic re-parsing the
+    incremental CommandObservationIndex was built to avoid."""
+    rd = _seed(tmp_path)
+    client, srv = _client(tmp_path, _Driver())
+
+    full_reads = []
+    original_events = srv.commands._events
+    monkeypatch.setattr(srv.commands, "_events",
+                        lambda p: (full_reads.append(str(p)), original_events(p))[1])
+    srv_state = []
+    original_state = srv.state
+    monkeypatch.setattr(srv, "state", lambda p: (srv_state.append(str(p)), original_state(p))[1])
+
+    assert srv.commands._finalize_incomplete(rd) is False
+    assert full_reads == [], f"still re-parsed the whole log: {full_reads}"
+    assert srv_state == [], f"still triggered a second full read+fold: {srv_state}"
+
+    # …and the ANSWER is unchanged: a durable stop that has not finished is still pending.
+    EventStore(rd / "events.jsonl").append("run_abort", {"reason": "operator"})
+    assert srv.commands._finalize_incomplete(rd) is True
+    assert full_reads == [] and srv_state == []

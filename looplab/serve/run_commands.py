@@ -2131,19 +2131,20 @@ class RunCommandService:
             return path, record
         return None, None
 
-    # CLAUDE REVIEW: [PERF] This helper re-reads and re-parses the ENTIRE events.jsonl
-    # (self._events = EventStore.read_all) and may additionally trigger a second full read+fold via
-    # srv.state(rd) — on every submit (_decision), every legacy /control POST (reject_if_active) and
-    # every destructive_guard entry. The incremental CommandObservationIndex was built precisely to
-    # avoid this quadratic re-parsing and already exposes both pieces
-    # (observation.incomplete_finalize_scope() and observation.state()); a submit against a large log
-    # currently costs several full-log parses per request.
-    def _finalize_incomplete(self, rd: Path, state=None) -> bool:
-        """A finalize remains pending until its terminal projections are durably complete."""
-        events = self._events(rd)
-        if incomplete_finalize_scope(events) is not None:
+    def _finalize_incomplete(self, rd: Path, state=None,
+                             observation: Optional[CommandObservation] = None) -> bool:
+        """A finalize remains pending until its terminal projections are durably complete.
+
+        Served from the INCREMENTAL observation, which is what that index exists for: this runs on
+        every submit, every legacy /control POST and every destructive_guard entry, and it used to
+        cost a fresh `EventStore(...).read_all()` plus a second full read+fold through
+        `srv.state(rd)` each time. Both pieces are memoized on the observation's revision, so an
+        unchanged log is free and a grown one parses only the new suffix. `observe()` re-stats the
+        file on every call, so the view is never staler than the request that asked for it."""
+        observation = observation or self._observe(rd)
+        if observation.incomplete_finalize_scope() is not None:
             return True
-        state = state or self.srv.state(rd)
+        state = state or observation.state()
         return bool(state.finalization_pending() or (state.stop_requested and (
             not state.finished or str(state.stop_reason or "").lower() == "error")))
 
