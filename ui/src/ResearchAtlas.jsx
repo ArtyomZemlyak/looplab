@@ -96,7 +96,10 @@ export function AtlasEmptyState({ sourceStates, conceptSource,
         const retryable = !loading && state !== 'current'
         return <li key={key}
         className={`atlas-empty-source atlas-empty-source-${loading ? 'loading' : state}`}>
-        <strong>{label}</strong><span className="atlas-readiness-state">{status}</span>
+        <span className="atlas-readiness-dot" aria-hidden="true" />
+        <span className="atlas-empty-source-head">
+          <strong>{label}</strong><span className="atlas-readiness-state">{status}</span>
+        </span>
         {retryable && <button type="button" className="btn sm" disabled={busy}
           onClick={() => retry(key)} aria-label={`Retry ${label}`}>
           {busy ? 'Refreshing…' : 'Retry'}
