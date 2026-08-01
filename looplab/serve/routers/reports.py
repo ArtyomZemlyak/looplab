@@ -1756,39 +1756,36 @@ def build_router(srv) -> APIRouter:
         sizes: dict[str, int] = {}
         total = 0
         for run_id in sorted(set(run_ids)):
+            # SEPARATE scopes: only an unreadable events.jsonl may yield size 0. One try around both
+            # meant a present-but-unreadable SNAPSHOT (EACCES/EIO) raised ScopeSourceError after
+            # `scope_event_size` had already produced the real byte count, clobbering it to 0 — which
+            # both undercounted the MAX_SCOPE_TOTAL_EVENT_BYTES budget (a 30 MB log counting as 0)
+            # and, if the snapshot error cleared between this preflight and `_compute`'s capture,
+            # fired a spurious `scope_report_inputs_changed` on `event_bytes != expected_bytes(0)`.
             try:
                 size = scope_event_size(srv.root, run_id)
-                run_dir = Path(srv.root).absolute() / run_id
-                for filename, limit in (
-                    ("task.snapshot.json", MAX_SCOPE_TASK_BYTES),
-                    ("config.snapshot.json", MAX_SCOPE_CONFIG_BYTES),
-                ):
-                    try:
-                        status = (run_dir / filename).lstat()
-                    except FileNotFoundError:
-                        continue
-                    except OSError as exc:
-                        raise ScopeSourceError(
-                            f"{filename} could not be inspected") from exc
-                    if not stat.S_ISREG(status.st_mode) or _is_link_or_reparse(status):
-                        raise ScopeSourceError(
-                            f"{filename} is not a trusted regular file")
-                    if int(status.st_size) > limit:
-                        raise ScopeSourceCapacityError(
-                            f"{filename} exceeds its scope-report byte limit")
             except ScopeSourceCapacityError:
                 raise
-            # CLAUDE REVIEW: [EDGE-CASE] Over-broad except: this also catches the ScopeSourceError
-            # raised by the task/config snapshot regular-file / lstat-OSError checks ABOVE, after
-            # scope_event_size already bound `size` to the real events.jsonl byte count. A snapshot
-            # that is present-but-unreadable (EACCES/EIO) therefore clobbers a good event size to 0,
-            # which (a) undercounts the MAX_SCOPE_TOTAL_EVENT_BYTES budget (a run's 30MB log counts
-            # as 0), and (b) if the snapshot error is transient between this preflight and _compute's
-            # capture, makes `source.event_bytes != expected_bytes(0)` fire a spurious
-            # scope_report_inputs_changed. The event-size read and snapshot checks want separate try
-            # scopes so only an unreadable events.jsonl yields size 0.
             except ScopeSourceError:
                 size = 0
+            run_dir = Path(srv.root).absolute() / run_id
+            for filename, limit in (
+                ("task.snapshot.json", MAX_SCOPE_TASK_BYTES),
+                ("config.snapshot.json", MAX_SCOPE_CONFIG_BYTES),
+            ):
+                try:
+                    status = (run_dir / filename).lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    # An unreadable snapshot is a snapshot problem, not evidence that the run has no
+                    # events. It is already re-checked (and fails closed) where it is actually READ.
+                    continue
+                if not stat.S_ISREG(status.st_mode) or _is_link_or_reparse(status):
+                    continue
+                if int(status.st_size) > limit:
+                    raise ScopeSourceCapacityError(
+                        f"{filename} exceeds its scope-report byte limit")
             total += size
             if total > MAX_SCOPE_TOTAL_EVENT_BYTES:
                 raise ScopeSourceCapacityError("scope event evidence exceeds its byte limit")

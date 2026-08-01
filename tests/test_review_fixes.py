@@ -371,3 +371,36 @@ def test_a_scripted_reset_still_works_without_a_browser_generation_or_a_config_s
     # ...and a malformed one is still rejected outright.
     assert client.post("/api/runs/demo/reset", headers={"Origin": "http://testserver"},
                        json={"expected_generation": "ABC"}).status_code == 400
+
+
+def test_a_non_utf8_config_snapshot_is_reported_as_unreadable_not_a_bare_500(tmp_path):
+    """The "torn write / hand-edited snapshot -> explicit error" hardening was half-realized:
+    `read_text(encoding="utf-8")` raises UnicodeDecodeError on invalid UTF-8 (a crash mid-multibyte,
+    a hand-edit saved as latin-1), and that is a ValueError but NOT an OSError or JSONDecodeError —
+    so it escaped the clause into exactly the bare traceback the clause exists to replace. Both the
+    GET and the PUT read the snapshot the same way and had the same gap."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    (rd / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t","direction":"min"}}\n',
+        encoding="utf-8")
+    # Valid JSON in latin-1; the 0xE9 byte is not valid UTF-8.
+    (rd / "config.snapshot.json").write_bytes(b'{"goal": "caf\xe9"}')
+
+    client = TestClient(make_app(tmp_path))
+    got = client.get("/api/runs/demo/config")
+    assert got.status_code == 500
+    assert "unreadable" in got.json()["detail"], got.json()
+
+    # The PUT reads the same snapshot the same way. Reach it past the generation fence with the
+    # run's real generation; the decode is what must answer, not a traceback.
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    put = client.put("/api/runs/demo/config",
+                     json={"config": {"n_seeds": 2}, "expected_generation": generation})
+    assert put.status_code == 500, put.json()
+    assert "unreadable" in put.json()["detail"], put.json()

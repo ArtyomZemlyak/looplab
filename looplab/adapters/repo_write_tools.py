@@ -400,11 +400,11 @@ def _md_cell(value: object, limit: int) -> str:
     """One markdown table cell: truncated, and with `|` neutralized. EVERY cell goes through this,
     not just the notes column — a single pipe in a spreadsheet label or a non-numeric value shifts
     every column after it, and this content is whatever the operator's xlsx happens to contain."""
-    # CLAUDE REVIEW: [EDGE-CASE] neutralizes `|` but NOT newlines. openpyxl returns wrap-text /
-    # multi-line cell strings verbatim (a label or free-text note can contain "\n"); an embedded
-    # newline splits the table ROW mid-line — the exact corruption this cell-escaper exists to
-    # prevent, worse than a pipe. Also collapse "\r"/"\n" (e.g. to a space) here.
-    return str(value)[:limit].replace("|", "/")
+    # NEWLINES are collapsed too, not just pipes. openpyxl returns wrap-text / multi-line cell
+    # strings verbatim, and an embedded "\n" splits the table ROW mid-line — the same corruption a
+    # stray pipe causes, only worse, since the row fragments into separate malformed lines.
+    return str(value)[:limit].replace("|", "/").replace("\r\n", " ").replace("\r", " ").replace(
+        "\n", " ")
 
 
 def _xlsx_to_markdown(path: str, *, max_rows: int = 120, cap: int = 9000) -> Optional[str]:
