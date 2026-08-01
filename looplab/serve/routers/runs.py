@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -23,6 +24,9 @@ from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings, settings_from_snapshot)
 from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
+from looplab.core.run_deletion import (
+    RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed,
+    load_run_deletion_fence, run_deletion_snapshot_token)
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
     load_run_reset_marker)
@@ -800,6 +804,20 @@ def build_router(srv) -> APIRouter:
         out = []
         root = srv.root
         for rd in sorted(root.iterdir()) if root.exists() else []:
+            if rd.name.lower().startswith((
+                    ".looplab-delete-fence-", ".looplab-delete-receipt-",
+                    ".looplab-delete-quarantine-")):
+                continue
+            try:
+                entry = rd.lstat()
+                attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
+                reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+                if (not stat.S_ISDIR(entry.st_mode) or stat.S_ISLNK(entry.st_mode)
+                        or bool(attributes & reparse_flag)
+                        or load_run_deletion_fence(rd) is not None):
+                    continue
+            except (OSError, RunDeletionStorageError):
+                continue
             log = rd / "events.jsonl"
             if not log.exists():
                 continue
@@ -816,12 +834,15 @@ def build_router(srv) -> APIRouter:
                 finalize_incomplete = (
                     incomplete_finalize_scope(events) is not None or st.finalization_pending())
                 best = st.best()
+                generation = run_generation_token(events)
                 summary = {
                     "run_id": rd.name, "task_id": st.task_id, "goal": st.goal,
                     # A run id is reusable after reset/delete.  Portfolio consumers must include the
                     # durable event-log generation in their resource identity or an in-flight detail
                     # read for generation A can be joined to generation B's unchanged run id.
-                    "generation": run_generation_token(events),
+                    "generation": generation,
+                    "deletion_generation": run_deletion_snapshot_token(log, generation),
+                    "seq": events[-1].seq if events else -1,
                     "direction": st.direction, "finished": st.finished,
                     "phase": _phase(st, finalize_incomplete=finalize_incomplete),
                     "finalization_incomplete": finalize_incomplete, "nodes": len(st.nodes),
@@ -1740,6 +1761,30 @@ def build_router(srv) -> APIRouter:
     async def stream_events(run_id: str, request: Request):
         """Stream canonical public state frames, including the Cards completeness receipt."""
         rd = _run_dir(run_id)
+        try:
+            initial_entry = rd.lstat()
+            initial_identity = (
+                initial_entry.st_dev, initial_entry.st_ino, initial_entry.st_mode,
+                int(getattr(initial_entry, "st_file_attributes", 0) or 0),
+            )
+        except OSError as exc:
+            raise HTTPException(404, "no such run") from exc
+
+        def _same_stream_run() -> bool:
+            """Revalidate the exact directory captured before this streaming response started."""
+            try:
+                current = _run_dir(run_id)
+                entry = current.lstat()
+            except (HTTPException, OSError):
+                # End the already-started response cleanly. The fetch-stream client reconnects and
+                # receives the authoritative 404/410 (or a temporary availability response) from
+                # the route boundary instead of accepting a fabricated empty state after quarantine.
+                return False
+            current_identity = (
+                entry.st_dev, entry.st_ino, entry.st_mode,
+                int(getattr(entry, "st_file_attributes", 0) or 0),
+            )
+            return current == rd and current_identity == initial_identity
 
         async def gen():
             last_sent = -2
@@ -1763,6 +1808,11 @@ def build_router(srv) -> APIRouter:
                 if await request.is_disconnected():
                     break
                 payload = await anyio.to_thread.run_sync(_state_payload, rd)
+                # Deletion atomically renames the directory out of the run namespace. Revalidate
+                # after building the snapshot so that race cannot emit one ghost empty frame; a
+                # later replacement at the same textual path is rejected by directory identity too.
+                if not await anyio.to_thread.run_sync(_same_stream_run):
+                    break
                 alive = payload["state"].get("engine_running")
                 generation = payload.get(RUN_GENERATION_FIELD)
                 event_count = payload.get("event_count")
@@ -2720,6 +2770,7 @@ def build_router(srv) -> APIRouter:
             with (_run_config_thread_lock(snap),
                   _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
                 assert_run_reset_write_allowed(rd)
+                assert_run_deletion_write_allowed(rd)
                 # Checked INSIDE the lock: reset can land between the request arriving and the write.
                 if (expected_generation is not None
                         and srv.commands.run_generation(rd) != expected_generation):
@@ -2745,6 +2796,18 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(503, {
                 "code": "run_reset_fence_unavailable",
                 "message": "Replay ownership cannot be verified; settings were not written.",
+            }) from exc
+        except RunDeletionFenceError as exc:
+            raise HTTPException(410, {
+                "code": "run_deletion_in_progress",
+                "operation_id": exc.operation_id,
+                "message": "This run is being deleted; settings were not written.",
+                "remediation": "Observe or retry that exact deletion operation first.",
+            }) from exc
+        except RunDeletionStorageError as exc:
+            raise HTTPException(503, {
+                "code": "run_deletion_fence_unavailable",
+                "message": "Deletion ownership cannot be verified; settings were not written.",
             }) from exc
     @router.get("/api/runs/{run_id}/cost")
     def run_cost(run_id: str):

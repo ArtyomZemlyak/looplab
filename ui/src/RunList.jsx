@@ -1,5 +1,6 @@
 import React, { lazy, useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
+import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun,
+  createIdempotencyKey, submitRunDeletion,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask,
   storageGet, storageSet } from './util.js'
 import { useMediaQuery, usePoll } from './hooks.js'
@@ -21,6 +22,10 @@ import {
 import { deadlineRequest } from './requestDeadline.js'
 import { getRunAccess, listStartOverRunAccesses } from './runMode.js'
 import { listRunStartOverRecoveries } from './runStartOverRecovery.js'
+import {
+  clearRunDeletionIntent, createRunDeletionIntent, listRunDeletionRecoveries,
+  loadRunDeletionIntent, saveRunDeletionIntent,
+} from './runDeletionRecovery.js'
 
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
@@ -29,6 +34,9 @@ const SAVED_VIEWS_KEY = 'll.portfolioViews'
 const COMPARE_COLUMNS_KEY = 'll.compareColumns'
 const LIST_READ_TIMEOUT_MS = 12_000
 const LIST_PAGE_SIZE = 200
+const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
+const RUN_DELETION_TIMEOUT_MS = 12_000
+const RUN_DELETION_POLL_MS = 2_500
 
 export function useResource(read, initial) {
   const [data, setData] = useState(initial)
@@ -42,12 +50,14 @@ export function useResource(read, initial) {
     const timed = deadlineRequest(signal => read(signal), LIST_READ_TIMEOUT_MS)
     return timed.promise
       .then(value => {
-        if (version.current !== owner) return
+        if (version.current !== owner) return { ok: false, superseded: true }
         setData(value); setState('ready')
+        return { ok: true, value }
       })
-      .catch(() => {
-        if (version.current !== owner) return
+      .catch(error => {
+        if (version.current !== owner) return { ok: false, superseded: true, error }
         setState(current => ['ready', 'stale'].includes(current) ? 'stale' : 'error')
+        return { ok: false, error }
       })
   }
   return [data, state, load]
@@ -284,9 +294,164 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
   </Modal>
 }
 
+const RUN_DELETION_STATUSES = new Set(['pending', 'succeeded'])
+const RUN_DELETION_PHASES = new Set([
+  'prepared', 'fenced', 'quarantining', 'quarantine_ambiguous', 'quarantined', 'metadata_committed',
+  'purging', 'retiring_fence', 'succeeded',
+])
+const deletionGenerationOf = run => String(run?.deletion_generation || run?.generation || '')
+
+const exactRunDeletionReceipt = (value, intent) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || typeof value.ok !== 'boolean'
+      || !RUN_DELETION_STATUSES.has(value.status)
+      || !RUN_DELETION_PHASES.has(value.phase)
+      || value.operation_id !== intent.operationId
+      || value.run_id !== intent.runId
+      || value.expected_generation !== intent.expectedGeneration
+      || value.expected_seq !== intent.expectedSeq) return null
+  if (value.status === 'pending' && (value.ok !== false || value.phase === 'succeeded')) return null
+  if (value.status === 'succeeded' && (value.ok !== true || value.phase !== 'succeeded')) return null
+  return {
+    ok: value.ok,
+    status: value.status,
+    phase: value.phase,
+    operationId: value.operation_id,
+    expectedGeneration: value.expected_generation,
+    expectedSeq: value.expected_seq,
+  }
+}
+
+const runDeletionErrorMessage = error => {
+  const code = String(error?.code || '')
+  if (['engine_running', 'engine_launching', 'run_command_active'].includes(code)) {
+    return 'This run is still active. Pause or finish it, then reopen Delete from the refreshed card.'
+  }
+  if (['run_generation_changed', 'run_seq_changed'].includes(code)) {
+    return 'This run changed after the menu was opened. The inspected generation was not deleted.'
+  }
+  if (code === 'run_reset_in_progress') {
+    return 'Finish the existing Start over recovery before deleting this run.'
+  }
+  if (code === 'run_finalization_incomplete') {
+    return 'This run is still finishing its terminal records. Refresh it before deleting.'
+  }
+  if (code === 'delete_cost_pending') {
+    return 'Run cost records are still being finalized. Wait for them to settle, then reopen Delete.'
+  }
+  if (code === 'delete_operation_conflict') {
+    return 'Another deletion already owns this run. This new request was not submitted.'
+  }
+  if (error?.status === 401 || error?.status === 403) {
+    return 'Owner access is required. Restore access before checking or deleting this run.'
+  }
+  if (error?.status === 404 || error?.status === 410) {
+    return 'The inspected run is no longer available. Refresh the list before deciding what to do next.'
+  }
+  if (error?.status === 422 || error?.status === 428) {
+    return 'The server rejected this deletion identity. Refresh the run before trying again.'
+  }
+  return 'The deletion request was rejected. The run remains unchanged; refresh before trying again.'
+}
+
+const runDeletionProgress = recovery => {
+  if (recovery.kind === 'corrupt') {
+    return 'Saved deletion recovery is invalid. This run stays locked because the exact earlier operation cannot be identified safely.'
+  }
+  const intent = recovery.intent
+  if (intent.phase === 'unknown') {
+    return 'Deletion outcome is not confirmed. Retry only this exact saved operation before changing the run.'
+  }
+  if (intent.phase === 'submitting') {
+    return 'The exact deletion request is being submitted. No result is assumed yet.'
+  }
+  const byServerPhase = {
+    prepared: 'The server preserved this deletion request and is preparing the run.',
+    fenced: 'The run is locked against new changes while deletion continues.',
+    quarantining: 'The run is being removed from the live workspace.',
+    quarantine_ambiguous: 'The exact run is isolated, but storage could not confirm the move. Manual repair is required before recovery can continue.',
+    quarantined: 'The run left the live workspace; metadata cleanup is continuing.',
+    metadata_committed: 'Run metadata is removed; final file cleanup is continuing.',
+    purging: 'The server is finishing permanent file cleanup.',
+    retiring_fence: 'Run files are gone; the server is retiring the final deletion lock.',
+    succeeded: 'Deletion is confirmed; refreshing the run list before releasing recovery.',
+  }
+  return byServerPhase[intent.serverPhase]
+    || 'The server preserved this exact deletion request. Checking its current phase automatically.'
+}
+
+function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm }) {
+  const dialogRef = useRef(null)
+  const errorRef = useRef(null)
+  useDialogFocus(dialogRef, busy ? null : onClose)
+  useEffect(() => {
+    if (error) errorRef.current?.focus({ preventScroll: true })
+  }, [error])
+  const targetValid = RUN_GENERATION_RE.test(target.expectedGeneration || '')
+    && Number.isSafeInteger(target.expectedSeq) && target.expectedSeq >= -1
+  const identityChanged = !currentRun
+    || deletionGenerationOf(currentRun) !== target.expectedGeneration
+    || currentRun.seq !== target.expectedSeq
+  const blocked = busy || target.invalidated === true || !targetValid || identityChanged
+  return <div className="overlay run-delete-overlay"
+    onMouseDown={event => { if (!busy && event.target === event.currentTarget) onClose() }}>
+    <section ref={dialogRef} className="modal run-delete-dialog" role="alertdialog"
+      aria-modal="true" aria-labelledby="run-delete-title"
+      aria-describedby="run-delete-description run-delete-warning"
+      aria-busy={busy} tabIndex={-1}>
+      <div className="modal-h"><b id="run-delete-title">Delete this run permanently?</b></div>
+      <div className="modal-b">
+        <p id="run-delete-description" className="run-delete-copy">
+          This removes the run-owned events, experiments, traces, chat, reports, and review access.
+        </p>
+        <dl className="run-delete-identity">
+          <div><dt>Label</dt><dd>{target.label || '(no display label)'}</dd></div>
+          <div><dt>Run ID</dt><dd><code>{target.runId}</code></dd></div>
+          <div><dt>Deletion identity</dt><dd><code>{target.expectedGeneration || 'unavailable'}</code></dd></div>
+          <div><dt>Sequence</dt><dd><code>{Number.isSafeInteger(target.expectedSeq) ? target.expectedSeq : 'unavailable'}</code></dd></div>
+        </dl>
+        <p id="run-delete-warning" className="run-delete-warning">This cannot be undone.</p>
+        {(!targetValid || identityChanged) && <div className="flag run-delete-error" role="alert">
+          {!targetValid
+            ? 'The exact generation or sequence is unavailable. Refresh the list before deleting.'
+            : 'This run changed while the dialog was open. Cancel and reopen Delete from the refreshed card.'}
+        </div>}
+        {error && <div ref={errorRef} className="flag run-delete-error" role="alert" tabIndex={-1}>{error}</div>}
+        <div className="modal-actions">
+          <button type="button" className="btn sm" data-dialog-initial-focus disabled={busy}
+            onClick={onClose}>Cancel</button>
+          <button type="button" className="btn sm danger" disabled={blocked}
+            onClick={onConfirm}>{busy ? 'Submitting exact request…' : 'Delete permanently'}</button>
+        </div>
+      </div>
+    </section>
+  </div>
+}
+
+function RunDeletionCard({ run, recovery, busy, onRetry, setRef }) {
+  const active = recovery.kind === 'active'
+  const urgent = !active || recovery.intent.phase === 'unknown' || recovery.storageUnavailable
+  return <div ref={setRef} className={`run-card run-deletion-card${urgent ? ' attention' : ''}`}
+    data-run-id={recovery.runId} tabIndex={-1}
+    role={urgent ? 'alert' : 'status'} aria-live={urgent ? 'assertive' : 'polite'}
+    aria-atomic="true" aria-busy={busy}>
+    <OpIcon name="alert" size={16} />
+    <div className="run-deletion-copy">
+      <div><b>{run?.label || recovery.runId}</b> <span className="pill warn">Deletion recovery</span></div>
+      <div>{runDeletionProgress(recovery)}</div>
+      {active && <div className="muted"><code>{recovery.runId}</code> · generation <code>{recovery.intent.expectedGeneration.slice(0, 12)}…</code></div>}
+      {recovery.storageUnavailable && <div className="flag">This tab could not update its saved recovery record.</div>}
+    </div>
+    {active && <button type="button" className="btn sm" disabled={busy}
+      onClick={() => onRetry(recovery)}>{busy ? 'Checking…'
+        : recovery.intent.phase === 'unknown' ? 'Retry exact deletion' : 'Check exact deletion'}</button>}
+  </div>
+}
+
 // Per-run "⋮" dropdown: open / rename / move (project) / assign (super-task) / delete.
 function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename,
-  onDelete, onReconcile, onClose, onBusyChange, mutationLocked = false }) {
+  onDelete, onReconcile, onClose, onBusyChange, mutationLocked = false,
+  mutationLockReason = 'Resolve the existing run operation before changing this run' }) {
   const menuRef = useRef(null)
   const [busy, error, mutate] = useMutation()
   useEffect(() => {
@@ -316,10 +481,10 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
       <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onOpen(r.run_id) }}>↗ Open</button>
       {mutationLocked && <div className="mi-label" role="status">
-        Start over unresolved · open this run to recover it
+        {mutationLockReason}
       </div>}
       <button type="button" role="menuitem" tabIndex={-1} className="mi"
-        disabled={mutationLocked} title={mutationLocked ? 'Recover Start over before renaming this run' : undefined}
+        disabled={mutationLocked} title={mutationLocked ? mutationLockReason : undefined}
         onClick={() => { close(false); onRename(r) }}><OpIcon name="pencil" size={12} /> Rename</button>
       <div className="mi-sep" />
       <div className="mi-label">Move to project</div>
@@ -345,7 +510,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       {error && <div className="flag" role="alert">{error}</div>}
       <div className="mi-sep" />
       <button type="button" role="menuitem" tabIndex={-1} className="mi danger"
-        disabled={mutationLocked} title={mutationLocked ? 'Recover Start over before deleting this run' : undefined}
+        disabled={mutationLocked} title={mutationLocked ? mutationLockReason : undefined}
         onClick={() => onDelete(r)}>✕ Delete run…</button>
     </div>
   </>
@@ -427,6 +592,19 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const runMenuTriggerRef = useRef(null)
   const runModalReturnFocusRef = useRef(null)
   const [runRename, setRunRename] = useState(null) // run object being renamed (popup)
+  const [deleteDialog, setDeleteDialog] = useState(null)
+  const [deleteDialogBusy, setDeleteDialogBusy] = useState(false)
+  const [deleteDialogError, setDeleteDialogError] = useState('')
+  const deleteDialogFocusRef = useRef(null)
+  const deleteConfirmLockRef = useRef(false)
+  const deletionFallbacksRef = useRef(new Map())
+  const deletionRequestRef = useRef(new Map())
+  const deletionRecoveryRefs = useRef(new Map())
+  const deletionMountedRef = useRef(true)
+  const [deletionBusy, setDeletionBusy] = useState(() => new Set())
+  const [deletionNotice, setDeletionNotice] = useState(null)
+  const [deletionRecoveries, setDeletionRecoveries] = useState(() => new Map(
+    listRunDeletionRecoveries().map(item => [item.runId, item])))
   // Sort + filter of the run list (client-side over the loaded summaries).
   const [sortKey, setSortKey] = useState('time')
   const [sortDir, setSortDir] = useState('desc')
@@ -461,6 +639,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const missingStartOverRecoveries = [...startOverRecoveryByRun.values()]
     .filter(item => !runListAuthoritative
       || !(runs || []).some(run => run.run_id === item.runId))
+  const deleteDialogCurrentRun = deleteDialog
+    ? (runs || []).find(run => run.run_id === deleteDialog.runId) || null
+    : null
   const closeRunMenu = (restore = false) => {
     setRunMenu(null)
     if (restore) focusSoon(runMenuTriggerRef.current)
@@ -480,6 +661,93 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }
   const closeRunRename = () => { setRunRename(null); restoreRunModalFocus() }
   const closeSuperTasks = () => { setStModal(false); restoreRunModalFocus() }
+  useEffect(() => {
+    deletionMountedRef.current = true
+    return () => {
+      deletionMountedRef.current = false
+      for (const request of deletionRequestRef.current.values()) request.controller.abort()
+      deletionRequestRef.current.clear()
+    }
+  }, [])
+  const updateDeletionRecovery = recovery => {
+    if (!deletionMountedRef.current) return
+    setDeletionRecoveries(current => {
+      const next = new Map(current)
+      next.set(recovery.runId, recovery)
+      return next
+    })
+  }
+  const removeDeletionRecovery = runId => {
+    if (!deletionMountedRef.current) return
+    setDeletionRecoveries(current => {
+      if (!current.has(runId)) return current
+      const next = new Map(current); next.delete(runId); return next
+    })
+  }
+  const setDeletionBusyFor = (runId, busy) => {
+    if (!deletionMountedRef.current) return
+    setDeletionBusy(current => {
+      const next = new Set(current)
+      busy ? next.add(runId) : next.delete(runId)
+      return next
+    })
+  }
+  const persistDeletionPhase = (intent, phase, serverPhase = intent.serverPhase) => {
+    const next = createRunDeletionIntent(
+      intent.runId, intent.expectedGeneration, intent.expectedSeq, intent.operationId,
+      phase, serverPhase)
+    if (!next) return null
+    const saved = saveRunDeletionIntent(next, undefined, intent.operationId)
+    if (!saved) {
+      const restored = loadRunDeletionIntent(intent.runId)
+      if (restored.kind === 'active' || restored.kind === 'corrupt') {
+        updateDeletionRecovery({ runId: intent.runId, ...restored, storageUnavailable: true })
+        return restored.kind === 'active' ? restored.intent : null
+      }
+    }
+    updateDeletionRecovery({ runId: intent.runId, kind: 'active', intent: next,
+      storageUnavailable: !saved })
+    return next
+  }
+  const clearDeletionRecovery = intent => {
+    if (clearRunDeletionIntent(intent.runId, undefined, intent.operationId)) {
+      removeDeletionRecovery(intent.runId)
+      return true
+    }
+    const restored = loadRunDeletionIntent(intent.runId)
+    updateDeletionRecovery(restored.kind === 'active' || restored.kind === 'corrupt'
+      ? { runId: intent.runId, ...restored, storageUnavailable: true }
+      : { runId: intent.runId, kind: 'active', intent, storageUnavailable: true })
+    return false
+  }
+  const focusDeletionRecovery = runId => requestAnimationFrame(() => {
+    ;(deletionRecoveryRefs.current.get(runId) || runsMainRef.current)
+      ?.focus?.({ preventScroll: true })
+  })
+  const focusAfterDeletion = (intent) => requestAnimationFrame(() => {
+    if (!deletionMountedRef.current) return
+    const fallback = deletionFallbacksRef.current.get(intent.operationId)
+    deletionFallbacksRef.current.delete(intent.operationId)
+    const currentCard = [...(runsMainRef.current?.querySelectorAll('.run-card') || [])]
+      .find(card => card.dataset.runId === intent.runId && !card.classList.contains('run-deletion-card'))
+    const target = currentCard?.querySelector('.run-card-main')
+      || (fallback?.next?.isConnected ? fallback.next : null)
+      || (fallback?.previous?.isConnected ? fallback.previous : null)
+      || runsMainRef.current
+    target?.focus?.({ preventScroll: true })
+  })
+  const closeDeleteDialog = (restore = true) => {
+    if (deleteDialogBusy) return
+    const fallback = deleteDialogFocusRef.current
+    deleteDialogFocusRef.current = null
+    setDeleteDialog(null); setDeleteDialogError('')
+    if (restore) requestAnimationFrame(() => {
+      const target = fallback?.returnFocus?.isConnected ? fallback.returnFocus
+        : fallback?.next?.isConnected ? fallback.next
+          : fallback?.previous?.isConnected ? fallback.previous : runsMainRef.current
+      target?.focus?.({ preventScroll: true })
+    })
+  }
   // Keep the compact drawer active while any list or menu mutation is pending.
   useDialogFocus(projectsDialogRef, navigationBusy ? null : () => setProjectsOpen(false), compactNav && projectsOpen)
   // Run creation is no longer a modal here — it happens INSIDE the assistant (the bottom command bar's
@@ -515,10 +783,18 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }), [runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
   const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
   const displayedRuns = visible.slice(0, listLimit)
+  const renderedDeletionIds = new Set(view === 'list'
+    ? displayedRuns.filter(run => deletionRecoveries.has(run.run_id)).map(run => run.run_id)
+    : [])
+  const missingDeletionRecoveries = [...deletionRecoveries.values()]
+    .filter(recovery => !renderedDeletionIds.has(recovery.runId))
+  const mapRuns = useMemo(() => visible.filter(run => !deletionRecoveries.has(run.run_id)),
+    [visible, deletionRecoveries])
   const compareRuns = useMemo(() => {
     const byId = new Map((runs || []).map(run => [run.run_id, run]))
-    return [...compareIds].map(id => byId.get(id)).filter(Boolean)
-  }, [runs, compareIds])
+    return [...compareIds].filter(id => !deletionRecoveries.has(id))
+      .map(id => byId.get(id)).filter(Boolean)
+  }, [runs, compareIds, deletionRecoveries])
   const metricSortAvailable = taskFilter !== ALL && metricComparable(filtered)
   const hasActiveFilters = !!query.trim() || taskFilter !== ALL || statusFilter !== 'all' || stFilter !== ALL
   const clearFilters = () => {
@@ -599,8 +875,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }
 
   const autoMapCollapsed = useMemo(
-    () => defaultCollapsedClusters(proj.projects, visible, subtree),
-    [proj.projects, visible, subtree])
+    () => defaultCollapsedClusters(proj.projects, mapRuns, subtree),
+    [proj.projects, mapRuns, subtree])
   const mapCollapsed = useMemo(() => {
     const next = new Set(autoMapCollapsed)
     mapCollapseOverrides.forEach((collapsed, id) => collapsed ? next.add(id) : next.delete(id))
@@ -685,23 +961,183 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const submitRunRename = async (label) => {
     await renameRun(runRename.run_id, label); await loadRuns()
   }
-  const removeRun = async (r) => {
-    const menuFocus = document.activeElement
+  const openRunDeletion = (r) => {
     const returnFocus = runMenuTriggerRef.current
     const card = returnFocus?.closest('.run-card')
-    const fallbackFocus = card?.nextElementSibling?.querySelector('.run-card-main')
-      || card?.previousElementSibling?.querySelector('.run-card-main')
-    if (!confirm(`Delete run "${r.label || r.run_id}" permanently? This removes its files on disk and cannot be undone.`)) {
-      focusSoon(menuFocus); return
+    deleteDialogFocusRef.current = {
+      returnFocus,
+      next: card?.nextElementSibling?.querySelector('.run-card-main'),
+      previous: card?.previousElementSibling?.querySelector('.run-card-main'),
     }
     setRunMenu(null)
-    await mutateList('delete-run', `Deleting run “${r.label || r.run_id}”…`,
-      async () => { await deleteRun(r.run_id); await refresh() }, refresh)
-    requestAnimationFrame(() => {
-      const target = returnFocus?.isConnected ? returnFocus : fallbackFocus?.isConnected ? fallbackFocus : runsMainRef.current
-      target?.focus({ preventScroll: true })
+    setDeleteDialogError(''); setDeleteDialogBusy(false)
+    setDeleteDialog({
+      runId: String(r.run_id), label: String(r.label || ''),
+      expectedGeneration: deletionGenerationOf(r), expectedSeq: r.seq,
+      operationId: null, invalidated: false,
     })
   }
+  const leaveDeleteDialogForRecovery = (intent) => {
+    setDeleteDialog(current => current?.runId === intent.runId ? null : current)
+    setDeleteDialogBusy(false); setDeleteDialogError('')
+    deleteDialogFocusRef.current = null
+    focusDeletionRecovery(intent.runId)
+  }
+  const finishRunDeletionReceipt = async (intent, receipt, { fromDialog = false } = {}) => {
+    if (receipt.status === 'pending') {
+      persistDeletionPhase(intent, 'pending', receipt.phase)
+      if (fromDialog) leaveDeleteDialogForRecovery(intent)
+      return
+    }
+    const listRead = await loadRuns()
+    if (!listRead?.ok) {
+      persistDeletionPhase(intent, 'pending', receipt.phase)
+      setDeletionNotice({ kind: 'error', text: receipt.status === 'succeeded'
+        ? 'Deletion is confirmed, but the current run list could not be refreshed. The exact recovery remains locked.'
+        : 'The deletion operation is resolved, but the current run list could not be refreshed.' })
+      if (fromDialog) leaveDeleteDialogForRecovery(intent)
+      return
+    }
+    const exactTargetStillVisible = (listRead.value || []).some(run =>
+      run.run_id === intent.runId
+      && deletionGenerationOf(run) === intent.expectedGeneration
+      && run.seq === intent.expectedSeq)
+    if (receipt.status === 'succeeded' && exactTargetStillVisible) {
+      persistDeletionPhase(intent, 'pending', receipt.phase)
+      setDeletionNotice({ kind: 'error', text:
+        'Deletion is confirmed, but the deleted generation is still present in the refreshed list. Recovery remains locked.' })
+      if (fromDialog) leaveDeleteDialogForRecovery(intent)
+      return
+    }
+    if (receipt.status === 'succeeded') {
+      setCompareIds(current => {
+        if (!current.has(intent.runId)) return current
+        const next = new Set(current); next.delete(intent.runId); return next
+      })
+    }
+    const cleared = clearDeletionRecovery(intent)
+    setDeletionNotice(cleared
+      ? { kind: 'status', text: `Run “${intent.runId}” was permanently deleted.` }
+      : { kind: 'error', text:
+          'The deletion operation is resolved, but this tab could not clear its recovery record safely.' })
+    if (fromDialog) {
+      setDeleteDialog(null); setDeleteDialogBusy(false); setDeleteDialogError('')
+      deleteDialogFocusRef.current = null
+    }
+    if (cleared) focusAfterDeletion(intent)
+    else focusDeletionRecovery(intent.runId)
+  }
+  const runDeletionRequest = async (intent, {
+    initialRequest = false, fromDialog = false,
+  } = {}) => {
+    if (!intent || deletionRequestRef.current.has(intent.operationId)) return
+    // GET observes a receipt but cannot roll a pending transaction forward. Every continuation uses
+    // the exact persisted POST identity, which is idempotent and resumes the server state machine.
+    const timed = deadlineRequest(signal => submitRunDeletion(
+      intent.runId, intent.expectedGeneration, intent.expectedSeq,
+      intent.operationId, { signal }), RUN_DELETION_TIMEOUT_MS)
+    const request = { controller: timed.controller, intent }
+    deletionRequestRef.current.set(intent.operationId, request)
+    setDeletionBusyFor(intent.runId, true)
+    if (fromDialog) setDeleteDialogBusy(true)
+    try {
+      const rawReceipt = await timed.promise
+      if (deletionRequestRef.current.get(intent.operationId) !== request) return
+      const receipt = exactRunDeletionReceipt(rawReceipt, intent)
+      if (!receipt) {
+        const protocol = new Error('Invalid deletion receipt')
+        protocol.code = 'delete_protocol_error'
+        throw protocol
+      }
+      await finishRunDeletionReceipt(intent, receipt, { fromDialog })
+    } catch (error) {
+      if (deletionRequestRef.current.get(intent.operationId) !== request
+          || error?.name === 'AbortError') return
+      const status = Number(error?.status)
+      // Every continuation is the same idempotent POST. A definitive 4xx means that exact operation
+      // was rejected; access failures remain unknown after a prior timeout because auth can stop the
+      // retry before the server exposes an already accepted receipt.
+      const authoritativeRejection = Number.isFinite(status)
+        && status >= 400 && status < 500 && ![408, 425, 429].includes(status)
+        && (initialRequest || ![401, 403].includes(status))
+      if (authoritativeRejection && clearDeletionRecovery(intent)) {
+        const rejectionMessage = runDeletionErrorMessage(error)
+        if (fromDialog) {
+          loadRuns()
+          deletionFallbacksRef.current.delete(intent.operationId)
+          setDeleteDialog(current => current?.runId === intent.runId
+            ? { ...current, invalidated: true } : current)
+          setDeleteDialogError(rejectionMessage)
+          setDeleteDialogBusy(false)
+        } else {
+          setDeletionNotice({ kind: 'error', text: rejectionMessage })
+          requestAnimationFrame(() => runsMainRef.current?.focus?.({ preventScroll: true }))
+          const listRead = await loadRuns()
+          if (![404, 410].includes(status) && listRead?.ok) {
+            focusAfterDeletion(intent)
+          } else {
+            deletionFallbacksRef.current.delete(intent.operationId)
+          }
+        }
+      } else {
+        persistDeletionPhase(intent, 'unknown')
+        setDeletionNotice({ kind: 'error', text:
+          'Deletion outcome is not confirmed. Retry only the exact saved deletion before changing this run.' })
+        if (fromDialog) leaveDeleteDialogForRecovery(intent)
+      }
+    } finally {
+      if (deletionRequestRef.current.get(intent.operationId) === request) {
+        deletionRequestRef.current.delete(intent.operationId)
+        setDeletionBusyFor(intent.runId, false)
+      }
+      if (fromDialog) setDeleteDialogBusy(false)
+      deleteConfirmLockRef.current = false
+    }
+  }
+  const confirmRunDeletion = async () => {
+    if (!deleteDialog || deleteDialog.invalidated || deleteConfirmLockRef.current) return
+    const current = (runs || []).find(run => run.run_id === deleteDialog.runId)
+    if (!current || deletionGenerationOf(current) !== deleteDialog.expectedGeneration
+        || current.seq !== deleteDialog.expectedSeq
+        || !RUN_GENERATION_RE.test(deleteDialog.expectedGeneration || '')
+        || !Number.isSafeInteger(deleteDialog.expectedSeq) || deleteDialog.expectedSeq < -1) {
+      setDeleteDialogError('The run changed before confirmation. Cancel and reopen Delete from the refreshed card.')
+      return
+    }
+    deleteConfirmLockRef.current = true
+    const operationId = createIdempotencyKey().toLowerCase()
+    const intent = createRunDeletionIntent(
+      deleteDialog.runId, deleteDialog.expectedGeneration, deleteDialog.expectedSeq, operationId)
+    if (!intent || !saveRunDeletionIntent(intent)) {
+      deleteConfirmLockRef.current = false
+      const restored = loadRunDeletionIntent(deleteDialog.runId)
+      if (restored.kind === 'active' || restored.kind === 'corrupt') {
+        updateDeletionRecovery({ runId: deleteDialog.runId, ...restored })
+      }
+      setDeleteDialogError(
+        'Deletion was not submitted because this tab could not preserve an exact recovery record.')
+      return
+    }
+    const fallback = deleteDialogFocusRef.current || {}
+    deletionFallbacksRef.current.set(operationId, fallback)
+    updateDeletionRecovery({ runId: intent.runId, kind: 'active', intent })
+    setDeleteDialog(currentDialog => currentDialog
+      ? { ...currentDialog, operationId } : currentDialog)
+    await runDeletionRequest(intent, { initialRequest: true, fromDialog: true })
+  }
+  const retryRunDeletion = recovery => {
+    if (recovery.kind !== 'active') return
+    runDeletionRequest(recovery.intent)
+  }
+  const pendingDeletionRecoveries = [...deletionRecoveries.values()]
+    .filter(recovery => recovery.kind === 'active' && recovery.intent.phase !== 'unknown'
+      && !recovery.storageUnavailable)
+  const pendingDeletionKey = pendingDeletionRecoveries
+    .map(recovery => `${recovery.intent.operationId}:${recovery.intent.phase}`).sort().join('|')
+  usePoll(() => Promise.all(pendingDeletionRecoveries.map(recovery =>
+    runDeletionRequest(recovery.intent))), RUN_DELETION_POLL_MS, [pendingDeletionKey], {
+    pauseHidden: true, enabled: pendingDeletionRecoveries.length > 0,
+  })
   // super-task CRUD (the buckets themselves; per-run assignment is assignToSuper above).
   const createSuper = async (name) => { await createSupertask(name); await loadSupers() }
   const renameSuper = async (id, name) => { await renameSupertask(id, name); await loadSupers() }
@@ -774,6 +1210,29 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           Open recovery
         </button>
       </div>)}
+      {deletionNotice && <div className={`notice run-deletion-notice ${deletionNotice.kind}`}
+        role={deletionNotice.kind === 'error' ? 'alert' : 'status'}>
+        <span>{deletionNotice.text}</span>
+        <button type="button" className="btn sm" onClick={() => setDeletionNotice(null)}>Dismiss</button>
+      </div>}
+      {missingDeletionRecoveries.map(recovery => {
+        const active = recovery.kind === 'active'
+        const urgent = !active || recovery.intent.phase === 'unknown' || recovery.storageUnavailable
+        const busy = deletionBusy.has(recovery.runId)
+        return <div key={recovery.runId}
+          ref={node => node
+            ? deletionRecoveryRefs.current.set(recovery.runId, node)
+            : deletionRecoveryRefs.current.delete(recovery.runId)}
+          className={`notice run-deletion-list-recovery${urgent ? ' attention' : ''}`}
+          role={urgent ? 'alert' : 'status'} tabIndex={-1} aria-busy={busy}>
+          <span><b>Deletion recovery</b> · <code>{recovery.runId}</code> {runDeletionProgress(recovery)}</span>
+          {active && <button type="button" className="btn sm"
+            disabled={busy} onClick={() => retryRunDeletion(recovery)}>
+            {busy ? 'Checking…'
+              : recovery.intent.phase === 'unknown' ? 'Retry exact deletion' : 'Check exact deletion'}
+          </button>}
+        </div>
+      })}
 
       <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
         {projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}
@@ -909,9 +1368,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
             {runsState === 'stale' ? 'No runs in the last loaded data match the filters.' : 'No runs match the filters.'}
             {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy} onClick={clearFilters}>Clear filters</button>}
           </div>}
-          {view === 'map' && ['ready', 'stale'].includes(projectsState) && runs && visible.length > 0 && <div className="map-stage">
+          {view === 'map' && ['ready', 'stale'].includes(projectsState) && runs && mapRuns.length > 0 && <div className="map-stage">
             <LazyBoundary label="run map" resetKey={`map:${sel}`}>
-              <MapView onOpen={id => { if (!navigationBusy) onOpen(id) }} runs={visible} projects={proj.projects}
+              <MapView onOpen={id => { if (!navigationBusy) onOpen(id) }} runs={mapRuns} projects={proj.projects}
                 collapsed={mapCollapsed} onToggle={toggleMapCluster}
                 scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
             </LazyBoundary>
@@ -923,10 +1382,17 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               onColumns={setCompareColumns} onRemove={toggleCompare} />
           </LazyBoundary>}
           {view === 'list' && runs && displayedRuns.map(r => {
+            const deletionRecovery = deletionRecoveries.get(r.run_id)
+            if (deletionRecovery) return <RunDeletionCard key={r.run_id} run={r}
+              recovery={deletionRecovery} busy={deletionBusy.has(r.run_id)}
+              onRetry={retryRunDeletion}
+              setRef={node => node
+                ? deletionRecoveryRefs.current.set(r.run_id, node)
+                : deletionRecoveryRefs.current.delete(r.run_id)} />
             const startOverLocked = getRunAccess(r.run_id).mode === 'start-over'
             return (
             <div className={'run-card' + (compareIds.has(r.run_id) ? ' compare-selected' : '')}
-                 key={r.run_id} draggable={!navigationBusy && !startOverLocked}
+                 key={r.run_id} data-run-id={r.run_id} draggable={!navigationBusy && !startOverLocked}
                  onPointerDownCapture={() => { compareDragGuardRef.current = null }}
                  onPointerUp={() => { compareDragGuardRef.current = null }}
                  onPointerCancel={() => { compareDragGuardRef.current = null }}
@@ -991,9 +1457,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                         }}>⋮</button>
                 {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects} supertasks={superdata.supertasks}
                   onOpen={onOpen} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
-                  onRename={openRunRename} onDelete={removeRun} onReconcile={reconcileAll}
+                  onRename={openRunRename} onDelete={openRunDeletion} onReconcile={reconcileAll}
                   onClose={closeRunMenu} onBusyChange={setMenuBusy}
-                  mutationLocked={startOverLocked} />}
+                  mutationLocked={startOverLocked}
+                  mutationLockReason="Start over is unresolved · open this run to recover it" />}
               </div>
             </div>
             )
@@ -1005,6 +1472,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           </div>}
         </div>
       </div>
+
+      {deleteDialog && <RunDeleteDialog target={deleteDialog}
+        currentRun={deleteDialogCurrentRun} busy={deleteDialogBusy} error={deleteDialogError}
+        onClose={() => closeDeleteDialog(true)} onConfirm={confirmRunDeletion} />}
 
       {projModal && <PromptModal
         title={projModal.parent_id ? 'New sub-project' : 'New project'}

@@ -123,6 +123,7 @@ export function useRunState(runId, {
     let terminalMode = false
     let terminalDelay = 60000
     let terminalRequest = null
+    let ownerEnded = false
     let reviewTerminal = false
     let reviewPoll = null
     let reviewPollRunning = false
@@ -185,19 +186,40 @@ export function useRunState(runId, {
     }
     const terminalSnapshot = payload => payload?.state?.finished === true
       && payload.state.engine_running === false && payload.state.phase !== 'finalizing'
-    const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
+    const endOwnerRun = () => {
+      if (stopped || ownerEnded) return
+      ownerEnded = true
+      terminalMode = false
+      clearTimeout(timer)
+      terminalRequest?.controller.abort()
+      terminalRequest = null
+      streamRef.current?.abort()
+      setConnected(false)
+      setLive(null)
+      setSeq(-1)
+      setGenerationState({ runId, value: null })
+      setEventCountState({ runId, value: null })
+      setStatus('not_found')
+      setError('This run does not exist or was removed.')
+    }
+    const ownerRunEnded = error => error?.status === 404 || error?.status === 410
+    const reconnect = (delay) => {
+      if (stopped || ownerEnded) return
+      clearTimeout(timer); timer = setTimeout(connect, delay)
+    }
 
     const scheduleTerminalProbe = (delay = terminalDelay) => {
-      if (stopped || !terminalMode || hidden()) return
+      if (stopped || ownerEnded || !terminalMode || hidden()) return
       clearTimeout(timer)
       timer = setTimeout(probeTerminal, delay)
     }
     function probeTerminal() {
-      if (stopped || !terminalMode || hidden() || terminalRequest) return
+      if (stopped || ownerEnded || !terminalMode || hidden() || terminalRequest) return
       const request = deadlineGet(runApiPath(runId, '/lifecycle'))
       terminalRequest = request
-      const failed = () => {
+      const failed = error => {
         if (stopped || !terminalMode || terminalRequest !== request) return
+        if (ownerRunEnded(error)) { endOwnerRun(); return }
         terminalRequest = null
         setConnected(false)
         terminalDelay = Math.min(terminalDelay * 2, TERMINAL_PROBE_MAX_MS)
@@ -219,6 +241,7 @@ export function useRunState(runId, {
       }, failed)
     }
     const enterTerminalMode = () => {
+      if (ownerEnded) return
       terminalMode = true
       terminalDelay = TERMINAL_PROBE_MS
       setConnected(true)
@@ -226,6 +249,7 @@ export function useRunState(runId, {
     }
 
     function connect() {
+      if (ownerEnded) return
       terminalMode = false
       terminalRequest?.controller.abort()
       terminalRequest = null
@@ -235,8 +259,9 @@ export function useRunState(runId, {
       streamRef.current = controller
       let terminal = false
       let acceptedTerminal = false
-      const rejectLiveStream = () => {
+      const rejectLiveStream = error => {
         if (stopped || controller.signal.aborted) return
+        if (ownerRunEnded(error)) { endOwnerRun(); return }
         const delay = backoff
         acceptedTerminal = false
         lastStreamEventId = ''
@@ -293,6 +318,7 @@ export function useRunState(runId, {
         backoff = Math.min(backoff * 2, MAX_BACKOFF)
       }).catch(error => {
         if (stopped || terminal || controller.signal.aborted || error?.name === 'AbortError') return
+        if (ownerRunEnded(error)) { endOwnerRun(); return }
         setConnected(false)
         reconnect(backoff)
         backoff = Math.min(backoff * 2, MAX_BACKOFF)
@@ -385,7 +411,7 @@ export function useRunState(runId, {
         if (reviewEnded) {
           setStatus('gone'); setError('This review link expired, was revoked, or is invalid.'); return
         }
-        if (st === 404) {
+        if (st === 404 || (!pollOnly && st === 410)) {
           setStatus('not_found'); setError('This run does not exist or was removed.'); return
         }
         // Transient probe failure (proxy 504, dropped connection, keepalive-starved idle drop): do NOT

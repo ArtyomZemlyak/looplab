@@ -1341,6 +1341,7 @@ def build_router(srv) -> APIRouter:
         # worker. Wrap the sequence-holding sections in to_thread like /control and submit_command.
         if key:
             with srv.commands.sequence(rd):
+                srv.commands._reject_unresolved_reset(rd, "replay this run start")
                 record, public, same_key = _inspect_keyed_start(rd, key_digest, request_digest)
                 if record is not None:
                     if same_key and public["status"] in {"accepted", "executing", "succeeded"}:
@@ -1378,6 +1379,7 @@ def build_router(srv) -> APIRouter:
 
         start_result = None
         with srv.commands.sequence(rd):
+            srv.commands._reject_unresolved_reset(rd, "start a run with this id")
             if key:
                 existing, public, same_key = _inspect_keyed_start(
                     rd, key_digest, request_digest)
@@ -1391,8 +1393,6 @@ def build_router(srv) -> APIRouter:
             # That absence is not an available run name: the durable marker still owns the namespace.
             # Keep lost-response observation of an already-owned keyed start above, but fence every
             # genuinely new reservation before it writes task/chat metadata or publishes a spawn claim.
-            srv.commands._reject_unresolved_reset(rd, "start a run with this id")
-
             current_rd = requested_rd.resolve()
             if requested_rd.is_symlink() or current_rd != rd or current_rd.parent != root:
                 raise HTTPException(409, {

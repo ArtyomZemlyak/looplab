@@ -35,6 +35,7 @@ from typing import Optional
 import orjson
 
 from looplab.core.atomicio import atomic_write_bytes
+from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.events.eventstore import _interprocess_lock
 from looplab.events.traceview import _normalize_span, _strip_span_io
@@ -474,9 +475,10 @@ class SpanIndex:
         # An unreadable marker is also fail-closed for this optional cache write: trace reads may
         # continue from memory/source, but they must not mutate a run whose reset owner is unknown.
         try:
-            if load_run_reset_marker(self.path.parent) is not None:
+            if (load_run_reset_marker(self.path.parent) is not None
+                    or load_run_deletion_fence(self.path.parent) is not None):
                 return
-        except RunResetStorageError:
+        except (RunResetStorageError, RunDeletionStorageError):
             return
         header = {"_idx": _SCHEMA, "covers": self.covers,
                   "dev": self.identity[0], "ino": self.identity[1]}

@@ -1571,7 +1571,39 @@ export const patchProject = (id, body) => send(`/api/projects/${encodeURICompone
 export const deleteProject = (id) => send(`/api/projects/${encodeURIComponent(id)}`, 'DELETE')
 export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURIComponent(runId)}/project`, { project_id })
 export const renameRun = (runId, label) => send(`/api/runs/${encodeURIComponent(runId)}`, 'PATCH', { label })
-export const deleteRun = (runId) => send(`/api/runs/${encodeURIComponent(runId)}`, 'DELETE')
+export function submitRunDeletion(runId, expectedGeneration, expectedSeq, operationId, options = {}) {
+  if (!validRunGeneration(expectedGeneration)) {
+    throw Object.assign(new Error('An exact run generation is required to delete a run.'), {
+      code: 'run_generation_unavailable',
+    })
+  }
+  if (!Number.isSafeInteger(expectedSeq) || expectedSeq < -1) {
+    throw Object.assign(new Error('An exact run sequence is required to delete a run.'), {
+      code: 'run_sequence_unavailable',
+    })
+  }
+  if (!UUID_V4_RE.test(operationId || '')) {
+    throw Object.assign(new Error('A stable deletion operation id is required.'), {
+      code: 'delete_operation_invalid',
+    })
+  }
+  return post(runApiPath(runId, '/deletions'), {
+    operation_id: String(operationId).toLowerCase(),
+    expected_generation: expectedGeneration,
+    expected_seq: expectedSeq,
+  }, options)
+}
+
+export function getRunDeletion(runId, operationId, options = {}) {
+  if (!UUID_V4_RE.test(operationId || '')) {
+    throw Object.assign(new Error('A stable deletion operation id is required.'), {
+      code: 'delete_operation_invalid',
+    })
+  }
+  return get(runApiPath(runId, `/deletions/${encodeURIComponent(String(operationId).toLowerCase())}`), {
+    ...options, cache: 'no-store',
+  })
+}
 export const createRunReview = (runId, {
   ttl_seconds, include_evidence = false, expected_generation, request_id, token_secret,
 } = {}, options) =>

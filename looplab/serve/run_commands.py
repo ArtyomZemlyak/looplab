@@ -44,6 +44,7 @@ from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
     Event, Idea, IdeaEmission, durable_idea_payload, effective_card_footprint,
 )
+from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.comment_projection import (
@@ -2381,7 +2382,22 @@ class RunCommandService:
 
     @staticmethod
     def _reject_unresolved_reset(rd: Path, operation: str) -> None:
-        """Fail closed while a durable whole-run Replay owns this run namespace."""
+        """Fail closed while a durable whole-run Replay or deletion owns this namespace."""
+        try:
+            deletion = load_run_deletion_fence(rd)
+        except RunDeletionStorageError as exc:
+            raise HTTPException(503, {
+                "code": "run_deletion_fence_unavailable",
+                "message": f"Cannot {operation} because deletion ownership cannot be verified.",
+                "remediation": "Inspect the saved deletion evidence before changing this run.",
+            }) from exc
+        if deletion is not None:
+            raise HTTPException(410, {
+                "code": "run_deletion_in_progress",
+                "operation_id": deletion["operation_id"],
+                "message": f"Cannot {operation} while deletion is unresolved.",
+                "remediation": "Observe or retry that exact deletion operation first.",
+            })
         try:
             marker = load_run_reset_marker(rd)
         except RunResetStorageError as exc:
@@ -2467,6 +2483,20 @@ class RunCommandService:
                     f"cannot {operation}: a paid call is waiting for durable run-cost accounting")
         with self.sequence(rd):
             try:
+                deletion_fence = load_run_deletion_fence(rd)
+            except RunDeletionStorageError as exc:
+                raise HTTPException(503, {
+                    "code": "run_deletion_fence_unavailable",
+                    "message": f"Cannot {operation} because deletion ownership cannot be verified.",
+                }) from exc
+            if deletion_fence is not None:
+                raise HTTPException(410, {
+                    "code": "run_deletion_in_progress",
+                    "operation_id": deletion_fence["operation_id"],
+                    "message": f"Cannot {operation} while deletion is unresolved.",
+                    "remediation": "Observe or retry that exact deletion operation first.",
+                })
+            try:
                 reset_marker = load_run_reset_marker(rd)
             except RunResetStorageError as exc:
                 raise HTTPException(503, {
@@ -2497,6 +2527,19 @@ class RunCommandService:
             if canonical != rd.resolve():
                 raise HTTPException(409, f"cannot {operation}: run path changed during validation")
             yield canonical
+
+    def begin_or_resume_deletion(
+            self, rd: Path, *, operation_id: str, expected_generation: str,
+            expected_seq: int) -> dict:
+        """Shared exact deletion entry point used by HTTP and Assistant control."""
+        from looplab.serve.deletion_service import begin_or_resume_run_deletion
+        return begin_or_resume_run_deletion(
+            self.srv, rd.name, operation_id=operation_id,
+            expected_generation=expected_generation, expected_seq=expected_seq)
+
+    def get_deletion(self, rd: Path, operation_id: str) -> dict:
+        from looplab.serve.deletion_service import get_run_deletion
+        return get_run_deletion(self.srv, rd.name, operation_id)
 
     @staticmethod
     def _payload(event_type: str, data: dict) -> tuple[bytes, str]:

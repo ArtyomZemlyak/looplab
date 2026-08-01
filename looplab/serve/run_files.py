@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
+from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
 from looplab.events.eventstore import _interprocess_lock
 
@@ -25,11 +26,13 @@ def run_config_thread_lock(snapshot_path: Path) -> threading.Lock:
 
 @contextmanager
 def run_config_write_lock(
-        snapshot_path: Path, *, operation_id: Optional[str] = None) -> Iterator[None]:
-    """Own the complete config read/compare/write transaction and enforce a pending reset fence."""
+        snapshot_path: Path, *, operation_id: Optional[str] = None,
+        deletion_operation_id: Optional[str] = None) -> Iterator[None]:
+    """Own the config transaction and enforce every whole-run writer fence."""
     with (run_config_thread_lock(snapshot_path),
           _interprocess_lock(Path(str(snapshot_path) + ".lock"), required=True)):
         assert_run_reset_write_allowed(snapshot_path.parent, operation_id)
+        assert_run_deletion_write_allowed(snapshot_path.parent, deletion_operation_id)
         yield
 
 

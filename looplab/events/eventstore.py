@@ -22,6 +22,7 @@ import orjson
 
 from looplab.core.atomicio import best_effort_fsync, strict_fsync
 from looplab.core.models import Event
+from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
 from looplab.core.tracing import current_ids
 
@@ -590,6 +591,7 @@ def repair_log(path: str | os.PathLike) -> dict:
     from looplab.core.atomicio import atomic_write_bytes
     with _interprocess_lock(Path(str(p) + ".lock"), required=True):
         assert_run_reset_write_allowed(p.parent)
+        assert_run_deletion_write_allowed(p.parent)
         # Authoritative INSIDE the lock. A caller's earlier peek proves nothing: the log may have been
         # repaired, extended past the divergence, or replaced entirely while we waited for the lock.
         div = log_divergence(p)
@@ -901,6 +903,7 @@ class EventStore:
             # critical section closes marker-check -> append races, and the replacement engine is
             # admitted only when it inherited the exact operation id.
             assert_run_reset_write_allowed(self.path.parent)
+            assert_run_deletion_write_allowed(self.path.parent)
             # Revalidate bytes written or replaced since the last read WHILE holding the writer lock.
             # A construction-time snapshot is insufficient on FUSE/network mounts: corruption can
             # appear mid-run, and appending after it would make every new event invisible to replay.
@@ -984,6 +987,7 @@ class EventStore:
         with self._append_lock, _interprocess_lock(
                 Path(str(self.path) + ".lock"), required=require_lock):
             assert_run_reset_write_allowed(self.path.parent)
+            assert_run_deletion_write_allowed(self.path.parent)
             self.read_all()
             if self._divergence is not None:
                 raise EventLogCorruptionError(self.path, self._divergence)

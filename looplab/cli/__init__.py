@@ -26,6 +26,8 @@ import typer
 
 from looplab import __version__
 from looplab.core.config import Settings
+from looplab.core.run_deletion import (
+    RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import EventStore
@@ -151,6 +153,19 @@ def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _assert_run_deletion_namespace_available(run_dir: Path) -> None:
+    """Refuse before mkdir so a fenced, quarantined run name is never recreated as an empty shell."""
+    try:
+        assert_run_deletion_write_allowed(run_dir)
+    except RunDeletionFenceError as exc:
+        raise RuntimeError(
+            f"Cannot materialize {run_dir}: deletion {exc.operation_id} is unresolved. "
+            "Retry or observe that exact deletion first.") from exc
+    except RunDeletionStorageError as exc:
+        raise RuntimeError(
+            f"Cannot materialize {run_dir}: deletion ownership cannot be verified.") from exc
+
+
 @contextmanager
 def _engine_singleton(run_dir: Path):
     """Hold an exclusive OS lock on <run_dir>/engine.lock for the engine's whole lifetime, so a second
@@ -161,6 +176,9 @@ def _engine_singleton(run_dir: Path):
     The OS frees the lock when the process exits (even on crash), so there's no stale-lock problem.
     Where file locking is UNAVAILABLE (FUSE/S3 mounts) single-writer can't be enforced, so it fails
     CLOSED with an actionable error unless LOOPLAB_ALLOW_UNLOCKED_WRITER=1 opts into the risk."""
+    # Keep the post-lock check below too: this first check protects the namespace before mkdir, while
+    # the second closes publication races before the engine can write.
+    _assert_run_deletion_namespace_available(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     f = open(run_dir / "engine.lock", "a+")
     acquired = True
@@ -233,6 +251,7 @@ def _engine_singleton(run_dir: Path):
                 # a waiting direct resume cannot steal that handoff; the matching child is admitted
                 # by its inherited operation id.
                 assert_run_reset_write_allowed(run_dir)
+                assert_run_deletion_write_allowed(run_dir)
             except RunResetFenceError as exc:
                 raise RuntimeError(
                     f"Cannot start an engine for {run_dir}: Replay {exc.operation_id} is unresolved. "
@@ -240,6 +259,13 @@ def _engine_singleton(run_dir: Path):
             except RunResetStorageError as exc:
                 raise RuntimeError(
                     f"Cannot start an engine for {run_dir}: Replay ownership cannot be verified.") from exc
+            except RunDeletionFenceError as exc:
+                raise RuntimeError(
+                    f"Cannot start an engine for {run_dir}: deletion {exc.operation_id} is unresolved. "
+                    "Retry or observe that exact deletion first.") from exc
+            except RunDeletionStorageError as exc:
+                raise RuntimeError(
+                    f"Cannot start an engine for {run_dir}: deletion ownership cannot be verified.") from exc
         yield acquired
     finally:
         if acquired:

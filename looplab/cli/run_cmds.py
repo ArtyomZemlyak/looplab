@@ -33,7 +33,8 @@ from looplab.search.speculation_calibration import canonical_speculation_toy_tas
 from looplab.core import appconfig
 from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
-                         _apply_speculation_calibration_profile, _load_task, _print_result,
+                         _apply_speculation_calibration_profile,
+                         _assert_run_deletion_namespace_available, _load_task, _print_result,
                          _require_run_dir, app)
 
 
@@ -524,6 +525,7 @@ def run(
     for field, p in _missing_task_paths(task_dict):
         typer.echo(f"⚠ task {field} does not exist on disk: {p}", err=True)
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
+    _assert_run_deletion_namespace_available(out)
     out.mkdir(parents=True, exist_ok=True)
     store = EventStore(out / "events.jsonl")
     _require_healthy_log(store, out)   # fail closed on a mid-file corruption before appending (P0-4)

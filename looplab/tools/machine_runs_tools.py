@@ -63,6 +63,24 @@ def _local_run_generation(rd: Path) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _deletion_operation_id(key: str) -> str:
+    if not key:
+        return str(uuid.uuid4())
+    digest = hashlib.sha256(("looplab-delete-v1\0" + key).encode("utf-8")).hexdigest()
+    return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
+
+
+def _render_deletion_result(result: dict, rid: str) -> str:
+    operation_id = str(result.get("operation_id") or "")
+    if result.get("status") == "succeeded" and result.get("ok") is True:
+        return f"(deleted run {rid} and all its artifacts; operation {operation_id})"
+    phase = str(result.get("phase") or "pending")
+    code = str(result.get("code") or "delete_pending")
+    return (
+        f"(run {rid} deletion is pending at {phase}; code={code}; retry only exact operation "
+        f"{operation_id})")
+
+
 class _MutationRecoveryBlocked(RuntimeError):
     """Fail-closed signal for a mutation that a recovered assistant turn may not issue."""
 
@@ -198,6 +216,31 @@ class _TurnMutationFence:
                 "assistant_turn_journal_unavailable",
                 "The mutation could not be staged durably; no run mutation was attempted.")
         return key, generation
+
+    def claim_recovery(self, tool: str, run_id: str) -> tuple[str, str, dict]:
+        """Consume the exact next durable deletion intent after its run directory disappeared."""
+        if self._invalid:
+            raise _MutationRecoveryBlocked(
+                "assistant_turn_journal_unavailable",
+                "The durable mutation journal is unavailable; no recovery was attempted.")
+        if not self.recovering or self._cursor >= len(self._entries):
+            raise _MutationRecoveryBlocked(
+                "assistant_turn_recovery_fenced",
+                "No matching durable run deletion is available to recover.")
+        entry = self._entries[self._cursor]
+        intent = entry.get("intent")
+        if (not isinstance(intent, dict) or intent.get("tool") != tool
+                or intent.get("run_id") != run_id
+                or entry.get("command_backed") is not True
+                or not isinstance(intent.get("data"), dict)):
+            raise _MutationRecoveryBlocked(
+                "assistant_turn_recovery_conflict",
+                "The recovered deletion differs from the durable original intent.")
+        self._cursor += 1
+        return (
+            str(entry["idempotency_key"]), str(entry["expected_generation"]),
+            dict(intent["data"]),
+        )
 
 
 def _command_record(value) -> dict:
@@ -389,7 +432,19 @@ class _RunCommandAdapter:
 
     @staticmethod
     def _reject_unresolved_reset(rd: Path, operation: str) -> None:
+        from looplab.core.run_deletion import (
+            RunDeletionStorageError, load_run_deletion_fence)
         from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
+        try:
+            deletion = load_run_deletion_fence(rd)
+        except RunDeletionStorageError as exc:
+            raise _MutationRecoveryBlocked(
+                "run_deletion_fence_unavailable",
+                f"Cannot {operation} because deletion ownership cannot be verified.") from exc
+        if deletion is not None:
+            raise _MutationRecoveryBlocked(
+                "run_deletion_in_progress",
+                f"Cannot {operation} while deletion {deletion['operation_id']} is unresolved.")
         try:
             marker = load_run_reset_marker(rd)
         except RunResetStorageError as exc:
@@ -438,44 +493,30 @@ class _RunCommandAdapter:
         self._require_generation(rd, expected_generation)
         yield rd
 
-    def retire_start_record_for_delete(self, rd: Path) -> Optional[dict]:
-        """Retire the exact root-sidecar start owner before removing a run directory.
+    @property
+    def durable_deletion_available(self) -> bool:
+        return callable(getattr(self.service, "begin_or_resume_deletion", None))
 
-        Keyed Genesis start records deliberately live outside ``rd`` so they survive partial
-        materialization and lost responses.  A storage-level assistant delete must therefore retire
-        that sidecar explicitly; otherwise recreating the same run id can remain permanently blocked
-        (or an old same-key start can be reported as successful after its run was deleted).
-        """
-        load = getattr(self.service, "load_start_record", None)
-        if not callable(load):
-            return None
-        record = load(rd)
-        if record is None:
-            return None
-        retire = getattr(self.service, "retire_start_record", None)
-        save = getattr(self.service, "save_start_record", None)
-        if not callable(retire) or not callable(save):
+    def begin_or_resume_deletion(
+            self, rd: Path, *, operation_id: str, expected_generation: str,
+            expected_seq: int) -> dict:
+        delete = getattr(self.service, "begin_or_resume_deletion", None)
+        if not callable(delete):
             raise _MutationRecoveryBlocked(
-                "run_start_record_unavailable",
-                "The run start owner cannot be retired safely; the run was not deleted.")
-        start_id = record.get("id") if isinstance(record, dict) else None
-        if not isinstance(start_id, str) or not start_id or not retire(rd, start_id):
-            raise _MutationRecoveryBlocked(
-                "run_start_record_changed",
-                "The run start owner changed before deletion; the run was not deleted.")
-        return dict(record)
-
-    def restore_start_record_after_failed_delete(self, rd: Path, record: Optional[dict]) -> None:
-        """Restore an exactly-retired start sidecar when directory deletion was incomplete."""
-        if record is None:
-            return
-        save = getattr(self.service, "save_start_record", None)
-        if not callable(save):
-            raise _MutationRecoveryBlocked(
-                "run_start_record_lost",
-                "Run deletion was incomplete and its start owner could not be restored.")
-        save(rd, record)
-
+                "run_deletion_service_unavailable",
+                "Durable run deletion is unavailable; no run files were modified.")
+        try:
+            value = delete(
+                rd, operation_id=operation_id,
+                expected_generation=expected_generation, expected_seq=expected_seq)
+        except Exception as exc:
+            detail = getattr(exc, "detail", None)
+            if isinstance(detail, dict):
+                raise _MutationRecoveryBlocked(
+                    str(detail.get("code") or "run_deletion_failed"),
+                    str(detail.get("message") or "Run deletion did not complete.")) from exc
+            raise
+        return dict(value) if isinstance(value, dict) else {}
 
 def _render_command_result(record: dict, *, name: str, run_id: str, completed: str) -> str:
     """Render an honest, bounded tool result for the model and eventual user-facing answer."""
@@ -1004,7 +1045,7 @@ class RunControlTools:
     # ------------------------------------------------------------------ helpers
     def _rd(self, run_id) -> Optional[Path]:
         # Resolve a run_id to its dir, refusing traversal (must be a direct, existing child of run-root).
-        rid = str(run_id or "").strip().strip("/")
+        rid = str(run_id or "").strip()
         if not rid or "/" in rid or "\\" in rid or rid.startswith("."):
             return None
         root = self.run_root.resolve()
@@ -1086,6 +1127,14 @@ class RunControlTools:
         rid = str(args.get("run_id") or "").strip()
         rd = self._rd(rid)
         if rd is None:
+            if (name == "delete_run" and self._mutation_fence is not None
+                    and self._mutation_fence.recovering):
+                try:
+                    return self._recover_delete_run(rid)
+                except _MutationRecoveryBlocked as e:
+                    return f"(run mutation blocked: code={e.code}; {e})"
+                except Exception as e:  # noqa: BLE001 - a tool error must never crash the loop
+                    return f"(tool error in {name}: {e})"
             return f"(no such run: {rid!r})"
         try:
             if name in ("finalize_run", "stop_run", "resume_run"):
@@ -1107,6 +1156,26 @@ class RunControlTools:
         except Exception as e:  # noqa: BLE001 — a tool error must never crash the loop
             return f"(tool error in {name}: {e})"
         return f"(unknown tool: {name})"
+
+    def _recover_delete_run(self, rid: str) -> str:
+        if not self._commands.durable_deletion_available or self._mutation_fence is None:
+            raise _MutationRecoveryBlocked(
+                "run_deletion_service_unavailable",
+                "The exact deletion receipt cannot be recovered in this process.")
+        if (not rid or "/" in rid or "\\" in rid or rid.startswith(".")
+                or Path(rid).name != rid):
+            raise _MutationRecoveryBlocked(
+                "run_deletion_identity_invalid", "The durable deletion run id is invalid.")
+        key, generation, data = self._mutation_fence.claim_recovery("delete_run", rid)
+        expected_tail = data.get("expected_tail")
+        if type(expected_tail) is not int or expected_tail < -1:
+            raise _MutationRecoveryBlocked(
+                "run_deletion_identity_invalid", "The durable deletion tail is invalid.")
+        rd = self.run_root.resolve() / rid
+        result = self._commands.begin_or_resume_deletion(
+            rd, operation_id=_deletion_operation_id(key),
+            expected_generation=generation, expected_seq=expected_tail)
+        return _render_deletion_result(result, rid)
 
     def _control(self, name: str, rid: str, rd: Path) -> str:
         from looplab.events.types import EV_PAUSE, EV_RESUME, EV_RUN_ABORT
@@ -1575,86 +1644,14 @@ class RunControlTools:
             scope={"run_id": rid, "expected_tail": expected_tail})
         if blocked:
             return blocked
+        if not self._commands.durable_deletion_available:
+            raise _MutationRecoveryBlocked(
+                "run_deletion_service_unavailable",
+                "Durable run deletion is unavailable; no run files were modified.")
         with self._mutation_intent(
                 "delete_run", rid, rd, {"expected_tail": expected_tail},
-                command_backed=False, expected_generation=formed_generation) as (_key, generation):
-            pass
-        with self._commands.destructive_guard(
-                rd, "delete run", expected_generation=generation) as canonical:
-            if self._live(canonical):
-                return f"(run {rid} is LIVE — stop it first before deleting)"
-            return self._delete_run_snapshot(rid, canonical, expected_tail)
-
-    def _delete_run_snapshot(self, rid: str, rd: Path, expected_tail: int) -> str:
-        """Delete only the stopped run snapshot approved before a possibly-slow permission prompt."""
-        from looplab.serve.engine_proc import (
-            _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending,
-            _run_lifecycle_lock)
-
-        with _run_lifecycle_lock(rd):
-            if _fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd):
-                return f"(run {rid} is launching — retry delete after the engine settles)"
-            # Mirror the node-delete guard (`_commit_delete_node_snapshot`): a directly-launched engine
-            # (`looplab run/resume`) records no resume launch-claim, so `_fresh_resume_launch_pending` is
-            # False for it. Without this check, an approve-after-the-engine-went-live delete would call
-            # `_delete_run_snapshot_locked`, whose BLOCKING `flock(engine.lock)` waits for the engine to
-            # exit while holding the lifecycle lock — hanging the call and cascading to every other
-            # lifecycle op on this run. Refuse cleanly instead.
-            if _engine_alive(rd):
-                return f"(run {rid} became LIVE while awaiting permission — stop it and retry)"
-            return self._delete_run_snapshot_locked(rid, rd, expected_tail)
-
-    def _delete_run_snapshot_locked(self, rid: str, rd: Path, expected_tail: int) -> str:
-        import shutil
-
-        from looplab.events.eventstore import EventStore, _interprocess_lock
-
-        event_path = rd / "events.jsonl"
-        engine_lock = rd / "engine.lock"
-        event_lock = Path(str(event_path) + ".lock")
-        # Holding engine.lock makes a racing CLI's non-blocking singleton acquisition fail. Holding
-        # the event lock closes the UI-control append race. Remove source-of-truth/artifacts while both
-        # are held, keeping the two open lock files until their contexts release on Windows.
-        retired_start_record = None
-        with _interprocess_lock(engine_lock), _interprocess_lock(event_lock):
-            # Reset publishes its marker while owning this same event lock. Rechecking here closes
-            # the standalone-tool marker-check -> delete race as well as the UI-server path.
-            self._commands._reject_unresolved_reset(rd, "delete run")
-            if not event_path.exists():
-                return f"(run {rid} changed before delete could commit — refresh and retry)"
-            events = EventStore(event_path).read_all()
-            actual_tail = events[-1].seq if events else -1
-            if actual_tail != expected_tail:
-                return f"(run {rid} changed while awaiting permission — refresh and retry)"
-            # This root-sidecar is outside ``rd`` and therefore would survive the directory delete.
-            # The outer destructive guard still owns the command sequencer here, matching the HTTP
-            # delete route's start-record retirement order.
-            retired_start_record = self._commands.retire_start_record_for_delete(rd)
-            try:
-                for child in list(rd.iterdir()):
-                    if child in (engine_lock, event_lock):
-                        continue
-                    if child.is_dir():
-                        shutil.rmtree(child, ignore_errors=True)
-                    else:
-                        try:
-                            child.unlink()
-                        except FileNotFoundError:
-                            pass
-            except Exception:
-                self._commands.restore_start_record_after_failed_delete(rd, retired_start_record)
-                raise
-
-        for lock_path in (event_lock, engine_lock):
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-        try:
-            rd.rmdir()
-        except OSError:
-            shutil.rmtree(rd, ignore_errors=True)
-        if rd.exists():
-            self._commands.restore_start_record_after_failed_delete(rd, retired_start_record)
-            return f"(run {rid} delete was incomplete — inspect {rd})"
-        return f"(deleted run {rid} and all its artifacts)"
+                command_backed=True, expected_generation=formed_generation) as (key, generation):
+            result = self._commands.begin_or_resume_deletion(
+                rd, operation_id=_deletion_operation_id(key),
+                expected_generation=generation, expected_seq=expected_tail)
+            return _render_deletion_result(result, rid)

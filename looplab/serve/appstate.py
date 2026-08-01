@@ -12,6 +12,7 @@ TIME: the test suite (and any operator tooling) monkeypatches `looplab.server.ma
 the flat alias + this late binding keep that single patch point working for every router."""
 from __future__ import annotations
 
+import stat
 import threading
 from pathlib import Path
 from typing import Callable, Optional
@@ -57,6 +58,10 @@ _LIFECYCLE_LOCK_PREFIX = ".looplab-lifecycle-"
 _TRACE_CLEAR_RECEIPT_PREFIX = ".trace-clear."
 # Whole-run Replay receipts are also root-side service files keyed by a run-path digest.
 _RESET_RECEIPT_PREFIX = ".looplab-reset-receipt-"
+# Whole-run deletion uses one root fence plus operation-bound receipt/quarantine entries.
+_DELETE_FENCE_PREFIX = ".looplab-delete-fence-"
+_DELETE_RECEIPT_PREFIX = ".looplab-delete-receipt-"
+_DELETE_QUARANTINE_PREFIX = ".looplab-delete-quarantine-"
 
 # Fields that can contain verbatim source, captured process output, private host paths, or an internal
 # model-facing prompt. `state_payload` feeds both the public /state GET and headerless EventSource SSE,
@@ -135,7 +140,41 @@ class AppState:
 
     # ------------------------------------------------------------------ helpers
     def run_dir(self, run_id: str) -> Path:
-        rd = (self.root / run_id).resolve()
+        from looplab.core.run_deletion import (
+            RunDeletionStorageError, load_run_deletion_fence)
+
+        root = self.root.resolve()
+        if (not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id
+                or run_id in {".", ".."} or "/" in run_id or "\\" in run_id):
+            raise HTTPException(404, "no such run")
+        requested = root / run_id
+        lowered = requested.name.lower()
+        if (lowered in _RESERVED_RUN_IDS or lowered.startswith((
+                _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
+                _DELETE_FENCE_PREFIX, _DELETE_RECEIPT_PREFIX, _DELETE_QUARANTINE_PREFIX))):
+            raise HTTPException(404, "no such run")
+        try:
+            fence = load_run_deletion_fence(requested)
+        except RunDeletionStorageError as exc:
+            raise HTTPException(503, {
+                "code": "run_deletion_fence_unavailable",
+                "message": "Deletion ownership cannot be verified for this run.",
+            }) from exc
+        if fence is not None:
+            raise HTTPException(410, {
+                "code": "run_deletion_in_progress",
+                "operation_id": fence["operation_id"],
+                "message": "This run is being deleted.",
+            })
+        try:
+            entry = requested.lstat()
+            rd = requested.resolve(strict=True)
+            junction_fn = getattr(requested, "is_junction", None)
+            junction = bool(callable(junction_fn) and junction_fn())
+        except (FileNotFoundError, OSError) as exc:
+            raise HTTPException(404, "no such run") from exc
+        attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
+        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
         # A run is a DIRECT CHILD of the root, and nothing else. Accepting any DESCENDANT (root is in
         # the parents of root/a/b/c) let a run_id like "run1/nodes/n3_ws" resolve to a sandbox-WRITABLE
         # node workspace: any events.jsonl the evaluated candidate wrote there became addressable as a
@@ -145,9 +184,20 @@ class AppState:
         # HTTP route params largely masked it, but the command service had already had to re-restrict
         # to `canonical.parent == root`; this is the base helper, so it enforces the same rule (and
         # rejects the root itself EXPLICITLY, rather than relying on root never having an events.jsonl).
-        if rd.parent != self.root:                            # path-traversal guard
+        if (rd.parent != root or rd != requested.resolve(strict=False)
+                or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode)
+                or bool(attributes & reparse_flag) or junction):
             raise HTTPException(404, "no such run")
-        if not (rd / "events.jsonl").exists():
+        events = rd / "events.jsonl"
+        try:
+            event_entry = events.lstat()
+            event_target = events.resolve(strict=True)
+        except (FileNotFoundError, OSError) as exc:
+            raise HTTPException(404, "no such run") from exc
+        event_attributes = int(getattr(event_entry, "st_file_attributes", 0) or 0)
+        if (stat.S_ISLNK(event_entry.st_mode) or not stat.S_ISREG(event_entry.st_mode)
+                or bool(event_attributes & reparse_flag) or event_target != events
+                or event_target.parent != rd):
             raise HTTPException(404, "no such run")
         return rd
 
@@ -400,6 +450,19 @@ class AppState:
         """
         with self._trace_view_lock:
             self._trace_view_cache.pop(str(rd), None)
+
+    def invalidate_run_caches(self, rd: Path) -> None:
+        """Evict every in-process projection retained for a quarantined run."""
+        key = str(rd)
+        self.summary_cache.pop(rd.name, None)
+        with self._state_cache_lock:
+            stale = [cache_key for cache_key in self._state_cache
+                     if cache_key and cache_key[0] == key]
+            for cache_key in stale:
+                self._state_cache.pop(cache_key, None)
+        self.invalidate_trace_view(rd)
+        from looplab.events.span_index import invalidate
+        invalidate(rd / "spans.jsonl")
 
     def node_trace_view(self, rd: Path, nid, cap: Optional[int] = None,
                         generation: Optional[int] = None) -> dict:
