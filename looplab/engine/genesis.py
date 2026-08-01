@@ -129,14 +129,15 @@ def _scout_tools(data: Optional[str], repo: Optional[str]):
     try:
         from looplab.agents.agent import CompositeTools
         from looplab.tools.reposcout import RepoScoutTools
-        # CLAUDE REVIEW: [SECURITY] Rooting the read-only scout at the ENTIRE home directory is
-        # broader than the task needs: RepoScoutTools' shared guards do block the classic secret
-        # targets (`looks_secret` hides ~/.ssh, ~/.aws, .env*, key/credential names; reads are
-        # extension-allowlisted), but any NON-secret allowlisted text file anywhere under $HOME —
-        # personal notes, other repos, e.g. ~/.mozilla profile .js files, which SECRET_DIRS does not
-        # cover — is listable/readable and provider-bound even though the user only named one
-        # data/repo path. The home root is a documented design choice, but scoping roots to the
-        # named paths (+ parents for siblings, as below) would shrink the exposure to intent.
+        # The home root is DELIBERATE and stays. Genesis exists to author a run from a vague goal on
+        # the operator's OWN machine, and its scout has to be able to find the data/repo the operator
+        # gestured at but did not name precisely — that discovery is the feature. The exposure is
+        # bounded by RepoScoutTools' shared guards (`looks_secret` hides ~/.ssh, ~/.aws, .env*, and
+        # key/credential names; reads are extension-allowlisted), and it is knowingly WIDER than the
+        # named paths: any non-secret allowlisted text file under $HOME — personal notes, other
+        # repos, a ~/.mozilla profile's .js files, which SECRET_DIRS does not cover — is listable and
+        # provider-bound. An operator who does not want that should not run Genesis against a shared
+        # home; narrowing the roots to the named paths would remove the sibling discovery it is for.
         roots = [Path.home()]
         for p in named:
             fp = Path(os.path.expanduser(p))

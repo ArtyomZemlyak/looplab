@@ -534,14 +534,18 @@ class ResearchCadenceMixin:
         open_hyps = [c for c in state.open_research_cards()
                      if not c.selection_ready and _pure_belief(c)]
         n = len(open_hyps)
-        # CLAUDE REVIEW: [REPLAY-SAFETY] `_last_hyp_merge_n` is in-memory only (never folded), so on a
-        # fresh process after resume the baseline defaults to -1 and this gate fires unconditionally when
-        # the board has >=4 pure beliefs — re-running the PAID `consolidate()` (hybrid retrieval + one
-        # merge-decision LLM call) even though a prior process already consolidated the same board. Actual
-        # merges are idempotent via EV_HYPOTHESIS_MERGED, but a cluster the prior agent DECIDED NOT to
-        # merge carries no durable record, so that paid decision is re-purchased once per resume. This is
-        # the exact double-charge the deep-research path was hardened against with a durable attempt
-        # receipt (`_record_research_attempt`); here it is only bounded to one pass per resume.
+        # KNOWN GAP, bounded and stated (the same class as the cadence note in `strategy.py`):
+        # `_last_hyp_merge_n` is IN-MEMORY only, never folded. On a fresh process after resume the
+        # baseline is -1, so this gate fires unconditionally whenever the board holds >=4 pure
+        # beliefs — re-running the PAID `consolidate()` (hybrid retrieval plus one merge-decision LLM
+        # call) even if a prior process already consolidated exactly this board. The MERGES themselves
+        # are idempotent through EV_HYPOTHESIS_MERGED, so nothing is double-applied; what is
+        # re-purchased is the DECISION, and only for a cluster the prior agent decided NOT to merge,
+        # since a declined merge leaves no durable record to compare against. The cost is bounded to
+        # one extra pass per resume. Closing it means what the deep-research path did — a durable
+        # attempt receipt claimed BEFORE the provider call (`_record_research_attempt`,
+        # `lessons._paid_curation_attempt`) — because an eventual `hypothesis_merged` is not a
+        # payment fence: it only exists when the answer was yes.
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
             return state
         try:

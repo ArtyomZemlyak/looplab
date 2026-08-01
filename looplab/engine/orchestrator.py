@@ -1800,6 +1800,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         break
                     continue
                 self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
+                self._pending_create_pause = []   # …and its worker-side request queue (see _request_create_pause)
                 if self._speculation_enabled():
                     receipt_owned = [META_CARD_ID in action for action in creates]
                     # One turn has one authority. A mixed lane could stage new work while claiming a
@@ -1968,6 +1969,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # the whole chunk finishes. So a developer/build crash pauses after AT MOST this one
                         # chunk (bounded by the fan-out width), not mid-chunk; stop before the next chunk.
                         if self._create_paused:
+                            self._drain_create_pause()
                             break
                     continue
                 for _create_index, a in enumerate(creates):
@@ -1998,6 +2000,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     else:
                         self._create_node(a)  # sequential -> deterministic ids/proposals
                     if self._create_paused:
+                        self._drain_create_pause()
                         for later in (_card_reservations or [])[_create_index + 1:]:
                             self._fail_reserved_build(
                                 node_id=later.node_id,
@@ -2512,6 +2515,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             or recorded_receipt != self._speculation_gate_receipt_digest
         ):
             reject()
+
+    def _request_create_pause(self, node_id: int, reason: str) -> None:
+        """Ask the MAIN task to append the run-global auto-pause gate.
+
+        Called from a build worker thread, where appending EV_PAUSE directly would put a FOLDED,
+        run-global, selection-affecting event outside invariant #1's worker seam. `list.append` is
+        atomic under the GIL, so several crashing siblings in one chunk queue safely; only the FIRST
+        is appended — they are the same "a build crashed, stop the batch" gate and one pause is what
+        the run needs.
+        """
+        # Lazily initialised: the run loop resets the queue each iteration, but a build can crash
+        # on a path that has not reached that reset yet.
+        if not isinstance(getattr(self, "_pending_create_pause", None), list):
+            self._pending_create_pause = []
+        self._pending_create_pause.append({
+            "node_id": node_id, "generation": 0, "reason": reason})
+        self._create_paused = True   # tell the create-batch loop to STOP after this node
+
+    def _drain_create_pause(self) -> None:
+        """Append any worker-requested auto-pause. MAIN TASK ONLY — this is the seam's whole point."""
+        pending = getattr(self, "_pending_create_pause", None) or []
+        self._pending_create_pause = []
+        if pending:
+            self.store.append(EV_PAUSE, pending[0])
 
     def _reentry_repin(self) -> bool:
         _events = self.store.read_all()
@@ -5212,21 +5239,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # it can't be resolved within the node, stop the whole run rather than rapid-fire more
                 # dead nodes (the 403 blowout spun 67 of them). Freeze (not finish) so a plain `resume`
                 # continues once the cause is resolved — no premature report/lessons.
-                # CLAUDE REVIEW: [REPLAY-SAFETY] On the parallel-build fan-out (`_pb_pairs`), this method
-                # runs in an `anyio.to_thread` WORKER thread, so this EV_PAUSE is a FOLDED, run-GLOBAL,
-                # selection-affecting event appended by a worker — outside invariant #1's documented
-                # worker seam (a worker may append only its OWN node's node_created/node_failed/per-node
-                # audit) and NOT in BACKGROUND_APPENDABLE/DIAGNOSTIC_EVENTS, and with no membership
-                # assertion the invariant requires "at the append sites". It is splice-neutral for the
-                # `paused` flag alone (pause folds monotonically and node folds ignore it), but NOT vs a
-                # concurrent EV_RESUME (which folds `paused=False`): the worker's byte-position relative to
-                # an external control is nondeterministic. The main task is blocked joining the task group,
-                # so appending this global gate from the main task after the join would keep the seam clean.
-                self.store.append(EV_PAUSE, {
-                    "node_id": node_id, "generation": 0,
-                    "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
-                              "unresolved within the node) — resume once it's fixed"})
-                self._create_paused = True   # tell the create-batch loop to STOP after this node
+                # REQUESTED, not appended here. On the parallel-build fan-out (`_pb_pairs`) this
+                # method runs in an `anyio.to_thread` WORKER thread, and EV_PAUSE is a FOLDED,
+                # run-GLOBAL, selection-affecting event — outside invariant #1's documented worker
+                # seam (a worker may append only its OWN node's node_created / node_failed /
+                # per-node audit) and not in BACKGROUND_APPENDABLE or DIAGNOSTIC_EVENTS. It is
+                # splice-neutral for the `paused` flag alone, but NOT against a concurrent EV_RESUME
+                # (which folds `paused=False`): a worker's byte position relative to an external
+                # control is nondeterministic. `_request_create_pause` records the intent; the MAIN
+                # task appends it where it already observes `_create_paused`, after the join.
+                self._request_create_pause(
+                    node_id,
+                    "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
+                    "unresolved within the node) — resume once it's fixed")
         # Variant-1: pass THIS build's pooled roles so concurrent draft builds don't cross-wire
         # each other's telemetry (last_report / last_hyp_priority / last_foresight). For serial
         # paths `researcher`/`developer` ARE `self.researcher`/`self.developer`, so byte-identical.
@@ -5272,17 +5297,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # (it would kill sibling builds), so mirror the developer_crash circuit-breaker: PAUSE
                     # so the batch loop stops after this chunk instead of burning the node budget on
                     # repeated build_crash nodes (review finding #3). A plain resume continues once fixed.
-                    # CLAUDE REVIEW: [REPLAY-SAFETY] Same seam deviation as the _create_node_scoped
-                    # developer_crash EV_PAUSE: `_create_node_guarded` is dispatched to an anyio worker
-                    # thread, so this run-global FOLDED EV_PAUSE is appended by a worker — outside the
-                    # documented parallel-build worker append list (own-node node_created/node_failed/audit)
-                    # and unasserted. Benign for the monotonic `paused` flag, but a worker writing a global
-                    # control gate is exactly the sole-writer boundary invariant #1 pins down.
-                    self.store.append(EV_PAUSE, {
-                        "node_id": node_id, "generation": 0,
-                        "reason": "auto-paused: a node build raised (LLM unreachable or a hard error, "
-                                  "unresolved within the build) — resume once it's fixed"})
-                    self._create_paused = True
+                    # Same worker-seam reason as the developer_crash branch above: request the
+                    # global pause, let the main task append it after the join.
+                    self._request_create_pause(
+                        node_id,
+                        "auto-paused: a node build raised (LLM unreachable or a hard error, "
+                        "unresolved within the build) — resume once it's fixed")
                 except Exception:  # noqa: BLE001 — best-effort terminal; never re-raise into the group
                     pass
 

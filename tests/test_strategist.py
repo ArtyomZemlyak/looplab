@@ -801,8 +801,19 @@ def test_create_node_guarded_pauses_on_a_hard_build_raise(tmp_path):
     fails = [e for e in evs if e.type == EV_NODE_FAILED and e.data["node_id"] == nid]
     assert fails and fails[-1].data["reason"] == "build_crash"
     assert nid not in fold(evs).nodes                          # no phantom node from a bare-building fail
-    assert any(e.type == EV_PAUSE for e in evs)                # circuit-breaker paused the run
-    assert eng._create_paused is True
+    assert eng._create_paused is True                          # circuit-breaker tripped
+
+    # The WORKER must not append the run-global pause itself: EV_PAUSE is FOLDED and
+    # selection-affecting, so a worker writing it sits outside invariant #1's seam (own-node
+    # node_created / node_failed / audit only) and races a concurrent EV_RESUME for byte position.
+    # It records the intent; the MAIN task appends it where it already observes `_create_paused`.
+    assert not any(e.type == EV_PAUSE for e in evs), "a build worker appended a run-global gate"
+    eng._drain_create_pause()
+    paused = [e for e in eng.store.read_all() if e.type == EV_PAUSE]
+    assert len(paused) == 1 and paused[0].data["node_id"] == nid
+    assert "resume once it" in paused[0].data["reason"]
+    eng._drain_create_pause()                                   # drained once, not on every look
+    assert len([e for e in eng.store.read_all() if e.type == EV_PAUSE]) == 1
 
 
 def test_create_node_guarded_keeps_a_built_node_when_a_post_creation_emit_raises(tmp_path):

@@ -79,7 +79,11 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    events, `EventStore.append`/`read_all` serialize via their own `threading.Lock`s, ids are reserved
    serially under `_id_lock` up front, and the fold is order-tolerant across independent nodes — so
    only the log's byte-order (not the folded state) becomes nondeterministic. A settled build width
-   of `1` keeps the strict "only the main task appends" behaviour, byte-identical.
+   of `1` keeps the strict "only the main task appends" behaviour, byte-identical. The seam is
+   OWN-NODE ONLY: a worker that needs a run-GLOBAL gate (the developer-crash / build-crash
+   auto-pause) calls `_request_create_pause` and the MAIN task appends the `pause` after the join,
+   via `_drain_create_pause` — a worker-written EV_PAUSE would race a concurrent EV_RESUME for byte
+   position, which the fold is not order-tolerant across.
 2. **Exactly one terminal event per node** (`node_evaluated` | `node_failed`). The fold is
    idempotent on duplicate terminals (first terminal wins).
 3. **Every side effect must be gated on a domain event** so resume-by-replay is idempotent
