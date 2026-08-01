@@ -5,7 +5,7 @@ import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
 import { useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
-import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
+import { deadlineGet, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
   storageGet, storageSet } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
@@ -126,6 +126,7 @@ const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
 // Heal old persisted splitter values instead of allowing a technically scrollable ~15 px sliver.
 const MIN_DOCK_HEIGHT = 200
 const RUN_CONFIG_REQUEST_TIMEOUT_MS = 15_000
+const HISTORICAL_SNAPSHOT_REQUEST_TIMEOUT_MS = 15_000
 const START_OVER_REQUEST_TIMEOUT_MS = 15_000
 const START_OVER_AUTO_RETRY_LIMIT = 3
 const hubMenuId = label => `panel-hub-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
@@ -619,10 +620,23 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     let alive = true
     const want = Number(viewSeq)
     setHistory(requestHistory(want, generation))
-    get(`/api/runs/${encodeURIComponent(runId)}/state?seq=${want}`)
+    const request = deadlineGet(
+      `/api/runs/${encodeURIComponent(runId)}/state?seq=${want}`,
+      HISTORICAL_SNAPSHOT_REQUEST_TIMEOUT_MS,
+    )
+    request.promise
       .then(p => { if (alive) setHistory(current => resolveHistory(current, want, generation, p)) })
-      .catch(e => { if (alive) setHistory(current => rejectHistory(current, want, generation, e)) })
-    return () => { alive = false }
+      .catch(error => {
+        if (!alive) return
+        const failure = error?.name === 'TimeoutError'
+          ? new Error('Historical snapshot loading timed out. Check the connection and retry.')
+          : error
+        setHistory(current => rejectHistory(current, want, generation, failure))
+      })
+    return () => {
+      alive = false
+      request.controller.abort()
+    }
   }, [viewSeq, runId, historyRetry, generation, routeFenceBlocked, reviewMode])
   const currentHistory = historyMatches(history, viewSeq, generation) ? history : null
   const hist = currentHistory?.status === 'ready' ? currentHistory.data : null
