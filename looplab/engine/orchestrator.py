@@ -444,6 +444,13 @@ def _detect_gpu_ids() -> list[int]:
 # The confirm phase (engine/confirm_phase.py) and ablation (engine/ablation.py) clusters are
 # MIXINS — pure file-level moves inherited unchanged, so every `self._confirm_phase(...)` /
 # `self._ablate(...)` call site (and every test poking those names on Engine) is untouched.
+# Poll geometry for a durable node-creating control head parked on an exhausted node budget
+# (`Engine._defer_for_node_budget`). Starts at the historical tick and doubles up to the ceiling, so
+# a multi-hour wait costs O(log(wait)) full-log refolds instead of two per second.
+_BUDGET_WAIT_MIN_S = 0.5
+_BUDGET_WAIT_MAX_S = 4.0
+
+
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
              AuditMixin, ResourceSchedulingMixin, SpeculationMixin, EvaluateMixin, NodeBuildMixin,
@@ -2694,14 +2701,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """
 
         if self._node_reservation_slots_remaining(state) >= 1:
+            self._budget_wait_s = _BUDGET_WAIT_MIN_S      # the wait ended; the next one starts short
             return False
-        # CLAUDE REVIEW: [PERF] While a fork/inject/ablate head waits on the node budget, every 0.5s
-        # tick makes the main loop re-read and re-fold the ENTIRE event log (plus the ack/mirror
-        # re-reads per turn) until an operator sends budget_extend — potentially hours of
-        # O(total-events) busy-polling on a long log, the same cost class the resource-wait comment
-        # in _dispatch_evals already flags. Gate the refold on the tail seq moving, or back off the
-        # tick geometrically.
-        await anyio.sleep(0.5)
+        # BACK OFF geometrically. Each tick makes the main loop re-read and re-fold the ENTIRE event
+        # log (plus the per-turn ack/mirror re-reads), and this head can wait hours for an operator's
+        # budget_extend — a fixed 0.5s tick meant hours of O(total-events) busy-polling on a long log,
+        # the same cost class the resource-wait comment in _dispatch_evals flags. The ceiling is
+        # small enough that abort/pause/budget controls are still observed within a few seconds,
+        # which is what "keeps the engine responsive" above actually requires.
+        delay = getattr(self, "_budget_wait_s", _BUDGET_WAIT_MIN_S)
+        await anyio.sleep(delay)
+        self._budget_wait_s = min(delay * 2.0, _BUDGET_WAIT_MAX_S)
         return True
 
     @staticmethod

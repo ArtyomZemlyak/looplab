@@ -266,3 +266,41 @@ def test_every_xlsx_cell_is_pipe_safe_not_just_the_notes_column():
     assert _md_cell("n/a | see note", 200) == "n/a / see note"   # non-numeric value cell
     assert _md_cell(0.5, 200) == "0.5"                      # numbers pass through unchanged
     assert _md_cell("x" * 99, 5) == "xxxxx"                 # still truncated
+
+
+def test_backups_are_depth_capped_and_keep_the_newest(tmp_path):
+    """Snapshots were append-only and never pruned, so a long assistant session repeatedly editing
+    one large file grew backup_dir without limit. Undo pops the NEWEST, so a depth cap only bounds
+    how far back it can reach — it must never touch the recent end."""
+    b = FileBackups(tmp_path / "bak")
+    b._MAX_DEPTH = 5
+    f = tmp_path / "a.txt"
+    for i in range(20):
+        f.write_text(f"v{i}", encoding="utf-8")
+        assert b.save(f)
+    f.write_text("HEAD", encoding="utf-8")
+
+    d = b._key(f)
+    baks = sorted(int(p.stem) for p in d.glob("*.bak"))
+    assert len(baks) == 5, baks
+    assert baks == list(range(15, 20)), "the cap must drop the OLDEST snapshots, not the newest"
+    # every surviving .bak keeps its meta, and undo still walks back through them newest-first
+    assert all((d / f"{n}.meta").exists() for n in baks)
+    for expected in ("v19", "v18", "v17", "v16", "v15"):
+        assert b.revert(f) and f.read_text(encoding="utf-8") == expected
+    assert not b.revert(f)                      # depth exhausted, and nothing corrupt left behind
+
+
+def test_pruning_never_leaves_a_bak_whose_meta_is_gone(tmp_path):
+    """`revert` enumerates `*.bak` and defaults a MISSING meta to {"existed": True}, so an orphan
+    .bak would be reverted as a real snapshot — recreating a file that never existed. The prune
+    deletes the .bak first for exactly the reason `save` writes the .meta first."""
+    b = FileBackups(tmp_path / "bak")
+    b._MAX_DEPTH = 2
+    f = tmp_path / "a.txt"
+    for i in range(6):
+        f.write_text(f"v{i}", encoding="utf-8")
+        b.save(f)
+    d = b._key(f)
+    orphans = [p.stem for p in d.glob("*.bak") if not (d / f"{p.stem}.meta").exists()]
+    assert not orphans, f"pruned .bak files left their meta behind: {orphans}"

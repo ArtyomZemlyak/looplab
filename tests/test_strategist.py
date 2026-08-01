@@ -1952,3 +1952,44 @@ def test_strategist_cross_run_tools_are_not_scoped_to_the_researcher_role(tmp_pa
     # together silently denied it the Part-V tools its own contract promises.
     assert _roles(core_only=True) == ["researcher"]
     assert _roles(cross_run=False) == []
+
+
+def test_a_node_budget_wait_backs_off_instead_of_refolding_twice_a_second(tmp_path, monkeypatch):
+    """Each poll turn makes the main loop re-read and re-fold the WHOLE event log. A fork/inject head
+    parked on an exhausted node budget waits for an operator's `budget_extend` — possibly for hours —
+    so a fixed 0.5s tick meant O(total-events) work twice a second for that entire time."""
+    from looplab.engine.orchestrator import _BUDGET_WAIT_MAX_S, _BUDGET_WAIT_MIN_S
+
+    eng = _engine(tmp_path / "budget-backoff", policy=GreedyTree(n_seeds=1, max_nodes=1))
+    state = RunState(
+        nodes={0: Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                       status=NodeStatus.evaluated, metric=1.0)},
+        fork_requests=[{"from_node_id": 0, "generation": 0}],
+    )
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(eng, "_create_node", lambda *_a, **_kw: None)
+    monkeypatch.setattr(anyio, "sleep", fake_sleep)
+
+    for _ in range(12):
+        assert anyio.run(eng._serve_forced_requests, state) is True
+
+    assert sleeps[0] == _BUDGET_WAIT_MIN_S, "the first tick keeps the historical latency"
+    assert sleeps == sorted(sleeps), "the delay must never shrink while the wait continues"
+    assert max(sleeps) == _BUDGET_WAIT_MAX_S, sleeps
+    assert sum(sleeps) > 12 * _BUDGET_WAIT_MIN_S, (
+        f"12 turns still cost {sum(sleeps)}s of polling — the tick never backed off")
+    # …and the ceiling stays small enough that abort/pause/budget stay responsive.
+    assert _BUDGET_WAIT_MAX_S <= 5.0
+
+    # Once the budget admits the head, the NEXT wait starts short again rather than at the ceiling.
+    state.budget_overrides["add_nodes"] = 1
+    assert anyio.run(eng._serve_forced_requests, state) is True
+    state.budget_overrides.pop("add_nodes")
+    sleeps.clear()
+    assert anyio.run(eng._serve_forced_requests, RunState(
+        nodes=state.nodes, fork_requests=[{"from_node_id": 0, "generation": 0}])) is True
+    assert sleeps == [_BUDGET_WAIT_MIN_S], sleeps

@@ -39,10 +39,33 @@ class FileBackups:
     def _key(self, path) -> Path:
         return self.dir / hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()[:16]
 
-    # CLAUDE REVIEW: [PERF] Snapshots are append-only and never pruned: every write/edit/patch stacks
-    # a full byte copy of the pre-image under backup_dir for the process/session lifetime, so a long
-    # assistant session repeatedly editing a large file grows disk unboundedly. A per-path depth cap
-    # (keep last N) or session-end cleanup would bound it without weakening undo.
+    # How many pre-images to keep per path. Snapshots used to be append-only and never pruned, so a
+    # long assistant session repeatedly editing one large file grew backup_dir without limit. Undo
+    # always pops the NEWEST snapshot, so capping the depth only bounds how far back undo can reach —
+    # 32 is far past any realistic undo chain and costs a bounded multiple of the file's size.
+    _MAX_DEPTH = 32
+
+    def _prune(self, d: Path) -> None:
+        """Drop the oldest snapshots beyond the depth cap. Never touches the newest, so `revert`
+        (which takes `baks[-1]`) and `save`'s `max(index)+1` slot allocation are both unaffected.
+
+        Deletes the `.bak` BEFORE its `.meta`, mirroring `save`'s write order for the same reason:
+        `revert` enumerates `*.bak` and defaults a MISSING meta to {"existed": True}, so a crash
+        between the two deletes must leave a lone `.meta` (invisible to revert), never a `.bak`
+        whose meta is gone.
+        """
+        try:
+            baks = sorted((b for b in d.glob("*.bak") if b.stem.isdigit()),
+                          key=lambda b: int(b.stem))
+        except OSError:
+            return
+        for stale in baks[:max(0, len(baks) - self._MAX_DEPTH)]:
+            try:
+                stale.unlink()
+                (d / f"{stale.stem}.meta").unlink(missing_ok=True)
+            except OSError:
+                return                      # a prune failure must never fail the write it follows
+
     def save(self, path) -> bool:
         try:
             p = Path(path)
@@ -61,6 +84,7 @@ class FileBackups:
             # `.meta` (invisible to `revert`'s `*.bak` glob), so a partial save can never revert wrong.
             (d / f"{n}.meta").write_text(json.dumps({"path": str(p), "existed": existed}))
             (d / f"{n}.bak").write_bytes(payload)
+            self._prune(d)                  # after the new snapshot lands, never before
             return True
         except OSError:
             return False
