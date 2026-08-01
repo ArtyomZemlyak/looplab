@@ -510,6 +510,8 @@ button { font: inherit; }
   flex: none; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
 .cmdbar-drawer-btn:hover, .cmdbar-drawer-btn.on { color: var(--fg); border-color: var(--accent-dim); background: var(--bg-3); }
 .cmdbar-toast { position: absolute; bottom: calc(100% + 8px); right: 12px; z-index: 60;
+  max-width: min(520px, calc(100vw - 24px)); max-width: min(520px, calc(100dvw - 24px));
+  overflow-wrap: anywhere; white-space: normal;
   background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg); font-size: 12px;
   padding: 6px 12px; border-radius: 8px; box-shadow: var(--shadow); }
 
@@ -548,13 +550,13 @@ button { font: inherit; }
 
 /* P1 hypothesis board: a compact kanban of the run's questions → verdicts. */
 .hyp-board { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; align-items: start; }
-.hyp-col { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px; min-height: 60px; }
+.hyp-col { min-width: 0; background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px; min-height: 60px; }
 .hyp-col-h { font-weight: 600; font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .03em; }
 .hyp-col.hyp-supported .hyp-col-h { color: color-mix(in srgb, var(--ok) 52%, var(--fg)); }
 .hyp-col.hyp-tested .hyp-col-h { color: var(--working); }
 .hyp-col.hyp-abandoned .hyp-col-h { color: var(--fg-mut); }
-.hyp-card { background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 7px; margin-bottom: 6px; }
-.hyp-stmt { font-size: 12px; line-height: 1.35; }
+.hyp-card { min-width: 0; background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 7px; margin-bottom: 6px; }
+.hyp-stmt { min-width: 0; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
 .hyp-src { display: inline-flex; vertical-align: -1px; color: var(--fg-dim); }
 
 /* L6 Card lifecycle board. Seven frozen lanes stay visible; future derived statuses are inserted before
@@ -650,7 +652,8 @@ textarea.text.card-control-statement { min-height: 48px; max-height: 120px; resi
 .chart-tools { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 2px; min-height: 18px; }
 .hyp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
 .hyp-empty { font-size: 11px; text-align: center; padding: 4px 0; }
-@media (max-width: 900px) { .hyp-board { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 900px) { .hyp-board { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .hyp-board { grid-template-columns: minmax(0, 1fr); } }
 
 /* ---------- inspector ---------- */
 .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
@@ -801,9 +804,13 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
   justify-content: center; align-items: flex-start; padding: 36px; z-index: 190; }
 .panel { background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 12px;
   box-shadow: var(--shadow); width: min(880px, 92%); max-height: 86%; overflow: auto; }
-.panel-h { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line);
+.panel-h { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 14px; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--bg-1); }
 .panel-h .ttl { font-weight: 700; font-size: 14px; }
+.panel-h .panel-title { min-width: 0; overflow-wrap: anywhere; }
+.panel-h .panel-sub { flex: 0 1 auto; min-width: 0; max-width: min(42ch, 48%);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-h .panel-close { flex: none; }
 .panel-b { padding: 12px 14px; }
 /* Deep-research drawer (panels.jsx ResearchPanel): memos with actionable directions. */
 .rsch-memo { padding: 10px 0; border-bottom: 1px solid var(--line); }
@@ -1064,7 +1071,9 @@ input.text, textarea.text, select.text { background: var(--bg); color: var(--fg)
   .panel-resource-toolbar .btn { width: 100%; min-height: 44px; margin-left: 0; justify-content: center; }
 }
 textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospace; }
-.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--bg-3);
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 24px)); max-width: min(520px, calc(100dvw - 24px));
+  overflow-wrap: anywhere; white-space: normal; background: var(--bg-3);
   border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 14px; box-shadow: var(--shadow); z-index: 100; }
 
 /* ---------- modal popup (create project / rename run) ---------- */
@@ -1693,13 +1702,15 @@ pre.code.event-json { max-height: 220px; }
 .cs-icon.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .cs-box { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-2);
   border: 1px solid var(--line-2); border-radius: 7px; padding: 2px 6px; }
-.cs-box.focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.cs-box.focus, .cs-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .cs-box > svg { color: var(--fg-mut); flex: none; }
 .cs-input { width: 150px; background: none; border: 0; color: var(--fg); font-size: 12.5px; padding: 3px 0; outline: none; min-width: 0; }
 .cs-input::placeholder { color: var(--fg-mut); }
 .cs-clear { background: none; border: 0; color: var(--fg-mut); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
 .cs-clear:hover { color: var(--fg); }
-.cs-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 260px; max-width: 360px;
+.cs-pop { position: absolute; top: calc(100% + 6px); right: 0; left: auto; z-index: 30;
+  min-width: min(260px, calc(100vw - 24px)); min-width: min(260px, calc(100dvw - 24px));
+  max-width: min(360px, calc(100vw - 24px)); max-width: min(360px, calc(100dvw - 24px));
   background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 9px; box-shadow: var(--shadow);
   padding: 5px; max-height: 264px; overflow: auto; }
 .cs-pop-h { font-size: 10.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--fg-mut); padding: 5px 8px 3px; }
@@ -2478,6 +2489,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-menu, .more-menu, .run-head > .fx-switch .fx-menu {
     position: fixed; inset: auto 8px 8px 8px; width: auto; min-width: 0;
     max-height: min(72dvh, 520px); overflow-y: auto; z-index: 96; }
+  .run-menu .mi, .panel-bar .btn { min-height: 44px; }
   .menu-backdrop { background: color-mix(in srgb, var(--bg) 44%, transparent); z-index: 95; }
   .run-head > .fx-switch .th-backdrop {
     background: color-mix(in srgb, var(--bg) 44%, transparent); z-index: 95;
