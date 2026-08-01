@@ -44,6 +44,14 @@ _BUDGET_REASONS = {
 _FAILED_FINISH_REASONS = {"error", "leakage", "no_eligible_candidate"}
 _STOPPED_FINISH_REASONS = {"aborted", "finalized"}
 
+# Canonical owner-inbox priority taxonomy.  Keep this on the projection side so the feed router
+# orders the COMPLETE collection before it slices a page; a client-side reorder cannot recover an
+# approval that was pushed beyond the page by a newer, active-but-advisory signal such as ASHA.
+ATTENTION_NEEDS_ACTION_KINDS = frozenset({
+    "approval", "approval_incomplete", "spec_approval", "failure_spike", "run_failed",
+    "finalization_stalled", "stalled", "train_monitor",
+})
+
 
 def _integer(value) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None

@@ -11,6 +11,7 @@ export const ATTENTION_KINDS = new Set([
   'budget_exhausted', 'finished', 'stopped', 'finalization_stalled', 'stalled', 'train_monitor', 'asha',
 ])
 const SEVERITIES = new Set(['action', 'warning', 'danger', 'success'])
+const SEVERITY_PRIORITY = Object.freeze({ danger: 4, action: 3, warning: 2, success: 1 })
 const NEEDS_ACTION = new Set([
   'approval', 'approval_incomplete', 'spec_approval', 'failure_spike', 'run_failed',
   'finalization_stalled', 'stalled', 'assistant_permission', 'train_monitor',
@@ -120,7 +121,12 @@ export function sortAttentionItems(items) {
   return [...unique.values()].sort((left, right) => {
     if (left.needsAction !== right.needsAction) return left.needsAction ? -1 : 1
     if (left.active !== right.active) return left.active ? -1 : 1
-    return right.created - left.created || right.id.localeCompare(left.id)
+    const severity = (SEVERITY_PRIORITY[right.severity] || 0)
+      - (SEVERITY_PRIORITY[left.severity] || 0)
+    const leftSeq = Number.isSafeInteger(left.seq) ? left.seq : -1
+    const rightSeq = Number.isSafeInteger(right.seq) ? right.seq : -1
+    return severity || right.created - left.created || rightSeq - leftSeq
+      || right.id.localeCompare(left.id)
   })
 }
 

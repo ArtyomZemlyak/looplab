@@ -1,6 +1,11 @@
 """Owner-plane attention feed: bounded, observation-only, and redacted."""
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import dataclass
+import hashlib
+import json
+import secrets
 import threading
 import time
 
@@ -8,11 +13,38 @@ from fastapi import APIRouter, HTTPException, Query
 
 from looplab.events.eventstore import log_divergence
 from looplab.serve.attention import (
-    project_event_attention, project_runtime_attention, visible_event_attention)
+    ATTENTION_NEEDS_ACTION_KINDS, project_event_attention, project_runtime_attention,
+    visible_event_attention)
 from looplab.serve.engine_proc import _engine_liveness
 
 
 _MAX_CACHE_ENTRIES = 8192  # exceeds the documented 5k-run operating target without unbounded growth
+# Refresh ahead of the owner's 8-second poll without calling an ordinary SWR refresh an outage. Only
+# the hard age (or a recorded refresh failure) marks the served last-safe snapshot stale.
+_SNAPSHOT_SOFT_REFRESH_SECONDS = 6.0
+_SNAPSHOT_HARD_STALE_SECONDS = 20.0
+_REFRESH_FAILURE_COOLDOWN_SECONDS = 8.0
+_CURSOR_TTL_SECONDS = 300.0
+_MAX_CURSOR_ENTRIES = 4096
+_MAX_CURSOR_SNAPSHOTS = 8
+_SEVERITY_PRIORITY = {"danger": 4, "action": 3, "warning": 2, "success": 1}
+
+
+@dataclass(frozen=True)
+class _AttentionSnapshot:
+    snapshot_id: str
+    cursor_scope: str
+    generated_at: float
+    completed_at: float
+    items: tuple[dict, ...]
+    partial: bool
+
+
+@dataclass(frozen=True)
+class _CursorRecord:
+    snapshot_scope: str
+    offset: int
+    expires_at: float
 
 
 def build_router(srv) -> APIRouter:
@@ -25,12 +57,16 @@ def build_router(srv) -> APIRouter:
     # raises "dictionary changed size during iteration" → 500 (the sibling trace_view cache locks for
     # exactly this). Reads via `.get()` stay lock-free (GIL-atomic; a slightly stale entry is fine).
     cache_lock = threading.Lock()
+    snapshot_lock = threading.Lock()
+    current_snapshot: _AttentionSnapshot | None = None
+    refresh_running = False
+    refresh_failed = False
+    refresh_not_before = 0.0
+    cursor_records: OrderedDict[str, _CursorRecord] = OrderedDict()
+    cursor_snapshots: OrderedDict[str, _AttentionSnapshot] = OrderedDict()
+    cursor_counts: dict[str, int] = {}
 
-    @router.get("/api/attention")
-    def attention(
-        limit: int = Query(default=100, ge=1, le=200),
-        cursor: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
-    ):
+    def scan_items() -> tuple[tuple[dict, ...], bool]:
         items: list[dict] = []
         present: set[str] = set()
         partial = False
@@ -162,20 +198,187 @@ def build_router(srv) -> APIRouter:
             return seq if isinstance(seq, int) and not isinstance(seq, bool) else -1
 
         items.sort(key=lambda item: (
-            bool(item.get("active")), float(item.get("created") or 0), _seq_key(item),
+            str(item.get("kind") or "") in ATTENTION_NEEDS_ACTION_KINDS,
+            bool(item.get("active")),
+            _SEVERITY_PRIORITY.get(str(item.get("severity") or ""), 0),
+            float(item.get("created") or 0), _seq_key(item),
             str(item.get("id") or "")), reverse=True)
-        start = 0
+        return tuple(items), bool(partial)
+
+    def build_snapshot() -> _AttentionSnapshot:
+        items, partial = scan_items()
+        normalized = json.dumps(
+            {"items": items, "partial": partial}, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False,
+        ).encode("ascii")
+        return _AttentionSnapshot(
+            snapshot_id=hashlib.sha256(normalized).hexdigest(),
+            cursor_scope=secrets.token_hex(32),
+            generated_at=time.time(),
+            completed_at=time.monotonic(),
+            items=items,
+            partial=partial,
+        )
+
+    def drop_cursor_locked(token: str) -> None:
+        record = cursor_records.pop(token, None)
+        if record is None:
+            return
+        remaining = cursor_counts.get(record.snapshot_scope, 0) - 1
+        if remaining > 0:
+            cursor_counts[record.snapshot_scope] = remaining
+        else:
+            cursor_counts.pop(record.snapshot_scope, None)
+            cursor_snapshots.pop(record.snapshot_scope, None)
+
+    def expire_cursors_locked(now: float) -> None:
+        while cursor_records:
+            token, record = next(iter(cursor_records.items()))
+            if record.expires_at > now:
+                break
+            drop_cursor_locked(token)
+
+    def register_cursor_locked(snapshot: _AttentionSnapshot, offset: int, now: float) -> str:
+        scope = snapshot.cursor_scope
+        if scope not in cursor_snapshots:
+            cursor_snapshots[scope] = snapshot
+            cursor_counts[scope] = 0
+        while len(cursor_snapshots) > _MAX_CURSOR_SNAPSHOTS:
+            stale_scope = next(iter(cursor_snapshots))
+            for token, record in list(cursor_records.items()):
+                if record.snapshot_scope == stale_scope:
+                    drop_cursor_locked(token)
+            cursor_snapshots.pop(stale_scope, None)
+            cursor_counts.pop(stale_scope, None)
+        token = hashlib.sha256(f"{scope}:{offset}".encode("ascii")).hexdigest()
+        if token in cursor_records:
+            return token
+        while len(cursor_records) >= _MAX_CURSOR_ENTRIES:
+            drop_cursor_locked(next(iter(cursor_records)))
+        cursor_records[token] = _CursorRecord(
+            snapshot_scope=scope, offset=offset, expires_at=now + _CURSOR_TTL_SECONDS)
+        cursor_counts[scope] = cursor_counts.get(scope, 0) + 1
+        return token
+
+    def snapshot_page(snapshot: _AttentionSnapshot, start: int, limit: int, *, stale: bool) -> dict:
+        end = min(start + limit, len(snapshot.items))
+        truncated = end < len(snapshot.items)
+        next_cursor = None
+        if truncated:
+            now = time.monotonic()
+            with snapshot_lock:
+                expire_cursors_locked(now)
+                next_cursor = register_cursor_locked(snapshot, end, now)
+        return {
+            "schema": 1,
+            "snapshot_id": snapshot.snapshot_id,
+            "generated_at": snapshot.generated_at,
+            "stale": bool(stale),
+            "items": list(snapshot.items[start:end]),
+            "truncated": truncated,
+            "next_cursor": next_cursor,
+            "partial": snapshot.partial,
+        }
+
+    def refresh_in_background() -> None:
+        nonlocal current_snapshot, refresh_failed, refresh_not_before, refresh_running
+        try:
+            built = build_snapshot()
+        except Exception:  # noqa: BLE001 - retain the last complete snapshot and cool down retries
+            with snapshot_lock:
+                refresh_failed = True
+                refresh_not_before = time.monotonic() + _REFRESH_FAILURE_COOLDOWN_SECONDS
+                refresh_running = False
+            return
+        with snapshot_lock:
+            current_snapshot = built
+            refresh_failed = False
+            refresh_not_before = 0.0
+            refresh_running = False
+
+    def start_background_refresh() -> None:
+        nonlocal refresh_failed, refresh_not_before, refresh_running
+        try:
+            threading.Thread(
+                target=refresh_in_background, name="looplab-attention-refresh", daemon=True,
+            ).start()
+        except RuntimeError:
+            with snapshot_lock:
+                refresh_failed = True
+                refresh_not_before = time.monotonic() + _REFRESH_FAILURE_COOLDOWN_SECONDS
+                refresh_running = False
+
+    @router.get("/api/attention")
+    def attention(
+        limit: int = Query(default=100, ge=1, le=200),
+        cursor: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+    ):
+        nonlocal current_snapshot, refresh_failed, refresh_not_before, refresh_running
+        now = time.monotonic()
         if cursor is not None:
-            position = next((index for index, item in enumerate(items)
-                             if item.get("id") == cursor), None)
-            if position is None:
+            with snapshot_lock:
+                expire_cursors_locked(now)
+                record = cursor_records.get(cursor)
+                snapshot = (cursor_snapshots.get(record.snapshot_scope)
+                            if record is not None else None)
+                latest = current_snapshot
+                failed = refresh_failed
+            if record is None or snapshot is None:
                 raise HTTPException(409, "attention cursor is stale; reload the first page")
-            start = position + 1
-        remaining = items[start:]
-        page = remaining[:limit]
-        truncated = len(remaining) > limit
-        next_cursor = page[-1]["id"] if truncated and page else None
-        return {"schema": 1, "generated_at": time.time(), "items": page,
-                "truncated": truncated, "next_cursor": next_cursor, "partial": partial}
+            # A routine soft refresh does not make an immutable page stale. A content mismatch, the
+            # matching latest snapshot's hard age, or an actual refresh failure does. Use the latest
+            # completion time when content ids match so an unchanged successful refresh renews the
+            # cursor's freshness instead of flashing a false stale state halfway through pagination.
+            stale = (latest is None or snapshot.snapshot_id != latest.snapshot_id
+                     or now - latest.completed_at >= _SNAPSHOT_HARD_STALE_SECONDS or failed)
+            return snapshot_page(snapshot, record.offset, limit, stale=stale)
+
+        launch_refresh = False
+        cold_builder = False
+        with snapshot_lock:
+            expire_cursors_locked(now)
+            snapshot = current_snapshot
+            age = now - snapshot.completed_at if snapshot is not None else 0.0
+            stale = snapshot is not None and (
+                age >= _SNAPSHOT_HARD_STALE_SECONDS or refresh_failed)
+            if snapshot is None:
+                if refresh_running or now < refresh_not_before:
+                    wait = max(1, int(refresh_not_before - now + 0.999))
+                    raise HTTPException(
+                        503, "attention snapshot is being prepared",
+                        headers={"Retry-After": str(wait)},
+                    )
+                refresh_running = True
+                cold_builder = True
+            elif ((age >= _SNAPSHOT_SOFT_REFRESH_SECONDS or refresh_failed)
+                  and not refresh_running and now >= refresh_not_before):
+                refresh_running = True
+                launch_refresh = True
+
+        if snapshot is not None:
+            if launch_refresh:
+                start_background_refresh()
+            return snapshot_page(snapshot, 0, limit, stale=stale)
+
+        if not cold_builder:  # defensive: the state machine above always chooses one path
+            raise HTTPException(503, "attention snapshot is temporarily unavailable",
+                                headers={"Retry-After": "1"})
+        try:
+            snapshot = build_snapshot()
+        except Exception as exc:  # noqa: BLE001 - cold scans fail closed; no empty authoritative inbox
+            with snapshot_lock:
+                refresh_failed = True
+                refresh_not_before = time.monotonic() + _REFRESH_FAILURE_COOLDOWN_SECONDS
+                refresh_running = False
+            raise HTTPException(
+                503, "attention snapshot is temporarily unavailable",
+                headers={"Retry-After": str(int(_REFRESH_FAILURE_COOLDOWN_SECONDS))},
+            ) from exc
+        with snapshot_lock:
+            current_snapshot = snapshot
+            refresh_failed = False
+            refresh_not_before = 0.0
+            refresh_running = False
+        return snapshot_page(snapshot, 0, limit, stale=False)
 
     return router

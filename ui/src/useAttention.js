@@ -5,22 +5,48 @@ import { deadlineRequest } from './requestDeadline.js'
 import {
   normalizePermissionAttention, normalizeRunAttention, sortAttentionItems,
 } from './attentionModel.js'
-import { usePoll } from './hooks.js'
 
-const CURSOR_RE = /^[0-9a-f]{64}$/
+const SNAPSHOT_RE = /^[0-9a-f]{64}$/
 const ATTENTION_REQUEST_TIMEOUT_MS = 8000
+const RUN_POLL_MS = 8000
+const PERMISSION_POLL_MS = 4000
+const MAX_BACKOFF_MS = 60_000
+
+const sourceStaleItem = item => item?.stale && item?.notifyEligible === false
+  ? item
+  : { ...item, stale: true, notifyEligible: false }
+const sourceUnverifiedItem = item => item?.notifyEligible === false
+  ? item
+  : { ...item, notifyEligible: false }
+const sourceStalePages = pages => pages.map(page => page.map(sourceStaleItem))
 
 function normalizeRunPage(payload) {
-  if (!payload || !Array.isArray(payload.items)) return null
-  const items = payload.items.map(normalizeRunAttention)
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || !Array.isArray(payload.items) || !SNAPSHOT_RE.test(payload.snapshot_id || '')
+      || typeof payload.generated_at !== 'number' || !Number.isFinite(payload.generated_at)
+      || payload.generated_at <= 0 || typeof payload.stale !== 'boolean'
+      || typeof payload.truncated !== 'boolean' || typeof payload.partial !== 'boolean') return null
+  const normalized = payload.items.map(normalizeRunAttention)
   // A protocol-invalid item must not turn an actionable last-safe snapshot into an
   // authoritative empty page. Treat the whole source read as stale and retry it.
-  if (items.some(item => item == null)) return null
-  const truncated = payload.truncated === true
+  if (normalized.some(item => item == null)) return null
   const nextCursor = typeof payload.next_cursor === 'string'
-    && CURSOR_RE.test(payload.next_cursor) ? payload.next_cursor : null
-  if (truncated && !nextCursor) return null
-  return { items, truncated, nextCursor, partial: payload.partial === true }
+    && SNAPSHOT_RE.test(payload.next_cursor) ? payload.next_cursor : null
+  if ((payload.truncated && !nextCursor) || (!payload.truncated && payload.next_cursor != null)) return null
+  const items = payload.stale
+    ? normalized.map(sourceStaleItem)
+    : payload.partial
+      ? normalized.map(sourceUnverifiedItem)
+      : normalized
+  return {
+    items,
+    truncated: payload.truncated,
+    nextCursor,
+    partial: payload.partial,
+    stale: payload.stale,
+    snapshotId: payload.snapshot_id,
+    generatedAt: payload.generated_at,
+  }
 }
 
 function normalizePermissionPage(payload, now) {
@@ -42,62 +68,162 @@ function normalizePermissionPage(payload, now) {
   return items
 }
 
-const sameIds = (left, right) => left.length === right.length
-  && left.every((item, index) => item.id === right[index]?.id)
+const hiddenDocument = () => typeof document !== 'undefined' && document.hidden
 
-function useAttentionPoll(read, settle, intervalMs, timeout, deps) {
-  usePoll(alive => {
-    const request = deadlineRequest(read, timeout)
-    request.promise.then(
-      payload => { if (alive()) settle(payload) },
-      () => { if (alive()) settle() },
-    )
-    return request
-  }, intervalMs, deps)
+function retryDelay(baseMs, streak, retryAfterMs = 0) {
+  const nominal = Math.min(MAX_BACKOFF_MS, baseMs * (2 ** Math.max(0, streak - 1)))
+  const jitterRoom = Math.max(0, Math.min(nominal * 0.2, MAX_BACKOFF_MS - nominal))
+  const jittered = nominal + Math.random() * jitterRoom
+  return Math.min(MAX_BACKOFF_MS, Math.max(jittered, Number(retryAfterMs) || 0))
 }
 
-export function useAttention({ intervalMs = 4000 } = {}) {
+// Schedule the next read only after the previous browser request settles. Hidden tabs finish their
+// current read but do not start another; becoming visible triggers one immediate catch-up read.
+// `settle` returns true for a valid, non-stale source response. A partial run read keeps the normal
+// recovery cadence but is still non-authoritative and notification-ineligible; invalid and stale
+// responses retain the last safe rows and advance the independent bounded backoff.
+function useSerializedAttentionPoll(read, settle, baseMs, refreshToken) {
+  useEffect(() => {
+    let active = true
+    let timer = null
+    let request = null
+    let running = false
+    let degradedStreak = 0
+
+    const clearTimer = () => {
+      if (timer != null) clearTimeout(timer)
+      timer = null
+    }
+    const schedule = delay => {
+      if (!active) return
+      clearTimer()
+      if (hiddenDocument()) return
+      timer = setTimeout(() => { void tick() }, delay)
+    }
+    const tick = async () => {
+      if (!active || running) return
+      if (hiddenDocument()) return
+      running = true
+      request = deadlineRequest(read, ATTENTION_REQUEST_TIMEOUT_MS)
+      let fresh = false
+      let retryAfterMs = 0
+      try {
+        const payload = await request.promise
+        if (!active) return
+        fresh = settle(payload) === true
+      } catch (error) {
+        if (!active) return
+        retryAfterMs = Number(error?.retryAfterMs) || 0
+        settle()
+      } finally {
+        request = null
+        running = false
+      }
+      if (!active) return
+      degradedStreak = fresh ? 0 : degradedStreak + 1
+      schedule(fresh ? baseMs : retryDelay(baseMs, degradedStreak, retryAfterMs))
+    }
+    const onVisibility = () => {
+      if (!active || hiddenDocument() || running) return
+      clearTimer()
+      void tick()
+    }
+
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
+    if (!hiddenDocument()) void tick()
+    return () => {
+      active = false
+      clearTimer()
+      request?.controller.abort()
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [baseMs, refreshToken])
+}
+
+export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
+  const runPollMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : RUN_POLL_MS
   const [state, setState] = useState({
-    runPages: [], permissions: [], runInitialized: false, permissionsInitialized: false,
+    runPages: [], permissions: [],
+    runAttempted: false, permissionsAttempted: false,
+    runVerified: false, permissionsVerified: false,
     runStale: false, permissionsStale: false, partial: false, truncated: false,
+    runSnapshotId: null, runGeneratedAt: null, runVerifiedGeneratedAt: null,
     nextCursor: null, firstNextCursor: null, loadingMore: false, loadMoreError: '',
   })
   const [refreshToken, setRefreshToken] = useState(0)
   const loadMoreRequestRef = useRef(null)
+  const runSnapshotRef = useRef(null)
 
-  const pollDeps = [intervalMs, refreshToken]
-  useAttentionPoll(signal => attentionFeed(200, null, { signal }), payload => {
+  const cancelLoadMore = useCallback(() => {
+    const request = loadMoreRequestRef.current
+    loadMoreRequestRef.current = null
+    request?.controller.abort()
+  }, [])
+
+  useSerializedAttentionPoll(signal => attentionFeed(200, null, { signal }), payload => {
     const firstPage = normalizeRunPage(payload)
+    if (!firstPage) {
+      cancelLoadMore()
+      setState(previous => ({
+        ...previous,
+        runPages: sourceStalePages(previous.runPages),
+        runAttempted: true,
+        runStale: true,
+        loadingMore: false,
+      }))
+      return false
+    }
+
+    const snapshotChanged = runSnapshotRef.current != null
+      && runSnapshotRef.current !== firstPage.snapshotId
+    const archiveInvalidated = snapshotChanged || firstPage.stale || firstPage.partial
+    const completeFresh = !firstPage.stale && !firstPage.partial
+    if (archiveInvalidated) cancelLoadMore()
+    runSnapshotRef.current = firstPage.snapshotId
     setState(previous => {
-      let runPages = previous.runPages
-      let nextCursor = previous.nextCursor
-      let firstNextCursor = previous.firstNextCursor
-      let truncated = previous.truncated
-      let loadMoreError = previous.loadMoreError
-      if (firstPage) {
-        const sameFirstPage = sameIds(previous.runPages[0] || [], firstPage.items)
-        firstNextCursor = firstPage.nextCursor
-        // Extra pages have no snapshot token. Preserve them only across two complete scans; a
-        // partial scan can omit a different run on every poll.
-        const archivalPagesStillAuthoritative = !previous.partial && !firstPage.partial
-        if (sameFirstPage && firstPage.truncated && previous.runPages.length > 1
-            && archivalPagesStillAuthoritative) {
-          runPages = [firstPage.items, ...previous.runPages.slice(1)]
-        } else {
-          runPages = [firstPage.items]
-          nextCursor = firstPage.nextCursor
-          truncated = firstPage.truncated
-          loadMoreError = ''
-        }
+      const preserveArchive = !snapshotChanged && previous.runPages.length > 1
+        && !previous.runStale && !previous.partial && !firstPage.stale && !firstPage.partial
+      const preserveStaleArchive = !snapshotChanged && previous.runPages.length > 1
+        && firstPage.stale
+      let runPages
+      let nextCursor
+      let truncated
+      if (preserveArchive) {
+        runPages = [firstPage.items, ...previous.runPages.slice(1)]
+        nextCursor = previous.nextCursor
+        truncated = previous.truncated
+      } else if (preserveStaleArchive) {
+        runPages = sourceStalePages([firstPage.items, ...previous.runPages.slice(1)])
+        nextCursor = previous.nextCursor
+        truncated = previous.truncated
+      } else {
+        runPages = [firstPage.items]
+        nextCursor = firstPage.nextCursor
+        truncated = firstPage.truncated
       }
       return {
-        ...previous, runPages, nextCursor, firstNextCursor, truncated, loadMoreError,
-        runInitialized: true, runStale: firstPage == null,
-        partial: firstPage ? firstPage.partial : previous.partial,
+        ...previous,
+        runPages,
+        nextCursor,
+        firstNextCursor: firstPage.nextCursor,
+        truncated,
+        loadMoreError: snapshotChanged ? '' : previous.loadMoreError,
+        loadingMore: archiveInvalidated ? false : previous.loadingMore,
+        runAttempted: true,
+        runVerified: previous.runVerified || completeFresh,
+        runStale: firstPage.stale,
+        partial: firstPage.partial,
+        runSnapshotId: firstPage.snapshotId,
+        runGeneratedAt: firstPage.generatedAt,
+        runVerifiedGeneratedAt: completeFresh
+          ? firstPage.generatedAt
+          : previous.runVerifiedGeneratedAt,
       }
     })
-  }, intervalMs, ATTENTION_REQUEST_TIMEOUT_MS, pollDeps)
-  useAttentionPoll(signal => assistantPermissions(null, { signal }), payload => {
+    return !firstPage.stale
+  }, runPollMs, refreshToken)
+
+  useSerializedAttentionPoll(signal => assistantPermissions(null, { signal }), payload => {
     const now = Date.now()
     const permissionPage = normalizePermissionPage(payload, now)
     setState(previous => ({
@@ -105,20 +231,22 @@ export function useAttention({ intervalMs = 4000 } = {}) {
       // Drop raw action/scope/preview immediately. Assistant re-reads the authoritative card.
       permissions: permissionPage != null
         ? permissionPage
-        : previous.permissions.filter(item => !item.expiresAt || item.expiresAt * 1000 > now),
-      permissionsInitialized: true,
+        : previous.permissions
+            .filter(item => !item.expiresAt || item.expiresAt * 1000 > now)
+            .map(sourceStaleItem),
+      permissionsAttempted: true,
+      permissionsVerified: previous.permissionsVerified || permissionPage != null,
       permissionsStale: permissionPage == null,
     }))
-  }, intervalMs, ATTENTION_REQUEST_TIMEOUT_MS, pollDeps)
+    return permissionPage != null
+  }, PERMISSION_POLL_MS, refreshToken)
 
-  useEffect(() => () => {
-    loadMoreRequestRef.current?.controller.abort()
-    loadMoreRequestRef.current = null
-  }, [])
+  useEffect(() => () => cancelLoadMore(), [cancelLoadMore])
 
   const loadMore = useCallback(async () => {
     const cursor = state.nextCursor
-    if (!cursor || loadMoreRequestRef.current) return
+    const snapshotId = state.runSnapshotId
+    if (!cursor || !snapshotId || state.runStale || state.partial || loadMoreRequestRef.current) return
     setState(previous => ({ ...previous, loadingMore: true, loadMoreError: '' }))
     const request = deadlineRequest(
       signal => attentionFeed(200, cursor, { signal }),
@@ -130,33 +258,57 @@ export function useAttention({ intervalMs = 4000 } = {}) {
       if (loadMoreRequestRef.current !== request) return
       if (!page) throw new Error('invalid attention page')
       setState(previous => {
-        // A first-page poll may have invalidated this cursor while the request was in flight.
-        if (previous.nextCursor !== cursor) return { ...previous, loadingMore: false }
+        if (previous.runStale || previous.partial || previous.runSnapshotId !== snapshotId
+            || previous.nextCursor !== cursor || page.snapshotId !== snapshotId) {
+          return {
+            ...previous,
+            runPages: sourceStalePages(previous.runPages.slice(0, 1)),
+            nextCursor: previous.firstNextCursor,
+            truncated: !!previous.firstNextCursor,
+            runStale: true,
+            loadingMore: false,
+            loadMoreError: 'The attention list changed before the next page loaded. Try again.',
+          }
+        }
+        const runPages = [...previous.runPages, page.items]
         return {
           ...previous,
-          runPages: [...previous.runPages, page.items],
+          runPages: page.stale ? sourceStalePages(runPages) : runPages,
           nextCursor: page.nextCursor,
           truncated: page.truncated,
           partial: previous.partial || page.partial,
+          runStale: page.stale,
           loadingMore: false,
           loadMoreError: '',
         }
       })
     } catch (error) {
       if (loadMoreRequestRef.current !== request) return
-      setState(previous => error?.status === 409 ? ({
-        ...previous, runPages: previous.runPages.slice(0, 1),
-        nextCursor: previous.firstNextCursor,
-        truncated: !!previous.firstNextCursor, loadingMore: false,
-        loadMoreError: 'The attention list changed before the next page loaded. Try again.',
+      const cursorStale = error?.status === 409
+      setState(previous => cursorStale ? ({
+        ...previous,
+        runPages: previous.runPages.slice(0, 1),
+        nextCursor: null,
+        firstNextCursor: null,
+        truncated: false,
+        loadingMore: false,
+        loadMoreError: '',
       }) : ({
-        ...previous, loadingMore: false,
+        ...previous,
+        loadingMore: false,
         loadMoreError: 'Older attention items could not be loaded. Try again.',
       }))
+      if (cursorStale) setRefreshToken(value => value + 1)
     } finally {
       if (loadMoreRequestRef.current === request) loadMoreRequestRef.current = null
     }
-  }, [state.nextCursor])
+  }, [state.nextCursor, state.partial, state.runSnapshotId, state.runStale])
+
+  const refresh = useCallback(() => {
+    cancelLoadMore()
+    setState(previous => ({ ...previous, loadingMore: false, loadMoreError: '' }))
+    setRefreshToken(value => value + 1)
+  }, [cancelLoadMore])
 
   const runs = useMemo(() => state.runPages.flat(), [state.runPages])
   const currentItems = useMemo(() => sortAttentionItems([
@@ -164,10 +316,24 @@ export function useAttention({ intervalMs = 4000 } = {}) {
   ]), [state.runPages, state.permissions])
   const items = useMemo(() => sortAttentionItems([...runs, ...state.permissions]),
     [runs, state.permissions])
-  const initialized = state.runInitialized && state.permissionsInitialized
+  const attempted = state.runAttempted && state.permissionsAttempted
+  const verified = state.runVerified && state.permissionsVerified
+  const authoritative = verified && !state.runStale && !state.permissionsStale && !state.partial
+  const runSnapshotAgeMs = state.runGeneratedAt == null
+    ? null
+    : Math.max(0, Date.now() - state.runGeneratedAt * 1000)
   return {
-    ...state, initialized, runs, items, currentItems,
-    hasMore: state.truncated && !!state.nextCursor, loadMore,
-    refresh: () => setRefreshToken(value => value + 1),
+    ...state,
+    initialized: attempted,
+    attempted,
+    verified,
+    authoritative,
+    runs,
+    items,
+    currentItems,
+    runSnapshotAgeMs,
+    hasMore: !state.runStale && !state.partial && state.truncated && !!state.nextCursor,
+    loadMore,
+    refresh,
   }
 }

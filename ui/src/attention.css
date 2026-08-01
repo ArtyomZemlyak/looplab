@@ -188,20 +188,25 @@
   padding: 14px 14px max(20px, env(safe-area-inset-bottom, 0px));
 }
 .attention-source-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   margin: 0 0 12px;
-  padding: 9px 12px 9px 30px;
+  padding: 9px 10px 9px 12px;
   color: var(--working-text);
   background: color-mix(in srgb, var(--working) 8%, var(--bg-2));
   border: 1px solid color-mix(in srgb, var(--working) 34%, var(--line));
   border-radius: var(--radius);
   font-size: 12px;
 }
+.attention-source-status ul { flex: 1; min-width: 0; margin: 0; padding-left: 18px; }
 .attention-source-status li + li { margin-top: 4px; }
+.attention-source-status .attention-button { flex: none; }
 .attention-notifications {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 4px;
+  margin: 20px 0 4px;
   padding: 11px 12px;
   background: var(--bg-2);
   border: 1px solid var(--line);
@@ -353,7 +358,7 @@
   to { transform: translateX(0); opacity: 1; }
 }
 
-@media (min-width: 1440px) {
+@media (min-width: 901px) {
   body.asst-side-open .attention-trigger {
     right: calc(var(--asst-side-w, 440px) + 16px);
   }
@@ -375,6 +380,8 @@
   .attention-button { min-height: 44px; }
   .attention-notifications { align-items: stretch; flex-direction: column; }
   .attention-notifications .attention-button { align-self: stretch; }
+  .attention-source-status { align-items: stretch; flex-direction: column; }
+  .attention-source-status .attention-button { align-self: stretch; }
   .attention-item-actions { margin-left: 0; }
   .attention-item-actions .attention-button { flex: 1 1 130px; }
 }

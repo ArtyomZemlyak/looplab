@@ -30,6 +30,17 @@ function itemTime(seconds) {
   return { iso: date.toISOString(), label }
 }
 
+function snapshotAge(value, now = Date.now()) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return ''
+  const timestamp = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric
+  const elapsed = Math.max(0, now - timestamp)
+  if (elapsed < 60_000) return 'just now'
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m ago`
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h ago`
+  return `${Math.floor(elapsed / 86_400_000)}d ago`
+}
+
 function capabilityCopy(capability, preferences) {
   if (!preferences.available) {
     return 'Desktop alerts are unavailable because this browser cannot safely persist notification state.'
@@ -69,8 +80,12 @@ const SEVERITY_LABEL = Object.freeze({
   action: 'Needs action', warning: 'Warning', danger: 'Urgent', success: 'Resolved',
 })
 
-function AttentionItem({ item, unread, onAcknowledge, onDismiss, onOpenPermission }) {
+function AttentionItem({ item, unread, sourceStale, onAcknowledge, onMarkRead, onDismiss,
+  onOpenPermission }) {
   const timestamp = itemTime(item.created)
+  const stale = item.stale || sourceStale
+  const activeAction = item.needsAction && item.active
+  const actionLabel = stale ? 'Verify current state' : item.actionLabel
   // Reconstruct the destination from the normalized, generation-fenced fields. Never trust a URL
   // supplied by the feed (and permission cards never receive a link at all).
   const runHref = item.source === 'run' ? attentionHref(item) : null
@@ -79,8 +94,8 @@ function AttentionItem({ item, unread, onAcknowledge, onDismiss, onOpenPermissio
       <span className="attention-severity-dot" aria-hidden="true" />
       {SEVERITY_LABEL[item.severity] && <span className="sr-only">{SEVERITY_LABEL[item.severity]}: </span>}
       <h4>{item.title}</h4>
-      {item.stale && <span className="attention-stale-label">Last verified</span>}
-      {unread && <span className="attention-new-label">New</span>}
+      {stale && <span className="attention-stale-label">Last verified</span>}
+      {unread && <span className="attention-new-label">{stale ? 'Unread' : 'New'}</span>}
     </div>
     {item.source === 'run' && <p className="attention-run-context">
       <strong>{item.contextLabel || item.runId}</strong>
@@ -90,13 +105,16 @@ function AttentionItem({ item, unread, onAcknowledge, onDismiss, onOpenPermissio
     {timestamp && <time dateTime={timestamp.iso}>{timestamp.label}</time>}
     <div className="attention-item-actions">
       {runHref && <a className="attention-button primary" href={runHref}
-        aria-label={`${item.actionLabel} for ${item.contextLabel || item.runId}`}
-        onClick={() => onAcknowledge(item.id)}>{item.actionLabel}</a>}
+        aria-label={`${actionLabel} for ${item.contextLabel || item.runId}`}
+        onClick={() => onAcknowledge(item.id)}>{actionLabel}</a>}
       {item.source === 'permission' && <button type="button" className="attention-button primary"
-        onClick={() => onOpenPermission(item)}>{item.actionLabel}</button>}
-      <button type="button" className="attention-button subtle"
+        onClick={() => onOpenPermission(item)}>{actionLabel}</button>}
+      {activeAction && unread && <button type="button" className="attention-button subtle"
+        aria-label={`Mark ${item.title}${item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''} as read`}
+        onClick={() => onMarkRead(item.id)}>Mark read</button>}
+      {!activeAction && <button type="button" className="attention-button subtle"
         aria-label={`Dismiss ${item.title}${item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''}`}
-        onClick={() => onDismiss(item.id)}>Dismiss</button>
+        onClick={() => onDismiss(item.id)}>Dismiss</button>}
     </div>
   </li>
 }
@@ -104,7 +122,8 @@ function AttentionItem({ item, unread, onAcknowledge, onDismiss, onOpenPermissio
 export default function AttentionCenter() {
   const {
     items, currentItems, initialized, runStale, permissionsStale, partial, truncated,
-    hasMore, loadingMore, loadMoreError, loadMore,
+    hasMore, loadingMore, loadMoreError, loadMore, refresh,
+    authoritative, verified, runVerifiedGeneratedAt,
   } = useAttention()
   const [open, setOpen] = useState(false)
   const [preferences, setPreferences] = useState(() => loadAttentionState())
@@ -155,7 +174,8 @@ export default function AttentionCenter() {
     () => attentionIds(preferences.state, 'dismissed'), [preferences.state.dismissed],
   )
   const visibleItems = useMemo(
-    () => items.filter(item => !dismissedIds.has(item.id)), [items, dismissedIds],
+    () => items.filter(item => (item.needsAction && item.active) || !dismissedIds.has(item.id)),
+    [items, dismissedIds],
   )
   const actionItems = useMemo(
     () => visibleItems.filter(item => item.needsAction && item.active), [visibleItems],
@@ -174,7 +194,7 @@ export default function AttentionCenter() {
     if (!initialized) return
     const fresh = []
     for (const source of ['run', 'permission']) {
-      const sourceStale = source === 'run' ? runStale : permissionsStale
+      const sourceStale = source === 'run' ? runStale || partial : permissionsStale
       const sourceItems = currentItems.filter(item => item.source === source)
       if (!baselinedSourcesRef.current[source]) {
         if (sourceStale) continue
@@ -190,7 +210,7 @@ export default function AttentionCenter() {
       }
     }
     if (fresh.length) setLiveMessage(`${fresh.length} new attention ${fresh.length === 1 ? 'item' : 'items'}.`)
-  }, [initialized, currentItems, dismissedIds, runStale, permissionsStale])
+  }, [initialized, currentItems, dismissedIds, runStale, permissionsStale, partial])
 
   const broadcastInvalidation = useCallback(value => {
     // Cross-tab messages are deliberately payload-free. The receiving tab reloads its own bounded,
@@ -216,6 +236,10 @@ export default function AttentionCenter() {
   const acknowledge = useCallback(async id => {
     await persistIds('acknowledged', [id], '')
     setOpen(false)
+  }, [persistIds])
+
+  const markRead = useCallback(async id => {
+    await persistIds('acknowledged', [id], 'Attention item marked as read.')
   }, [persistIds])
 
   const dismiss = useCallback(async id => {
@@ -320,6 +344,8 @@ export default function AttentionCenter() {
     return () => cancelAnimationFrame(frame)
   }, [open, visibleItems.length])
 
+  const feedVerified = authoritative === true
+  const verifiedAge = verified === true ? snapshotAge(runVerifiedGeneratedAt) : ''
   const sourceMessages = []
   if (!initialized) sourceMessages.push('Updating attention items…')
   else {
@@ -327,7 +353,10 @@ export default function AttentionCenter() {
     else if (runStale) sourceMessages.push('Run attention is temporarily stale; showing the last safe snapshot.')
     else if (permissionsStale) sourceMessages.push('Assistant approvals are temporarily stale; showing the last safe snapshot.')
     if (partial) sourceMessages.push('Some run logs could not be inspected, so this list may be incomplete.')
-    if (truncated) sourceMessages.push('More older attention items are available below.')
+    if (!feedVerified) sourceMessages.push(verifiedAge
+      ? `Last verified snapshot was updated ${verifiedAge}.`
+      : 'No complete verified snapshot is available yet.')
+    if (hasMore && truncated) sourceMessages.push('More older attention items are available below.')
   }
   const notificationsEnabled = preferences.valid && preferences.state.enabled
   const enableBlocked = notificationBusy || !preferences.available
@@ -336,6 +365,23 @@ export default function AttentionCenter() {
   const triggerLabel = unreadCount
     ? `Open attention center, ${unreadCount} unread ${unreadCount === 1 ? 'item' : 'items'}`
     : 'Open attention center'
+  const headerStatus = !initialized
+    ? 'Checking for updates'
+    : !feedVerified
+      ? (verifiedAge ? `Last verified ${verifiedAge}` : 'Status unavailable')
+      : unreadCount
+        ? `${unreadCount} unread ${unreadCount === 1 ? 'item' : 'items'}`
+        : 'You are caught up'
+  const actionEmptyCopy = !initialized
+    ? 'Checking for items that need action…'
+    : feedVerified
+      ? 'Nothing needs your action right now.'
+      : 'Current action status is unavailable. Showing the last verified snapshot.'
+  const recentEmptyCopy = !initialized
+    ? 'Checking recent run notices…'
+    : feedVerified
+      ? 'No recent completion or budget notices.'
+      : 'Recent notice status is unavailable. Showing the last verified snapshot.'
 
   return <>
     <button type="button" className={`attention-trigger${unreadCount ? ' has-unread' : ''}`}
@@ -353,20 +399,36 @@ export default function AttentionCenter() {
         <header className="attention-header">
           <div className="attention-title-wrap">
             <h2 id={titleId}>Attention center</h2>
-            <p id={descriptionId}>{unreadCount
-              ? `${unreadCount} unread ${unreadCount === 1 ? 'item' : 'items'}`
-              : 'You are caught up'}</p>
+            <p id={descriptionId}>{headerStatus}</p>
           </div>
-          <button type="button" className="attention-header-action" disabled={!unreadCount}
-            onClick={markAllRead}>Mark all read</button>
+          {unreadCount > 0 && <button type="button" className="attention-header-action"
+            onClick={markAllRead}>Mark all read</button>}
           <button type="button" className="attention-close" aria-label="Close attention center"
             data-dialog-initial-focus onClick={close}><OpIcon name="cross" size={20} /></button>
         </header>
 
         <div className="attention-scroll">
-          {sourceMessages.length > 0 && <ul className="attention-source-status" role="status">
-            {sourceMessages.map(message => <li key={message}>{message}</li>)}
-          </ul>}
+          {sourceMessages.length > 0 && <div className="attention-source-status">
+            <ul role="status" aria-live="polite">
+              {sourceMessages.map(message => <li key={message}>{message}</li>)}
+            </ul>
+            {!feedVerified && <button type="button" className="attention-button subtle"
+              onClick={() => refresh?.()}>Retry now</button>}
+          </div>}
+
+          <section className="attention-section" aria-labelledby={`${titleId}-action`}>
+            <div className="attention-section-heading">
+              <h3 id={`${titleId}-action`}>Needs action</h3>
+              <span>{actionItems.length}</span>
+            </div>
+            {actionItems.length
+              ? <ul className="attention-list">{actionItems.map(item => <AttentionItem key={item.id}
+                  item={item} unread={!acknowledgedIds.has(item.id)}
+                  sourceStale={item.source === 'run' ? runStale : permissionsStale}
+                  onAcknowledge={acknowledge} onMarkRead={markRead}
+                  onDismiss={dismiss} onOpenPermission={openPermission} />)}</ul>
+              : <p className="attention-empty">{actionEmptyCopy}</p>}
+          </section>
 
           <section className="attention-notifications" aria-labelledby={`${titleId}-notifications`}>
             <div>
@@ -381,19 +443,6 @@ export default function AttentionCenter() {
           </section>
           {notificationFeedback && <p className="attention-feedback" role="status">{notificationFeedback}</p>}
 
-          <section className="attention-section" aria-labelledby={`${titleId}-action`}>
-            <div className="attention-section-heading">
-              <h3 id={`${titleId}-action`}>Needs action</h3>
-              <span>{actionItems.length}</span>
-            </div>
-            {actionItems.length
-              ? <ul className="attention-list">{actionItems.map(item => <AttentionItem key={item.id}
-                  item={item} unread={!acknowledgedIds.has(item.id)} onAcknowledge={acknowledge}
-                  onDismiss={dismiss} onOpenPermission={openPermission} />)}</ul>
-              : <p className="attention-empty">{initialized
-                  ? 'Nothing needs your action right now.' : 'Checking for items that need action…'}</p>}
-          </section>
-
           <section className="attention-section" aria-labelledby={`${titleId}-recent`}>
             <div className="attention-section-heading">
               <h3 id={`${titleId}-recent`}>Recent</h3>
@@ -401,10 +450,11 @@ export default function AttentionCenter() {
             </div>
             {recentItems.length
               ? <ul className="attention-list">{recentItems.map(item => <AttentionItem key={item.id}
-                  item={item} unread={!acknowledgedIds.has(item.id)} onAcknowledge={acknowledge}
+                  item={item} unread={!acknowledgedIds.has(item.id)}
+                  sourceStale={item.source === 'run' ? runStale : permissionsStale}
+                  onAcknowledge={acknowledge} onMarkRead={markRead}
                   onDismiss={dismiss} onOpenPermission={openPermission} />)}</ul>
-              : <p className="attention-empty">{initialized
-                  ? 'No recent completion or budget notices.' : 'Checking recent run notices…'}</p>}
+              : <p className="attention-empty">{recentEmptyCopy}</p>}
           </section>
 
           {hasMore && <div className="attention-load-more">
@@ -414,7 +464,9 @@ export default function AttentionCenter() {
           {loadMoreError && <p className="attention-feedback" role="status">{loadMoreError}</p>}
 
           {initialized && items.length > 0 && visibleItems.length === 0
-            && <p className="attention-all-dismissed">All current items are dismissed. New IDs will appear here normally.</p>}
+            && <p className="attention-all-dismissed">{feedVerified
+              ? 'All current items are dismissed. New IDs will appear here normally.'
+              : 'All items in the last verified snapshot are dismissed. Retry to check the current state.'}</p>}
         </div>
       </section>
     </div>}
