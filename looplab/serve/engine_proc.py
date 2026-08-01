@@ -742,18 +742,27 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
     def _wait_then_spawn() -> None:
         try:
             last_sig = None
+            last_pending_check = 0.0        # monotonic stamp of the last full-log `_pending()` fold
             while True:
                 while _spawn_liveness(run_dir) is not False:
                     sig = _log_sig()
-                    # CLAUDE REVIEW: [PERF] _pending() re-reads and re-folds the ENTIRE events.jsonl
-                    # every time the log signature changes. While the live owner is actively
-                    # appending (long finalization tail, or a stale unserved resume request on an
-                    # engine that runs for hours), this waiter refolds the full log once per append
-                    # at up to 20 Hz for the run's whole remaining lifetime — O(n) per event, O(n^2)
-                    # aggregate. An incremental observation (CommandObservationIndex) or a
-                    # tail-only resume_served check would bound this.
-                    if sig != last_sig:
+                    # RATE-LIMITED, because `_pending()` re-reads and re-folds the ENTIRE log and the
+                    # signature moves on every append: a live owner writing a long finalization tail
+                    # made this waiter refold the whole log at the poll rate for the rest of the run.
+                    #
+                    # Deliberately NOT made incremental. `CommandObservationIndex` would parse only
+                    # the new suffix, but `resume_pending()` is derived from a FOLD, and the fold is
+                    # re-run whole on every revision — so the observation index moves the parse cost
+                    # and leaves the O(n) fold. A tail-only `resume_served` probe would be O(1) but
+                    # cannot see a `resume_requested` that lands after it, which is exactly the
+                    # comparison `resume_pending()` exists to make. The interval below is bounded by
+                    # a pinned contract: `test_live_owner_explicitly_serves_resume_before_finish`
+                    # gives the waiter 0.75s to notice an explicit serve, and that latency is the
+                    # point of the waiter — so this trades a constant factor, not the complexity.
+                    now = time.monotonic()
+                    if sig != last_sig and now - last_pending_check >= _PENDING_RECHECK_S:
                         last_sig = sig
+                        last_pending_check = now
                         # A live owner explicitly served the wake-up. Stop probing its lock for the
                         # rest of a potentially hours-long run; a later request installs a new waiter.
                         if _pending() is False:
@@ -802,17 +811,28 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
     return True
 
 
+# Minimum seconds between two full-log `_pending()` folds in the tail waiter. The log signature
+# moves on every append, so without this the waiter refolds the whole log at its 20 Hz poll rate for
+# as long as the owner keeps writing. Kept well inside the 0.75s an explicit serve is given to be
+# noticed (see the waiter's comment); the liveness probe itself keeps its original cadence.
+_PENDING_RECHECK_S = 0.25
+
+
 def install_resume_reconcile_hooks(
         app, root: Path, *, before_spawn: Optional[Callable[[], None]] = None) -> threading.Event:
     """Recover durable resume intents on startup, without requiring a dashboard list poll."""
     timers: list[threading.Timer] = []
     shutdown = threading.Event()
 
-    # CLAUDE REVIEW: [PERF] _scan_startup runs synchronously inside the ASGI startup hook and does
-    # fold(store.read_all()) — a full parse + fold of the COMPLETE event log — for EVERY run under the
-    # root. A run root with many/large runs (multi-GB logs) blocks server readiness for the whole
-    # scan. Only resume_pending() is needed here; a cheap tail/derived check (or offloading the scan
-    # to a background thread like the reap/timer machinery already uses) would keep startup O(1).
+    # ADJUDICATED, kept SYNCHRONOUS. This folds the complete event log of every run under the root,
+    # so a workspace of many large runs does hold up server readiness — the cost is real. But
+    # "startup has recovered by the time startup returns" is the guarantee, not an implementation
+    # detail: `test_server_startup_recovers_restart_after_command_worker_loss` asserts the re-spawn
+    # has happened once the app has started, and moving the scan to a daemon thread makes recovery
+    # race the first request and the shutdown hook (a server stopped early would silently skip it).
+    # The cheap-check alternative is not available either: only `resume_pending()` is needed, but it
+    # is derived from the FOLD, and a tail probe cannot make that comparison (see the tail waiter's
+    # note). Losing an unserved resume is worse than a slow start, so the slow start stays.
     def _scan_startup() -> None:
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold

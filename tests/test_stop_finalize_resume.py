@@ -427,3 +427,59 @@ def test_partial_reflection_is_not_replayed_or_rebilled_on_finalize_retry(monkey
     recovered = [event.data for event in store.read_all()
                  if event.type == "finalize_step" and event.data.get("step") == "reflection"]
     assert recovered[-1]["outcome"] == "prior_attempt_incomplete_not_replayed"
+
+
+def test_the_tail_waiter_rate_limits_its_full_log_refolds(tmp_path, monkeypatch):
+    """`_pending()` re-reads and re-folds the ENTIRE log, and the log signature moves on every
+    append — so a live owner writing a long finalization tail made this waiter refold the whole log
+    at its poll rate for the rest of the run."""
+    import threading
+    import time
+
+    import looplab.serve.engine_proc as ep
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "demo", "task_id": "t", "direction": "min"})
+    # An UNSERVED resume keeps `_pending()` True, so the waiter stays in its poll loop instead of
+    # returning on the first check — which is the state this rate limit exists for.
+    store.append("resume_requested", {})
+
+    folds = []
+    monkeypatch.setattr(ep, "_spawn_liveness", lambda _rd: True)      # a live owner, never exits
+    real_pending_source = ep.fold if hasattr(ep, "fold") else None
+    assert real_pending_source is None, "waiter folds via a local import; patch replay instead"
+
+    import looplab.events.replay as replay
+    real_fold = replay.fold
+    monkeypatch.setattr(replay, "fold", lambda events: (folds.append(1), real_fold(events))[1])
+
+    stop = threading.Event()
+
+    def _append_forever():
+        while not stop.is_set():
+            store.append("timeline_note", {"n": len(folds)})
+            time.sleep(0.005)                       # ~200 appends/s: far above the poll rate
+
+    writer = threading.Thread(target=_append_forever, daemon=True)
+    cancel = threading.Event()
+    writer.start()
+    try:
+        waiter = threading.Thread(
+            target=lambda: ep._spawn_engine_after_exit(
+                ["resume", str(rd)], run_dir=rd, cancel_event=cancel),
+            daemon=True)
+        waiter.start()
+        time.sleep(1.5)
+    finally:
+        cancel.set()
+        stop.set()
+        writer.join(timeout=5)
+
+    # 1.5s of continuous appends against a 20 Hz poll is ~30 refolds unthrottled. The bound is an
+    # absolute number, not a function of the interval, so shrinking the interval to nothing is a
+    # behavioural failure rather than an arithmetic one.
+    assert len(folds) <= 14, (
+        f"{len(folds)} full-log folds in 1.5s of appends — the waiter is refolding per append")
