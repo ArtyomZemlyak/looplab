@@ -1664,9 +1664,12 @@ export const saveSecret = (key, value, { expectedRevision, ...options } = {}) =>
   }, options)
 // Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
 // change (only changed fields are sent). A live engine keeps its in-memory copy until restart.
-export const saveRunConfig = (rid, settings, { expectedRevision, ...options } = {}) =>
+export const saveRunConfig = (rid, settings, {
+  expectedRevision, expectedGeneration, ...options
+} = {}) =>
   send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', {
     settings, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
+    ...(expectedGeneration == null ? {} : { expected_generation: expectedGeneration }),
   }, options)
 
 // Experimental Research Atlas: owner-only, read-only projections over the shared memory portfolio.

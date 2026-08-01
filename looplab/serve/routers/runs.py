@@ -145,6 +145,7 @@ class RunConfigUpdateRequest(BaseModel):
 
     settings: dict[str, Any]
     expected_revision: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")] = None
+    expected_generation: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 class LegacyRunConfigUpdateRequest(BaseModel):
@@ -156,6 +157,7 @@ class LegacyRunConfigUpdateRequest(BaseModel):
     )
 
     expected_revision: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")] = None
+    expected_generation: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
 class RunConfigUpdateResponse(BaseModel):
@@ -2612,7 +2614,8 @@ def build_router(srv) -> APIRouter:
         raise HTTPException(409, "the run changed while trust_gate was being saved; retry the edit")
 
     def _put_run_config_locked(
-            rd: Path, snap: Path, incoming: dict, expected_revision: Optional[str]) -> dict:
+            rd: Path, snap: Path, incoming: dict, expected_revision: Optional[str],
+            expected_generation: str) -> dict:
         """Read/compare/merge/validate/write while the caller holds both config locks."""
         from pydantic import ValidationError
         from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
@@ -2690,6 +2693,17 @@ def build_router(srv) -> APIRouter:
         except Exception as exc:  # noqa: BLE001 - normalize any other coercion failure
             raise HTTPException(422, f"invalid settings: {exc}") from exc
 
+        # This is the last authority check before the first durable mutation. Reset owns this same
+        # config lock, so the named generation cannot be replaced between this check and the write.
+        current_generation = srv.commands.run_generation(rd)
+        if current_generation != expected_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": current_generation or None,
+                "message": "The run was reset while these settings were being edited.",
+                "remediation": "Reload the run's configuration and re-apply your changes.",
+            })
         atomic_write_text(snap, json.dumps(updated, indent=2))
         # trust_gate is enforced by the fold, so repair its event while this config transaction is
         # still serialized. A legacy request can retry an ambiguous dual-write failure safely.
@@ -2752,10 +2766,15 @@ def build_router(srv) -> APIRouter:
         # survives a reset byte-identical — and a revision observed against generation A therefore
         # still matches after the run has been reset into generation B, letting a delayed PUT rewrite
         # the replacement run's settings. `expected_generation` is the fence that actually names the
-        # run; optional for now because the UI does not send it yet, mandatory once it does.
+        # run, so every write must name the exact generation displayed with the edited form.
         expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
-        if expected_generation is not None and not isinstance(expected_generation, str):
-            raise HTTPException(400, f"{EXPECTED_RUN_GENERATION_FIELD} must be a string")
+        if (not isinstance(expected_generation, str)
+                or _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from the run state.",
+                "remediation": "Reload the run before saving its configuration.",
+            })
         incoming = body.get("settings", body)
         if not isinstance(incoming, dict):
             raise HTTPException(400, "settings must be a JSON object")
@@ -2771,15 +2790,8 @@ def build_router(srv) -> APIRouter:
                   _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
                 assert_run_reset_write_allowed(rd)
                 assert_run_deletion_write_allowed(rd)
-                # Checked INSIDE the lock: reset can land between the request arriving and the write.
-                if (expected_generation is not None
-                        and srv.commands.run_generation(rd) != expected_generation):
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "message": "the run was reset while these settings were being edited",
-                        "remediation": "reload the run's configuration and re-apply your changes",
-                    })
-                return _put_run_config_locked(rd, snap, incoming, expected_revision)
+                return _put_run_config_locked(
+                    rd, snap, incoming, expected_revision, expected_generation)
         except EventStoreLockError as exc:
             raise HTTPException(503, {
                 "code": "run_config_lock_unavailable",

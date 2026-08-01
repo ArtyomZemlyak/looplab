@@ -272,9 +272,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [history, setHistory] = useState(liveHistory)
   const [historyRetry, setHistoryRetry] = useState(0)
   const readOnlyMode = reviewMode || historyActive || routeFenceBlocked
+  // A route id is not mutation authority. Keep every persistent control fail-closed until the
+  // resource has supplied both the current run state and its generation; 404/410 and transport
+  // failures must never inherit the previous route's live access.
+  const runAuthorityBlocked = runStatus !== 'ready' || !live || !generation
   const startOverMutationBlocked = startOverRecovery.kind === 'active'
     || startOverRecovery.kind === 'corrupt'
-  const mutationReadOnlyMode = readOnlyMode || startOverMutationBlocked
+  const mutationReadOnlyMode = readOnlyMode || runAuthorityBlocked || startOverMutationBlocked
   const mutationReadOnlyReason = reviewMode ? 'review'
     : startOverMutationBlocked ? 'start-over' : 'history'
   const reviewEvidence = reviewMode && (reviewMeta?.scopes || []).includes('evidence')
@@ -324,12 +328,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     // live access during the commit-to-passive-effect window.
     setRunAccess(runId, { readOnly: mutationReadOnlyMode, seq: viewSeq,
       mode: reviewMode ? 'review' : startOverMutationBlocked ? 'start-over'
-        : routeFenceBlocked ? 'stale-link' : historyActive ? 'history' : 'live' })
+        : routeFenceBlocked ? 'stale-link' : historyActive ? 'history'
+          : runStatus === 'loading' ? 'loading' : runAuthorityBlocked ? 'unavailable' : 'live' })
     // An unresolved destructive operation outlives this route. Leave its published access lock in
     // place when navigating Back; getRunAccess also reconstructs it from session storage after reload.
     return () => { if (!startOverMutationBlocked) clearRunAccess(runId) }
   }, [runId, reviewMode, mutationReadOnlyMode, viewSeq, historyActive, routeFenceBlocked,
-    startOverMutationBlocked])
+    runStatus, runAuthorityBlocked, startOverMutationBlocked])
   const [toast, setToast] = useState(null)
   const [routeNotice, setRouteNotice] = useState('')
   const [copyFallback, setCopyFallback] = useState('')
@@ -1963,7 +1968,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         reviewRouteState={routeState} reviewMode={reviewMode}
         draftStore={inspectorDraftStoreRef.current}
         expectedGeneration={generation} refreshKey={state?.comments_revision} />}
-      {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={closePanel} />}
+      {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId}
+        expectedGeneration={generation} state={state} live={live} onToast={showToast} onClose={closePanel} />}
       {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
       {panel === 'memory' && panelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
       {panel === 'registry' && panelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}

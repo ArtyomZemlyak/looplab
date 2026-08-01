@@ -41,6 +41,7 @@ const nullableNumber = value => value === null || (typeof value === 'number' && 
 // before replacing last-good data or presenting an authoritative empty state.
 const PANEL_REQUEST_TIMEOUT_MS = 15_000
 const publicConfigForm = form => ({ ...(form || {}), llm_api_key: '' })
+const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 
 function authoringPayload(value) {
   if (!isRecord(value) || !nullableText(value.dir) || !Array.isArray(value.files)) invalidPanelPayload()
@@ -558,7 +559,7 @@ export function DataQualityPanel({ state, onClose }) {
 // defaults), so this is how you change a specific run's settings (e.g. raise `timeout`, enable timeout
 // repair). Works for live runs too: saving the snapshot is safe mid-run (the engine never re-reads it),
 // and a "Pause & resume" applies it now by restarting the engine (pause → wait for it to stop → resume).
-export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }) {
+export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: closePanel, onToast }) {
   const [cfg, setCfg] = useState(null)
   const [settingsSchema, setSettingsSchema] = useState(null)
   const [form, setForm] = useState(null)
@@ -578,24 +579,62 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
   const budgetHelpId = useId()
   const budgetInputId = `${budgetHelpId}-input`
   const loadGenerationRef = useRef(0)
+  const loadedIdentityRef = useRef({ runId: '', expectedGeneration: '' })
   const mutationRef = useRef(null)
   const allowConfigNavigationRef = useRef(false)
-  useEffect(() => setSec(''), [runId])
+  useEffect(() => setSec(''), [runId, expectedGeneration])
   useEffect(() => {
+    const requestedGeneration = typeof expectedGeneration === 'string' ? expectedGeneration : ''
+    const previousIdentity = loadedIdentityRef.current
     const generation = ++loadGenerationRef.current
-    const configRequest = deadlineGet(runApiPath(runId, '/config'), PANEL_REQUEST_TIMEOUT_MS)
+    const generationChanged = previousIdentity.runId === runId
+      && previousIdentity.expectedGeneration
+      && previousIdentity.expectedGeneration !== requestedGeneration
+    const uncertainKeys = settingsSchema && form && saved
+      ? Object.keys(settingsSchema.fieldByKey).filter(
+        key => JSON.stringify(form[key]) !== JSON.stringify(saved[key]))
+      : []
+    const uncertainControlKeys = JSON.stringify(agentControl) !== JSON.stringify(savedAC)
+      ? [...new Set([...Object.keys(agentControl), ...Object.keys(savedAC)])] : []
+    const retainedKeys = [...new Set([
+      ...uncertainKeys, ...(configMutationUnknown?.uncertainKeys || []),
+    ])]
+    const retainedControlKeys = [...new Set([
+      ...uncertainControlKeys, ...(configMutationUnknown?.uncertainControlKeys || []),
+    ])]
+    // A reset may replace the run while this panel has edits or an uncertain write. Keep that form
+    // visibly fenced to its old identity until an explicit authoritative reload rebases the draft.
+    if (generationChanged && form && saved
+        && (retainedKeys.length || retainedControlKeys.length || busy || configMutationUnknown)) {
+      mutationRef.current = null
+      setBusy(false); setLoadError('')
+      setConfigMutationUnknown({
+        stage: 'conflict', runId, generation, expectedGeneration: requestedGeneration,
+        submittedForm: publicConfigForm(form), submittedControl: agentControl,
+        uncertainKeys: retainedKeys, uncertainControlKeys: retainedControlKeys,
+      })
+      onToast('The run changed. Load its current settings and review your retained draft.')
+      return undefined
+    }
+    loadedIdentityRef.current = { runId: '', expectedGeneration: '' }
     // A reused panel must never display or reconcile the previous run while the next config loads.
     mutationRef.current = null
     setBusy(false); setCfg(null); setSettingsSchema(null); setForm(null); setSaved(null); setLoadError('')
     setConfigMutationUnknown(null)
     setAgentControl({}); setSavedAC({})
     setConfigMeta({ configRevision: '', pinnedFields: new Set(), readOnlyFields: new Set(), mismatchFields: [] })
+    if (!RUN_GENERATION_RE.test(requestedGeneration)) {
+      setLoadError('Run identity is not available yet. Wait for the current run state and retry.')
+      return undefined
+    }
+    const configRequest = deadlineGet(runApiPath(runId, '/config'), PANEL_REQUEST_TIMEOUT_MS)
     Promise.all([
       configRequest.promise,
       loadSettingsSchema({ reload: loadNonce > 0 }),
     ]).then(([c, nextSchema]) => {
       if (configRequest.controller.signal.aborted || generation !== loadGenerationRef.current) return
       const parsed = splitRunConfigPayload(c, nextSchema)
+      loadedIdentityRef.current = { runId, expectedGeneration: requestedGeneration }
       setCfg(parsed.config); setConfigMeta(parsed)
       setSettingsSchema(nextSchema)
       const f = toForm(parsed.config, nextSchema); setForm(f); setSaved(f)
@@ -607,13 +646,17 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
       }
     })
     return () => configRequest.controller.abort()
-  }, [runId, loadNonce])
+  }, [runId, expectedGeneration, loadNonce])
 
   // A live engine keeps its in-memory settings until it restarts; gate on `live` (not the possibly
   // historical `state`) so time-travel doesn't misreport liveness.
   const engineLive = live?.engine_running === true
   const engineStopped = live?.engine_running === false
-  const controlBusy = busy || !!configMutationUnknown
+  const loadedIdentity = loadedIdentityRef.current
+  const configIdentityReady = loadedIdentity.runId === runId
+    && loadedIdentity.expectedGeneration === expectedGeneration
+    && RUN_GENERATION_RE.test(loadedIdentity.expectedGeneration)
+  const controlBusy = busy || !!configMutationUnknown || !configIdentityReady
   const liveEvalSeconds = Number(live?.total_eval_seconds ?? state?.total_eval_seconds)
   const runtimeEvalCeiling = Number(
     live?.budget_overrides?.max_eval_seconds ?? state?.budget_overrides?.max_eval_seconds)
@@ -719,9 +762,18 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
     const cur = new Set(ac[key] || []); cur.has(role) ? cur.delete(role) : cur.add(role)
     return { ...ac, [key]: [...cur] }
   })
-  const beginMutation = (kind = 'control') => {
+  const beginMutation = (kind = 'control', reconcileGeneration = '') => {
     if (mutationRef.current || (configMutationUnknown && kind !== 'reconciling')) return null
-    const token = { generation: loadGenerationRef.current, kind }
+    const identity = loadedIdentityRef.current
+    const mutationGeneration = kind === 'reconciling'
+      ? reconcileGeneration : identity.expectedGeneration
+    if (identity.runId !== runId || !RUN_GENERATION_RE.test(mutationGeneration)
+        || mutationGeneration !== expectedGeneration
+        || (kind !== 'reconciling' && identity.expectedGeneration !== expectedGeneration)) return null
+    const token = {
+      generation: loadGenerationRef.current, runId,
+      expectedGeneration: mutationGeneration, kind,
+    }
     mutationRef.current = token
     setBusy(true)
     return token
@@ -737,13 +789,15 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
     setRaw(false)
     setInvalidFocus(previous => ({ key, request: previous.request + 1 }))
   }
-  const rememberUnknownSave = (stage, submittedForm, submittedControl, submittedRunId, generation,
+  const rememberUnknownSave = (stage, submittedForm, submittedControl, submittedRunId, mutation,
     uncertainKeys, uncertainControlKeys) => {
-    if (generation !== loadGenerationRef.current || submittedRunId !== runId) return
+    if (mutation.generation !== loadGenerationRef.current || submittedRunId !== runId
+        || mutation.expectedGeneration !== expectedGeneration) return
     setConfigMutationUnknown({
       stage,
       runId: submittedRunId,
-      generation,
+      generation: mutation.generation,
+      expectedGeneration: mutation.expectedGeneration,
       submittedForm: publicConfigForm(toForm(
         fromForm(submittedForm, settingsSchema, { allowClear: false }), settingsSchema)),
       submittedControl,
@@ -757,16 +811,20 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
   const reconcileUnknownSave = async () => {
     const recovery = configMutationUnknown
     if (!recovery) return
-    const mutation = beginMutation('reconciling')
+    const mutation = beginMutation('reconciling', recovery.expectedGeneration)
     if (!mutation) return
     const request = deadlineGet(
       runApiPath(recovery.runId, '/config'), PANEL_REQUEST_TIMEOUT_MS)
     try {
       const response = await request.promise
-      if (mutation.generation !== loadGenerationRef.current || recovery.runId !== runId) return
+      if (mutation.generation !== loadGenerationRef.current || recovery.runId !== runId
+          || mutation.expectedGeneration !== expectedGeneration) return
       const parsed = splitRunConfigPayload(response, settingsSchema)
       const acceptedForm = toForm(parsed.config, settingsSchema)
       const acceptedControl = parsed.config.agent_control || {}
+      loadedIdentityRef.current = {
+        runId: recovery.runId, expectedGeneration: mutation.expectedGeneration,
+      }
       setCfg(parsed.config); setConfigMeta(parsed); setSaved(acceptedForm); setSavedAC(acceptedControl)
       setForm(current => reconcileUnknownRecord(
         current, recovery.submittedForm, acceptedForm, recovery.uncertainKeys,
@@ -801,15 +859,17 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
     if (!Object.keys(changed).length) return
     const mutation = beginMutation('save')
     if (!mutation) return
-    const submittedRunId = runId
+    const submittedRunId = mutation.runId
     try {
       const write = deadlineRequest(
         signal => saveRunConfig(submittedRunId, changed, {
           signal, expectedRevision: submittedRevision,
+          expectedGeneration: mutation.expectedGeneration,
         }), PANEL_REQUEST_TIMEOUT_MS,
       )
       const r = validateRunConfigSaveAck(await write.promise, settingsSchema)
-      if (mutation.generation !== loadGenerationRef.current) return
+      if (mutation.generation !== loadGenerationRef.current
+          || loadedIdentityRef.current.expectedGeneration !== mutation.expectedGeneration) return
       const parsed = splitRunConfigPayload(r.config, settingsSchema)
       const acceptedForm = toForm(parsed.config, settingsSchema)
       const acceptedControl = parsed.config.agent_control || {}
@@ -821,16 +881,17 @@ export function ConfigPanel({ runId, state, live, onClose: closePanel, onToast }
       const what = (r.changed?.length ? `saved ${r.changed.join(', ')}` : 'saved') + repaired
       onToast(what + (r.engine_running ? ' — applies when the live run restarts' : ' — applies on next resume'))
     } catch (e) {
-      const disposition = runConfigWriteDisposition(e)
+      const disposition = e?.status === 409 && e?.code === 'run_generation_changed'
+        ? 'conflict' : runConfigWriteDisposition(e)
       if (disposition === 'conflict') {
         rememberUnknownSave(
-          'conflict', submittedForm, submittedControl, submittedRunId, mutation.generation,
+          'conflict', submittedForm, submittedControl, submittedRunId, mutation,
           Object.keys(changed).filter(key => key !== 'agent_control'),
           acDirty ? [...new Set([...Object.keys(submittedControl), ...Object.keys(savedAC)])] : [],
         )
       } else if (disposition === 'unknown') {
         rememberUnknownSave(
-          'unknown', submittedForm, submittedControl, submittedRunId, mutation.generation,
+          'unknown', submittedForm, submittedControl, submittedRunId, mutation,
           Object.keys(changed).filter(key => key !== 'agent_control'),
           acDirty ? [...new Set([...Object.keys(submittedControl), ...Object.keys(savedAC)])] : [],
         )

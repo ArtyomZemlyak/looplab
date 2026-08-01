@@ -164,18 +164,37 @@ const readFileText = (file) => new Promise((resolve) => {
 
 export default function AssistantBar({ runId, hidden = false, onReady }) {
   const compactAssistant = useMediaQuery(`(max-width: ${ASSISTANT_OVERLAY_MAX_PX}px)`)
-  const [runAccess, setRunAccessState] = useState(() => getRunAccess(runId))
+  const runAccessKey = runId == null ? null : String(runId)
+  const pendingRouteAccess = { readOnly: true, seq: null, mode: 'loading' }
+  const [runAccessState, setRunAccessState] = useState(() => ({
+    runId: runAccessKey,
+    // RunView publishes authoritative access in a layout effect. Until that publication is
+    // observed, the persistent Assistant must not reuse a previous route's live capability.
+    access: runId ? pendingRouteAccess : getRunAccess(runId),
+  }))
+  const runAccess = runAccessState.runId === runAccessKey
+    ? runAccessState.access : pendingRouteAccess
   const historical = !!runId && runAccess.readOnly
   const staleDiagnostic = historical && runAccess.mode === 'stale-link'
   const startOverLocked = historical && runAccess.mode === 'start-over'
   const reviewLocked = historical && runAccess.mode === 'review'
-  const readOnlyAction = startOverLocked
+  const runLoadingLocked = historical && runAccess.mode === 'loading'
+  const runUnavailableLocked = historical && runAccess.mode === 'unavailable'
+  const readOnlyAction = runLoadingLocked
+    ? 'Run access is still loading; Assistant actions stay paused until it is verified'
+    : runUnavailableLocked
+      ? 'This run is unavailable; return to the run list or retry before using Assistant actions'
+      : startOverLocked
     ? 'Start over must be resolved before asking the Assistant to change this run'
     : reviewLocked ? 'This review link is read-only'
       : staleDiagnostic
         ? 'This diagnostic link targets an earlier run generation — open the current generation to act'
         : `History seq ${runAccess.seq} is read-only — return live to act`
-  const readOnlyShort = startOverLocked
+  const readOnlyShort = runLoadingLocked
+    ? 'Run loading · Assistant paused'
+    : runUnavailableLocked
+      ? 'Run unavailable · Assistant paused'
+      : startOverLocked
     ? 'Start over unresolved · recover the exact request'
     : reviewLocked ? 'Read-only review'
       : staleDiagnostic
@@ -329,9 +348,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     })
   }, [])
   useEffect(() => {
-    setRunAccessState(getRunAccess(runId))
+    const accessKey = runId == null ? null : String(runId)
+    setRunAccessState({ runId: accessKey, access: getRunAccess(runId) })
     const onAccess = (e) => {
-      if (String(e.detail?.runId) === String(runId)) setRunAccessState(getRunAccess(runId))
+      if (String(e.detail?.runId) === String(runId)) {
+        setRunAccessState({ runId: accessKey, access: getRunAccess(runId) })
+      }
     }
     window.addEventListener('ll:run-access', onAccess)
     return () => window.removeEventListener('ll:run-access', onAccess)
@@ -1717,7 +1739,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div className="chat-in asst-in">
-    {historical && <div className="assistant-history-lock">{startOverLocked
+    {historical && <div className="assistant-history-lock">{runLoadingLocked
+      ? 'Verifying this run · Assistant actions are paused.'
+      : runUnavailableLocked
+        ? 'Run unavailable · Assistant actions are paused. Retry the run or return to the run list.'
+        : startOverLocked
       ? 'Start over unresolved · Assistant paused until the exact request is recovered.'
       : reviewLocked ? 'Read-only review · Assistant actions are unavailable.'
         : staleDiagnostic
