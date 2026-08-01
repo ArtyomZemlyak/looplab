@@ -1351,7 +1351,98 @@ export const clearNodeTrace = (
   }, { signal })
 }
 
-export const llmHealth = (options = {}) => get('/api/llm/health', options)
+const validSettingsRevision = value => typeof value === 'string' && value.length > 0 && value.length <= 256
+const validLlmHealthIdentity = value => typeof value === 'string'
+  && /^probe-v1:[\da-f]{64}$/i.test(value)
+const validLlmHealthFailureCode = value => typeof value === 'string'
+  && /^[a-z][a-z0-9_:-]{0,127}$/i.test(value)
+
+const llmHealthRevisionError = (code, message, detail = null) => {
+  const error = new Error(message)
+  error.code = code
+  if (detail) error.detail = detail
+  return error
+}
+
+export async function llmHealth(
+  expectedSettingsRevision, expectedSecretRevision, operationId, options = {},
+) {
+  if (!validSettingsRevision(expectedSettingsRevision) || !validSettingsRevision(expectedSecretRevision)) {
+    throw llmHealthRevisionError(
+      'llm_health_revision_unavailable',
+      'Saved settings revisions are required before testing the LLM configuration.',
+    )
+  }
+  if (!UUID_V4_RE.test(operationId || '')) {
+    throw llmHealthRevisionError(
+      'llm_health_operation_unavailable',
+      'A unique operation identity is required before testing the LLM configuration.',
+    )
+  }
+  const { replayOnly = false, ...requestOptions } = options
+  let payload
+  try {
+    payload = await post('/api/llm/health', {
+      expected_settings_revision: expectedSettingsRevision,
+      expected_secret_revision: expectedSecretRevision,
+      operation_id: operationId,
+      replay_only: replayOnly === true,
+    }, requestOptions)
+  } catch (error) {
+    const detail = error?.detail && typeof error.detail === 'object'
+      && !Array.isArray(error.detail) ? error.detail : null
+    const exactErrorEnvelope = detail
+      && detail.operation_id === operationId
+      && detail.expected_settings_revision === expectedSettingsRevision
+      && detail.expected_secret_revision === expectedSecretRevision
+      && validLlmHealthFailureCode(detail.code)
+      && typeof detail.provider_attempted === 'boolean'
+      && typeof detail.outcome_unknown === 'boolean'
+      && (detail.ambiguous == null || typeof detail.ambiguous === 'boolean')
+      && !(detail.ambiguous === true && detail.outcome_unknown !== true)
+    if (!exactErrorEnvelope) {
+      throw llmHealthRevisionError(
+        'llm_health_identity_protocol_error',
+        'The LLM health error did not prove which operation or saved configuration it belonged to.',
+        {
+          operation_id: operationId,
+          provider_attempted: detail?.provider_attempted === true,
+          ambiguous: true,
+          outcome_unknown: true,
+        },
+      )
+    }
+    throw error
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || payload.operation_id !== operationId
+      || payload.settings_revision !== expectedSettingsRevision
+      || payload.secret_revision !== expectedSecretRevision
+      || typeof payload.ok !== 'boolean'
+      || typeof payload.provider_attempted !== 'boolean'
+      || typeof payload.outcome_unknown !== 'boolean'
+      || (payload.ambiguous != null && typeof payload.ambiguous !== 'boolean')
+      || !validLlmHealthIdentity(payload.effective_identity)
+      || (payload.ok === true
+        && (payload.provider_attempted !== true || payload.outcome_unknown !== false))
+      || (payload.outcome_unknown === true && payload.provider_attempted !== true)
+      || (payload.ambiguous === true && payload.outcome_unknown !== true)
+      || (payload.ok === false
+        && !validLlmHealthFailureCode(payload.code || payload.error_kind))) {
+    throw llmHealthRevisionError(
+      'llm_health_identity_protocol_error',
+      'The LLM health response did not match the requested operation, saved settings revisions, or provider-attempt contract.',
+      {
+        operation_id: operationId,
+        provider_attempted: payload?.provider_attempted === true,
+        // A malformed success envelope cannot prove that a paid provider attempt did not happen.
+        ambiguous: true,
+        outcome_unknown: true,
+      },
+    )
+  }
+  return payload
+}
 
 // Owner and reviewer are distinct principals. A review fragment wins even if this tab has stale
 // owner state, so the read-only surface can never accidentally send both credentials.

@@ -10,14 +10,17 @@ panel bug), and is included LAST among the /api routers by `make_app`."""
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import stat
 import threading
 import time
 import unicodedata
+from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
@@ -51,6 +54,11 @@ _AUTHOR_MAX_FILES = 500
 _AUTHOR_MAX_BYTES = 256 * 1024
 _AUTHOR_OPERATION_RE = re.compile(
     r"\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+_LLM_HEALTH_OPERATION_MAX = 256
+_LLM_HEALTH_OPERATION_TTL_S = 10 * 60.0
+_LLM_HEALTH_MAX_TOKENS = 4
+_LLM_HEALTH_TIMEOUT_MIN_S = 0.25
+_LLM_HEALTH_TIMEOUT_MAX_S = 60.0
 _AUTHOR_REVISION_RE = re.compile(r"\A(?:missing|sha256:[0-9a-f]{64})\Z")
 _AUTHOR_RESULT_REVISION_RE = re.compile(r"\A(?:missing|oversized|sha256:[0-9a-f]{64})\Z")
 _AUTHOR_TARGET_ROOT_ID_RE = re.compile(r"\Aroot-sha256:[0-9a-f]{64}\Z")
@@ -141,6 +149,20 @@ class SettingsSnapshotResponse(BaseModel):
     defaults: dict[str, Any]
     settings_revision: str
     secret_revision: str
+
+
+class LLMHealthRequest(BaseModel):
+    """One paid provider probe bound to the saved Settings snapshot the owner displayed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_settings_revision: Annotated[str, Field(min_length=1, max_length=256)]
+    expected_secret_revision: Annotated[str, Field(min_length=1, max_length=256)]
+    operation_id: str = Field(
+        min_length=36, max_length=36,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
+    replay_only: bool = False
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -1020,6 +1042,12 @@ def _run_legacy_author_write(srv, *, kind: str, name: str, text: str) -> dict[st
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     store = srv.settings
+    # App-local paid-probe registry. It intentionally does not cross run roots/processes and retains
+    # only opaque request identities plus terminal public envelopes -- never Settings, credentials,
+    # provider output, clients, or raw exceptions.
+    llm_health_operations: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    llm_health_operations_lock = threading.Lock()
+    llm_health_identity_key = secrets.token_bytes(32)
 
     # ------------------------------------------------------------------ settings (UI defaults)
     # The engine has no settings server (ADR-18); these are UI-chosen DEFAULTS for new runs,
@@ -1234,25 +1262,375 @@ def build_router(srv) -> APIRouter:
         Pure process-liveness — never touches the LLM, a run, or any sensitive state."""
         return {"ok": True, "service": "looplab"}
 
-    @router.get("/api/llm/health")
-    def llm_health():
-        """Liveness self-test for the configured LLM endpoint (the UI equivalent of `LoopLab
-        smoke`): pings the model with a one-word prompt. Never raises — returns reachability so
-        the UI can warn before a run launches against a dead endpoint."""
-        s = srv.llm_settings()
-        # The configured URL may contain user-info or sensitive query parameters.  The health card
-        # only needs the model identity, so never reflect the URL even to the owner API.
-        info = {"model": s.llm_model}
+    def _llm_health_revisions() -> tuple[str, str]:
+        # The fixed lock order matches GET /api/settings. Never hold either lock across provider I/O.
+        with store.ui_settings_transaction(), store.secret_transaction():
+            return store.ui_settings_revision(), store.secret_revision()
+
+    def _llm_health_effective_identity(settings: Settings, timeout_s: float) -> str:
+        """Process-keyed identity of the actual probe inputs, including URL/key, without a verifier."""
+        secret = (settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local") or "x"
+        header_timeout = min(float(getattr(settings, "llm_header_timeout", timeout_s)), timeout_s)
+        canonical = json.dumps({
+            "model": settings.llm_model,
+            "base_url": str(settings.llm_base_url).rstrip("/"),
+            "api_key": secret,
+            "temperature": settings.llm_temperature,
+            "trust_env": bool(getattr(settings, "llm_trust_env", False)),
+            "header_timeout": header_timeout,
+            "wall_timeout": timeout_s,
+            "stream": False,
+            "reasoning": False,
+            "cache": False,
+            "max_tokens": _LLM_HEALTH_MAX_TOKENS,
+        }, ensure_ascii=True, separators=(",", ":"), sort_keys=True, default=str).encode("utf-8")
+        return "probe-v1:" + hmac.new(
+            llm_health_identity_key, canonical, hashlib.sha256).hexdigest()
+
+    def _llm_health_prune_locked(now: float) -> None:
+        for operation_id, entry in list(llm_health_operations.items()):
+            completed_at = entry.get("completed_at")
+            if completed_at is not None and now - completed_at >= _LLM_HEALTH_OPERATION_TTL_S:
+                llm_health_operations.pop(operation_id, None)
+
+    def _llm_health_reserve(body: LLMHealthRequest) -> tuple[str, dict[str, Any] | None]:
+        identity = (body.expected_settings_revision, body.expected_secret_revision)
+        now = time.monotonic()
+        with llm_health_operations_lock:
+            _llm_health_prune_locked(now)
+            existing = llm_health_operations.get(body.operation_id)
+            if existing is not None:
+                llm_health_operations.move_to_end(body.operation_id)
+                return (("replay", existing) if existing["identity"] == identity
+                        else ("conflict", existing))
+            # Reconciliation is observation-only. After TTL eviction or a process restart, absence
+            # must stay absence instead of silently turning the old paid UUID into a new provider call.
+            if body.replay_only:
+                return "missing", None
+            # One app issues at most one paid probe at a time, even when two tabs mint different UUIDs.
+            if any(entry.get("completed_at") is None for entry in llm_health_operations.values()):
+                return "busy", None
+            while len(llm_health_operations) >= _LLM_HEALTH_OPERATION_MAX:
+                victim = next((key for key, entry in llm_health_operations.items()
+                               if entry.get("completed_at") is not None), None)
+                if victim is None:
+                    return "capacity", None
+                llm_health_operations.pop(victim, None)
+            entry = {
+                "identity": identity,
+                "done": threading.Event(),
+                "outcome": None,
+                "completed_at": None,
+            }
+            llm_health_operations[body.operation_id] = entry
+            return "leader", entry
+
+    def _llm_health_finish(operation_id: str, entry: dict[str, Any],
+                           outcome: tuple[int, dict[str, Any]]) -> None:
+        # `outcome` is already the public, allow-listed envelope. Keep no exception, Settings, client,
+        # provider text, URL, key, or response object reachable from the replay registry.
+        public_outcome = (int(outcome[0]), dict(outcome[1]))
+        with llm_health_operations_lock:
+            entry["outcome"] = public_outcome
+            entry["completed_at"] = time.monotonic()
+            if llm_health_operations.get(operation_id) is entry:
+                llm_health_operations.move_to_end(operation_id)
+            entry["done"].set()
+
+    def _llm_health_render(entry: dict[str, Any]):
+        entry["done"].wait()
+        outcome = entry.get("outcome")
+        if not isinstance(outcome, tuple) or len(outcome) != 2:
+            raise HTTPException(503, detail={
+                "code": "llm_health_outcome_unavailable",
+                "message": "The provider-check outcome is unavailable.",
+            })
+        status_code, payload = outcome
+        if status_code != 200:
+            raise HTTPException(status_code=status_code, detail=dict(payload))
+        return dict(payload)
+
+    def _llm_health_base(body: LLMHealthRequest, revisions: tuple[str, str], *,
+                         provider_attempted: bool, effective_identity: str) -> dict:
+        return {
+            "operation_id": body.operation_id,
+            "settings_revision": revisions[0],
+            "secret_revision": revisions[1],
+            "provider_attempted": provider_attempted,
+            "effective_identity": effective_identity,
+        }
+
+    def _llm_health_changed(body: LLMHealthRequest, revisions: tuple[str, str], *,
+                            provider_attempted: bool, change_scope: str,
+                            effective_identity: str | None = None,
+                            current_effective_identity: str | None = None) -> tuple[int, dict]:
+        after = provider_attempted
+        detail = {
+            "code": ("llm_configuration_changed_after_attempt" if after
+                     else "llm_configuration_changed"),
+            "message": ("LLM configuration changed while the provider attempt was in flight; "
+                        "the paid outcome is ambiguous." if after else
+                        "LLM configuration changed before the provider attempt."),
+            "remediation": ("Do not start a new probe automatically; inspect the saved configuration "
+                            "and explicitly choose whether to try again." if after else
+                            "Reload saved Settings and start a new provider check."),
+            "operation_id": body.operation_id,
+            "provider_attempted": provider_attempted,
+            "ambiguous": after,
+            "outcome_unknown": after,
+            "retryable": False,
+            "change_scope": change_scope,
+            "expected_settings_revision": body.expected_settings_revision,
+            "expected_secret_revision": body.expected_secret_revision,
+            "settings_revision": revisions[0],
+            "secret_revision": revisions[1],
+        }
+        if effective_identity is not None:
+            detail["effective_identity"] = effective_identity
+        if current_effective_identity is not None:
+            detail["current_effective_identity"] = current_effective_identity
+        return 409, detail
+
+    def _llm_health_unverifiable(body: LLMHealthRequest, *,
+                                 provider_attempted: bool) -> tuple[int, dict]:
+        return (409 if provider_attempted else 503), {
+            "code": ("llm_health_outcome_unverifiable_after_attempt" if provider_attempted
+                     else "llm_health_precondition_unavailable"),
+            "message": ("The provider attempt may have completed, but its configuration fence "
+                        "could not be verified." if provider_attempted else
+                        "The saved LLM configuration fence is temporarily unavailable."),
+            "remediation": ("Treat this operation as terminal and ambiguous; do not start another "
+                            "probe automatically." if provider_attempted else
+                            "Retry later with a new operation ID after settings storage is available."),
+            "operation_id": body.operation_id,
+            "provider_attempted": provider_attempted,
+            "ambiguous": provider_attempted,
+            "outcome_unknown": provider_attempted,
+            "retryable": False,
+            "expected_settings_revision": body.expected_settings_revision,
+            "expected_secret_revision": body.expected_secret_revision,
+        }
+
+    def _llm_health_definitive_rejection(_exc: Exception, failure: dict) -> bool:
+        # Only classifications whose semantics prove that the provider declined the request may
+        # release the recovery fence. A generic/provider-specific 4xx (including proxy 4xx) can be
+        # emitted after upstream work started, so its billing/outcome must remain unknown.
+        return failure.get("error_kind") in {"credentials", "rate_limit"}
+
+    def _run_llm_health(body: LLMHealthRequest,
+                        attempt_state: dict[str, bool]) -> tuple[int, dict[str, Any]]:
+        expected = (body.expected_settings_revision, body.expected_secret_revision)
+
+        def _preflight_failure(exc: Exception,
+                               effective_identity: str | None = None) -> tuple[int, dict[str, Any]]:
+            try:
+                current = _llm_health_revisions()
+            except Exception:  # noqa: BLE001
+                return _llm_health_unverifiable(body, provider_attempted=False)
+            if current != expected:
+                return _llm_health_changed(
+                    body, current, provider_attempted=False, change_scope="saved",
+                    effective_identity=effective_identity)
+            if effective_identity is None:
+                return _llm_health_unverifiable(body, provider_attempted=False)
+            return 200, {
+                "ok": False,
+                **safe_provider_failure(exc),
+                **_llm_health_base(
+                    body, current, provider_attempted=False,
+                    effective_identity=effective_identity),
+                "outcome_unknown": False,
+            }
+
         try:
-            # Bound the probe well under any proxy gateway timeout: a reachable-but-hanging endpoint
-            # (queued model, heartbeat-only body) must NOT make the health check itself 504 — the very
-            # thing it exists to warn about. (Connection-refused already fails fast.) Env-tunable.
-            hc_timeout = float(os.environ.get("LOOPLAB_HEALTHCHECK_TIMEOUT", "10.0"))
-            client = srv.make_llm_client(s, timeout=hc_timeout)
-            txt = client.complete_text([{"role": "user", "content": "Reply with one word: ready"}])
-            return {"ok": True, "text": (txt or "").strip()[:80], **info}
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, **safe_provider_failure(e), **info}
+            revisions = _llm_health_revisions()
+        except Exception:  # noqa: BLE001 -- never persist/reflect lock or filesystem detail
+            return _llm_health_unverifiable(body, provider_attempted=False)
+        if revisions != expected:
+            return _llm_health_changed(
+                body, revisions, provider_attempted=False, change_scope="saved")
+
+        try:
+            timeout_s = float(os.environ.get("LOOPLAB_HEALTHCHECK_TIMEOUT", "10.0"))
+            if (not math.isfinite(timeout_s)
+                    or not _LLM_HEALTH_TIMEOUT_MIN_S <= timeout_s <= _LLM_HEALTH_TIMEOUT_MAX_S):
+                raise ValueError("health-check timeout is outside the supported range")
+            settings = srv.llm_settings()
+            effective_identity = _llm_health_effective_identity(settings, timeout_s)
+        except Exception as exc:  # noqa: BLE001
+            return _preflight_failure(exc)
+
+        # Preserve the settings-load CAS boundary before constructing any client object.
+        try:
+            revisions = _llm_health_revisions()
+        except Exception:  # noqa: BLE001
+            return _llm_health_unverifiable(body, provider_attempted=False)
+        if revisions != expected:
+            return _llm_health_changed(
+                body, revisions, provider_attempted=False, change_scope="saved",
+                effective_identity=effective_identity)
+
+        try:
+            # Re-resolve ambient env/.env before construction. The HMAC is process-keyed, so it
+            # detects key/URL drift without exposing or storing either value.
+            current_settings = srv.llm_settings()
+            current_effective_identity = _llm_health_effective_identity(current_settings, timeout_s)
+        except Exception as exc:  # noqa: BLE001
+            return _preflight_failure(exc, effective_identity)
+
+        try:
+            revisions = _llm_health_revisions()
+        except Exception:  # noqa: BLE001
+            return _llm_health_unverifiable(body, provider_attempted=False)
+        if revisions != expected:
+            return _llm_health_changed(
+                body, revisions, provider_attempted=False, change_scope="saved",
+                effective_identity=effective_identity)
+
+        if current_effective_identity != effective_identity:
+            return _llm_health_changed(
+                body, revisions, provider_attempted=False, change_scope="effective",
+                effective_identity=effective_identity,
+                current_effective_identity=current_effective_identity)
+
+        try:
+            client = srv.make_llm_client(
+                settings, timeout=timeout_s, max_retries=0, stream=False,
+                disable_reasoning=True, wall_timeout=timeout_s, cache=False)
+        except Exception as exc:  # noqa: BLE001
+            return _preflight_failure(exc, effective_identity)
+
+        # This is deliberately the final operation before entering the one-call client method.
+        try:
+            revisions = _llm_health_revisions()
+        except Exception:  # noqa: BLE001
+            return _llm_health_unverifiable(body, provider_attempted=False)
+        if revisions != expected:
+            return _llm_health_changed(
+                body, revisions, provider_attempted=False, change_scope="saved",
+                effective_identity=effective_identity)
+
+        provider_error: Exception | None = None
+        attempt_state["provider_attempted"] = True
+        try:
+            client.probe(
+                [{"role": "user", "content": "Reply with one word: ready"}],
+                max_tokens=_LLM_HEALTH_MAX_TOKENS)
+        except Exception as exc:  # noqa: BLE001
+            provider_error = exc
+
+        # A paid attempt is now possible. Any failure to prove the postcondition is terminal and
+        # ambiguous; it must never be downgraded to an ordinary retryable provider failure.
+        try:
+            revisions = _llm_health_revisions()
+        except Exception:  # noqa: BLE001
+            return _llm_health_unverifiable(body, provider_attempted=True)
+        if revisions != expected:
+            return _llm_health_changed(
+                body, revisions, provider_attempted=True, change_scope="saved",
+                effective_identity=effective_identity)
+        try:
+            current_settings = srv.llm_settings()
+            current_effective_identity = _llm_health_effective_identity(current_settings, timeout_s)
+            confirmed_revisions = _llm_health_revisions()
+        except Exception:  # noqa: BLE001
+            return _llm_health_unverifiable(body, provider_attempted=True)
+        if confirmed_revisions != expected:
+            return _llm_health_changed(
+                body, confirmed_revisions, provider_attempted=True, change_scope="saved",
+                effective_identity=effective_identity)
+        if current_effective_identity != effective_identity:
+            return _llm_health_changed(
+                body, confirmed_revisions, provider_attempted=True, change_scope="effective",
+                effective_identity=effective_identity,
+                current_effective_identity=current_effective_identity)
+
+        base = _llm_health_base(
+            body, confirmed_revisions, provider_attempted=True,
+            effective_identity=effective_identity)
+        if provider_error is not None:
+            failure = safe_provider_failure(provider_error)
+            # Only an explicit auth/rate-limit rejection proves the provider declined the request.
+            # A 5xx, empty/no-choices HTTP 200, timeout, connection loss, or generic post-send error
+            # may already have generated/billed work even though no usable response reached us.
+            outcome_unknown = not _llm_health_definitive_rejection(provider_error, failure)
+            if outcome_unknown:
+                message = ("The provider-check outcome is unresolved; the request may have "
+                           "completed or been billed.")
+                failure = {**failure,
+                           "code": "llm_health_provider_outcome_unknown",
+                           "error": message,
+                           "message": message,
+                           "remediation": "Do not start another probe automatically.",
+                           "retryable": False}
+            return 200, {"ok": False, **failure, **base,
+                         "outcome_unknown": outcome_unknown}
+        return 200, {"ok": True, **base, "outcome_unknown": False}
+
+    @router.post("/api/llm/health")
+    def llm_health(body: LLMHealthRequest):
+        """One revision-fenced, idempotent and output-capped provider reachability mutation."""
+        reservation, entry = _llm_health_reserve(body)
+        if reservation == "conflict":
+            raise HTTPException(409, detail={
+                "code": "llm_health_operation_conflict",
+                "message": "This operation ID belongs to a different saved-configuration identity.",
+                "remediation": "Use a new UUIDv4 for a different saved Settings snapshot.",
+                "operation_id": body.operation_id,
+                "expected_settings_revision": body.expected_settings_revision,
+                "expected_secret_revision": body.expected_secret_revision,
+                "provider_attempted": False,
+                "outcome_unknown": False,
+            })
+        if reservation == "busy":
+            raise HTTPException(409, detail={
+                "code": "llm_health_in_progress",
+                "message": "Another provider check is already in progress.",
+                "remediation": "Wait for the active check to finish before starting another one.",
+                "operation_id": body.operation_id,
+                "expected_settings_revision": body.expected_settings_revision,
+                "expected_secret_revision": body.expected_secret_revision,
+                "provider_attempted": False,
+                "outcome_unknown": False,
+            })
+        if reservation == "missing":
+            raise HTTPException(410, detail={
+                "code": "llm_health_replay_unavailable",
+                "message": ("The prior provider-check result is no longer available; replay-only "
+                            "reconciliation made no new provider call."),
+                "remediation": ("Treat the prior outcome as unresolved. Start a new provider check "
+                                "only through an explicit new user action and UUIDv4."),
+                "operation_id": body.operation_id,
+                "expected_settings_revision": body.expected_settings_revision,
+                "expected_secret_revision": body.expected_secret_revision,
+                "provider_attempted": False,
+                "outcome_unknown": True,
+                "ambiguous": True,
+                "retryable": False,
+                "replay_only": True,
+            })
+        if reservation == "capacity":
+            raise HTTPException(503, detail={
+                "code": "llm_health_capacity",
+                "message": "Provider-check replay capacity is temporarily unavailable.",
+                "operation_id": body.operation_id,
+                "expected_settings_revision": body.expected_settings_revision,
+                "expected_secret_revision": body.expected_secret_revision,
+                "provider_attempted": False,
+                "outcome_unknown": False,
+            })
+        assert entry is not None
+        if reservation == "replay":
+            return _llm_health_render(entry)
+
+        attempt_state = {"provider_attempted": False}
+        try:
+            outcome = _run_llm_health(body, attempt_state)
+        except Exception:  # noqa: BLE001 -- terminalize the flight; never strand duplicate waiters
+            outcome = _llm_health_unverifiable(
+                body, provider_attempted=attempt_state["provider_attempted"])
+        _llm_health_finish(body.operation_id, entry, outcome)
+        return _llm_health_render(entry)
 
     # ------------------------------------------------------------------ GPU monitor
     @router.get("/api/gpu")

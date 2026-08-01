@@ -8,13 +8,14 @@ import './settings-polish.css'
 //
 // `only` and `hideSecret` keep compact consumers (run settings and launch dialogs) compatible.
 // `mode` and `query` add progressive disclosure to the full Settings page.
-function AgentPills({ f, granted, onToggleAgent, rolePills }) {
+function AgentPills({ f, granted, onToggleAgent, rolePills, interactionDisabled = false }) {
   if (!f.agents || !onToggleAgent) return null
   return <div className="sf-agents" role="group" aria-label={`Runtime access for ${f.label}`}>
     {f.agents.map(role => {
       const p = rolePills[role]
       const on = granted.includes(role)
       return <button key={role} type="button" className={'agpill' + (on ? ' on' : '')}
+                     disabled={interactionDisabled}
                      aria-pressed={on} aria-label={`${p.title}: ${on ? 'allowed' : 'not allowed'}`}
                      title={(on ? 'Allowed: ' : 'Not allowed: ') + p.title}
                      onClick={() => onToggleAgent(f.key, role)}>{p.short}</button>
@@ -33,7 +34,8 @@ function changeDot(unsaved, changed) {
 const safeId = value => String(value).replace(/[^a-zA-Z0-9_-]/g, '-')
 
 function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted, onToggleAgent,
-                 secretSet, onClearSecret, secretActionDisabled, readOnly, rolePills }) {
+                 secretSet, onClearSecret, secretActionDisabled, readOnly, rolePills,
+                 interactionDisabled = false }) {
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
   const helpId = `${inputId}-help`
@@ -49,13 +51,13 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
   if (f.type === 'bool') {
     input = <label className="switch" title={`Toggle ${f.label}`}>
       <input id={inputId} name={f.key} type="checkbox" checked={!!value}
-             aria-describedby={describedBy} disabled={readOnly}
+             aria-describedby={describedBy} disabled={readOnly || interactionDisabled}
              onChange={e => set(e.target.checked)} />
       <span className="track" aria-hidden="true" />
     </label>
   } else if (f.type === 'enum') {
     input = <select id={inputId} name={f.key} className="text" value={value ?? ''}
-                    aria-describedby={describedBy} disabled={readOnly}
+                    aria-describedby={describedBy} disabled={readOnly || interactionDisabled}
                     onChange={e => set(e.target.value)}>
       {f.options.map(o => <option key={o || '__default'} value={o}>{o === '' ? 'Use provider default' : o}</option>)}
     </select>
@@ -64,7 +66,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
     input = <div className="sf-secret">
       <input id={inputId} name={f.key} className="text" type="password" autoComplete="new-password"
              value={value ?? ''} aria-describedby={describedBy}
-             disabled={readOnly}
+             disabled={readOnly || interactionDisabled}
              placeholder={secretSet ? 'Stored — leave blank to keep' : 'Not set'}
              onChange={e => set(e.target.value)} />
       {secretSet && onClearSecret &&
@@ -81,7 +83,8 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
                    type="text" inputMode={f.type === 'int' ? 'numeric' : f.type === 'float' ? 'decimal' : undefined}
                    value={value ?? ''} spellCheck={numeric ? false : undefined}
                    aria-describedby={describedBy} aria-invalid={error ? 'true' : undefined}
-                   aria-readonly={readOnly || undefined} readOnly={readOnly}
+                   aria-readonly={readOnly || interactionDisabled || undefined}
+                   readOnly={readOnly || interactionDisabled}
                    placeholder={f.placeholder || ''}
                    onChange={e => set(e.target.value)} />
   }
@@ -93,7 +96,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
         {readOnly && <span className="muted" title="Fixed when this run started"> · launch-pinned</span>}
       </label>
       <AgentPills f={f} granted={granted || []} onToggleAgent={readOnly ? undefined : onToggleAgent}
-        rolePills={rolePills} />
+        rolePills={rolePills} interactionDisabled={interactionDisabled} />
     </div>
     <div className="sf-input">{input}</div>
     {error && <div id={errorId} className="sf-error" role="alert">{error}</div>}
@@ -115,7 +118,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
 
 function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, agentControl,
                       onToggleAgent, secretState, onClearSecret, secretActionDisabled, readOnlyKeys,
-                      panelId, labelledBy, searchable, rolePills }) {
+                      panelId, labelledBy, searchable, rolePills, interactionDisabled }) {
   const headingId = `${idPrefix}-heading-${safeId(group.title)}`
   return <section className="sf-group" id={panelId}
                   role={labelledBy ? 'tabpanel' : undefined}
@@ -130,7 +133,8 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
         granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent}
         secretSet={secretState?.[f.key]} onClearSecret={onClearSecret}
         secretActionDisabled={secretActionDisabled}
-        readOnly={readOnlyKeys?.has(f.key)} rolePills={rolePills} />)}
+        readOnly={readOnlyKeys?.has(f.key)} rolePills={rolePills}
+        interactionDisabled={interactionDisabled} />)}
     </div>
   </section>
 }
@@ -138,7 +142,7 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
 export default function SettingsForm({ form, onChange, dirty, unsaved, errors, only, agentControl, onToggleAgent,
                                        secretState, onClearSecret, secretActionDisabled, readOnlyKeys, hideSecret,
                                        mode = 'all', query = '', schema,
-                                       focusKey = '', focusRequest = 0 }) {
+                                       focusKey = '', focusRequest = 0, interactionDisabled = false }) {
   const groups = filterSettingsGroups(schema.groups, { mode, query, only, hideSecret })
   const rolePills = schema.agentRolePills
   const [active, setActive] = useState(0)
@@ -176,7 +180,8 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
       secretActionDisabled={secretActionDisabled}
-      readOnlyKeys={readOnlyKeys} searchable rolePills={rolePills} />)}
+      readOnlyKeys={readOnlyKeys} searchable rolePills={rolePills}
+      interactionDisabled={interactionDisabled} />)}
   </div>
 
   const onTabKeyDown = (event, index) => {
@@ -210,6 +215,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
       secretActionDisabled={secretActionDisabled}
-      readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} rolePills={rolePills} />
+      readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} rolePills={rolePills}
+      interactionDisabled={interactionDisabled} />
   </div>
 }

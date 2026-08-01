@@ -289,7 +289,7 @@ def _unauth_api_ok(p: str) -> bool:
             or p.startswith("/api/assistant/shared/"))
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/log-page", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
-_RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
+_RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory")
 
 
 def _ui_extra_error(missing: str) -> ModuleNotFoundError:
@@ -530,7 +530,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
     @app.middleware("http")
     async def _volatile_api_no_store(request: "Request", call_next):
-        """Never cache lifecycle observations or generation-bound log pages, including errors.
+        """Never cache lifecycle observations, paid probes or generation-bound pages, including errors.
 
         Route-injected headers only cover successful handler returns: FastAPI replaces that Response
         for HTTPException, and the owner-auth middleware can return before routing.  Keeping this
@@ -571,13 +571,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         is_concepts = (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                        and parts[4] == "concepts")
         is_attention = route_path in {"/api/attention", "/api/assistant/permissions"}
+        is_llm_health = route_path == "/api/llm/health"
         is_assistant_share = (
             route_path == "/api/assistant/shared"
             or route_path.startswith("/api/assistant/shared/")
         )
         if (is_command or is_start_status or is_log_page or is_artifact or is_report_refresh or is_scope_report
                 or is_scope_report_action or is_job or is_comments or is_concepts or is_attention
-                or is_assistant_share):
+                or is_llm_health or is_assistant_share):
             response.headers["Cache-Control"] = "no-store"
             if is_assistant_share:
                 response.headers["Referrer-Policy"] = "no-referrer"

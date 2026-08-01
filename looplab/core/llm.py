@@ -207,7 +207,8 @@ class OpenAICompatibleClient:
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
                  guided_json: bool = False, reasoning: Optional[dict] = None,
                  stream: bool = True, cache: bool = False,
-                 header_timeout: Optional[float] = None, trust_env: bool = False):
+                 header_timeout: Optional[float] = None, trust_env: bool = False,
+                 max_retries: int = 8, wall_timeout: Optional[float] = None):
         # The live transport needs the openai SDK + httpx. They are declared deps, but the module
         # import is guarded (offline/replay import-safety), so fail with a clear, actionable message
         # here rather than an opaque `NoneType has no attribute 'OpenAI'` if someone stripped them.
@@ -219,6 +220,16 @@ class OpenAICompatibleClient:
         self.api_key = api_key or "x"
         self.temperature = temperature
         self.timeout = timeout
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise ValueError("max_retries must be a non-negative integer")
+        self._max_retries = max_retries
+        if wall_timeout is not None:
+            wall_timeout = float(wall_timeout)
+            if not math.isfinite(wall_timeout) or wall_timeout <= 0:
+                raise ValueError("wall_timeout must be a positive finite number")
+        # Optional whole-attempt guard for short, non-streaming probes. Ordinary generation keeps
+        # the historical timeout+header+cleanup window; streaming remains governed by its idle guards.
+        self.wall_timeout = wall_timeout
         # `header_timeout` bounds the TCP/TLS CONNECT (httpx `connect=`, see `_new_sdk`), so a connection
         # that never ESTABLISHES fails over fast instead of waiting the full idle `timeout`. It ALSO bounds
         # the wait for HTTP response HEADERS on the STREAM path: `create(stream=True)` runs under a wall-
@@ -253,8 +264,9 @@ class OpenAICompatibleClient:
         # that field, so streaming keeps working (without provider-reported usage) instead of the
         # client dying against that endpoint entirely. Per-client, detected once and cached.
         self._stream_options_ok = True
-        self._max_retries = 8               # 429/5xx/throttle-403 backoff retries before surfacing an
-        #   LLMError. 8 (≈150s: 2+4+8+16+30+30+30+30) rides out the gateway's COLD-START throttle: after
+        # 429/5xx/throttle-403 backoff retries before surfacing an LLMError. The normal default is 8;
+        # explicit probes can set zero so one user action produces at most one provider request.
+        # 8 (≈150s: 2+4+8+16+30+30+30+30) rides out the gateway's COLD-START throttle: after
         #   the engine sits idle (e.g. paused), the FIRST call-burst on resume gets a 403 "security
         #   policy" throttle for up to ~2min, then clears (measured: 1st call 63s, next 11 instant). At 4
         #   (~30s) or even 6 (~90s) that first node developer-crashed → the run auto-paused → resumed →
@@ -331,6 +343,8 @@ class OpenAICompatibleClient:
         monkeypatch THIS method (not urllib) to script transport behaviour."""
         kwargs: dict = {"model": payload["model"], "messages": payload["messages"],
                         "temperature": payload.get("temperature", self.temperature)}
+        if payload.get("max_tokens") is not None:
+            kwargs["max_tokens"] = payload["max_tokens"]
         if payload.get("tools"):
             kwargs["tools"] = payload["tools"]
             kwargs["tool_choice"] = payload.get("tool_choice", "auto")
@@ -397,8 +411,10 @@ class OpenAICompatibleClient:
     def _nonstream_bounded(self, kwargs: dict) -> dict:
         """A NON-STREAM chat call: no SSE loop guards a TRICKLED body (a byte resets httpx's read timer
         while the payload never completes), so bound the WHOLE call (headers + body) via `_bounded_create`
-        at timeout+header_timeout, then serialize the completed response."""
-        return self._bounded_create(kwargs, self.timeout + self.header_timeout + 10).model_dump()
+        at the explicit wall guard or the historical timeout+header window, then serialize it."""
+        join_s = (self.wall_timeout if self.wall_timeout is not None
+                  else self.timeout + self.header_timeout + 10)
+        return self._bounded_create(kwargs, join_s).model_dump()
 
     def _pool_teardown_is_safe_locked(self) -> bool:
         """May this wedged call tear down the SHARED client? Caller holds `_inflight_lock`.
@@ -666,7 +682,8 @@ class OpenAICompatibleClient:
         import hashlib
         blob = json.dumps({"model": self.model, "messages": payload.get("messages"),
                            "tools": payload.get("tools"), "tool_choice": payload.get("tool_choice"),
-                           "response_format": payload.get("response_format")},
+                           "response_format": payload.get("response_format"),
+                           "max_tokens": payload.get("max_tokens")},
                           sort_keys=True, default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -875,11 +892,32 @@ class OpenAICompatibleClient:
         any provider reasoning toggle, so the trace shows HOW the model was called."""
         return {"temperature": self.temperature, **(self.reasoning or {})}
 
-    def complete_text(self, messages: list[dict]) -> str:
+    def _text_payload(self, messages: list[dict], max_tokens: Optional[int]) -> dict:
+        if (max_tokens is not None
+                and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
+                     or not 1 <= max_tokens <= 1_000_000)):
+            raise ValueError("max_tokens must be an integer between 1 and 1000000")
+        payload = {"model": self.model, "messages": messages,
+                   "temperature": self.temperature}
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        return payload
+
+    def probe(self, messages: list[dict], *, max_tokens: int = 4) -> None:
+        """Issue one bounded-output completion and discard its content without tracing it.
+
+        Transport attempt count is configured on the client. A privacy-sensitive caller should also
+        construct the client with response caching disabled, as the health route does.
+        """
+        self._post(self._text_payload(messages, max_tokens))
+
+    def complete_text(self, messages: list[dict], *, max_tokens: Optional[int] = None) -> str:
+        model_parameters = self._model_params()
+        if max_tokens is not None:
+            model_parameters = {**model_parameters, "max_tokens": max_tokens}
         with tracing.generation(op="complete_text", model=self.model, messages=messages,
-                                model_parameters=self._model_params()) as gen:
-            body = self._post({"model": self.model, "messages": messages,
-                               "temperature": self.temperature})
+                                model_parameters=model_parameters) as gen:
+            body = self._post(self._text_payload(messages, max_tokens))
             msg = body["choices"][0]["message"]
             _apply_native_tool_calls(msg)   # strip a leaked native tool-call block from the text
             out = msg.get("content") or ""
@@ -1514,36 +1552,48 @@ def make_llm_client(settings, *, model: str | None = None,
                     base_url: str | None = None,
                     timeout: float | None = None,
                     temperature: float | None = None,
-                    api_key: str | None = None) -> OpenAICompatibleClient:
+                    api_key: str | None = None,
+                    max_retries: int | None = None,
+                    stream: bool | None = None,
+                    disable_reasoning: bool = False,
+                    wall_timeout: float | None = None,
+                    cache: bool | None = None) -> OpenAICompatibleClient:
     """The one Settings -> live client factory (used by cli, serve, adapters and the agent loop).
     Historically lived in adapters/tasks.py — the only reason `agents` ever imported `adapters` —
     but constructing an LLM client is a foundation (core) capability; both old import paths keep
     resolving via re-exports (adapters.tasks and looplab.serve.server, the monkeypatch point).
 
     `api_key` overrides the shared `settings.llm_api_key` for ONE client — the per-role credential
-    path (`make_llm_client_for`). Additive and passed only when it differs, so the signature every
-    existing caller and monkeypatch relies on is untouched."""
+    path (`make_llm_client_for`). Probe controls are additive and preserve every ordinary caller's
+    historical defaults."""
     key = api_key or (settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local")
     mdl = model or settings.llm_model
-    reasoning = reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
-                               getattr(settings, "llm_reasoning_style", "auto"),
-                               getattr(settings, "llm_reasoning_extra", None))
+    reasoning = ({} if disable_reasoning else
+                 reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
+                                getattr(settings, "llm_reasoning_style", "auto"),
+                                getattr(settings, "llm_reasoning_extra", None)))
     # `timeout` lets a caller bound a UI-side probe (e.g. the health check) well under a proxy's
     # gateway timeout; omitted -> the run-wide `llm_timeout` setting (idle/stall limit, default 180s).
     extra = {"timeout": timeout if timeout is not None
              else float(getattr(settings, "llm_timeout", 180.0) or 180.0)}
+    # Probe-only transport controls are additive and omitted for every historical caller. Keeping
+    # the ordinary constructor defaults out of kwargs also preserves simple patch/test factories.
+    if max_retries is not None:
+        extra["max_retries"] = max_retries
+    if wall_timeout is not None:
+        extra["wall_timeout"] = wall_timeout
     return OpenAICompatibleClient(
         model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
         temperature=(temperature if temperature is not None else settings.llm_temperature),
         accountant=CostAccountant(),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
-        stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
+        stream=(getattr(settings, "llm_stream", True) if stream is None else stream),
         # Fall back to the CONSTANT this module declares as the single source of the default (which
         # config.py imports for its own field default) — a literal here would drift the moment it moved.
         header_timeout=float(getattr(settings, "llm_header_timeout", DEFAULT_HEADER_TIMEOUT_S)
                              or DEFAULT_HEADER_TIMEOUT_S),
         trust_env=bool(getattr(settings, "llm_trust_env", False)),  # direct-connect by default (bypass proxy)
-        cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache
+        cache=(getattr(settings, "llm_cache", False) if cache is None else cache),
         **extra,
     )

@@ -1211,7 +1211,8 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .settings-page { flex: 1; overflow: auto; padding: 22px; max-width: 1000px; margin: 0 auto; width: 100%; }
 /* Action bar pinned to the bottom of the settings window — Save / Defaults / Test-LLM travel WITH the
    settings (a flex child of .app after the scrolling .settings-page), not the global top bar. */
-.settings-actions { border-top: 1px solid var(--line); background: var(--bg-2); padding: 10px 22px; }
+.settings-actions { border-top: 1px solid var(--line); background: var(--bg-2);
+  padding: 10px 22px calc(10px + env(safe-area-inset-bottom)); }
 .settings-actions .sa-inner { display: flex; align-items: center; gap: 8px; max-width: 1000px; margin: 0 auto; width: 100%; }
 .settings-form { display: flex; flex-direction: column; gap: 14px; }
 /* Tabbed settings: one tab per group instead of a long scroll. Reuses the standard .tabs/.tab look. */

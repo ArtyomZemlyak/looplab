@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { deadlineGet, saveSettings, saveSecret, llmHealth } from './util.js'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createIdempotencyKey, deadlineGet, saveSettings, saveSecret, llmHealth } from './util.js'
 import {
   toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema,
 } from './settingsSchema.js'
@@ -15,52 +15,417 @@ import { installNavigationLossGuard } from './navigationLossGuard.js'
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
 const SETTINGS_READ_TIMEOUT_MS = 15_000
 const SETTINGS_WRITE_TIMEOUT_MS = 15_000
-const LLM_HEALTH_TIMEOUT_MS = 15_000
+// The server permits a 60s provider wall limit plus bounded teardown. The browser must keep the
+// same operation alive long enough to receive that authoritative result instead of timing out first.
+const LLM_HEALTH_TIMEOUT_MS = 70_000
 const unknownTransport = error => !Number.isInteger(error?.status)
   || error.status >= 500 || [408, 425, 429].includes(error.status)
 const publicSubmittedForm = form => ({ ...(form || {}), llm_api_key: '' })
 const boundedSettingsWrite = work =>
   deadlineRequest(signal => work(signal), SETTINGS_WRITE_TIMEOUT_MS).promise
-const navigationWarning = busy => busy
-  ? 'A settings update is still in flight and may finish after you leave. Leave this page anyway?'
-  : 'Discard unsaved settings changes and leave this page?'
+const navigationWarning = (busy, unknown = false, healthRecovery = false) => busy === 'testing-llm'
+  ? 'An LLM provider check is still in flight and may complete or be billed after you leave. Leave this page anyway?'
+  : busy
+    ? 'A settings action is still in flight and may finish after you leave. Leave this page anyway?'
+    : unknown
+      ? 'A settings action has an unresolved server outcome. Leave this page anyway?'
+      : healthRecovery
+        ? 'An LLM provider outcome is unresolved. Leaving may discard the visible recovery warning; leave anyway?'
+      : 'Discard unsaved settings changes and leave this page?'
+
+const releaseHealthRequest = active => {
+  if (!active || active.released) return
+  active.released = true
+  active.finishAction?.(active.mutation)
+}
+
+const LLM_HEALTH_RECOVERY_KEY = 'looplab.llm-health-recovery.v1'
+const LLM_HEALTH_OPERATION_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i
+let volatileHealthRecovery = null
+const healthRecoveryScope = () => typeof location === 'undefined'
+  ? '' : `${location.origin}${location.pathname}`
+const validHealthRecovery = value => !!value && value.scope === healthRecoveryScope()
+  && LLM_HEALTH_OPERATION_RE.test(value.operationId || '')
+  && typeof value.settingsRevision === 'string' && value.settingsRevision.length <= 256
+  && typeof value.secretRevision === 'string' && value.secretRevision.length <= 256
+  && ['reconcile', 'terminal-unknown'].includes(value.mode)
+  && Number.isFinite(value.createdAt) && value.createdAt > 0
+const readHealthRecovery = () => {
+  if (validHealthRecovery(volatileHealthRecovery)) return volatileHealthRecovery
+  let value = null
+  try {
+    value = JSON.parse(window.sessionStorage.getItem(LLM_HEALTH_RECOVERY_KEY) || 'null')
+  } catch { /* fall back to this page's volatile recovery fence */ }
+  return validHealthRecovery(value) ? value : null
+}
+const writeHealthRecovery = value => {
+  const record = {
+    scope: healthRecoveryScope(),
+    operationId: value.operationId,
+    settingsRevision: value.settingsRevision,
+    secretRevision: value.secretRevision,
+    mode: value.mode,
+    createdAt: value.createdAt || Date.now(),
+  }
+  volatileHealthRecovery = record
+  try {
+    window.sessionStorage.setItem(LLM_HEALTH_RECOVERY_KEY, JSON.stringify(record))
+    return true
+  } catch { return false }
+}
+const clearHealthRecovery = operationId => {
+  try {
+    const current = readHealthRecovery()
+    if (!operationId || !current || current.operationId === operationId) {
+      volatileHealthRecovery = null
+      window.sessionStorage.removeItem(LLM_HEALTH_RECOVERY_KEY)
+    }
+  } catch { volatileHealthRecovery = null }
+}
 
 // LLM endpoint self-test (the UI equivalent of `LoopLab smoke`): pings the configured model so the
 // user knows it is reachable before launching a run against it.
-export function LlmHealth() {
+export function LlmHealth({
+  savedSettingsRevision,
+  savedSecretRevision,
+  unsavedCount = 0,
+  actionBlocked = false,
+  actionKind = '',
+  beginAction,
+  finishAction,
+  reloadSavedSettings,
+  onRecoveryChange,
+}) {
   const [status, setStatus] = useState(null)
-  const [busy, setBusy] = useState(false)
+  const [busyContext, setBusyContext] = useState(null)
   const requestRef = useRef(null)
-  useEffect(() => () => {
-    requestRef.current?.controller.abort()
-    requestRef.current = null
-  }, [])
-  const check = () => {
-    if (requestRef.current) return
-    const request = deadlineRequest(signal => llmHealth({ signal }), LLM_HEALTH_TIMEOUT_MS)
-    requestRef.current = request
-    setBusy(true)
-    request.promise.then(value => {
-      if (requestRef.current === request) setStatus(value)
-    }).catch(error => {
-      if (requestRef.current !== request) return
-      setStatus({ ok: false, error: error?.name === 'TimeoutError'
-        ? 'Provider check timed out. No automatic retry was sent.'
-        : 'Check provider configuration and network access.' })
-    }).finally(() => {
-      if (requestRef.current !== request) return
+  const identityRef = useRef(null)
+  const previousIdentity = identityRef.current
+  const identityChanged = !previousIdentity
+    || previousIdentity.savedSettingsRevision !== savedSettingsRevision
+    || previousIdentity.savedSecretRevision !== savedSecretRevision
+  if (identityChanged) {
+    identityRef.current = {
+      savedSettingsRevision,
+      savedSecretRevision,
+      version: (previousIdentity?.version || 0) + 1,
+    }
+  }
+  const contextVersion = identityRef.current.version
+  const revisionsReady = typeof savedSettingsRevision === 'string' && savedSettingsRevision.length > 0
+    && typeof savedSecretRevision === 'string' && savedSecretRevision.length > 0
+  const busy = busyContext === contextVersion && requestRef.current?.contextVersion === contextVersion
+  const reloading = actionKind === 'reloading settings'
+  const visibleStatus = status?.contextVersion === contextVersion ? status.value : null
+
+  // Effects run after render. The version above hides and fences an old result synchronously; this
+  // layout effect then cancels transport work before paint and releases the shared settings action.
+  useLayoutEffect(() => {
+    const active = requestRef.current
+    if (active && active.contextVersion !== contextVersion) {
       requestRef.current = null
-      setBusy(false)
+      active.timed.controller.abort()
+      releaseHealthRequest(active)
+    }
+    setStatus(current => {
+      if (current?.contextVersion === contextVersion) return current
+      if (!revisionsReady) return null
+      const recovery = readHealthRecovery()
+      if (!recovery) return null
+      const revisionChanged = recovery.settingsRevision !== savedSettingsRevision
+        || recovery.secretRevision !== savedSecretRevision
+      const terminalUnknown = recovery.mode === 'terminal-unknown'
+      return { contextVersion, value: {
+        ok: false,
+        unresolved: true,
+        reconcilable: !terminalUnknown,
+        terminalUnknown,
+        revisionChanged,
+        previousConfiguration: revisionChanged,
+        operationId: recovery.operationId,
+        error: revisionChanged
+          ? terminalUnknown
+            ? 'A provider outcome from the previous saved configuration is unresolved and may have been billed. Acknowledge it before starting another check.'
+            : 'A check from the previous saved configuration has no verified result. Check that previous result without starting a new provider call.'
+          : terminalUnknown
+          ? 'The previous provider outcome is unresolved and may have been billed. Starting another check may bill again.'
+          : 'A previous browser request has no verified result. Check the previous result to reconcile it without starting a new provider call.',
+      } }
+    })
+    setBusyContext(current => current === contextVersion ? current : null)
+  }, [contextVersion, revisionsReady, savedSettingsRevision, savedSecretRevision])
+
+  useEffect(() => {
+    onRecoveryChange?.(visibleStatus?.unresolved === true)
+  }, [visibleStatus?.unresolved, onRecoveryChange])
+
+  useEffect(() => () => {
+    const active = requestRef.current
+    requestRef.current = null
+    active?.timed.controller.abort()
+    releaseHealthRequest(active)
+  }, [])
+
+  const startCheck = (replayOnly = false) => {
+    if (actionBlocked || requestRef.current || !revisionsReady) return
+    const mutation = beginAction?.('testing-llm')
+    if (!mutation) return
+    const requestedContext = contextVersion
+    const operationId = replayOnly && visibleStatus?.reconcilable && visibleStatus.operationId
+      ? visibleStatus.operationId : createIdempotencyKey()
+    const previousRecovery = readHealthRecovery()
+    const replayRecovery = replayOnly && previousRecovery?.operationId === operationId
+      ? previousRecovery : null
+    const requestSettingsRevision = replayRecovery?.settingsRevision || savedSettingsRevision
+    const requestSecretRevision = replayRecovery?.secretRevision || savedSecretRevision
+    const previousConfiguration = requestSettingsRevision !== savedSettingsRevision
+      || requestSecretRevision !== savedSecretRevision
+    const recoveryCreatedAt = previousRecovery?.operationId === operationId
+      ? previousRecovery.createdAt : Date.now()
+    // Persist the non-secret recovery fence before POST. If the tab unloads after submission, the
+    // next Settings mount can only issue a replay-only lookup for this UUID.
+    const recoveryPersisted = writeHealthRecovery({
+      operationId,
+      settingsRevision: requestSettingsRevision,
+      secretRevision: requestSecretRevision,
+      mode: 'reconcile',
+      createdAt: recoveryCreatedAt,
+    })
+    if (!recoveryPersisted) {
+      // A health operation is unsafe to hand off across reload unless its UUID survives. Restore
+      // any older fence and stop before constructing the request; no provider was contacted here.
+      if (previousRecovery) writeHealthRecovery(previousRecovery)
+      else clearHealthRecovery(operationId)
+      finishAction?.(mutation)
+      setStatus({ contextVersion: requestedContext, value: previousRecovery
+        ? {
+            ...(visibleStatus || {}),
+            ok: false,
+            unresolved: true,
+            reconcilable: previousRecovery.mode === 'reconcile',
+            terminalUnknown: previousRecovery.mode === 'terminal-unknown',
+            operationId: previousRecovery.operationId,
+            error: 'Browser recovery storage is unavailable. No provider request was sent; the previous outcome remains unresolved.',
+          }
+        : {
+            ok: false,
+            notStarted: true,
+            storageUnavailable: true,
+            error: 'Browser recovery storage is unavailable, so the check was not started and no provider request was sent.',
+          } })
+      return
+    }
+    const timed = deadlineRequest(signal => llmHealth(
+      requestSettingsRevision, requestSecretRevision, operationId, { signal, replayOnly },
+    ), LLM_HEALTH_TIMEOUT_MS)
+    const active = {
+      timed,
+      contextVersion: requestedContext,
+      operationId,
+      replayOnly,
+      requestSettingsRevision,
+      requestSecretRevision,
+      previousConfiguration,
+      recoveryCreatedAt,
+      mutation,
+      finishAction,
+      released: false,
+    }
+    requestRef.current = active
+    setStatus(null)
+    setBusyContext(requestedContext)
+    timed.promise.then(value => {
+      if (timed.controller.signal.aborted || requestRef.current !== active
+          || identityRef.current.version !== requestedContext) return
+      const providerAttempted = value.provider_attempted === true
+      const terminalUnknown = value.ok !== true
+        && (value.outcome_unknown === true || value.ambiguous === true)
+      if (terminalUnknown) {
+        writeHealthRecovery({ operationId, settingsRevision: active.requestSettingsRevision,
+          secretRevision: active.requestSecretRevision, mode: 'terminal-unknown',
+          createdAt: active.recoveryCreatedAt })
+      } else clearHealthRecovery(operationId)
+      setStatus({ contextVersion: requestedContext, value: value.ok === true
+        ? { ok: true, previousConfiguration: active.previousConfiguration }
+        : terminalUnknown
+          ? {
+              ok: false,
+              unresolved: true,
+              terminalUnknown: true,
+              previousConfiguration: active.previousConfiguration,
+              operationId,
+              error: 'The server recorded an unresolved provider outcome that may have been billed. Starting another check may bill again.',
+            }
+          : {
+              ok: false,
+              previousConfiguration: active.previousConfiguration,
+              notStarted: !providerAttempted,
+              error: value.message || value.error
+                || 'The active LLM check did not complete successfully.',
+            } })
+    }).catch(error => {
+      if (error?.name === 'AbortError' || requestRef.current !== active
+          || identityRef.current.version !== requestedContext) return
+      const detail = error?.detail && typeof error.detail === 'object'
+        && !Array.isArray(error.detail) ? error.detail : {}
+      const configurationChanged = error?.code === 'llm_configuration_changed'
+      const attemptContractKnown = typeof detail.provider_attempted === 'boolean'
+        && typeof detail.outcome_unknown === 'boolean'
+      const postAttempt = error?.code === 'llm_configuration_changed_after_attempt'
+        || error?.code === 'llm_health_outcome_unverifiable_after_attempt'
+      const replayUnavailable = error?.code === 'llm_health_replay_unavailable'
+      const replayConflict = replayOnly && error?.code === 'llm_health_operation_conflict'
+      const protocolUncertain = error?.code === 'llm_health_identity_protocol_error'
+      const terminalUnknown = !protocolUncertain && (postAttempt || replayUnavailable || replayConflict
+        || detail.outcome_unknown === true || detail.ambiguous === true)
+      const reconcilable = !terminalUnknown && (error?.name === 'TimeoutError'
+        || protocolUncertain || (!attemptContractKnown && unknownTransport(error)))
+      const unresolved = terminalUnknown || reconcilable
+      const anotherCheckBusy = error?.code === 'llm_health_in_progress'
+      if (terminalUnknown) {
+        writeHealthRecovery({ operationId, settingsRevision: active.requestSettingsRevision,
+          secretRevision: active.requestSecretRevision, mode: 'terminal-unknown',
+          createdAt: active.recoveryCreatedAt })
+      } else if (!reconcilable) clearHealthRecovery(operationId)
+      setStatus({ contextVersion: requestedContext, value: {
+        ok: false,
+        configurationChanged,
+        unresolved,
+        operationId: unresolved ? operationId : undefined,
+        reconcilable,
+        terminalUnknown,
+        replayUnavailable,
+        replayConflict,
+        anotherCheckBusy,
+        previousConfiguration: active.previousConfiguration,
+        notStarted: !unresolved && !configurationChanged,
+        error: configurationChanged
+          ? 'The active LLM configuration changed before the provider was contacted. Reload saved settings before testing again.'
+          : terminalUnknown
+            ? replayUnavailable
+              ? 'The previous result is no longer available. No new provider call was made; its outcome remains unknown.'
+              : replayConflict
+                ? 'The recovery ID belongs to a different server receipt. No new provider call was made; the prior outcome remains unknown.'
+              : 'The server recorded an unresolved provider outcome that may have been billed. Starting another check may bill again.'
+            : reconcilable
+              ? 'The browser has no verified result. Check the previous result to reuse this operation without starting a new provider call.'
+            : anotherCheckBusy
+              ? 'Another active LLM check is already running. This request did not contact the provider; wait, then try again.'
+              : detail.message || error?.message
+                || 'The active LLM check could not start; no provider result was confirmed.',
+      } })
+    }).finally(() => {
+      if (requestRef.current === active) requestRef.current = null
+      releaseHealthRequest(active)
+      if (identityRef.current.version === requestedContext) {
+        setBusyContext(current => current === requestedContext ? null : current)
+      }
     })
   }
+
+  const check = () => {
+    if (visibleStatus?.configurationChanged) {
+      Promise.resolve(reloadSavedSettings?.()).then(reloaded => {
+        if (reloaded !== false) setStatus(null)
+      })
+      return
+    }
+    if (visibleStatus?.terminalUnknown) return
+    startCheck(visibleStatus?.reconcilable === true)
+  }
+  const startNewAfterUnknown = () => {
+    if (actionBlocked || requestRef.current || !revisionsReady || !visibleStatus?.terminalUnknown) return
+    if (!window.confirm('The previous provider outcome is unresolved and may already be billed. Start a new active LLM check that may bill again?')) return
+    // `startCheck` replaces the old recovery record only after it owns the shared mutation token.
+    // If another same-tick action won that token, keep the terminal warning and its UUID intact.
+    startCheck(false)
+  }
+  const dismissRecovery = () => {
+    if (actionBlocked || requestRef.current || !visibleStatus?.unresolved) return
+    if (!window.confirm('Acknowledge and dismiss this unresolved provider outcome? A later Test active LLM action will create a new provider operation and may bill again.')) return
+    clearHealthRecovery(visibleStatus.operationId)
+    setStatus(null)
+  }
+
+  const buttonTitle = busy
+    ? 'An active provider check is in progress. Leaving may not stop provider work or billing.'
+    : reloading
+      ? 'Reloading the saved configuration without contacting the provider.'
+    : visibleStatus?.configurationChanged
+      ? 'Reload the server-resolved active LLM configuration before checking again.'
+      : visibleStatus?.terminalUnknown
+        ? 'The previous outcome is unresolved. A new check is available only as a separate confirmed action because it may bill again.'
+      : visibleStatus?.reconcilable
+        ? visibleStatus.previousConfiguration
+          ? 'Requests only the operation result from the previous saved configuration. The current active LLM cannot be contacted by this action.'
+          : 'Requests only the previous operation result. It cannot start a new provider call if that result expired or the server restarted.'
+    : revisionsReady
+      ? 'Starts one explicit check of the server-resolved active LLM. Unsaved edits and typed API keys are excluded; environment or .env configuration may override the saved store. The browser does not auto-retry.'
+      : 'Load saved settings before testing the active LLM.'
+  const activeReplayOnly = busy && requestRef.current?.replayOnly === true
+  const healthActionNote = reloading || visibleStatus?.configurationChanged
+    ? 'Reload only · no provider request'
+    : activeReplayOnly || visibleStatus?.reconcilable
+      ? 'Replay only · no new provider request'
+      : visibleStatus?.terminalUnknown
+        ? 'A new check requires confirmation and may bill again'
+        : busy
+          ? 'Provider check in progress and may be billed'
+          : 'One provider request may be billed'
+  const healthDescription = ['llm-health-action-note',
+    unsavedCount > 0 ? 'llm-health-draft-note' : ''].filter(Boolean).join(' ')
   return <span className="llm-health">
-    <button className="btn sm" disabled={busy} onClick={check} title="Ping the configured LLM endpoint">
-      {busy ? '… pinging' : <><OpIcon name="bolt" className="t-ic" /> Test LLM</>}
+    <button type="button" className="btn sm"
+            disabled={actionBlocked || busy || !revisionsReady || visibleStatus?.terminalUnknown}
+            onClick={check} title={buttonTitle}
+            aria-describedby={healthDescription}>
+      {busy ? (activeReplayOnly ? 'Checking previous result…' : 'Testing active LLM…')
+        : reloading ? 'Reloading settings…'
+        : visibleStatus?.configurationChanged ? 'Reload saved settings'
+        : visibleStatus?.terminalUnknown ? 'Outcome unresolved'
+        : visibleStatus?.reconcilable ? 'Check previous result'
+        : <><OpIcon name="bolt" className="t-ic" /> Test active LLM</>}
     </button>
-    {status && <span className={'chip ' + (status.ok ? 'ok' : 'alarm')}
-                     title={status.ok ? status.text
-                       : status.error || 'Check provider configuration and network access.'} role="status">
-      {status.ok ? '✓' : '×'} {status.model || 'Connection failed'}
+    {visibleStatus?.terminalUnknown && <button type="button" className="btn sm warn"
+      disabled={actionBlocked || busy || !revisionsReady} onClick={startNewAfterUnknown}
+      aria-describedby="llm-health-action-note"
+      title="Requires confirmation because this creates a new provider operation that may be billed.">
+      Start new check (may bill)
+    </button>}
+    {visibleStatus?.unresolved && <button type="button" className="btn sm ghost"
+      disabled={actionBlocked || busy} onClick={dismissRecovery}
+      title="Acknowledge the unknown outcome and remove its recovery gate without contacting the provider.">
+      Dismiss warning
+    </button>}
+    <span id="llm-health-action-note" className="llm-health-note">{healthActionNote}</span>
+    {unsavedCount > 0 && <span id="llm-health-draft-note" className="llm-health-note">
+      {countLabel(unsavedCount, 'draft change')} excluded
+    </span>}
+    {visibleStatus && <span className="llm-health-result" role="status" aria-live="polite">
+      <span className={'chip llm-health-status ' + (visibleStatus.ok ? 'ok'
+        : visibleStatus.unresolved || visibleStatus.configurationChanged || visibleStatus.anotherCheckBusy
+          ? 'warn' : 'alarm')}
+                       title={visibleStatus.ok
+                         ? visibleStatus.previousConfiguration
+                           ? 'The previous saved LLM configuration responded successfully; the current active configuration was not contacted.'
+                           : 'The server-resolved active LLM responded successfully.'
+                         : visibleStatus.error || 'Check the active provider configuration and network access.'}>
+        {visibleStatus.ok ? '✓' : visibleStatus.unresolved || visibleStatus.configurationChanged
+          || visibleStatus.anotherCheckBusy ? '!' : '×'} {visibleStatus.configurationChanged
+          ? 'Reload saved settings'
+          : visibleStatus.replayUnavailable ? 'Previous result unavailable'
+          : visibleStatus.terminalUnknown ? 'Provider outcome unresolved'
+          : visibleStatus.reconcilable ? 'Previous result pending'
+          : visibleStatus.anotherCheckBusy ? 'Another check is running'
+          : visibleStatus.ok ? visibleStatus.previousConfiguration
+            ? 'Previous LLM responded' : 'Active LLM responded'
+          : visibleStatus.notStarted ? 'Check not started'
+          : visibleStatus.previousConfiguration ? 'Previous LLM failed' : 'Active LLM failed'}
+      </span>
+      {visibleStatus.previousConfiguration && <span className="llm-health-detail">
+        Result belongs to the previous saved configuration; the current active LLM was not contacted.
+      </span>}
+      {!visibleStatus.ok && visibleStatus.error && <span className="llm-health-detail">{visibleStatus.error}</span>}
     </span>}
   </span>
 }
@@ -82,6 +447,7 @@ export default function Settings({ onBack }) {
   const [query, setQuery] = useState('')
   const [mutationBusy, setMutationBusy] = useState('')
   const [mutationUnknown, setMutationUnknown] = useState(null)
+  const [healthRecoveryActive, setHealthRecoveryActive] = useState(false)
   const [invalidFocus, setInvalidFocus] = useState({ key: '', request: 0 })
   const mutationRef = useRef(null)
   const toastTimer = useRef(null)
@@ -90,14 +456,14 @@ export default function Settings({ onBack }) {
   const allowNavigationRef = useRef(false)
   const settingsHashRef = useRef(typeof location === 'undefined' ? '#/settings' : location.hash)
 
-  const load = (reloadSchema = false) => {
+  const load = (reloadSchema = false, preserveExisting = false) => {
     const owner = ++loadRef.current
     loadControllerRef.current?.abort()
     const timed = deadlineGet('/api/settings', SETTINGS_READ_TIMEOUT_MS)
     loadControllerRef.current = timed.controller
     setLoadError('')
     return Promise.all([timed.promise, loadSettingsSchema({ reload: reloadSchema })]).then(([data, nextSchema]) => {
-      if (loadRef.current !== owner) return
+      if (loadRef.current !== owner) return false
       validateSettingsResource(data, nextSchema)
       const settings = data.settings || {}
       const nextForm = toForm(settings, nextSchema)
@@ -110,11 +476,13 @@ export default function Settings({ onBack }) {
       setSavedAC(control)
       setSecretState({ llm_api_key: !!settings.llm_api_key })
       setRevisions({ settings: data.settings_revision, secret: data.secret_revision })
+      return true
     }).catch(() => {
       if (loadRef.current === owner) {
-        setSchema(null)
+        if (!preserveExisting) setSchema(null)
         setLoadError('Settings or their editor schema could not be loaded.')
       }
+      return false
     }).finally(() => {
       if (loadRef.current === owner && loadControllerRef.current === timed.controller) {
         loadControllerRef.current = null
@@ -145,23 +513,39 @@ export default function Settings({ onBack }) {
     return changed
   }, [form, defaults, schema])
 
-  // A field is unsaved when either its value or runtime-governance roles changed since the last save.
+  const validationErrors = useMemo(() => form && schema
+    ? settingsValidationErrors(form, schema) : {}, [form, schema])
+
+  // Valid form values compare in their persisted/coerced shape (an input's "8" is the saved number 8).
+  // Invalid transitional input stays unsaved in its raw shape; secrets are write-only and stay raw too.
   const unsavedKeys = useMemo(() => {
     const changed = new Set()
-    if (form && saved) for (const key of Object.keys(form)) {
-      if (JSON.stringify(form[key]) !== JSON.stringify(saved[key])) changed.add(key)
+    if (form && saved && schema) {
+      const currentValues = fromForm(form, schema)
+      const savedValues = fromForm(saved, schema)
+      for (const key of Object.keys(form)) {
+        const field = schema.fieldByKey?.[key]
+        if (field?.type === 'secret') {
+          if (JSON.stringify(form[key]) !== JSON.stringify(saved[key])) changed.add(key)
+        } else if (validationErrors[key]
+          || JSON.stringify(currentValues[key]) !== JSON.stringify(savedValues[key])) {
+          changed.add(key)
+        }
+      }
     }
     const controlKeys = new Set([...Object.keys(agentControl || {}), ...Object.keys(savedAC || {})])
     for (const key of controlKeys) {
       if (JSON.stringify((agentControl || {})[key] || []) !== JSON.stringify((savedAC || {})[key] || [])) changed.add(key)
     }
     return changed
-  }, [form, saved, agentControl, savedAC])
+  }, [form, saved, schema, validationErrors, agentControl, savedAC])
   const unsaved = unsavedKeys.size > 0
-  const validationErrors = useMemo(() => form && schema
-    ? settingsValidationErrors(form, schema) : {}, [form, schema])
   const invalidCount = Object.keys(validationErrors).length
-  const navigationUnsafe = unsaved || !!mutationBusy || !!mutationUnknown
+  // The storage fence is written synchronously before a provider POST, while the child-to-parent
+  // status callback lands in an effect. Read both so a same-tick Save/clear/navigation cannot slip
+  // through that render gap.
+  const healthRecoveryBlocked = healthRecoveryActive || !!readHealthRecovery()
+  const navigationUnsafe = unsaved || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked
 
   useEffect(() => {
     if (!navigationUnsafe) return undefined
@@ -170,9 +554,9 @@ export default function Settings({ onBack }) {
     return installNavigationLossGuard({
       allowRef: allowNavigationRef,
       guardedHash: settingsHashRef.current,
-      message: () => navigationWarning(!!mutationBusy || !!mutationUnknown),
+      message: () => navigationWarning(mutationBusy, !!mutationUnknown, healthRecoveryBlocked),
     })
-  }, [navigationUnsafe, mutationBusy, mutationUnknown])
+  }, [navigationUnsafe, mutationBusy, mutationUnknown, healthRecoveryBlocked])
 
   const visibleGroups = useMemo(() => schema
     ? filterSettingsGroups(schema.groups, { mode, query }) : [], [mode, query, schema])
@@ -185,8 +569,12 @@ export default function Settings({ onBack }) {
       ? countLabel(visibleStats.fields, 'essential setting')
       : `${countLabel(visibleStats.fields, 'setting')} in ${countLabel(visibleStats.groups, 'section')}`
 
-  const onChange = (key, value) => setForm(current => ({ ...current, [key]: value }))
+  const onChange = (key, value) => {
+    if (mutationRef.current?.kind === 'reloading settings') return
+    setForm(current => ({ ...current, [key]: value }))
+  }
   const onToggleAgent = (key, role) => setAgentControl(current => {
+    if (mutationRef.current?.kind === 'reloading settings') return current
     const roles = new Set(current[key] || [])
     roles.has(role) ? roles.delete(role) : roles.add(role)
     return { ...current, [key]: [...roles] }
@@ -249,7 +637,8 @@ export default function Settings({ onBack }) {
           current, recovery.submittedForm, acceptedForm, recovery.uncertainKeys,
         )
         // GET can report only that a credential exists, never which replacement won. Retain the
-        // password-box draft so the operator can Test LLM and deliberately decide what to do next.
+        // password-box draft for deliberate review; Test active LLM never sends it. The server
+        // resolves the active credential, including any environment/.env override.
         if (recovery.preserveSecret) next.llm_api_key = current?.llm_api_key || ''
         return next
       })
@@ -258,10 +647,10 @@ export default function Settings({ onBack }) {
       setSecretState({ llm_api_key: !!settings.llm_api_key })
       setRevisions({ settings: data.settings_revision, secret: data.secret_revision })
       setMutationUnknown(null)
-      show(recovery.stage.endsWith('-conflict')
+      show(recovery.preserveSecret
+        ? 'Server state refreshed; the typed API-key draft was not sent, and Test active LLM uses the server-resolved credential'
+        : recovery.stage.endsWith('-conflict')
         ? 'Current server settings loaded; review the retained draft before saving again'
-        : recovery.preserveSecret
-        ? 'Server state refreshed; test the write-only credential before replacing it again'
         : 'Settings refreshed from the server; the unknown write was not replayed')
     } catch {
       show('Could not refresh authoritative settings; the previous outcome is still unknown')
@@ -270,6 +659,10 @@ export default function Settings({ onBack }) {
     }
   }
   const onSave = async () => {
+    if (healthRecoveryBlocked) {
+      show('Acknowledge or resolve the LLM provider warning before saving a new configuration')
+      return
+    }
     if (invalidCount) {
       show(`Fix ${countLabel(invalidCount, 'invalid setting')} before saving`)
       focusFirstInvalid()
@@ -362,6 +755,10 @@ export default function Settings({ onBack }) {
     }
   }
   const onClearSecret = async key => {
+    if (healthRecoveryBlocked) {
+      show('Acknowledge or resolve the LLM provider warning before changing its credential')
+      return
+    }
     if (!window.confirm('Clear the stored API key now? This is immediate, separate from Save, and cannot be undone. Any typed replacement stays as an unsaved draft.')) return
     const mutation = beginMutation('clearing secret')
     if (!mutation) { show('A settings update is already in progress'); return }
@@ -388,6 +785,7 @@ export default function Settings({ onBack }) {
     }
   }
   const resetToDefaults = () => {
+    if (mutationRef.current?.kind === 'reloading settings') return
     if (defaults) {
       setForm(toForm(defaults, schema))
       setAgentControl(defaults.agent_control || {})
@@ -398,7 +796,8 @@ export default function Settings({ onBack }) {
     setMode('all')
   }
   const requestBack = () => {
-    if (navigationUnsafe && !window.confirm(navigationWarning(!!mutationBusy || !!mutationUnknown))) return
+    if (navigationUnsafe && !window.confirm(navigationWarning(
+      mutationBusy, !!mutationUnknown, healthRecoveryBlocked))) return
     allowNavigationRef.current = true
     onBack()
   }
@@ -475,11 +874,11 @@ export default function Settings({ onBack }) {
           <span>{mutationUnknown.stage === 'settings-conflict'
             ? 'Your draft is retained. Refresh the current server state before deliberately saving it against the new revision.'
             : mutationUnknown.stage === 'secret-conflict'
-              ? 'Ordinary settings were accepted, but another credential update won. The typed replacement is retained for review.'
+              ? 'Ordinary settings were accepted, but another credential update won. The typed replacement is retained and is not sent by Test active LLM; the server resolves its active credential.'
             : mutationUnknown.stage === 'secret-clear-conflict'
               ? 'Another credential update won before this clear. Refresh before deciding whether to clear the current credential.'
             : mutationUnknown.stage === 'secret-set'
-            ? 'Ordinary settings were accepted, but the write-only API-key replacement could not be confirmed. The draft is retained; never submit it blindly.'
+            ? 'Ordinary settings were accepted, but the API-key replacement could not be confirmed. The typed draft is retained and is not sent by Test active LLM; the server resolves its active credential.'
             : mutationUnknown.stage === 'secret-clear'
               ? 'The API-key clear may or may not have reached the server. Do not repeat it blindly.'
               : 'The settings save may or may not have reached the server. Current edits are kept and will not be replayed automatically.'}</span>
@@ -492,14 +891,31 @@ export default function Settings({ onBack }) {
                       errors={validationErrors}
                       agentControl={agentControl} onToggleAgent={onToggleAgent}
                       secretState={secretState} onClearSecret={onClearSecret}
-                      secretActionDisabled={!!mutationBusy || !!mutationUnknown}
+                      secretActionDisabled={!!mutationBusy || !!mutationUnknown || healthRecoveryBlocked}
+                      interactionDisabled={mutationBusy === 'reloading settings'}
                       mode={mode} query={query} schema={schema}
                       focusKey={invalidFocus.key} focusRequest={invalidFocus.request} />
       </>}
     </main>
 
     {form && schema && <div className="settings-actions"><div className="sa-inner">
-      <LlmHealth />
+      <LlmHealth savedSettingsRevision={revisions.settings} savedSecretRevision={revisions.secret}
+        unsavedCount={unsavedKeys.size}
+        actionBlocked={!!mutationBusy || !!mutationUnknown}
+        actionKind={mutationBusy}
+        beginAction={beginMutation} finishAction={finishMutation}
+        onRecoveryChange={setHealthRecoveryActive}
+        reloadSavedSettings={async () => {
+          if (unsaved && !window.confirm('Reload saved settings and discard the current draft changes?')) return false
+          const mutation = beginMutation('reloading settings')
+          if (!mutation) return false
+          try {
+            const reloaded = await load(false, true)
+            if (!reloaded) show('Saved settings could not be reloaded; current values and the provider warning were kept')
+            return reloaded
+          }
+          finally { finishMutation(mutation) }
+        }} />
       <span className="spacer" style={{ flex: 1 }} />
       {invalidCount
         ? <button type="button" className="settings-summary-link settings-save-state is-invalid"
@@ -508,9 +924,9 @@ export default function Settings({ onBack }) {
             role="status" aria-live="polite">
           {unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'All changes saved'}
         </span>}
-      <button className="btn sm ghost" onClick={resetToDefaults}
+      <button className="btn sm ghost" disabled={mutationBusy === 'reloading settings'} onClick={resetToDefaults}
               title="Reset every field to the engine default">↻ Defaults</button>
-      <button className="btn sm primary" disabled={!unsaved || invalidCount > 0 || !!mutationBusy || !!mutationUnknown} onClick={onSave}>
+      <button className="btn sm primary" disabled={!unsaved || invalidCount > 0 || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked} onClick={onSave}>
         {mutationBusy === 'saving' ? 'Saving...' : 'Save'}
       </button>
     </div></div>}
