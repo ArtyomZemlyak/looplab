@@ -31,23 +31,25 @@ def build_router(srv) -> APIRouter:
         return body
 
     # ------------------------------------------------------------------ projects (ClearML-style)
-    # CLAUDE REVIEW: [PERF] Every project MUTATOR route that calls this (create_project,
-    # patch_project, assign_run, create_supertask, patch_supertask, assign_supertask, rename_run) is
-    # an `async def`, so `_project_call(fn)` runs `fn()` — `ProjectStore._transaction` ->
-    # `_interprocess_lock(required=True)` -> a BLOCKING `fcntl.flock(LOCK_EX)` with NO timeout, plus
-    # load/atomic-save disk I/O — directly on the ASGI event loop. If another UI worker/process holds
-    # `projects.json.lock` the flock waits UNBOUNDED, freezing every concurrent SSE tick/poll on this
-    # worker. The read routes and the destructive ones (delete_project/delete_supertask/delete_run)
-    # are sync `def` (threadpool) and are safe; only these async mutators block. They need the same
-    # `anyio.to_thread.run_sync` offload that /control and submit_command already use.
     def _project_call(fn):
-        """Map invalid mutations to 400 and an unavailable required durability lock to 503."""
+        """Map invalid mutations to 400 and an unavailable required durability lock to 503.
+
+        BLOCKING: `fn` reaches `ProjectStore._transaction` -> `_interprocess_lock(required=True)` ->
+        an unbounded `fcntl.flock(LOCK_EX)`, plus load/atomic-save disk I/O. A sync `def` route runs
+        in FastAPI's threadpool and may call this directly; an `async def` route must NOT — on the
+        ASGI event loop a lock another UI worker or process holds freezes every concurrent SSE tick
+        and poll on this worker until it is released. Async callers go through `_project_call_async`.
+        """
         try:
             return fn()
         except ProjectStoreLockError as e:
             raise HTTPException(503, str(e)) from e
         except ProjectError as e:
             raise HTTPException(400, str(e)) from e
+
+    async def _project_call_async(fn):
+        """`_project_call` off the event loop — the offload `assign_run` / `rename_run` already use."""
+        return await anyio.to_thread.run_sync(lambda: _project_call(fn))
 
     def _expected_run_generation(body: dict) -> str:
         generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
@@ -94,7 +96,8 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/projects")
     async def create_project(request: Request):
         body = await _json_object(request)
-        p = _project_call(lambda: projects.create(body.get("name", ""), body.get("parent_id")))
+        p = await _project_call_async(
+            lambda: projects.create(body.get("name", ""), body.get("parent_id")))
         return p.model_dump()
 
     @router.patch("/api/projects/{pid}")
@@ -106,7 +109,7 @@ def build_router(srv) -> APIRouter:
                 projects.rename(pid, body["name"])
             if "parent_id" in body:
                 projects.reparent(pid, body["parent_id"])
-        _project_call(_apply)
+        await _project_call_async(_apply)
         return {"ok": True}
 
     @router.delete("/api/projects/{pid}")
@@ -133,13 +136,14 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/supertasks")
     async def create_supertask(request: Request):
         body = await _json_object(request)
-        st = _project_call(lambda: projects.create_supertask(body.get("name", ""), body.get("task_id")))
+        st = await _project_call_async(
+            lambda: projects.create_supertask(body.get("name", ""), body.get("task_id")))
         return st
 
     @router.patch("/api/supertasks/{sid}")
     async def patch_supertask(sid: str, request: Request):
         body = await _json_object(request)
-        _project_call(lambda: projects.rename_supertask(sid, body.get("name", "")))
+        await _project_call_async(lambda: projects.rename_supertask(sid, body.get("name", "")))
         return {"ok": True}
 
     @router.delete("/api/supertasks/{sid}")

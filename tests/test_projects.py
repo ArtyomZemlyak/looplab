@@ -336,3 +336,50 @@ def test_a_hand_edited_row_missing_id_or_name_is_dropped_instead_of_500ing_every
                  lambda: store.rename_supertask("s2", "")):
         with pytest.raises(ProjectError):
             call()
+
+
+def test_project_mutating_routes_never_take_the_blocking_lock_on_the_event_loop(tmp_path, monkeypatch):
+    """`ProjectStore._transaction` ends in `_interprocess_lock(required=True)` — a blocking
+    `fcntl.flock(LOCK_EX)` with NO timeout — plus load/atomic-save disk I/O. Run from an `async def`
+    route that runs it INLINE, a lock another UI worker or process holds freezes this worker's whole
+    event loop (every SSE tick and poll) until the other side releases it. Every mutating route must
+    therefore reach the transaction from a worker thread. `asyncio.get_running_loop()` is the probe:
+    it returns the loop on the ASGI thread and raises RuntimeError anywhere else."""
+    pytest.importorskip("fastapi")
+    import asyncio
+    from contextlib import contextmanager
+
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+
+    app = make_app(tmp_path)
+    projects = app.state.looplab.projects
+    original = projects._transaction
+    on_loop: list[str] = []
+
+    @contextmanager
+    def probing_transaction():
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass                                    # a worker thread — the contract
+        else:
+            on_loop.append("blocked the event loop")
+        with original():
+            yield
+
+    monkeypatch.setattr(projects, "_transaction", probing_transaction)
+    client = TestClient(app)
+
+    pid = client.post("/api/projects", json={"name": "vision"}).json()["id"]
+    assert client.patch(f"/api/projects/{pid}", json={"name": "renamed"}).status_code == 200
+    sid = client.post("/api/supertasks", json={"name": "sweep"}).json()["id"]
+    assert client.patch(f"/api/supertasks/{sid}", json={"name": "resweep"}).status_code == 200
+    # `assign_run` is deliberately absent: it already offloads via `_run_project_call`, and its
+    # generation fence rejects a synthetic run before the transaction is ever reached.
+
+    assert on_loop == [], on_loop
+    # …and the offload did not break the writes it wraps.
+    assert projects.load()["projects"][0]["name"] == "renamed"
+    assert projects.load()["supertasks"][0]["name"] == "resweep"

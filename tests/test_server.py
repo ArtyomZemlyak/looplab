@@ -1825,6 +1825,50 @@ def test_sparse_agent_control_patches_from_stale_tabs_merge_by_setting(tmp_path)
     assert merged["policy"] == baseline["policy"]
 
 
+def test_settings_and_secret_puts_never_take_their_blocking_locks_on_the_event_loop(
+        tmp_path, monkeypatch):
+    """`ui_settings_transaction` / `secret_transaction` each end in `_interprocess_lock(required=
+    True)` — a blocking `fcntl.flock(LOCK_EX)` with NO timeout — followed by load/validate/atomic-
+    write disk I/O. Both PUTs must `await request.json()`, so they are `async def` and used to run
+    that whole transaction INLINE on the ASGI loop: a lock another server process held froze every
+    SSE stream and poll on this worker until it was released. The probe is `asyncio.
+    get_running_loop()` — it returns the loop on the ASGI thread and raises RuntimeError elsewhere."""
+    import asyncio
+    from contextlib import contextmanager
+
+    app = make_app(tmp_path)
+    store = app.state.looplab.settings
+    on_loop: list[str] = []
+
+    def _probe(name, original):
+        @contextmanager
+        def probing():
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass                                # a worker thread — the contract
+            else:
+                on_loop.append(name)
+            with original():
+                yield
+        return probing
+
+    monkeypatch.setattr(store, "ui_settings_transaction",
+                        _probe("settings", store.ui_settings_transaction))
+    monkeypatch.setattr(store, "secret_transaction",
+                        _probe("secret", store.secret_transaction))
+    client = TestClient(app)
+
+    saved = client.put("/api/settings", json={"settings": {"max_nodes": 11}})
+    stored = client.put("/api/settings/secret", json={"key": "llm_api_key", "value": "sk-x"})
+
+    assert saved.status_code == 200 and stored.status_code == 200
+    assert on_loop == [], on_loop
+    # …and the offload did not break the writes it wraps.
+    assert saved.json()["overrides"]["max_nodes"] == 11
+    assert stored.json()["set"] is True
+
+
 def test_settings_put_rejects_bad_shape_and_invalid_value_without_writing(tmp_path):
     client = TestClient(make_app(tmp_path))
     assert client.put("/api/settings", json={"settings": []}).status_code == 400
