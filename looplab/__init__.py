@@ -184,6 +184,8 @@ _LAYOUT = {
     "repo_write_tools": "adapters",
     "report": "serve",
     "research_cadence": "engine",
+    "reset_route": "serve",
+    "reset_transaction": "serve",
     "resources": "engine",  # resource-envelope and Card footprint scheduling helpers
     "reposcout": "tools",
     "retrieval": "tools",
@@ -191,6 +193,8 @@ _LAYOUT = {
     "reward_hack": "trust",
     "roles": "agents",
     "run_commands": "serve",
+    "run_files": "serve",
+    "run_reset": "core",
     "run_tools": "tools",
     "machine_runs_tools": "tools",
     "sandbox": "runtime",
