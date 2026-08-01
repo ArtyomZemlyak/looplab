@@ -43,17 +43,26 @@ export function attentionHref(item) {
   if (!item || item.source !== 'run' || !safeRunId(item.runId)
       || !GENERATION_RE.test(item.generation || '')) return null
   const state = { ...emptyRunRouteState(), generation: item.generation }
-  if (item.kind === 'approval') state.nodeId = item.nodeId
+  const exactNodeId = safeInteger(item.nodeId)
+  const exactNodeAttempt = safeInteger(item.nodeGeneration)
+  const hasExactNode = exactNodeId != null && exactNodeAttempt != null
+  if (item.kind === 'approval' && hasExactNode) state.nodeId = exactNodeId
+  else if (item.kind === 'approval') state.panel = 'events'
   else if (item.kind === 'finished' || item.kind === 'budget_exhausted'
       || item.kind === 'stopped') state.view = 'report'
   else if (item.kind === 'failure_spike') {
     state.panel = 'failures'
-    if (item.nodeId != null) state.nodeId = item.nodeId
-  } else if (item.kind === 'run_failed' && item.nodeId != null) {
-    state.panel = 'failures'; state.nodeId = item.nodeId
-  } else if ((item.kind === 'train_monitor' || item.kind === 'asha') && item.nodeId != null) {
-    state.nodeId = item.nodeId          // deep-link to the evaluating node (its live training curve)
+    if (hasExactNode) state.nodeId = exactNodeId
+  } else if (item.kind === 'run_failed') {
+    state.panel = 'failures'
+    if (hasExactNode) state.nodeId = exactNodeId
+  } else if ((item.kind === 'train_monitor' || item.kind === 'asha') && hasExactNode) {
+    state.nodeId = exactNodeId          // deep-link to the evaluating node (its live training curve)
   } else state.panel = 'events'
+  // A run generation can contain several lifecycles for the same numeric node after a reset/retry.
+  // Target a node only when the feed carries both halves of its lifecycle identity; incomplete or
+  // future-schema notifications degrade to a safe run-level panel rather than the current attempt.
+  if (state.nodeId != null) state.nodeGeneration = exactNodeAttempt
   const query = encodeRunRouteState(state, { forceGeneration: true })
   return `#/run/${encodeURIComponent(item.runId)}${query ? `?${query}` : ''}`
 }

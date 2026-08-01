@@ -67,16 +67,20 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
     && resource.state.generation !== generation)
   const pendingFence = !!(resource.state.generation && !generation)
 
-  const update = useCallback((patch, { mode = 'push', preserveIssues = false } = {}) => {
+  const update = useCallback((patch, {
+    mode = 'push', preserveIssues = false, forceGeneration = false,
+  } = {}) => {
     const current = stateRef.current
     if (current.generation && generation && current.generation !== generation) return current
     const raw = typeof patch === 'function' ? patch(current) : { ...current, ...patch }
-    const candidate = reconcileRunRouteStateUpdate(current, raw, { generation, reviewMode })
+    const candidate = reconcileRunRouteStateUpdate(current, raw, {
+      generation, reviewMode, forceGeneration,
+    })
     if (candidate === current || sameRunRouteState(current, candidate)) return current
     stateRef.current = candidate
     setResource(value => ({ ...value, state: candidate,
       issues: preserveIssues ? value.issues : [] }))
-    write(candidate, mode)
+    write(candidate, mode, { forceGeneration })
     return candidate
   }, [generation, reviewMode, write])
 

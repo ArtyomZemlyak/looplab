@@ -2398,7 +2398,8 @@ export const assistantCreate = (title = '', mode = 'plan', options) =>
   post('/api/assistant/sessions', { title, mode }, options)
 export const assistantGet = (sid, options) =>
   get(`/api/assistant/sessions/${encodeURIComponent(sid)}`, options)
-export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE')
+export const assistantDelete = (sid, options) =>
+  send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE', undefined, options)
 export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
 // Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
 // Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
@@ -2490,7 +2491,28 @@ export const assistantCancel = (sid, options) =>
 export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
 
 export const assistantCommands = () => get('/api/assistant/commands')
-export const assistantRevert = (path) => post('/api/assistant/revert', { path })
+export const assistantRevert = (change, options) => {
+  // Both values are opaque receipt material. A legal POSIX path may contain leading/trailing spaces;
+  // normalizing either field would turn an exact request into a different request.
+  const path = typeof change?.abs_path === 'string' ? change.abs_path : ''
+  const recoveryId = typeof change?.recovery_id === 'string' ? change.recovery_id : ''
+  const exists = change?.recovery_postimage_exists
+  const digest = change?.recovery_postimage_digest
+  const mode = change?.recovery_postimage_mode
+  if (!path || !recoveryId || typeof exists !== 'boolean'
+      || (exists && (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)))
+      || (exists && (!Number.isInteger(mode) || mode < 0 || mode > 0o7777))
+      || (!exists && (digest != null || mode != null))) {
+    const error = new Error('This file change has no exact recovery identity.')
+    error.code = 'ASSISTANT_REVERT_IDENTITY_REQUIRED'
+    throw error
+  }
+  return post('/api/assistant/revert', {
+    path,
+    recovery_id: recoveryId,
+    expected_postimage: { exists, digest: exists ? digest : null, mode: exists ? mode : null },
+  }, options)
+}
 // A share link is its own capability: the response carries the token-bearing URL, when it expires,
 // and whether it follows the chat (`live`) or is frozen at the turns that existed when it was minted.
 // The session id is NOT a share link — unshare revokes every link without touching the conversation.

@@ -30,6 +30,17 @@ function RunChip({ id, run }) {
 const stripCtx = (s) => typeof s === 'string'
   ? s.replace(/\n*\[UI context:[^\]]*\]\s*$/, '').trimEnd() : s
 
+const exactRecoveryAvailable = action => !!action
+  && typeof action.abs_path === 'string' && action.abs_path.length > 0
+  && typeof action.recovery_id === 'string' && action.recovery_id.length > 0
+  && typeof action.recovery_postimage_exists === 'boolean'
+  && (action.recovery_postimage_exists
+    ? typeof action.recovery_postimage_digest === 'string'
+      && /^[0-9a-f]{64}$/.test(action.recovery_postimage_digest)
+      && Number.isInteger(action.recovery_postimage_mode)
+      && action.recovery_postimage_mode >= 0 && action.recovery_postimage_mode <= 0o7777
+    : action.recovery_postimage_digest == null && action.recovery_postimage_mode == null)
+
 function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
   return <div className={`assistant-error-card ${error.kind}`} role="alert">
     <div className="assistant-error-card__head">
@@ -49,6 +60,7 @@ function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
 export function Turn({
   m, runsById, onRevert, onRetry, onOpenSettings, launchChat, readOnly = false,
   launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, onLaunchDraft, onLaunchStarted,
+  revertState,
 }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
   const content = m.role === 'user' ? stripCtx(m.content) : m.content
@@ -75,10 +87,18 @@ export function Turn({
       {m.role === 'assistant' && m.streaming && !m.content && !(m.activity && m.activity.length) &&
         <div className="asst-status thinking"><span className="asst-status-ic">…</span><span> thinking</span></div>}
       {m.role === 'assistant' && Array.isArray(m.applied) && m.applied.length > 0 &&
-        <div className="asst-steps">{m.applied.map((a, i) =>
-          <span key={i} className="asst-step done">✓ {a.label || a.tool}
-            {onRevert && a.abs_path && <button className="asst-undo" title="undo this change"
-              onClick={() => onRevert(a.abs_path)}>undo</button>}</span>)}</div>}
+        <div className="asst-steps">{m.applied.map((a, i) => {
+          const recovery = revertState?.(a) || {}
+          const canRevert = onRevert && exactRecoveryAvailable(a)
+          return <span key={i} className="asst-step done">✓ {a.label || a.tool}
+            {canRevert && <button className="asst-undo" title={recovery.done
+              ? 'this exact file change was reverted'
+              : recovery.busy ? 'reverting this exact file change' : 'undo this exact file change'}
+              aria-label={`${recovery.done ? 'Reverted' : recovery.busy ? 'Reverting' : 'Undo'} ${a.label || a.tool || 'file change'}`}
+              disabled={recovery.busy || recovery.done}
+              onClick={() => onRevert(a)}>{recovery.done ? 'reverted'
+                : recovery.busy ? 'reverting…' : 'undo'}</button>}</span>
+        })}</div>}
       {m.role === 'assistant' && <Todos items={m.todos} />}
       {(m.content || !m.streaming) && <div
         className={'chat-bubble' + (assistantError ? ' assistant-error-bubble' : '')

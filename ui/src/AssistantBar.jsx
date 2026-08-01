@@ -165,6 +165,24 @@ const clampAssistantWidth = (value, compact = window.innerWidth <= ASSISTANT_OVE
   const max = assistantMaxWidth(compact)
   return Math.min(Math.max(Number(value) || 440, 320), max)
 }
+const assistantRevertKey = (sessionId, change) => {
+  const path = typeof change?.abs_path === 'string' ? change.abs_path : ''
+  const recoveryId = typeof change?.recovery_id === 'string' ? change.recovery_id : ''
+  return path && recoveryId
+    ? JSON.stringify([String(sessionId || NEW_CHAT_COMPOSER_KEY), path, recoveryId]) : ''
+}
+const rememberBoundedSetValue = (values, value, limit = 256) => {
+  values.delete(value)
+  values.add(value)
+  while (values.size > limit) values.delete(values.values().next().value)
+  return values
+}
+const rememberBoundedMapValue = (values, key, value, limit = 256) => {
+  values.delete(key)
+  values.set(key, value)
+  while (values.size > limit) values.delete(values.keys().next().value)
+  return values
+}
 const readFileText = (file) => new Promise((resolve) => {
   const r = new FileReader()
   r.onload = () => resolve({ name: file.name, size: file.size, content: String(r.result || '').slice(0, FILE_CHAR_CAP), truncated: (r.result || '').length > FILE_CHAR_CAP })
@@ -243,6 +261,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const resolvedPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
   const [sessionsStatus, setSessionsStatus] = useState('idle')
+  const [deleteConfirm, setDeleteConfirm] = useState(null)
+  const [deleteConfirmBusy, setDeleteConfirmBusy] = useState(false)
+  const [deleteConfirmError, setDeleteConfirmError] = useState('')
+  const [revertingChanges, setRevertingChanges] = useState(() => new Set())
+  const [revertedChanges, setRevertedChanges] = useState(() => new Set())
   const sessionsLoadedRef = useRef(false)
   const sessionsRequestSeqRef = useRef(0)
   const sessionDeleteTombstonesRef = useRef(new Map())
@@ -286,6 +309,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const feedRef = useRef(null)
   const fullDialogRef = useRef(null)
   const sideDialogRef = useRef(null)
+  const deleteDialogRef = useRef(null)
+  const deleteErrorRef = useRef(null)
+  const deleteTriggerRef = useRef(null)
+  const deleteFocusAfterRef = useRef(null)
+  const deleteConfirmBusyRef = useRef(false)
+  const revertingChangesRef = useRef(new Set())
+  const revertedChangesRef = useRef(new Set())
   const atBottomRef = useRef(true)     // is the feed scrolled to (near) the bottom? gates autoscroll
   const flashTimerRef = useRef(null)   // single toast-clear timer so rapid flashes don't clip each other
   const fileRef = useRef(null)
@@ -459,6 +489,26 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   const openSide = () => openCommandView('side')   // openable any time (even empty)
   const openFull = () => openCommandView('full')
+  const closeDeleteConfirm = React.useCallback(() => {
+    if (deleteConfirmBusyRef.current) return
+    const trigger = deleteTriggerRef.current
+    const focusAfterDelete = deleteFocusAfterRef.current
+    setDeleteConfirm(null)
+    setDeleteConfirmError('')
+    deleteTriggerRef.current = null
+    deleteFocusAfterRef.current = null
+    // useDialogFocus restores the original trigger in the normal case. If an optimistic attempt
+    // removed and then restored that row, its original DOM node no longer exists, so keep a stable
+    // neighbouring action as the recovery destination instead of dropping focus onto <body>.
+    requestAnimationFrame(() => {
+      const target = trigger?.isConnected
+        ? trigger
+        : focusAfterDelete?.isConnected
+          ? focusAfterDelete
+          : document.querySelector('.asst-sessions .asst-sess-open, .asst-side-h .btn.primary')
+      target?.focus({ preventScroll: true })
+    })
+  }, [])
   const collapseToBar = () => {
     const returnSelector = view === 'side' ? '.cmdbar-drawer-btn' : '.cmdbar-ic'
     const la = lastAssistant()
@@ -470,6 +520,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
   useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden)
   useDialogFocus(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden)
+  useDialogFocus(deleteDialogRef, deleteConfirmBusy ? null : closeDeleteConfirm,
+    !!deleteConfirm && !hidden)
+  useEffect(() => {
+    if (deleteConfirmError) deleteErrorRef.current?.focus({ preventScroll: true })
+  }, [deleteConfirmError])
 
   // ── resizable side panel (drag its left edge) ──
   const resizeCleanupRef = useRef(null)
@@ -775,51 +830,143 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     activateComposer(NEW_CHAT_COMPOSER_KEY, { clear: true })
     storageRemove('ll.asstSid')
   }
-  const delSession = async (id, e) => {
-    e?.stopPropagation()
-    const row = e?.currentTarget?.closest('.asst-sess')
-    const focusAfterDelete = row?.nextElementSibling?.querySelector('.asst-sess-open')
-      || row?.previousElementSibling?.querySelector('.asst-sess-open')
-      || document.querySelector('.asst-side-h .btn.primary')
+  const deleteSessionBlock = (id) => {
     const unresolved = listLaunchTransports()
       .find(item => launchDraftSession(item.identity) === String(id))
     if (unresolved) {
-      flash(`Check or release startup recovery${unresolved.runId ? ` for “${unresolved.runId}”` : ''} before deleting this chat`)
-      if (sidRef.current === id) openSide()
-      return
+      return {
+        message: `Check or release startup recovery${unresolved.runId ? ` for “${unresolved.runId}”` : ''} before deleting this chat`,
+        revealRecovery: sidRef.current === id,
+      }
     }
     if (shareActionSessionRef.current === id) {
-      flash('Wait for the current share action before deleting this chat')
+      return { message: 'Wait for the current share action before deleting this chat' }
+    }
+    if (deletingSessionsRef.current.has(id)) return { duplicate: true }
+    return null
+  }
+  const reportDeleteSessionBlock = block => {
+    if (!block) return
+    if (block.message) flash(block.message)
+    if (block.revealRecovery) openSide()
+  }
+  const requestDeleteSession = (session, e) => {
+    e?.stopPropagation()
+    const row = e?.currentTarget?.closest('.asst-sess')
+    const block = deleteSessionBlock(session.id)
+    if (block) {
+      reportDeleteSessionBlock(block)
       return
     }
-    if (deletingSessionsRef.current.has(id)) return
+    deleteTriggerRef.current = e?.currentTarget || null
+    deleteFocusAfterRef.current = row?.nextElementSibling?.querySelector('.asst-sess-open:not(:disabled)')
+      || row?.previousElementSibling?.querySelector('.asst-sess-open:not(:disabled)')
+      || document.querySelector('.asst-side-h .btn.primary')
+    setDeleteConfirm({ id: session.id, title: session.title || 'Chat' })
+    setDeleteConfirmError('')
+  }
+  const confirmDeleteSession = async () => {
+    const target = deleteConfirm
+    if (!target || deleteConfirmBusyRef.current) return
+    const { id } = target
+    const block = deleteSessionBlock(id)
+    if (block) {
+      closeDeleteConfirm()
+      reportDeleteSessionBlock(block)
+      return
+    }
+    deleteConfirmBusyRef.current = true
+    setDeleteConfirmBusy(true)
+    setDeleteConfirmError('')
     deletingSessionsRef.current.add(id)
-    sessionDeleteTombstonesRef.current.set(String(id), 'pending')
+    rememberBoundedMapValue(sessionDeleteTombstonesRef.current, String(id), 'pending')
     const deletedIndex = sessions.findIndex(session => session.id === id)
     const deletedSession = deletedIndex >= 0 ? sessions[deletedIndex] : null
     mutateSessionsLocally(ss => ss.filter(s => s.id !== id)) // optimistic: drop it now (geesefs list can lag)
-    requestAnimationFrame(() => focusAfterDelete?.isConnected && focusAfterDelete.focus({ preventScroll: true }))
-    try {
-      await assistantDelete(id)
+    let deleted = false
+    const acceptDeletedSession = () => {
       setLaunchDrafts(current => clearLaunchDraftSession(current, id))
       composerDraftsRef.current.delete(id)
       setShareUnknown(id, false)
       clearShareCopy(id)
       if (id === storageGet('ll.asstSid')) storageRemove('ll.asstSid')
       if (id === sidRef.current) newChat()
-      sessionDeleteTombstonesRef.current.set(String(id), 'confirmed')
-    } catch {
-      sessionDeleteTombstonesRef.current.delete(String(id))
-      if (deletedSession) mutateSessionsLocally(current => {
-        if (current.some(session => session.id === id)) return current
-        const restored = [...current]
-        restored.splice(Math.min(deletedIndex, restored.length), 0, deletedSession)
-        return restored
-      })
-      flash('Could not delete this Assistant chat')
-      refreshSessions()
+      rememberBoundedMapValue(sessionDeleteTombstonesRef.current, String(id), 'confirmed')
+      deleted = true
     }
-    finally { deletingSessionsRef.current.delete(id) }
+    try {
+      await boundedRequest(signal => assistantDelete(id, { signal }))
+      acceptDeletedSession()
+    } catch (error) {
+      const requestWasAmbiguous = candidate => candidate?.name === 'TimeoutError'
+        || candidate?.name === 'AbortError'
+        || candidate?.status == null || Number(candidate.status) >= 500
+      const ambiguous = requestWasAmbiguous(error)
+      let finalError = error
+      let finalAmbiguous = ambiguous
+      // DELETE is idempotent for this exact session id. If the first response was lost, repeat the
+      // same bounded operation: a successful second response proves the directory is now gone even
+      // when the first request actually completed. A list omission cannot prove that — unreadable or
+      // partially deleted session metadata is intentionally skipped by the list projection.
+      if (ambiguous) {
+        try {
+          await boundedRequest(signal => assistantDelete(id, { signal }))
+          acceptDeletedSession()
+        } catch (retryError) {
+          finalError = retryError
+          finalAmbiguous = requestWasAmbiguous(retryError)
+        }
+      }
+      let listedPresence = null
+      if (finalAmbiguous && !deleted) {
+        try {
+          const payload = await boundedRequest(
+            signal => assistantSessions({ signal, cache: 'no-store' }), 8000)
+          listedPresence = Array.isArray(payload?.sessions)
+            ? payload.sessions.some(session => session?.id === id) : null
+        } catch { /* list truth is optional context; only DELETE can confirm removal */ }
+      }
+      if (!deleted) {
+        sessionDeleteTombstonesRef.current.delete(String(id))
+        if (deletedSession) mutateSessionsLocally(current => {
+          if (current.some(session => session.id === id)) return current
+          const restored = [...current]
+          restored.splice(Math.min(deletedIndex, restored.length), 0, deletedSession)
+          return restored
+        })
+        const incomplete = finalError?.code === 'assistant_delete_incomplete'
+        const stillStopping = finalError?.code === 'assistant_delete_busy'
+        const message = stillStopping
+          ? 'The live Assistant turn is still stopping. The chat is shown again; try deleting it again shortly.'
+          : incomplete
+          ? 'The server could not completely remove the chat. Close anything using its files and try again.'
+          : finalAmbiguous && listedPresence === true
+            ? 'Neither bounded deletion attempt was confirmed, and the chat still appears available. You can try again.'
+            : finalAmbiguous
+              ? 'Neither bounded deletion attempt was confirmed. The chat is shown again for safety; retry or refresh.'
+              : 'The chat was not deleted. It is shown again; you can cancel or try again.'
+        flash(stillStopping ? 'Assistant work is still stopping'
+          : incomplete ? 'Assistant chat was not completely removed' : 'Could not confirm chat deletion')
+        if (mountedRef.current) setDeleteConfirmError(message)
+      }
+    }
+    finally {
+      deletingSessionsRef.current.delete(id)
+      deleteConfirmBusyRef.current = false
+      if (mountedRef.current) setDeleteConfirmBusy(false)
+      if (deleted && mountedRef.current) {
+        const focusAfterDelete = deleteFocusAfterRef.current
+        deleteTriggerRef.current = null
+        deleteFocusAfterRef.current = null
+        setDeleteConfirm(null)
+        requestAnimationFrame(() => {
+          const targetAfterDelete = focusAfterDelete?.isConnected
+            ? focusAfterDelete
+            : document.querySelector('.asst-sessions .asst-sess-open:not(:disabled), .asst-side-h .btn.primary')
+          targetAfterDelete?.focus({ preventScroll: true })
+        })
+      }
+    }
   }
 
   const resolvePerm = async (reqId, decision) => {
@@ -856,9 +1003,32 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       })
     }
   }
-  const onRevert = async (absPath) => {
+  const onRevert = async (change) => {
     if (historical) { flash(readOnlyAction); return }
-    try { await assistantRevert(absPath); flash('File change reverted') } catch { flash('Could not revert this file change') }
+    const key = assistantRevertKey(sidRef.current || sid, change)
+    if (!key) { flash('This older file change has no exact undo receipt'); return }
+    if (revertingChangesRef.current.has(key) || revertedChangesRef.current.has(key)) return
+    revertingChangesRef.current.add(key)
+    setRevertingChanges(current => new Set(current).add(key))
+    try {
+      await boundedRequest(signal => assistantRevert(change, { signal }))
+      rememberBoundedSetValue(revertedChangesRef.current, key)
+      if (mountedRef.current) {
+        setRevertedChanges(new Set(revertedChangesRef.current))
+        flash('Exact file change reverted')
+      }
+    } catch (error) {
+      if (mountedRef.current) flash(error?.status === 409 || error?.code === 'assistant_revert_conflict'
+          ? 'Undo stopped — the file changed or a newer recovery point now owns this path'
+          : error?.name === 'TimeoutError' || error?.name === 'AbortError'
+            ? 'Undo outcome was not confirmed — retrying the same receipt is safe'
+            : 'Could not revert this file change')
+    } finally {
+      revertingChangesRef.current.delete(key)
+      if (mountedRef.current) setRevertingChanges(current => {
+          const next = new Set(current); next.delete(key); return next
+        })
+    }
   }
 
   const directLabels = entry => entry.spec.arg && entry.arg == null ? {
@@ -1733,6 +1903,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // latest explicit Genesis command through the owning proposal message; unrelated session history,
   // attachment payloads, system/tool records, and unfinished turns fail closed.
   const launchChatThrough = index => proposalLaunchChat(msgs, index)
+  const revertState = change => {
+    const key = assistantRevertKey(sid, change)
+    return key ? { busy: revertingChanges.has(key), done: revertedChanges.has(key) } : {}
+  }
   const renderThread = () => <>
     {msgs.length === 0 && <div className="asst-empty">
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
@@ -1752,6 +1926,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : onRevert}
         onRetry={retryHandlerFor(i)}
         onOpenSettings={openAssistantSettings} launchChat={launchChatThrough(i)}
+        revertState={revertState}
         launchSessionId={sid} launchMessageId={m.turn_id || m.id} launchMessageIndex={i}
         launchDrafts={launchDrafts}
         onLaunchDraft={(key, draft) => setLaunchDrafts(current => retainLaunchDraft(current, key, draft))}
@@ -1927,6 +2102,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       onPointerDown={collapseToBar} />}
     {view === 'side' && <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
       role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
+      aria-hidden={deleteConfirm ? 'true' : undefined} inert={deleteConfirm ? '' : undefined}
       tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
       {!compactAssistant && <div className="asst-resize" role="separator" aria-label="Resize Assistant panel"
         aria-orientation="vertical" aria-valuemin={320} aria-valuemax={maxSideWidth()}
@@ -1950,7 +2126,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
     {/* ── full page — dedicated OPAQUE view (sessions · thread · composer) ── */}
     {view === 'full' && <div ref={fullDialogRef} className="asst-view asst-full" role="dialog"
-      aria-modal="true" aria-label="Assistant" tabIndex={-1}>
+      aria-modal="true" aria-label="Assistant" aria-hidden={deleteConfirm ? 'true' : undefined}
+      inert={deleteConfirm ? '' : undefined} tabIndex={-1}>
       <div className="asst-side">
         <div className="asst-side-h">
           <button className="btn sm" title="fold back to the bar" onClick={collapseToBar}>▾ bar</button>
@@ -1976,14 +2153,24 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           </div>}
           {sessionsStatus === 'ready' && sessions.length === 0
             && <div className="muted asst-session-empty">No chats yet.</div>}
-          {sessions.map(s => <div key={s.id} className={'asst-sess' + (s.id === sid ? ' active' : '')}>
-            <button type="button" className="asst-sess-open" aria-current={s.id === sid ? 'page' : undefined}
+          {sessions.map(s => <div key={s.id} className={'asst-sess'
+            + (s.id === sid ? ' active' : '') + (s.cleanup_required ? ' cleanup-required' : '')}>
+            <button type="button" className="asst-sess-open"
+              aria-current={s.id === sid ? 'page' : undefined}
+              aria-label={s.cleanup_required
+                ? 'Incomplete chat deletion; use Delete to retry cleanup'
+                : undefined}
+              title={s.cleanup_required ? 'This partial chat cannot be opened. Delete it to retry cleanup.' : undefined}
+              disabled={s.cleanup_required === true}
               onClick={() => openSession(s.id)}>
               <span className="asst-sess-t">{s.title || 'Chat'}</span>
-              <span className="asst-sess-m">{fmtAgo(s.updated)}</span>
+              <span className="asst-sess-m">{s.cleanup_required
+                ? 'Cleanup required · delete to retry' : fmtAgo(s.updated)}</span>
             </button>
-            <button className="asst-sess-x" onClick={(e) => delSession(s.id, e)}
-              aria-label={`Delete chat ${s.title || 'Chat'}`}>✕</button>
+            <button type="button" className="asst-sess-x" onClick={(e) => requestDeleteSession(s, e)}
+              aria-label={s.cleanup_required
+                ? `Retry cleanup for ${s.title || 'incomplete chat deletion'}`
+                : `Delete chat ${s.title || 'Chat'}`}>✕</button>
           </div>)}
         </div>
       </div>
@@ -2101,6 +2288,38 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {composer('Message the assistant…  (/ for commands · Enter to send)')}
         {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
       </div>
+    </div>}
+    {deleteConfirm && <div className="overlay assistant-delete-overlay"
+      onPointerDown={event => {
+        if (!deleteConfirmBusy && event.target === event.currentTarget) closeDeleteConfirm()
+      }}>
+      <section ref={deleteDialogRef} className="modal assistant-delete-dialog" role="alertdialog"
+        aria-modal="true" aria-labelledby="assistant-delete-title"
+        aria-describedby="assistant-delete-description assistant-delete-warning"
+        aria-busy={deleteConfirmBusy} tabIndex={-1}>
+        <div className="modal-h">
+          <b id="assistant-delete-title">Delete this Assistant chat?</b>
+        </div>
+        <div className="modal-b">
+          <p id="assistant-delete-description" className="assistant-delete-copy">
+            You are deleting <strong>“{deleteConfirm.title}”</strong>.
+          </p>
+          <p id="assistant-delete-warning" className="assistant-delete-warning">
+            Its transcript will be permanently deleted, and any live Assistant work in this chat will be cancelled. This cannot be undone.
+          </p>
+          {deleteConfirmError && <div ref={deleteErrorRef} className="flag assistant-delete-error"
+            role="alert" tabIndex={-1}>{deleteConfirmError}</div>}
+          {deleteConfirmBusy && <div className="assistant-delete-progress" role="status" aria-live="polite">
+            Deleting chat and cancelling live work…
+          </div>}
+          <div className="modal-actions">
+            <button type="button" className="btn sm" data-dialog-initial-focus
+              disabled={deleteConfirmBusy} onClick={closeDeleteConfirm}>Cancel</button>
+            <button type="button" className="btn sm danger" disabled={deleteConfirmBusy}
+              onClick={confirmDeleteSession}>{deleteConfirmBusy ? 'Deleting chat…' : 'Delete chat'}</button>
+          </div>
+        </div>
+      </section>
     </div>}
   </>
 }

@@ -302,7 +302,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const setInspectTab = (value, options = {}) => route.update(current => {
     const next = typeof value === 'function' ? value(current.inspectTab) : value
     return { ...current, inspectTab: next,
-      nodeGeneration: next === 'Comments' ? current.nodeGeneration : null,
+      nodeGeneration: current.nodeGeneration,
       commentId: next === 'Comments' ? current.commentId : null }
   }, options)
   const setPanel = (value, options = {}) => route.update(current => ({
@@ -338,6 +338,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     runStatus, runAuthorityBlocked, startOverMutationBlocked])
   const [toast, setToast] = useState(null)
   const [routeNotice, setRouteNotice] = useState('')
+  const [attemptFenceNotice, setAttemptFenceNotice] = useState('')
+  // Route warnings belong only to the address that produced them. Back/Forward or a newly opened
+  // deep link starts a fresh navigation; route.update() intentionally does not bump this value, so a
+  // mismatch handler can canonicalize its own URL without erasing the warning it just raised.
+  useLayoutEffect(() => {
+    setRouteNotice('')
+    setAttemptFenceNotice('')
+  }, [route.navigationRevision])
   const [copyFallback, setCopyFallback] = useState('')
   const [groupMode, setGroupMode] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
@@ -918,6 +926,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const selectNode = (id) => {
     setSelectedId(id)
     if (id != null) {
+      setRouteNotice('')
       setSelectedGroup(null)
       if (compactWorkspace) setCompactInspectorOpen(true)
       else setSideC(false)
@@ -1025,22 +1034,34 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       .filter(Boolean).join(' '))
     route.update(current => ({ ...current, nodeId: null, nodeGeneration: null,
       inspectTab: 'Overview', commentId: null }),
-      { mode: 'replace', preserveIssues: true })
+      { mode: 'replace', preserveIssues: true,
+        forceGeneration: routeState.nodeGeneration != null })
     setCompactInspectorOpen(false)
-  }, [live2, selectedId, historyActive, history.status, startOverHandoff])
+  }, [live2, selectedId, historyActive, history.status, startOverHandoff,
+    routeState.nodeGeneration])
   const currentSelectedAttempt = selectedId == null ? null : live2?.nodes?.[selectedId]?.attempt
+  const exactNodeAttemptMismatch = routeState.nodeGeneration != null
+    && live2?.nodes?.[selectedId] != null
+    && routeState.nodeGeneration !== currentSelectedAttempt
   const commentAttemptMatches = !routeState.commentId
     || (Number.isSafeInteger(routeState.nodeGeneration)
       && routeState.nodeGeneration === currentSelectedAttempt)
-  useEffect(() => {
-    if (!routeState.commentId || !live2 || commentAttemptMatches) return
-    setRouteNotice(current => [current,
-      `The linked comment belongs to attempt ${routeState.nodeGeneration}; experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}.`]
-      .filter(Boolean).join(' '))
-    route.update(current => ({ ...current, nodeGeneration: null, commentId: null }),
-      { mode: 'replace', preserveIssues: true })
-  }, [routeState.commentId, routeState.nodeGeneration, live2, selectedId,
-    currentSelectedAttempt, commentAttemptMatches])
+  useLayoutEffect(() => {
+    if (!exactNodeAttemptMismatch) return
+    setAttemptFenceNotice(routeState.commentId
+      ? `The linked comment belongs to attempt ${routeState.nodeGeneration}, but experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}. The newer attempt was not opened.`
+      : `The link targets attempt ${routeState.nodeGeneration}, but experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}. The newer attempt was not opened.`)
+    route.update(current => ({ ...current, nodeId: null, nodeGeneration: null,
+      inspectTab: 'Overview', commentId: null }),
+      { mode: 'replace', preserveIssues: true, forceGeneration: true })
+    setCompactInspectorOpen(false)
+  }, [exactNodeAttemptMismatch, routeState.nodeGeneration, routeState.commentId,
+    selectedId, currentSelectedAttempt])
+  useLayoutEffect(() => {
+    // An in-app DAG selection is a new, current target even though it uses route.update() rather than
+    // browser navigation. Retire only the attempt-fence warning; unrelated route notices remain.
+    if (selectedId != null && !exactNodeAttemptMismatch) setAttemptFenceNotice('')
+  }, [selectedId, currentSelectedAttempt, routeState.nodeGeneration, exactNodeAttemptMismatch])
   useEffect(() => {
     // Initial hydration and Back/Forward are navigation, not a hidden selection: reveal the actual
     // Inspector destination even when a persisted desktop rail or a compact drawer was closed.
@@ -1680,11 +1701,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {startOverRecovery.kind === 'unavailable' && <button type="button" className="btn xs"
           onClick={retryStartOverStorage}>Try storage again</button>}
       </div>}
-      {(routeNotice || route.issues.length > 0) && <div className="route-state-notice" role="status">
+      {(routeNotice || attemptFenceNotice || route.issues.length > 0) && <div className="route-state-notice" role="status">
         <OpIcon name="info" size={13} />
-        <span>{[...route.issues, routeNotice].filter(Boolean).join(' ')}</span>
+        <span>{[...route.issues, routeNotice, attemptFenceNotice].filter(Boolean).join(' ')}</span>
         <button type="button" className="btn xs ghost" aria-label="Dismiss link-state notice"
-          onClick={() => { setRouteNotice(''); route.clearIssues() }}>×</button>
+          onClick={() => { setRouteNotice(''); setAttemptFenceNotice(''); route.clearIssues() }}>×</button>
       </div>}
       {copyFallback && <div className="copy-link-fallback" role="status">
         <label htmlFor="copy-view-fallback">Clipboard blocked — select and copy this link</label>

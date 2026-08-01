@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import secrets
 import threading
@@ -40,6 +41,9 @@ from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa
 # for. Detect the checkout by its pyproject and otherwise fall back to the package directory.
 _PKG_ROOT = Path(__file__).resolve().parents[1]                       # …/looplab
 REPO_ROOT = (_PKG_ROOT.parent if (_PKG_ROOT.parent / "pyproject.toml").is_file() else _PKG_ROOT)
+
+_SESSION_ID_RE = re.compile(r"[0-9a-f]{16}")
+_INCOMPLETE_SESSION_TITLE = "Incomplete chat (cleanup required)"
 
 
 def safe_assistant_failure(exc: Exception) -> dict:
@@ -170,9 +174,48 @@ class SessionStore:
 
     def _read_meta(self, sid: str) -> Optional[dict]:
         try:
-            return json.loads(self._meta_path(sid).read_text(encoding="utf-8"))
+            meta = json.loads(self._meta_path(sid).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        return meta if isinstance(meta, dict) else None
+
+    @staticmethod
+    def _valid_timestamp(value) -> bool:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            return value >= 0 and math.isfinite(value)
+        except (OverflowError, TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _valid_meta(cls, sid: str, meta: Optional[dict]) -> bool:
+        if meta is None or meta.get("id") != sid or not isinstance(meta.get("title"), str):
+            return False
+        if not cls._valid_timestamp(meta.get("created")) or not cls._valid_timestamp(meta.get("updated")):
+            return False
+        parent = meta.get("parent")
+        if parent is not None and (not isinstance(parent, str) or _SESSION_ID_RE.fullmatch(parent) is None):
+            return False
+        return meta.get("mode") in MODES
+
+    @staticmethod
+    def _cleanup_meta(sid: str, directory: Path) -> dict:
+        try:
+            timestamp = float(directory.stat().st_mtime)
+        except (OSError, OverflowError, TypeError, ValueError):
+            timestamp = 0.0
+        if timestamp < 0 or not math.isfinite(timestamp):
+            timestamp = 0.0
+        return {
+            "id": sid,
+            "title": _INCOMPLETE_SESSION_TITLE,
+            "created": timestamp,
+            "updated": timestamp,
+            "parent": None,
+            "mode": DEFAULT_MODE,
+            "cleanup_required": True,
+        }
 
     def update_meta(self, sid: str, **fields) -> Optional[dict]:
         # Read-modify-write under the meta lock so concurrent updates don't drop each other's fields.
@@ -189,11 +232,16 @@ class SessionStore:
         if not self.dir.exists():
             return []
         out = []
+        root = self.dir.resolve()
         for d in self.dir.iterdir():
-            if d.is_dir():
-                m = self._read_meta(d.name)
-                if m:
-                    out.append(m)
+            try:
+                if (d.is_symlink() or not d.is_dir() or d.resolve().parent != root
+                        or _SESSION_ID_RE.fullmatch(d.name) is None):
+                    continue
+            except (OSError, RuntimeError):
+                continue
+            meta = self._read_meta(d.name)
+            out.append(meta if self._valid_meta(d.name, meta) else self._cleanup_meta(d.name, d))
         out.sort(key=lambda m: m.get("updated", 0), reverse=True)
         return out
 

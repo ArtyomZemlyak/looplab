@@ -136,11 +136,14 @@ def build_router(srv) -> APIRouter:
     # REAL result). "allow_always" is exact-action/scope, mode, and turn-epoch bound — never a broad
     # session→tool-kind bypass.
     _perm_lock = threading.Lock()
+    _delete_lock = threading.Lock()  # retries of the same idempotent DELETE must not race rmtree
     _perm_reqs: dict = {}
     _perm_always = RememberedGrantStore()
     _asst_progress: dict = {}      # sid -> {steps:[label,…], updated} — live tool steps during a turn
     _asst_cancel: dict = {}        # sid -> threading.Event — set by /cancel to stop an in-flight turn
+    _asst_turn_done: dict = {}     # sid -> threading.Event — deletion waits for the worker to quiesce
     _asst_epoch: dict = {}         # sid -> opaque random epoch owned by the active cancel event
+    _deleting_sessions: set[str] = set()  # closes get→turn races while DELETE owns the session
     try:
         _configured_perm_timeout = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
     except (TypeError, ValueError):
@@ -260,6 +263,8 @@ def build_router(srv) -> APIRouter:
         the cancel event + a fresh progress entry, both owned by `cancel_ev`, atomically under the
         lock."""
         with _perm_lock:
+            if sid in _deleting_sessions:
+                raise HTTPException(409, "this session is being deleted")
             existing = _asst_cancel.get(sid)
             # A set cancel flag means "stopping", not "finished": the old worker may still be inside
             # an uninterruptible model/tool call and may already own a durable run command.  Keep the
@@ -267,6 +272,7 @@ def build_router(srv) -> APIRouter:
             if existing is not None:
                 raise HTTPException(409, "a turn is already running for this session")
             _asst_cancel[sid] = cancel_ev
+            _asst_turn_done[sid] = threading.Event()
             _asst_epoch[sid] = epoch
             _asst_progress[sid] = {"steps": [], "todos": [], "text": "", "updated": time.time(),
                                    "owner": cancel_ev, "epoch": epoch}
@@ -274,14 +280,18 @@ def build_router(srv) -> APIRouter:
     def _release_turn(sid: str, cancel_ev: "threading.Event", epoch: str) -> None:
         """Tear down ONLY this turn's registry entries (a newer turn may have replaced them): pop the
         cancel event and progress entry only when `cancel_ev` still owns them."""
+        done = None
         with _perm_lock:
             if _asst_cancel.get(sid) is cancel_ev:
                 _asst_cancel.pop(sid, None)
+                done = _asst_turn_done.pop(sid, None)
                 _asst_epoch.pop(sid, None)
                 _perm_always.invalidate(sid, epoch=epoch)
             p = _asst_progress.get(sid)
             if p is not None and p.get("owner") is cancel_ev:
                 _asst_progress.pop(sid, None)
+        if done is not None:
+            done.set()
 
     def _deny_session_perms_locked(sid: str) -> None:
         """Deny a session's pending cards while `_perm_lock` is held by the caller."""
@@ -359,24 +369,54 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/assistant/revert")
     async def assistant_revert(request: Request):
-        """Undo the assistant's most recent change to a file (restore the pre-edit snapshot)."""
+        """Undo one exact assistant change while its applied post-image is still current."""
         body = await _json_object(request)
-        path = (body.get("path") or "").strip()
-        if not path:
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
             raise HTTPException(400, "path is required")
+        recovery_id = body.get("recovery_id")
+        if not isinstance(recovery_id, str) or not recovery_id or len(recovery_id) > 128:
+            raise HTTPException(400, "recovery_id is required")
+        expected_postimage = body.get("expected_postimage")
+        if (not isinstance(expected_postimage, dict)
+                or set(expected_postimage) != {"exists", "digest", "mode"}
+                or not isinstance(expected_postimage.get("exists"), bool)):
+            raise HTTPException(
+                400, "expected_postimage must contain exactly exists, digest, and mode")
+        expected_digest = expected_postimage.get("digest")
+        expected_mode = expected_postimage.get("mode")
+        if expected_postimage["exists"]:
+            if (not isinstance(expected_digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None):
+                raise HTTPException(400, "expected_postimage.digest must be a SHA-256 digest")
+            if type(expected_mode) is not int or not 0 <= expected_mode <= 0o7777:
+                raise HTTPException(
+                    400, "expected_postimage.mode must be valid permission bits")
+        elif expected_digest is not None or expected_mode is not None:
+            raise HTTPException(
+                400, "expected_postimage.digest and mode must be null when the file is absent")
+        expected_state = {
+            "exists": expected_postimage["exists"], "digest": expected_digest,
+        }
         from looplab.tools.perm_modes import DEFAULT_MODE
         from looplab.tools.write_tools import WriteTools
-        # This is the OPERATOR-CLICKED undo, and the click IS the approval — so it calls the bare
-        # `WriteTools.revert`, which `write_tools.py` deliberately leaves un-gated for exactly this
-        # caller (the MODEL-invocable `_revert_tool` next to it carries the mode/approver gate). The
-        # path is still bounded by `_check`: allowed roots, `looks_secret`, and the protected-file
-        # list, none of which depend on the mode.
-        # `mode` is therefore inert here — `revert` never reaches `_authorize`. It is pinned to the
+        # This is the OPERATOR-CLICKED undo, and the click IS the approval — so it calls the ungated,
+        # receipt-bound `WriteTools.revert_exact`. The MODEL-invocable `_revert_tool` keeps its
+        # historical path-only behavior and mode/approver gate. The path is still bounded by `_check`:
+        # allowed roots, `looks_secret`, and the protected-file list, none of which depend on the mode.
+        # `mode` is therefore inert here — `revert_exact` never reaches `_authorize`. It is pinned to the
         # fail-closed DEFAULT rather than "auto" so that if this route is ever pointed at a GATED
         # verb, the permission machinery denies by default instead of silently self-approving.
         wt = WriteTools([Path.home(), _ASSISTANT_REPO_ROOT, root], mode=DEFAULT_MODE,
                         repo_root=_ASSISTANT_REPO_ROOT, backup_dir=root / "assistant" / "backups")
-        return {"ok": True, "result": wt.revert(path)}
+        result = await anyio.to_thread.run_sync(
+            lambda: wt.revert_exact(path, recovery_id, expected_state, expected_mode))
+        if result is None:
+            raise HTTPException(409, {
+                "code": "assistant_revert_conflict",
+                "message": "This change is no longer the current undo target or the file changed after it was applied.",
+            })
+        return {"ok": True, "result": result}
 
     @router.get("/api/assistant/progress")
     def assistant_progress(session: str):
@@ -436,22 +476,51 @@ def build_router(srv) -> APIRouter:
             d = _asst._sdir(sid)
         except ValueError:
             raise HTTPException(404, "no such session")
-        # Stop an in-flight turn on this session before removing its files: cancel the loop AND unblock
-        # a worker parked on a confirm — else it runs against a now-deleted session for up to 900s.
-        with _perm_lock:
-            cev = _asst_cancel.get(sid)
-            if cev is not None:
-                cev.set()
-            _deny_session_perms_locked(sid)
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-        with _perm_lock:      # drop the deleted session's in-memory grants/progress (no slow leak)
-            _perm_always.invalidate(sid)
-            _asst_epoch.pop(sid, None)
-            _asst_progress.pop(sid, None)
-            for k in [k for k, r in _perm_reqs.items()
-                      if r.get("session") == sid and r.get("status") != "pending"]:
-                _perm_reqs.pop(k, None)
+        with _delete_lock:
+            # Stop an in-flight turn before removing its files: cancel the loop, unblock a worker parked
+            # on a confirm, and prevent a request that already read the session from claiming a new turn.
+            # Waiting for the worker closes the mutation-journal/reply race that could recreate material
+            # after rmtree and turn a reported success into a partial deletion.
+            with _perm_lock:
+                _deleting_sessions.add(sid)
+                cev = _asst_cancel.get(sid)
+                done = _asst_turn_done.get(sid)
+                if cev is not None:
+                    cev.set()
+                _deny_session_perms_locked(sid)
+            try:
+                if cev is not None and (done is None or not done.wait(timeout=5.0)):
+                    raise HTTPException(409, {
+                        "code": "assistant_delete_busy",
+                        "message": "The live Assistant turn is still stopping. Try deleting this chat again shortly.",
+                    })
+                if d.exists():
+                    try:
+                        shutil.rmtree(d)
+                    except OSError:
+                        # Windows commonly refuses a recursive delete while an editor/indexer still has
+                        # a transcript file open. Never report success while session material remains.
+                        if d.exists():
+                            raise HTTPException(409, {
+                                "code": "assistant_delete_incomplete",
+                                "message": "The chat could not be completely removed. Close anything using its files and try again.",
+                            })
+                if d.exists():
+                    raise HTTPException(409, {
+                        "code": "assistant_delete_incomplete",
+                        "message": "The chat could not be completely removed. Close anything using its files and try again.",
+                    })
+                with _perm_lock:  # drop the deleted session's in-memory grants/progress (no slow leak)
+                    _perm_always.invalidate(sid)
+                    _asst_epoch.pop(sid, None)
+                    _asst_progress.pop(sid, None)
+                    _asst_turn_done.pop(sid, None)
+                    for k in [k for k, r in _perm_reqs.items()
+                              if r.get("session") == sid and r.get("status") != "pending"]:
+                        _perm_reqs.pop(k, None)
+            finally:
+                with _perm_lock:
+                    _deleting_sessions.discard(sid)
         return {"ok": True}
 
     @router.post("/api/assistant/sessions/{sid}/share")
@@ -600,6 +669,11 @@ def build_router(srv) -> APIRouter:
         # the session wedges at 409 forever. `_asst.append` raises ValueError if a concurrent DELETE
         # rmtree'd the session dir between `_asst.get` above and here; `_llm_settings` can also raise.
         try:
+            # DELETE may have completed while this request was paused between its first read and slot
+            # acquisition. Revalidate only after owning the turn; a later DELETE must wait for our done
+            # event, so the append below cannot race rmtree once this check succeeds.
+            if _asst.get(sid) is None:
+                raise HTTPException(404, "no such session")
             shown = display or instruction
             trailing = history[-1] if history else None
             trailing_user = isinstance(trailing, dict) and trailing.get("role") == "user"
@@ -743,10 +817,12 @@ def build_router(srv) -> APIRouter:
         try:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
-            _release_turn(sid, cancel_ev, turn_epoch)
             failure = _safe_assistant_failure(e)
-            _asst.append(sid, {"role": "assistant", "content": failure["reply"],
-                               "error_kind": failure["error_kind"]})
+            try:
+                _asst.append(sid, {"role": "assistant", "content": failure["reply"],
+                                   "error_kind": failure["error_kind"]})
+            finally:
+                _release_turn(sid, cancel_ev, turn_epoch)
             return {"ok": False, **failure, "mode": eff_mode}
 
         approver = _make_approver(
@@ -783,7 +859,6 @@ def build_router(srv) -> APIRouter:
         try:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
-            _release_turn(sid, cancel_ev, turn_epoch)
             # Persist an assistant error bubble too (mirror the non-stream endpoint) so a page reload
             # shows the failure instead of a DANGLING user turn — the user's message with no reply,
             # since _begin_turn already appended the user turn before make_llm_client.
@@ -793,6 +868,8 @@ def build_router(srv) -> APIRouter:
                                    "error_kind": failure["error_kind"]})
             except Exception:  # noqa: BLE001 - a concurrent session DELETE must not turn this into a 500
                 pass
+            finally:
+                _release_turn(sid, cancel_ev, turn_epoch)
             err_msg = failure["reply"]
 
             async def _err_gen():

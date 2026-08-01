@@ -107,10 +107,10 @@ export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   if (Number.isSafeInteger(input.nodeId) && input.nodeId >= 0) state.nodeId = input.nodeId
   const nodeGeneration = state.nodeId != null && Number.isSafeInteger(input.nodeGeneration)
     && input.nodeGeneration >= 0 ? input.nodeGeneration : null
+  if (nodeGeneration != null) state.nodeGeneration = nodeGeneration
   if (state.nodeId != null && RUN_ROUTE_TABS.includes(input.inspectTab)) state.inspectTab = input.inspectTab
-  if (state.nodeId != null && nodeGeneration != null && state.inspectTab === 'Comments'
+  if (state.nodeId != null && state.nodeGeneration != null && state.inspectTab === 'Comments'
       && typeof input.commentId === 'string' && COMMENT_ID_RE.test(input.commentId)) {
-    state.nodeGeneration = nodeGeneration
     state.commentId = input.commentId
   }
   if (PANEL_SET.has(input.panel)) state.panel = input.panel
@@ -173,8 +173,14 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
     else if (view !== 'dag') issues.push('Unknown workspace view was ignored.')
   }
   state.nodeId = integer(single(params, 'node', issues), 'node id', issues)
+  const attemptSupplied = params.has('attempt')
   const attempt = integer(single(params, 'attempt', issues), 'node attempt', issues)
-  if (attempt != null) {
+  if (attemptSupplied && attempt == null) {
+    issues.push(state.nodeId == null
+      ? 'Invalid node attempt was ignored.'
+      : 'The node target had an invalid attempt and was not opened.')
+    state.nodeId = null
+  } else if (attempt != null) {
     if (state.nodeId == null) issues.push('Node attempt without a node was ignored.')
     else state.nodeGeneration = attempt
   }
@@ -193,9 +199,15 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
       issues.push('Comment target without the matching node attempt and Comments tab was ignored.')
     } else state.commentId = comment
   }
-  if (state.nodeGeneration != null && state.commentId == null) {
-    issues.push('Node attempt without a valid comment target was ignored.')
+  // `attempt` is now also a standalone exact node-lifecycle fence. A supplied comment is an exact
+  // compound target, however, so rejecting any part of it (including a missing attempt) must reject
+  // the node too instead of silently opening that numeric id's current lifecycle.
+  if (params.has('comment') && state.commentId == null) {
+    issues.push('The comment target was invalid and its experiment was not opened.')
+    state.nodeId = null
     state.nodeGeneration = null
+    state.inspectTab = 'Overview'
+    state.commentId = null
   }
   const panel = single(params, 'panel', issues)
   if (panel != null && panel !== '') {
@@ -279,7 +291,7 @@ export function sameRunRouteState(left, right) {
 }
 
 export function reconcileRunRouteStateUpdate(current, raw, {
-  generation = null, reviewMode = false,
+  generation = null, reviewMode = false, forceGeneration = false,
 } = {}) {
   let candidate = { ...emptyRunRouteState(), ...raw }
   if (!candidate.generation && generation && runRouteStateHasTarget(candidate, { reviewMode })) {
@@ -289,6 +301,6 @@ export function reconcileRunRouteStateUpdate(current, raw, {
   // An explicit `?gen=A` with otherwise-default state is meaningful. A click on the already-active
   // Search view (or any other semantic no-op) must not silently turn that exact link into a live alias.
   if (sameRunRouteState(current, candidate)) return current
-  if (!runRouteStateHasTarget(candidate, { reviewMode })) candidate.generation = null
+  if (!forceGeneration && !runRouteStateHasTarget(candidate, { reviewMode })) candidate.generation = null
   return sameRunRouteState(current, candidate) ? current : candidate
 }

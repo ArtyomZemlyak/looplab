@@ -2099,8 +2099,12 @@ pre.code.event-json { max-height: 220px; }
   border: 1px solid transparent; }
 .asst-sess:hover { background: var(--bg-2); }
 .asst-sess.active { background: var(--bg-2); border-color: var(--accent-dim); }
+.asst-sess.cleanup-required { border-color: color-mix(in srgb, var(--working) 52%, var(--line));
+  background: color-mix(in srgb, var(--working) 8%, var(--bg-1)); }
 .asst-sess-open { display: flex; flex: 1; min-width: 0; flex-direction: column; padding: 0 18px 0 0;
   border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.asst-sess-open:disabled { cursor: default; opacity: 1; }
+.asst-sess.cleanup-required .asst-sess-m { color: var(--working-text); }
 .asst-sess-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .asst-sess-t { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 18px; }
 .asst-sess-m { font-size: 10.5px; color: var(--fg-mut); margin-top: 2px; }
@@ -2175,7 +2179,9 @@ pre.code.event-json { max-height: 220px; }
   .asst-full .asst-side { width: 100%; max-height: min(32dvh, 220px); border-right: 0;
     border-bottom: 1px solid var(--line); }
   .asst-full .asst-sessions { display: flex; flex: none; overflow: auto; gap: 6px; }
-  .asst-full .asst-sess { min-width: 170px; }
+  .asst-full .asst-sess { min-width: 190px; min-height: 52px; padding-right: 52px; }
+  .asst-full .asst-sess-x { top: 50%; right: 4px; width: 44px; height: 44px; padding: 0;
+    transform: translateY(-50%); opacity: 1; }
   .asst-side-panel .asst-resize { display: none; }
   .asst-perm-details > div { grid-template-columns: 1fr; gap: 1px; }
   .asst-perm-actions .btn { min-height: 44px; flex: 1 1 auto; }
@@ -2332,6 +2338,18 @@ pre.code.event-json { max-height: 220px; }
   opacity: .3; flex: none; padding: 2px 5px; border-radius: 5px; }
 .asst-sess:hover .asst-sess-x { opacity: 1; }
 .asst-sess-x:hover { color: var(--fail); background: var(--bg-3); }
+
+/* Irreversible Assistant transcript deletion uses a real, keyboard-contained confirmation layer. */
+.assistant-delete-overlay { align-items: center; z-index: 230; }
+.assistant-delete-dialog { width: min(520px, 94%); }
+.assistant-delete-copy { margin: 0; color: var(--fg); line-height: 1.5; overflow-wrap: anywhere; }
+.assistant-delete-warning { margin: 12px 0 0; padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--fail) 50%, var(--line-2)); border-radius: 8px;
+  background: color-mix(in srgb, var(--fail) 8%, var(--bg-2)); color: var(--fail-text); line-height: 1.5; }
+.assistant-delete-error { margin-top: 10px; line-height: 1.45; }
+.assistant-delete-error:focus { outline: 2px solid var(--fail); outline-offset: 2px; }
+.assistant-delete-progress { margin-top: 10px; color: var(--fg-dim); font-size: 12px; line-height: 1.4; }
+.assistant-delete-dialog .modal-actions .btn { min-height: 44px; }
 
 .cmdbar-toast.side { position: absolute; bottom: 70px; left: 12px; right: 12px; text-align: center; }
 
