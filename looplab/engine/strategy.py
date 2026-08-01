@@ -14,6 +14,7 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events, search, agents and stdlib (SurrogateResearcher / cli PRESETS stay lazy, method-local)."""
 from __future__ import annotations
 
+import json
 import math
 from typing import Optional
 
@@ -1191,14 +1192,26 @@ class StrategyCadenceMixin:
             or set(raw_pin) != active_pinned)
         if not pin_drift and not consulting:
             return state
-        # CLAUDE REVIEW: [PERF] A persistently-INVALID operator pin defeats the cheap short-circuit
-        # above: `pin_drift` is computed from raw_pin (pre-validation), so a pin carrying only
-        # out-of-whitelist fields (e.g. a free-text boss `policy`) can never match active_core and
-        # keeps pin_drift True for the rest of the run (pending_strategy is only replaced by a new
-        # set_strategy). It is then dropped by validate_strategy below (pin_fields empty), so it is a
-        # no-op for RECORDING — but not for COST: _strategy_ctx (O(nodes) operator_yields, and
-        # cross-run memory I/O under a governance lock when cross_run_advisory is on) now runs on
-        # EVERY loop pass, not just the strategist cadence, contradicting the "harmless no-op" claim.
+        # Second short-circuit, for a pin that is drifting only because it is INVALID. `pin_drift` is
+        # computed from raw_pin (pre-validation), so a pin carrying only out-of-whitelist fields (a
+        # free-text boss `policy`, say) can never match active_core and stays "drifting" for the rest
+        # of the run — `pending_strategy` is replaced only by a new set_strategy. validate_strategy
+        # then drops it (pin_fields empty), so it is a no-op for RECORDING, but without this memo it
+        # was not a no-op for COST: `_strategy_ctx` is O(nodes) in operator_yields and does cross-run
+        # memory I/O under a governance lock when cross_run_advisory is on, and it would run on EVERY
+        # loop pass rather than on the strategist cadence.
+        # The memo is keyed on everything the whitelist can consult for THESE fields: the pin itself,
+        # `card_driven_selection` (gates card_scoring) and the policy registry (gates policy). Both
+        # can move mid-run, so a pin that only becomes valid later is still picked up. Purely
+        # in-process and only ever skips work whose outcome is "return state unchanged", so it cannot
+        # affect the event log or resume (a resumed engine simply re-validates once).
+        pin_verdict_key = None
+        if raw_pin:
+            pin_verdict_key = (json.dumps(raw_pin, sort_keys=True, default=str),
+                               bool(getattr(self, "card_driven_selection", False)),
+                               tuple(available_policies()))
+            if not consulting and self._invalid_pin_verdict == pin_verdict_key:
+                return state
         ctx = self._strategy_ctx(state)
         # Validate the pin against the SAME whitelist the engine applies, keeping only the pinned
         # fields that survive. The boss `strategy` action carries free-text policy/fidelity (server
@@ -1209,6 +1222,10 @@ class StrategyCadenceMixin:
         # invalid pin a harmless no-op.
         vpin = validate_strategy({**raw_pin, "source": "operator"}, ctx) if raw_pin else None
         pin_fields = {k: vpin[k] for k in raw_pin if vpin and k in vpin}
+        # Latch (or clear) the "this pin survives validation as nothing" verdict the short-circuit
+        # above reads. Clearing on a pin that DID survive matters as much as latching: it keeps the
+        # memo from outliving the pin that produced it.
+        self._invalid_pin_verdict = pin_verdict_key if (raw_pin and not pin_fields) else None
         ownership_drift = bool(pin_fields) and set(pin_fields) != active_pinned
         # 1. Re-assert the pin if a VALID pinned value or its exact ownership set isn't in force
         # (merge onto active). Invalid historical pins remain harmless no-ops.

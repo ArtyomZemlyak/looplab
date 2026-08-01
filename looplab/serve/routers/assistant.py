@@ -42,6 +42,12 @@ from looplab.core.redact import redact_secrets
 
 ASSISTANT_SHARE_HEADER = "X-LoopLab-Share"
 
+# Cadence for draining the assistant worker's queue from the event loop (see `gen` below). The poll
+# only runs while the worker has produced NOTHING, so it bounds idle latency, not throughput; the
+# keepalive comment keeps a buffering proxy's idle read-timer from firing on a long LLM call.
+_ASSISTANT_STREAM_POLL_SECONDS = 0.05
+_ASSISTANT_STREAM_KEEPALIVE_SECONDS = 10.0
+
 
 async def _json_object(request: Request) -> dict:
     """Parse a request body as a JSON object or fail with 400 (mirrors routers/boss + control), so a
@@ -850,18 +856,26 @@ def build_router(srv) -> APIRouter:
             # so a long or stalled LLM call still emits a keepalive comment (the proxy's idle read-timer
             # never fires, and a dead client surfaces promptly on the failed write).
             yield ": " + " " * 2048 + "\n\n"
-            # CLAUDE REVIEW: [PERF] Each open assistant stream keeps one anyio threadpool worker
-            # blocked in q.get(timeout=10) essentially continuously. FastAPI sync `def` routes and
-            # every anyio.to_thread caller (runs SSE _state_payload, boss offloads) share that same
-            # default 40-token pool, so a few dozen concurrent assistant streams starve the whole
-            # server. Use an anyio.from_thread/memory-object stream bridge (worker pushes into an
-            # async channel) instead of polling a blocking queue via the shared threadpool.
+            # Drain the worker's queue ON THE EVENT LOOP. This used to be
+            # `await anyio.to_thread.run_sync(lambda: q.get(timeout=10))`, which parked one anyio
+            # threadpool worker per open stream for essentially the whole turn — and FastAPI's sync
+            # `def` routes and every other `anyio.to_thread` caller (the runs SSE `_state_payload`,
+            # the boss offloads, the settings/project writes) share that same default 40-token pool,
+            # so a few dozen concurrent assistant streams starved the entire server. A non-blocking
+            # `get_nowait` costs no pool token; the sleep runs ONLY when the worker has produced
+            # nothing, so it bounds idle latency and never throttles a stream that is emitting.
+            idle = 0.0
             while True:
                 try:
-                    kind, data = await anyio.to_thread.run_sync(lambda: q.get(timeout=10))
+                    kind, data = q.get_nowait()
                 except _queue.Empty:
-                    yield ": keepalive\n\n"
+                    await anyio.sleep(_ASSISTANT_STREAM_POLL_SECONDS)
+                    idle += _ASSISTANT_STREAM_POLL_SECONDS
+                    if idle >= _ASSISTANT_STREAM_KEEPALIVE_SECONDS:
+                        idle = 0.0
+                        yield ": keepalive\n\n"
                     continue
+                idle = 0.0
                 if kind == ASSISTANT_STREAM_END_SENTINEL:
                     break
                 yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"

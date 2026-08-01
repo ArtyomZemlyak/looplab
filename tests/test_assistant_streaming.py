@@ -167,3 +167,49 @@ def test_complete_text_stream_falls_back_on_an_empty_clean_eof(monkeypatch):
                         lambda messages: calls.__setitem__("fallback", calls["fallback"] + 1) or "x")
     assert list(c.complete_text_stream([{"role": "user", "content": "hi"}])) == ["hi"]
     assert calls["fallback"] == 0
+
+
+class _ManyTokenFake(_StreamFake):
+    """Streams enough pieces that a per-item threadpool hop is unmistakable in the call count."""
+
+    def complete_text_stream(self, messages):
+        for i in range(60):
+            yield f"t{i} "
+
+    def complete_text(self, messages):
+        return "".join(f"t{i} " for i in range(60))
+
+
+def test_the_sse_drain_does_not_consume_a_threadpool_worker_per_event(tmp_path, monkeypatch):
+    """The drain used to be `await anyio.to_thread.run_sync(lambda: q.get(timeout=10))` — one hop
+    into anyio's DEFAULT 40-token threadpool per streamed event, with a worker parked there for the
+    whole gap between events. FastAPI's sync `def` routes and every other `anyio.to_thread` caller
+    (the runs SSE payload, the boss offloads, the settings/project writes) share that one pool, so a
+    handful of concurrent assistant streams starved the entire server. The drain must not touch the
+    pool at all: its cost must not scale with the number of events it forwards."""
+    import anyio.to_thread
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _ManyTokenFake())
+    hops = []
+    real_run_sync = anyio.to_thread.run_sync
+
+    async def counting_run_sync(*a, **kw):
+        hops.append(1)
+        return await real_run_sync(*a, **kw)
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", counting_run_sync)
+
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
+    hops.clear()                                   # count only the streaming request
+    tokens, event = [], None
+    with client.stream("POST", f"/api/assistant/sessions/{sid}/message_stream",
+                       json={"instruction": "hi", "mode": "plan"}) as r:
+        for line in r.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:") and event == "token":
+                tokens.append(json.loads(line.split(":", 1)[1].strip()))
+
+    assert len(tokens) == 60, len(tokens)          # the events really were forwarded one by one…
+    assert len(hops) < 20, (len(hops), len(tokens))   # …without a pool hop each

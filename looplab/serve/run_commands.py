@@ -3482,9 +3482,6 @@ class RunCommandService:
             self._release_execution(rd, command_id)
             raise
 
-    def _events(self, rd: Path):
-        return EventStore(self._events_path(rd)).read_all()
-
     def _observe(self, rd: Path) -> CommandObservation:
         return self._command_observations.observe(self._events_path(rd))
 
@@ -3718,14 +3715,14 @@ class RunCommandService:
                 # can complete an externally-appended finalize after `_decision` observes pending but
                 # before this worker continues; that run_finished must remain *after* the attach
                 # baseline so it satisfies the command instead of being hidden inside the baseline.
-                # CLAUDE REVIEW: [PERF] self._events(rd) is a full EventStore.read_all() (parse+Event
-                # for every row) executed purely to read `[-1].seq` on the per-command append path,
-                # bypassing the incremental observation index (`self._observe(rd).latest_seq`) that was
-                # added specifically to avoid re-parsing the whole log on every command request. Same at
-                # line ~3586. The CAS `expected_last_seq` on append is authoritative, so the cheaper
-                # incremental latest_seq would be a correct baseline here.
-                before_decision = self._events(rd)
-                decision_baseline = before_decision[-1].seq if before_decision else -1
+                # Read the baseline from the incremental observation index, NOT from a full
+                # `EventStore.read_all()`. `latest_seq` is the last seq of the same recoverable
+                # prefix `read_all` would return — both stop at the identical torn/corrupt boundary,
+                # and both report -1 for an absent or empty log — but the index only parses bytes
+                # appended since the previous observation, which is exactly why it exists. Reading
+                # `[-1].seq` off a fresh full parse re-read and re-validated the entire log on every
+                # command request. The append below is CAS'd on this value, so it stays authoritative.
+                decision_baseline = self._observe(rd).latest_seq
                 decision, err = self._decision(rd, event_type)
                 if (decision == "append"
                         and self._standing_hint_duplicate(
@@ -3785,8 +3782,7 @@ class RunCommandService:
                 record["event_seq"] = intent.seq
             elif "baseline_seq" not in record:
                 if decision_baseline is None:
-                    before = self._events(rd)
-                    decision_baseline = before[-1].seq if before else -1
+                    decision_baseline = self._observe(rd).latest_seq   # same prefix, incremental
                 record["baseline_seq"] = decision_baseline
             record["status"] = "executing"
             record["updated_at"] = time.time()

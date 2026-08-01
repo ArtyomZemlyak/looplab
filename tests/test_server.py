@@ -1825,6 +1825,93 @@ def test_sparse_agent_control_patches_from_stale_tabs_merge_by_setting(tmp_path)
     assert merged["policy"] == baseline["policy"]
 
 
+def test_boss_routes_never_run_their_whole_log_work_on_the_event_loop(tmp_path, monkeypatch):
+    """Every BOSS route below is `async def` because it must `await` its request body, and each then
+    ran whole-log blocking work INLINE on the ASGI loop: `chat-log` took the run command sequencer
+    and fsync'd a sidecar that can be tens of MiB; `/chat`, `/suggest` and `/command` did a full
+    event-log read + fold plus run-file prompt assembly; `report_refresh` took the sequencer AND read
+    the entire events.jsonl for its idempotency ledger. Each froze every SSE stream and every other
+    handler in the process for its duration, even though all of them carefully offload their LLM
+    call. The probe is `asyncio.get_running_loop()`: it returns the loop on the ASGI thread and
+    raises RuntimeError anywhere else."""
+    import asyncio
+    from contextlib import contextmanager
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    app = make_app(tmp_path)
+    srv = app.state.looplab
+    on_loop: list[str] = []
+
+    def _probe(name, original):
+        def probing(*a, **kw):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass                                # a worker thread — the contract
+            else:
+                on_loop.append(name)
+            return original(*a, **kw)
+        return probing
+
+    def _probe_into(sink, original):
+        def probing(*a, **kw):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                sink.append(getattr(original, "__name__", "call"))
+            return original(*a, **kw)
+        return probing
+
+    @contextmanager
+    def probing_sequence(*a, **kw):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            on_loop.append("sequence")
+        with original_sequence(*a, **kw):
+            yield
+
+    original_sequence = srv.commands.sequence
+    monkeypatch.setattr(srv.commands, "sequence", probing_sequence)
+    monkeypatch.setattr(srv.commands, "run_activity",
+                        _probe("run_activity", srv.commands.run_activity))
+    monkeypatch.setattr(srv, "state", _probe("state", srv.state))
+    client = TestClient(app)
+
+    assert client.post("/api/runs/demo/chat-log",
+                       json={"role": "user", "content": "hi"}).status_code == 200
+    # The LLM routes soft-fail offline, but their fold + prompt prologue still runs — which is the
+    # part under test here.
+    for route, payload in (("chat", {"messages": [{"role": "user", "content": "hi"}]}),
+                           ("suggest", {"instruction": "try something"}),
+                           ("command", {"instruction": "pause the run"})):
+        assert client.post(f"/api/runs/demo/{route}", json=payload).status_code == 200
+    # An expected_generation that cannot match still exercises each sequenced ledger claim.
+    client.post("/api/runs/demo/report_refresh", headers={"Idempotency-Key": "k1"},
+                json={"expected_generation": "0" * 64})
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    client.post("/api/runs/demo/concepts/lens",
+                headers={"Idempotency-Key": "test-receipt::loop::0123456789abcdef"},
+                json={"prompt": "group by usage", "expected_generation": generation})
+    # /api/genesis is run-independent; its prologue reads the task catalogue, the settings store and
+    # every prior report, so it is probed through those instead of the run-scoped hooks above.
+    assert on_loop == [], on_loop
+
+    catalogue_on_loop: list[str] = []
+    monkeypatch.setattr(srv, "list_tasks_fn", _probe_into(catalogue_on_loop, srv.list_tasks_fn))
+    monkeypatch.setattr(srv.settings, "resolved_settings",
+                        _probe_into(catalogue_on_loop, srv.settings.resolved_settings))
+    client.post("/api/genesis", json={"instruction": "plan a small run"})
+    assert catalogue_on_loop == [], catalogue_on_loop
+
+
 def test_settings_and_secret_puts_never_take_their_blocking_locks_on_the_event_loop(
         tmp_path, monkeypatch):
     """`ui_settings_transaction` / `secret_transaction` each end in `_interprocess_lock(required=

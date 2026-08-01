@@ -2906,22 +2906,25 @@ def test_the_finalize_pending_check_reads_the_incremental_index_not_the_whole_lo
     rd = _seed(tmp_path)
     client, srv = _client(tmp_path, _Driver())
 
-    full_reads = []
-    original_events = srv.commands._events
-    monkeypatch.setattr(srv.commands, "_events",
-                        lambda p: (full_reads.append(str(p)), original_events(p))[1])
+    # Pinned on the MECHANISM, not on a helper name: constructing an EventStore inside the service
+    # is what a full `read_all()` costs, so make that construction itself the failure. (The test's own
+    # `EventStore` below is a separate import and is unaffected by patching the module attribute.)
+    class _NoFullRead:
+        def __init__(self, *a, **kw):
+            raise AssertionError(f"still re-parsed the whole log: EventStore{a!r}")
+
+    monkeypatch.setattr("looplab.serve.run_commands.EventStore", _NoFullRead)
     srv_state = []
     original_state = srv.state
     monkeypatch.setattr(srv, "state", lambda p: (srv_state.append(str(p)), original_state(p))[1])
 
     assert srv.commands._finalize_incomplete(rd) is False
-    assert full_reads == [], f"still re-parsed the whole log: {full_reads}"
     assert srv_state == [], f"still triggered a second full read+fold: {srv_state}"
 
     # …and the ANSWER is unchanged: a durable stop that has not finished is still pending.
     EventStore(rd / "events.jsonl").append("run_abort", {"reason": "operator"})
     assert srv.commands._finalize_incomplete(rd) is True
-    assert full_reads == [] and srv_state == []
+    assert srv_state == []
 
 
 def test_operator_collaboration_appends_do_not_extend_a_stalled_finalize(tmp_path):
@@ -2955,3 +2958,46 @@ def test_operator_collaboration_appends_do_not_extend_a_stalled_finalize(tmp_pat
     condition = slide.split("or spec.engine_policy is not EnginePolicy.NO_SPAWN)", 1)[1][:300]
     assert "has_domain_progress(last_progress_seq)" in condition, condition
     assert "latest_seq > last_progress_seq" not in condition, condition
+
+
+def test_the_command_append_baseline_comes_from_the_incremental_index_not_a_full_reparse(
+        tmp_path, monkeypatch):
+    """The CAS baseline for a command's intent append was read as `EventStore(...).read_all()[-1].seq`
+    — a fresh full parse (orjson + Event construction for EVERY row) on every command request, purely
+    to learn the last seq. `CommandObservation.latest_seq` is the last seq of the SAME recoverable
+    prefix and only parses bytes appended since the previous observation, which is the whole point of
+    that index. The append is still CAS'd on the value, so it stays authoritative."""
+    import looplab.serve.run_commands as rc
+
+    rd = _seed(tmp_path)
+    client, srv = _client(tmp_path, _Driver())
+    store = EventStore(rd / "events.jsonl")
+    for i in range(80):                       # a log long enough that a full re-parse is not free
+        store.append("node_created", {
+            "node_id": i + 1, "parent_ids": [0], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "rationale": "x" * 512},
+        })
+    before = store.read_all()[-1].seq
+
+    reparses = []
+    real_read_all = rc.EventStore.read_all
+
+    class _CountingStore(rc.EventStore):
+        def __init__(self, *a, **kw):
+            reparses.append("construct")
+            super().__init__(*a, **kw)
+
+        def read_all(self):
+            reparses.append("read_all")
+            return real_read_all(self)
+
+    monkeypatch.setattr(rc, "EventStore", _CountingStore)
+    body = _post(client, "pause").json()
+    record = client.get(f"/api/runs/demo/commands/{body['id']}").json()
+
+    assert record["baseline_seq"] == before, (record.get("baseline_seq"), before)
+    # Exactly ONE EventStore: the one that APPENDS the intent (its constructor scans the tail, and
+    # `append` re-reads to extend its own cache). The second store — built solely to read a last seq
+    # the observation index already knows — is what must be gone.
+    assert reparses.count("construct") == 1, reparses
+    assert reparses.count("read_all") <= 3, reparses

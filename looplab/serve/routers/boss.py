@@ -6,6 +6,7 @@ historical `looplab.server._Action` import path keeps working for tests and call
 from __future__ import annotations
 
 import hashlib
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import anyio
@@ -517,7 +518,6 @@ def build_router(srv) -> APIRouter:
         so it survives a remount/reload. Single writer (this server) + a synchronous fsync'd append
         per request serialize within the process, so no cross-process lock is needed here."""
         rd = _run_dir(run_id)
-        generation = srv.commands.run_generation(rd)
         try:
             turn = await request.json()
         except (ValueError, UnicodeDecodeError) as exc:
@@ -526,33 +526,41 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "chat turn must be a JSON object")
         turn = _sanitize_chat_turn(turn)
         path = rd / "chat.jsonl"
-        # Bound the durable sidecar so unbounded turn appends can't exhaust disk / slow every re-read.
-        # The COMPACTION SUMMARY is exempt (within a small overshoot): `chat-compact` is read-only — it
-        # returns a recap the client appends as a `summary` turn — so refusing that one append made the
-        # 413's own advertised remedy impossible and left the transcript permanently wedged, with only a
-        # destructive run reset as an escape. The exemption is bounded by a fixed grace so it cannot
-        # itself become the unbounded-growth path it exists to stop.
-        _is_summary = str(turn.get("role") or turn.get("kind") or "").lower() == "summary"
-        _ceiling = _CHAT_LOG_MAX_BYTES + (_CHAT_SUMMARY_GRACE_BYTES if _is_summary else 0)
-        try:
-            if path.stat().st_size >= _ceiling:
-                raise HTTPException(413, "chat log is full for this run — compact it (chat-compact, "
-                                         "then append the returned recap as a `summary` turn) or reset "
-                                         "the run to start a fresh transcript")
-        except OSError:
-            pass                                   # no file yet (or unstat-able) -> nothing to bound
-        # CLAUDE REVIEW: [PERF] `async def` handler doing blocking I/O on the event loop:
-        # run_activity acquires the run command sequencer (thread + OS file lock) and the fsync of
-        # a chat.jsonl that may be tens of MiB can take seconds on FUSE/S3-backed storage — during
-        # which every SSE stream and async handler in the process stalls. The sibling LLM routes in
-        # this file offload via anyio.to_thread; this append (and the run_generation log scan
-        # above) should run in a worker thread too.
-        with srv.commands.run_activity(rd, "chat_append", generation=generation):
-            with open(path, "ab") as f:
-                f.write(orjson.dumps(turn) + b"\n")
-                f.flush()
-                best_effort_fsync(f.fileno())  # FUSE/S3 fsync may raise — don't fail the chat append
-        return {"ok": True}
+
+        # OFF the event loop, like the LLM routes below. `run_generation` scans the event log,
+        # `run_activity` takes the run command sequencer (a thread lock plus an OS file lock with a
+        # bounded-retry acquire), and the fsync of a chat.jsonl that may be tens of MiB can take
+        # SECONDS on FUSE/S3-backed storage. Run inline on this `async def` handler's loop, all of
+        # that stalled every SSE stream and every other async handler in the process. The body parse
+        # stays on the loop (it needs the `await`, and it is pure CPU over bytes already received);
+        # reading the generation after it only narrows the window between the fence and the write.
+        def _append() -> dict:
+            generation = srv.commands.run_generation(rd)
+            # Bound the durable sidecar so unbounded turn appends can't exhaust disk / slow every
+            # re-read. The COMPACTION SUMMARY is exempt (within a small overshoot): `chat-compact` is
+            # read-only — it returns a recap the client appends as a `summary` turn — so refusing that
+            # one append made the 413's own advertised remedy impossible and left the transcript
+            # permanently wedged, with only a destructive run reset as an escape. The exemption is
+            # bounded by a fixed grace so it cannot itself become the unbounded-growth path it exists
+            # to stop.
+            _is_summary = str(turn.get("role") or turn.get("kind") or "").lower() == "summary"
+            _ceiling = _CHAT_LOG_MAX_BYTES + (_CHAT_SUMMARY_GRACE_BYTES if _is_summary else 0)
+            try:
+                if path.stat().st_size >= _ceiling:
+                    raise HTTPException(
+                        413, "chat log is full for this run — compact it (chat-compact, "
+                             "then append the returned recap as a `summary` turn) or reset "
+                             "the run to start a fresh transcript")
+            except OSError:
+                pass                               # no file yet (or unstat-able) -> nothing to bound
+            with srv.commands.run_activity(rd, "chat_append", generation=generation):
+                with open(path, "ab") as f:
+                    f.write(orjson.dumps(turn) + b"\n")
+                    f.flush()
+                    best_effort_fsync(f.fileno())  # FUSE/S3 fsync may raise — don't fail the append
+            return {"ok": True}
+
+        return await anyio.to_thread.run_sync(_append)
 
     @router.post("/api/runs/{run_id}/chat-compact")
     async def chat_compact(run_id: str, request: Request):
@@ -562,15 +570,16 @@ def build_router(srv) -> APIRouter:
         durable `summary` turn and then sends to the boss IN PLACE OF those turns. Read-only + soft-fail
         offline — compaction is opt-in, so a missing model just leaves the chat uncompacted."""
         rd = _run_dir(run_id)
-        generation = srv.commands.run_generation(rd)
         body = await _json_object(request)
         msgs = body.get("messages") or []
         convo = "\n".join(f"{m.get('role')}: {m.get('content', '')}"
                           for m in msgs if str(m.get("content", "")).strip())
         if not convo.strip():
             return {"ok": True, "summary": "", "tokens": None}
+        # `run_generation` scans the whole event log — off the loop, like the fold in the routes below.
+        generation = await anyio.to_thread.run_sync(lambda: srv.commands.run_generation(rd))
         try:
-            with _metered_run_client(srv, _llm_settings(rd), rd, generation) as client:
+            async with _metered_client(rd, _llm_settings(rd), generation) as client:
                 sys_prompt = COMPACT_SYSTEM
                 summary = await anyio.to_thread.run_sync(lambda: client.complete_text(
                     [{"role": "system", "content": sys_prompt},
@@ -585,32 +594,63 @@ def build_router(srv) -> APIRouter:
             return JSONResponse({"ok": False, **_safe_boss_failure(e)}, status_code=200)
         return {"ok": True, "summary": (summary or "").strip(), "tokens": tokens}
 
+    @asynccontextmanager
+    async def _metered_client(rd, settings, generation):
+        """`_metered_run_client` entered and exited on a WORKER thread.
+
+        Both ends are blocking: entering opens durable run-cost accounting (a run activity that takes
+        the command sequencer), and leaving flushes the cost ledger. The context has to stay OPEN
+        across the `await` on the LLM call, so it cannot simply move inside one `to_thread` call —
+        each end is offloaded instead, which is what actually keeps the ASGI loop free. `with`
+        semantics are reproduced exactly, including a suppressing `__exit__`."""
+        context = _metered_run_client(srv, settings, rd, generation)
+        client = await anyio.to_thread.run_sync(context.__enter__)
+        try:
+            yield client
+        except BaseException as exc:
+            # Bind the triple BEFORE the lambda: Python unbinds `exc` at the end of an `except ... as`
+            # block, so a closure that reads it later would see an unbound name.
+            failure = (type(exc), exc, exc.__traceback__)
+            if not await anyio.to_thread.run_sync(lambda: context.__exit__(*failure)):
+                raise
+        else:
+            await anyio.to_thread.run_sync(lambda: context.__exit__(None, None, None))
+
+    async def _boss_prologue(rd, build):
+        """`run_generation` + the fold + prompt assembly, OFF the event loop.
+
+        The three routes below are `async def` because they must `await` the request body, and they
+        each then ran a whole-log scan (`run_generation`), a whole-log read+fold (`srv.state`) and a
+        run-file-reading prompt assembly INLINE on the ASGI loop — freezing every SSE stream and
+        every other handler in the process for the fold's duration on a large run, even though each
+        carefully offloads its LLM call. `build(state)` is the route's own prompt-assembly step.
+        Returns `(generation, state, build_result)`."""
+        def _work():
+            generation = srv.commands.run_generation(rd)
+            state = srv.state(rd)
+            return generation, state, build(state)
+
+        return await anyio.to_thread.run_sync(_work)
+
     @router.post("/api/runs/{run_id}/chat")
     async def chat(run_id: str, request: Request):
         """Advisory chat grounded on a run (and optionally one experiment node). Read-only — it
         never appends events; it's a thinking aid. The UI keeps the history and posts the full
         message list each turn. Soft-fails offline so the panel degrades cleanly."""
         rd = _run_dir(run_id)
-        generation = srv.commands.run_generation(rd)
         body = await _json_object(request)
         msgs = body.get("messages") or []
         nid = body.get("node_id")
-        # CLAUDE REVIEW: [PERF] srv.state(rd) is a full event-log read + fold and boss_prompt_parts
-        # below reads run files — all executed inline on the event loop of this `async def` handler
-        # even though the actual LLM call is carefully offloaded to a thread. On a large run every
-        # chat turn freezes the server's event loop for the fold's duration; /suggest and /command
-        # have the same synchronous st = srv.state(rd) + prompt-assembly prologue. Move the fold
-        # and prompt assembly into the offloaded worker (or anyio.to_thread) as well.
-        st = srv.state(rd)
         # advisory=True: /chat has no actions channel, so the RUN STATUS block must recommend,
         # not command ("you MUST act: resume") — else the model claims actions it can't take.
         # The run's own experiments ride as a separate labelled user message, NOT inside the system
         # prompt: node code and model-authored text are untrusted, and this is the role that can
         # raise budgets and route commands (see llm_context.boss_prompt_parts).
-        sys_suffix, evidence = boss_prompt_parts(st, nid, rd, advisory=True)
+        generation, st, (sys_suffix, evidence) = await _boss_prologue(
+            rd, lambda state: boss_prompt_parts(state, nid, rd, advisory=True))
         sys_prompt = CHAT_SYSTEM + sys_suffix + (BOSS_EVIDENCE_GUARD if evidence else "")
         try:
-            with _metered_run_client(srv, _llm_settings(rd), rd, generation) as client:
+            async with _metered_client(rd, _llm_settings(rd), generation) as client:
                 # Offload to a thread — an `async def` handler must not run the blocking completion on
                 # the event loop (it would freeze other clients/SSE for up to the client timeout).
                 text = await anyio.to_thread.run_sync(
@@ -642,25 +682,25 @@ def build_router(srv) -> APIRouter:
         (operator + params + rationale) the UI can drop straight into the inject-node dialog.
         Uses structured output so the result is a ready-to-run Idea. Soft-fails offline."""
         rd = _run_dir(run_id)
-        generation = srv.commands.run_generation(rd)
         body = await _json_object(request)
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
         history = body.get("messages") or []
-        st = srv.state(rd)
         from looplab.core.models import Idea, IdeaEmission, durable_idea_payload
         from looplab.core.parse import parse_structured
         from looplab.agents.roles import _CONCEPT_AUTHORING_GUIDANCE
+        generation, st, node_context = await _boss_prologue(
+            rd, lambda state: _node_context(state, nid))
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
         prompt = ("Propose ONE next experiment as a structured Idea (operator one of "
                   "draft/improve/debug/merge; numeric params; a short rationale). "
                   + _CONCEPT_AUTHORING_GUIDANCE + "Base it on the "
-                  "run context and this discussion.\n\n" + _node_context(st, nid)
+                  "run context and this discussion.\n\n" + node_context
                   + (f"\n\nDiscussion so far:\n{convo}" if convo else "")
                   + (f"\n\nInstruction: {instruction}" if instruction else ""))
         s = _llm_settings(rd)
         try:
-            with _metered_run_client(srv, s, rd, generation) as client:
+            async with _metered_client(rd, s, generation) as client:
                 try:
                     # Offload — the blocking parser/completion must not stall the event loop.
                     idea = await anyio.to_thread.run_sync(lambda: parse_structured(
@@ -693,14 +733,13 @@ def build_router(srv) -> APIRouter:
         via jobAwait instead of 504ing — a fast model still returns the plan inline within the wait,
         so the confirm-card flow downstream is unchanged."""
         rd = _run_dir(run_id)
-        generation = srv.commands.run_generation(rd)
         body = await _json_object(request)
         msgs = body.get("messages") or []
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
-        st = srv.state(rd)
+        generation, st, (sys_suffix, evidence) = await _boss_prologue(
+            rd, lambda state: boss_prompt_parts(state, nid, rd))
         s = _llm_settings(rd)
-        sys_suffix, evidence = boss_prompt_parts(st, nid, rd)
         sys_prompt = COMMAND_SYSTEM + sys_suffix + (BOSS_EVIDENCE_GUARD if evidence else "")
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
@@ -857,97 +896,107 @@ def build_router(srv) -> APIRouter:
         settings = None
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"
-        # CLAUDE REVIEW: [PERF] `async def` handler blocking the event loop: the command sequencer
-        # (thread + OS file lock, bounded-retry acquire) and EventStore.read_all() over the ENTIRE
-        # events.jsonl for the refresh ledger both run inline. On a multi-hundred-MB run log this
-        # freezes every other client (SSE ticks included) per report-refresh POST; wrap the
-        # sequenced ledger section in anyio.to_thread.run_sync (the paid worker itself already runs
-        # on a job thread).
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            generation = srv.commands.run_generation(rd)
-            if not generation:
-                raise HTTPException(409, {
-                    "code": "run_generation_unavailable",
-                    "message": "The run has no durable generation identity.",
-                    "remediation": "Wait for run_started, refresh the run, and try again.",
-                })
-            if generation != expected:
-                raise HTTPException(409, {
-                    "code": "run_generation_changed",
-                    "expected_generation": expected,
-                    "current_generation": generation,
-                    "message": "The run was reset or replaced before report refresh arrived.",
-                    "remediation": "Reload the replacement run before generating its report.",
-                })
-            # The event log is the restart-safe idempotency ledger. `started` lands
-            # before provider construction; success/failure is a terminal receipt. An orphaned start
-            # is intentionally uncertain and can never be replayed into a second paid call.
-            canonical_identity = _report_run_identity(rd)
-            job_identity = hashlib.sha256(
-                ("report_refresh\0" + canonical_identity + "\0" + generation + "\0"
-                 + raw_idempotency_key).encode("utf-8")).hexdigest()
-            store = EventStore(rd / "events.jsonl")
-            terminals, unresolved = _report_refresh_ledger(store.read_all(), generation)
-            terminal = terminals.get(job_identity)
-            if terminal is not None:
-                if not _confirm_report_refresh_terminal(store.path):
-                    return {
-                        "ok": False,
-                        "code": "report_refresh_uncertain",
-                        "error_kind": "uncertain",
-                        "error": (
-                            "The saved report terminal is visible but its durable receipt is still "
-                            "unconfirmed. Resume with this same request identity later."
-                        ),
-                        "generation": generation,
-                        "ambiguous": True,
-                    }
-                return _report_refresh_terminal(terminal, generation)
-            if unresolved:
-                if job_identity not in unresolved:
+        # OFF the event loop. `sequence()` takes the run command sequencer (a thread lock plus an OS
+        # file lock with a bounded-retry acquire), `run_generation` scans the log, and the refresh
+        # ledger reads the ENTIRE events.jsonl — on a multi-hundred-MB run log that froze every other
+        # client, SSE ticks included, for every report-refresh POST. The paid worker already runs on
+        # a job thread; this is the claim section in front of it. Nothing about the ledger's ordering
+        # changes: the whole sequenced section still runs as one unit, just on a worker thread.
+        # Returns `(early_response, continuation)` — exactly one is non-None.
+        def _claim():
+            nonlocal rd, settings
+            with srv.commands.sequence(rd):
+                rd = srv.commands.validate_paths(rd)
+                generation = srv.commands.run_generation(rd)
+                if not generation:
                     raise HTTPException(409, {
-                        "code": "report_refresh_in_progress",
-                        "message": "Another report refresh already owns this run generation.",
-                        "remediation": "Wait for its report event or reload before trying again.",
+                        "code": "run_generation_unavailable",
+                        "message": "The run has no durable generation identity.",
+                        "remediation": "Wait for run_started, refresh the run, and try again.",
                     })
-                reservation = srv.jobs.rejoin(job_identity)
-                if reservation is None:
-                    return {
-                        "ok": False,
-                        "code": "report_refresh_uncertain",
-                        "error_kind": "uncertain",
-                        "error": "The earlier paid report attempt has no live process receipt.",
-                        "generation": generation,
-                        "ambiguous": True,
-                    }
-                # The current implementation starts before releasing this sequencer. The lazy
-                # fallback also repairs a workerless reservation created by an older process without
-                # reading mutable settings when the existing worker is already live.
-                compute = lambda: _run_report_refresh_worker(  # noqa: E731
-                    srv, _llm_settings(rd), rd, generation, job_identity)
-            else:
-                # Configuration is needed only for brand-new paid work. Durable terminal replay,
-                # restart uncertainty, and live same-key rejoin must survive later config damage.
-                settings = _llm_settings(rd)
-                # The event ledger, not this bounded process receipt, owns replay.
-                reservation = srv.jobs.reserve(job_identity, consume_on_poll=True)
-                if reservation.get("status") != "running":
-                    return {**reservation, "generation": generation}
-                compute = lambda: _run_report_refresh_worker(  # noqa: E731 - bound claim closure
-                    srv, settings, rd, generation, job_identity)
-                try:
-                    store.append(
-                        EV_REPORT_REFRESH_STARTED,
-                        {"refresh_id": job_identity, "generation": generation},
-                        require_lock=True, require_durable=True,
-                    )
-                    # Start before releasing the sequencer: no accepted durable claim can remain an
-                    # in-memory workerless reservation if the HTTP task is cancelled at its first await.
-                    srv.jobs.start_reserved(reservation["job_id"], compute)
-                except Exception:
-                    srv.jobs.discard_reservation(str(reservation.get("job_id") or ""))
-                    raise
+                if generation != expected:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected,
+                        "current_generation": generation,
+                        "message": "The run was reset or replaced before report refresh arrived.",
+                        "remediation": "Reload the replacement run before generating its report.",
+                    })
+                # The event log is the restart-safe idempotency ledger. `started` lands
+                # before provider construction; success/failure is a terminal receipt. An orphaned start
+                # is intentionally uncertain and can never be replayed into a second paid call.
+                canonical_identity = _report_run_identity(rd)
+                job_identity = hashlib.sha256(
+                    ("report_refresh\0" + canonical_identity + "\0" + generation + "\0"
+                     + raw_idempotency_key).encode("utf-8")).hexdigest()
+                store = EventStore(rd / "events.jsonl")
+                terminals, unresolved = _report_refresh_ledger(store.read_all(), generation)
+                terminal = terminals.get(job_identity)
+                if terminal is not None:
+                    if not _confirm_report_refresh_terminal(store.path):
+                        return ({
+                            "ok": False,
+                            "code": "report_refresh_uncertain",
+                            "error_kind": "uncertain",
+                            "error": (
+                                "The saved report terminal is visible but its durable receipt is still "
+                                "unconfirmed. Resume with this same request identity later."
+                            ),
+                            "generation": generation,
+                            "ambiguous": True,
+                        }, None)
+                    return _report_refresh_terminal(terminal, generation), None
+                if unresolved:
+                    if job_identity not in unresolved:
+                        raise HTTPException(409, {
+                            "code": "report_refresh_in_progress",
+                            "message": "Another report refresh already owns this run generation.",
+                            "remediation": "Wait for its report event or reload before trying again.",
+                        })
+                    reservation = srv.jobs.rejoin(job_identity)
+                    if reservation is None:
+                        return ({
+                            "ok": False,
+                            "code": "report_refresh_uncertain",
+                            "error_kind": "uncertain",
+                            "error": "The earlier paid report attempt has no live process receipt.",
+                            "generation": generation,
+                            "ambiguous": True,
+                        }, None)
+                    # The current implementation starts before releasing this sequencer. The lazy
+                    # fallback also repairs a workerless reservation created by an older process without
+                    # reading mutable settings when the existing worker is already live.
+                    compute = lambda: _run_report_refresh_worker(  # noqa: E731
+                        srv, _llm_settings(rd), rd, generation, job_identity)
+                else:
+                    # Configuration is needed only for brand-new paid work. Durable terminal replay,
+                    # restart uncertainty, and live same-key rejoin must survive later config damage.
+                    settings = _llm_settings(rd)
+                    # The event ledger, not this bounded process receipt, owns replay.
+                    reservation = srv.jobs.reserve(job_identity, consume_on_poll=True)
+                    if reservation.get("status") != "running":
+                        return {**reservation, "generation": generation}, None
+                    compute = lambda: _run_report_refresh_worker(  # noqa: E731 - bound claim closure
+                        srv, settings, rd, generation, job_identity)
+                    try:
+                        store.append(
+                            EV_REPORT_REFRESH_STARTED,
+                            {"refresh_id": job_identity, "generation": generation},
+                            require_lock=True, require_durable=True,
+                        )
+                        # Start before releasing the sequencer: no accepted durable claim can remain an
+                        # in-memory workerless reservation if the HTTP task is cancelled at its first await.
+                        srv.jobs.start_reserved(reservation["job_id"], compute)
+                    except Exception:
+                        srv.jobs.discard_reservation(str(reservation.get("job_id") or ""))
+                        raise
+                return None, (compute, reservation, generation, job_identity)
+
+        early, continuation = await anyio.to_thread.run_sync(_claim)
+        if early is not None:
+            return early
+        compute, reservation, generation, job_identity = continuation
+
         # Return a durable job receipt well inside the browser's request deadline; paid work continues
         # in the worker and the same identity rejoins it after any ambiguous transport response.
         result = await srv.jobs.run_as_job(
