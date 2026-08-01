@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import threading
+from contextlib import contextmanager
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -362,6 +363,47 @@ def _bounded_around(rows: list[_Row], anchor_index: int, limit: int,
     return start, end
 
 
+class _PathLocks:
+    """Per-path mutual exclusion for the incremental byte indexes.
+
+    Both indexes used ONE process-global lock held across a whole request, so the first full scan of
+    a multi-MB log — or a cold network read — stalled every OTHER run's poll behind it. The work is
+    already per-path (each `_Index` is scanned and read independently), so the exclusion should be
+    too; only the registry map itself needs a shared lock, and that is held for dictionary
+    operations alone.
+
+    A lock is evicted only while UNREFERENCED. Handing a second lock object out for a path whose
+    first is still held would let two threads scan and mutate the same `_Index` concurrently, which
+    is exactly the corruption the lock exists to prevent — so the LRU bound yields to liveness.
+    """
+
+    __slots__ = ("_locks", "_registry", "_maximum")
+
+    def __init__(self, maximum: int):
+        self._locks: "OrderedDict[str, list]" = OrderedDict()   # key -> [RLock, waiters]
+        self._registry = threading.RLock()
+        self._maximum = max(1, int(maximum))
+
+    @contextmanager
+    def hold(self, key: str):
+        with self._registry:
+            entry = self._locks.get(key)
+            if entry is None:
+                entry = self._locks[key] = [threading.RLock(), 0]
+            entry[1] += 1
+            self._locks.move_to_end(key)
+        try:
+            with entry[0]:
+                yield
+        finally:
+            with self._registry:
+                entry[1] -= 1
+                excess = len(self._locks) - self._maximum
+                if excess > 0:
+                    for stale in [k for k, e in self._locks.items() if e[1] == 0][:excess]:
+                        self._locks.pop(stale, None)
+
+
 class EventLogPager:
     """Thread-safe incremental byte index, scoped to one UI server process."""
 
@@ -373,13 +415,17 @@ class EventLogPager:
         # A dense boundary index makes page reads and anchor jumps fast. Keep only a small LRU of
         # active runs so browsing thousands of historical runs cannot retain every row forever.
         self._indexes: OrderedDict[str, _Index] = OrderedDict()
+        # `_lock` now guards ONLY the registry dict; the expensive work (a cold full `_scan`,
+        # `_materialize`'s disk reads) runs under `_paths.hold(key)` so it stalls one run, not all.
         self._lock = threading.RLock()
+        self._paths = _PathLocks(max_indexed_runs * 4)
 
     def _refresh(self, path: Path, handle: BinaryIO, snapshot_size: int,
                  identity: tuple[int, int], metadata: tuple[int, int]) -> _Index:
         key = str(path)
         generation = _first_generation(handle, snapshot_size)
-        index = self._indexes.get(key)
+        with self._lock:
+            index = self._indexes.get(key)
         # A rewritten prefix must ROTATE the revision, not extend it. Identity, first-event generation
         # and growth all survive an in-place rewrite (an atomic repair may deliberately keep the first
         # event while replacing every later row), so without checking the indexed bytes themselves an
@@ -393,10 +439,13 @@ class EventLogPager:
                 or snapshot_size < index.observed_size or rewritten
                 or (snapshot_size == index.observed_size and index.metadata != metadata)):
             index = _Index(identity=identity, generation=generation, metadata=metadata)
+        with self._lock:
+            # Re-assigning the same object when the index was reused is a no-op for both value and
+            # ordering, so this stays equivalent to the previous create-only assignment.
             self._indexes[key] = index
-        self._indexes.move_to_end(key)
-        while len(self._indexes) > self.max_indexed_runs:
-            self._indexes.popitem(last=False)
+            self._indexes.move_to_end(key)
+            while len(self._indexes) > self.max_indexed_runs:
+                self._indexes.popitem(last=False)
         # Re-scan a previously torn boundary even if the size is unchanged: a writer may have filled
         # reserved bytes in place. For a normal append this extends only from the old valid boundary.
         if snapshot_size != index.observed_size or index.torn_tail or not index.rows:
@@ -489,13 +538,7 @@ class EventLogPager:
             handle = open(path, "rb")
         except OSError as exc:
             raise HTTPException(404, "no such run") from exc
-        # CLAUDE REVIEW: [PERF] The single process-global RLock is held for the WHOLE request —
-        # including the initial full-file `_scan` of a never-indexed multi-MB log and the
-        # `_materialize` disk reads — and it serializes page
-        # requests across ALL runs, not just this one. One slow first-index (or a cold NFS read)
-        # stalls every other run's timeline poll. A per-path lock (as the OrderedDict LRU already
-        # suggests) would confine the stall to the run being indexed.
-        with handle, self._lock:
+        with handle, self._paths.hold(str(path)):
             stat = os.fstat(handle.fileno())
             snapshot_size = stat.st_size
             identity = (stat.st_dev, stat.st_ino)

@@ -532,3 +532,80 @@ def test_a_rewritten_prefix_rotates_the_revision_instead_of_extending_it(tmp_pat
     with pytest.raises(HTTPException) as exc:
         pager.page(p, direction="newer", cursor=stale_cursor, limit=10)
     assert exc.value.status_code in (409, 410, 400)
+
+
+def test_one_runs_cold_index_does_not_stall_another_runs_page(tmp_path, monkeypatch):
+    """A single process-global lock held for the WHOLE request meant one slow first-index — a
+    multi-MB log, or a cold network read — froze every OTHER run's timeline poll behind it. The work
+    is per-path, so the exclusion must be too."""
+    import threading
+
+    slow = tmp_path / "slow" / "events.jsonl"
+    fast = tmp_path / "fast" / "events.jsonl"
+    _write_events(slow, [_event(seq, run_id="slow") for seq in range(8)])
+    _write_events(fast, [_event(seq, run_id="fast") for seq in range(8)])
+
+    pager = EventLogPager()
+    entered_slow = threading.Event()
+    release_slow = threading.Event()
+    real_scan = log_pages_module._scan
+
+    def _scan(handle, index, snapshot_size):
+        if "slow" in str(getattr(handle, "name", "")):
+            entered_slow.set()
+            assert release_slow.wait(10), "the fast page never completed — it was blocked"
+        return real_scan(handle, index, snapshot_size)
+
+    monkeypatch.setattr(log_pages_module, "_scan", _scan)
+
+    errors: list = []
+
+    def _read_slow():
+        try:
+            pager.page(slow)
+        except BaseException as exc:               # noqa: BLE001 — surfaced by the assert below
+            errors.append(exc)
+
+    worker = threading.Thread(target=_read_slow, daemon=True)
+    worker.start()
+    assert entered_slow.wait(10), "the slow run never reached its scan"
+
+    # …while the slow run is mid-scan, the other run's page must complete on its own.
+    page = pager.page(fast)
+    assert page["events"], "a second run's page blocked behind the first run's cold index"
+
+    release_slow.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive() and not errors, errors
+
+
+def test_a_second_reader_of_the_SAME_run_still_waits_for_the_first(tmp_path, monkeypatch):
+    """Per-path exclusion is the point, not no exclusion: two threads must never scan and mutate
+    the same `_Index` at once."""
+    import threading
+
+    path = tmp_path / "demo" / "events.jsonl"
+    _write_events(path, [_event(seq) for seq in range(8)])
+
+    pager = EventLogPager()
+    inside = threading.Event()
+    overlapped = []
+    real_scan = log_pages_module._scan
+    concurrent = threading.Semaphore(1)
+
+    def _scan(handle, index, snapshot_size):
+        if not concurrent.acquire(blocking=False):
+            overlapped.append(True)
+        else:
+            inside.set()
+            threading.Event().wait(0.2)
+            concurrent.release()
+        return real_scan(handle, index, snapshot_size)
+
+    monkeypatch.setattr(log_pages_module, "_scan", _scan)
+    threads = [threading.Thread(target=lambda: pager.page(path)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    assert not overlapped, "two readers scanned the same run's index concurrently"

@@ -18,6 +18,7 @@ import hashlib
 import os
 import secrets
 import threading
+from contextlib import contextmanager
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from itertools import chain
@@ -315,6 +316,47 @@ class CommandObservation:
         return self._owner._incomplete_finalize_scope(self)
 
 
+class _PathLocks:
+    """Per-path mutual exclusion for the incremental byte indexes.
+
+    Both indexes used ONE process-global lock held across a whole request, so the first full scan of
+    a multi-MB log — or a cold network read — stalled every OTHER run's poll behind it. The work is
+    already per-path (each `_Index` is scanned and read independently), so the exclusion should be
+    too; only the registry map itself needs a shared lock, and that is held for dictionary
+    operations alone.
+
+    A lock is evicted only while UNREFERENCED. Handing a second lock object out for a path whose
+    first is still held would let two threads scan and mutate the same `_Index` concurrently, which
+    is exactly the corruption the lock exists to prevent — so the LRU bound yields to liveness.
+    """
+
+    __slots__ = ("_locks", "_registry", "_maximum")
+
+    def __init__(self, maximum: int):
+        self._locks: "OrderedDict[str, list]" = OrderedDict()   # key -> [RLock, waiters]
+        self._registry = threading.RLock()
+        self._maximum = max(1, int(maximum))
+
+    @contextmanager
+    def hold(self, key: str):
+        with self._registry:
+            entry = self._locks.get(key)
+            if entry is None:
+                entry = self._locks[key] = [threading.RLock(), 0]
+            entry[1] += 1
+            self._locks.move_to_end(key)
+        try:
+            with entry[0]:
+                yield
+        finally:
+            with self._registry:
+                entry[1] -= 1
+                excess = len(self._locks) - self._maximum
+                if excess > 0:
+                    for stale in [k for k, e in self._locks.items() if e[1] == 0][:excess]:
+                        self._locks.pop(stale, None)
+
+
 class CommandObservationIndex:
     """Thread-safe incremental LRU over event logs used by command workers."""
 
@@ -324,7 +366,11 @@ class CommandObservationIndex:
             raise ValueError("max_indexed_runs must be a positive integer")
         self.max_indexed_runs = max_indexed_runs
         self._indexes: OrderedDict[str, _Index] = OrderedDict()
+        # `_lock` guards the registry dict and the short per-index memo sections; the incremental
+        # `_scan` of a big append burst runs under `_paths.hold(key)` so it stalls one run's command
+        # monitor, not every other run's.
         self._lock = threading.RLock()
+        self._paths = _PathLocks(max_indexed_runs * 4)
         self.metrics = ObservationMetrics()
 
     @property
@@ -342,7 +388,8 @@ class CommandObservationIndex:
         identity = _identity(stat)
         metadata = _metadata(stat)
         probe_before = _probe_signature(handle, size)
-        index = self._indexes.get(key)
+        with self._lock:
+            index = self._indexes.get(key)
         # A rewrite that also GROWS the file used to slip every fence: same inode, size larger, so
         # the equal-size metadata/probe checks never ran, the scan resumed from valid_end over
         # foreign bytes, and the intents/acks/finishes cached from the OLD image were re-certified
@@ -362,10 +409,13 @@ class CommandObservationIndex:
         )
         if rebuild:
             index = self._new_index(stat)
+        with self._lock:
+            # Re-assigning the same object when the index was reused is a no-op for both value and
+            # ordering, so this stays equivalent to the previous create-only assignment.
             self._indexes[key] = index
-        self._indexes.move_to_end(key)
-        while len(self._indexes) > self.max_indexed_runs:
-            self._indexes.popitem(last=False)
+            self._indexes.move_to_end(key)
+            while len(self._indexes) > self.max_indexed_runs:
+                self._indexes.popitem(last=False)
 
         # An unchanged stopped tail is a cache hit. Growth replays only from the valid boundary,
         # including the formerly partial row that may now have its terminating newline.
@@ -376,7 +426,8 @@ class CommandObservationIndex:
         if probe_after != probe_before:
             # Never pair events parsed from one same-size image with the sentinel signature from a
             # later image. Without this fence the next poll could trust that stale pairing forever.
-            self._indexes.pop(key, None)
+            with self._lock:
+                self._indexes.pop(key, None)
             raise _ObservationChanged
         if cache_hit:
             self.metrics.cache_hits += 1
@@ -392,12 +443,10 @@ class CommandObservationIndex:
         # names the indexed handle. Ordinary append growth after the snapshot is fine: this
         # observation consistently names the earlier complete prefix and the next poll reads delta.
         for attempt in range(3):
-            # CLAUDE REVIEW: [PERF] The single registry-wide RLock is held across the whole
-            # _refresh_locked call, including the probe reads and the incremental _scan. The first
-            # observation of a large log (or any big append burst) parses the entire new suffix under
-            # this global lock, stalling every other run's command monitor/GET for the duration. A
-            # per-run lock (the registry already keys per path) would confine the stall to one run.
-            with open(path, "rb") as handle, self._lock:
+            # Counters are diagnostics, and observe() no longer serializes across runs, so they
+            # are best-effort across CONCURRENT paths (exact for one path, and for any single-
+            # threaded caller — which is every test and every per-run monitor loop).
+            with open(path, "rb") as handle, self._paths.hold(str(path)):
                 self.metrics.refreshes += 1
                 stat = os.fstat(handle.fileno())
                 try:
@@ -419,7 +468,8 @@ class CommandObservationIndex:
                         or (current.st_size == stat.st_size
                             and _metadata(current) != _metadata(stat))
                         or sampled_content_changed):
-                    self._indexes.pop(str(path), None)
+                    with self._lock:
+                        self._indexes.pop(str(path), None)
                     if attempt < 2:
                         continue
                     raise OSError(f"event log changed while observing {path}")
