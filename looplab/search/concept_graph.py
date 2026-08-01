@@ -209,28 +209,31 @@ class ConceptGraph:
         # A dense multi-parent DAG also re-walked shared ancestors exponentially. A node currently on
         # the stack contributes no depth (following it would be the cycle), so the answer stays the
         # longest ACYCLIC root path.
-        # CLAUDE REVIEW: [PERF] The memoization is INEFFECTIVE — it never prevents the exponential
-        # re-walk the docstring/test claim it fixes. `memo` is written ONLY when `not on_path`, but the
-        # sole call with an empty `on_path` is the top-level `_depth(concept_id, frozenset())`; every
-        # recursive descent passes `on_path | {cid}` (non-empty), so no sub-call is ever cached and the
-        # `if cid in memo` check never hits during recursion. On the test's own dense diamond DAG this
-        # runs 2**depth walks (measured: depth-21 -> 4,194,303 parents_of calls, ~7s), i.e. exactly the
-        # blowup the comment says memoization avoids — the test passes only because 2**21 is barely
-        # tractable, not because it is linear. A correct fix must cache nodes proven off every cycle
-        # (e.g. cache when the subtree hit no pruned self/cycle edge), not just the root.
+        # Cache the depth VALUE of any node whose subtree pruned NO self/cycle edge: such a node's longest
+        # acyclic root-path is the same in every traversal context, so it is safe to reuse across the whole
+        # walk — turning a dense diamond DAG from 2**depth re-walks into linear. A node whose subtree DID
+        # prune a cycle edge stays uncached (its depth is context-bound), so cyclic graphs still terminate
+        # and return the same depths as the bare recursion, and acyclic graphs are unchanged.
         memo: dict[str, int] = {}
 
-        def _depth(cid: str, on_path: frozenset) -> int:
+        def _depth(cid: str, on_path: frozenset) -> tuple[int, bool]:
+            # Returns (depth, clean); `clean` is True iff no self/cycle edge was pruned anywhere in cid's
+            # subtree, i.e. the depth is context-independent and therefore cacheable.
             if cid in memo:
-                return memo[cid]
-            parents = [p for p in self.parents_of(cid) if p != cid and p not in on_path]
-            depth = 0 if not parents else 1 + max(
-                _depth(p, on_path | {cid}) for p in parents)
-            if not on_path:                  # only the cycle-free root call is safely cacheable
+                return memo[cid], True
+            depth, clean = 0, True
+            for p in self.parents_of(cid):
+                if p == cid or p in on_path:
+                    clean = False            # pruned a cycle edge -> this subtree's depth is context-bound
+                    continue
+                d, child_clean = _depth(p, on_path | {cid})
+                depth = max(depth, 1 + d)
+                clean = clean and child_clean
+            if clean:                        # only nodes proven off every cycle are safely cacheable
                 memo[cid] = depth
-            return depth
+            return depth, clean
 
-        return _depth(concept_id, frozenset())
+        return _depth(concept_id, frozenset())[0]
 
     def key_concepts(self) -> list[str]:
         return [c.id for c in self.concepts() if c.key]

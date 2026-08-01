@@ -871,14 +871,10 @@ class Settings(BaseSettings):
     # the model. Left as `str`, not `Literal`, so old snapshots still validate through the same path.
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
-    # CLI coding agent: "opencode" | "aider" | "goose" | "continue".
-    # CLAUDE REVIEW: [LOGIC] developer_backend is a CLOSED enum (default + cli_agent.PRESETS keys) but is
-    # NOT validated in _check_trust_gate like backend/seed_mode/eval_trust_mode/strategist_backend. Only
-    # the CLI --developer-backend flag guards it (_choice/_DEV_BACKENDS); a file `settings:` block,
-    # LOOPLAB_DEVELOPER_BACKEND env, or `--set developer_backend=Aider` reaches here unchecked. The
-    # consumer (adapters/tasks.py: `settings.developer_backend not in PRESETS`) then silently wires the
-    # DEFAULT in-house developer — the exact silent-downgrade no-op the `backend` typo guard was added to
-    # close (test_an_unknown_backend_is_rejected_instead_of_downgrading_to_toy), with no diagnostic.
+    # CLI coding agent: "opencode" | "aider" | "goose" | "continue". A CLOSED enum ("default" +
+    # cli_agent.PRESETS keys), validated loudly in `_check_trust_gate` — an unknown value used to reach
+    # adapters/tasks.py (`developer_backend not in PRESETS`) and silently wire the DEFAULT in-house
+    # developer, the same silent downgrade the `backend` guard closes.
     developer_backend: str = "default"
     # C2 best-of-N: generate N candidate implementations per node and keep the best by an
     # execution-free reward (static validity + metric-print). 1 = off. In-house LLM developer only
@@ -1359,6 +1355,18 @@ class Settings(BaseSettings):
             raise ValueError(f"seed_mode must be auto|tracked|all, got {self.seed_mode!r}")
         if self.backend not in ("toy", "llm"):
             raise ValueError(f"backend must be toy|llm, got {self.backend!r}")
+        # developer_backend is a CLOSED enum: "default" (in-house developer) plus the external
+        # coding-agent keys in agents/cli_agent.py::PRESETS. The CLI --developer-backend flag guards it
+        # (_DEV_BACKENDS), but a file/env/`--set` value reached here unchecked and adapters/tasks.py then
+        # silently wired the DEFAULT developer for anything not in PRESETS. Validate against the SAME
+        # authoritative registry the runtime consumer uses (imported lazily to keep config import-light),
+        # so a typo fails loud instead of downgrading — mirroring the `backend` guard above.
+        from looplab.agents.cli_agent import PRESETS as _DEV_PRESETS
+        _dev_backends = ("default", *_DEV_PRESETS)
+        if self.developer_backend not in _dev_backends:
+            raise ValueError(
+                f"developer_backend must be {'|'.join(_dev_backends)}, "
+                f"got {self.developer_backend!r}")
         # `parse_structured` resolves an unknown name to the DEFAULT fallback order, so a typo'd
         # llm_parser is indistinguishable from asking for the default. Validate against the parser
         # registry itself (imported here, not at module scope, to keep config import-light).

@@ -606,13 +606,9 @@ class JsonlCaseLibrary:
         if not isinstance(query, str) or not limit:
             return []
         q = set(query.lower().split())
-        # CLAUDE REVIEW: [EDGE-CASE] `valid_case_record` admits an EXPLICIT `goal: null` row (its guard is
-        # `if value is not None and not isinstance(value, str)` — None passes), so such a row is retained
-        # into `self.cases`; here `c.get("goal", "")` then returns None (key present, value None), and
-        # `None + " "` raises TypeError OUTSIDE the try (which only wraps the `limit` computation), crashing
-        # search on a row the store deliberately called valid. Siblings use `... or ""`; `_reload`/`all` don't
-        # touch goal, so the crash is latent until search runs (currently only exercised by tests).
-        scored = [(len(q & set((c.get("goal", "") + " " + c.get("task_id", "")).lower().split())), c)
+        # `valid_case_record` admits an explicit `goal: null` row, so `c.get("goal")` can be None here;
+        # `... or ""` degrades that to an empty string instead of raising TypeError on `None + " "`.
+        scored = [(len(q & set(((c.get("goal") or "") + " " + c.get("task_id", "")).lower().split())), c)
                   for c in self.cases]
         scored.sort(key=lambda t: -t[0])
         return [c for _, c in scored[:limit]]
