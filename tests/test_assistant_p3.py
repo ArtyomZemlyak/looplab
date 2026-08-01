@@ -559,3 +559,49 @@ def test_the_share_secret_is_stored_only_as_a_digest(tmp_path):
     # A guessed id with the wrong secret opens nothing.
     assert client.get(
         f"/api/assistant/shared/{token.split('.')[0]}.wrong").status_code == 404
+
+
+def test_the_deadline_precheck_never_reaps_the_child_it_is_only_inspecting():
+    """`_enforce_deadline`'s pre-check runs OUTSIDE `deadline_lock`, and `poll()` REAPS. While
+    `kill()` holds that lock inside `_kill_tree` — past its own non-reaping returncode fence — a
+    watcher/read()/list() caller reaching the pre-check could reap a child that exited in that
+    instant and free its PID mid-kill, so `os.getpgid`/`killpg` could land on a REUSED pid. That is
+    the F10 hazard `_kill_tree` documents and fences against; the pre-check must not undo it.
+
+    Also pins `kill()`'s final outcome read, which had the same class of exposure once the lock was
+    released before it."""
+    import inspect
+
+    from looplab.runtime import bg_tasks
+
+    polls = []
+
+    class _Proc:
+        returncode = None
+        pid = 4242
+
+        def poll(self):
+            polls.append("poll")           # a REAP — must not happen from the unlocked pre-check
+            return None
+
+    task = {"proc": _Proc(), "deadline": time.monotonic() - 1.0,
+            "deadline_lock": threading.Lock()}
+    task["deadline_lock"].acquire()        # stand in for kill() holding it inside _kill_tree
+    try:
+        bg_tasks.BackgroundManager._enforce_deadline(task)
+    finally:
+        task["deadline_lock"].release()
+    assert polls == [], "the unlocked pre-check reaped the child a concurrent kill() was fencing"
+
+    # A NOT-yet-overdue task short-circuits before the process is touched at all.
+    fresh = {"proc": _Proc(), "deadline": time.monotonic() + 60.0,
+             "deadline_lock": threading.Lock()}
+    bg_tasks.BackgroundManager._enforce_deadline(fresh)
+    assert polls == []
+
+    # kill()'s outcome read happens under the lock it fenced the kill with, not after releasing it.
+    src = inspect.getsource(bg_tasks.BackgroundManager.kill)
+    body = src.split('with t["deadline_lock"]:', 1)[1]
+    locked, _, after = body.partition('\n        try:')
+    assert "rc = proc.poll()" in locked and "rc = proc.poll()" not in after, (
+        "kill() reads its outcome outside the lock that fenced the kill")

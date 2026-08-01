@@ -182,14 +182,14 @@ class BackgroundManager:
         read()/list(). Idempotent; a None deadline (timeout disabled) is a no-op. Operates on the
         handle `t` directly (never re-enters the lock)."""
         dl = t.get("deadline")
-        # CLAUDE REVIEW: [RACE] This pre-check `poll()` runs OUTSIDE deadline_lock, and poll() REAPS.
-        # kill() (server thread) holds the lock inside _kill_tree past its returncode fence while a
-        # watcher/read()/list() caller executes this line; if the child exits in that instant, the
-        # unlocked poll() reaps it and frees the PID mid-_kill_tree, so os.getpgid/killpg can land on
-        # a reused PID — the exact F10 hazard the module's own comments (below) claim is fenced
-        # everywhere. The non-reaping pre-check is `t["proc"].returncode is not None` (the same
-        # distinction _kill_tree itself documents). kill()'s final `rc = proc.poll()` has the same class.
-        if dl is None or time.monotonic() <= dl or t["proc"].poll() is not None:
+        # `returncode`, NOT `poll()`: this pre-check runs OUTSIDE `deadline_lock`, and `poll()` REAPS.
+        # While `kill()` (a server thread) holds that lock inside `_kill_tree`, past its own returncode
+        # fence, a watcher/read()/list() caller reaching this line could reap a child that exited in
+        # that instant and free its PID mid-`_kill_tree` — so `os.getpgid`/`killpg` could then land on
+        # a REUSED pid. That is the same F10 hazard `_kill_tree` documents and fences against, and it
+        # is exactly why the non-reaping read is the right one here; the locked re-check below still
+        # calls `poll()`, which is safe because it owns the lock.
+        if dl is None or time.monotonic() <= dl or t["proc"].returncode is not None:
             return
         deadline_lock = t["deadline_lock"]
         if not deadline_lock.acquire(blocking=False):
@@ -340,12 +340,16 @@ class BackgroundManager:
                     proc.wait(timeout=10)
                 except Exception:  # noqa: BLE001 — still alive; reported below
                     pass
+            # Read the outcome under the SAME lock that fenced the kill. Outside it a sweep could
+            # already be inside its own `_kill_tree` (whose PID fence is a non-reaping `returncode`
+            # read), and a `poll()` here would reap the child and free its pid mid-flight — the
+            # PID-reuse hazard that fence exists for.
+            rc = proc.poll()
         try:
             t["fh"].close()
         except OSError:
             pass
         t["closed"] = True
-        rc = proc.poll()
         if rc is None:                       # still alive after tree-kill + wait — do NOT claim success
             return {"ok": False, "task_id": tid, "status": "kill_failed",
                     "error": "process did not exit after tree-kill"}

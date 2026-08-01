@@ -475,3 +475,33 @@ def test_a_non_dict_job_result_is_returned_rather_than_500ing_every_poll(monkeyp
             break
         time.sleep(0.01)
     assert body == {"answer": 42, "status": JOB_DONE}      # a dict still spreads, unchanged
+
+
+def test_a_registered_but_not_yet_started_worker_is_not_declared_dead():
+    """`start_reserved` registers the worker in `_job_threads` under the lock, RELEASES it, and only
+    then calls `worker.start()`. In that window `is_alive()` is False because the thread has not
+    begun — not because it ended — and `_reconcile_locked` (which every `poll`/`reserve` runs, over
+    ALL jobs) terminalized the still-pending job with a spurious "worker ended without publishing".
+    That terminal reaches an inline `run_reserved` waiter, and on a consume_on_poll job the receipt
+    is consumed, so the real worker's later `put` finds no job and the true result is lost."""
+    from looplab.serve.protocol import JOB_DONE, JOB_RUNNING
+
+    registry = JobRegistry()
+    job_id = registry.reserve()["job_id"]
+    registry.put(job_id, worker_started=True)
+    # Constructed and registered, NOT started — exactly the `start_reserved` window.
+    pending = threading.Thread(target=lambda: None, daemon=True)
+    registry._job_threads[job_id] = pending
+    assert pending.ident is None and not pending.is_alive()
+
+    registry.reserve()                                   # any admission runs reconciliation
+    still = registry.get(job_id)
+    assert still is not None and still["status"] == JOB_RUNNING, still
+
+    # Once it really has run and ended, the corpse IS retired — the guard must not be a blanket skip.
+    pending.start()
+    pending.join()
+    registry.reserve()
+    settled = registry.get(job_id)
+    assert settled is not None and settled["status"] == JOB_DONE
+    assert settled["result"]["code"] == "job_failed"

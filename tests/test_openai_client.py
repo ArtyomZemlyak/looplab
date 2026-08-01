@@ -1056,7 +1056,7 @@ def test_stream_path_bounds_create_by_header_budget(monkeypatch):
                                    timeout=99.0, header_timeout=4.0)
     seen = {}
 
-    def fake_bounded(kwargs, join_s):
+    def fake_bounded(kwargs, join_s, **_kw):
         seen["join"] = join_s
         seen["stream"] = kwargs.get("stream")
         return iter([])                                  # empty stream -> _accumulate_stream returns empty body

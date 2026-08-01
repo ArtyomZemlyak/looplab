@@ -89,19 +89,31 @@ def test_inflight_is_not_leaked_when_the_worker_thread_cannot_start():
     assert client._inflight == before, "the in-flight counter leaked when the thread never started"
 
 
-def test_the_streaming_guard_does_not_open_until_the_header_wait_is_over():
-    """A wedged call must not be double-counted as its own sibling.
+def test_a_stream_holds_exactly_one_inflight_slot_from_header_wait_through_body():
+    """A wedged stream must count itself EXACTLY once — never twice, never zero.
 
-    `_streaming_body` covers the BODY read; `_bounded_create`'s `_inflight` covers the header wait.
-    Nesting them (evaluating `_bounded_create` as an argument inside the `with`) charged ONE call to
-    both counters at once, so `_pool_teardown_is_safe_locked` saw a phantom sibling and a black-holed
-    stream skipped the socket shutdown + client rebuild that is the whole point of the abort path.
+    Two arrangements were wrong before this. Nesting `_bounded_create` inside `_streaming_body` while
+    `_bounded_create` also took its own `_inflight` slot charged ONE call to both counters, so
+    `_pool_teardown_is_safe_locked` saw a phantom sibling and a black-holed stream skipped the socket
+    shutdown + client rebuild the abort path exists for. Un-nesting fixed that but left a handoff
+    window where NEITHER counter held the stream — `_bounded_create` returns only after its worker
+    decremented `_inflight`, and `_streaming_body` had not yet incremented — long enough for a
+    sibling wedged in its own header wait to judge the teardown safe and rip this live socket away.
+
+    The invariant that rules both out: the total is 1 for the whole call, header wait and body alike.
     """
     from looplab.core.llm import OpenAICompatibleClient
 
     client = OpenAICompatibleClient(base_url="http://x/v1", api_key="k", model="m",
                                     stream=True, timeout=0.3, header_timeout=0.3)
-    seen: list[tuple[int, int, bool]] = []
+    during_headers: list[tuple[int, int, bool]] = []
+    during_body: list[tuple[int, int]] = []
+
+    def _chunks():
+        with client._inflight_lock:
+            during_body.append((client._inflight, client._stream_inflight))
+        return
+        yield        # pragma: no cover - generator with no chunks
 
     class _SDK:
         class chat:
@@ -110,16 +122,38 @@ def test_the_streaming_guard_does_not_open_until_the_header_wait_is_over():
                 def create(**_kwargs):
                     # Sampled from INSIDE the header wait, where the abort decision is made.
                     with client._inflight_lock:
-                        seen.append((client._inflight, client._stream_inflight,
-                                     client._pool_teardown_is_safe_locked()))
-                    return []
+                        during_headers.append((client._inflight, client._stream_inflight,
+                                               client._pool_teardown_is_safe_locked()))
+                    return _chunks()
 
     client._sdk = _SDK()
+    # Sampled at the ENTRY to `_bounded_create` — the instant that proves there is no handoff window.
+    # Under the un-nested arrangement the slot was taken only AFTER create() returned, so a live
+    # header-complete stream was momentarily counted by neither cell.
+    on_entry: list[tuple[int, int]] = []
+    real_bounded = client._bounded_create
+
+    def _spy(kwargs, join_s, **kw):
+        with client._inflight_lock:
+            on_entry.append((client._inflight, client._stream_inflight))
+        return real_bounded(kwargs, join_s, **kw)
+
+    client._bounded_create = _spy
     client._sdk_chat({"model": "m", "messages": []}, use_stream=True)
-    assert seen, "the transport never reached the SDK"
-    inflight, stream_inflight, alone = seen[0]
-    assert (inflight, stream_inflight) == (1, 0)
+
+    assert on_entry and sum(on_entry[0]) == 1, (
+        f"the slot was not held when create() began ({on_entry}) — a sibling sampling this window "
+        "would judge the pool teardown safe and rip the socket out from under a live stream")
+    assert during_headers, "the transport never reached the SDK"
+    inflight, stream_inflight, alone = during_headers[0]
+    assert inflight + stream_inflight == 1, (inflight, stream_inflight)   # counted ONCE, not twice
     assert alone, "a lone wedged stream would refuse its own teardown"
+    assert during_body, "the body was never iterated"
+    assert sum(during_body[0]) == 1, during_body[0]      # ...and still counted during the body
+
+    # The slot is released once the call is over — no leak across calls.
+    with client._inflight_lock:
+        assert (client._inflight, client._stream_inflight) == (0, 0)
 
 
 def test_a_sibling_that_starts_during_the_abort_never_binds_the_doomed_client():

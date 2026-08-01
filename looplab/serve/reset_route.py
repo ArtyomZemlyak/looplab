@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -42,6 +43,9 @@ from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
 
 _GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+# Namespace for the DERIVED operation id a non-browser Replay gets (see `durable_reset_run`). A fixed
+# constant, so the same (run, generation) always names the same operation across processes.
+_RESET_OPERATION_NS = uuid.UUID("6f5b7f2a-1c4d-5e8a-9b3c-2d1e0f4a7c65")
 _TASK_MAX_BYTES = 16 * 1024 * 1024
 _CONFIG_MAX_BYTES = 8 * 1024 * 1024
 
@@ -880,11 +884,31 @@ async def durable_reset_run(
         raise HTTPException(400, "reset body must be a JSON object")
     expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
     operation_id = body.get("operation_id")
-    if (not isinstance(expected_generation, str)
+    # A BROWSER Replay must carry its own generation fence: the tab may be acting on a snapshot the
+    # run has already moved past, and 428 is what tells it to re-read and retry. A scripted caller —
+    # the CLI, operator tooling, a test client — has no stale snapshot to guard against and has always
+    # been allowed to omit the field; requiring it unconditionally 400'd every non-browser reset
+    # before any of the route's real work. Origin is the same browser signal the pre-split handler
+    # keyed on, and the 428/400/409 ladder below is the contract
+    # `test_browser_replay_requires_and_validates_generation` pins.
+    browser = bool(request.headers.get("origin"))
+    if expected_generation is None and browser:
+        raise HTTPException(428, "expected_generation is required for browser Replay")
+    if expected_generation is not None and (
+            not isinstance(expected_generation, str)
             or _GENERATION_RE.fullmatch(expected_generation) is None):
         raise HTTPException(400, "expected_generation must be a lowercase SHA-256 token")
-    if (not isinstance(operation_id, str)
+    # The durable operation id gets the same split, and a supplied one is validated either way. It
+    # exists so a caller whose request outcome became unknown can REJOIN that exact operation rather
+    # than start a second one against the same generation — which `reset_receipts_for_run` below
+    # rejects as `reset_operation_conflict`. A browser persists its id to get that; a scripted caller
+    # has nowhere to persist one, so the server DERIVES it below from (run, generation) — a random id
+    # per request would make an ordinary retry collide with its own predecessor's receipt.
+    if operation_id is not None and (
+            not isinstance(operation_id, str)
             or RUN_RESET_OPERATION_RE.fullmatch(operation_id) is None):
+        raise HTTPException(400, "operation_id must be a lowercase UUID")
+    if operation_id is None and browser:
         raise HTTPException(400, "operation_id must be a lowercase UUID")
 
     root = srv.root.resolve()
@@ -914,6 +938,30 @@ async def durable_reset_run(
             or not rd.is_dir()):
         raise HTTPException(404, "no such run")
 
+    if expected_generation is None:
+        # The non-browser opt-out, resolved ONCE here so everything downstream keeps working on a real
+        # token: the fence, the receipt binding (which requires a 64-hex generation) and the locked
+        # re-check are all unchanged. Skipping the fence entirely — what the old handler did — would
+        # mean the CAS could no longer reject a generation change at all; resolving the CURRENT
+        # generation instead narrows the window to "changed between this read and the locked
+        # re-check", which is precisely what the fence is for.
+        expected_generation = srv.commands.run_generation(rd)
+        if not expected_generation:
+            # No durable generation identity yet (an empty or torn first line). Accepting a mutation
+            # here would re-open the very reset race the token exists to close — see
+            # `run_commands.run_generation_token`.
+            raise HTTPException(409, {
+                "code": "run_generation_unknown",
+                "message": "The run has no durable generation identity to fence Replay against.",
+            })
+    if operation_id is None:
+        # DERIVED, not random: "replay THIS generation of THIS run" is one operation, so a retry
+        # after an unknown outcome must land on the same receipt and rejoin — which is exactly what a
+        # browser gets by persisting its id. A fresh random id per request would instead be a SECOND
+        # operation against the same generation, and the ownership check below correctly rejects that
+        # as `reset_operation_conflict`. The generation is part of the key, so the next Replay (of the
+        # replacement generation) is a genuinely new operation with a new id.
+        operation_id = str(uuid.uuid5(_RESET_OPERATION_NS, f"{run_id}\n{expected_generation}"))
     return await anyio.to_thread.run_sync(lambda: _reset_blocking(
         srv, rd, run_id=run_id, expected_generation=expected_generation,
         operation_id=operation_id, spawn_engine=spawn_engine))

@@ -363,27 +363,35 @@ class OpenAICompatibleClient:
             # on THIS thread after a worker thread created it is safe: sync-httpx sequential handoff, no
             # concurrent access.
             header_join = self.header_timeout + min(10.0, self.header_timeout)
-            # The header wait must finish BEFORE `_streaming_body` opens. Nesting the two (evaluating
-            # `_bounded_create` as an argument inside the `with`) made ONE wedged call count itself
-            # twice — `_inflight=1` plus `_stream_inflight=1` — so `_pool_teardown_is_safe_locked`
-            # saw a phantom sibling and the call skipped the very teardown it needed.
-            _stream = self._bounded_create(kwargs, header_join)
-            # CLAUDE REVIEW: [RACE] Un-nesting to avoid self-double-count (comment above) leaves a
-            # window here: `_bounded_create` returns only AFTER its worker decremented `_inflight`
-            # (create() finished at headers), and `_streaming_body()` has not yet incremented
-            # `_stream_inflight` — so for the brief handoff this healthy, header-complete stream is
-            # counted by NEITHER cell. A concurrent sibling whose OWN header-wait is wedged then sees
-            # `_inflight+_stream_inflight <= 1`, judges the teardown safe, and `_shutdown_pool_sockets`
-            # rips the socket out from under this stream (spurious APITimeoutError + re-spend) — the
-            # exact spurious-sibling failure the counting exists to prevent.
+            # ONE slot held CONTINUOUSLY across the header wait AND the body, taken here and passed
+            # down as `counted=True` so `_bounded_create` does not add a second.
+            #
+            # Both simpler arrangements are wrong. Nesting with `_bounded_create` doing its own
+            # `_inflight += 1` made a wedged call count ITSELF twice (`_inflight` + `_stream_inflight`),
+            # so `_pool_teardown_is_safe_locked` saw a phantom sibling and the call skipped the very
+            # teardown it needed. Un-nesting fixed that but opened a handoff window: `_bounded_create`
+            # returns only after its worker has already decremented `_inflight`, and `_streaming_body`
+            # had not yet incremented `_stream_inflight`, so a healthy header-complete stream was
+            # counted by NEITHER cell — long enough for a sibling wedged in its own header wait to see
+            # `<= 1`, judge the teardown safe, and have `_shutdown_pool_sockets` rip the socket out
+            # from under this stream (spurious APITimeoutError plus a re-spend), which is precisely the
+            # failure the counting exists to prevent. Holding the slot the whole time has neither
+            # problem: the self-count stays exactly 1, and it never drops to 0 while a socket is live.
             with self._streaming_body():
-                # CLAUDE REVIEW: [QUALITY] `_stream` is not closed on the error path here, unlike the
-                # deliberate own-and-close-in-finally in `complete_text_stream` (see its 900-905 note):
-                # if `_accumulate_stream` raises for a reason OTHER than the watchdog kill (which calls
-                # resp.close()) — e.g. the raw-httpx-error normalization in `_stream_with_idle_guard`,
-                # or any openai.APIError mid-iteration — the SDK Stream/response and its pooled socket
-                # leak until GC, the same connection leak that path was fixed to avoid.
-                return self._accumulate_stream(_stream, self.timeout, self.header_timeout)
+                _stream = self._bounded_create(kwargs, header_join, counted=True)
+                try:
+                    return self._accumulate_stream(_stream, self.timeout, self.header_timeout)
+                finally:
+                    # Own-and-close, like `complete_text_stream` (see its note there). The watchdog
+                    # kill closes the response itself, but every OTHER exit — the raw-httpx-error
+                    # normalization in `_stream_with_idle_guard`, any openai.APIError mid-iteration —
+                    # left the SDK Stream and its pooled socket to leak until GC.
+                    _close = getattr(_stream, "close", None)
+                    if callable(_close):
+                        try:
+                            _close()
+                        except Exception:  # noqa: BLE001 — a close failure must not mask the result
+                            pass
         return self._nonstream_bounded(kwargs)
 
     def _nonstream_bounded(self, kwargs: dict) -> dict:
@@ -418,7 +426,7 @@ class OpenAICompatibleClient:
             with self._inflight_lock:
                 self._stream_inflight -= 1
 
-    def _bounded_create(self, kwargs: dict, join_s: float):
+    def _bounded_create(self, kwargs: dict, join_s: float, *, counted: bool = False):
         """Run one `chat.completions.create(**kwargs)` in a worker thread bounded by a `join_s` wall-clock
         deadline; if it overruns, ABORT: `socket.shutdown()` the in-flight connection (forces a recv()
         wedged in the kernel to return — close() alone can't), close + rebuild the httpx client, and raise
@@ -438,11 +446,17 @@ class OpenAICompatibleClient:
             except BaseException as e:  # noqa: BLE001 — ferry ANY error back to the caller thread
                 box["exc"] = e
             finally:
-                with self._inflight_lock:
-                    self._inflight -= 1
+                if not counted:
+                    with self._inflight_lock:
+                        self._inflight -= 1
 
         with self._inflight_lock:
-            self._inflight += 1
+            # `counted=True`: the CALLER already holds a slot (`_streaming_body`) covering this call
+            # for its whole lifetime — header wait and body alike — so adding one here would make a
+            # wedged stream count itself twice and forbid its own teardown. The `self._sdk` bind below
+            # still happens under this lock either way; that is what the lock is doing here.
+            if not counted:
+                self._inflight += 1
             # Bind the client UNDER the same lock that counts this call in. The abort path below
             # publishes its replacement `self._sdk` while holding this lock too, so a call either
             # binds the doomed client BEFORE that check — and is therefore counted as a sibling, which
@@ -456,9 +470,11 @@ class OpenAICompatibleClient:
             # `_call`'s finally is the ONLY decrement and never runs if the thread never started
             # (`RuntimeError: can't start new thread` under exhaustion). Leaking the counter would
             # pin `_alone` False for the process lifetime, disabling this abort path for every later
-            # wedged call — and thread exhaustion is exactly when it is needed.
-            with self._inflight_lock:
-                self._inflight -= 1
+            # wedged call — and thread exhaustion is exactly when it is needed. Nothing to undo when
+            # `counted`: the caller's `_streaming_body` owns that slot and releases it on the way out.
+            if not counted:
+                with self._inflight_lock:
+                    self._inflight -= 1
             raise
         th.join(join_s)
         if th.is_alive():
