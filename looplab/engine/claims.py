@@ -2330,6 +2330,10 @@ _INTENT_CUES = {
 # COUNTER-EVIDENCE/contradictions — an inconclusive (no-stance) claim is neither. Two distinct mechanisms,
 # not an accidental inconsistency (concept-conformance).
 _CAVEAT = frozenset(("mixed", "refuted"))
+# Tie-break order for `_classify_intent` when two intents match the same number of cues: the intents that
+# RAISE the caveat/contradiction quota win, so a mixed query surfaces counter-evidence rather than burying
+# it. `contested` outranks `failed` because it is the narrower, more specific signal of the two.
+_INTENT_TIE_RANK = {"contested": 2, "failed": 1, "worked": 0}
 
 
 def _classify_intent(query: str) -> str:
@@ -2337,13 +2341,13 @@ def _classify_intent(query: str) -> str:
     Deterministic, no LLM. `explore` (neutral) when no cue fires — the safe default that reorders nothing."""
     toks = set(_CLAIM_WORD.findall(str(query or "").casefold()))
     scored = [(sum(1 for w in cues if w in toks), name) for name, cues in _INTENT_CUES.items()]
-    # CLAUDE REVIEW: [LOGIC] On an equal cue count the tie-break `t[1]` (the intent NAME) always resolves to
-    # the alphabetically-largest name — "worked" > "failed"/"contested". A genuinely mixed query ("avoid the
-    # failed approach, use the best proven method": 1 failed cue + 1 worked cue) is therefore classified
-    # "worked", which floats positives and does NOT raise the caveat/contradiction quota (only failed/contested
-    # do, line ~2623). That biases ties toward hiding counter-evidence — the opposite of this module's
-    # design intent (§21.20.5 caveat preservation). A caveat-favouring or `explore` tie-break would be safer.
-    best_n, best = max(scored, key=lambda t: (t[0], t[1]))
+    # An equal cue count is broken CAVEAT-FIRST, not alphabetically. The tie-break used to be the intent
+    # NAME, which always resolves to the alphabetically-largest — "worked" > "failed" > "contested" — so a
+    # genuinely mixed query ("avoid the failed approach, use the best proven method": one failed cue, one
+    # worked cue) classified as "worked", floating positives and leaving the caveat/contradiction quota
+    # unraised (only failed/contested raise it). That biased ties toward HIDING counter-evidence, the exact
+    # inverse of this module's §21.20.5 caveat-preservation intent. Still total and deterministic.
+    best_n, best = max(scored, key=lambda t: (t[0], _INTENT_TIE_RANK.get(t[1], 0)))
     return best if best_n else "explore"
 
 

@@ -253,3 +253,35 @@ def test_flatten_drops_system_and_labels_tools():
     text = _flatten_transcript(msgs)
     assert "SYS" not in text
     assert "tool calls: grep" in text and "[tool result] result" in text
+
+
+def test_emit_force_still_terminates_a_tool_less_loop_that_can_self_plan():
+    """`emit_force` is the HARD termination guarantee for an unlimited-`max_turns` loop, but the
+    gate keyed on `tools is not None` — while `self_plan` (ON by default via
+    loop_opts_from_settings) still exposes `update_plan` on an emit-only loop. A model that keeps
+    calling `update_plan` with VARYING args defeats the StuckDetector's identical-PAIR check, so
+    under the default `max_turns=0` / `time_budget_s=0` that loop spun forever. Reachable: an
+    agentic ToolUsingStrategist gets tools=None when build_strategist_tools() finds no providers,
+    and UnifiedAgent's pilot/triage pass pilot_tools=None when researcher_tools=False."""
+    from looplab.agents.tool_loop import drive_tool_loop
+
+    class _PlanForever:
+        """Never emits; always updates the plan with DIFFERENT text (so no repeat is ever seen)."""
+        def __init__(self):
+            self.turns = 0
+
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.turns += 1
+            if self.turns > 60:                     # the safety net for THIS test, not for the loop
+                raise AssertionError("drive_tool_loop never terminated")
+            return _tool_call("update_plan", {"plan": [{"step": f"investigate {self.turns}"}]})
+
+        def complete_tool(self, messages, json_schema):
+            return {"forced": True}                 # the forced emit the ceiling must reach
+
+    client = _PlanForever()
+    out = drive_tool_loop(client, None, [{"role": "user", "content": "go"}], _EMIT,
+                          self_plan=True, emit_force=5,
+                          finalize=lambda a: ("emit", a), fallback=lambda m: ("fb", None))
+    assert out == ("emit", {"forced": True}), out
+    assert client.turns <= 6, f"the force ceiling did not bite until turn {client.turns}"

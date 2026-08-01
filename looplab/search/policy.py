@@ -165,14 +165,17 @@ def weighted_parent(state: RunState, feasible=None) -> Optional[int]:
     if not pool:
         return None
     ranked = rank_by_metric(state, pool)
-    # CLAUDE REVIEW: [LOGIC] `kids` counts children over RAW state.nodes, so a §6.3-tombstoned or a
-    # gate-flagged (breed_excluded) child still lowers its honest parent's under-expansion weight
-    # (1/(1+children)). A logically-deleted child is meant to be invisible to selection, yet here it
-    # de-prioritizes its ancestor for improve — deleting/flagging a child changes where the search
-    # goes. Same lifecycle-gate gap the MCTS value-filter (467-470) and operator_yields (120-121)
-    # explicitly close; this counter should skip tombstoned/aborted/breed_excluded children too.
+    # The under-expansion counter skips children the lifecycle has retired. Counting over RAW
+    # state.nodes meant a §6.3-tombstoned, aborted or gate-flagged (breed_excluded) child still
+    # lowered its honest parent's weight through `1/(1 + children)` — a logically-deleted child is
+    # supposed to be invisible to selection, yet it de-prioritized its own ancestor for `improve`,
+    # so deleting or flagging a child changed where the search goes. Same lifecycle gap the MCTS
+    # value filter and `operator_yields` already close. A FAILED child still counts: that expansion
+    # really was spent, and not counting it would re-hammer the same parent.
     kids: dict[int, int] = {}
     for n in state.nodes.values():
+        if n.tombstoned or n.id in state.aborted_nodes or n.id in state.breed_excluded:
+            continue
         for p in n.parent_ids:
             kids[p] = kids.get(p, 0) + 1
     best_id, best_w = None, -1.0
@@ -482,17 +485,17 @@ class MCTSPolicy:
             # the max branch was unbounded `reward = value` before architecture-review M2).
             reward = _mcts_reward(value, state.direction)
             # Visits = real (feasible, evaluated) trials in the subtree, not failed/infeasible
-            # nodes, so the UCB exploration term reflects actual exploration (#76).
-            # CLAUDE REVIEW: [LOGIC] `visits` filters only status/feasible, but the `metrics`/value
-            # filter above (467-470) ALSO excludes tombstoned, aborted, and breed_excluded descendants.
-            # A tombstoned/gate-flagged descendant is still status==evaluated and feasible==True
-            # (§6.3 delete and gate-posture both keep those flags), so it inflates `visits` while
-            # contributing nothing to `value`. By this policy's OWN §6.3 argument at 462-466 (deleting
-            # a node must not change where the search goes), the exploration denominator drifting on a
-            # logically-deleted/cheating descendant changes UCB1 for its ancestor — the same invariant
-            # the value-filter closes but `visits` leaves open. Should share the value-filter gates.
+            # nodes, so the UCB exploration term reflects actual exploration (#76). It shares the
+            # value filter's lifecycle gates: a tombstoned / aborted / gate-flagged descendant is
+            # still `status is evaluated` and `feasible` (§6.3 delete and the gate posture both keep
+            # those flags), so filtering only on status/feasible inflated the exploration
+            # DENOMINATOR with descendants that contribute nothing to `value` — and by this
+            # policy's own §6.3 argument above, deleting or flagging a node would then change UCB1
+            # for its ancestor, i.e. change where the search goes.
             visits = sum(1 for i in tree if state.nodes[i].status is NodeStatus.evaluated
-                         and state.nodes[i].feasible) or 1
+                         and state.nodes[i].feasible and not state.nodes[i].tombstoned
+                         and i not in state.aborted_nodes
+                         and i not in state.breed_excluded) or 1
             ucb = reward + self.c * math.sqrt(math.log(n_total + 1) / visits)
             scores[node.id] = round(ucb, 4)
             if best_ucb is None or ucb > best_ucb:

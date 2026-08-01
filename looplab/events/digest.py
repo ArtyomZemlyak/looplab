@@ -286,12 +286,15 @@ def trust_reflection(state: RunState, max_shown: int = 2) -> str:
     hard = hard_flagged_ids(state)
     if not hard:
         return ""
-    # CLAUDE REVIEW: [LOGIC] `r.get("node_id") or -1` treats node_id 0 as falsy and sorts it as -1.
-    # Node ids start at 0 (orchestrator._next_id: max(nodes,-1)+1 = 0 for the first draft), so a
-    # hard-flagged node 0 is pushed to the bottom of this reverse sort and can be wrongly dropped by the
-    # [:max_shown] slice when 3+ nodes are flagged. Use `... if ... is not None else -1` instead.
+    # `is not None`, not a truthiness fallback. Node ids start at 0 (`orchestrator._next_id` =
+    # max(nodes, -1) + 1 gives 0 for the first draft), so `r.get("node_id") or -1` mapped a
+    # hard-flagged node 0 to -1. That is currently ORDER-EQUIVALENT — every other id is a larger
+    # non-negative int and the comprehension already dropped rows whose id is not in `hard`, so a
+    # missing id never reaches the key — but it is a trap one step away from firing, and the
+    # explicit form costs nothing.
     recent = sorted((r for r in state.reward_hacks if r.get("node_id") in hard),
-                    key=lambda r: r.get("node_id") or -1, reverse=True)[:max_shown]
+                    key=lambda r: r["node_id"] if r.get("node_id") is not None else -1,
+                    reverse=True)[:max_shown]
 
     def _sigs(r) -> str:
         # Name the HARD signals (the reason it gates); advisory `critic:`/`perfect_metric` noise stays

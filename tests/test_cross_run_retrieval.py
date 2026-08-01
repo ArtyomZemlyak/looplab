@@ -105,6 +105,21 @@ def test_intent_classified_in_receipt():
     assert _classify_intent("hard negatives for retrieval") == "explore"
 
 
+def test_a_tied_intent_breaks_toward_the_caveat_not_the_positives():
+    """The tie-break used to be the intent NAME, which always resolves to the alphabetically-largest
+    ("worked" > "failed" > "contested"). A genuinely mixed query therefore classified as "worked",
+    floating positives and leaving the caveat/contradiction quota unraised — biasing ties toward
+    HIDING counter-evidence, the inverse of §21.20.5 caveat preservation."""
+    from looplab.engine.claims import _classify_intent
+    # one `failed` cue ("avoid") + one `worked` cue ("proven")
+    assert _classify_intent("avoid that approach, use the proven one") == "failed"
+    # one `contested` cue ("conflicting") + one `worked` cue ("best") — the narrower signal wins
+    assert _classify_intent("conflicting reports about the best setting") == "contested"
+    # An unambiguous positive is untouched, and an unambiguous negative still wins outright.
+    assert _classify_intent("the best proven effective approach") == "worked"
+    assert _classify_intent("what pitfalls should I avoid") == "failed"
+
+
 def test_contradiction_quota_surfaces_a_caveat_even_amid_positives(tmp_path):
     # 6 supported claims about retrieval + one CONTESTED claim; a positive-heavy recall must still surface
     # the contested one (the reserved contradiction quota), not bury it under the positives.

@@ -427,3 +427,24 @@ def test_repo_context_discloses_truncation_instead_of_silently_narrowing_the_rep
     listed, _, disclosure = listing.partition(" … ")
     assert len(listed.split(", ")) == LLMRepoDeveloper._MAX_LISTED_FILES
     assert f"listing capped at {LLMRepoDeveloper._MAX_LISTED_FILES}" in disclosure
+
+
+def test_an_empty_output_flag_value_does_not_disable_the_missing_input_guard():
+    """`--output=` (or the `--save ''` space form) makes `_stage_output_values` yield "", which
+    landed in `produced`; `m.startswith("".rstrip("/") + "/")` is then `m.startswith("/")` — true
+    for EVERY absolute path. One empty output value therefore reported every hallucinated input as
+    already produced, in that stage AND in all following ones (`produced.extend` keeps the ""), and
+    the whole declare-time guard silently returned []."""
+    from looplab.adapters.repo_write_tools import _missing_stage_input_paths
+
+    hallucinated = "/nonexistent/looplab/test/train.pck"
+    stages = [
+        {"command": ["python", "prep.py", "--output=", "--train_dataset", hallucinated]},
+        {"command": ["python", "train.py", "--train_dataset", hallucinated]},
+    ]
+    assert _missing_stage_input_paths(stages) == [hallucinated]
+
+    # A REAL produced directory still covers its own descendants — the guard must not over-fire.
+    covered = [{"command": ["python", "prep.py", "--outdir", "/nonexistent/prep"]},
+               {"command": ["python", "train.py", "--train", "/nonexistent/prep/train.npy"]}]
+    assert _missing_stage_input_paths(covered) == []

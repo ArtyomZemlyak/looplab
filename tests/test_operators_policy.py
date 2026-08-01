@@ -8,7 +8,8 @@ import anyio
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.search.operators import merge_idea
 from looplab.engine.orchestrator import Engine
-from looplab.search.policy import ASHAPolicy, GreedyTree, MCTSPolicy, make_policy
+from looplab.search.policy import (ASHAPolicy, GreedyTree, MCTSPolicy, META_SCORES,
+                                   make_policy)
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
 
@@ -401,3 +402,60 @@ def test_mcts_subtree_value_ignores_deleted_and_aborted_descendants():
     # values node 0's subtree — the two decisions are computed from different metric pools.
     assert with_star is not None and without is not None
     assert all(a.get("parent_id") != 1 for a in without if "parent_id" in a)
+
+
+def test_a_tombstoned_child_does_not_de_prioritize_its_parent_for_improve():
+    """`weighted_parent`'s under-expansion term counted children over RAW state.nodes, so a
+    §6.3-tombstoned / aborted / gate-flagged child still divided its honest parent's weight by
+    `1 + children`. A logically-deleted child is meant to be invisible to selection, yet it
+    de-prioritized its own ancestor — deleting or flagging a child changed where the search goes."""
+    from looplab.search.policy import weighted_parent
+
+    st = RunState(direction="min")
+    # Two equally-ranked-by-id parents; node 0 is BETTER (min direction) so it should win outright.
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
+                status=NodeStatus.evaluated, feasible=True),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=2.0,
+                status=NodeStatus.evaluated, feasible=True),
+        2: Node(id=2, parent_ids=[0], operator="improve", idea=Idea(operator="improve"),
+                metric=5.0, status=NodeStatus.evaluated, feasible=True, tombstoned=True),
+        3: Node(id=3, parent_ids=[0], operator="improve", idea=Idea(operator="improve"),
+                metric=6.0, status=NodeStatus.evaluated, feasible=True, tombstoned=True),
+    }
+    # Retired: node 0 weighs 1/1/1 = 1.0 and wins. Counted: 1/1/3 = 0.33 < node 1's 1/2/1 = 0.5.
+    assert weighted_parent(st) == 0, "two tombstoned children still divided node 0's weight"
+
+    # A gate-flagged child is retired the same way…
+    st.nodes[2].tombstoned = st.nodes[3].tombstoned = False
+    st.breed_excluded = {2, 3}
+    assert weighted_parent(st) == 0
+    # …and so is an aborted one.
+    st.breed_excluded = set()
+    st.aborted_nodes = {2, 3}
+    assert weighted_parent(st) == 0
+    # But LIVE children really were expansions, so they still rotate selection to the sibling.
+    st.aborted_nodes = set()
+    assert weighted_parent(st) == 1
+
+
+def test_mcts_visits_share_the_value_filters_lifecycle_gates():
+    """A tombstoned / aborted / gate-flagged descendant is still `status is evaluated` and
+    `feasible`, so it inflated the UCB exploration DENOMINATOR while contributing nothing to
+    `value` — deleting or flagging a node changed UCB1 for its ancestor."""
+    st = RunState(direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=5.0,
+                status=NodeStatus.evaluated, feasible=True),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=5.0,
+                status=NodeStatus.evaluated, feasible=True),
+    }
+    act = MCTSPolicy(n_seeds=1, max_nodes=10, c=1.4).next_actions(st)
+    baseline = dict(act[0][META_SCORES])                       # both nodes: visits == 1
+
+    # Give node 0 a tombstoned descendant. It adds nothing to `value` (same 5.0), so if the UCB
+    # score moves at all, it moved through `visits`.
+    st.nodes[2] = Node(id=2, parent_ids=[0], operator="improve", idea=Idea(operator="improve"),
+                       metric=5.0, status=NodeStatus.evaluated, feasible=True, tombstoned=True)
+    act2 = MCTSPolicy(n_seeds=1, max_nodes=10, c=1.4).next_actions(st)
+    assert act2[0][META_SCORES][0] == baseline[0], "a deleted descendant moved its ancestor's UCB1"

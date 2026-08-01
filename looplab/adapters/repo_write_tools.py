@@ -55,14 +55,14 @@ def _stage_output_values(cmd) -> list[str]:
 def _covered_by(m: str, produced: list) -> bool:
     """True when absolute path `m` equals, or lives under, a path some stage PRODUCES (exact match, or
     `m` under a produced DIRECTORY like `--outdir /x/prep` covering `/x/prep/train.npy`)."""
-    # CLAUDE REVIEW: [LOGIC] an EMPTY produced value silently defeats the missing-input guard. A
-    # stage command like `--output=` (or a `--save ''` space form) makes `_stage_output_values`
-    # yield "", which lands in `produced`; here `v=""` gives `m.startswith("".rstrip("/") + "/")` ==
-    # `m.startswith("/")` — TRUE for every absolute path — so EVERY hallucinated `/…/train.pck`
-    # input in that stage AND all following stages (produced.extend keeps the "") is reported as
-    # "covered" and `_missing_stage_input_paths` returns []. Skip falsy `v` (confirmed reachable).
+    # A falsy produced value is SKIPPED, not treated as a covering directory. A stage command like
+    # `--output=` (or the `--save ''` space form) makes `_stage_output_values` yield "", which lands in
+    # `produced`; then `m.startswith("".rstrip("/") + "/")` is `m.startswith("/")` — true for EVERY
+    # absolute path. One empty output value therefore reported every hallucinated `/…/train.pck` input
+    # as covered, in that stage and in all following ones (`produced.extend` keeps the ""), and
+    # `_missing_stage_input_paths` returned [] — silently disabling the whole guard.
     for v in produced:
-        if v == m or m.startswith(v.rstrip("/") + "/"):
+        if v and (v == m or m.startswith(v.rstrip("/") + "/")):
             return True
     return False
 
