@@ -459,6 +459,12 @@ class Settings(BaseSettings):
     # need big files); set it for tasks that write only small artifacts.
     sandbox_fsize_local: str = ""
     # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha".
+    # CLAUDE REVIEW: [DOCS-MISMATCH] this enum list omits "bohb", which IS a registered policy
+    # (search/policy.py::_REGISTRY aliases it to the ASHA factory) and IS advertised by
+    # appconfig.render_template ("greedy | evolutionary | mcts | asha | bohb") and the `bohb` template
+    # kind. The schema comment (the documented value set) undersells the valid values. (policy itself is
+    # unvalidated at config time, but make_policy raises on an unknown name, so a typo fails loud-late
+    # rather than silently — unlike developer_backend above.)
     policy: str = "greedy"
     # Ablation-driven refinement (I7): every N improves, ablate the best to find the
     # highest-impact parameter and refine it. 0 = off. (GreedyTree only.)
@@ -866,6 +872,13 @@ class Settings(BaseSettings):
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
     # CLI coding agent: "opencode" | "aider" | "goose" | "continue".
+    # CLAUDE REVIEW: [LOGIC] developer_backend is a CLOSED enum (default + cli_agent.PRESETS keys) but is
+    # NOT validated in _check_trust_gate like backend/seed_mode/eval_trust_mode/strategist_backend. Only
+    # the CLI --developer-backend flag guards it (_choice/_DEV_BACKENDS); a file `settings:` block,
+    # LOOPLAB_DEVELOPER_BACKEND env, or `--set developer_backend=Aider` reaches here unchecked. The
+    # consumer (adapters/tasks.py: `settings.developer_backend not in PRESETS`) then silently wires the
+    # DEFAULT in-house developer — the exact silent-downgrade no-op the `backend` typo guard was added to
+    # close (test_an_unknown_backend_is_rejected_instead_of_downgrading_to_toy), with no diagnostic.
     developer_backend: str = "default"
     # C2 best-of-N: generate N candidate implementations per node and keep the best by an
     # execution-free reward (static validity + metric-print). 1 = off. In-house LLM developer only
@@ -1200,6 +1213,11 @@ class Settings(BaseSettings):
     memora_anchors: int = 6           # max cue anchors kept per memory
     # Cosine similarity at/above which a new case is CONSOLIDATED into an existing one (same evolving
     # topic) rather than stored as a separate entry. Only used when `memora` is on.
+    # CLAUDE REVIEW: [EDGE-CASE] unbounded 0..1 cosine knob with no Field bounds. Consumers compare
+    # `cosine(...) >= consolidate_threshold` (engine/memory.py, tools/knowledge_tools.py) and cosine is
+    # capped at 1.0, so a typo'd value >1.0 validates cleanly and SILENTLY DISABLES consolidation forever
+    # (a negative one consolidates everything). Its 0..1 sibling novelty_semantic_threshold carries
+    # Field(ge=0.5, le=1.0); this should be bounded the same way (e.g. ge=0.0, le=1.0) to fail loud.
     memora_consolidate_threshold: float = 0.86
     # Where the LLM-abstraction cache lives (JSON). Blank (default) derives it from `memory_dir`
     # (`<memory_dir>/memora_cache.json`) or else `knowledge_dir` (`<knowledge_dir>/.memora_cache.json`);
@@ -1326,6 +1344,10 @@ class Settings(BaseSettings):
         # The remaining enum-ish string fields (arch-review §5 P3): a typo used to be accepted at
         # construction and only fail-safe/later-loud downstream (e.g. a mis-cased strategist_backend
         # silently ran the default). Fail loudly here like the fields above.
+        # CLAUDE REVIEW: [READABILITY] the parenthetical in the novelty_mode comment above claims
+        # seed_mode/eval_trust_mode/strategist_backend are "left unvalidated here ... because their full
+        # value sets are less settled" — stale: all three ARE validated in this very block below. Update
+        # that parenthetical so a load-bearing comment doesn't contradict the code 8 lines down.
         if self.strategist_backend not in ("off", "rule", "llm", "agent"):
             raise ValueError(
                 f"strategist_backend must be off|rule|llm|agent, got {self.strategist_backend!r}")
@@ -1505,6 +1527,15 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "agent_drives_actions": False,
     "concurrent_research": False,
     "deep_repair": False,
+    # CLAUDE REVIEW: [QUALITY] possible gap — `merge_mode` is absent. options.py's docstring names it as a
+    # product-vs-library divergence in the SAME breath as report_every ("merge_mode='auto', report_every=3"),
+    # and report_every IS in this map. Settings defaults "auto", which resolves to "ensemble" for a
+    # code-generating developer (orchestrator.__init__ L715) — a PAID code-recombination merge producing a
+    # DIFFERENT merged solution than the frozen legacy default "mean" (EngineOptions/orchestrator._DEFAULTS).
+    # So a pre-field snapshot resumed on an LLM backend silently gains ensemble merges it never did — the
+    # exact "add paid calls / a different selection policy to an old run" this map guards against, with a
+    # pointable before-value ("mean"). Add `"merge_mode": "mean"` here IF merge_mode postdates 2026-06-23
+    # (unverifiable in this squashed history — confirm against the real commit before acting).
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour

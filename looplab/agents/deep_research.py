@@ -241,6 +241,8 @@ def _arg_label(args: dict) -> str:
     return redact_persisted_text(value, max_chars=60, single_line=True)
 
 
+# CLAUDE REVIEW: [DEAD-CODE] `_arg_url` has no callers in looplab/ or tests/ — `_record` uses
+# `_arg_source` directly for both the display url and its identity. Dead since the source-identity split.
 def _arg_url(args: dict) -> str:
     return _arg_source(args)[0]
 

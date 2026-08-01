@@ -285,6 +285,12 @@ EV_CONCEPT_LENS_COMPLETED = "concept_lens_completed"  # validated spec or author
 EV_CONCEPT_LENS_FAILED = "concept_lens_failed"        # retry-safe pre-provider terminal failure
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
+# CLAUDE REVIEW: [DOCS-MISMATCH] EV_SETUP_FINISHED sits under the "DIAGNOSTIC / SIDECAR events
+# (deliberately NOT folded)" section header, but it IS folded (replay.py::_on_setup_finished handler,
+# registered in _HANDLERS) and correctly absent from DIAGNOSTIC_EVENTS below — the partition test
+# would fail otherwise. Unlike EV_RUN_SETUP_STARTED/FINISHED (which carry an explicit "FOLDED (moved
+# out of DIAGNOSTIC_EVENTS)" annotation), this folded constant is placed in the diagnostic block with
+# no note, so a reader scanning the section header wrongly concludes the fold ignores setup_finished.
 EV_SETUP_FINISHED = "setup_finished"
 EV_DRIFT_UNAVAILABLE = "drift_unavailable"
 EV_INJECT_FAILED = "inject_failed"

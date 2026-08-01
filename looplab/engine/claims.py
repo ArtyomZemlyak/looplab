@@ -2337,6 +2337,12 @@ def _classify_intent(query: str) -> str:
     Deterministic, no LLM. `explore` (neutral) when no cue fires — the safe default that reorders nothing."""
     toks = set(_CLAIM_WORD.findall(str(query or "").casefold()))
     scored = [(sum(1 for w in cues if w in toks), name) for name, cues in _INTENT_CUES.items()]
+    # CLAUDE REVIEW: [LOGIC] On an equal cue count the tie-break `t[1]` (the intent NAME) always resolves to
+    # the alphabetically-largest name — "worked" > "failed"/"contested". A genuinely mixed query ("avoid the
+    # failed approach, use the best proven method": 1 failed cue + 1 worked cue) is therefore classified
+    # "worked", which floats positives and does NOT raise the caveat/contradiction quota (only failed/contested
+    # do, line ~2623). That biases ties toward hiding counter-evidence — the opposite of this module's
+    # design intent (§21.20.5 caveat preservation). A caveat-favouring or `explore` tie-break would be safer.
     best_n, best = max(scored, key=lambda t: (t[0], t[1]))
     return best if best_n else "explore"
 

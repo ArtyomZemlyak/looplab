@@ -1175,6 +1175,14 @@ class StrategyCadenceMixin:
             or set(raw_pin) != active_pinned)
         if not pin_drift and not consulting:
             return state
+        # CLAUDE REVIEW: [PERF] A persistently-INVALID operator pin defeats the cheap short-circuit
+        # above: `pin_drift` is computed from raw_pin (pre-validation), so a pin carrying only
+        # out-of-whitelist fields (e.g. a free-text boss `policy`) can never match active_core and
+        # keeps pin_drift True for the rest of the run (pending_strategy is only replaced by a new
+        # set_strategy). It is then dropped by validate_strategy below (pin_fields empty), so it is a
+        # no-op for RECORDING — but not for COST: _strategy_ctx (O(nodes) operator_yields, and
+        # cross-run memory I/O under a governance lock when cross_run_advisory is on) now runs on
+        # EVERY loop pass, not just the strategist cadence, contradicting the "harmless no-op" claim.
         ctx = self._strategy_ctx(state)
         # Validate the pin against the SAME whitelist the engine applies, keeping only the pinned
         # fields that survive. The boss `strategy` action carries free-text policy/fidelity (server

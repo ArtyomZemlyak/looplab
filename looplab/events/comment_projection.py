@@ -74,6 +74,11 @@ def _timestamp(value: object) -> float:
 def _actor(value: object, *, legacy: bool = False) -> Optional[str]:
     if legacy:
         return "legacy_unknown"
+    # CLAUDE REVIEW: [REPLAY-SAFETY] Set membership hashes `value`: a comment_created/edited/
+    # resolution_changed row with an unhashable `actor_kind` (list/dict) raises TypeError through
+    # apply_comment_event into replay.fold — bricking every replay, despite this module's own
+    # contract that malformed records are deterministic no-ops (the crash precedes the later
+    # comment_id/shape checks). Guard with isinstance(value, str) before the membership test.
     return value if value in {"deployment_owner", "local_operator"} else None
 
 

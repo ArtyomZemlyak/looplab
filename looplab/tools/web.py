@@ -45,6 +45,11 @@ def _proxied(url: str) -> bool:
         host = urllib.parse.urlparse(url).hostname or ""
         if scheme not in urllib.request.getproxies():
             return False
+        # CLAUDE REVIEW: [EDGE-CASE] Passes the PORTLESS hostname, but urllib's ProxyHandler passes
+        # req.host (host:port) to proxy_bypass, and proxy_bypass_environment matches NO_PROXY entries
+        # against both forms. A NO_PROXY entry with an explicit port ("internal.corp:8080") makes
+        # urllib connect DIRECT while this returns True ("proxied") — so the peer check is skipped on
+        # a direct connection. Pass the same host:port urllib uses.
         return not urllib.request.proxy_bypass(host)
     except Exception:  # noqa: BLE001 — an unreadable proxy env must not decide the fetch either way
         return False
@@ -101,6 +106,10 @@ _RESULT = re.compile(
     r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>', re.DOTALL)
 _SNIPPET = re.compile(r'class="result__snippet"[^>]*>(?P<snip>.*?)</a>', re.DOTALL)
 _TAG = re.compile(r"<[^>]+>")
+# CLAUDE REVIEW: [PERF] Quadratic on hostile input: for every UNCLOSED "<script"/"<style" the lazy
+# .*? scans to end-of-document looking for the close tag. A 2MB page (the _MAX_DOWNLOAD_BYTES cap)
+# stuffed with repeated unclosed "<script>" costs ~n^2/2 steps — minutes of CPU inside _untag() on
+# the (untimed, per Finding above) tool-loop thread. Cap occurrences or scan in a single linear pass.
 _SCRIPT = re.compile(r"<(script|style)\b.*?</\1>", re.DOTALL | re.IGNORECASE)
 _WS = re.compile(r"\s+")
 
@@ -169,11 +178,23 @@ class WebTools:
             # entirely: on the common loopback/RFC1918 proxy it refused EVERY fetch — a total false
             # positive — and on a public one it passed everything while the rebind window was owned
             # by the proxy either way. The preflight and the per-redirect re-check are unchanged.
+            # CLAUDE REVIEW: [SECURITY] _proxied() is consulted with the ORIGINAL url, but the peer
+            # socket belongs to the FINAL redirect hop — proxy-ness can flip mid-chain (a NO_PROXY
+            # host, or an http->https redirect with only one of http_proxy/https_proxy set).
+            # original-proxied -> final-direct then SKIPS the peer check on the very direct connection
+            # it exists for (rebind window reopened); original-direct -> final-proxied via a loopback
+            # proxy false-blocks. Use _proxied(r.url) to match the hop actually connected.
             landed = None if _proxied(url) else _peer_blocked(r)
             if landed:
                 return f"(blocked: {landed})"
             # Bounded read (see _MAX_DOWNLOAD_BYTES): `read(n)` returns AT MOST n bytes, so a multi-GB /
             # endless response can't exhaust host memory; the unread tail is dropped when the stream closes.
+            # CLAUDE REVIEW: [SECURITY] Size is bounded but TIME is not: read(n) blocks until n bytes
+            # or EOF, and urlopen's timeout is per-socket-op — a hostile server dripping one byte per
+            # <timeout seconds holds this thread for up to ~2M reads. drive_tool_loop runs
+            # tools.execute() synchronously with no timeout (its time_budget_s does not interrupt an
+            # in-flight turn), so one slow-drip web_fetch wedges the research phase. Needs a
+            # wall-clock deadline across the read loop.
             return r.read(_MAX_DOWNLOAD_BYTES).decode("utf-8", errors="replace")
 
     def _search(self, query: str) -> str:

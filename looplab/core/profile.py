@@ -12,6 +12,12 @@ def _is_number(v: Any) -> bool:
         return False
     # NaN/inf poison every stat (mean/std -> NaN) and hide missingness; treat them as non-numeric so
     # the column is counted as missing rather than silently corrupting the profile.
+    # CLAUDE REVIEW: [BUG] misses arbitrary-precision Python ints. JSON integers are unbounded, so a
+    # column value like 10**400 is a finite Python int and passes this gate (numeric=True), but
+    # profile_column's `sum(nonnull)/len(nonnull)` mean (and the std term) does a float division/
+    # conversion that raises OverflowError ("integer division result too large for a float") — crashing
+    # the profiler/leakage front-end on a single oversized cell, the exact stat-poisoning this guard is
+    # meant to reject. Reject ints not representable as a finite float too (e.g. abs(v) > sys.float_info.max).
     return v == v and v not in (float("inf"), float("-inf"))
 
 

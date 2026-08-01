@@ -463,6 +463,12 @@ def build_router(srv) -> APIRouter:
         # knob that happens to equal the bare default (breaking "explicit knob wins").
         # Atomic rename prevents torn JSON but cannot protect this larger load→merge→write cycle:
         # two concurrent disjoint PUTs must observe one another instead of losing the first rename.
+        # CLAUDE REVIEW: [PERF] `async def` put_settings (and put_secret below via secret_transaction)
+        # runs this transaction on the event loop: ui_settings_transaction() takes a threading.Lock
+        # plus _interprocess_lock(required=True) — a blocking fcntl.flock with NO timeout — then does
+        # load/merge/Settings() validation/atomic write inline. If another server process holds
+        # ui_settings.json.lock, the whole event loop (every SSE stream/poll) freezes indefinitely.
+        # Offload via anyio.to_thread.run_sync after the JSON parse, like /control does.
         with store.ui_settings_transaction():
             current_revision = store.ui_settings_revision()
             if expected_revision is not None and expected_revision != current_revision:

@@ -209,6 +209,15 @@ class ConceptGraph:
         # A dense multi-parent DAG also re-walked shared ancestors exponentially. A node currently on
         # the stack contributes no depth (following it would be the cycle), so the answer stays the
         # longest ACYCLIC root path.
+        # CLAUDE REVIEW: [PERF] The memoization is INEFFECTIVE — it never prevents the exponential
+        # re-walk the docstring/test claim it fixes. `memo` is written ONLY when `not on_path`, but the
+        # sole call with an empty `on_path` is the top-level `_depth(concept_id, frozenset())`; every
+        # recursive descent passes `on_path | {cid}` (non-empty), so no sub-call is ever cached and the
+        # `if cid in memo` check never hits during recursion. On the test's own dense diamond DAG this
+        # runs 2**depth walks (measured: depth-21 -> 4,194,303 parents_of calls, ~7s), i.e. exactly the
+        # blowup the comment says memoization avoids — the test passes only because 2**21 is barely
+        # tractable, not because it is linear. A correct fix must cache nodes proven off every cycle
+        # (e.g. cache when the subtree hit no pruned self/cycle edge), not just the root.
         memo: dict[str, int] = {}
 
         def _depth(cid: str, on_path: frozenset) -> int:

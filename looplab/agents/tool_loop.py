@@ -520,6 +520,15 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # work the model never did. The FORCE ceiling deliberately keeps counting every tool-calling
         # turn — it is the termination guarantee for an unlimited-`max_turns` loop, and a model that
         # only ever updates its plan must still be forced to emit.
+        # CLAUDE REVIEW: [LOGIC] the `emit_force` HARD termination guarantee is silently disabled
+        # whenever `tools is None`, but `self_plan` (default ON via loop_opts_from_settings) still
+        # exposes `update_plan` on an emit-only loop — so a model that keeps calling update_plan with
+        # VARYING args (which defeats the StuckDetector's identical-PAIR check) and never emits will
+        # spin forever under the default unlimited max_turns=0 / time_budget_s=0. Reachable: an agentic
+        # ToolUsingStrategist gets tools=None whenever build_strategist_tools() finds no providers, and
+        # UnifiedAgent's pilot/triage pass pilot_tools=None when researcher_tools=False — both with
+        # self_plan on. DeepResearcher dodges this by passing a `_NoTools()` sentinel (tools is not
+        # None) instead of None; the gate should key on self_plan/plan tool presence, not `tools`.
         if (emit_after or emit_force) and tools is not None:
             call_turns += 1
             tool_turns += int(investigated)

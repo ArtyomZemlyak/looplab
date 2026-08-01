@@ -249,6 +249,12 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: boo
         except OSError as exc:
             if required:
                 raise EventStoreLockError(lock_path, exc) from exc
+            # CLAUDE REVIEW: [DOCS-MISMATCH] The docstring promises "degrades to a no-op if locking is
+            # unavailable unless required is set", but here a non-required (ordinary engine) caller
+            # re-RAISES when the lock FILE cannot be opened, aborting the append instead of degrading.
+            # Only the flock() capability gap below (OSError/ImportError/...) degrades to no-op; an
+            # inaccessible lock path does not. On a mount where events.jsonl is appendable but the
+            # sibling .lock cannot be created, engine appends would crash rather than run unlocked.
             raise  # preserve the existing engine-writer behavior for an inaccessible lock path
         try:
             if os.name == "nt":
@@ -825,6 +831,13 @@ class EventStore:
         truth instead of letting this long-lived store reuse the seq.
         """
         with self._read_lock:
+            # CLAUDE REVIEW: [BUG] Reserving a seq whose bytes never landed (buffered f.write
+            # succeeded but flush/fsync raised BEFORE reaching the file — e.g. ENOSPC) makes this
+            # store's NEXT append write seq+1 onto a disk tail still at seq-1: a durable GAP the
+            # restored dense fence (event_sequence_continues) then classifies as corruption. That
+            # next append RETURNS SUCCESS while its event is invisible to fold (read_all only records
+            # _divergence), and every later append raises EventLogCorruptionError — self-inflicted
+            # brick. append_many's _mark_uncertain_append(events[-1].seq) reserves up to 4096 seqs.
             self._seq = max(self._seq, seq)
             self._cache = []
             self._cache_bytes = 0
@@ -902,6 +915,14 @@ class EventStore:
                     # reports failure. Reserve its seq on every exceptional exit.
                     accepted = True
                     f.flush()
+                    # CLAUDE REVIEW: [BUG] Durability gap for require_durable: strict_fsync syncs the
+                    # FILE CONTENTS but never the parent DIRECTORY entry. When this append is the one
+                    # that created events.jsonl (or the dir link created by an earlier best-effort
+                    # append has not yet been flushed), a power loss can lose the whole file even
+                    # though this record's bytes were strictly synced — exactly the "paid_work_claimed
+                    # survives a crash before the external side effect" contract this flag exists for.
+                    # core.atomicio ships strict_fsync_parent() for precisely this (strict_atomic_write_bytes
+                    # calls it), but append() does not, so a durable paid claim can vanish and be re-billed.
                     if require_durable:
                         strict_fsync(f.fileno())
                     else:
@@ -994,6 +1015,9 @@ class EventStore:
                     f.write(payload)
                     accepted = True
                     f.flush()
+                    # CLAUDE REVIEW: [BUG] Same parent-directory durability gap as append() above: a
+                    # require_durable batch strictly syncs its contents but not the events.jsonl dir
+                    # entry, so a first-created log can be lost on power loss despite the receipt.
                     if require_durable:
                         strict_fsync(f.fileno())
                     else:

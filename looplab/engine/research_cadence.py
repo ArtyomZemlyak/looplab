@@ -534,6 +534,14 @@ class ResearchCadenceMixin:
         open_hyps = [c for c in state.open_research_cards()
                      if not c.selection_ready and _pure_belief(c)]
         n = len(open_hyps)
+        # CLAUDE REVIEW: [REPLAY-SAFETY] `_last_hyp_merge_n` is in-memory only (never folded), so on a
+        # fresh process after resume the baseline defaults to -1 and this gate fires unconditionally when
+        # the board has >=4 pure beliefs — re-running the PAID `consolidate()` (hybrid retrieval + one
+        # merge-decision LLM call) even though a prior process already consolidated the same board. Actual
+        # merges are idempotent via EV_HYPOTHESIS_MERGED, but a cluster the prior agent DECIDED NOT to
+        # merge carries no durable record, so that paid decision is re-purchased once per resume. This is
+        # the exact double-charge the deep-research path was hardened against with a durable attempt
+        # receipt (`_record_research_attempt`); here it is only bounded to one pass per resume.
         if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
             return state
         try:

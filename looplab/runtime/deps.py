@@ -185,6 +185,14 @@ def install(package: str, *, python: Optional[str] = None, timeout: float = 900.
     # (`PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL` carry inline tokens for a private index), and stripping
     # it would break exactly the installs an operator configured. `SECRET_ENV` does not match those
     # names, so pip keeps its index while the LLM/cloud keys are gone.
+    # CLAUDE REVIEW: [SECURITY] Name-only screen here diverges from the value-aware `is_secret_env(k, v)`
+    # that every OTHER child spawn uses (sandbox.run_argv line ~465, bg_tasks._child_env line ~63). That
+    # sibling ALSO strips inline-credential URL VALUES (`_CREDENTIAL_URL_VALUE`: DATABASE_URL/MONGO_URI/
+    # *_DSN = `scheme://user:pw@host`) whose NAME matches nothing. This pip child runs the sdist's
+    # setup.py/build backend — arbitrary code, as this docstring warns — so such a credential leaks into
+    # it here while it's stripped everywhere else. The PIP_INDEX_URL rationale only justifies keeping
+    # PIP_* names; screening values EXCEPT for the PIP_* index vars would close the gap without breaking
+    # a configured private index.
     env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",

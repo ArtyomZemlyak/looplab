@@ -283,6 +283,11 @@ class CommandObservation:
         # oddities such as ``True == 1``) instead of narrowing old logs to a new integer schema.
         return event_seq in self._acknowledgements.get(command_id, ())
 
+    # CLAUDE REVIEW: [DEAD-CODE] has_domain_progress — and the entire max_non_control_seq accumulation
+    # it depends on in _apply_delta (including the engine_card_drop compat branch) — has NO production
+    # caller; the only references are this module's own tests. run_commands._execute's pause/finalize
+    # deadline slide now keys on raw `latest_seq` instead (see the LOGIC note there), so this
+    # domain-only progress signal was orphaned. Either wire it back into the deadline slide or drop it.
     def has_domain_progress(self, after_seq: int) -> bool:
         return self.max_non_control_seq > after_seq
 

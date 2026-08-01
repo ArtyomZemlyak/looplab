@@ -2924,6 +2924,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     reason="materialization_failed",
                 )
                 return True
+            # CLAUDE REVIEW: [REPLAY-SAFETY] The inject receipt is spent AFTER the paid work — the
+            # exact ordering the fork branch above reversed ("claim the request before the paid
+            # producer", at-most-once). A crash inside _create_injected_node re-serves this head on
+            # resume and buys the Developer session again; a crash between the durable node_created
+            # and this append re-serves too, where Card dedup closes the SUCCEEDED inject as
+            # "materialization_failed" (unchanged best) or mints a duplicate node (moved
+            # scored_against). Claim the inject_done receipt BEFORE _create_injected_node, as the
+            # fork path now does (invariant #3: side effect gated on its event so resume is idempotent).
             self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
             return True
         forced_ablate = self._pending_forced_ablation(state)
@@ -5183,6 +5191,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # it can't be resolved within the node, stop the whole run rather than rapid-fire more
                 # dead nodes (the 403 blowout spun 67 of them). Freeze (not finish) so a plain `resume`
                 # continues once the cause is resolved — no premature report/lessons.
+                # CLAUDE REVIEW: [REPLAY-SAFETY] On the parallel-build fan-out (`_pb_pairs`), this method
+                # runs in an `anyio.to_thread` WORKER thread, so this EV_PAUSE is a FOLDED, run-GLOBAL,
+                # selection-affecting event appended by a worker — outside invariant #1's documented
+                # worker seam (a worker may append only its OWN node's node_created/node_failed/per-node
+                # audit) and NOT in BACKGROUND_APPENDABLE/DIAGNOSTIC_EVENTS, and with no membership
+                # assertion the invariant requires "at the append sites". It is splice-neutral for the
+                # `paused` flag alone (pause folds monotonically and node folds ignore it), but NOT vs a
+                # concurrent EV_RESUME (which folds `paused=False`): the worker's byte-position relative to
+                # an external control is nondeterministic. The main task is blocked joining the task group,
+                # so appending this global gate from the main task after the join would keep the seam clean.
                 self.store.append(EV_PAUSE, {
                     "node_id": node_id, "generation": 0,
                     "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
@@ -5233,6 +5251,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # (it would kill sibling builds), so mirror the developer_crash circuit-breaker: PAUSE
                     # so the batch loop stops after this chunk instead of burning the node budget on
                     # repeated build_crash nodes (review finding #3). A plain resume continues once fixed.
+                    # CLAUDE REVIEW: [REPLAY-SAFETY] Same seam deviation as the _create_node_scoped
+                    # developer_crash EV_PAUSE: `_create_node_guarded` is dispatched to an anyio worker
+                    # thread, so this run-global FOLDED EV_PAUSE is appended by a worker — outside the
+                    # documented parallel-build worker append list (own-node node_created/node_failed/audit)
+                    # and unasserted. Benign for the monotonic `paused` flag, but a worker writing a global
+                    # control gate is exactly the sole-writer boundary invariant #1 pins down.
                     self.store.append(EV_PAUSE, {
                         "node_id": node_id, "generation": 0,
                         "reason": "auto-paused: a node build raised (LLM unreachable or a hard error, "

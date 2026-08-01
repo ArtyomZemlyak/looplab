@@ -196,6 +196,13 @@ def build_router(srv) -> APIRouter:
         `draft` so the boss edits it in place. Degrades cleanly when no model is reachable."""
         from looplab.adapters.tasks import kinds
         body = await _json_object(request)
+        # CLAUDE REVIEW: [PERF] The entire prologue below runs inline on this `async def` handler's
+        # event loop even though the paid planning is carefully offloaded to a job thread (_compute).
+        # srv.list_tasks_fn() reads + json-parses every catalogue file, _prior_learnings_index(reports_dir)
+        # os.scandir's + reads/parses the prior-report files, srv.settings.resolved_settings() reads the
+        # settings store, and the catalogue/draft/convo redaction + JSON serialization is O(rows*messages)
+        # CPU — all blocking every other client and SSE tail until it finishes. The boss.py chat/command
+        # siblings were flagged for exactly this; offload this assembly (anyio.to_thread) as they should.
         raw_msgs = body.get("messages")
         msgs = raw_msgs if isinstance(raw_msgs, list) else []
         instruction = _evidence_text(body.get("instruction") or "", 4_000).strip()

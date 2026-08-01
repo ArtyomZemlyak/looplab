@@ -975,6 +975,13 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # kill: fall through to the psutil path, which walks the tree by PID and so never touches the
     # engine. Returning outright instead would leave the whole tree running — trading "we killed
     # ourselves" for "the eval keeps burning a GPU the scheduler already released".
+    # CLAUDE REVIEW: [DOCS-MISMATCH] The comment above claims the psutil path "walks the tree by PID
+    # and so never touches the engine" — but for a DEAD leader (leader exits in the 250ms wait window,
+    # the same race the returncode fence documents for the non-same-group case) psutil's
+    # parent.children(recursive=True) finds NOTHING: the live descendants were reparented to
+    # init/subreaper. So on the same_group route a dead-leader tree is killed by NO path at all
+    # (killpg disqualified, psutil empty), yet the comment/docs assert "the tree still dies". State
+    # the residual gap, or snapshot children() BEFORE the exit.
     same_group = False
     if os.name != "nt":
         try:
@@ -991,6 +998,14 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     try:
         import psutil  # optional (extras: proc) — Windows tree kill, or a POSIX fallback if killpg failed
 
+        # CLAUDE REVIEW: [BUG] psutil tree-kill aborts on the FIRST vanished child: child.kill()
+        # raises psutil.NoSuchProcess for a child that exited between the children() snapshot and the
+        # kill (routine with churning DataLoader workers), escaping to the enclosing `except: pass` —
+        # skipping ALL remaining children AND parent.kill(). Since this is the designated kill path
+        # for the same_group case (whose last-resort fallback is only proc.kill() = leader-only),
+        # one racing worker exit leaks every other descendant in the engine's own group where no
+        # later group sweep can reach them. Wrap each child.kill()/parent.kill() in its own
+        # try/except psutil.NoSuchProcess.
         parent = psutil.Process(proc.pid)
         for child in parent.children(recursive=True):
             child.kill()

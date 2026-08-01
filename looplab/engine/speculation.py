@@ -767,6 +767,12 @@ class SpeculationMixin:
         ]
         return min(matches, key=lambda node: node.id) if matches else None
 
+    # CLAUDE REVIEW: [DEAD-CODE] this method is shadowed on every real Engine — the Engine class body
+    # (orchestrator.py::_refresh_speculation_budget) overrides it without calling super(), and its own
+    # docstring says so ("This overrides the SpeculationMixin helper..."). The override takes an extra
+    # `events=` kwarg and refunds the hard Node-reservation ceiling differently, so this mixin version
+    # is never invoked (all call sites resolve to the override via MRO). It is stale relative to the
+    # authoritative one and can only mislead; either delete it or make the override delegate to it.
     def _refresh_speculation_budget(self, state: RunState) -> None:
         used = card_budget_used(state)
         self.policy.max_nodes = max(
@@ -1588,6 +1594,15 @@ class SpeculationMixin:
                                 roles,
                                 send,
                             )
+                        # CLAUDE REVIEW: [EDGE-CASE] rollback is asymmetric vs the raw-stage path
+                        # (which rolls back only an in-memory flag). Here the DURABLE
+                        # `card_build_attempted` receipt was appended just above and is NOT undone on a
+                        # start_soon failure — only `_spec_build_inflight` is discarded. The producer
+                        # never ran, yet on the next service turn `_serve_card_builds` finds an
+                        # unreconciled attempt (no inflight marker, no result) and closes the head
+                        # `producer_failed`, permanently barring an unbilled Card from speculative
+                        # re-election. start_soon only raises during task-group teardown, so this is a
+                        # shutdown-only, conservative-degrade edge, but the receipt outlives its cause.
                         except BaseException:
                             self._spec_build_inflight.discard(key)
                             raise

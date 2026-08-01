@@ -668,6 +668,11 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         # summary) the model saw on the original turn would be LOST on every later turn. Re-expand a
         # historical user turn's mentions here (skip turns that already carry a grounded `raw`) so the
         # context stays present — the same asymmetry the `raw` mechanism fixed for attachments.
+        # CLAUDE REVIEW: [LOGIC] Re-expansion is skipped whenever `raw` is set, but a user turn that
+        # carried a UI-context preamble (so `raw` was persisted) AND an @run/@file mention loses its
+        # grounding on every later turn — `raw` holds the UNEXPANDED instruction (router persists
+        # raw=instruction pre-expand), and expand_mentions' output is never stored. This is the exact
+        # "grounding lost on replay" case this block exists to fix; gate on "@" in body, not on `not raw`.
         if role == "user" and not m.get("raw") and body and "@" in body:
             try:
                 body, _ = expand_mentions(body, run_root, alive_fn=alive_fn, roots=roots)

@@ -26,6 +26,15 @@ def build_router(srv) -> APIRouter:
         return body
 
     # ------------------------------------------------------------------ projects (ClearML-style)
+    # CLAUDE REVIEW: [PERF] Every project MUTATOR route that calls this (create_project,
+    # patch_project, assign_run, create_supertask, patch_supertask, assign_supertask, rename_run) is
+    # an `async def`, so `_project_call(fn)` runs `fn()` — `ProjectStore._transaction` ->
+    # `_interprocess_lock(required=True)` -> a BLOCKING `fcntl.flock(LOCK_EX)` with NO timeout, plus
+    # load/atomic-save disk I/O — directly on the ASGI event loop. If another UI worker/process holds
+    # `projects.json.lock` the flock waits UNBOUNDED, freezing every concurrent SSE tick/poll on this
+    # worker. The read routes and the destructive ones (delete_project/delete_supertask/delete_run)
+    # are sync `def` (threadpool) and are safe; only these async mutators block. They need the same
+    # `anyio.to_thread.run_sync` offload that /control and submit_command already use.
     def _project_call(fn):
         """Map invalid mutations to 400 and an unavailable required durability lock to 503."""
         try:

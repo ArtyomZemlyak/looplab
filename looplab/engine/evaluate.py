@@ -345,6 +345,16 @@ class EvaluateMixin:
                             await anyio.sleep(0.3)
                             if cancel.is_set():
                                 return
+                            # CLAUDE REVIEW: [EDGE-CASE] Every engine run_sync shares anyio's default
+                            # 40-token thread limiter, and each in-flight eval's `_run_eval` worker
+                            # holds one token for the eval's whole (often multi-hour) duration. At
+                            # eval_parallel >= ~40 (config allows up to 1024; 0 = AUTO = GPU count)
+                            # evals pin all tokens, so this watcher tick — and the train/ASHA monitor
+                            # ticks that deliver kill_signal — queue behind them: operator abort/reset
+                            # and both watchdog kills go blind until an eval finishes on its own, and
+                            # over-admitted evals idle reserved GPUs while queued. Use a dedicated
+                            # CapacityLimiter for watcher/monitor ticks. (orchestrator.py:699's
+                            # 40-token note covers only build fan-out, not this liveness loss.)
                             intervention = await anyio.to_thread.run_sync(_intervention_seen)
                             if intervention is not None:
                                 superseded = intervention == "reset"

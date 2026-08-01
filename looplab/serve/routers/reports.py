@@ -1778,6 +1778,15 @@ def build_router(srv) -> APIRouter:
                             f"{filename} exceeds its scope-report byte limit")
             except ScopeSourceCapacityError:
                 raise
+            # CLAUDE REVIEW: [EDGE-CASE] Over-broad except: this also catches the ScopeSourceError
+            # raised by the task/config snapshot regular-file / lstat-OSError checks ABOVE, after
+            # scope_event_size already bound `size` to the real events.jsonl byte count. A snapshot
+            # that is present-but-unreadable (EACCES/EIO) therefore clobbers a good event size to 0,
+            # which (a) undercounts the MAX_SCOPE_TOTAL_EVENT_BYTES budget (a run's 30MB log counts
+            # as 0), and (b) if the snapshot error is transient between this preflight and _compute's
+            # capture, makes `source.event_bytes != expected_bytes(0)` fire a spurious
+            # scope_report_inputs_changed. The event-size read and snapshot checks want separate try
+            # scopes so only an unreadable events.jsonl yields size 0.
             except ScopeSourceError:
                 size = 0
             total += size

@@ -55,6 +55,12 @@ def _stage_output_values(cmd) -> list[str]:
 def _covered_by(m: str, produced: list) -> bool:
     """True when absolute path `m` equals, or lives under, a path some stage PRODUCES (exact match, or
     `m` under a produced DIRECTORY like `--outdir /x/prep` covering `/x/prep/train.npy`)."""
+    # CLAUDE REVIEW: [LOGIC] an EMPTY produced value silently defeats the missing-input guard. A
+    # stage command like `--output=` (or a `--save ''` space form) makes `_stage_output_values`
+    # yield "", which lands in `produced`; here `v=""` gives `m.startswith("".rstrip("/") + "/")` ==
+    # `m.startswith("/")` — TRUE for every absolute path — so EVERY hallucinated `/…/train.pck`
+    # input in that stage AND all following stages (produced.extend keeps the "") is reported as
+    # "covered" and `_missing_stage_input_paths` returns []. Skip falsy `v` (confirmed reachable).
     for v in produced:
         if v == m or m.startswith(v.rstrip("/") + "/"):
             return True
@@ -394,6 +400,10 @@ def _md_cell(value: object, limit: int) -> str:
     """One markdown table cell: truncated, and with `|` neutralized. EVERY cell goes through this,
     not just the notes column — a single pipe in a spreadsheet label or a non-numeric value shifts
     every column after it, and this content is whatever the operator's xlsx happens to contain."""
+    # CLAUDE REVIEW: [EDGE-CASE] neutralizes `|` but NOT newlines. openpyxl returns wrap-text /
+    # multi-line cell strings verbatim (a label or free-text note can contain "\n"); an embedded
+    # newline splits the table ROW mid-line — the exact corruption this cell-escaper exists to
+    # prevent, worse than a pipe. Also collapse "\r"/"\n" (e.g. to a space) here.
     return str(value)[:limit].replace("|", "/")
 
 

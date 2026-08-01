@@ -3522,6 +3522,12 @@ class RunCommandService:
                 # can complete an externally-appended finalize after `_decision` observes pending but
                 # before this worker continues; that run_finished must remain *after* the attach
                 # baseline so it satisfies the command instead of being hidden inside the baseline.
+                # CLAUDE REVIEW: [PERF] self._events(rd) is a full EventStore.read_all() (parse+Event
+                # for every row) executed purely to read `[-1].seq` on the per-command append path,
+                # bypassing the incremental observation index (`self._observe(rd).latest_seq`) that was
+                # added specifically to avoid re-parsing the whole log on every command request. Same at
+                # line ~3586. The CAS `expected_last_seq` on append is authoritative, so the cheaper
+                # incremental latest_seq would be a correct baseline here.
                 before_decision = self._events(rd)
                 decision_baseline = before_decision[-1].seq if before_decision else -1
                 decision, err = self._decision(rd, event_type)
@@ -3721,6 +3727,14 @@ class RunCommandService:
                 # Pause/finalize may legitimately wait through one long evaluation or wrap-up. A
                 # live lock or fresh event progress slides their observation deadline; an actually
                 # stalled/dead driver still reaches a terminal timeout.
+                # CLAUDE REVIEW: [LOGIC] The deadline slide keys on `latest_seq` (ANY event, including
+                # control/collaboration appends) rather than DOMAIN progress. Collaboration events
+                # (card drops, comments) deliberately bypass the active-driver gate, so while a finalize
+                # sits `executing` an operator that keeps appending them repeatedly bumps latest_seq and
+                # extends this observation window against a stalled/dead driver that made no finalize
+                # progress — bounded only by absolute_deadline_at (~20 min default). The observation
+                # layer already exposes a domain-only signal built for exactly this (max_non_control_seq
+                # / has_domain_progress, which EXCLUDE control events), but it is unused here.
                 if ((record.get("postcondition") in {"paused_and_stopped", "finished_and_stopped"}
                      or spec.engine_policy is not EnginePolicy.NO_SPAWN)
                         and (alive or latest_seq > last_progress_seq)):

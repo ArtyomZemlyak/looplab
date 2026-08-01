@@ -165,6 +165,12 @@ def weighted_parent(state: RunState, feasible=None) -> Optional[int]:
     if not pool:
         return None
     ranked = rank_by_metric(state, pool)
+    # CLAUDE REVIEW: [LOGIC] `kids` counts children over RAW state.nodes, so a §6.3-tombstoned or a
+    # gate-flagged (breed_excluded) child still lowers its honest parent's under-expansion weight
+    # (1/(1+children)). A logically-deleted child is meant to be invisible to selection, yet here it
+    # de-prioritizes its ancestor for improve — deleting/flagging a child changes where the search
+    # goes. Same lifecycle-gate gap the MCTS value-filter (467-470) and operator_yields (120-121)
+    # explicitly close; this counter should skip tombstoned/aborted/breed_excluded children too.
     kids: dict[int, int] = {}
     for n in state.nodes.values():
         for p in n.parent_ids:
@@ -477,6 +483,14 @@ class MCTSPolicy:
             reward = _mcts_reward(value, state.direction)
             # Visits = real (feasible, evaluated) trials in the subtree, not failed/infeasible
             # nodes, so the UCB exploration term reflects actual exploration (#76).
+            # CLAUDE REVIEW: [LOGIC] `visits` filters only status/feasible, but the `metrics`/value
+            # filter above (467-470) ALSO excludes tombstoned, aborted, and breed_excluded descendants.
+            # A tombstoned/gate-flagged descendant is still status==evaluated and feasible==True
+            # (§6.3 delete and gate-posture both keep those flags), so it inflates `visits` while
+            # contributing nothing to `value`. By this policy's OWN §6.3 argument at 462-466 (deleting
+            # a node must not change where the search goes), the exploration denominator drifting on a
+            # logically-deleted/cheating descendant changes UCB1 for its ancestor — the same invariant
+            # the value-filter closes but `visits` leaves open. Should share the value-filter gates.
             visits = sum(1 for i in tree if state.nodes[i].status is NodeStatus.evaluated
                          and state.nodes[i].feasible) or 1
             ucb = reward + self.c * math.sqrt(math.log(n_total + 1) / visits)

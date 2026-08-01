@@ -182,6 +182,13 @@ class BackgroundManager:
         read()/list(). Idempotent; a None deadline (timeout disabled) is a no-op. Operates on the
         handle `t` directly (never re-enters the lock)."""
         dl = t.get("deadline")
+        # CLAUDE REVIEW: [RACE] This pre-check `poll()` runs OUTSIDE deadline_lock, and poll() REAPS.
+        # kill() (server thread) holds the lock inside _kill_tree past its returncode fence while a
+        # watcher/read()/list() caller executes this line; if the child exits in that instant, the
+        # unlocked poll() reaps it and frees the PID mid-_kill_tree, so os.getpgid/killpg can land on
+        # a reused PID — the exact F10 hazard the module's own comments (below) claim is fenced
+        # everywhere. The non-reaping pre-check is `t["proc"].returncode is not None` (the same
+        # distinction _kill_tree itself documents). kill()'s final `rc = proc.poll()` has the same class.
         if dl is None or time.monotonic() <= dl or t["proc"].poll() is not None:
             return
         deadline_lock = t["deadline_lock"]
@@ -203,6 +210,11 @@ class BackgroundManager:
             _kill_tree(t["proc"])
         finally:
             deadline_lock.release()
+        # CLAUDE REVIEW: [EDGE-CASE] No exit-time descendant sweep, unlike the sandbox path which
+        # gained _reap_process_group precisely because a leader can exit 0 leaving nohup'd/daemonized
+        # descendants running. Here _enforce_deadline returns as soon as poll() is not None, so
+        # descendants of an exited leader escape both the tree-kill AND the wall-clock cap forever;
+        # reaping via poll()/_reap without sweeping the group first also forecloses the sandbox's fix.
 
     def _evict_finished(self) -> None:
         """Drop the OLDEST finished tasks (insertion order) once more than `max_finished` are retained,

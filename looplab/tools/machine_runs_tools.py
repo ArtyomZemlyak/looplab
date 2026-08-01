@@ -1488,6 +1488,14 @@ class RunControlTools:
             # only one nested member names the purged node. Rewriting logical rows also removes the
             # internal storage wrapper while preserving every surviving event and sequence.
             recs = list(iter_event_jsonl(evp))
+            # CLAUDE REVIEW: [BUG] Filters logical rows WITHOUT renumbering seq, so a surviving event
+            # after any purged one (e.g. the trailing `pause`, or later sibling nodes) leaves a seq
+            # GAP — and eventstore's restored dense fence (`event_sequence_continues`: "no legitimate
+            # workflow produces a monotonic gap") now treats that gap as corruption: the fold below
+            # (`read_all`) silently DROPS every surviving event after the gap, and the next
+            # append/resume raises EventLogCorruptionError. The purge can brick the run. Renumber the
+            # kept rows to a dense 0..N-1 sequence before writing (or teach the fence that purge is a
+            # legitimate gap-producing rewrite).
             kept = [record for record in recs
                     if not (isinstance(record.get("data"), dict)
                             and record["data"].get("node_id") in subtree)]

@@ -85,6 +85,14 @@ class JobRegistry:
                     self._remove_locked(job_id)
                 continue
             thread = self._job_threads.get(job_id)
+            # CLAUDE REVIEW: [RACE] `start_reserved` registers the worker in `_job_threads` under
+            # `self._lock`, RELEASES that lock, and only THEN calls `worker.start()`. In that pre-start
+            # window `is_alive()` is False because the thread has not started yet — NOT because it died.
+            # A concurrent `poll`/`reserve` (both call `_reconcile_locked`, which scans ALL jobs) that
+            # lands here marks the still-pending job DONE with a spurious "worker ended without publishing"
+            # terminal — returned to an inline `run_reserved` waiter, and for a consume_on_poll job the
+            # receipt can be consumed so the real worker's later `put` finds no job and the true result is
+            # lost. `thread.ident is None` distinguishes not-yet-started from dead; is_alive() alone cannot.
             if thread is not None and not thread.is_alive():
                 # `ts` is deliberately NOT refreshed. It is the last sign of life this job gave
                 # (reserved, or a progress write), so leaving it in place makes the ordinary

@@ -379,6 +379,14 @@ class KnowledgeTools:
                 target = (self.dir / Path(args.get("name", "")).name)  # restrict to kb dir
                 if not target.exists():
                     return f"(no such note: {args.get('name')})"
+                # CLAUDE REVIEW: [SECURITY] read_note reads ANY basename in knowledge_dir with no
+                # _pathsafe.looks_secret / _readable gate — unlike its sibling readers (RepoTools.repo_read,
+                # RepoScoutTools._read_file), which both refuse secret/non-source files. `.name` blocks
+                # traversal, but knowledge_dir is operator-configurable and is NOT .md-only (it already holds
+                # `.memora_cache.json`, adapters/tasks.py:374). If an operator points knowledge_dir at a dir
+                # that also holds an `.env`/`id_rsa`, `read_note(".env")` streams it to the (possibly remote)
+                # model even though list_notes (*.md only) never advertised it — the exact defense-in-depth
+                # gap _pathsafe exists to close everywhere else.
                 return read_file(str(target))[:4000]
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"

@@ -2034,6 +2034,12 @@ def build_router(srv) -> APIRouter:
             idx = get_index(rd / "spans.jsonl")
             s = idx.full_span(sid) if idx is not None else None
             indexed_span = s is not None
+            # CLAUDE REVIEW: [PERF] `sid` is an unvalidated path param, and any sid the index lacks —
+            # a bogus/nonexistent id, not just the "span past the indexed tail" the comment above cites
+            # — falls into this fallback, which iter_jsonl-scans the ENTIRE (up to ~1 GB) spans.jsonl
+            # from the start and finds nothing. A client polling made-up span ids thus pins a threadpool
+            # thread on a full-file read per request. Bound the scan (e.g. cap lines / only scan the
+            # unindexed tail) or reject sids the index cannot resolve instead of a whole-file walk.
             if s is None:
                 for cand in iter_jsonl(rd / "spans.jsonl"):
                     if isinstance(cand, dict) and cand.get("span_id") == sid:
@@ -2474,6 +2480,11 @@ def build_router(srv) -> APIRouter:
         try:
             current = (json.loads(snap.read_text(encoding="utf-8"))
                        if snap.exists() else Settings().masked_snapshot())
+        # CLAUDE REVIEW: [EDGE-CASE] The "torn write / hand-edited snapshot -> explicit 500" intent is
+        # only half-realized: read_text(encoding="utf-8") on a snapshot containing invalid UTF-8 bytes
+        # (a crash mid-multibyte, or a hand-edit saved as latin-1) raises UnicodeDecodeError, which is a
+        # ValueError but NOT an OSError/JSONDecodeError — so it escapes this clause into the bare 500
+        # traceback this code claims to have eliminated. Catch UnicodeDecodeError (or ValueError) too.
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
         if not isinstance(current, dict):
@@ -2538,6 +2549,9 @@ def build_router(srv) -> APIRouter:
                 404, "run has no config.snapshot.json (it predates self-describing runs)")
         try:                                     # same unreadable-vs-fault distinction as the GET
             current = json.loads(snap.read_text(encoding="utf-8"))
+        # CLAUDE REVIEW: [EDGE-CASE] Same gap as the GET above: a snapshot with non-UTF-8 bytes raises
+        # UnicodeDecodeError (ValueError, not OSError/JSONDecodeError), so it slips past this "same
+        # unreadable-vs-fault distinction" clause and 500s bare on a PUT. Include UnicodeDecodeError.
         except (OSError, json.JSONDecodeError) as exc:
             raise HTTPException(500, f"the run configuration snapshot is unreadable: {exc}") from exc
         if not isinstance(current, dict):

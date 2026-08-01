@@ -994,6 +994,11 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.status = NodeStatus.failed
             n.terminal_event_seq = e.seq
             n.error = d.get("error", "")
+            # CLAUDE REVIEW: [REPLAY-SAFETY] `reason` is stored UNCOERCED (assignment skips pydantic
+            # validation), and `_card_debuggable_leaf_ids` later runs `node.error_reason not in
+            # {"idea_rejected", "card_dropped"}` (set membership) inside `_derive_cards` — so ONE
+            # node_failed row with an unhashable reason (list/dict) makes every fold/replay/resume
+            # raise TypeError forever. Same class as the totality fixes elsewhere; coerce with str().
             n.error_reason = d.get("reason", "")
             # Crash-triage verdict, when the LLM triage ran (signal-delivery §1): fold it onto
             # the node so the failure-reflection hint / digest can hand it to the next proposal.
@@ -1409,6 +1414,10 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Retryable infrastructure refusals still charge any admitted setup/probe time above, but they are
     # not completed seed evidence. Excluding them from the resume memo lets an unchanged seed retry after
     # GPU discovery, a Card re-pin, or the container runtime is repaired.
+    # CLAUDE REVIEW: [REPLAY-SAFETY] `d.get("reason")` is hashed by this set membership, so an
+    # unhashable reason (list/dict) on one confirm_eval row raises TypeError out of the fold and
+    # bricks every replay/resume. The earlier `!= "aborted"` comparisons are safe; this one needs an
+    # isinstance(..., str) guard like the rest of this handler's reads.
     retryable_infrastructure = d.get("reason") in {"gpu_unavailable", "gpu_unpinnable"}
     if keyed and not retryable_infrastructure:               # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(nid, {})[seed] = _finite_metric(d.get("metric"))
@@ -1971,6 +1980,13 @@ def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     # the proposal cue and stamp KIND_EXPAND. Admit a detached, allow-listed, bounded schema and compact
     # history; retaining raw event data lets malformed/oversized fields steer search and inflate every
     # fold, owner-state response, and SSE update.
+    # CLAUDE REVIEW: [QUALITY] the append still stores the raw Event.data verbatim — the exact
+    # "retaining raw event data" the comment two lines up says NOT to do. It is behavioral (strategy.py
+    # /proposal_cues.py read arbitrary `(c or {}).get(...)` fields off each snapshot to steer proposals),
+    # unbounded, and aliased into RunState (deep-copied on every FoldCursor snapshot). Unlike the card
+    # handlers, which re-bound into a detached schema, a malformed/oversized field on a hand-edited or
+    # foreign log flows through unchecked; the prescribed detached/allow-listed/bounded projection was
+    # never applied here.
     st.concept_coverage_snapshots.append(d)
 
 def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -3493,6 +3509,10 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
             or type(generation) is not int or generation != request["generation"]):
         return
     skipped = d.get("skipped")
+    # CLAUDE REVIEW: [REPLAY-SAFETY] Set membership hashes the raw event value: a forged/corrupt
+    # `skipped` that is a list/dict raises TypeError out of the fold and bricks every replay/resume of
+    # the run (the fold loop has no per-event try/except). Every other field this handler reads is
+    # shape-guarded; guard this one too (e.g. `isinstance(skipped, str) and skipped in ...`).
     if skipped in {"producer_failed", "stale"}:
         st.card_builds_done += 1
         st.card_build_outcomes.append(skipped)

@@ -368,7 +368,21 @@ class OpenAICompatibleClient:
             # twice — `_inflight=1` plus `_stream_inflight=1` — so `_pool_teardown_is_safe_locked`
             # saw a phantom sibling and the call skipped the very teardown it needed.
             _stream = self._bounded_create(kwargs, header_join)
+            # CLAUDE REVIEW: [RACE] Un-nesting to avoid self-double-count (comment above) leaves a
+            # window here: `_bounded_create` returns only AFTER its worker decremented `_inflight`
+            # (create() finished at headers), and `_streaming_body()` has not yet incremented
+            # `_stream_inflight` — so for the brief handoff this healthy, header-complete stream is
+            # counted by NEITHER cell. A concurrent sibling whose OWN header-wait is wedged then sees
+            # `_inflight+_stream_inflight <= 1`, judges the teardown safe, and `_shutdown_pool_sockets`
+            # rips the socket out from under this stream (spurious APITimeoutError + re-spend) — the
+            # exact spurious-sibling failure the counting exists to prevent.
             with self._streaming_body():
+                # CLAUDE REVIEW: [QUALITY] `_stream` is not closed on the error path here, unlike the
+                # deliberate own-and-close-in-finally in `complete_text_stream` (see its 900-905 note):
+                # if `_accumulate_stream` raises for a reason OTHER than the watchdog kill (which calls
+                # resp.close()) — e.g. the raw-httpx-error normalization in `_stream_with_idle_guard`,
+                # or any openai.APIError mid-iteration — the SDK Stream/response and its pooled socket
+                # leak until GC, the same connection leak that path was fixed to avoid.
                 return self._accumulate_stream(_stream, self.timeout, self.header_timeout)
         return self._nonstream_bounded(kwargs)
 
