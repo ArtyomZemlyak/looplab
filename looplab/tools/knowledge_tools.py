@@ -379,14 +379,16 @@ class KnowledgeTools:
                 target = (self.dir / Path(args.get("name", "")).name)  # restrict to kb dir
                 if not target.exists():
                     return f"(no such note: {args.get('name')})"
-                # CLAUDE REVIEW: [SECURITY] read_note reads ANY basename in knowledge_dir with no
-                # _pathsafe.looks_secret / _readable gate — unlike its sibling readers (RepoTools.repo_read,
-                # RepoScoutTools._read_file), which both refuse secret/non-source files. `.name` blocks
-                # traversal, but knowledge_dir is operator-configurable and is NOT .md-only (it already holds
-                # `.memora_cache.json`, adapters/tasks.py:374). If an operator points knowledge_dir at a dir
-                # that also holds an `.env`/`id_rsa`, `read_note(".env")` streams it to the (possibly remote)
-                # model even though list_notes (*.md only) never advertised it — the exact defense-in-depth
-                # gap _pathsafe exists to close everywhere else.
+                # Same secret gate every sibling reader applies (RepoTools.repo_read,
+                # RepoScoutTools._read_file). `.name` already blocks traversal, but knowledge_dir is
+                # OPERATOR-CONFIGURABLE and is not .md-only — it already holds `.memora_cache.json` —
+                # so pointing it at a directory that also contains an `.env`/`id_rsa` let
+                # `read_note(".env")` stream that file to the (possibly remote) model, even though
+                # `list_notes` (*.md only) never advertised it. Defense in depth, not traversal
+                # defense: the reachable set is one directory, and this is what keeps a credential in
+                # it out of the prompt.
+                if _pathsafe.looks_secret(Path(target.name)):
+                    return f"(refused: {target.name} looks like a secret/credential)"
                 return read_file(str(target))[:4000]
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -101,22 +102,84 @@ _UA = "Mozilla/5.0 (compatible; LoopLab/1.0; +https://example.invalid/looplab)"
 # / hostile / endless URL is a memory-blowup vector. Read at most this many bytes — far above the ~4k
 # chars ever surfaced, small enough to bound RAM. A bigger body is cut here (marked truncated).
 _MAX_DOWNLOAD_BYTES = 2_000_000
+# How much longer than the per-socket-op timeout the WHOLE body read may take. `urlopen`'s timeout
+# bounds one recv, never the transfer, so a hostile server dripping a byte just inside it held the
+# thread for up to ~2M reads. A slow but honest CDN still finishes well inside this multiple.
+_READ_DEADLINE_FACTOR = 4.0
+
+
+def _read_bounded(stream, timeout: float, limit: int = _MAX_DOWNLOAD_BYTES) -> bytes:
+    """Read at most `limit` bytes AND at most a wall-clock deadline's worth of them.
+
+    Size alone was bounded before: `read(n)` returns at most n bytes, so a multi-GB or endless
+    response cannot exhaust host RAM. But TIME was not — `read(n)` blocks until n bytes or EOF and
+    `urlopen`'s timeout is per-socket-operation, so a server dripping one byte per (timeout - ε)
+    seconds kept this thread alive essentially forever. That matters here specifically because
+    `drive_tool_loop` calls `tools.execute()` SYNCHRONOUSLY and its `time_budget_s` does not
+    interrupt an in-flight turn: one slow-drip `web_fetch` wedged the whole research phase.
+
+    Whatever arrived before the deadline is returned — a truncated page is strictly better than a
+    hung loop, and every caller already treats the body as best-effort text.
+    """
+    deadline = time.monotonic() + max(1.0, float(timeout or 0) * _READ_DEADLINE_FACTOR)
+    chunks: list[bytes] = []
+    got = 0
+    while got < limit:
+        if time.monotonic() >= deadline:
+            break
+        block = stream.read(min(65536, limit - got))
+        if not block:                       # EOF
+            break
+        chunks.append(block)
+        got += len(block)
+    return b"".join(chunks)
+
+
 # DuckDuckGo HTML result anchors + snippets (class names are stable on the html endpoint).
 _RESULT = re.compile(
     r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>', re.DOTALL)
 _SNIPPET = re.compile(r'class="result__snippet"[^>]*>(?P<snip>.*?)</a>', re.DOTALL)
 _TAG = re.compile(r"<[^>]+>")
-# CLAUDE REVIEW: [PERF] Quadratic on hostile input: for every UNCLOSED "<script"/"<style" the lazy
-# .*? scans to end-of-document looking for the close tag. A 2MB page (the _MAX_DOWNLOAD_BYTES cap)
-# stuffed with repeated unclosed "<script>" costs ~n^2/2 steps — minutes of CPU inside _untag() on
-# the (untimed, per Finding above) tool-loop thread. Cap occurrences or scan in a single linear pass.
-_SCRIPT = re.compile(r"<(script|style)\b.*?</\1>", re.DOTALL | re.IGNORECASE)
+_SCRIPT_OPEN = re.compile(r"<(script|style)\b", re.IGNORECASE)
+_SCRIPT_CLOSE = {"script": re.compile(r"</script\s*>", re.IGNORECASE),
+                 "style": re.compile(r"</style\s*>", re.IGNORECASE)}
 _WS = re.compile(r"\s+")
+
+
+def _strip_script_blocks(html: str) -> str:
+    """Drop `<script>`/`<style>` blocks in ONE forward pass over the document.
+
+    This was a single `<(script|style)\\b.*?</\\1>` substitution, which is QUADRATIC on hostile
+    input: the lazy body re-scans to end-of-document looking for a close tag, and the engine then
+    retries from the next `<script`. A 2 MB page (the `_MAX_DOWNLOAD_BYTES` cap) stuffed with
+    repeated unclosed `<script>` cost ~n²/2 steps — minutes of CPU inside `_untag`, on the tool-loop
+    thread `drive_tool_loop` never interrupts. Here the cursor only ever moves forward, so a page of
+    any shape costs one pass. (A bounded-body regex is NOT enough: it stops the body from re-walking
+    but not the engine from restarting at each of the n open tags.)
+
+    An UNCLOSED block keeps the old behaviour — the remainder is left in place for `_TAG` to strip.
+    The one deliberate difference: a close tag with trailing space (`</script >`, valid HTML) now
+    matches, where the old `</\\1>` did not and leaked the block's source into the extracted text.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = _SCRIPT_OPEN.search(html, pos)
+        if m is None:
+            out.append(html[pos:])
+            break
+        out.append(html[pos:m.start()])
+        close = _SCRIPT_CLOSE[m.group(1).lower()].search(html, m.end())
+        if close is None:
+            out.append(html[m.start():])
+            break
+        pos = close.end()
+    return " ".join(out)
 
 
 def _untag(html: str) -> str:
     """Strip tags + collapse whitespace to plain text (best-effort, no HTML parser dependency)."""
-    return _WS.sub(" ", _TAG.sub(" ", _SCRIPT.sub(" ", html))).strip()
+    return _WS.sub(" ", _TAG.sub(" ", _strip_script_blocks(html))).strip()
 
 
 def _resolve(href: str) -> str:
@@ -178,24 +241,16 @@ class WebTools:
             # entirely: on the common loopback/RFC1918 proxy it refused EVERY fetch — a total false
             # positive — and on a public one it passed everything while the rebind window was owned
             # by the proxy either way. The preflight and the per-redirect re-check are unchanged.
-            # CLAUDE REVIEW: [SECURITY] _proxied() is consulted with the ORIGINAL url, but the peer
-            # socket belongs to the FINAL redirect hop — proxy-ness can flip mid-chain (a NO_PROXY
-            # host, or an http->https redirect with only one of http_proxy/https_proxy set).
-            # original-proxied -> final-direct then SKIPS the peer check on the very direct connection
-            # it exists for (rebind window reopened); original-direct -> final-proxied via a loopback
-            # proxy false-blocks. Use _proxied(r.url) to match the hop actually connected.
-            landed = None if _proxied(url) else _peer_blocked(r)
+            # The proxy question is asked about the hop we ACTUALLY CONNECTED TO (`r.url`), not the
+            # url the caller passed. Proxy-ness can flip mid-chain — a NO_PROXY host, or an
+            # http->https redirect with only one of http_proxy/https_proxy set — so keying on the
+            # original url meant original-proxied -> final-direct SKIPPED the peer check on the very
+            # direct connection it exists for (reopening the rebind window), while original-direct ->
+            # final-proxied false-blocked every fetch through a loopback proxy.
+            landed = None if _proxied(getattr(r, "url", None) or url) else _peer_blocked(r)
             if landed:
                 return f"(blocked: {landed})"
-            # Bounded read (see _MAX_DOWNLOAD_BYTES): `read(n)` returns AT MOST n bytes, so a multi-GB /
-            # endless response can't exhaust host memory; the unread tail is dropped when the stream closes.
-            # CLAUDE REVIEW: [SECURITY] Size is bounded but TIME is not: read(n) blocks until n bytes
-            # or EOF, and urlopen's timeout is per-socket-op — a hostile server dripping one byte per
-            # <timeout seconds holds this thread for up to ~2M reads. drive_tool_loop runs
-            # tools.execute() synchronously with no timeout (its time_budget_s does not interrupt an
-            # in-flight turn), so one slow-drip web_fetch wedges the research phase. Needs a
-            # wall-clock deadline across the read loop.
-            return r.read(_MAX_DOWNLOAD_BYTES).decode("utf-8", errors="replace")
+            return _read_bounded(r, self.timeout).decode("utf-8", errors="replace")
 
     def _search(self, query: str) -> str:
         if not query:

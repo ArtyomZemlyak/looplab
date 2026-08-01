@@ -27,7 +27,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
-from looplab.runtime.sandbox import SECRET_ENV
+from looplab.runtime.sandbox import is_secret_env
 
 # "No module named 'X'" / 'X.Y' — the canonical ModuleNotFoundError / ImportError text. Captures
 # the dotted path; callers reduce it to the TOP-LEVEL package (the unit pip installs).
@@ -183,17 +183,18 @@ def install(package: str, *, python: Optional[str] = None, timeout: float = 900.
     # would otherwise hand a typosquatted sdist the secrets.
     # NAME-based only, deliberately: pip's own configuration is credential-bearing by design
     # (`PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL` carry inline tokens for a private index), and stripping
-    # it would break exactly the installs an operator configured. `SECRET_ENV` does not match those
-    # names, so pip keeps its index while the LLM/cloud keys are gone.
-    # CLAUDE REVIEW: [SECURITY] Name-only screen here diverges from the value-aware `is_secret_env(k, v)`
-    # that every OTHER child spawn uses (sandbox.run_argv line ~465, bg_tasks._child_env line ~63). That
-    # sibling ALSO strips inline-credential URL VALUES (`_CREDENTIAL_URL_VALUE`: DATABASE_URL/MONGO_URI/
-    # *_DSN = `scheme://user:pw@host`) whose NAME matches nothing. This pip child runs the sdist's
-    # setup.py/build backend — arbitrary code, as this docstring warns — so such a credential leaks into
-    # it here while it's stripped everywhere else. The PIP_INDEX_URL rationale only justifies keeping
-    # PIP_* names; screening values EXCEPT for the PIP_* index vars would close the gap without breaking
-    # a configured private index.
-    env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+    # it would break exactly the installs an operator configured, so PIP_* is exempted below by
+    # name and pip keeps its index while the LLM/cloud keys and inline URL credentials are gone.
+    # The PIP_* exemption is exactly that — an exemption, not a reason to use a weaker screen. This
+    # used to be a NAME-only filter, diverging from the value-aware `is_secret_env(k, v)` every OTHER
+    # child spawn uses (`sandbox.run_argv`, `bg_tasks._child_env`). That sibling also strips
+    # INLINE-CREDENTIAL URL VALUES (`scheme://user:pw@host` under DATABASE_URL / MONGO_URI / *_DSN)
+    # whose name matches nothing — so a database credential was handed to the sdist's setup.py while
+    # being stripped everywhere else. Now the full screen applies, minus the PIP_* index vars the
+    # rationale above actually covers: those are credential-bearing BY DESIGN and stripping them
+    # breaks precisely the private-index installs an operator configured.
+    env = {k: v for k, v in os.environ.items()
+           if k.upper().startswith("PIP_") or not is_secret_env(k, v)}
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout, env=env)

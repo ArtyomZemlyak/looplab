@@ -33,6 +33,26 @@ def test_knowledge_tools(tmp_path):
     assert "no such note" in kt.execute("read_note", {"name": "../../secrets.txt"}).lower()
 
 
+def test_read_note_refuses_a_credential_file_sitting_in_the_knowledge_dir(tmp_path):
+    """`.name` blocks traversal, but knowledge_dir is OPERATOR-CONFIGURABLE and is not .md-only — it
+    already holds `.memora_cache.json`. Pointed at a directory that also contains an `.env`/`id_rsa`,
+    `read_note(".env")` streamed that file straight to the (possibly remote) model, even though
+    `list_notes` (*.md only) never advertised it. Every sibling reader — RepoTools.repo_read,
+    RepoScoutTools._read_file — applies the same `looks_secret` gate."""
+    _seed_kb(tmp_path)
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-live-abc123\n", encoding="utf-8")
+    (tmp_path / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+    kt = KnowledgeTools(str(tmp_path))
+
+    assert ".env" not in kt.execute("list_notes", {})            # never advertised…
+    for name in (".env", "id_rsa"):
+        out = kt.execute("read_note", {"name": name})
+        assert "refused" in out.lower(), out                      # …and no longer readable either
+        assert "sk-live-abc123" not in out and "PRIVATE KEY" not in out
+    # An ordinary note is unaffected.
+    assert "ridge" in kt.execute("read_note", {"name": "ridge.md"}).lower()
+
+
 class _FakeChatClient:
     """Scripts assistant messages; records the messages it received each turn."""
     def __init__(self, scripted):

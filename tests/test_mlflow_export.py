@@ -90,3 +90,47 @@ def test_export_run_dir_logs_champion_not_best(tmp_path, monkeypatch):
     assert rid == "fake-1"
     assert logged["params"] == {"x": 9.0}                       # champion's params, NOT best()'s {"x": 0.0}
     assert logged["texts"]["solution.py"] == "# n1 champ"       # champion's code, not best's
+
+
+def test_exported_champion_code_is_redacted_at_the_egress_boundary(tmp_path, monkeypatch):
+    """An external tracking server is an egress boundary, and node code is secret-BEARING: a
+    repo-mode Developer that read a checked-in .env or token through its tools can echo it into the
+    solution. Every other egress in the codebase redacts (serve/reviews.py before disclosure,
+    core/tracing.py for the OTLP exporter); this one shipped the code verbatim."""
+    import sys
+    import types
+
+    import looplab.events.mlflow_export as mod
+
+    secret = "sk-livekey-4f2b91ce77a04d3e8b615ca2d09f7e31aa5c"
+    rd = tmp_path / "run"
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {"x": 0.0}, "rationale": ""},
+                              "code": f'API_KEY = "{secret}"\nprint("train")\n'})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+
+    logged = {}
+    fake = types.ModuleType("mlflow")
+    fake.set_tracking_uri = fake.set_experiment = fake.set_tags = lambda *a, **k: None
+    fake.log_param = fake.log_metric = lambda *a, **k: None
+    fake.log_text = lambda t, p: logged.__setitem__(p, t)
+
+    class _Run:
+        class info:
+            run_id = "fake-redact"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    fake.start_run = lambda *a, **k: _Run()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+
+    assert mod.export_run_dir(rd) == "fake-redact"
+    assert secret not in logged["solution.py"], "the champion's credential was shipped verbatim"
+    assert "***" in logged["solution.py"]                 # masked, not silently dropped
+    assert 'print("train")' in logged["solution.py"]      # the code itself still exports

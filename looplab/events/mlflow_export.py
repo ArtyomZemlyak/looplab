@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from looplab.core.models import RunState
+from looplab.core.redact import redact_secrets
 
 
 def available() -> bool:
@@ -59,12 +60,13 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
         mlflow.log_metric("nodes", len(state.nodes))
         mlflow.log_metric("evaluated", len(state.evaluated_nodes()))
         if code:
-            # CLAUDE REVIEW: [SECURITY] Champion code is shipped to an EXTERNAL MLflow tracking server
-            # with no redact_secrets pass. The codebase treats node code as secret-bearing at egress:
-            # reviews.py redacts code/files/parent_code before disclosure, and tracing.py calls the
-            # OTLP exporter "a DURABLE egress boundary, so redaction has to happen here". A repo-mode
-            # Developer that read a checked-in .env/token via its tools can echo it into solution code.
-            mlflow.log_text(code, "solution.py")
+            # An EXTERNAL tracking server is an egress boundary, so the champion's code is redacted
+            # here — the same treatment `serve/reviews.py` gives code/files/parent_code before
+            # disclosure and `core/tracing.py` gives the OTLP exporter ("a DURABLE egress boundary,
+            # so redaction has to happen here"). Node code is secret-BEARING in practice: a repo-mode
+            # Developer that read a checked-in .env or token through its tools can echo it straight
+            # into the solution.
+            mlflow.log_text(redact_secrets(code), "solution.py")
         return run.info.run_id
 
 

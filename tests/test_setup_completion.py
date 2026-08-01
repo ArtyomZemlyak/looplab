@@ -337,6 +337,7 @@ def test_run_setup_repeat_after_an_interrupted_attempt_is_stamped(tmp_path, monk
     eng.store = store
     eng.run_dir = tmp_path
     eng._repo_spec = {}
+    eng._redact_output = False        # Engine.__init__ always sets it; this stub bypasses __init__
     eng._eval_spec = {"run_setup": ["pip", "install", "-e", "."]}
     monkeypatch.setattr(sandbox_module, "_run_argv",
                         lambda *_a, **_k: (0, "", "", False))
@@ -356,3 +357,36 @@ def test_run_setup_repeat_after_an_interrupted_attempt_is_stamped(tmp_path, monk
     assert repeats[-1].data["after_interrupted_attempt"] is True, (
         "a repeat after an interrupted attempt must be distinguishable from a first attempt")
     assert fold(store.read_all()).run_setup_open == set()
+
+
+def test_run_setup_output_tails_are_redacted_like_every_other_tail(tmp_path, monkeypatch):
+    """The `stderr_tail` is persisted to the DURABLE event log, so under `redact_output=True` — the
+    recommended untrusted-tier posture — a run_setup command's stderr (pip echoing an index URL with
+    an inline token, a git error carrying URL userinfo) landed verbatim and stayed there, unlike
+    every sibling tail (`evaluate.py`'s stdout_tail/stderr, `train_monitor`'s reason). The
+    RuntimeError raised on failure re-leaked the same bytes."""
+    import pytest
+
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime import sandbox as sandbox_module
+
+    leak = "https://user:s3cr3t-index-token@pypi.internal/simple"
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "direction": "min"})
+    eng = Engine.__new__(Engine)
+    eng.store = store
+    eng.run_dir = tmp_path
+    eng._repo_spec = {}
+    eng._redact_output = True
+    eng._eval_spec = {"run_setup": ["pip", "install", "-e", "."]}
+    monkeypatch.setattr(sandbox_module, "_run_argv",
+                        lambda *_a, **_k: (1, "", f"ERROR: could not reach {leak}", False))
+
+    with pytest.raises(RuntimeError) as exc:
+        eng._do_run_setup(list(eng._eval_spec["run_setup"]))
+
+    assert "s3cr3t-index-token" not in str(exc.value), "the failure message re-leaked the tail"
+    fin = [e for e in store.read_all() if e.type == "run_setup_finished"]
+    assert len(fin) == 1
+    assert "s3cr3t-index-token" not in fin[0].data["stderr_tail"], fin[0].data["stderr_tail"]
+    assert "could not reach" in fin[0].data["stderr_tail"]      # the diagnostic itself survives

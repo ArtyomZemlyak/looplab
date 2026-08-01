@@ -122,18 +122,18 @@ class EvalDispatchMixin:
         log = str(Path(self.run_dir) / "run_setup.log")
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
         # Carry the command so the fold can key the exactly-once record on it (arch-review §5 P2).
-        # CLAUDE REVIEW: [SECURITY] This 2000-char stderr_tail is persisted to the durable event log
-        # WITHOUT self._redact(...), unlike every sibling output tail (evaluate.py's stdout_tail/err,
-        # train_monitor's reason). With redact_output=True (the recommended untrusted-tier posture) a
-        # run_setup command's stderr (pip echoing an index URL with an inline token, a git error with
-        # URL userinfo, a traceback) lands verbatim; the RuntimeError below re-leaks the same bytes
-        # via (err or out or "")[-500:]. Route both through self._redact like the other tails.
+        # Both output tails go through `self._redact`, like every sibling tail (evaluate.py's
+        # stdout_tail/stderr, train_monitor's reason). This one is persisted to the DURABLE event
+        # log, so under `redact_output=True` — the recommended untrusted-tier posture — a run_setup
+        # command's stderr (pip echoing an index URL with an inline token, a git error carrying URL
+        # userinfo, a traceback quoting an env var) used to land verbatim and stay there; the
+        # RuntimeError below re-leaked the same bytes into the failure message.
         self.store.append(EV_RUN_SETUP_FINISHED,
                           {"command": cmd, "exit_code": rc, "timed_out": timed,
-                           "stderr_tail": (err or "")[-2000:]})
+                           "stderr_tail": self._redact((err or "")[-2000:])})
         if rc != 0 or timed:
             raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
-                               + (err or out or "")[-500:])
+                               + self._redact((err or out or "")[-500:]))
 
     def _data_binds(self, workdir) -> Optional[list]:
         """(host_path, read_only) binds for the untrusted tier: every data/reference source that was
