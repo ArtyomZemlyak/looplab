@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Callable, Optional
@@ -31,8 +32,10 @@ _ART_MAX_BYTES = 2_000_000     # 2 MB cap for an inline text view (the tail is d
 _LOG_TAIL_MAX = 5_000_000      # hard cap on the client-controlled `tail` byte count for node_logs
 
 
+_NODE_WORKDIR_RE = re.compile(r"^node_(\d+)$")
 _TRACE_INTERNAL_BASES = ("spans.jsonl", "spans.index.jsonl", "trace.json", "tree.html")
 ArtifactExposure = Callable[[Path, Optional[str], Optional[os.stat_result]], bool]
+ArtifactListingTransform = Callable[[Path, dict], Optional[dict]]
 
 
 class ArtifactPolicyUnavailable(OSError):
@@ -45,6 +48,34 @@ def _artifact_file_identity(stt: os.stat_result) -> Optional[tuple[int, int]]:
     if not ino:
         return None
     return (int(getattr(stt, "st_dev", 0) or 0), ino)
+
+
+def _artifact_node_id(run_dir: Path, candidate: Path) -> Optional[int]:
+    """Return the node id owning a canonical run-workspace file, if any.
+
+    Resolve the target instead of trusting the caller's root id or lexical path: a declared task root
+    or a file symlink can alias ``runs/<run>/nodes/node_<id>`` and must not bypass the attempt fence.
+    ``None`` means the target is not inside an engine-owned node workdir (or disappeared mid-read).
+    """
+    try:
+        run = Path(run_dir).resolve(strict=True)
+        target = Path(candidate).resolve(strict=True)
+        relative = target.relative_to(run)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if (len(relative.parts) < 3
+            or os.path.normcase(relative.parts[0]) != os.path.normcase("nodes")):
+        return None
+    node_dir = os.path.normcase(relative.parts[1])
+    match = _NODE_WORKDIR_RE.fullmatch(node_dir)
+    if match is None:
+        return None
+    try:
+        node_id = int(match.group(1))
+    except ValueError:
+        return None
+    # Engine paths are formatted from an integer, so reject alternate spellings such as node_01.
+    return node_id if node_dir == os.path.normcase(f"node_{node_id}") else None
 
 
 def _trace_internal_name(name: str) -> bool:
@@ -235,10 +266,12 @@ def _list_artifact_files(
     base: Path,
     *,
     exposed: Optional[ArtifactExposure] = None,
+    transform: Optional[ArtifactListingTransform] = None,
 ) -> tuple[list[dict], bool]:
     """Walk `base`, pruning heavy/noise dirs, capped at _ART_MAX_FILES. Returns (files, truncated). The
     walk is sorted (dirs + files) so a truncated listing is deterministic across calls/platforms rather
-    than whatever arbitrary subset os.scandir happened to yield first."""
+    than whatever arbitrary subset os.scandir happened to yield first. An optional transform may
+    decorate or reject an already-authorized file; rejection happens before it consumes the cap."""
     out: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = sorted(d for d in dirnames if d not in _ART_SKIP_DIRS)
@@ -255,8 +288,13 @@ def _list_artifact_files(
             # from a deterministic 1500-entry response. Direct content re-checks the same policy.
             if exposed is not None and not exposed(fp, relative, stt):
                 continue
-            out.append({"path": relative, "size": stt.st_size,
-                        "mtime": stt.st_mtime, "is_text": _artifact_is_text(fp)})
+            item = {"path": relative, "size": stt.st_size,
+                    "mtime": stt.st_mtime, "is_text": _artifact_is_text(fp)}
+            if transform is not None:
+                item = transform(fp, item)
+                if item is None:
+                    continue
+            out.append(item)
             if len(out) >= _ART_MAX_FILES:
                 out.sort(key=lambda f: f["path"])
                 return out, True

@@ -546,6 +546,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                            and parts[4] == "status")
         is_log_page = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
                        and parts[4] == "log-page")
+        # File inventory/content are live generation/attempt-bound workspace observations.  The
+        # query fence prevents cross-generation reuse, while no-store also prevents a same-generation
+        # node reset or host-workspace edit from being hidden behind an intermediary cache.
+        is_artifact = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
+                       and parts[4] in {"artifact", "artifacts"})
         is_report_refresh = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
                              and parts[4] == "report_refresh")
         # scope reports are live, membership-bound observations. A cached GET or paid
@@ -570,7 +575,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             route_path == "/api/assistant/shared"
             or route_path.startswith("/api/assistant/shared/")
         )
-        if (is_command or is_start_status or is_log_page or is_report_refresh or is_scope_report
+        if (is_command or is_start_status or is_log_page or is_artifact or is_report_refresh or is_scope_report
                 or is_scope_report_action or is_job or is_comments or is_concepts or is_attention
                 or is_assistant_share):
             response.headers["Cache-Control"] = "no-store"

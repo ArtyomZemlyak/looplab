@@ -47,7 +47,7 @@ from looplab.events.types import (
 from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, ArtifactPolicyUnavailable,
-    _artifact_exposure_policy, _artifact_file_identity, _artifact_roots,
+    _artifact_exposure_policy, _artifact_file_identity, _artifact_node_id, _artifact_roots,
     _list_artifact_files)
 from looplab.serve.concept_frame import (
     MAX_LENS_BODY_BYTES as _CONCEPT_FRAME_MAX_LENS_BODY_BYTES,
@@ -2426,40 +2426,104 @@ def build_router(srv) -> APIRouter:
             log_path, direction=direction, limit=limit, byte_limit=byte_limit,
             cursor=cursor, generation=generation, anchor_seq=anchor_seq)
 
+    def _assert_artifact_generation(rd: Path, expected: str, *, phase: str) -> str:
+        if _RUN_GENERATION_RE.fullmatch(expected) is None:
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation returned by run state.",
+                "remediation": "Reload the run before requesting its files.",
+            })
+        with srv.commands.sequence(rd):
+            rd = srv.commands.validate_paths(rd)
+            current = srv.commands.run_generation(rd)
+            if current != expected:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected,
+                    "current_generation": current or None,
+                    "message": f"The run was reset or replaced {phase} its files were read.",
+                    "remediation": "Reload Files and request only the current run generation.",
+                })
+        return current
+
+    def _artifact_attempt_conflict(node_id: int, expected_attempt: Optional[int],
+                                   current_attempt: Optional[int], message: str) -> None:
+        raise HTTPException(409, {
+            "code": "node_attempt_changed",
+            "node_id": node_id,
+            "expected_attempt": expected_attempt,
+            "current_attempt": current_attempt,
+            "message": message,
+            "remediation": "Reload Files and request the current node attempt.",
+        })
+
     @router.get("/api/runs/{run_id}/artifacts")
-    def artifacts(run_id: str):
+    def artifacts(run_id: str, expected_generation: str = Query(...)):
         """List files currently visible to the run, grouped by root.
 
         The run directory and declared RepoTask host paths are live request-time views. They can contain
         inputs, later edits and outputs, so this endpoint explicitly reports workspace visibility rather
-        than claiming file-level production provenance it cannot prove.
+        than claiming file-level production provenance it cannot prove. The response is fenced to the
+        required run generation; files in a current node workdir carry their node id and attempt.
         """
         rd = _run_dir(run_id)
+        generation = _assert_artifact_generation(rd, expected_generation, phase="before")
+        before_state = srv.state(rd)
         try:
             exposed = _artifact_exposure_policy(rd)
         except ArtifactPolicyUnavailable:
             # A 503 is deliberate: a failed security proof is unavailable, not a truthful empty list.
             raise HTTPException(503, "artifact inventory unavailable") from None
         out = []
+        node_attempts: dict[int, int] = {}
+
+        def _identify_node_file(candidate: Path, file_info: dict) -> Optional[dict]:
+            node_id = _artifact_node_id(rd, candidate)
+            if node_id is None:
+                return file_info
+            attempt = _node_attempt(before_state, node_id)
+            # A leftover/crash-era node directory without folded ownership has no trustworthy
+            # attempt identity. Drop it before it can consume a bounded inventory slot.
+            if attempt is None:
+                return None
+            node_attempts[node_id] = attempt
+            return {**file_info, "node_id": node_id, "attempt": attempt}
+
         for r in _artifact_roots(rd):
-            files, truncated = _list_artifact_files(r["base"], exposed=exposed)
+            files, truncated = _list_artifact_files(
+                r["base"], exposed=exposed, transform=_identify_node_file)
             visibility = "run_workspace" if r["id"] == "run" else "live_task_path"
             out.append({"id": r["id"], "label": r["label"], "path": str(r["base"]),
                         "is_run_dir": r["id"] == "run", "truncated": truncated,
                         "visibility": visibility, "n_files": len(files), "files": files})
+        generation = _assert_artifact_generation(rd, expected_generation, phase="while")
+        after_state = srv.state(rd)
+        for node_id, expected_attempt in node_attempts.items():
+            current_attempt = _node_attempt(after_state, node_id)
+            if current_attempt != expected_attempt:
+                _artifact_attempt_conflict(
+                    node_id, expected_attempt, current_attempt,
+                    "The node was reset while its file inventory was being prepared.")
+        generation = _assert_artifact_generation(rd, expected_generation, phase="while")
         return {
             "run_id": run_id,
+            "run_generation": generation,
             "inventory_semantics": "live_workspace_snapshot",
             "roots": out,
         }
 
     @router.get("/api/runs/{run_id}/artifact")
-    def artifact(run_id: str, root: str, path: str):
+    def artifact(run_id: str, root: str, path: str,
+                 expected_generation: str = Query(...),
+                 node_id: Optional[int] = Query(default=None, ge=0),
+                 attempt: Optional[int] = Query(default=None, ge=0)):
         """Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by
         /artifacts; `path` is resolved within that root and traversal-guarded (a browser can never read
         outside the declared roots). Text is returned UTF-8 (errors replaced) capped at 2 MB; binary or
-        oversize files return is_text=false / truncated=true with no inline content."""
+        oversize files return is_text=false / truncated=true with no inline content. The exact inventory
+        generation is required; a canonical node-workdir target additionally requires node id + attempt."""
         rd = _run_dir(run_id)
+        generation = _assert_artifact_generation(rd, expected_generation, phase="before")
         base = next((r["base"] for r in _artifact_roots(rd) if r["id"] == root), None)
         if base is None:
             raise HTTPException(404, "no such artifact root")
@@ -2471,6 +2535,32 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such artifact") from None
         if target != base and base not in target.parents:     # path-traversal guard
             raise HTTPException(404, "no such artifact")
+        target_node_id = _artifact_node_id(rd, target)
+        target_attempt = None
+        if target_node_id is not None:
+            if node_id is None or attempt is None:
+                raise HTTPException(400, {
+                    "code": "node_attempt_required",
+                    "node_id": target_node_id,
+                    "message": "Node workspace files require their exact node id and attempt.",
+                    "remediation": "Reload Files and echo the node_id and attempt from its inventory entry.",
+                })
+            target_attempt = _node_attempt(srv.state(rd), target_node_id)
+            if node_id != target_node_id:
+                raise HTTPException(409, {
+                    "code": "node_attempt_changed",
+                    "node_id": target_node_id,
+                    "expected_node_id": node_id,
+                    "current_node_id": target_node_id,
+                    "expected_attempt": attempt,
+                    "current_attempt": target_attempt,
+                    "message": "The requested file now belongs to a different node identity.",
+                    "remediation": "Reload Files and request the current node and attempt.",
+                })
+            if target_attempt is None or attempt != target_attempt:
+                _artifact_attempt_conflict(
+                    target_node_id, attempt, target_attempt,
+                    "The node attempt changed before its file was read.")
         try:
             exposed = _artifact_exposure_policy(rd)
         except ArtifactPolicyUnavailable:
@@ -2508,13 +2598,24 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(503, "artifact access unavailable") from None
         except (OSError, RuntimeError, ValueError):
             raise HTTPException(404, "no such artifact") from None
+        generation = _assert_artifact_generation(rd, expected_generation, phase="while")
+        if target_node_id is not None:
+            current_attempt = _node_attempt(srv.state(rd), target_node_id)
+            if current_attempt != target_attempt:
+                _artifact_attempt_conflict(
+                    target_node_id, target_attempt, current_attempt,
+                    "The node was reset while its file was being read.")
+        generation = _assert_artifact_generation(rd, expected_generation, phase="while")
         body = head[:_ART_MAX_BYTES]
+        response_identity = {"run_generation": generation}
+        if target_node_id is not None:
+            response_identity.update({"node_id": target_node_id, "attempt": target_attempt})
         if b"\x00" in body:                                    # a NUL anywhere in the read → binary
             return {"root": root, "path": path, "size": size, "is_text": False,
-                    "truncated": False, "content": None}
+                    "truncated": False, "content": None, **response_identity}
         return {"root": root, "path": path, "size": size, "is_text": True,
                 "truncated": size > _ART_MAX_BYTES,
-                "content": body.decode("utf-8", errors="replace")}
+                "content": body.decode("utf-8", errors="replace"), **response_identity}
 
     @router.get("/api/runs/{run_id}/trace")
     def trace(run_id: str):

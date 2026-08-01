@@ -3,6 +3,7 @@ import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTR
   saveRunConfig, operatorMeta, commandFeedback, runApiPath, runNodeApiPath,
   createIdempotencyKey, getRunCommand, isTransientCommandReadError, retryRunCommand, runCommand,
   getAuthoringOperation, putAuthoringOperation, validAuthoringName, validAuthoringTargetRootId,
+  getRunArtifactContent, getRunArtifactInventory,
 } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
@@ -3859,11 +3860,25 @@ export function EventExplorer({ runId, timeline, historyActive = false, onReturn
 
 const _MAX_VIEW = 2_000_000   // mirrors server _ART_MAX_BYTES (inline text view cap)
 
+const ARTIFACT_SCOPE_ERRORS = new Set([
+  'artifact_attempt_protocol_error',
+  'artifact_generation_protocol_error',
+  'artifact_path_protocol_error',
+  'artifact_run_protocol_error',
+  'invalid_run_generation',
+  'node_attempt_changed',
+  'node_attempt_required',
+  'run_generation_changed',
+  'run_generation_unavailable',
+])
+
+const artifactScopeChanged = error => error?.status === 409 || ARTIFACT_SCOPE_ERRORS.has(error?.code)
+
 // Workspace file browser: lists the run directory and live host repo / reference / data paths declared
 // by a RepoTask. Those task paths can contain inputs, later edits and outputs; without a start-time
 // manifest the UI deliberately makes no file-level production claim. Text files open inline; binary /
 // oversize ones are flagged. Backed by GET /api/runs/{id}/artifacts + /artifact.
-export function ArtifactsPanel({ runId, onToast, onClose }) {
+export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) {
   const [roots, setRoots] = useState(null)
   const [err, setErr] = useState(null)
   const [open, setOpen] = useState({})        // root id -> expanded?
@@ -3871,39 +3886,106 @@ export function ArtifactsPanel({ runId, onToast, onClose }) {
   const [content, setContent] = useState(null)
   const [busy, setBusy] = useState(false)
   const [filter, setFilter] = useState('')
+  const [reload, setReload] = useState(0)
+  const inventoryReqRef = useRef(0)
+  const contentAbortRef = useRef(null)
+  const scope = `${String(runId)}@${String(expectedGeneration || '')}`
+  const scopeRef = useRef(scope)
+  scopeRef.current = scope
+  const generationReady = RUN_GENERATION_RE.test(expectedGeneration || '')
   const reqRef = useRef(0)                     // request token — drops out-of-order view() responses
 
   useEffect(() => {
-    let alive = true
-    get(`/api/runs/${encodeURIComponent(runId)}/artifacts`).then(d => {
-      if (!alive) return
-      const rs = d.roots || []
+    const requestScope = scope
+    const token = ++inventoryReqRef.current
+    ++reqRef.current
+    contentAbortRef.current?.abort()
+    contentAbortRef.current = null
+    setRoots(null)
+    setErr(null)
+    setOpen({})
+    setSel(null)
+    setContent(null)
+    setBusy(false)
+    setFilter('')
+
+    if (!generationReady) return () => { inventoryReqRef.current += 1 }
+
+    const controller = new AbortController()
+    getRunArtifactInventory(runId, expectedGeneration, { signal: controller.signal }).then(d => {
+      if (token !== inventoryReqRef.current || requestScope !== scopeRef.current) return
+      if (!Array.isArray(d.roots)) throw new Error('Invalid file inventory')
+      const rs = d.roots
       setRoots(rs)
       const o = {}; rs.forEach(r => { o[r.id] = !!r.is_run_dir })   // expand the run dir, collapse repos
       setOpen(o)
-    }).catch(e => alive && setErr(e.message))
-    return () => { alive = false }
-  }, [runId])
+    }).catch(e => {
+      if (e?.name === 'AbortError' || token !== inventoryReqRef.current || requestScope !== scopeRef.current) return
+      setErr(artifactScopeChanged(e)
+        ? 'The run or experiment attempt changed while files were loading. Reopen Files from the current run.'
+        : e.message)
+    })
+    return () => {
+      controller.abort()
+      ++reqRef.current
+      contentAbortRef.current?.abort()
+      contentAbortRef.current = null
+      if (token === inventoryReqRef.current) inventoryReqRef.current += 1
+    }
+  }, [expectedGeneration, generationReady, reload, runId, scope])
 
   const view = (rootId, f) => {
+    if (!generationReady) return
     const token = ++reqRef.current
-    setSel({ root: rootId, path: f.path })
+    const requestScope = scope
+    contentAbortRef.current?.abort()
+    const controller = new AbortController()
+    contentAbortRef.current = controller
+    const hasNodeIdentity = f?.node_id != null || f?.attempt != null
+    setSel({
+      root: rootId,
+      path: f.path,
+      ...(hasNodeIdentity ? { nodeId: f.node_id, attempt: f.attempt } : {}),
+    })
     setContent(null); setBusy(true)
     // Always fetch — don't trust the extension-based is_text GUESS (a text .bin/.pb would otherwise be
     // unviewable); the SERVER does the authoritative binary sniff. The token ignores a stale response
     // (fast-clicking A then B must not let A's slower reply render under B).
-    get(`/api/runs/${encodeURIComponent(runId)}/artifact?root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(f.path)}`)
-      .then(c => { if (token === reqRef.current) setContent(c) })
-      .catch(e => { if (token === reqRef.current) { setContent(null); onToast && onToast('view failed: ' + e.message) } })
-      .finally(() => { if (token === reqRef.current) setBusy(false) })
+    getRunArtifactContent(runId, {
+      root: rootId,
+      path: f.path,
+      expectedGeneration,
+      ...(hasNodeIdentity ? { nodeId: f.node_id, attempt: f.attempt } : {}),
+      signal: controller.signal,
+    }).then(c => {
+      if (token === reqRef.current && requestScope === scopeRef.current) setContent(c)
+    }).catch(e => {
+      if (e?.name === 'AbortError' || token !== reqRef.current || requestScope !== scopeRef.current) return
+      setContent(null)
+      if (artifactScopeChanged(e)) {
+        setRoots(null)
+        setOpen({})
+        setSel(null)
+        setErr(e?.code === 'node_attempt_changed'
+          ? 'This experiment attempt changed. Reopen Files to load its current inventory.'
+          : 'The run changed while this file was loading. Reopen Files from the current run.')
+      } else onToast?.('view failed: ' + e.message)
+    }).finally(() => {
+      if (token !== reqRef.current || requestScope !== scopeRef.current) return
+      if (contentAbortRef.current === controller) contentAbortRef.current = null
+      setBusy(false)
+    })
   }
 
   const ql = filter.trim().toLowerCase()
   const binary = content && content.is_text === false   // the server's verdict, not the extension guess
   return (
     <Panel title="Files" sub={runId} wide onClose={onClose}>
-      {err && <div className="notice">Could not load files: {err}</div>}
-      {!roots ? <div className="muted">Loading…</div> :
+      {!generationReady ? <div className="muted">Waiting for the current run identity…</div>
+        : err ? <div className="notice">Could not load files: {err}{' '}
+            <button type="button" className="btn sm" onClick={() => { setErr(null); setReload(n => n + 1) }}>Retry</button>
+          </div>
+        : !roots ? <div className="muted">Loading…</div> :
         <div className="art-wrap">
           <div className="art-list">
             <input className="text art-filter" aria-label="Filter files" placeholder="filter files…" value={filter}

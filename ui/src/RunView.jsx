@@ -1985,7 +1985,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       </>}
 
       {panel && panelAllowed(panel) && <LazyBoundary label={`${HUB_OF[panel] || panel} panel`}
-        mode="overlay" resetKey={panel} onClose={closePanel}>
+        mode="overlay" resetKey={`${panel}:${runId}@${generation || 'pending'}`} onClose={closePanel}>
       <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }} />}
@@ -2016,7 +2016,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'gpu' && panelAllowed('gpu') && <GpuPanel onClose={closePanel} />}
       {panel === 'events' && panelAllowed('events') && <EventExplorer runId={runId} timeline={timeline}
         historyActive={historyActive} onReturnToLive={returnToLive} onClose={closePanel} />}
-      {panel === 'artifacts' && panelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
+      {panel === 'artifacts' && panelAllowed('artifacts') && <ArtifactsPanel
+        key={`artifacts:${runId}@${generation || 'pending'}`} runId={runId}
+        expectedGeneration={generation} onToast={showToast} onClose={closePanel} />}
       </>
       </LazyBoundary>}
 

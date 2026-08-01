@@ -1555,6 +1555,121 @@ export async function get(path, options = {}) {
 }
 export const deadlineGet = (path, timeout = 8000, options) =>
   deadlineRequest(signal => get(path, { cache: 'no-store', ...options, signal }), timeout)
+
+const artifactGenerationQuery = expectedGeneration => {
+  if (!validRunGeneration(expectedGeneration)) {
+    throw runGenerationError(
+      'run_generation_unavailable',
+      'A verified run generation is required before reading files.',
+      'Wait for the current run identity, then reopen Files.',
+    )
+  }
+  const query = new URLSearchParams()
+  query.set('expected_generation', expectedGeneration)
+  return query
+}
+
+const validateArtifactGeneration = (payload, expectedGeneration, path) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || !validRunGeneration(payload.run_generation)) {
+    const error = new Error(`${path}: invalid artifact generation receipt`)
+    error.code = 'artifact_generation_protocol_error'
+    throw error
+  }
+  if (payload.run_generation !== expectedGeneration) {
+    const error = runGenerationError(
+      'run_generation_changed',
+      'The run changed while files were loading.',
+      'Reload the file inventory for the current run generation.',
+    )
+    error.status = 409
+    error.detail = {
+      expected_generation: expectedGeneration,
+      current_generation: payload.run_generation,
+    }
+    throw error
+  }
+  return payload
+}
+
+const artifactProtocolError = (code, message, path) => {
+  const error = new Error(`${path}: ${message}`)
+  error.code = code
+  return error
+}
+
+const validateArtifactContentIdentity = (payload, expected, requestPath) => {
+  if (payload.root !== expected.root || payload.path !== expected.path) {
+    throw artifactProtocolError(
+      'artifact_path_protocol_error',
+      'the response did not echo the requested file identity',
+      requestPath,
+    )
+  }
+  const responseHasNodeIdentity = payload.node_id != null || payload.attempt != null
+  if (responseHasNodeIdentity !== expected.hasNodeIdentity
+      || (expected.hasNodeIdentity
+        && (payload.node_id !== expected.nodeId || payload.attempt !== expected.attempt))) {
+    throw artifactProtocolError(
+      'artifact_attempt_protocol_error',
+      'the response did not echo the requested experiment attempt',
+      requestPath,
+    )
+  }
+  return payload
+}
+
+export async function getRunArtifactInventory(runId, expectedGeneration, options = {}) {
+  const query = artifactGenerationQuery(expectedGeneration)
+  const path = runApiPath(runId, `/artifacts?${query}`)
+  const payload = await get(path, { ...options, cache: 'no-store' })
+  const fenced = validateArtifactGeneration(payload, expectedGeneration, path)
+  if (fenced.run_id !== String(runId)) {
+    throw artifactProtocolError(
+      'artifact_run_protocol_error',
+      'the response did not echo the requested run identity',
+      path,
+    )
+  }
+  return fenced
+}
+
+export async function getRunArtifactContent(runId, {
+  root, path: artifactPath, expectedGeneration, nodeId = null, attempt = null, ...options
+} = {}) {
+  if (typeof root !== 'string' || typeof artifactPath !== 'string') {
+    throw artifactProtocolError(
+      'artifact_path_protocol_error',
+      'the file inventory returned an invalid root or path',
+      runApiPath(runId, '/artifact'),
+    )
+  }
+  const query = artifactGenerationQuery(expectedGeneration)
+  query.set('root', root)
+  query.set('path', artifactPath)
+  const hasNodeIdentity = nodeId != null || attempt != null
+  if (hasNodeIdentity) {
+    if (!Number.isSafeInteger(nodeId) || nodeId < 0
+        || !Number.isSafeInteger(attempt) || attempt < 0) {
+      const error = new Error('The artifact inventory returned an invalid experiment attempt identity.')
+      error.code = 'artifact_attempt_protocol_error'
+      throw error
+    }
+    query.set('node_id', String(nodeId))
+    query.set('attempt', String(attempt))
+  }
+  const requestPath = runApiPath(runId, `/artifact?${query}`)
+  const payload = await get(requestPath, { ...options, cache: 'no-store' })
+  const fenced = validateArtifactGeneration(payload, expectedGeneration, requestPath)
+  return validateArtifactContentIdentity(fenced, {
+    root,
+    path: artifactPath,
+    nodeId,
+    attempt,
+    hasNodeIdentity,
+  }, requestPath)
+}
+
 export async function post(path, body, { signal, allowRunMutationModes = [] } = {}) {
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path, { allowModes: allowRunMutationModes })
