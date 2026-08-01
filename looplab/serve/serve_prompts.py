@@ -126,13 +126,11 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         f"Task catalogue:\n{cat_lines}\n")
 
 
-# CLAUDE REVIEW: [DOCS-MISMATCH] Stale trust-boundary description: boss.py now calls
-# boss_prompt_parts and appends only the TRUSTED suffix (status/attention/hardware) to this
-# constant, sending untrusted node code/rationales/report as a SEPARATE labelled user message. It
-# does not append the joined `_boss_context(...)` named here, which would put untrusted grounding at
-# system authority — the exact injection footgun the split was built to avoid.
-# Boss `/command` action-router (`POST /api/runs/{id}/command`): the route appends the run's
-# `_boss_context(...)` grounding to this constant.
+# Boss `/command` action-router (`POST /api/runs/{id}/command`). The route calls `boss_prompt_parts`
+# and appends only the TRUSTED suffix (status / attention / hardware) to this constant; untrusted
+# grounding — node code, rationales, the report — travels as a SEPARATE labelled user message. It
+# deliberately does NOT append the joined `_boss_context(...)`, which would put untrusted text at
+# SYSTEM authority: the exact injection footgun that split exists to close.
 COMMAND_SYSTEM = (
     "You are the BOSS of an autonomous ML experiment run. Turn the human's chat message into a "
     "PLAN: a short conversational `reply` plus an ORDERED list of `actions` to apply right now. "
@@ -177,10 +175,9 @@ COMMAND_SYSTEM = (
     "Give each step a one-line `rationale`.\n\n")
 
 
-# CLAUDE REVIEW: [DOCS-MISMATCH] Same staleness as COMMAND_SYSTEM above: the /chat route uses
-# boss_prompt_parts (advisory=True) and appends only the trusted suffix here, not the joined
-# `_boss_context(...)`; untrusted evidence travels as a separate labelled user message.
-# Per-run advisory chat (`POST /api/runs/{id}/chat`): the route appends `_boss_context(...)`.
+# Per-run advisory chat (`POST /api/runs/{id}/chat`). Same trust split as COMMAND_SYSTEM above: the
+# route calls `boss_prompt_parts(advisory=True)` and appends only the trusted suffix here, never the
+# joined `_boss_context(...)` — untrusted evidence is a separate labelled user message.
 CHAT_SYSTEM = (
     "You are an ML research collaborator embedded in an autonomous experiment loop, chatting "
     "with the human running it. Talk like a sharp, friendly colleague at a whiteboard — warm "

@@ -2922,3 +2922,36 @@ def test_the_finalize_pending_check_reads_the_incremental_index_not_the_whole_lo
     EventStore(rd / "events.jsonl").append("run_abort", {"reason": "operator"})
     assert srv.commands._finalize_incomplete(rd) is True
     assert full_reads == [] and srv_state == []
+
+
+def test_operator_collaboration_appends_do_not_extend_a_stalled_finalize(tmp_path):
+    """The observation deadline slid on `latest_seq`, which counts CONTROL and collaboration events.
+    Card drops and comments deliberately bypass the active-driver gate, so while a finalize sat
+    `executing` an operator who kept appending them repeatedly bumped `latest_seq` and extended the
+    window against a driver that had made no finalize progress at all — bounded only by
+    `absolute_deadline_at` (~20 min by default). `has_domain_progress` excludes exactly those, which
+    is why it exists; it had no production caller at all while the slide used the raw cursor."""
+    import inspect
+
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    client, srv = _client(tmp_path, _Driver(alive=False))
+
+    # The two cursors must genuinely diverge, or the distinction below means nothing.
+    store.append("card_dropped", {"id": "c1", "dropped_by": "operator"})
+    store.append("comment_created", {"comment_id": "k1", "body": "still waiting"})
+    observed = srv.commands._observe(rd)
+    assert observed.latest_seq > observed.max_non_control_seq
+    domain_cursor = observed.max_non_control_seq
+    assert observed.has_domain_progress(domain_cursor) is False, (
+        "operator collaboration appends must not read as driver progress")
+
+    # …and ENGINE work does move it, so the slide still protects a genuinely working driver.
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    assert srv.commands._observe(rd).has_domain_progress(domain_cursor) is True
+
+    # The slide itself asks that question rather than comparing raw sequence numbers.
+    slide = inspect.getsource(run_commands_module.RunCommandService._execute)
+    condition = slide.split("or spec.engine_policy is not EnginePolicy.NO_SPAWN)", 1)[1][:300]
+    assert "has_domain_progress(last_progress_seq)" in condition, condition
+    assert "latest_seq > last_progress_seq" not in condition, condition

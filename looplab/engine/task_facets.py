@@ -148,10 +148,11 @@ def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_cal
                 }, ensure_ascii=False, separators=(",", ":"))}]
         out = parse_structured(client, msgs, _Out, parser)
         raw = out.facets.model_dump()
-        # CLAUDE REVIEW: [QUALITY] hardcoded `60` decoupled from `_MAX_FACET` (the constant used by
-        # `record_task_facets`'s len>_MAX_FACET RAISE at ln 177). steward_task_facets chains propose->record,
-        # so lowering _MAX_FACET would let propose emit slugs record then rejects with ValueError. Use _MAX_FACET.
-        facets = {ax: normalize_key(raw.get(ax))[:60] for ax in FACET_AXES if normalize_key(raw.get(ax))}
+        # `_MAX_FACET`, not a hardcoded 60: `record_task_facets` RAISES on `len > _MAX_FACET`, and
+        # `steward_task_facets` chains propose -> record, so a decoupled literal meant lowering the
+        # constant would let propose emit slugs that record then rejects with ValueError.
+        facets = {ax: normalize_key(raw.get(ax))[:_MAX_FACET]
+                  for ax in FACET_AXES if normalize_key(raw.get(ax))}
         return facets
     except Exception:  # noqa: BLE001 — interactive callers retain the historical best-effort contract
         if raise_on_failure:

@@ -3895,8 +3895,12 @@ class RunCommandService:
                 self._succeeded(rd, path, record)
                 return
 
+            # The baseline is the DOMAIN cursor, matching what the slide below compares against —
+            # seeding it from `latest_seq` would start the window ahead of every domain event whose
+            # seq a later control append had already passed, and the first real progress would then
+            # fail to slide.
             if record.get("last_progress_seq") is None:
-                last_progress_seq = observation.latest_seq
+                last_progress_seq = observation.max_non_control_seq
             else:
                 last_progress_seq = int(record.get("last_progress_seq", -1))
             while True:
@@ -3923,19 +3927,21 @@ class RunCommandService:
                 # Pause/finalize may legitimately wait through one long evaluation or wrap-up. A
                 # live lock or fresh event progress slides their observation deadline; an actually
                 # stalled/dead driver still reaches a terminal timeout.
-                # CLAUDE REVIEW: [LOGIC] The deadline slide keys on `latest_seq` (ANY event, including
-                # control/collaboration appends) rather than DOMAIN progress. Collaboration events
-                # (card drops, comments) deliberately bypass the active-driver gate, so while a finalize
-                # sits `executing` an operator that keeps appending them repeatedly bumps latest_seq and
-                # extends this observation window against a stalled/dead driver that made no finalize
-                # progress — bounded only by absolute_deadline_at (~20 min default). The observation
-                # layer already exposes a domain-only signal built for exactly this (max_non_control_seq
-                # / has_domain_progress, which EXCLUDE control events), but it is unused here.
+                # DOMAIN progress, not any append. Keying the slide on `latest_seq` counted CONTROL
+                # and collaboration events too — and card drops/comments deliberately bypass the
+                # active-driver gate, so while a finalize sat `executing` an operator who kept
+                # appending them repeatedly bumped `latest_seq` and extended this observation window
+                # against a stalled or dead driver that had made no finalize progress at all, bounded
+                # only by `absolute_deadline_at` (~20 min). `max_non_control_seq` is the signal the
+                # observation layer already builds for exactly this — it excludes CONTROL_EVENTS —
+                # and the driver-liveness half of the condition (`alive`) is untouched, so a live
+                # engine still slides its own deadline whether or not it has appended yet.
+                progress_seq = observation.max_non_control_seq
                 if ((record.get("postcondition") in {"paused_and_stopped", "finished_and_stopped"}
                      or spec.engine_policy is not EnginePolicy.NO_SPAWN)
-                        and (alive or latest_seq > last_progress_seq)):
-                    last_progress_seq = latest_seq
-                    record["last_progress_seq"] = latest_seq
+                        and (alive or observation.has_domain_progress(last_progress_seq))):
+                    last_progress_seq = progress_seq
+                    record["last_progress_seq"] = progress_seq
                     # Never shrink a longer Popen→engine.lock lease installed above. Fresh progress
                     # extends a normal observation deadline, while an in-flight spawn keeps its full
                     # startup window even if this is the monitor's first pass.

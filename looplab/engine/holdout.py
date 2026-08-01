@@ -85,15 +85,13 @@ class HoldoutGrader:
         import json as _json
         from looplab.runtime.command_eval import host_score
         g = self._e._host_grader
-        # CLAUDE REVIEW: [DOCS-MISMATCH] This comment claims the medal/above-median report "rides along
-        # in extra_metrics", but the mlebench branch below never touches res.extra_metrics — it writes the
-        # report to mlebench_report.json and its OWN comment (lines below) states it must NOT go into
-        # extra_metrics (typed dict[str,float]). The extra_metrics claim here is stale and misleads a
-        # maintainer looking for medal data on the node's Pareto objectives.
         # Real MLE-bench: the candidate writes submission.csv; mle-bench's REAL grader scores it
         # out-of-process against private/test.csv answers (in the mle-bench data dir, never copied
-        # into the candidate workdir). The official score replaces any self-report; the medal/
-        # above-median report rides along in extra_metrics for the trust panel + final report.
+        # into the candidate workdir). The official score replaces any self-report. The medal /
+        # above-median report is written to `mlebench_report.json` and read from there by the trust
+        # panel and the final report — NOT to `res.extra_metrics`, which is a typed dict[str, float]
+        # and feeds the node's Pareto objectives (see the branch's own note below). This comment used
+        # to say extra_metrics, sending anyone looking for medal data to the wrong place.
         if g.get("kind") == "mlebench":
             from looplab.adapters.mlebench_grade import grade_in_subprocess
             # Resolve so the grader subprocess (run from the repo root) reads the submission from the

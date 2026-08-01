@@ -767,19 +767,6 @@ class SpeculationMixin:
         ]
         return min(matches, key=lambda node: node.id) if matches else None
 
-    # CLAUDE REVIEW: [DEAD-CODE] this method is shadowed on every real Engine — the Engine class body
-    # (orchestrator.py::_refresh_speculation_budget) overrides it without calling super(), and its own
-    # docstring says so ("This overrides the SpeculationMixin helper..."). The override takes an extra
-    # `events=` kwarg and refunds the hard Node-reservation ceiling differently, so this mixin version
-    # is never invoked (all call sites resolve to the override via MRO). It is stale relative to the
-    # authoritative one and can only mislead; either delete it or make the override delegate to it.
-    def _refresh_speculation_budget(self, state: RunState) -> None:
-        used = card_budget_used(state)
-        self.policy.max_nodes = max(
-            used,
-            self._base_max_nodes + int(state.budget_overrides.get("add_nodes", 0) or 0),
-        )
-
     def _speculative_selection_node_limit(self, state: RunState) -> int:
         """Compensate the pure selector for request slots already removed from the live denominator.
 

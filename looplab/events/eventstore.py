@@ -720,6 +720,9 @@ class EventStore:
         # extend the incremental cache without re-hashing its prefix; externally observed growth
         # must prove the cached prefix still matches disk before joining a new tail to it.
         self._trusted_growth_stat: Optional[tuple] = None
+        # Latch for `_publish_dir_entry`: the log's directory entry only needs a strict sync from the
+        # append that CREATES the file, and `strict_fsync` is a process-wide single-flight.
+        self._dir_entry_published = False
         # The abort watcher (and, under eval_parallel fan-out, several concurrent watchers) call read_all()
         # from worker THREADS while the main loop may also read — guard the cache top-up so a
         # concurrent extend/offset update can't race into a corrupt cache.
@@ -832,6 +835,24 @@ class EventStore:
                 f.truncate(newline_at + 1 if newline_at != -1 else 0)
         except OSError:
             pass  # best-effort healing; a read still tolerates the torn tail
+
+    def _publish_dir_entry(self, existed: bool) -> None:
+        """Durably publish the log's directory ENTRY, once, for the append that created the file.
+
+        `fsync(file)` confirms contents but not the parent directory entry that makes a
+        first-created paid-work claim discoverable after power loss. Only the CREATING append needs
+        this: once the entry is synced it stays durable, and every later append is covered by the
+        content sync alone.
+
+        Deliberately not unconditional. `strict_fsync` is process-wide SINGLE-FLIGHT and spawns a
+        worker thread per call, so syncing the directory on every durable append would double the
+        traffic through that serialized resource on the hot claim path for no added durability.
+        """
+        if existed or self._dir_entry_published:
+            self._dir_entry_published = True
+            return
+        strict_fsync_parent(self.path)
+        self._dir_entry_published = True
 
     def _uncertain_append_needs_reservation(self, seq: int) -> bool:
         """Whether an append that failed mid-sync left bytes only a SEQ RESERVATION can fence.
@@ -953,6 +974,7 @@ class EventStore:
             line = orjson.dumps(e.model_dump(mode="json"))
             accepted = False
             written_stat = None
+            existed = os.path.exists(self.path)
             try:
                 with open(self.path, "ab") as f:
                     f.write(line + b"\n")
@@ -960,17 +982,16 @@ class EventStore:
                     # reports failure. Reserve its seq on every exceptional exit.
                     accepted = True
                     f.flush()
-                    # `require_durable` syncs the file CONTENTS *and* the parent DIRECTORY entry.
-                    # Content-only was a real durability gap: when this append is the one that created
-                    # events.jsonl (or an earlier best-effort append created the link and it has not
-                    # been flushed), a power loss can lose the WHOLE FILE even though this record's
-                    # bytes were strictly synced — which is exactly the "paid_work_claimed survives a
-                    # crash before the external side effect" contract the flag exists for, so a
-                    # durable paid claim could vanish and be re-billed. `strict_atomic_write_bytes`
-                    # has always paired the two this way.
+                    # `require_durable` syncs the file CONTENTS, and `_publish_dir_entry` below adds
+                    # the parent DIRECTORY entry the first time it is needed. Content-only was a real
+                    # durability gap: when the durable append is the one that created events.jsonl —
+                    # or an earlier best-effort append created the link and it was never flushed — a
+                    # power loss can lose the WHOLE FILE even though the record's bytes were strictly
+                    # synced, which is exactly the "paid_work_claimed survives a crash before the
+                    # external side effect" contract this flag exists for. A durable paid claim could
+                    # vanish and be re-billed. `strict_atomic_write_bytes` has always paired the two.
                     if require_durable:
                         strict_fsync(f.fileno())
-                        strict_fsync_parent(self.path)
                     else:
                         best_effort_fsync(f.fileno())  # read tolerates a torn final line
                     written_stat = os.fstat(f.fileno())
@@ -978,6 +999,8 @@ class EventStore:
                 if accepted:
                     self._mark_uncertain_append(seq)
                 raise
+            if require_durable:
+                self._publish_dir_entry(existed)
             self._seq = seq
             if written_stat is not None:
                 self._trusted_growth_stat = (
@@ -1058,16 +1081,14 @@ class EventStore:
                 raise ValueError(f"event batch exceeds {_MAX_EVENT_BATCH_BYTES} serialized bytes")
             accepted = False
             written_stat = None
+            existed = os.path.exists(self.path)
             try:
                 with open(self.path, "ab") as f:
                     f.write(payload)
                     accepted = True
                     f.flush()
-                    # Parent-directory sync for the same reason as `append` above: a first-created
-                    # log can otherwise be lost on power loss despite a strictly-synced receipt.
                     if require_durable:
                         strict_fsync(f.fileno())
-                        strict_fsync_parent(self.path)
                     else:
                         best_effort_fsync(f.fileno())
                     written_stat = os.fstat(f.fileno())
@@ -1075,6 +1096,8 @@ class EventStore:
                 if accepted:
                     self._mark_uncertain_append(events[-1].seq)
                 raise
+            if require_durable:
+                self._publish_dir_entry(existed)
             self._seq = events[-1].seq
             if written_stat is not None:
                 self._trusted_growth_stat = (

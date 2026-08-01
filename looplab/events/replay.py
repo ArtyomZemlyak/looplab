@@ -1977,21 +1977,59 @@ def _materialize_concept_deltas(
         st.node_concepts[nid] = sorted(effective.get(nid, set()))
 
 
+# The only fields any consumer reads off a coverage snapshot, with the shape each one is read AS:
+# `at_node`/`projection_token` gate liveness (`snapshot_matches_analytics_projection`), `fired` +
+# `directive` drive the pivot cue, `current_streak`/`recent_axis`/`locked_axis` drive
+# capability-expansion, and the rest is display/diagnostic. Anything else on the row is dropped.
+_COVERAGE_SNAPSHOT_STR = ("projection_token", "directive", "top_concept", "locked_axis",
+                          "recent_axis", "tag_mode")
+_COVERAGE_SNAPSHOT_INT = ("at_node", "experiments", "streak", "current_streak")
+_COVERAGE_SNAPSHOT_FLOAT = ("top_concept_frac",)
+_COVERAGE_SNAPSHOT_LIST = ("uncovered_key", "uncovered_axes")
+_COVERAGE_TEXT_MAX = 2_000
+_COVERAGE_LIST_MAX = 64
+
+
+def _coverage_snapshot_row(d: dict) -> dict:
+    """One coverage snapshot, re-bound into a detached allow-listed row with every field bounded.
+
+    Absent/ill-typed fields are simply omitted, so a consumer's `.get(...)` sees the same "no signal"
+    it already handles — never a str where it expects an int, and never an unbounded blob.
+    """
+    row: dict = {}
+    for key in _COVERAGE_SNAPSHOT_STR:
+        value = d.get(key)
+        if isinstance(value, str):
+            row[key] = value[:_COVERAGE_TEXT_MAX]
+    for key in _COVERAGE_SNAPSHOT_INT:
+        value = d.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            row[key] = value
+    for key in _COVERAGE_SNAPSHOT_FLOAT:
+        value = d.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value == value:
+            row[key] = float(value)
+    for key in _COVERAGE_SNAPSHOT_LIST:
+        value = d.get(key)
+        if isinstance(value, list):
+            row[key] = [item[:_COVERAGE_TEXT_MAX] for item in value[:_COVERAGE_LIST_MAX]
+                        if isinstance(item, str)]
+    if isinstance(d.get("fired"), bool):
+        row["fired"] = d["fired"]
+    return row
+
+
 def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV Phase 2a: the fold only retains the coverage / uncovered-region curve and never selects
     # from it; the live proposal path may later consume the record as a steering cue. at_node dedups resume.
     # This journal is behavioral, not audit-only: ``capability_expansion_due`` can rewrite
-    # the proposal cue and stamp KIND_EXPAND. Admit a detached, allow-listed, bounded schema and compact
-    # history; retaining raw event data lets malformed/oversized fields steer search and inflate every
-    # fold, owner-state response, and SSE update.
-    # CLAUDE REVIEW: [QUALITY] the append still stores the raw Event.data verbatim — the exact
-    # "retaining raw event data" the comment two lines up says NOT to do. It is behavioral (strategy.py
-    # /proposal_cues.py read arbitrary `(c or {}).get(...)` fields off each snapshot to steer proposals),
-    # unbounded, and aliased into RunState (deep-copied on every FoldCursor snapshot). Unlike the card
-    # handlers, which re-bound into a detached schema, a malformed/oversized field on a hand-edited or
-    # foreign log flows through unchecked; the prescribed detached/allow-listed/bounded projection was
-    # never applied here.
-    st.concept_coverage_snapshots.append(d)
+    # the proposal cue and stamp KIND_EXPAND. So the row is admitted through a DETACHED, ALLOW-LISTED,
+    # BOUNDED projection, like the card handlers — it used to append `d` verbatim, which is the exact
+    # "retaining raw event data" this comment forbids: `strategy.py` / `proposal_cues.py` read
+    # arbitrary fields off each snapshot to steer proposals, so a malformed or oversized field on a
+    # hand-edited or foreign log flowed straight through, aliased into RunState and deep-copied on
+    # every FoldCursor snapshot.
+    st.concept_coverage_snapshots.append(_coverage_snapshot_row(d))
 
 def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D5 Phase 2c: the LLM tagger's RAW tags for one node, recorded once so later cadences reuse

@@ -458,13 +458,12 @@ class Settings(BaseSettings):
     # SIGXFSZ instead of filling the host disk. POSIX only. Default "" = OFF (large model checkpoints
     # need big files); set it for tasks that write only small artifacts.
     sandbox_fsize_local: str = ""
-    # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha".
-    # CLAUDE REVIEW: [DOCS-MISMATCH] this enum list omits "bohb", which IS a registered policy
-    # (search/policy.py::_REGISTRY aliases it to the ASHA factory) and IS advertised by
-    # appconfig.render_template ("greedy | evolutionary | mcts | asha | bohb") and the `bohb` template
-    # kind. The schema comment (the documented value set) undersells the valid values. (policy itself is
-    # unvalidated at config time, but make_policy raises on an unknown name, so a typo fails loud-late
-    # rather than silently — unlike developer_backend above.)
+    # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha" | "bohb".
+    # `bohb` is a registered policy (`search/policy.py::_REGISTRY` aliases it to the ASHA factory,
+    # which BOHB reuses as its racing half) and is advertised by `appconfig.render_template` and the
+    # `bohb` template kind; this comment used to omit it and undersell the valid set. The value is
+    # not validated at config time, but `make_policy` raises on an unknown name — loud-late rather
+    # than silent, unlike `developer_backend` above.
     policy: str = "greedy"
     # Ablation-driven refinement (I7): every N improves, ablate the best to find the
     # highest-impact parameter and refine it. 0 = off. (GreedyTree only.)
@@ -1332,18 +1331,14 @@ class Settings(BaseSettings):
         # novelty_mode drives the dedup/novelty gate; an out-of-set value (e.g. a mis-cased
         # LOOPLAB_NOVELTY_MODE=LLM, or "on") used to fall through _apply_novelty_gate silently as a
         # NO-OP — turning the gate off with no diagnostic. Fail loudly at config time like trust_gate/
-        # merge_mode do. (Other enum-ish string fields — seed_mode/eval_trust_mode/strategist_backend —
-        # share the pattern; left unvalidated here only because their full value sets are less settled.)
+        # merge_mode do. (seed_mode / eval_trust_mode / strategist_backend share the pattern and are
+        # validated in this same block, just below.)
         if self.novelty_mode not in ("off", "algo", "llm"):
             raise ValueError(
                 f"novelty_mode must be off|algo|llm, got {self.novelty_mode!r}")
         # The remaining enum-ish string fields (arch-review §5 P3): a typo used to be accepted at
         # construction and only fail-safe/later-loud downstream (e.g. a mis-cased strategist_backend
         # silently ran the default). Fail loudly here like the fields above.
-        # CLAUDE REVIEW: [READABILITY] the parenthetical in the novelty_mode comment above claims
-        # seed_mode/eval_trust_mode/strategist_backend are "left unvalidated here ... because their full
-        # value sets are less settled" — stale: all three ARE validated in this very block below. Update
-        # that parenthetical so a load-bearing comment doesn't contradict the code 8 lines down.
         if self.strategist_backend not in ("off", "rule", "llm", "agent"):
             raise ValueError(
                 f"strategist_backend must be off|rule|llm|agent, got {self.strategist_backend!r}")

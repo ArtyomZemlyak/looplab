@@ -326,14 +326,30 @@ def test_a_durable_append_syncs_the_parent_directory_too(tmp_path, monkeypatch):
     parents = []
     monkeypatch.setattr(eventstore_module, "strict_fsync_parent", lambda p: parents.append(str(p)))
 
-    path = tmp_path / "fresh" / "events.jsonl"
-    path.parent.mkdir()
-    store = EventStore(path)
-    store.append("run_started", {"run_id": "r"})               # best-effort: no parent sync
+    # A durable append that CREATES the log publishes its directory entry.
+    fresh = tmp_path / "fresh" / "events.jsonl"
+    fresh.parent.mkdir()
+    created = EventStore(fresh)
+    created.append("run_started", {"run_id": "r"}, require_durable=True)
+    assert parents == [str(fresh)], parents
+
+    # ...once. `strict_fsync` is process-wide SINGLE-FLIGHT and spawns a worker thread per call, so
+    # repeating it on every durable append would double traffic through that serialized resource on
+    # the hot claim path without adding durability — the entry is already published.
+    created.append("paid_work_claimed", {"attempt": 1}, require_durable=True)
+    created.append_many([("pause", {}), ("resume", {})], require_durable=True)
+    assert parents == [str(fresh)], parents
+
+    # A log that already exists needs no publication: some earlier append made the entry durable.
+    existing = tmp_path / "old" / "events.jsonl"
+    existing.parent.mkdir()
+    existing.write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
+    parents.clear()
+    EventStore(existing).append("paid_work_claimed", {"attempt": 1}, require_durable=True)
     assert parents == []
 
-    store.append("paid_work_claimed", {"attempt": 1}, require_durable=True)
-    assert parents == [str(path)], parents
-
-    store.append_many([("pause", {}), ("resume", {})], require_durable=True)
-    assert parents == [str(path), str(path)], parents
+    # ...and a BEST-EFFORT append never publishes, whether or not it creates the file.
+    besteffort = tmp_path / "cheap" / "events.jsonl"
+    besteffort.parent.mkdir()
+    EventStore(besteffort).append("run_started", {"run_id": "r"})
+    assert parents == []
