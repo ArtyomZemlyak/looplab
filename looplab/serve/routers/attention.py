@@ -37,6 +37,7 @@ class _AttentionSnapshot:
     generated_at: float
     completed_at: float
     items: tuple[dict, ...]
+    active_action_count: int
     partial: bool
 
 
@@ -207,8 +208,18 @@ def build_router(srv) -> APIRouter:
 
     def build_snapshot() -> _AttentionSnapshot:
         items, partial = scan_items()
+        active_action_count = sum(
+            1 for item in items
+            if item.get("active") is True
+            and str(item.get("kind") or "") in ATTENTION_NEEDS_ACTION_KINDS
+        )
         normalized = json.dumps(
-            {"items": items, "partial": partial}, sort_keys=True, separators=(",", ":"),
+            {
+                "items": items,
+                "partial": partial,
+                "active_action_count": active_action_count,
+            },
+            sort_keys=True, separators=(",", ":"),
             ensure_ascii=True, allow_nan=False,
         ).encode("ascii")
         return _AttentionSnapshot(
@@ -217,6 +228,7 @@ def build_router(srv) -> APIRouter:
             generated_at=time.time(),
             completed_at=time.monotonic(),
             items=items,
+            active_action_count=active_action_count,
             partial=partial,
         )
 
@@ -274,6 +286,7 @@ def build_router(srv) -> APIRouter:
             "snapshot_id": snapshot.snapshot_id,
             "generated_at": snapshot.generated_at,
             "stale": bool(stale),
+            "active_action_count": snapshot.active_action_count,
             "items": list(snapshot.items[start:end]),
             "truncated": truncated,
             "next_cursor": next_cursor,

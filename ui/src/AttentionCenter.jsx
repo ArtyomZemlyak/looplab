@@ -41,6 +41,18 @@ function snapshotAge(value, now = Date.now()) {
   return `${Math.floor(elapsed / 86_400_000)}d ago`
 }
 
+const itemWord = count => count === 1 ? 'item' : 'items'
+
+function actionCountCopy(count, still = false) {
+  if (count === 1) return `1 item${still ? ' still' : ''} needs action`
+  return `${count} items${still ? ' still' : ''} need action`
+}
+
+function visualCount(count, incomplete = false) {
+  if (count > 99) return '99+'
+  return `${count}${incomplete ? '+' : ''}`
+}
+
 function capabilityCopy(capability, preferences) {
   if (!preferences.available) {
     return 'Desktop alerts are unavailable because this browser cannot safely persist notification state.'
@@ -123,7 +135,7 @@ export default function AttentionCenter() {
   const {
     items, currentItems, initialized, runStale, permissionsStale, partial, truncated,
     hasMore, loadingMore, loadMoreError, loadMore, refresh,
-    authoritative, verified, runVerifiedGeneratedAt,
+    authoritative, verified, runVerifiedGeneratedAt, runActiveActionCount,
   } = useAttention()
   const [open, setOpen] = useState(false)
   const [preferences, setPreferences] = useState(() => loadAttentionState())
@@ -186,10 +198,38 @@ export default function AttentionCenter() {
   const recentItems = useMemo(
     () => visibleItems.filter(item => !(item.needsAction && item.active)), [visibleItems],
   )
-  const unreadCount = useMemo(
-    () => visibleItems.reduce((count, item) => count + (acknowledgedIds.has(item.id) ? 0 : 1), 0),
+  const unreadItems = useMemo(
+    () => visibleItems.filter(item => !acknowledgedIds.has(item.id)),
     [visibleItems, acknowledgedIds],
   )
+  const unreadCount = unreadItems.length
+  const permissionActiveActionCount = useMemo(
+    () => currentItems.reduce((count, item) => count
+      + (item.source === 'permission' && item.needsAction && item.active ? 1 : 0), 0),
+    [currentItems],
+  )
+  const runActionCountKnown = Number.isSafeInteger(runActiveActionCount)
+    && runActiveActionCount >= 0
+  const loadedRunActionCount = actionItems.reduce((count, item) => count
+    + (item.source === 'run' ? 1 : 0), 0)
+  const feedAuthoritative = authoritative === true
+  const displayedRunActionCount = feedAuthoritative && runActionCountKnown
+    ? runActiveActionCount
+    : Math.max(runActionCountKnown ? runActiveActionCount : 0, loadedRunActionCount)
+  const activeActionCount = displayedRunActionCount
+    + permissionActiveActionCount
+  const actionCountExact = feedAuthoritative && runActionCountKnown
+  const actionPhrase = actionCountCopy(activeActionCount)
+  const stillActionPhrase = actionCountCopy(activeActionCount, true)
+  const uncertainActionPhrase = activeActionCount === 1
+    ? (verified
+        ? '1 item is shown or was last verified as needing action'
+        : '1 loaded item needs action')
+    : (verified
+        ? `${activeActionCount} items are shown or were last verified as needing action`
+        : `${activeActionCount} loaded items need action`)
+  const unreadComplete = feedAuthoritative && !truncated
+  const unreadPaginationIncomplete = feedAuthoritative && truncated
 
   // Baseline each source's first successful snapshot silently. A source may recover after the other
   // one initialized the hook, so treating them separately prevents a delayed backlog avalanche.
@@ -254,9 +294,16 @@ export default function AttentionCenter() {
 
   const markAllRead = useCallback(async () => {
     if (!unreadCount) return
-    await persistIds('acknowledged', visibleItems.map(item => item.id),
-      `${unreadCount} ${unreadCount === 1 ? 'item' : 'items'} marked as read.`)
-  }, [persistIds, unreadCount, visibleItems])
+    const loaded = unreadComplete ? '' : 'loaded '
+    const unresolved = activeActionCount > 0
+      ? actionCountExact
+        ? ` ${stillActionPhrase}.`
+        : ` ${uncertainActionPhrase}. Current action total is unavailable.`
+      : ''
+    await persistIds('acknowledged', unreadItems.map(item => item.id),
+      `${unreadCount} ${loaded}${itemWord(unreadCount)} marked as read.${unresolved}`)
+  }, [activeActionCount, actionCountExact, persistIds, stillActionPhrase,
+    uncertainActionPhrase, unreadComplete, unreadCount, unreadItems])
 
   const openPermission = useCallback(async item => {
     if (item?.source !== 'permission' || !/^[0-9a-f]{16}$/.test(item.session || '')) return
@@ -338,7 +385,7 @@ export default function AttentionCenter() {
     return () => { active = false }
   }, [broadcastInvalidation, deliveryKey, initialized, preferences.state.enabled, reloadPreferences])
 
-  // If dismissing the focused row removes it from the DOM, keep keyboard focus inside the dialog.
+  // If a focused read/dismiss control disappears from the DOM, keep keyboard focus in the dialog.
   useEffect(() => {
     if (!open) return
     const frame = requestAnimationFrame(() => {
@@ -348,9 +395,9 @@ export default function AttentionCenter() {
       }
     })
     return () => cancelAnimationFrame(frame)
-  }, [open, visibleItems.length])
+  }, [open, unreadCount, visibleItems.length])
 
-  const feedVerified = authoritative === true
+  const feedVerified = feedAuthoritative
   const verifiedAge = verified === true ? snapshotAge(runVerifiedGeneratedAt) : ''
   const sourceMessages = []
   if (!initialized) sourceMessages.push('Updating attention items…')
@@ -367,17 +414,52 @@ export default function AttentionCenter() {
   const notificationsEnabled = preferences.valid && preferences.state.enabled
   const enableBlocked = notificationBusy || !preferences.available
     || capability === 'unsupported' || capability === 'denied' || capability === 'locks-unavailable'
-  const badge = unreadCount > 99 ? '99+' : String(unreadCount)
-  const triggerLabel = unreadCount
-    ? `Open attention center, ${unreadCount} unread ${unreadCount === 1 ? 'item' : 'items'}`
-    : 'Open attention center'
+  const unreadPhrase = unreadCount === 1 ? '1 unread item' : `${unreadCount} unread items`
+  const loadedUnreadPhrase = unreadCount > 0
+    ? `${unreadCount} unread loaded ${itemWord(unreadCount)}` : 'unread count incomplete'
+  const actionAria = actionCountExact
+    ? (activeActionCount > 0 ? actionPhrase : 'no items need action')
+    : activeActionCount > 0
+      ? `${uncertainActionPhrase}; current action total is unavailable`
+      : verified
+        ? 'current action total is unavailable; no loaded or last verified items need action'
+        : 'current action total is unavailable; no loaded items need action'
+  const unreadAria = unreadComplete
+    ? (unreadCount > 0 ? unreadPhrase : 'no unread items')
+    : unreadCount > 0
+      ? `at least ${unreadCount} loaded ${itemWord(unreadCount)} ${unreadCount === 1 ? 'is' : 'are'} unread`
+      : 'no unread items are loaded; unread count is incomplete'
+  const countAria = `${actionAria}; ${unreadAria}`
+  const triggerLabel = !initialized
+    ? 'Open attention center. Checking for updates.'
+    : feedVerified
+      ? `Open attention center, ${countAria}.`
+      : verified
+        ? `Open attention center. Current status unavailable. ${countAria}.`
+        : `Open attention center. Current status unavailable. No complete verified snapshot. ${countAria}.`
+  const badgeShowsActions = activeActionCount > 0
+  const showBadge = badgeShowsActions || unreadCount > 0 || unreadPaginationIncomplete
+  const badge = badgeShowsActions
+    ? `!${visualCount(activeActionCount)}${actionCountExact ? '' : '?'}`
+    : unreadCount > 0
+      ? visualCount(unreadCount, unreadPaginationIncomplete)
+      : '?'
+  const triggerClass = `attention-trigger${badgeShowsActions ? ' has-action' : showBadge ? ' has-unread' : ''}${feedVerified ? '' : ' is-unverified'}`
   const headerStatus = !initialized
     ? 'Checking for updates'
     : !feedVerified
       ? (verifiedAge ? `Last verified ${verifiedAge}` : 'Status unavailable')
-      : unreadCount
-        ? `${unreadCount} unread ${unreadCount === 1 ? 'item' : 'items'}`
-        : 'You are caught up'
+      : activeActionCount > 0
+        ? unreadCount > 0
+          ? `${actionPhrase} · ${unreadComplete ? unreadPhrase : loadedUnreadPhrase}`
+          : unreadComplete
+            ? stillActionPhrase
+            : `${stillActionPhrase} · unread count incomplete`
+        : unreadCount > 0
+          ? (unreadComplete ? unreadPhrase : loadedUnreadPhrase)
+          : unreadComplete
+            ? 'You are caught up'
+            : 'Unread count incomplete'
   const actionEmptyCopy = !initialized
     ? 'Checking for items that need action…'
     : feedVerified
@@ -390,11 +472,12 @@ export default function AttentionCenter() {
       : 'Recent notice status is unavailable. Showing the last verified snapshot.'
 
   return <>
-    <button type="button" className={`attention-trigger${unreadCount ? ' has-unread' : ''}`}
+    <button type="button" className={triggerClass}
       aria-label={triggerLabel} aria-haspopup="dialog" aria-expanded={open}
       aria-controls={drawerId} onClick={() => setOpen(value => !value)}>
       <OpIcon name="bell" size={22} className="attention-bell-icon" />
-      {unreadCount > 0 && <span className="attention-badge" aria-hidden="true">{badge}</span>}
+      {showBadge && <span className={`attention-badge ${badgeShowsActions ? 'is-action' : 'is-unread'}`}
+        aria-hidden="true">{badge}</span>}
     </button>
     <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {liveMessage.text && <span key={liveMessage.revision}>{liveMessage.text}</span>}
@@ -410,7 +493,8 @@ export default function AttentionCenter() {
             <p id={descriptionId}>{headerStatus}</p>
           </div>
           {unreadCount > 0 && <button type="button" className="attention-header-action"
-            onClick={markAllRead}>Mark all read</button>}
+            aria-label={`${unreadComplete ? 'Mark all' : 'Mark'} ${unreadCount} ${unreadComplete ? 'unread' : 'loaded unread'} ${itemWord(unreadCount)} as read${activeActionCount > 0 ? `; ${actionCountExact ? stillActionPhrase : `${uncertainActionPhrase}; current action total is unavailable`}` : ''}`}
+            onClick={markAllRead}>{unreadComplete ? 'Mark all read' : 'Mark loaded read'}</button>}
           <button type="button" className="attention-close" aria-label="Close attention center"
             data-dialog-initial-focus onClick={close}><OpIcon name="cross" size={20} /></button>
         </header>
@@ -427,7 +511,14 @@ export default function AttentionCenter() {
           <section className="attention-section" aria-labelledby={`${titleId}-action`}>
             <div className="attention-section-heading">
               <h3 id={`${titleId}-action`}>Needs action</h3>
-              <span>{actionItems.length}</span>
+              <span className={`attention-section-count${activeActionCount > 0 ? ' has-action' : ''}`}>
+                <span aria-hidden="true">{actionCountExact
+                  ? activeActionCount
+                  : activeActionCount > 99 ? '99+?' : `${activeActionCount}?`}</span>
+                <span className="sr-only">{actionCountExact
+                  ? `${actionPhrase} in total`
+                  : `${uncertainActionPhrase}. Current total unavailable.`}</span>
+              </span>
             </div>
             {actionItems.length
               ? <ul className="attention-list">{actionItems.map(item => <AttentionItem key={item.id}
@@ -454,7 +545,7 @@ export default function AttentionCenter() {
           <section className="attention-section" aria-labelledby={`${titleId}-recent`}>
             <div className="attention-section-heading">
               <h3 id={`${titleId}-recent`}>Recent</h3>
-              <span>{recentItems.length}</span>
+              <span className="attention-section-count">{recentItems.length}</span>
             </div>
             {recentItems.length
               ? <ul className="attention-list">{recentItems.map(item => <AttentionItem key={item.id}

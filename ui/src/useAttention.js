@@ -25,11 +25,17 @@ function normalizeRunPage(payload) {
       || !Array.isArray(payload.items) || !SNAPSHOT_RE.test(payload.snapshot_id || '')
       || typeof payload.generated_at !== 'number' || !Number.isFinite(payload.generated_at)
       || payload.generated_at <= 0 || typeof payload.stale !== 'boolean'
-      || typeof payload.truncated !== 'boolean' || typeof payload.partial !== 'boolean') return null
+      || typeof payload.truncated !== 'boolean' || typeof payload.partial !== 'boolean'
+      || !Number.isSafeInteger(payload.active_action_count)
+      || payload.active_action_count < 0) return null
   const normalized = payload.items.map(normalizeRunAttention)
   // A protocol-invalid item must not turn an actionable last-safe snapshot into an
   // authoritative empty page. Treat the whole source read as stale and retry it.
   if (normalized.some(item => item == null)) return null
+  const pageActiveActionCount = normalized.reduce(
+    (count, item) => count + (item.needsAction && item.active ? 1 : 0), 0,
+  )
+  if (payload.active_action_count < pageActiveActionCount) return null
   const nextCursor = typeof payload.next_cursor === 'string'
     && SNAPSHOT_RE.test(payload.next_cursor) ? payload.next_cursor : null
   if ((payload.truncated && !nextCursor) || (!payload.truncated && payload.next_cursor != null)) return null
@@ -46,6 +52,7 @@ function normalizeRunPage(payload) {
     stale: payload.stale,
     snapshotId: payload.snapshot_id,
     generatedAt: payload.generated_at,
+    activeActionCount: payload.active_action_count,
   }
 }
 
@@ -148,11 +155,13 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
     runVerified: false, permissionsVerified: false,
     runStale: false, permissionsStale: false, partial: false, truncated: false,
     runSnapshotId: null, runGeneratedAt: null, runVerifiedGeneratedAt: null,
+    runActiveActionCount: null,
     nextCursor: null, firstNextCursor: null, loadingMore: false, loadMoreError: '',
   })
   const [refreshToken, setRefreshToken] = useState(0)
   const loadMoreRequestRef = useRef(null)
   const runSnapshotRef = useRef(null)
+  const runActiveActionCountRef = useRef({ snapshotId: null, count: null })
 
   const cancelLoadMore = useCallback(() => {
     const request = loadMoreRequestRef.current
@@ -176,10 +185,30 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
 
     const snapshotChanged = runSnapshotRef.current != null
       && runSnapshotRef.current !== firstPage.snapshotId
+    const priorCount = runActiveActionCountRef.current
+    const countMismatch = priorCount.snapshotId === firstPage.snapshotId
+      && priorCount.count !== firstPage.activeActionCount
+    if (countMismatch) {
+      cancelLoadMore()
+      setState(previous => ({
+        ...previous,
+        runPages: sourceStalePages(previous.runPages),
+        runAttempted: true,
+        runStale: true,
+        loadingMore: false,
+      }))
+      return false
+    }
     const archiveInvalidated = snapshotChanged || firstPage.stale || firstPage.partial
     const completeFresh = !firstPage.stale && !firstPage.partial
     if (archiveInvalidated) cancelLoadMore()
     runSnapshotRef.current = firstPage.snapshotId
+    if (completeFresh) {
+      runActiveActionCountRef.current = {
+        snapshotId: firstPage.snapshotId,
+        count: firstPage.activeActionCount,
+      }
+    }
     setState(previous => {
       const preserveArchive = !snapshotChanged && previous.runPages.length > 1
         && !previous.runStale && !previous.partial && !firstPage.stale && !firstPage.partial
@@ -215,6 +244,9 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
         partial: firstPage.partial,
         runSnapshotId: firstPage.snapshotId,
         runGeneratedAt: firstPage.generatedAt,
+        runActiveActionCount: completeFresh
+          ? firstPage.activeActionCount
+          : previous.runActiveActionCount,
         runVerifiedGeneratedAt: completeFresh
           ? firstPage.generatedAt
           : previous.runVerifiedGeneratedAt,
@@ -246,7 +278,10 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
   const loadMore = useCallback(async () => {
     const cursor = state.nextCursor
     const snapshotId = state.runSnapshotId
-    if (!cursor || !snapshotId || state.runStale || state.partial || loadMoreRequestRef.current) return
+    const activeActionCount = state.runActiveActionCount
+    if (!cursor || !snapshotId || !Number.isSafeInteger(activeActionCount)
+        || activeActionCount < 0 || state.runStale || state.partial
+        || loadMoreRequestRef.current) return
     setState(previous => ({ ...previous, loadingMore: true, loadMoreError: '' }))
     const request = deadlineRequest(
       signal => attentionFeed(200, cursor, { signal }),
@@ -257,9 +292,15 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
       const page = normalizeRunPage(await request.promise)
       if (loadMoreRequestRef.current !== request) return
       if (!page) throw new Error('invalid attention page')
+      if (page.snapshotId !== snapshotId || page.activeActionCount !== activeActionCount) {
+        const mismatch = new Error('attention snapshot changed')
+        mismatch.status = 409
+        throw mismatch
+      }
       setState(previous => {
         if (previous.runStale || previous.partial || previous.runSnapshotId !== snapshotId
-            || previous.nextCursor !== cursor || page.snapshotId !== snapshotId) {
+            || previous.runActiveActionCount !== activeActionCount
+            || previous.nextCursor !== cursor) {
           return {
             ...previous,
             runPages: sourceStalePages(previous.runPages.slice(0, 1)),
@@ -287,10 +328,10 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
       const cursorStale = error?.status === 409
       setState(previous => cursorStale ? ({
         ...previous,
-        runPages: previous.runPages.slice(0, 1),
-        nextCursor: null,
-        firstNextCursor: null,
-        truncated: false,
+        runPages: sourceStalePages(previous.runPages.slice(0, 1)),
+        nextCursor: previous.firstNextCursor,
+        truncated: !!previous.firstNextCursor,
+        runStale: true,
         loadingMore: false,
         loadMoreError: '',
       }) : ({
@@ -302,7 +343,8 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
     } finally {
       if (loadMoreRequestRef.current === request) loadMoreRequestRef.current = null
     }
-  }, [state.nextCursor, state.partial, state.runSnapshotId, state.runStale])
+  }, [state.nextCursor, state.partial, state.runActiveActionCount,
+    state.runSnapshotId, state.runStale])
 
   const refresh = useCallback(() => {
     cancelLoadMore()
