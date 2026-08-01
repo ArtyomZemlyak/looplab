@@ -14,6 +14,7 @@ from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
 from looplab.serve.metrics_adapters import read_node_metrics
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
+from looplab.events.replay import fold
 from looplab.serve.reviews import (
     DEFAULT_TTL_SECONDS, REVIEW_HEADER, ReviewError, exact_review_generation,
     exact_review_request_id, exact_review_token_secret)
@@ -486,18 +487,53 @@ def build_router(srv) -> APIRouter:
             return {"metrics": metrics}
 
     @router.get("/api/review/nodes/{nid}")
-    def review_node(nid: int, request: Request, seq: Optional[int] = None):
+    def review_node(nid: int, request: Request,
+                    seq: Optional[int] = Query(None, ge=0),
+                    expected_generation: Optional[str] = None):
         """Opt-in evidence projection: source/results, redacted, never live trace sidecars."""
         with _bound_run(request) as (record, rd):
             _evidence(record)
+            bound_generation = exact_review_generation(record.get("generation"))
+            if bound_generation is None:
+                raise _generation_gone()
+            request_generation = exact_review_generation(expected_generation)
+            if expected_generation is not None and request_generation is None:
+                raise HTTPException(400, {
+                    "code": "invalid_run_generation",
+                    "message": "Review evidence requires a canonical run generation.",
+                    "remediation": "Use the generation returned by the review state response.",
+                })
+            if request_generation is not None and request_generation != bound_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "message": "The requested evidence belongs to a different run generation.",
+                    "remediation": "Reload the review state before requesting solution evidence.",
+                })
             if seq is not None:
-                raise HTTPException(400, "historical node evidence is not available through review links")
-            st = srv.state(rd)
+                if request_generation is None:
+                    raise HTTPException(400, {
+                        "code": "historical_generation_required",
+                        "message": "Snapshot-bound review evidence requires the exact run generation.",
+                        "remediation": "Use the generation returned by the review state response.",
+                    })
+                # Review links intentionally have no history browser. Permit only the exact latest
+                # state sequence the reviewer could have observed, then fold that captured event list
+                # so an append racing the response cannot relabel newer code as the requested snapshot.
+                events = srv.events(rd)
+                current_seq = events[-1].seq if events else -1
+                if seq != current_seq:
+                    raise HTTPException(409, {
+                        "code": "review_snapshot_changed",
+                        "message": "The run advanced after this review snapshot was displayed.",
+                        "remediation": "Wait for the review state to refresh and retry.",
+                    })
+                st = fold(events)
+            else:
+                st = srv.state(rd)
             node = st.nodes.get(nid)
             if node is None:
-                # A non-None `seq` already raised 400 above, so there is no "at requested
-                # sequence" case left to distinguish here.
-                raise HTTPException(404, "no such node")
+                raise HTTPException(404, "no such node at requested sequence"
+                                    if seq is not None else "no such node")
             dumped = node.model_dump(mode="json")
             out = {key: dumped[key] for key in _REVIEW_NODE_KEYS if key in dumped}
             # Keep the same short failure summary already present in the light state projection; the
@@ -522,6 +558,10 @@ def build_router(srv) -> APIRouter:
                     out["parent_code"] = redact_secrets(parent.code or "")
                     out["parent_id_diffed"] = parent.id
             out["trace"] = {"nodes": [], "rollup": {}, "summary": {}}
+            out["run_generation"] = bound_generation
+            if seq is not None:
+                out["historical_seq"] = seq
+                out["historical_generation"] = bound_generation
             return _scrub_json(out)
 
     @router.post("/api/runs/{run_id}/reviews")

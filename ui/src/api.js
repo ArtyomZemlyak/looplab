@@ -1566,13 +1566,187 @@ export async function post(path, body, { signal, allowRunMutationModes = [] } = 
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
-export async function putText(path, text) {
+export async function putText(path, text, { signal } = {}) {
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
-  const r = await fetch(apiUrl(path), { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'text/plain' }), body: text })
+  const r = await fetch(apiUrl(path), {
+    method: 'PUT', signal,
+    headers: _authHeaders({ 'Content-Type': 'text/plain' }), body: text,
+  })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
+
+export const AUTHORING_MISSING_REVISION = 'missing'
+const AUTHORING_KINDS = new Set(['prompts', 'skills', 'knowledge'])
+const AUTHORING_MAX_BYTES = 256 * 1024
+const AUTHORING_REVISION_RE = /^(?:missing|sha256:[0-9a-f]{64})$/
+const AUTHORING_RESULT_REVISION_RE = /^(?:missing|oversized|sha256:[0-9a-f]{64})$/
+const AUTHORING_TARGET_ROOT_ID_RE = /^root-sha256:[0-9a-f]{64}$/
+const AUTHORING_RECEIPT_KEYS = new Set([
+  'schema', 'operation_id', 'kind', 'name', 'target_root_id', 'expected_revision',
+  'desired_revision', 'status', 'result_revision', 'code', 'created_at', 'updated_at',
+  'ok', 'replayable',
+])
+export const validAuthoringName = value => typeof value === 'string'
+  && value.length > 3 && [...value].length <= 255 && value.endsWith('.md')
+  && !/[\\/]/.test(value) && !/\p{C}/u.test(value)
+const validAuthoringOperationId = value => typeof value === 'string'
+  && value.length === 36 && value === value.toLowerCase() && UUID_V4_RE.test(value)
+const validAuthoringRevision = value => typeof value === 'string'
+  && (value === AUTHORING_MISSING_REVISION
+    || (value.length === 71 && AUTHORING_REVISION_RE.test(value)))
+const validAuthoringDesiredRevision = value => value !== AUTHORING_MISSING_REVISION
+  && validAuthoringRevision(value)
+const validAuthoringResultRevision = value => typeof value === 'string'
+  && (value === AUTHORING_MISSING_REVISION || value === 'oversized'
+    || (value.length === 71 && AUTHORING_RESULT_REVISION_RE.test(value)))
+export const validAuthoringTargetRootId = value => typeof value === 'string'
+  && value.length === 76 && AUTHORING_TARGET_ROOT_ID_RE.test(value)
+const authoringTextWellFormed = text => {
+  if (typeof text !== 'string') return false
+  if (typeof text.isWellFormed === 'function') return text.isWellFormed()
+  for (let index = 0; index < text.length; index++) {
+    const unit = text.charCodeAt(index)
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+      index++
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false
+  }
+  return true
+}
+
+const authoringOperationPath = (kind, name, operationId) => {
+  const normalizedKind = String(kind || '')
+  const normalizedName = String(name || '')
+  const normalizedOperationId = String(operationId || '')
+  if (!AUTHORING_KINDS.has(normalizedKind) || !validAuthoringName(normalizedName)
+      || !validAuthoringOperationId(normalizedOperationId)) {
+    const error = new Error('Invalid authoring operation identity')
+    error.code = 'AUTHORING_PROTOCOL_ERROR'
+    throw error
+  }
+  return `/api/${encodeURIComponent(normalizedKind)}/${encodeURIComponent(normalizedName)}`
+    + `/operations/${encodeURIComponent(normalizedOperationId)}`
+}
+
+function authoringProtocolError(message, receipt = null) {
+  const error = new Error(message)
+  error.code = 'AUTHORING_PROTOCOL_ERROR'
+  if (receipt && typeof receipt === 'object') error.receipt = receipt
+  return error
+}
+
+export async function authoringTextRevision(text, source = globalThis.crypto) {
+  if (typeof text !== 'string' || typeof TextEncoder === 'undefined'
+      || typeof source?.subtle?.digest !== 'function') {
+    throw authoringProtocolError('Secure UTF-8 hashing is unavailable for this authoring payload.')
+  }
+  if (!authoringTextWellFormed(text)) {
+    throw authoringProtocolError('Authoring text contains an unpaired Unicode surrogate.')
+  }
+  const bytes = new TextEncoder().encode(text)
+  if (bytes.byteLength > AUTHORING_MAX_BYTES) {
+    throw authoringProtocolError(`Authoring text exceeds ${AUTHORING_MAX_BYTES} UTF-8 bytes.`)
+  }
+  const digest = await source.subtle.digest('SHA-256', bytes)
+  return 'sha256:' + [...new Uint8Array(digest)]
+    .map(value => value.toString(16).padStart(2, '0')).join('')
+}
+
+export function validateAuthoringReceipt(receipt, expected = {}) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+      || !hasOnlyKeys(receipt, AUTHORING_RECEIPT_KEYS)
+      || Object.keys(receipt).length !== AUTHORING_RECEIPT_KEYS.size
+      || receipt.schema !== 'looplab.authoring-operation/v1'
+      || !validAuthoringOperationId(receipt.operation_id)
+      || !AUTHORING_KINDS.has(receipt.kind)
+      || !validAuthoringName(receipt.name)
+      || !validAuthoringTargetRootId(receipt.target_root_id)
+      || !validAuthoringRevision(receipt.expected_revision)
+      || !validAuthoringDesiredRevision(receipt.desired_revision)
+      || !['prepared', 'succeeded', 'conflict'].includes(receipt.status)
+      || !Number.isSafeInteger(receipt.created_at) || receipt.created_at < 0
+      || !Number.isSafeInteger(receipt.updated_at) || receipt.updated_at < receipt.created_at) {
+    throw authoringProtocolError('The server returned an invalid authoring receipt.', receipt)
+  }
+  const validTerminal = receipt.status === 'prepared'
+    ? receipt.result_revision === null && receipt.code === null
+    : receipt.status === 'succeeded'
+      ? receipt.result_revision === receipt.desired_revision && receipt.code === null
+      : validAuthoringResultRevision(receipt.result_revision)
+        && ['authoring_revision_conflict', 'authoring_intervening_write'].includes(receipt.code)
+  if (!validTerminal || receipt.ok !== (receipt.status === 'succeeded')
+      || receipt.replayable !== (receipt.status === 'prepared')) {
+    throw authoringProtocolError('The server returned an inconsistent authoring receipt.', receipt)
+  }
+  const expectedOperationId = expected.operationId == null ? null : String(expected.operationId)
+  const expectedKind = expected.kind == null ? null : String(expected.kind)
+  const expectedName = expected.name == null ? null : String(expected.name)
+  const expectedRevision = expected.expectedRevision == null
+    ? null : String(expected.expectedRevision)
+  const expectedTargetRootId = expected.expectedTargetRootId == null
+    ? null : String(expected.expectedTargetRootId)
+  const desiredRevision = expected.desiredRevision == null
+    ? null : String(expected.desiredRevision)
+  if ((expectedOperationId != null && receipt.operation_id !== expectedOperationId)
+      || (expectedKind != null && receipt.kind !== expectedKind)
+      || (expectedName != null && receipt.name !== expectedName)
+      || (expectedTargetRootId != null && receipt.target_root_id !== expectedTargetRootId)
+      || (expectedRevision != null && receipt.expected_revision !== expectedRevision)
+      || (desiredRevision != null && receipt.desired_revision !== desiredRevision)) {
+    throw authoringProtocolError(
+      'The authoring receipt does not match the requested operation identity.', receipt)
+  }
+  return receipt
+}
+
+export async function putAuthoringOperation(
+  kind, name, operationId, {
+    text, expectedRevision, expectedTargetRootId, desiredRevision = null,
+  }, { signal } = {},
+) {
+  const path = authoringOperationPath(kind, name, operationId)
+  if (typeof text !== 'string' || !validAuthoringRevision(expectedRevision)
+      || !validAuthoringTargetRootId(expectedTargetRootId)) {
+    throw authoringProtocolError('Invalid authoring operation payload.')
+  }
+  const submittedRevision = await authoringTextRevision(text)
+  if (desiredRevision != null && desiredRevision !== submittedRevision) {
+    throw authoringProtocolError('The authoring payload does not match its durable desired revision.')
+  }
+  const receipt = await send(path, 'PUT', {
+    text,
+    expected_revision: expectedRevision,
+    expected_target_root_id: expectedTargetRootId,
+  }, { signal })
+  return validateAuthoringReceipt(receipt, {
+    operationId, kind, name, expectedRevision, expectedTargetRootId,
+    desiredRevision: submittedRevision,
+  })
+}
+
+export async function getAuthoringOperation(
+  kind, name, operationId, {
+    signal, expectedRevision, expectedTargetRootId, desiredRevision,
+  } = {},
+) {
+  if (!validAuthoringTargetRootId(expectedTargetRootId)
+      || !validAuthoringRevision(expectedRevision)
+      || !validAuthoringDesiredRevision(desiredRevision)) {
+    throw authoringProtocolError('An exact authoring operation identity is required for receipt lookup.')
+  }
+  const path = authoringOperationPath(kind, name, operationId)
+    + `?expected_target_root_id=${encodeURIComponent(expectedTargetRootId)}`
+    + `&expected_revision=${encodeURIComponent(expectedRevision)}`
+    + `&desired_revision=${encodeURIComponent(desiredRevision)}`
+  const receipt = await get(path, { signal, cache: 'no-store' })
+  return validateAuthoringReceipt(receipt, {
+    operationId, kind, name, expectedRevision, expectedTargetRootId, desiredRevision,
+  })
+}
+
 async function send(path, method, body, { signal } = {}) {
   if (method !== 'GET') assertNotReviewMutation(path)
   if (method !== 'GET') assertRunMutationAllowed(path)
@@ -1616,7 +1790,7 @@ export const listProjects = options => get('/api/projects', options)
 export const createProject = (name, parent_id = null) => post('/api/projects', { name, parent_id })
 export const patchProject = (id, body) => send(`/api/projects/${encodeURIComponent(id)}`, 'PATCH', body)
 export const deleteProject = (id) => send(`/api/projects/${encodeURIComponent(id)}`, 'DELETE')
-const runOrganizationBody = (field, value, expectedGeneration) => {
+const runOrganizationBody = (field, value, expectedGeneration, expectedCurrent) => {
   if (!validRunGeneration(expectedGeneration)) {
     throw runGenerationError(
       'run_generation_unavailable',
@@ -1624,14 +1798,25 @@ const runOrganizationBody = (field, value, expectedGeneration) => {
       'Refresh the Runs list and repeat the change on the intended run.',
     )
   }
-  return { [field]: value, expected_generation: expectedGeneration }
+  if (expectedCurrent !== null && typeof expectedCurrent !== 'string') {
+    throw runGenerationError(
+      'run_organization_unavailable',
+      'The exact current organization value is required before changing run organization.',
+      'Refresh the Runs list and repeat the change from the current run card.',
+    )
+  }
+  return {
+    [field]: value,
+    [`expected_${field}`]: expectedCurrent,
+    expected_generation: expectedGeneration,
+  }
 }
-export const assignRun = (runId, project_id, expectedGeneration) => post(
+export const assignRun = (runId, project_id, expectedGeneration, expectedProjectId) => post(
   `/api/runs/${encodeURIComponent(runId)}/project`,
-  runOrganizationBody('project_id', project_id, expectedGeneration))
-export const renameRun = (runId, label, expectedGeneration) => send(
+  runOrganizationBody('project_id', project_id, expectedGeneration, expectedProjectId))
+export const renameRun = (runId, label, expectedGeneration, expectedLabel) => send(
   `/api/runs/${encodeURIComponent(runId)}`, 'PATCH',
-  runOrganizationBody('label', label, expectedGeneration))
+  runOrganizationBody('label', label, expectedGeneration, expectedLabel))
 export function submitRunDeletion(runId, expectedGeneration, expectedSeq, operationId, options = {}) {
   if (!validRunGeneration(expectedGeneration)) {
     throw Object.assign(new Error('An exact run generation is required to delete a run.'), {
@@ -1706,9 +1891,12 @@ export const listSupertasks = options => get('/api/supertasks', options)
 export const createSupertask = (name, task_id = null) => post('/api/supertasks', { name, task_id })
 export const renameSupertask = (id, name) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'PATCH', { name })
 export const deleteSupertask = (id) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'DELETE')
-export const assignSupertask = (runId, supertask_id, expectedGeneration) => post(
+export const assignSupertask = (
+  runId, supertask_id, expectedGeneration, expectedSupertaskId,
+) => post(
   `/api/runs/${encodeURIComponent(runId)}/supertask`,
-  runOrganizationBody('supertask_id', supertask_id, expectedGeneration))
+  runOrganizationBody(
+    'supertask_id', supertask_id, expectedGeneration, expectedSupertaskId))
 
 export const gpuStat = () => get('/api/gpu')
 

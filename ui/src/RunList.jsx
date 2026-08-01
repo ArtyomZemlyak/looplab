@@ -80,7 +80,9 @@ const mutationMessage = (error, timedOut = false) => timedOut
   : error?.storage
     ? 'Browser storage is blocked or full; this view was not saved.'
   : error?.code === 'run_generation_changed' || error?.code === 'run_generation_unavailable'
-      || error?.code === 'invalid_run_generation'
+      || error?.code === 'invalid_run_generation' || error?.code === 'run_organization_changed'
+      || error?.code === 'run_organization_unavailable'
+      || error?.code === 'invalid_expected_organization'
     ? [error.message, error.remediation].filter(Boolean).join(' ')
   : error?.status === 409
     ? 'Conflict; current input or selection kept.'
@@ -163,7 +165,9 @@ const focusSoon = target => requestAnimationFrame(() => target?.isConnected && t
 
 const listMutationMessage = (kind, error) => {
   if (error?.code === 'run_generation_changed' || error?.code === 'run_generation_unavailable'
-      || error?.code === 'invalid_run_generation') {
+      || error?.code === 'invalid_run_generation' || error?.code === 'run_organization_changed'
+      || error?.code === 'run_organization_unavailable'
+      || error?.code === 'invalid_expected_organization') {
     return [error.message, error.remediation].filter(Boolean).join(' ')
   }
   if (kind === 'delete-run') return error?.status === 409
@@ -855,7 +859,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const stName = useMemo(() => Object.fromEntries(superdata.supertasks.map(s => [s.id, s.name])), [superdata])
   const assignToSuper = async (run, sid) => {
     await assignSupertask(
-      run.run_id, sid === UNASSIGNED ? null : sid, run.generation)
+      run.run_id, sid === UNASSIGNED ? null : sid, run.generation,
+      run.supertask_id ?? null)
     await loadRuns()
   }
 
@@ -1049,7 +1054,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     const target = project_id === UNASSIGNED ? 'Unassigned' : (projName[project_id] || 'project')
     return mutateList('move-run', `Moving run to “${target}”…`,
       () => assignRun(
-        run.run_id, project_id === UNASSIGNED ? null : project_id, run.generation), refresh)
+        run.run_id, project_id === UNASSIGNED ? null : project_id, run.generation,
+        run.project_id ?? null), refresh)
   }
   const onDrop = async (project_id) => {
     const run = dragRun
@@ -1058,7 +1064,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     await moveRun(run, project_id)
   }
   const submitRunRename = async (label) => {
-    await renameRun(runRename.run_id, label, runRename.generation); await loadRuns()
+    await renameRun(
+      runRename.run_id, label, runRename.generation, runRename.label ?? null)
+    await loadRuns()
   }
   const openRunDeletion = (r) => {
     const returnFocus = runMenuTriggerRef.current
@@ -1530,7 +1538,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                      return
                    }
                    if (!runGenerationAvailable) { event.preventDefault(); return }
-                   setDragRun({ run_id: r.run_id, generation: r.generation })
+                   setDragRun({
+                     run_id: r.run_id, generation: r.generation,
+                     project_id: r.project_id ?? null,
+                   })
                  }}
                  onDragEnd={() => {
                    compareDragGuardRef.current = null

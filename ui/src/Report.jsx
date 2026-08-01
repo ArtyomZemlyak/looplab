@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, get, fmt,
+import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, deadlineGet, fmt,
   fmtInt, CONTROL, runNodeApiPath } from './util.js'
 import { Trajectory, ImprovementWaterfall } from './charts.jsx'
 import { analyze, buildModelCard, verdict, paramDiffLabel, toMarkdown, hyperImportance } from './report.js'
@@ -17,6 +17,8 @@ import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
 const TRUST_LABEL = { unverified: 'not fully verified', caveats: 'with caveats', suspect: 'flags found' }
+const SOLUTION_DETAIL_TIMEOUT_MS = 12_000
+const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 const OUTCOME_LABEL = { improved: '▲ improved', flat: '— flat', regressed: '▼ regressed', none: 'no result' }
 
 export const reportRefreshFailure = (failure, thrown = false) => {
@@ -171,15 +173,40 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   const imp = useMemo(() => hyperImportance(state).slice(0, 6), [state])
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = memoProjection.memos
-  const [bestCodeResource, setBestCodeResource] = useState({ status: 'idle', data: null, error: null })
+  const solutionRunReady = typeof runId === 'string' && runId.length > 0 && state.run_id === runId
+  const solutionGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')
+    ? expectedGeneration : null
+  const solutionSeq = Number.isSafeInteger(observedSeq) && observedSeq >= 0 ? observedSeq : null
+  const solutionHistoryAligned = !(readOnly && historySeq != null) || historySeq === solutionSeq
+  const solutionIdentityReady = solutionRunReady && solutionGeneration != null
+    && solutionSeq != null && solutionHistoryAligned
+  // Scope the async source projection to the exact report identity. In particular, a late live
+  // response from an older event must not become the winning code for a newer report render even
+  // when the run generation and champion id happen to be unchanged.
+  const bestCodeScope = useMemo(() => JSON.stringify({
+    runId: String(runId),
+    stateRunId: state.run_id ?? null,
+    generation: solutionGeneration,
+    nodeId: best?.id ?? null,
+    access: { readOnlyReason, evidenceAvailable: evidenceAvailable !== false },
+    snapshot: {
+      kind: readOnly && historySeq != null ? 'history' : readOnly ? 'read-only' : 'live',
+      seq: solutionSeq, routeSeq: readOnly ? historySeq : null,
+    },
+  }), [runId, state.run_id, solutionGeneration, best?.id, readOnlyReason, evidenceAvailable,
+    readOnly, historySeq, solutionSeq])
+  const [bestCodeResource, setBestCodeResource] = useState({
+    scope: null, status: 'idle', data: null, error: null,
+  })
   const [bestCodeNonce, setBestCodeNonce] = useState(0)
+  const bestCodeRequestRef = useRef(null)
   const [openMemo, setOpenMemo] = useState(memos.length ? memos[memos.length - 1].sourceIndex : null)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const [refreshRetryAllowed, setRefreshRetryAllowed] = useState(true)
   const [savedRefreshIntent, setSavedRefreshIntent] = useState(null)
   const refreshStorageReady = savedRefreshIntent !== false
-  const refreshGenerationReady = /^[0-9a-f]{64}$/.test(expectedGeneration || '')
+  const refreshGenerationReady = RUN_GENERATION_RE.test(expectedGeneration || '')
   const refreshRequestRef = useRef({
     token: 0, receiptSeq: null, timer: null, busy: false,
     idempotencyKey: null, generation: null, controller: null,
@@ -187,35 +214,72 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   const observedSeqRef = useRef(observedSeq)
   observedSeqRef.current = observedSeq
   useEffect(() => {
-    if (!best) { setBestCodeResource({ status: 'idle', data: null, error: null }); return }
-    if (readOnlyReason === 'review' && !evidenceAvailable) {
-      setBestCodeResource({ status: 'restricted', data: null, error: null }); return
+    bestCodeRequestRef.current?.controller.abort()
+    bestCodeRequestRef.current = null
+    if (!best) {
+      setBestCodeResource({ scope: bestCodeScope, status: 'idle', data: null, error: null })
+      return
     }
-    let alive = true
-    const controller = typeof AbortController === 'undefined' ? null : new AbortController()
-    setBestCodeResource({ status: 'loading', data: null, error: null })
+    if (readOnlyReason === 'review' && !evidenceAvailable) {
+      setBestCodeResource({ scope: bestCodeScope, status: 'restricted', data: null, error: null })
+      return
+    }
+    if (!solutionIdentityReady) {
+      setBestCodeResource({ scope: bestCodeScope, status: 'waiting', data: null, error: null })
+      return
+    }
     const params = new URLSearchParams()
-    if (readOnly && historySeq != null) params.set('seq', String(historySeq))
-    if (expectedGeneration) params.set('expected_generation', expectedGeneration)
-    const query = params.toString()
-    const at = query ? `?${query}` : ''
-    get(runNodeApiPath(runId, best.id, at), controller ? { signal: controller.signal } : {})
-      .then(data => {
-        if (!alive) return
+    params.set('seq', String(solutionSeq))
+    params.set('expected_generation', solutionGeneration)
+    const at = `?${params.toString()}`
+    const timed = deadlineGet(runNodeApiPath(runId, best.id, at), SOLUTION_DETAIL_TIMEOUT_MS)
+    const request = { scope: bestCodeScope, controller: timed.controller }
+    bestCodeRequestRef.current = request
+    setBestCodeResource({ scope: bestCodeScope, status: 'loading', data: null, error: null })
+    timed.promise.then(
+      data => {
+        if (bestCodeRequestRef.current !== request) return
+        bestCodeRequestRef.current = null
         const exact = normalizeReportNodeDetail(data, {
-          nodeId: best.id, historySeq: readOnly && historySeq != null ? historySeq : null,
-          expectedGeneration,
+          nodeId: best.id, historySeq: solutionSeq, expectedGeneration: solutionGeneration,
         })
         setBestCodeResource(exact
-          ? { status: 'ready', data: exact, error: null }
-          : { status: 'error', data: null,
-              error: 'The node detail response did not match this report.' })
-      })
-      .catch(() => { if (alive) setBestCodeResource({ status: 'error', data: null, error: 'The node detail request failed.' }) })
-    return () => { alive = false; controller?.abort() }
-  }, [runId, best?.id, readOnly, historySeq, expectedGeneration, readOnlyReason,
-    evidenceAvailable, bestCodeNonce])
-  const bestCode = bestCodeResource.data
+          ? { scope: request.scope, status: 'ready', data: exact, error: null }
+          : { scope: request.scope, status: 'error', data: null,
+              error: 'The node detail response did not match this run, generation, and snapshot.' })
+      },
+      () => {
+        if (bestCodeRequestRef.current !== request) return
+        bestCodeRequestRef.current = null
+        const timeout = timed.timedOut()
+        setBestCodeResource({
+          scope: request.scope, status: timeout ? 'timeout' : 'error', data: null,
+          error: timeout
+            ? `The node detail request timed out after ${SOLUTION_DETAIL_TIMEOUT_MS / 1000} seconds.`
+            : 'The node detail request failed. Check the connection and retry.',
+        })
+      },
+    )
+    return () => {
+      if (bestCodeRequestRef.current !== request) return
+      bestCodeRequestRef.current = null
+      request.controller.abort()
+    }
+  }, [runId, best?.id, readOnlyReason, evidenceAvailable, solutionIdentityReady,
+    solutionSeq, solutionGeneration, bestCodeScope, bestCodeNonce])
+  const bestCodeCurrent = bestCodeResource.scope === bestCodeScope
+  const bestCodeStatus = bestCodeCurrent ? bestCodeResource.status
+    : !best ? 'idle'
+      : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted'
+        : !solutionIdentityReady ? 'waiting' : 'loading'
+  const solutionWaitingMessage = !solutionRunReady
+    ? 'Waiting for this report to match the requested run before loading solution code…'
+    : solutionGeneration == null
+      ? 'Waiting for the exact run generation before loading solution code…'
+      : solutionSeq == null
+        ? 'Waiting for the exact report snapshot before loading solution code…'
+        : 'Waiting for the historical snapshot to finish reconciling…'
+  const bestCode = bestCodeCurrent ? bestCodeResource.data : null
 
   const finishRefresh = (token, {
     error = '', canRetry = true, preserveIntent = false,
@@ -490,15 +554,18 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       </div>
 
       {best && <><h2 className="section-h">Reproduce — winning solution</h2>
-        {bestCodeResource.status === 'restricted' && <div className="report-inline-state report-code-state" role="status">
+        {bestCodeStatus === 'restricted' && <div className="report-inline-state report-code-state" role="status">
           Solution source was not included in this summary-only review link.
         </div>}
-        {bestCodeResource.status === 'loading' && <div className="report-inline-state report-code-state" role="status">Loading solution code…</div>}
-        {bestCodeResource.status === 'error' && <div className="report-inline-state report-code-state error" role="alert">
-          <span>Couldn’t load the winning code: {bestCodeResource.error}</span>
-          <button className="btn sm" onClick={() => setBestCodeNonce(n => n + 1)}>Retry</button>
+        {bestCodeStatus === 'waiting' && <div className="report-inline-state report-code-state" role="status" aria-live="polite">
+          {solutionWaitingMessage}
         </div>}
-        {bestCodeResource.status === 'ready' && (bestCode?.code
+        {bestCodeStatus === 'loading' && <div className="report-inline-state report-code-state" role="status">Loading solution code…</div>}
+        {(bestCodeStatus === 'error' || bestCodeStatus === 'timeout') && <div className="report-inline-state report-code-state error" role="alert">
+          <span>Couldn’t load the winning code: {bestCodeResource.error}</span>
+          <button type="button" className="btn sm" onClick={() => setBestCodeNonce(n => n + 1)}>Retry</button>
+        </div>}
+        {bestCodeStatus === 'ready' && (bestCode?.code
           ? <pre className="code">{bestCode.code}</pre>
           : <div className="report-inline-state report-code-state" role="status">No solution source was recorded for this node (for example, a repository task may not use solution.py).</div>)}
       </>}

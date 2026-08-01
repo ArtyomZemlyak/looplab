@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, get_run_deletion, validate_deletion_request)
-from looplab.serve.projects import ProjectError, ProjectStoreLockError
+from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 
 
@@ -32,7 +32,7 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ projects (ClearML-style)
     def _project_call(fn):
-        """Map invalid mutations to 400 and an unavailable required durability lock to 503.
+        """Map CAS conflicts to 409, invalid mutations to 400, and lock failures to 503.
 
         BLOCKING: `fn` reaches `ProjectStore._transaction` -> `_interprocess_lock(required=True)` ->
         an unbounded `fcntl.flock(LOCK_EX)`, plus load/atomic-save disk I/O. A sync `def` route runs
@@ -42,6 +42,32 @@ def build_router(srv) -> APIRouter:
         """
         try:
             return fn()
+        except ProjectConflictError as e:
+            labels = {
+                "project_id": "project assignment",
+                "supertask_id": "super-task assignment",
+                "label": "display name",
+            }
+            operations = {
+                "project_id": "assign_project",
+                "supertask_id": "assign_supertask",
+                "label": "rename",
+            }
+            raise HTTPException(409, {
+                "code": "run_organization_changed",
+                "run_id": e.run_id,
+                "operation": operations[e.field],
+                "organization_field": e.field,
+                "expected_value": e.expected,
+                "current_value": e.current,
+                f"expected_{e.field}": e.expected,
+                f"current_{e.field}": e.current,
+                "message": (
+                    f"The run's {labels[e.field]} changed before this request could be applied; "
+                    "no organization metadata was written."),
+                "remediation": (
+                    "Refresh the Runs list and repeat the change from the current run card."),
+            }) from e
         except ProjectStoreLockError as e:
             raise HTTPException(503, str(e)) from e
         except ProjectError as e:
@@ -63,6 +89,28 @@ def build_router(srv) -> APIRouter:
                     "Refresh the Runs list before changing this run's organization."),
             })
         return generation
+
+    def _expected_organization_value(body: dict, field: str) -> str | None:
+        expected_field = f"expected_{field}"
+        if expected_field not in body:
+            raise HTTPException(400, {
+                "code": "invalid_expected_organization",
+                "organization_field": field,
+                "message": (
+                    f"{expected_field} must be the exact value from the Runs list, including null."),
+                "remediation": (
+                    "Refresh the Runs list before changing this run's organization."),
+            })
+        value = body[expected_field]
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(400, {
+                "code": "invalid_expected_organization",
+                "organization_field": field,
+                "message": f"{expected_field} must be a string or null.",
+                "remediation": (
+                    "Refresh the Runs list before changing this run's organization."),
+            })
+        return value
 
     def _run_project_call(
             run_id: str, expected_generation: str, operation: str, action: str, fn):
@@ -121,10 +169,12 @@ def build_router(srv) -> APIRouter:
     async def assign_run(run_id: str, request: Request):
         body = await _json_object(request)
         expected_generation = _expected_run_generation(body)
+        expected_project_id = _expected_organization_value(body, "project_id")
         await anyio.to_thread.run_sync(lambda: _run_project_call(
             run_id, expected_generation, "assign_project",
             "its project assignment could be updated",
-            lambda: projects.assign(run_id, body.get("project_id"))))
+            lambda: projects.assign(
+                run_id, body.get("project_id"), expected_current=expected_project_id)))
         return {"ok": True}
 
     # ------------------------------------------------------------------ super-tasks (flat axis)
@@ -155,10 +205,12 @@ def build_router(srv) -> APIRouter:
     async def assign_supertask(run_id: str, request: Request):
         body = await _json_object(request)
         expected_generation = _expected_run_generation(body)
+        expected_supertask_id = _expected_organization_value(body, "supertask_id")
         await anyio.to_thread.run_sync(lambda: _run_project_call(
             run_id, expected_generation, "assign_supertask",
             "its super-task assignment could be updated",
-            lambda: projects.assign_supertask(run_id, body.get("supertask_id"))))
+            lambda: projects.assign_supertask(
+                run_id, body.get("supertask_id"), expected_current=expected_supertask_id)))
         return {"ok": True}
 
     @router.patch("/api/runs/{run_id}")
@@ -166,9 +218,11 @@ def build_router(srv) -> APIRouter:
         """Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged."""
         body = await _json_object(request)
         expected_generation = _expected_run_generation(body)
+        expected_label = _expected_organization_value(body, "label")
         await anyio.to_thread.run_sync(lambda: _run_project_call(
             run_id, expected_generation, "rename", "it could be renamed",
-            lambda: projects.set_label(run_id, body.get("label"))))
+            lambda: projects.set_label(
+                run_id, body.get("label"), expected_current=expected_label)))
         return {"ok": True}
 
     @router.post("/api/runs/{run_id}/deletions")

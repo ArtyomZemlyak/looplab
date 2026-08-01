@@ -1,6 +1,8 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { deadlineGet, get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
+import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
   saveRunConfig, operatorMeta, commandFeedback, runApiPath, runNodeApiPath,
+  createIdempotencyKey, getRunCommand, isTransientCommandReadError, retryRunCommand, runCommand,
+  getAuthoringOperation, putAuthoringOperation, validAuthoringName, validAuthoringTargetRootId,
 } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
@@ -40,16 +42,185 @@ const nullableNumber = value => value === null || (typeof value === 'number' && 
 // HTTP 200 proves transport success, not resource truth. Each panel validates its exact envelope
 // before replacing last-good data or presenting an authoritative empty state.
 const PANEL_REQUEST_TIMEOUT_MS = 15_000
+const AUTHORING_SAVE_TIMEOUT_MS = 12_000
+const AUTHORING_MAX_BYTES = 256 * 1024
+const AUTHORING_OPERATION_SCHEMA = 'looplab.authoring-operation-intent/v1'
+const AUTHORING_OPERATION_STORAGE_PREFIX = 'll.authoring-operation.'
+const AUTHORING_KINDS = new Set(['prompts', 'skills', 'knowledge'])
+const AUTHORING_REVISION_RE = /^(?:missing|sha256:[0-9a-f]{64})$/
+const AUTHORING_OPERATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const AUTHORING_OPERATION_KEYS = new Set([
+  'schema', 'operationId', 'kind', 'name', 'submittedText', 'expectedRevision',
+  'expectedTargetRootId', 'desiredRevision', 'updatedAt',
+])
+const authoringDigestQuarantine = new Map()
 const publicConfigForm = form => ({ ...(form || {}), llm_api_key: '' })
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 
 function authoringPayload(value) {
   if (!isRecord(value) || !nullableText(value.dir) || !Array.isArray(value.files)) invalidPanelPayload()
+  const targetRootId = value.target_root_id == null ? null : value.target_root_id
+  const truncatedFiles = value.truncated_files == null ? 0 : value.truncated_files
+  if (!Number.isSafeInteger(truncatedFiles) || truncatedFiles < 0) invalidPanelPayload()
+  if ((value.dir == null && (targetRootId !== null || value.files.length > 0 || truncatedFiles > 0))
+      || (value.dir != null && !validAuthoringTargetRootId(targetRootId))) invalidPanelPayload()
   const files = value.files.map(file => {
-    if (!isRecord(file) || !file.name || typeof file.name !== 'string' || typeof file.text !== 'string') invalidPanelPayload()
-    return { name: file.name, text: file.text }
+    if (!isRecord(file) || !validAuthoringName(file.name) || typeof file.text !== 'string') invalidPanelPayload()
+    const truncated = file.truncated === true
+    const revision = typeof file.revision === 'string' && AUTHORING_REVISION_RE.test(file.revision)
+      ? file.revision : null
+    if (!truncated && revision == null) invalidPanelPayload()
+    return { name: file.name, text: file.text, revision, truncated }
   })
-  return { dir: value.dir, files }
+  return { dir: value.dir, targetRootId, files, truncatedFiles }
+}
+
+const authoringScope = (kind, name) => `${String(kind || '')}\u0000${String(name || '')}`
+const authoringStorageKey = (kind, name) => AUTHORING_OPERATION_STORAGE_PREFIX
+  + encodeURIComponent(authoringScope(kind, name))
+const authoringStorage = () => {
+  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage } catch { return null }
+}
+const authoringUtf8Bytes = text => {
+  try { return new TextEncoder().encode(String(text)).byteLength } catch { return Infinity }
+}
+const authoringTextWellFormed = text => {
+  if (typeof text !== 'string') return false
+  if (typeof text.isWellFormed === 'function') return text.isWellFormed()
+  for (let index = 0; index < text.length; index++) {
+    const unit = text.charCodeAt(index)
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+      index++
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false
+  }
+  return true
+}
+const validAuthoringOperation = value => isRecord(value)
+  && Object.keys(value).every(key => AUTHORING_OPERATION_KEYS.has(key))
+  && Object.keys(value).length === AUTHORING_OPERATION_KEYS.size
+  && value.schema === AUTHORING_OPERATION_SCHEMA
+  && AUTHORING_OPERATION_RE.test(value.operationId)
+  && AUTHORING_KINDS.has(value.kind) && validAuthoringName(value.name)
+  && authoringTextWellFormed(value.submittedText)
+  && authoringUtf8Bytes(value.submittedText) <= AUTHORING_MAX_BYTES
+  && AUTHORING_REVISION_RE.test(value.expectedRevision)
+  && validAuthoringTargetRootId(value.expectedTargetRootId)
+  && /^sha256:[0-9a-f]{64}$/.test(value.desiredRevision)
+  && Number.isSafeInteger(value.updatedAt) && value.updatedAt >= 0
+
+function parseAuthoringStorageIdentity(key) {
+  if (typeof key !== 'string' || !key.startsWith(AUTHORING_OPERATION_STORAGE_PREFIX)) return null
+  try {
+    const decoded = decodeURIComponent(key.slice(AUTHORING_OPERATION_STORAGE_PREFIX.length))
+    const split = decoded.indexOf('\u0000')
+    if (split <= 0 || decoded.indexOf('\u0000', split + 1) !== -1) return null
+    const kind = decoded.slice(0, split), name = decoded.slice(split + 1)
+    return AUTHORING_KINDS.has(kind) && validAuthoringName(name)
+      ? { kind, name, scope: authoringScope(kind, name) } : null
+  } catch { return null }
+}
+
+function inspectAuthoringOperations() {
+  const storage = authoringStorage()
+  if (!storage) return { available: false, valid: {}, damaged: {} }
+  const valid = {}, damaged = {}
+  try {
+    const keys = []
+    for (let index = 0; index < storage.length; index++) {
+      const key = storage.key(index)
+      if (key?.startsWith(AUTHORING_OPERATION_STORAGE_PREFIX)) keys.push(key)
+    }
+    for (const key of keys) {
+      const raw = storage.getItem(key)
+      const identity = parseAuthoringStorageIdentity(key)
+      const quarantined = authoringDigestQuarantine.get(key)
+      if (quarantined && quarantined.raw !== raw) authoringDigestQuarantine.delete(key)
+      const exactQuarantine = quarantined?.raw === raw ? quarantined : null
+      let parsed = null
+      try { parsed = JSON.parse(raw || 'null') } catch { /* damaged below */ }
+      if (identity && key === authoringStorageKey(identity.kind, identity.name)
+          && !exactQuarantine
+          && !Object.hasOwn(valid, identity.scope) && validAuthoringOperation(parsed)
+          && parsed.kind === identity.kind && parsed.name === identity.name) {
+        valid[identity.scope] = { ...parsed, scope: identity.scope, storageKey: key, storageRaw: raw }
+      } else {
+        const scope = `damaged:${key}`
+        damaged[scope] = {
+          scope, key, raw: raw ?? '', identity, inspected: false,
+          ...(exactQuarantine ? { reason: exactQuarantine.reason } : {}),
+        }
+      }
+    }
+    return { available: true, valid, damaged }
+  } catch { return { available: false, valid: {}, damaged: {} } }
+}
+
+function saveAuthoringOperationIntent(intent) {
+  const storage = authoringStorage()
+  if (!storage || !validAuthoringOperation(intent)) return null
+  const key = authoringStorageKey(intent.kind, intent.name)
+  try {
+    const raw = storage.getItem(key)
+    if (raw != null) {
+      let existing = null
+      try { existing = JSON.parse(raw) } catch { return null }
+      if (!validAuthoringOperation(existing)
+          || existing.kind !== intent.kind || existing.name !== intent.name
+          || existing.operationId !== intent.operationId
+          || existing.submittedText !== intent.submittedText
+          || existing.expectedRevision !== intent.expectedRevision
+          || existing.expectedTargetRootId !== intent.expectedTargetRootId
+          || existing.desiredRevision !== intent.desiredRevision) return null
+    }
+    const serialized = JSON.stringify(intent)
+    storage.setItem(key, serialized)
+    if (storage.getItem(key) !== serialized) return null
+    return { ...intent, scope: authoringScope(intent.kind, intent.name), storageKey: key, storageRaw: serialized }
+  } catch { return null }
+}
+
+function clearAuthoringOperationIntent(intent) {
+  const storage = authoringStorage()
+  if (!storage || !intent?.storageKey || typeof intent.storageRaw !== 'string') return false
+  try {
+    if (storage.getItem(intent.storageKey) !== intent.storageRaw) return false
+    storage.removeItem(intent.storageKey)
+    return storage.getItem(intent.storageKey) == null
+  } catch { return false }
+}
+
+function clearDamagedAuthoringOperation(recovery) {
+  const storage = authoringStorage()
+  if (!storage || !recovery?.key || typeof recovery.raw !== 'string') return false
+  try {
+    if (storage.getItem(recovery.key) !== recovery.raw) return false
+    storage.removeItem(recovery.key)
+    return storage.getItem(recovery.key) == null
+  } catch { return false }
+}
+
+async function authoringTextRevision(text) {
+  if (!authoringTextWellFormed(text)) {
+    const error = new Error('File text contains an unpaired Unicode surrogate.')
+    error.code = 'AUTHORING_TEXT_NOT_WELL_FORMED'
+    throw error
+  }
+  const bytes = new TextEncoder().encode(text)
+  if (bytes.byteLength > AUTHORING_MAX_BYTES) {
+    const error = new Error(`File is larger than ${AUTHORING_MAX_BYTES} UTF-8 bytes.`)
+    error.code = 'AUTHORING_TEXT_TOO_LARGE'
+    throw error
+  }
+  if (!globalThis.crypto?.subtle) {
+    const error = new Error('Secure browser hashing is unavailable.')
+    error.code = 'AUTHORING_HASH_UNAVAILABLE'
+    throw error
+  }
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+  return 'sha256:' + [...new Uint8Array(digest)]
+    .map(value => value.toString(16).padStart(2, '0')).join('')
 }
 
 function memoryPayload(value) {
@@ -1049,29 +1220,828 @@ export function ConfigPanel({ runId, expectedGeneration, state, live, onClose: c
 
 export function AuthoringPanel({ onClose, onToast }) {
   const [kind, setKind] = useState('prompts')
-  const [sel, setSel] = useState(null)
-  const [text, setText] = useState('')
+  const [selectedScope, setSelectedScope] = useState(null)
+  const [documents, setDocuments] = useState({})
+  const documentsRef = useRef(documents)
+  documentsRef.current = documents
+  const [saveState, setSaveState] = useState(null)
+  const initialRecoveryRef = useRef(null)
+  if (initialRecoveryRef.current == null) initialRecoveryRef.current = inspectAuthoringOperations()
+  const [uncertainSaves, setUncertainSaves] = useState(() => Object.fromEntries(
+    Object.entries(initialRecoveryRef.current.valid).map(([scope, recovery]) => [scope, {
+      ...recovery, phase: 'unknown', inspectedMissing: false,
+      releaseAllowed: false, releaseInspected: false,
+      message: `A saved operation for ${recovery.name} may still be pending. Check its exact durable receipt.`,
+    }]),
+  ))
+  const [damagedRecoveries, setDamagedRecoveries] = useState(initialRecoveryRef.current.damaged)
+  const [storageAvailable, setStorageAvailable] = useState(initialRecoveryRef.current.available)
+  const uncertainSavesRef = useRef(uncertainSaves)
+  uncertainSavesRef.current = uncertainSaves
+  const saveRef = useRef(null)
+  const activeRef = useRef(true)
+  const allowNavigationRef = useRef(false)
   const [source, retry] = usePanelResource(signal => get(`/api/${kind}`, { signal }), authoringPayload, kind)
-  const data = source.data || { dir: null, files: [] }
+  const data = source.data || { dir: null, targetRootId: null, files: [], truncatedFiles: 0 }
+  const scopeFor = authoringScope
+  useEffect(() => {
+    activeRef.current = true
+    return () => { activeRef.current = false }
+  }, [])
+  useEffect(() => {
+    if (source.state !== 'ready') return
+    setDocuments(current => {
+      let changed = false
+      const next = { ...current }
+      for (const file of data.files || []) {
+        const scope = scopeFor(kind, file.name)
+        const previous = current[scope]
+        if (!previous) {
+          next[scope] = {
+            kind, name: file.name, savedText: file.text, draftText: file.text,
+            savedRevision: file.revision, observedText: file.text, observedRevision: file.revision,
+            savedTargetRootId: data.targetRootId, observedTargetRootId: data.targetRootId,
+            truncated: file.truncated, conflict: false, rootConflict: false,
+            observationIncomplete: false, error: '',
+            recoveryOperationId: null, recoveryStorageRaw: null,
+          }
+          changed = true
+        } else if (previous.draftText === previous.savedText && !uncertainSaves[scope]) {
+          if (previous.savedText !== file.text || previous.observedText !== file.text
+              || previous.savedRevision !== file.revision || previous.truncated !== file.truncated
+              || previous.savedTargetRootId !== data.targetRootId
+              || previous.observedTargetRootId !== data.targetRootId
+              || previous.conflict || previous.rootConflict
+              || previous.observationIncomplete || previous.error) {
+            next[scope] = { ...previous, savedText: file.text, draftText: file.text,
+              savedRevision: file.revision, observedText: file.text, observedRevision: file.revision,
+              savedTargetRootId: data.targetRootId, observedTargetRootId: data.targetRootId,
+              truncated: file.truncated, conflict: false, rootConflict: false,
+              observationIncomplete: false, error: '' }
+            changed = true
+          }
+        } else if (previous.observedText !== file.text
+            || previous.observedRevision !== file.revision
+            || previous.observedTargetRootId !== data.targetRootId
+            || previous.observationIncomplete
+            || previous.conflict !== (previous.savedRevision !== file.revision
+              || previous.savedTargetRootId !== data.targetRootId)) {
+          // A refresh must never replace local text. Remember the newly observed server version and
+          // make the conflict explicit while preserving both the draft and its original baseline.
+          const rootConflict = previous.savedTargetRootId !== data.targetRootId
+          next[scope] = { ...previous,
+            observedText: file.text, observedRevision: file.revision,
+            observedTargetRootId: data.targetRootId, truncated: file.truncated,
+            rootConflict, observationIncomplete: false,
+            conflict: rootConflict || previous.savedRevision !== file.revision }
+          changed = true
+        }
+      }
+      const visibleNames = new Set((data.files || []).map(file => file.name))
+      const listComplete = data.truncatedFiles === 0
+      for (const [scope, previous] of Object.entries(current)) {
+        if (previous.kind !== kind || visibleNames.has(previous.name)
+            || uncertainSaves[scope]) continue
+        // A retained document that disappeared from the response must be rebound even while clean.
+        // Otherwise an edit made after this refresh would still submit the old root/revision. Only a
+        // complete list proves absence; a capped list leaves the observation unknown and Save disabled.
+        const observedRevision = validAuthoringTargetRootId(data.targetRootId) && listComplete
+          ? 'missing' : null
+        const rootConflict = previous.savedTargetRootId !== data.targetRootId
+        const observationIncomplete = validAuthoringTargetRootId(data.targetRootId) && !listComplete
+        const conflict = rootConflict || observationIncomplete
+          || previous.savedRevision !== observedRevision
+        if (previous.observedText !== null || previous.observedRevision !== observedRevision
+            || previous.observedTargetRootId !== data.targetRootId
+            || previous.rootConflict !== rootConflict || previous.conflict !== conflict
+            || previous.observationIncomplete !== observationIncomplete) {
+          next[scope] = {
+            ...previous, observedText: null, observedRevision,
+            observedTargetRootId: data.targetRootId, rootConflict, conflict,
+            observationIncomplete,
+          }
+          changed = true
+        }
+      }
+      for (const recovery of Object.values(uncertainSaves)) {
+        if (recovery.kind !== kind) continue
+        const scope = recovery.scope
+        const previous = next[scope]
+        const sameRoot = data.targetRootId === recovery.expectedTargetRootId
+        const file = sameRoot
+          ? (data.files || []).find(candidate => candidate.name === recovery.name) : null
+        const observationIncomplete = sameRoot && !file && !listComplete
+        const observedRevision = sameRoot
+          ? (file ? file.revision : (listComplete ? 'missing' : null)) : null
+        const sameRecovery = previous?.recoveryOperationId === recovery.operationId
+          && previous?.recoveryStorageRaw === recovery.storageRaw
+        const hydrated = {
+          ...(sameRecovery ? previous : {}),
+          kind: recovery.kind, name: recovery.name,
+          savedText: sameRecovery ? previous.savedText : (file?.text ?? ''),
+          draftText: sameRecovery ? previous.draftText : recovery.submittedText,
+          savedRevision: recovery.expectedRevision,
+          observedText: file?.text ?? null, observedRevision,
+          savedTargetRootId: recovery.expectedTargetRootId,
+          observedTargetRootId: data.targetRootId,
+          truncated: file?.truncated === true, rootConflict: !sameRoot,
+          observationIncomplete,
+          conflict: !sameRoot || observationIncomplete
+            || (observedRevision !== recovery.expectedRevision
+            && observedRevision !== recovery.desiredRevision),
+          error: recovery.message, recoveryOperationId: recovery.operationId,
+          recoveryStorageRaw: recovery.storageRaw,
+        }
+        if (!previous || Object.keys(hydrated).some(key => hydrated[key] !== previous[key])) {
+          next[scope] = hydrated
+          changed = true
+        }
+      }
+      return changed ? next : current
+    })
+  }, [kind, source.state, source.data, uncertainSaves])
+  const selected = selectedScope ? documents[selectedScope] || null : null
+  const selectedUncertainSave = selectedScope ? uncertainSaves[selectedScope] || null : null
+  const damagedRows = Object.values(damagedRecoveries)
+  const selectedDamagedRecovery = damagedRows.find(recovery => !recovery.identity
+    || recovery.identity.scope === selectedScope) || null
+  const uncertainSaveCount = Object.keys(uncertainSaves).length
+  const damagedRecoveryCount = damagedRows.length
+  const dirtyCount = Object.values(documents)
+    .filter(document => document.draftText !== document.savedText).length
+  const mutationBusy = !!saveState
+  const navigationUnsafe = dirtyCount > 0 || mutationBusy
+    || uncertainSaveCount > 0 || damagedRecoveryCount > 0
+  useEffect(() => {
+    if (!navigationUnsafe) {
+      allowNavigationRef.current = false
+      return undefined
+    }
+    return installNavigationLossGuard({
+      allowRef: allowNavigationRef,
+      guardedHash: location.hash,
+      message: () => uncertainSaveCount > 0
+        ? `${uncertainSaveCount} file save outcome${uncertainSaveCount === 1 ? '' : 's'} may still be unknown. Leave Authoring anyway?`
+        : damagedRecoveryCount > 0
+          ? `${damagedRecoveryCount} damaged Authoring recovery record${damagedRecoveryCount === 1 ? '' : 's'} remain quarantined. Leave Authoring anyway?`
+        : mutationBusy
+          ? 'A file save is still in progress. Leave Authoring anyway?'
+          : `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be lost. Leave anyway?`,
+    })
+  }, [navigationUnsafe, mutationBusy, uncertainSaveCount, damagedRecoveryCount, dirtyCount])
+  const retainNotice = destination => {
+    if (!selected || selected.draftText === selected.savedText) return
+    onToast?.(`Unsaved draft for ${selected.name} is preserved while you ${destination}.`)
+  }
+  const chooseKind = nextKind => {
+    if (nextKind === kind) return
+    retainNotice('switch sections')
+    setKind(nextKind)
+    setSelectedScope(null)
+  }
+  const chooseFile = file => {
+    const scope = scopeFor(kind, file.name)
+    if (scope === selectedScope) return
+    retainNotice('switch files')
+    setDocuments(current => current[scope] ? current : {
+      ...current,
+      [scope]: { kind, name: file.name, savedText: file.text, draftText: file.text,
+        savedRevision: file.revision, observedText: file.text, observedRevision: file.revision,
+        savedTargetRootId: data.targetRootId, observedTargetRootId: data.targetRootId,
+        truncated: file.truncated, conflict: false, rootConflict: false,
+        observationIncomplete: false, error: '',
+        recoveryOperationId: null, recoveryStorageRaw: null },
+    })
+    setSelectedScope(scope)
+  }
+  const editSelected = value => {
+    if (!selectedScope) return
+    setDocuments(current => current[selectedScope] ? {
+      ...current, [selectedScope]: { ...current[selectedScope], draftText: value, error: '' },
+    } : current)
+  }
+  const updateRecovery = (token, patch) => setUncertainSaves(current => {
+    const exact = current[token.scope]
+    if (!exact || exact.operationId !== token.operationId
+        || exact.storageRaw !== token.storageRaw) return current
+    return { ...current, [token.scope]: { ...exact, ...patch } }
+  })
+  const removeRecovery = token => setUncertainSaves(current => {
+    const exact = current[token.scope]
+    if (!exact || exact.operationId !== token.operationId
+        || exact.storageRaw !== token.storageRaw) return current
+    const next = { ...current }; delete next[token.scope]; return next
+  })
+  const quarantineAuthoringRecovery = (recovery, message) => {
+    const exact = uncertainSavesRef.current[recovery?.scope]
+    if (!exact || exact.operationId !== recovery.operationId
+        || exact.storageRaw !== recovery.storageRaw) return false
+    const next = { ...uncertainSavesRef.current }
+    delete next[recovery.scope]
+    uncertainSavesRef.current = next
+    setUncertainSaves(next)
+    authoringDigestQuarantine.set(recovery.storageKey, { raw: recovery.storageRaw, reason: message })
+    setDamagedRecoveries(current => {
+      let damagedScope = `damaged:${recovery.storageKey}`
+      while (Object.hasOwn(current, damagedScope)
+          && (current[damagedScope].key !== recovery.storageKey
+            || current[damagedScope].raw !== recovery.storageRaw)) damagedScope += ':retained'
+      return {
+        ...current,
+        [damagedScope]: {
+          scope: damagedScope, key: recovery.storageKey, raw: recovery.storageRaw,
+          identity: { kind: recovery.kind, name: recovery.name, scope: recovery.scope },
+          inspected: false, reason: message,
+        },
+      }
+    })
+    setDocuments(current => {
+      const retained = current[recovery.scope] || {
+        kind: recovery.kind, name: recovery.name, savedText: null,
+        draftText: recovery.submittedText, savedRevision: recovery.expectedRevision,
+        observedText: null, observedRevision: recovery.expectedRevision,
+        savedTargetRootId: recovery.expectedTargetRootId, observedTargetRootId: null,
+        truncated: false, conflict: false, rootConflict: false,
+        observationIncomplete: false,
+      }
+      return { ...current, [recovery.scope]: {
+        ...retained, error: message,
+        recoveryOperationId: null, recoveryStorageRaw: null,
+      } }
+    })
+    onToast?.(message)
+    return true
+  }
+  const verifyAuthoringRecovery = async recovery => {
+    const exact = uncertainSavesRef.current[recovery?.scope]
+    if (!exact || exact.operationId !== recovery.operationId
+        || exact.storageRaw !== recovery.storageRaw) return null
+    let actualRevision
+    try {
+      actualRevision = await authoringTextRevision(exact.submittedText)
+    } catch (error) {
+      const message = `Could not verify the retained contents for ${exact.name}: ${error?.message || error}. No request was sent.`
+      updateRecovery(exact, {
+        phase: 'unknown', releaseAllowed: false, releaseInspected: false, message,
+      })
+      onToast?.(message)
+      return null
+    }
+    const storage = authoringStorage()
+    const latest = uncertainSavesRef.current[exact.scope]
+    let storedRaw = null
+    try { storedRaw = storage?.getItem(exact.storageKey) ?? null } catch {
+      setStorageAvailable(false)
+      const message = `Browser recovery storage became unavailable while verifying ${exact.name}. No request was sent.`
+      updateRecovery(exact, {
+        phase: 'unknown', releaseAllowed: false, releaseInspected: false, message,
+      })
+      onToast?.(message)
+      return null
+    }
+    if (!storage || storedRaw !== exact.storageRaw
+        || !latest || latest.operationId !== exact.operationId
+        || latest.storageRaw !== exact.storageRaw) {
+      refreshRecoveryStore()
+      onToast?.('The Authoring recovery record changed while it was being verified. Inspect the refreshed exact record.')
+      return null
+    }
+    if (actualRevision !== exact.desiredRevision) {
+      quarantineAuthoringRecovery(exact,
+        `The retained operation for ${exact.name} has an invalid content digest. It was quarantined without contacting the server.`)
+      return null
+    }
+    return latest
+  }
+  const refreshRecoveryStore = () => {
+    const inspected = inspectAuthoringOperations()
+    setStorageAvailable(inspected.available)
+    if (!inspected.available) return
+    setDamagedRecoveries(current => {
+      const incoming = Object.values(inspected.damaged)
+      const previous = Object.values(current)
+      const retainedScopes = new Set()
+      const next = {}
+      for (const record of incoming) {
+        const exact = previous.find(candidate => candidate.key === record.key
+          && candidate.raw === record.raw)
+        if (exact) retainedScopes.add(exact.scope)
+        next[record.scope] = exact ? {
+          ...record, inspected: exact.inspected, reason: record.reason || exact.reason,
+          storageMissing: false,
+        } : record
+      }
+      for (const record of previous) {
+        if (retainedScopes.has(record.scope)) continue
+        // A disappearing or replaced unreadable envelope is still evidence of an unknown write.
+        // Keep that exact snapshot quarantined in this tab without touching any newer stored record.
+        let scope = record.scope
+        while (Object.hasOwn(next, scope)) scope += ':retained'
+        next[scope] = {
+          ...record, scope, storageMissing: true, inspected: false,
+        }
+      }
+      return next
+    })
+    setUncertainSaves(current => {
+      const next = Object.fromEntries(Object.entries(inspected.valid).map(([scope, record]) => {
+        const previous = current[scope]
+        return [scope, previous?.operationId === record.operationId
+            && previous?.storageRaw === record.storageRaw
+          ? { ...record, phase: previous.phase, inspectedMissing: previous.inspectedMissing,
+            releaseAllowed: previous.releaseAllowed, releaseInspected: previous.releaseInspected,
+            message: previous.message }
+          : { ...record, phase: 'unknown', inspectedMissing: false,
+            releaseAllowed: false, releaseInspected: false,
+            message: `A saved operation for ${record.name} may still be pending. Check its exact durable receipt.` }]
+      }))
+      const damagedSnapshots = new Set(Object.values(inspected.damaged)
+        .map(record => `${record.key}\u0000${record.raw}`))
+      for (const [scope, previous] of Object.entries(current)) {
+        if (next[scope] || damagedSnapshots.has(`${previous.storageKey}\u0000${previous.storageRaw}`)) continue
+        next[scope] = {
+          ...previous, phase: 'storage-missing', inspectedMissing: false,
+          releaseAllowed: false, releaseInspected: false,
+          message: `The browser recovery record for ${previous.name} disappeared or changed before a terminal receipt was proved. This tab keeps the exact draft quarantined; no new save will be sent.`,
+        }
+      }
+      uncertainSavesRef.current = next
+      return next
+    })
+  }
+  const releaseTerminalRecovery = token => {
+    if (clearAuthoringOperationIntent(token)) {
+      removeRecovery(token)
+      return true
+    }
+    try {
+      const storage = authoringStorage()
+      if (storage && storage.getItem(token.storageKey) == null) {
+        removeRecovery(token)
+        return true
+      }
+    } catch { /* retain fail-closed below */ }
+    refreshRecoveryStore()
+    updateRecovery(token, {
+      phase: 'unknown', releaseAllowed: true, releaseInspected: false,
+      message: `The server settled ${token.name}, but its browser recovery record changed or could not be released. Inspect the exact record before another save.`,
+    })
+    return false
+  }
+  const applyAuthoringReceipt = (token, receipt) => {
+    if (receipt.desired_revision !== token.desiredRevision
+        || receipt.target_root_id !== token.expectedTargetRootId) {
+      const error = new Error('The durable receipt does not match the submitted file contents.')
+      error.code = 'AUTHORING_PROTOCOL_ERROR'
+      throw error
+    }
+    if (receipt.status === 'prepared') {
+      const message = `The exact operation for ${token.name} is durably prepared but not complete. Resume the same save identity.`
+      updateRecovery(token, {
+        phase: 'prepared', inspectedMissing: false,
+        releaseAllowed: false, releaseInspected: false, message,
+      })
+      setDocuments(current => current[token.scope] ? {
+        ...current, [token.scope]: { ...current[token.scope], error: message },
+      } : current)
+      return 'prepared'
+    }
+    if (receipt.status === 'succeeded') {
+      const released = releaseTerminalRecovery(token)
+      setDocuments(current => {
+        const exact = current[token.scope]
+        if (!exact || exact.kind !== token.kind || exact.name !== token.name) return current
+        return { ...current, [token.scope]: {
+          ...exact, savedText: token.submittedText, savedRevision: token.desiredRevision,
+          observedText: token.submittedText, observedRevision: token.desiredRevision,
+          savedTargetRootId: token.expectedTargetRootId,
+          observedTargetRootId: token.expectedTargetRootId,
+          conflict: false, rootConflict: false, observationIncomplete: false, error: '',
+          recoveryOperationId: released ? null : token.operationId,
+          recoveryStorageRaw: released ? null : token.storageRaw,
+        } }
+      })
+      onToast?.(`Saved ${token.name}`)
+      return 'succeeded'
+    }
+    const message = receipt.code === 'authoring_intervening_write'
+      ? `${token.name} changed after this exact save was prepared. Your draft is retained; inspect the current server copy before saving again.`
+      : `${token.name} changed before this save began. Your retained draft was not written.`
+    const released = releaseTerminalRecovery(token)
+    setDocuments(current => {
+      const exact = current[token.scope]
+      const retained = exact || {
+        kind: token.kind, name: token.name, savedText: null,
+        draftText: token.submittedText, savedRevision: token.expectedRevision,
+        savedTargetRootId: token.expectedTargetRootId,
+        observedTargetRootId: token.expectedTargetRootId,
+        truncated: false, rootConflict: false,
+      }
+      return { ...current, [token.scope]: {
+        ...retained, observedText: null, observedRevision: receipt.result_revision,
+        observedTargetRootId: token.expectedTargetRootId,
+        conflict: true, rootConflict: false, observationIncomplete: false, error: message,
+        recoveryOperationId: released ? null : token.operationId,
+        recoveryStorageRaw: released ? null : token.storageRaw,
+      } }
+    })
+    retry()
+    onToast?.(message)
+    return 'conflict'
+  }
+  const submitAuthoringSave = async token => {
+    if (saveRef.current) return
+    saveRef.current = token
+    setSaveState(token)
+    updateRecovery(token, {
+      phase: 'submitting', inspectedMissing: false,
+      releaseAllowed: false, releaseInspected: false,
+      message: `Submitting the exact saved operation for ${token.name}…`,
+    })
+    setDocuments(current => current[token.scope] ? {
+      ...current, [token.scope]: {
+        ...current[token.scope], error: '', recoveryOperationId: token.operationId,
+        recoveryStorageRaw: token.storageRaw,
+      },
+    } : current)
+    const timed = deadlineRequest(
+      signal => putAuthoringOperation(token.kind, token.name, token.operationId, {
+        text: token.submittedText, expectedRevision: token.expectedRevision,
+        expectedTargetRootId: token.expectedTargetRootId,
+        desiredRevision: token.desiredRevision,
+      }, { signal }),
+      AUTHORING_SAVE_TIMEOUT_MS,
+    )
+    try {
+      const receipt = await timed.promise
+      if (saveRef.current !== token || !activeRef.current) return
+      applyAuthoringReceipt(token, receipt)
+    } catch (error) {
+      if (saveRef.current !== token || !activeRef.current) return
+      const message = `Save outcome for ${token.name} is not confirmed. Its exact operation and draft remain durable in this tab; check the receipt before retrying.`
+      updateRecovery(token, {
+        phase: 'unknown', inspectedMissing: false,
+        // A failed client request cannot prove that the exact PUT is no longer waiting on the
+        // server-side lock or fsync. Keep it quarantined until a validated terminal receipt exists.
+        releaseAllowed: false, releaseInspected: false, message,
+      })
+      setDocuments(current => current[token.scope] ? {
+        ...current, [token.scope]: { ...current[token.scope], error: message },
+      } : current)
+      onToast?.(message)
+    } finally {
+      if (saveRef.current === token) {
+        saveRef.current = null
+        if (activeRef.current) setSaveState(null)
+      }
+    }
+  }
+  const saveSelected = async () => {
+    const document = selectedScope ? documents[selectedScope] : null
+    if (!document || document.draftText === document.savedText || saveRef.current
+        || selectedUncertainSave || selectedDamagedRecovery) return
+    if (document.rootConflict || !validAuthoringTargetRootId(document.observedTargetRootId)) {
+      const message = `${document.name} belongs to a different or unavailable Authoring directory. Its retained draft was not written; refresh the configured directory before saving.`
+      setDocuments(current => current[selectedScope] ? {
+        ...current, [selectedScope]: { ...current[selectedScope], error: message },
+      } : current)
+      onToast?.(message)
+      return
+    }
+    if (document.truncated || !AUTHORING_REVISION_RE.test(document.observedRevision || '')) {
+      const message = `${document.name} has no complete writable revision. Refresh or edit the file outside this truncated view.`
+      setDocuments(current => current[selectedScope] ? {
+        ...current, [selectedScope]: { ...current[selectedScope], error: message },
+      } : current)
+      onToast?.(message)
+      return
+    }
+    if (document.conflict && !window.confirm(
+      `${document.name} changed on the server while this draft was open. Save this retained draft over the newer server copy?`,
+    )) return
+    try {
+      const desiredRevision = await authoringTextRevision(document.draftText)
+      if (!activeRef.current || saveRef.current) return
+      const latestDocument = documentsRef.current[selectedScope]
+      if (!latestDocument || latestDocument.draftText !== document.draftText
+          || latestDocument.savedRevision !== document.savedRevision
+          || latestDocument.observedRevision !== document.observedRevision
+          || latestDocument.savedTargetRootId !== document.savedTargetRootId
+          || latestDocument.observedTargetRootId !== document.observedTargetRootId
+          || latestDocument.conflict !== document.conflict || latestDocument.rootConflict) {
+        const message = `${document.name} changed while the save identity was being prepared. Review the retained draft and current server copy; no request was sent.`
+        setDocuments(current => current[selectedScope] ? {
+          ...current, [selectedScope]: { ...current[selectedScope], error: message },
+        } : current)
+        onToast?.(message)
+        return
+      }
+      const intent = {
+        schema: AUTHORING_OPERATION_SCHEMA,
+        operationId: createIdempotencyKey(), kind: latestDocument.kind, name: latestDocument.name,
+        submittedText: latestDocument.draftText,
+        expectedRevision: latestDocument.conflict
+          ? latestDocument.observedRevision : latestDocument.savedRevision,
+        expectedTargetRootId: latestDocument.observedTargetRootId,
+        desiredRevision, updatedAt: Date.now(),
+      }
+      const stored = saveAuthoringOperationIntent(intent)
+      if (!stored) {
+        const message = `Save was not sent because the exact operation for ${document.name} could not be retained in browser recovery storage.`
+        setDocuments(current => current[selectedScope] ? {
+          ...current, [selectedScope]: { ...current[selectedScope], error: message },
+        } : current)
+        refreshRecoveryStore()
+        onToast?.(message)
+        return
+      }
+      const recovery = {
+        ...stored, phase: 'submitting', inspectedMissing: false,
+        releaseAllowed: false, releaseInspected: false,
+        message: `Submitting the exact saved operation for ${stored.name}…`,
+      }
+      setUncertainSaves(current => ({ ...current, [stored.scope]: recovery }))
+      await submitAuthoringSave(recovery)
+    } catch (error) {
+      const message = `Could not prepare ${document.name} for saving: ${error?.message || error}`
+      setDocuments(current => current[selectedScope] ? {
+        ...current, [selectedScope]: { ...current[selectedScope], error: message },
+      } : current)
+      onToast?.(message)
+    }
+  }
+  const reconcileSave = async recovery => {
+    const exactRecovery = uncertainSaves[recovery?.scope]
+    if (!recovery || saveRef.current || !exactRecovery
+        || exactRecovery.operationId !== recovery.operationId
+        || exactRecovery.storageRaw !== recovery.storageRaw) return
+    const verifiedRecovery = await verifyAuthoringRecovery(exactRecovery)
+    if (!verifiedRecovery || saveRef.current || !activeRef.current) return
+    recovery = verifiedRecovery
+    const token = { ...recovery, reconcile: true }
+    saveRef.current = token
+    setSaveState(token)
+    const request = deadlineRequest(
+      signal => getAuthoringOperation(recovery.kind, recovery.name, recovery.operationId, {
+        signal, expectedRevision: recovery.expectedRevision,
+        expectedTargetRootId: recovery.expectedTargetRootId,
+        desiredRevision: recovery.desiredRevision,
+      }),
+      PANEL_REQUEST_TIMEOUT_MS,
+    )
+    try {
+      const receipt = await request.promise
+      if (saveRef.current !== token || !activeRef.current) return
+      applyAuthoringReceipt(recovery, receipt)
+    } catch (error) {
+      if (saveRef.current === token && activeRef.current) {
+        const missing = Number(error?.status) === 404
+          && error?.code === 'authoring_operation_not_found'
+        const message = missing
+          ? `No durable receipt exists yet for ${recovery.name}. Resume the same operation identity; it cannot overwrite a newer revision.`
+          : `Could not check ${recovery.name}: ${error?.message || error}. Its exact draft and operation identity remain retained.`
+        updateRecovery(recovery, {
+          phase: missing ? 'missing' : 'unknown', inspectedMissing: missing,
+          // Even a 404 can race a still-running timed-out PUT before its prepared receipt is
+          // published. Reuse/check the same identity; never release it from an unknown response.
+          releaseAllowed: false,
+          releaseInspected: false, message,
+        })
+        setDocuments(current => current[recovery.scope] ? {
+          ...current, [recovery.scope]: { ...current[recovery.scope], error: message },
+        } : current)
+        onToast?.(message)
+      }
+    } finally {
+      if (saveRef.current === token) {
+        saveRef.current = null
+        if (activeRef.current) setSaveState(null)
+      }
+    }
+  }
+  const retryExactSave = async recovery => {
+    const exact = uncertainSaves[recovery?.scope]
+    if (!exact || saveRef.current || exact.operationId !== recovery.operationId
+        || exact.storageRaw !== recovery.storageRaw
+        || !['prepared', 'missing'].includes(exact.phase)) return
+    const verifiedRecovery = await verifyAuthoringRecovery(exact)
+    if (!verifiedRecovery || saveRef.current || !activeRef.current
+        || !['prepared', 'missing'].includes(verifiedRecovery.phase)) return
+    if (!window.confirm(
+      `Resume the exact retained save for ${recovery.name}?\n\nThis reuses the same durable operation identity, expected revision, and file contents. It cannot overwrite an intervening newer version.`,
+    )) return
+    submitAuthoringSave(verifiedRecovery)
+  }
+  const adoptObservedServerCopy = document => {
+    if (!document?.conflict || document.truncated || document.observedText == null
+        || !/^sha256:[0-9a-f]{64}$/.test(document.observedRevision || '') || saveRef.current) return
+    if (!window.confirm(
+      `Use the current server copy of ${document.name}?\n\nThis discards the retained local draft for that file.`,
+    )) return
+    const scope = scopeFor(document.kind, document.name)
+    setDocuments(current => current[scope] ? {
+      ...current,
+      [scope]: {
+        ...current[scope], savedText: document.observedText, draftText: document.observedText,
+        savedRevision: document.observedRevision,
+        savedTargetRootId: document.observedTargetRootId,
+        observedTargetRootId: document.observedTargetRootId,
+        conflict: false, rootConflict: false, observationIncomplete: false, error: '',
+      },
+    } : current)
+    onToast?.(`Using the current server copy of ${document.name}.`)
+  }
+  const releaseAuthoringRecovery = recovery => {
+    const exact = uncertainSaves[recovery?.scope]
+    if (!exact || !exact.releaseAllowed || !exact.releaseInspected
+        || exact.operationId !== recovery.operationId) return
+    if (!window.confirm(
+      `Release the exact saved operation for ${recovery.name}?\n\nThis sends no write. The retained draft stays open here, but closing the panel will discard it.`,
+    )) return
+    if (!clearAuthoringOperationIntent(exact)) {
+      updateRecovery(exact, {
+        releaseAllowed: false, releaseInspected: false,
+        message: 'The browser recovery record changed or could not be released. It remains protected.',
+      })
+      refreshRecoveryStore()
+      onToast?.('The exact Authoring recovery record changed or could not be released.')
+      return
+    }
+    removeRecovery(exact)
+    setDocuments(current => current[exact.scope] ? {
+      ...current,
+      [exact.scope]: {
+        ...current[exact.scope], recoveryOperationId: null,
+        recoveryStorageRaw: null,
+        error: 'The old operation recovery was released. Review the retained draft and current server version before saving again.',
+      },
+    } : current)
+    onToast?.('The exact Authoring recovery identity was released. No save was sent.')
+  }
+  const releaseDamagedRecovery = recovery => {
+    if (!recovery?.inspected) return
+    if (!window.confirm(
+      'Release this exact unreadable Authoring recovery record?\n\nOnly continue after confirming that no retained save operation still needs recovery.',
+    )) return
+    const storedRecordReleased = clearDamagedAuthoringOperation(recovery)
+    if (!storedRecordReleased) {
+      let exactSnapshotIsGone = false
+      if (recovery.storageMissing) {
+        const storage = authoringStorage()
+        try { exactSnapshotIsGone = !!storage && storage.getItem(recovery.key) !== recovery.raw } catch {
+          setStorageAvailable(false)
+        }
+      }
+      if (!exactSnapshotIsGone) {
+        onToast?.('The recovery record changed or could not be released. It remains protected.')
+        refreshRecoveryStore()
+        return
+      }
+    }
+    setDamagedRecoveries(current => {
+      const exact = current[recovery.scope]
+      if (!exact || exact.raw !== recovery.raw || exact.key !== recovery.key) return current
+      const next = { ...current }; delete next[recovery.scope]; return next
+    })
+    const quarantined = authoringDigestQuarantine.get(recovery.key)
+    if (quarantined?.raw === recovery.raw) authoringDigestQuarantine.delete(recovery.key)
+    if (recovery.identity?.scope) {
+      setDocuments(current => current[recovery.identity.scope] ? {
+        ...current,
+        [recovery.identity.scope]: {
+          ...current[recovery.identity.scope],
+          recoveryOperationId: null, recoveryStorageRaw: null,
+          error: 'The old recovery record was released. Review the retained draft and current server version before saving again.',
+        },
+      } : current)
+    }
+    if (!storedRecordReleased) refreshRecoveryStore()
+    onToast?.(storedRecordReleased
+      ? 'The exact damaged Authoring recovery record was released. No save was sent.'
+      : 'The retained snapshot of the missing recovery record was released. No stored record was changed.')
+  }
+  const requestClose = () => {
+    if (!navigationUnsafe) { onClose?.(); return }
+    const warning = uncertainSaveCount > 0
+      ? `${uncertainSaveCount} file save outcome${uncertainSaveCount === 1 ? '' : 's'} may still be unknown, and the exact draft${uncertainSaveCount === 1 ? ' is' : 's are'} retained here.`
+      : damagedRecoveryCount > 0
+        ? `${damagedRecoveryCount} damaged Authoring recovery record${damagedRecoveryCount === 1 ? '' : 's'} remain quarantined in this tab.`
+      : mutationBusy ? 'A file save is still in progress.'
+        : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost.`
+    if (!window.confirm(`${warning} Close Authoring anyway?`)) return
+    allowNavigationRef.current = true
+    onClose?.()
+  }
+  const dirtyByKind = documentKind => Object.values(documents)
+    .filter(document => document.kind === documentKind && document.draftText !== document.savedText).length
+  const fileRows = [...(data.files || [])]
+  for (const recovery of Object.values(uncertainSaves)) {
+    if (recovery.kind === kind && !fileRows.some(file => file.name === recovery.name)) {
+      fileRows.push({ name: recovery.name, text: recovery.submittedText,
+        revision: null, truncated: false, recovered: true })
+    }
+  }
+  for (const document of Object.values(documents)) {
+    if (document.kind === kind
+        && (document.draftText !== document.savedText || document.recoveryOperationId
+          || scopeFor(document.kind, document.name) === selectedScope)
+        && !fileRows.some(file => file.name === document.name)) {
+      fileRows.push({
+        name: document.name, text: document.draftText,
+        revision: document.observedRevision || null,
+        truncated: document.truncated === true, recovered: true,
+      })
+    }
+  }
   return (
-    <Panel title="Authoring — configure the scientist" sub="hot-reloaded next run" onClose={onClose} wide>
+    <Panel title="Authoring — configure the scientist" sub="hot-reloaded next run" onClose={requestClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
-          onClick={() => { setKind(k); setSel(null); setText('') }}>{k}</button>)}
+          onClick={() => chooseKind(k)}>{k}{dirtyByKind(k) ? ` (${dirtyByKind(k)} unsaved)` : ''}</button>)}
         {source.state === 'ready' && <span className="muted">{data.dir || `no ${kind} dir configured (set LOOPLAB_${kind.toUpperCase()}_DIR)`}</span>}
+        {source.state === 'ready' && data.truncatedFiles > 0
+          && <span className="muted">{data.truncatedFiles} more file{data.truncatedFiles === 1 ? '' : 's'} omitted</span>}
       </div>
       <PanelResourceNotice resource={source} label={`${kind} files`} onRetry={retry} />
+      {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
+        {dirtyCount} unsaved draft{dirtyCount === 1 ? '' : 's'} retained in this panel. Switching files or sections is safe; closing is not.
+      </div>}
+      {!storageAvailable && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
+        <OpIcon name="alert" size={14} /><span>Browser recovery storage is unavailable. Authoring saves stay disabled so an ambiguous write cannot lose its exact identity.</span>
+      </div>}
+      {damagedRows.map(recovery => <div key={recovery.scope}
+        className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
+        <OpIcon name="alert" size={14} />
+        <span>{recovery.storageMissing
+          ? `A previously seen unreadable Authoring recovery record${recovery.identity
+            ? ` for ${recovery.identity.name}` : ''} disappeared or was replaced in browser storage. Its exact snapshot remains quarantined in this tab.`
+          : recovery.reason || `An unreadable Authoring recovery record exists${recovery.identity
+          ? ` for ${recovery.identity.name}` : ''}. Saves for that scope remain locked.`}</span>
+        {!recovery.inspected
+          ? <button className="btn sm" onClick={() => setDamagedRecoveries(current => ({
+            ...current, [recovery.scope]: { ...current[recovery.scope], inspected: true },
+          }))}>Inspect recovery</button>
+          : <>
+            <span className="muted">Stored record {recovery.raw.length} bytes; {recovery.reason
+              ? 'its retained contents fail the integrity check.'
+              : 'its operation identity cannot be verified.'}</span>
+            <button className="btn sm danger" onClick={() => releaseDamagedRecovery(recovery)}>Release exact record</button>
+          </>}
+      </div>)}
+      {Object.values(uncertainSaves).map(recovery => <div key={recovery.scope}
+        className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
+        <OpIcon name="alert" size={14} /><span>{recovery.message}</span>
+        <button className="btn sm" disabled={mutationBusy} onClick={() => reconcileSave(recovery)}>
+          {saveState?.reconcile && saveState.scope === recovery.scope ? 'Checking…' : 'Check exact operation'}</button>
+        {['prepared', 'missing'].includes(recovery.phase) && <button className="btn sm" disabled={mutationBusy}
+          onClick={() => retryExactSave(recovery)}>Resume exact save</button>}
+        {recovery.releaseAllowed && !recovery.releaseInspected
+          && <button className="btn sm" disabled={mutationBusy}
+            onClick={() => updateRecovery(recovery, { releaseInspected: true })}>Inspect recovery</button>}
+        {recovery.releaseAllowed && recovery.releaseInspected && <>
+          <span className="muted">Operation {recovery.operationId}; expected revision {recovery.expectedRevision.slice(0, 18)}….</span>
+          <button className="btn sm danger" disabled={mutationBusy}
+            onClick={() => releaseAuthoringRecovery(recovery)}>Release exact recovery</button>
+        </>}
+      </div>)}
       <div className="authoring-layout">
         <div className="authoring-list">
-          {(data.files || []).map(f => <button type="button" key={f.name}
-            className={'run-card authoring-file' + (sel === f.name ? ' sel' : '')}
-            onClick={() => { setSel(f.name); setText(f.text) }}>{f.name}</button>)}
-          {source.state === 'ready' && !data.files?.length && <div className="muted">no files</div>}
+          {fileRows.map(f => <button type="button" key={f.name}
+            className={'run-card authoring-file' + (selectedScope === scopeFor(kind, f.name) ? ' sel' : '')}
+            onClick={() => chooseFile(f)}>{f.name}
+            {documents[scopeFor(kind, f.name)]?.draftText !== documents[scopeFor(kind, f.name)]?.savedText
+              ? ' • unsaved' : ''}{uncertainSaves[scopeFor(kind, f.name)] ? ' • recovery' : ''}</button>)}
+          {source.state === 'ready' && fileRows.length === 0 && <div className="muted">no files</div>}
         </div>
         <div className="authoring-editor">
-          {sel ? <>
-            <textarea className="text" aria-label={`Edit ${sel}`} value={text} onChange={e => setText(e.target.value)} />
-            <button className="btn sm primary" style={{ marginTop: 8 }} onClick={async () => { await putText(`/api/${kind}/${sel}`, text); onToast('saved ' + sel) }}>Save</button>
+          {selected ? <>
+            <textarea className="text" aria-label={`Edit ${selected.name}`} value={selected.draftText}
+              disabled={selected.truncated} onChange={e => editSelected(e.target.value)} />
+            {selected.truncated && <div className="report-inline-state error" role="alert">
+              <OpIcon name="alert" size={14} /><span>This file is larger than the safe editor limit. Only a prefix is shown, so saving is disabled.</span>
+            </div>}
+            {selected.conflict && <div className="report-inline-state error" role="alert">
+              <OpIcon name="alert" size={14} /><span>{selected.rootConflict
+                ? 'The configured Authoring directory changed while this draft was retained. The draft stays bound to its original directory and cannot be written into the new one.'
+                : selected.observationIncomplete
+                  ? 'The server returned an incomplete file list, so this file\'s current version could not be verified. Saving stays disabled until a complete refresh can prove its revision.'
+                : 'The server copy changed while this draft was retained. Your text was not replaced.'}</span>
+              {!selected.truncated && selected.observedText != null
+                && /^sha256:[0-9a-f]{64}$/.test(selected.observedRevision || '')
+                && !selectedUncertainSave && <button className="btn sm"
+                onClick={() => adoptObservedServerCopy(selected)}>Use server copy</button>}
+            </div>}
+            {selected.error && <div className="report-inline-state error" role="alert">
+              <OpIcon name="alert" size={14} /><span>{selected.error}</span>
+            </div>}
+            <button className="btn sm primary" style={{ marginTop: 8 }} onClick={saveSelected}
+              disabled={mutationBusy || !storageAvailable || !!selectedUncertainSave
+                || !!selectedDamagedRecovery || selected.truncated
+                || selected.rootConflict
+                || !validAuthoringTargetRootId(selected.observedTargetRootId)
+                || !AUTHORING_REVISION_RE.test(selected.observedRevision || '')
+                || selected.draftText === selected.savedText}>
+              {saveState && !saveState.reconcile ? `Saving ${saveState.name}…` : 'Save'}</button>
           </> : source.state === 'ready' && <div className="muted">select a file to edit</div>}
         </div>
       </div>
@@ -1952,20 +2922,235 @@ function _CardKanban({ state, cards, runId, onSelect, onClose, onToast }) {
   </Panel>
 }
 
-function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
+const HYPOTHESIS_DELETE_STORAGE_PREFIX = 'll.hypothesis-delete.'
+const HYPOTHESIS_DELETE_COMMAND_RE = /^cmd_[0-9a-f]{32}$/
+const HYPOTHESIS_DELETE_PENDING = new Set(['submitting', 'accepted', 'executing'])
+const HYPOTHESIS_DELETE_TERMINAL = new Set(['succeeded', 'noop', 'failed', 'timed_out', 'rejected'])
+const HYPOTHESIS_DELETE_STORED = new Set([
+  ...HYPOTHESIS_DELETE_PENDING, 'failed', 'timed_out', 'rejected',
+])
+const HYPOTHESIS_DELETE_KEYS = new Set([
+  'runId', 'expectedGeneration', 'hypothesisId', 'idempotencyKey', 'commandId', 'status', 'updatedAt',
+])
+const canonicalHypothesisId = value => typeof value === 'string' && value === value.trim()
+  && value.length > 0 && [...value].length <= 256 && !/\p{C}/u.test(value)
+const ownHypothesisEntry = (collection, id) => collection
+  && Object.hasOwn(collection, String(id)) ? collection[String(id)] : null
+const exactHypothesisDeleteRecord = (intent, record) => !!intent && isRecord(record)
+  && typeof record.id === 'string' && HYPOTHESIS_DELETE_COMMAND_RE.test(record.id)
+  && (!intent.commandId || record.id === intent.commandId)
+  && record.event_type === 'hypothesis_updated'
+  && record.run_generation === intent.expectedGeneration
+  && isRecord(record.subject) && record.subject.kind === 'hypothesis'
+  && record.subject.id === intent.hypothesisId && record.subject.status === 'deleted'
+
+const hypothesisDeleteStorage = () => {
+  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage } catch { return null }
+}
+const hypothesisDeleteStorageKey = (runId, generation) => HYPOTHESIS_DELETE_STORAGE_PREFIX
+  + encodeURIComponent(`${String(runId || '')}\u0000${String(generation || '')}`)
+const validHypothesisDeleteIntent = (value, runId, generation) => !!value && isRecord(value)
+  && Object.keys(value).every(key => HYPOTHESIS_DELETE_KEYS.has(key))
+  && value.runId === String(runId) && value.expectedGeneration === String(generation)
+  && RUN_GENERATION_RE.test(value.expectedGeneration)
+  && canonicalHypothesisId(value.hypothesisId)
+  && typeof value.idempotencyKey === 'string' && value.idempotencyKey.length > 0
+  && value.idempotencyKey.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value.idempotencyKey)
+  && typeof value.commandId === 'string'
+  && (!value.commandId || HYPOTHESIS_DELETE_COMMAND_RE.test(value.commandId))
+  && HYPOTHESIS_DELETE_STORED.has(value.status) && Number.isFinite(value.updatedAt)
+
+function loadHypothesisDeleteIntent(runId, generation) {
+  const storage = hypothesisDeleteStorage()
+  if (!storage || !runId || !RUN_GENERATION_RE.test(String(generation || ''))) return null
+  try {
+    const parsed = JSON.parse(storage.getItem(hypothesisDeleteStorageKey(runId, generation)) || 'null')
+    return validHypothesisDeleteIntent(parsed, runId, generation) ? parsed : null
+  } catch { return null }
+}
+
+function inspectHypothesisDeleteRecovery(runId, generation) {
+  const storage = hypothesisDeleteStorage()
+  if (!storage || !runId || !RUN_GENERATION_RE.test(String(generation || ''))) {
+    return { state: 'unavailable', raw: null, key: null, intent: null }
+  }
+  const key = hypothesisDeleteStorageKey(runId, generation)
+  try {
+    const raw = storage.getItem(key)
+    if (raw == null) return { state: 'empty', raw: null, key, intent: null }
+    const intent = loadHypothesisDeleteIntent(runId, generation)
+    return intent ? { state: 'valid', raw, key, intent }
+      : { state: 'damaged', raw, key, intent: null }
+  } catch { return { state: 'unavailable', raw: null, key, intent: null } }
+}
+
+function clearDamagedHypothesisDeleteRecovery(recovery) {
+  const storage = hypothesisDeleteStorage()
+  if (!storage || recovery?.state !== 'damaged' || !recovery.key || typeof recovery.raw !== 'string') return false
+  try {
+    // Compare-and-clear only the unreadable envelope the operator inspected. A different tab or a
+    // late command receipt wins the race and remains protected.
+    if (storage.getItem(recovery.key) !== recovery.raw) return false
+    storage.removeItem(recovery.key)
+    return storage.getItem(recovery.key) == null
+  } catch { return false }
+}
+
+function saveHypothesisDeleteIntent(intent, expectedRaw) {
+  const storage = hypothesisDeleteStorage()
+  if (!storage || !validHypothesisDeleteIntent(intent, intent?.runId, intent?.expectedGeneration)) return null
+  try {
+    const key = hypothesisDeleteStorageKey(intent.runId, intent.expectedGeneration)
+    const raw = storage.getItem(key)
+    if (expectedRaw !== undefined && raw !== expectedRaw) return null
+    const existing = loadHypothesisDeleteIntent(intent.runId, intent.expectedGeneration)
+    // A corrupt/unknown recovery envelope may still describe an accepted destructive command. Never
+    // overwrite it with a fresh identity; keep the surface fail-closed until storage is repaired.
+    if (raw != null && !existing) return null
+    if (existing && (existing.idempotencyKey !== intent.idempotencyKey
+        || existing.hypothesisId !== intent.hypothesisId
+        || (existing.commandId && existing.commandId !== intent.commandId))) return null
+    const serialized = JSON.stringify(intent)
+    storage.setItem(key, serialized)
+    const stored = loadHypothesisDeleteIntent(intent.runId, intent.expectedGeneration)
+    return stored && stored.idempotencyKey === intent.idempotencyKey
+      && stored.hypothesisId === intent.hypothesisId && stored.commandId === intent.commandId
+      && storage.getItem(key) === serialized
+      ? { storageKey: key, storageRaw: serialized } : null
+  } catch { return null }
+}
+
+function clearHypothesisDeleteIntent(intent) {
+  const storage = hypothesisDeleteStorage()
+  if (!storage || !intent?.storageKey || typeof intent.storageRaw !== 'string') return false
+  try {
+    const key = hypothesisDeleteStorageKey(intent.runId, intent.expectedGeneration)
+    if (intent.storageKey !== key || storage.getItem(key) !== intent.storageRaw) return false
+    storage.removeItem(key)
+    return storage.getItem(key) == null
+  } catch { return false }
+}
+
+function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, onToast,
+  onRecoveryReleased }) {
   const [draft, setDraft] = useState('')
   // Optimistic status overrides {id: 'abandoned'|'deleted'}: the run-state round-trip that reflects a
   // control event can lag (its SSE is buffered by a proxy), so apply the click to the board AT ONCE
   // instead of leaving it looking dead for up to a minute. The real fold catches up idempotently.
   const [optim, setOptim] = useState({})
+  const [deleteIntents, setDeleteIntents] = useState(() => {
+    const recovery = inspectHypothesisDeleteRecovery(runId, runGeneration)
+    const restored = recovery.state === 'valid' ? recovery.intent : null
+    return restored ? { [restored.hypothesisId]: {
+      ...restored, storageKey: recovery.key, storageRaw: recovery.raw,
+      phase: 'unknown',
+      releaseAllowed: false, releaseInspected: false,
+      message: restored.commandId
+        ? 'A saved permanent deletion needs recovery. Check this exact command before another action.'
+        : 'A prior permanent deletion has an unknown outcome. Resume the exact saved request to recover it safely.',
+    } } : {}
+  })
+  const [deleteNotices, setDeleteNotices] = useState({})
+  const [damagedRecovery, setDamagedRecovery] = useState(() => {
+    const inspected = inspectHypothesisDeleteRecovery(runId, runGeneration)
+    return inspected.state === 'damaged' ? inspected : null
+  })
+  const [damagedInspected, setDamagedInspected] = useState(false)
+  const deleteIntentsRef = useRef(deleteIntents)
+  deleteIntentsRef.current = deleteIntents
+  const deleteFlights = useRef(new Set())
+  const activeRef = useRef(true)
+  useEffect(() => {
+    activeRef.current = true
+    return () => { activeRef.current = false }
+  }, [])
+  const refreshDeleteRecovery = fallback => {
+    const inspected = inspectHypothesisDeleteRecovery(runId, runGeneration)
+    if (inspected.state === 'valid') {
+      const restored = {
+        ...inspected.intent, storageKey: inspected.key, storageRaw: inspected.raw,
+        phase: 'unknown', releaseAllowed: false, releaseInspected: false,
+        message: inspected.intent.commandId
+          ? 'The saved recovery changed. Check its exact command before another action.'
+          : 'The saved recovery changed. Resume its exact retained request before another action.',
+      }
+      const collection = { [restored.hypothesisId]: restored }
+      deleteIntentsRef.current = collection
+      if (activeRef.current) setDeleteIntents(collection)
+      setDamagedRecovery(null)
+      setDamagedInspected(false)
+      return
+    }
+    if (inspected.state === 'damaged') {
+      deleteIntentsRef.current = {}
+      if (activeRef.current) setDeleteIntents({})
+      setDamagedRecovery(inspected)
+      setDamagedInspected(false)
+      return
+    }
+    const current = ownHypothesisEntry(deleteIntentsRef.current, fallback.hypothesisId)
+    if (!current || current.idempotencyKey !== fallback.idempotencyKey) return
+    const retained = { ...current, phase: 'unknown', releaseAllowed: false,
+      releaseInspected: false,
+      message: 'Recovery storage changed or became unavailable. No command was sent; keep this tab open and inspect recovery again.' }
+    const collection = { ...deleteIntentsRef.current, [fallback.hypothesisId]: retained }
+    deleteIntentsRef.current = collection
+    if (activeRef.current) setDeleteIntents(collection)
+  }
+  const updateDeleteIntent = (intent, patch, persist = true) => {
+    const current = ownHypothesisEntry(deleteIntentsRef.current, intent.hypothesisId)
+    if (!current || current.idempotencyKey !== intent.idempotencyKey
+        || current.expectedGeneration !== intent.expectedGeneration) return null
+    const next = { ...current, ...patch, updatedAt: Date.now() }
+    const storedSnapshot = persist ? saveHypothesisDeleteIntent({
+      runId: next.runId, expectedGeneration: next.expectedGeneration,
+      hypothesisId: next.hypothesisId, idempotencyKey: next.idempotencyKey,
+      commandId: next.commandId || '', status: HYPOTHESIS_DELETE_STORED.has(next.status)
+        ? next.status : 'submitting', updatedAt: next.updatedAt,
+    }, current.storageRaw) : null
+    const durable = !persist || !!storedSnapshot
+    const presented = durable ? {
+      ...next,
+      ...(storedSnapshot || { storageKey: current.storageKey, storageRaw: current.storageRaw }),
+    } : {
+      ...next,
+      phase: 'unknown',
+      message: 'The command was observed, but its updated recovery receipt could not be saved. Keep this tab open; recovery will reuse the original exact request identity.',
+    }
+    if (!durable) {
+      refreshDeleteRecovery(current)
+      return null
+    }
+    const collection = { ...deleteIntentsRef.current, [intent.hypothesisId]: presented }
+    deleteIntentsRef.current = collection
+    if (activeRef.current) setDeleteIntents(collection)
+    return presented
+  }
+  const dropDeleteIntent = intent => {
+    const current = ownHypothesisEntry(deleteIntentsRef.current, intent.hypothesisId)
+    if (!current || current.idempotencyKey !== intent.idempotencyKey) return false
+    if (!clearHypothesisDeleteIntent({ ...current, commandId: current.commandId || '' })) {
+      updateDeleteIntent(current, {
+        phase: 'unknown',
+        message: 'The command settled, but its saved recovery identity could not be released. No new deletion will be sent.',
+      }, false)
+      return false
+    }
+    const collection = { ...deleteIntentsRef.current }
+    delete collection[intent.hypothesisId]
+    deleteIntentsRef.current = collection
+    if (activeRef.current) setDeleteIntents(collection)
+    onRecoveryReleased?.()
+    return true
+  }
   // Drop an optimistic override once the real fold REFLECTS it (deleted card gone from state; abandoned
   // card now status='abandoned'), so a stale override can't keep masking a LATER server-side reopen of
   // the same hypothesis while the board stays mounted.
   useEffect(() => {
     setOptim(o => {
-      const next = {}
+      const next = Object.create(null)
       for (const [id, v] of Object.entries(o)) {
-        const h = (state.hypotheses || {})[id]
+        const h = ownHypothesisEntry(state.hypotheses, id)
         if (v === 'deleted' && h) next[id] = v                          // not yet dropped by the fold
         else if (v === 'abandoned' && h && h.status !== 'abandoned') next[id] = v   // not yet reflected
       }
@@ -1973,8 +3158,11 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
     })
   }, [state.hypotheses])
   const hyps = Object.values(state.hypotheses || {})
-    .filter(h => optim[h.id] !== 'deleted')
-    .map(h => optim[h.id] ? { ...h, status: optim[h.id] } : h)
+    .filter(h => ownHypothesisEntry(optim, h.id) !== 'deleted')
+    .map(h => {
+      const status = ownHypothesisEntry(optim, h.id)
+      return status ? { ...h, status } : h
+    })
   // FOREAGENT board prioritization: order cards by predicted payoff (`priority`, 0 = best;
   // unranked cards last), so the kanban shows the sort the world model chose. `ranking` carries the
   // analysis trace (reason + confidence) surfaced as a header note and per-card tooltip.
@@ -1982,9 +3170,11 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
   const rankConf = ranking && typeof ranking.confidence === 'number' ? Math.round(ranking.confidence * 100) : null
   const byStatus = (s) => hyps.filter(h => (h.status || 'open') === s)
     .sort((a, b) => (a.priority ?? Infinity) - (b.priority ?? Infinity))
+  const pendingDelete = Object.values(deleteIntents)[0] || null
+  const deleteLocked = !!pendingDelete || !!damagedRecovery
   const add = async () => {
     const s = draft.trim()
-    if (!s) return
+    if (!s || deleteLocked) return
     try {
       const feedback = commandFeedback(await CONTROL.addHypothesis(runId, s), {
         success: 'Hypothesis added', noop: 'That hypothesis was already tracked',
@@ -1996,6 +3186,10 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
   }
   const _revert = (id) => setOptim(o => { const n = { ...o }; delete n[id]; return n })
   const abandon = async (h) => {
+    if (deleteLocked) {
+      onToast?.('Finish checking the pending permanent deletion before another hypothesis command.')
+      return
+    }
     setOptim(o => ({ ...o, [h.id]: 'abandoned' }))          // reflect immediately (SSE lag)
     try {
       const feedback = commandFeedback(await CONTROL.abandonHypothesis(runId, h.id), {
@@ -2006,26 +3200,429 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
       onToast?.(feedback.message)
     } catch (error) { _revert(h.id); onToast?.(`Could not update hypothesis: ${error.message || error}`) }
   }
-  const del = async (h) => {
-    setOptim(o => ({ ...o, [h.id]: 'deleted' }))            // remove from the board at once
+  const deleteFailure = (intent, message) => {
+    dropDeleteIntent(intent)
+    if (!activeRef.current) return
+    setDeleteNotices(current => ({ ...current, [intent.hypothesisId]: message }))
+    onToast?.(message)
+  }
+  const retainDeleteFailure = (intent, record, message) => {
+    const retryable = ['failed', 'timed_out'].includes(record?.status)
+      && record?.error?.retryable === true
+    updateDeleteIntent(intent, {
+      commandId: record.id, status: record.status,
+      phase: retryable ? 'retryable' : 'terminal', message,
+      releaseAllowed: !retryable, releaseInspected: false,
+    })
+    if (activeRef.current) onToast?.(message)
+  }
+  const deleteSuccess = (intent, message) => {
+    dropDeleteIntent(intent)
+    if (!activeRef.current) return
+    setOptim(current => ({ ...current, [intent.hypothesisId]: 'deleted' }))
+    setDeleteNotices(current => {
+      const next = { ...current }; delete next[intent.hypothesisId]; return next
+    })
+    onToast?.(message)
+  }
+  const observeDeleteRecord = (intent, record) => {
+    if (!record || typeof record.id !== 'string' || !HYPOTHESIS_DELETE_COMMAND_RE.test(record.id)
+        || !exactHypothesisDeleteRecord(intent, record)) return null
+    if (!HYPOTHESIS_DELETE_PENDING.has(record.status)) return record
+    const message = record.status === 'executing'
+      ? 'Permanent deletion is executing — waiting for the run.'
+      : 'Permanent deletion was accepted — waiting for the run.'
+    return updateDeleteIntent(intent, {
+      commandId: record.id, status: record.status, phase: 'pending', message,
+      releaseAllowed: false, releaseInspected: false,
+    }) ? record : null
+  }
+  const submitDelete = async intent => {
+    const hypothesisId = intent.hypothesisId
+    const current = ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)
+    if (deleteFlights.current.has(hypothesisId) || !current
+        || current.idempotencyKey !== intent.idempotencyKey
+        || current.expectedGeneration !== intent.expectedGeneration) return
+    const durableSubmission = updateDeleteIntent(current, {
+      commandId: current.commandId || '', status: current.status || 'submitting', phase: 'submitting',
+      message: 'Submitting the exact saved permanent deletion…',
+      releaseAllowed: false, releaseInspected: false,
+    })
+    if (!durableSubmission) return
+    deleteFlights.current.add(hypothesisId)
     try {
-      const feedback = commandFeedback(await CONTROL.deleteHypothesis(runId, h.id), {
+      const record = await runCommand(intent.runId, 'hypothesis_updated', {
+        id: intent.hypothesisId, status: 'deleted',
+      }, {
+        expectedGeneration: intent.expectedGeneration,
+        idempotencyKey: intent.idempotencyKey,
+        onRecord: next => {
+          const latest = ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)
+          if (!latest || latest.idempotencyKey !== intent.idempotencyKey) return
+          observeDeleteRecord(intent, next)
+        },
+      })
+      const currentIntent = ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)
+      if (!currentIntent || currentIntent.idempotencyKey !== intent.idempotencyKey) return
+      if (!record || !exactHypothesisDeleteRecord(currentIntent, record)) {
+        const current = ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)
+        const observedCommandId = typeof record?.id === 'string'
+          && HYPOTHESIS_DELETE_COMMAND_RE.test(record.id) ? record.id : ''
+        const terminalMismatch = !!record && HYPOTHESIS_DELETE_TERMINAL.has(record.status)
+          && !!observedCommandId && (!current?.commandId || current.commandId === observedCommandId)
+        updateDeleteIntent(intent, {
+          commandId: current?.commandId || observedCommandId,
+          phase: 'unknown', releaseAllowed: terminalMismatch, releaseInspected: false,
+          message: 'The delete command receipt did not prove this exact run generation and hypothesis. It remains quarantined.',
+        })
+        if (activeRef.current) onToast?.('Permanent deletion outcome is unknown. The receipt did not prove the exact target.')
+        return
+      }
+      const feedback = commandFeedback(record, {
         success: 'Hypothesis deleted', noop: 'Hypothesis was already deleted',
         executing: 'Delete requested — waiting for the run', failure: 'Could not delete hypothesis',
       })
-      if (feedback.kind !== 'success') _revert(h.id)
-      onToast?.(feedback.message)
-    } catch (error) { _revert(h.id); onToast?.(`Could not delete hypothesis: ${error.message || error}`) }
+      if (feedback.kind === 'success') deleteSuccess(intent, feedback.message)
+      else if (feedback.kind === 'pending') {
+        observeDeleteRecord(intent, record)
+        if (activeRef.current) onToast?.(feedback.message)
+      } else if (record.status === 'rejected') deleteFailure(intent, feedback.message)
+      else retainDeleteFailure(intent, record, feedback.message)
+    } catch (error) {
+      const latestIntent = ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)
+      if (!latestIntent || latestIntent.idempotencyKey !== intent.idempotencyKey) return
+      const record = error?.commandRecord
+      const recoveryIntent = ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)
+      if (record && !exactHypothesisDeleteRecord(recoveryIntent, record)) {
+        const savedCommandId = ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)?.commandId || ''
+        const commandId = savedCommandId || (typeof record.id === 'string'
+          && HYPOTHESIS_DELETE_COMMAND_RE.test(record.id) ? record.id : '')
+        const transportUnknown = error?.submissionMayHaveSucceeded === true
+          || error?.commandUnknown === true || isTransientCommandReadError(error)
+        const terminalMismatch = HYPOTHESIS_DELETE_TERMINAL.has(record.status)
+          && (!savedCommandId || savedCommandId === record.id)
+        const message = transportUnknown
+          ? 'The exact command is temporarily unavailable. Its identity remains quarantined; check it again.'
+          : 'A command receipt was returned, but it did not prove this exact run generation and hypothesis. The deletion remains quarantined.'
+        updateDeleteIntent(intent, {
+          commandId, phase: 'unknown', message,
+          releaseAllowed: !transportUnknown && terminalMismatch, releaseInspected: false,
+        })
+        if (activeRef.current) onToast?.(message)
+        return
+      }
+      if (record && ['failed', 'timed_out'].includes(record.status)) {
+        const feedback = commandFeedback(record, { failure: 'Could not delete hypothesis' })
+        retainDeleteFailure(intent, record, feedback.message)
+        return
+      }
+      if (record?.status === 'rejected') {
+        const feedback = commandFeedback(record, { failure: 'Could not delete hypothesis' })
+        deleteFailure(intent, feedback.message)
+        return
+      }
+      const pendingRecord = HYPOTHESIS_DELETE_PENDING.has(record?.status)
+        && typeof record?.id === 'string' && HYPOTHESIS_DELETE_COMMAND_RE.test(record.id)
+        && exactHypothesisDeleteRecord(recoveryIntent, record)
+      const errorCommandId = [error?.commandId]
+        .map(value => String(value || '')).find(value => HYPOTHESIS_DELETE_COMMAND_RE.test(value)) || ''
+      const ambiguous = pendingRecord || error?.submissionMayHaveSucceeded === true
+        || error?.commandUnknown === true || isTransientCommandReadError(error)
+      if (ambiguous) {
+        const commandId = pendingRecord ? record.id
+          : (ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)?.commandId || errorCommandId)
+        const status = pendingRecord ? record.status
+          : (ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)?.status || 'submitting')
+        const message = commandId
+          ? 'Permanent deletion may still complete. Check this exact saved command; it was not replayed.'
+          : 'Permanent deletion outcome is unknown. Resume this exact saved request; it reuses the same identity and cannot create a second logical deletion.'
+        updateDeleteIntent(intent, {
+          commandId, status, phase: 'unknown', message,
+          releaseAllowed: false, releaseInspected: false,
+        })
+        if (activeRef.current) onToast?.(message)
+      } else if (errorCommandId) {
+        const message = 'The exact command identity was returned, but its target outcome could not be proved. Inspect it before releasing recovery.'
+        updateDeleteIntent(intent, {
+          commandId: ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)?.commandId || errorCommandId,
+          phase: 'unknown', message, releaseAllowed: false, releaseInspected: false,
+        })
+        if (activeRef.current) onToast?.(message)
+      } else {
+        const feedback = record ? commandFeedback(record, {
+          failure: 'Could not delete hypothesis',
+        }) : null
+        deleteFailure(intent, feedback?.message || `Could not delete hypothesis: ${error?.message || error}`)
+      }
+    } finally {
+      deleteFlights.current.delete(hypothesisId)
+    }
+  }
+  const del = async h => {
+    const hypothesisId = String(h.id)
+    if (!canonicalHypothesisId(hypothesisId)) {
+      const message = 'This hypothesis has a non-canonical id and cannot be targeted safely. Refresh or repair the run record before deleting it.'
+      setDeleteNotices(current => ({ ...current, [hypothesisId]: message }))
+      onToast?.(message)
+      return
+    }
+    if (deleteFlights.current.has(hypothesisId)
+        || ownHypothesisEntry(deleteIntentsRef.current, hypothesisId)
+        || Object.keys(deleteIntentsRef.current).length > 0) {
+      onToast?.('A permanent hypothesis deletion is already pending. Recover that exact command first.')
+      return
+    }
+    if (!runId || !RUN_GENERATION_RE.test(String(runGeneration || ''))) {
+      const message = 'The displayed run generation is unavailable. Refresh the run before deleting a hypothesis.'
+      setDeleteNotices(current => ({ ...current, [hypothesisId]: message }))
+      onToast?.(message)
+      return
+    }
+    const statement = String(h.statement || '').trim()
+    if (!window.confirm(`Delete this hypothesis permanently?\n\n${statement.slice(0, 500)}\n\nThis removes it from the board and cannot be undone.`)) return
+    const intent = {
+      runId: String(runId), expectedGeneration: String(runGeneration), hypothesisId,
+      idempotencyKey: createIdempotencyKey(), commandId: '', status: 'submitting',
+      updatedAt: Date.now(), phase: 'submitting',
+      message: 'Submitting one permanent deletion…',
+    }
+    const stored = {
+      runId: intent.runId, expectedGeneration: intent.expectedGeneration,
+      hypothesisId: intent.hypothesisId, idempotencyKey: intent.idempotencyKey,
+      commandId: '', status: 'submitting', updatedAt: intent.updatedAt,
+    }
+    // Commit the exact operation identity before POST. If tab-scoped storage is unavailable, fail
+    // closed: an unremembered destructive request could be replayed after close/reload.
+    const storedSnapshot = saveHypothesisDeleteIntent(stored, null)
+    if (!storedSnapshot) {
+      const message = 'Permanent deletion was not sent because this browser could not retain its recovery identity.'
+      setDeleteNotices(current => ({ ...current, [hypothesisId]: message }))
+      onToast?.(message)
+      return
+    }
+    const retainedIntent = { ...intent, ...storedSnapshot }
+    deleteIntentsRef.current = { [hypothesisId]: retainedIntent }
+    setDeleteIntents(deleteIntentsRef.current)
+    setDeleteNotices(current => { const next = { ...current }; delete next[hypothesisId]; return next })
+    await submitDelete(retainedIntent)
+  }
+  const resumeDelete = async intent => {
+    const current = ownHypothesisEntry(deleteIntentsRef.current, intent?.hypothesisId)
+    if (!current || current.commandId || deleteFlights.current.has(current.hypothesisId)
+        || current.idempotencyKey !== intent.idempotencyKey) return
+    if (!window.confirm(
+      'Resume the exact saved permanent deletion?\n\nThis reuses the original idempotency identity and payload. It cannot create a second logical deletion.',
+    )) return
+    await submitDelete(current)
+  }
+  const checkDelete = async intent => {
+    if (!intent?.commandId || deleteFlights.current.has(intent.hypothesisId)) return
+    const durableCheck = updateDeleteIntent(intent, {
+      phase: 'checking', message: 'Checking the exact delete command…',
+      releaseAllowed: false, releaseInspected: false,
+    })
+    if (!durableCheck) return
+    deleteFlights.current.add(intent.hypothesisId)
+    try {
+      const record = await getRunCommand(intent.runId, intent.commandId, {
+        requestTimeoutMs: PANEL_REQUEST_TIMEOUT_MS,
+      })
+      const current = ownHypothesisEntry(deleteIntentsRef.current, intent.hypothesisId)
+      if (!activeRef.current || !current || current.idempotencyKey !== intent.idempotencyKey
+          || current.commandId !== intent.commandId) return
+      if (!exactHypothesisDeleteRecord(intent, record)) {
+        const terminalMismatch = HYPOTHESIS_DELETE_TERMINAL.has(record?.status)
+          && record?.id === intent.commandId
+        updateDeleteIntent(intent, {
+          phase: 'unknown', releaseAllowed: terminalMismatch, releaseInspected: false,
+          message: 'The saved command did not prove this exact run generation and hypothesis. It remains quarantined.',
+        })
+        return
+      }
+      const feedback = commandFeedback(record, {
+        success: 'Hypothesis deleted', noop: 'Hypothesis was already deleted',
+        executing: 'Delete requested — waiting for the run', failure: 'Could not delete hypothesis',
+      })
+      if (feedback.kind === 'success') deleteSuccess(intent, feedback.message)
+      else if (feedback.kind === 'pending') {
+        observeDeleteRecord(intent, record)
+        onToast?.(feedback.message)
+      } else if (record.status === 'rejected') deleteFailure(intent, feedback.message)
+      else retainDeleteFailure(intent, record, feedback.message)
+    } catch (error) {
+      const current = ownHypothesisEntry(deleteIntentsRef.current, intent.hypothesisId)
+      if (!activeRef.current || !current || current.idempotencyKey !== intent.idempotencyKey
+          || current.commandId !== intent.commandId) return
+      const message = isTransientCommandReadError(error)
+        ? 'The exact delete command is temporarily unavailable. Its identity is retained; try checking again.'
+        : 'The exact delete command could not be verified. Its identity remains quarantined; no delete was replayed.'
+      updateDeleteIntent(intent, {
+        phase: 'unknown', message,
+        releaseAllowed: !isTransientCommandReadError(error)
+          && ([403, 404].includes(Number(error?.status))
+            || error?.code === 'COMMAND_PROTOCOL_ERROR'),
+        releaseInspected: false,
+      })
+      onToast?.(message)
+    } finally {
+      deleteFlights.current.delete(intent.hypothesisId)
+    }
+  }
+  const retryDelete = async intent => {
+    const current = ownHypothesisEntry(deleteIntentsRef.current, intent?.hypothesisId)
+    if (!current || current.phase !== 'retryable' || !current.commandId
+        || deleteFlights.current.has(current.hypothesisId)
+        || current.idempotencyKey !== intent.idempotencyKey) return
+    if (!window.confirm(
+      'Retry this exact failed permanent-deletion command?\n\nThis reuses the same durable command id; it does not submit a new delete intent.',
+    )) return
+    const durableRetry = updateDeleteIntent(current, {
+      phase: 'retrying', releaseAllowed: false, releaseInspected: false,
+      message: 'Retrying the exact durable delete command…',
+    })
+    if (!durableRetry) return
+    deleteFlights.current.add(current.hypothesisId)
+    try {
+      const record = await retryRunCommand(current.runId, current.commandId, {
+        requestTimeoutMs: PANEL_REQUEST_TIMEOUT_MS,
+        onRecord: next => {
+          const latest = ownHypothesisEntry(deleteIntentsRef.current, current.hypothesisId)
+          if (!latest || latest.idempotencyKey !== current.idempotencyKey) return
+          observeDeleteRecord(latest, next)
+        },
+      })
+      const latest = ownHypothesisEntry(deleteIntentsRef.current, current.hypothesisId)
+      if (!activeRef.current || !latest || latest.idempotencyKey !== current.idempotencyKey) return
+      if (!exactHypothesisDeleteRecord(latest, record)) {
+        const message = 'The retry receipt did not prove this exact run generation and hypothesis. Recovery remains quarantined.'
+        updateDeleteIntent(latest, {
+          phase: 'unknown', message,
+          releaseAllowed: HYPOTHESIS_DELETE_TERMINAL.has(record?.status)
+            && record?.id === latest.commandId,
+          releaseInspected: false,
+        })
+        onToast?.(message)
+        return
+      }
+      const feedback = commandFeedback(record, {
+        success: 'Hypothesis deleted', noop: 'Hypothesis was already deleted',
+        executing: 'Delete retry is still executing', failure: 'Could not delete hypothesis',
+      })
+      if (feedback.kind === 'success') deleteSuccess(latest, feedback.message)
+      else if (feedback.kind === 'pending') {
+        observeDeleteRecord(latest, record)
+        onToast?.(feedback.message)
+      } else if (record.status === 'rejected') deleteFailure(latest, feedback.message)
+      else retainDeleteFailure(latest, record, feedback.message)
+    } catch (error) {
+      const latest = ownHypothesisEntry(deleteIntentsRef.current, current.hypothesisId)
+      if (!activeRef.current || !latest || latest.idempotencyKey !== current.idempotencyKey) return
+      const message = isTransientCommandReadError(error) || error?.submissionMayHaveSucceeded === true
+        ? 'The exact retry outcome is temporarily unavailable. Its command identity remains retained.'
+        : 'The exact retry could not be verified. Inspect the saved command before releasing recovery.'
+      updateDeleteIntent(latest, {
+        phase: 'unknown', message,
+        releaseAllowed: false,
+        releaseInspected: false,
+      })
+      onToast?.(message)
+    } finally {
+      deleteFlights.current.delete(current.hypothesisId)
+    }
+  }
+  const releaseValidRecovery = intent => {
+    const current = ownHypothesisEntry(deleteIntentsRef.current, intent?.hypothesisId)
+    if (!current || !current.releaseAllowed || !current.releaseInspected
+        || current.idempotencyKey !== intent.idempotencyKey) return
+    if (!window.confirm(
+      'Release this exact permanent-deletion recovery identity?\n\nThis sends no command. Only continue after inspecting the run and accepting that this old outcome cannot be proved.',
+    )) return
+    if (!clearHypothesisDeleteIntent({ ...current, commandId: current.commandId || '' })) {
+      updateDeleteIntent(current, {
+        phase: 'unknown', releaseAllowed: false, releaseInspected: false,
+        message: 'The saved recovery identity changed or could not be released. It remains protected.',
+      }, false)
+      onToast?.('The exact recovery identity changed or could not be released.')
+      return
+    }
+    const collection = { ...deleteIntentsRef.current }
+    delete collection[current.hypothesisId]
+    deleteIntentsRef.current = collection
+    setDeleteIntents(collection)
+    onRecoveryReleased?.()
+    onToast?.('The exact recovery identity was released. No deletion was sent.')
+  }
+  const releaseDamagedRecovery = () => {
+    if (!damagedRecovery || !damagedInspected) return
+    if (!window.confirm(
+      'Release this exact unreadable recovery record?\n\nOnly continue after inspecting the current run state and confirming that no permanent deletion still needs recovery.',
+    )) return
+    if (!clearDamagedHypothesisDeleteRecovery(damagedRecovery)) {
+      onToast?.('The recovery record changed or could not be released. It remains protected; inspect it again.')
+      const refreshed = inspectHypothesisDeleteRecovery(runId, runGeneration)
+      if (refreshed.state === 'valid') {
+        const restored = {
+          ...refreshed.intent, phase: 'unknown',
+          storageKey: refreshed.key, storageRaw: refreshed.raw,
+          releaseAllowed: false, releaseInspected: false,
+          message: refreshed.intent.commandId
+            ? 'The recovery record changed to a valid permanent deletion. Check its exact command.'
+            : 'The recovery record changed to a valid id-less deletion. Resume its exact saved request.',
+        }
+        deleteIntentsRef.current = { [restored.hypothesisId]: restored }
+        setDeleteIntents(deleteIntentsRef.current)
+        setDamagedRecovery(null)
+      } else if (refreshed.state === 'damaged') setDamagedRecovery(refreshed)
+      setDamagedInspected(false)
+      return
+    }
+    setDamagedRecovery(null)
+    setDamagedInspected(false)
+    onToast?.('The exact damaged recovery record was released. No deletion was sent.')
+    onRecoveryReleased?.()
   }
   return (
     <Panel title="Hypotheses" sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
         <input className="text" style={{ flex: 1 }} aria-label="New hypothesis"
           placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
-          value={draft} onChange={e => setDraft(e.target.value)}
+          value={draft} disabled={deleteLocked} onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') add() }} />
-        <button className="btn sm primary" onClick={add} disabled={!draft.trim()}>+ Add</button>
+        <button className="btn sm primary" onClick={add} disabled={!draft.trim() || deleteLocked}>+ Add</button>
       </div>
+      {pendingDelete && <div className="report-inline-state" role="status" style={{ marginBottom: 10 }}>
+        <OpIcon name="alert" size={14} /><span>{pendingDelete.message}</span>
+        {pendingDelete.commandId && <button className="btn sm" onClick={() => checkDelete(pendingDelete)}
+          disabled={['checking', 'retrying', 'submitting'].includes(pendingDelete.phase)}>
+          {pendingDelete.phase === 'checking' ? 'Checking…' : 'Check exact command'}</button>}
+        {pendingDelete.commandId && pendingDelete.phase === 'retryable'
+          && <button className="btn sm" onClick={() => retryDelete(pendingDelete)}>Retry exact command</button>}
+        {!pendingDelete.commandId && <button className="btn sm" onClick={() => resumeDelete(pendingDelete)}
+          disabled={pendingDelete.phase === 'submitting'}>
+          {pendingDelete.phase === 'submitting' ? 'Submitting…' : 'Resume exact request'}</button>}
+        {pendingDelete.releaseAllowed && !pendingDelete.releaseInspected
+          && <button className="btn sm" onClick={() => updateDeleteIntent(pendingDelete, {
+            releaseInspected: true,
+          }, false)}>Inspect recovery</button>}
+        {pendingDelete.releaseAllowed && pendingDelete.releaseInspected && <>
+          <span className="muted">Run {pendingDelete.runId}; generation {pendingDelete.expectedGeneration.slice(0, 12)}…;
+            hypothesis {pendingDelete.hypothesisId}; command {pendingDelete.commandId || 'not recorded'}.</span>
+          <button className="btn sm danger" onClick={() => releaseValidRecovery(pendingDelete)}>
+            Release exact recovery</button>
+        </>}
+      </div>}
+      {damagedRecovery && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
+        <OpIcon name="alert" size={14} />
+        <span>An unreadable permanent-deletion recovery record exists for this exact run generation.
+          Destructive controls stay locked until it is inspected and explicitly released.</span>
+        {!damagedInspected
+          ? <button className="btn sm" onClick={() => setDamagedInspected(true)}>Inspect recovery</button>
+          : <>
+            <span className="muted">Run {runId}; generation {String(runGeneration).slice(0, 12)}…;
+              stored record {damagedRecovery.raw.length} bytes. Its command identity cannot be verified.</span>
+            <button className="btn sm danger" onClick={releaseDamagedRecovery}>Release exact record</button>
+          </>}
+      </div>}
       {ranking && <div className="muted" style={{ marginBottom: 8, fontSize: 12, display: 'flex', gap: 6, alignItems: 'baseline' }}
         title={ranking.reason || 'predicted before execution'}>
         <OpIcon name="bulb" size={11} />
@@ -2041,7 +3638,10 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
             const col = byStatus(key)
             return <div key={key} className={'hyp-col hyp-' + key}>
               <div className="hyp-col-h" title={hint}>{label} <span className="muted">{col.length}</span></div>
-              {col.map(h => <div key={h.id} className="hyp-card">
+              {col.map(h => {
+                const deletion = ownHypothesisEntry(deleteIntents, h.id)
+                const deleteNotice = ownHypothesisEntry(deleteNotices, h.id) || ''
+                return <div key={h.id} className="hyp-card">
                 <div className="hyp-stmt">
                   <span className="hyp-src" title={`source: ${h.source}`}>
                     <OpIcon name={_HYP_ICON[h.source] || 'dot'} size={12} /></span> {h.statement}
@@ -2055,11 +3655,15 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
                   {h.best_delta != null && <span className={'chip xs ' + (h.best_delta > 0 ? 'ok' : '')}
                     title="best improvement over parent among the evidence">Δ{fmt(h.best_delta)}</span>}
                   {key !== 'abandoned' && <button className="btn xs ghost" title="abandon — move to the Abandoned column (keeps the record)"
-                    onClick={() => abandon(h)}><OpIcon name="cross" size={11} /></button>}
+                    disabled={deleteLocked} onClick={() => abandon(h)}><OpIcon name="cross" size={11} /></button>}
                   <button className="btn xs ghost danger" title="delete this hypothesis permanently (remove from the board)"
-                    onClick={() => del(h)}>🗑</button>
+                    disabled={deleteLocked} aria-label={`Delete hypothesis ${h.id} permanently`}
+                    onClick={() => del(h)}>{deletion ? 'Deleting…' : 'Delete'}</button>
                 </div>
-              </div>)}
+                {deleteNotice && <div className="report-inline-state error" role="alert">
+                  <OpIcon name="alert" size={14} /><span>{deleteNotice}</span>
+                </div>}
+              </div>})}
               {col.length === 0 && <div className="muted hyp-empty">—</div>}
             </div>
           })}
@@ -2069,6 +3673,7 @@ function _HypothesisFallback({ state, runId, onSelect, onClose, onToast }) {
 }
 
 export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose, onToast }) {
+  const [, setRecoveryEpoch] = useState(0)
   const cards = _cardRows(state)
   const projection = isRecord(state?.cards_projection) ? state.cards_projection : null
   // A non-empty/omitted/invalid Card projection is authoritative. With no Cards at all, preserve the
@@ -2082,11 +3687,15 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
   // Card ids can repeat across runs and after an in-place reset. Remount every optimistic/ref tracker
   // at that exact scope boundary; the child also ignores completions after unmount.
   const scopeKey = `${runId || ''}:${runGeneration || ''}`
-  return hasAuthoritativeCards
+  const recovery = inspectHypothesisDeleteRecovery(runId, runGeneration)
+  const recoveryVisible = recovery.state === 'valid' || recovery.state === 'damaged'
+  return hasAuthoritativeCards && !recoveryVisible
     ? <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId} onSelect={onSelect}
       onClose={onClose} onToast={onToast} />
     : <_HypothesisFallback key={`hypotheses:${scopeKey}`} state={state} runId={runId}
-      onSelect={onSelect} onClose={onClose} onToast={onToast} />
+      runGeneration={runGeneration}
+      onSelect={onSelect} onClose={onClose} onToast={onToast}
+      onRecoveryReleased={() => setRecoveryEpoch(value => value + 1)} />
 }
 
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live

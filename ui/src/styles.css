@@ -2253,6 +2253,11 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-actions { margin-top: 0; }
 .asst-launch input:focus-visible, .asst-launch textarea:focus-visible, .asst-launch select:focus-visible,
 .asst-launch summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The Assistant drawer is independently resizable, so viewport media queries cannot describe the
+   launch card's actual space there. Keep labels, inherited values, and budget help readable even
+   when the desktop viewport is wide but the drawer itself is narrow. */
+.asst-side-panel .asst-launch-runtime { grid-template-columns: 1fr; }
+.asst-side-panel .asst-launch-summary > div { grid-template-columns: 1fr; gap: 1px; }
 @media (max-width: 720px) {
   .asst-launch { padding: 10px; }
   .asst-launch-runtime { grid-template-columns: repeat(2, minmax(0, 1fr)); }

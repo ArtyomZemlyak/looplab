@@ -76,6 +76,16 @@ class RunCommandError(BaseModel):
     remediation: str = ""
 
 
+class RunCommandSubject(BaseModel):
+    """Closed public identity currently emitted only for a permanent hypothesis deletion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["hypothesis"]
+    id: str = Field(min_length=1, max_length=256)
+    status: Literal["deleted"]
+
+
 class RunCommandRecord(BaseModel):
     """Public durable command record; additive observation fields remain forward compatible."""
 
@@ -89,6 +99,9 @@ class RunCommandRecord(BaseModel):
     error: RunCommandError | None
     # Pre-generation command records remain readable as terminal history.
     run_generation: Optional[str] = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    # Present only when the server can derive a closed, non-secret semantic target from normalized
+    # immutable command data. Clients pair it with run_generation before releasing destructive recovery.
+    subject: Optional[RunCommandSubject] = None
     created_at: float
     updated_at: float
     event_seq: Optional[int] = Field(default=None, ge=0)

@@ -640,6 +640,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }, [viewSeq, runId, historyRetry, generation, routeFenceBlocked, reviewMode])
   const currentHistory = historyMatches(history, viewSeq, generation) ? history : null
   const hist = currentHistory?.status === 'ready' ? currentHistory.data : null
+  // Report source reads are always sequence-bound. Use the generation that owns the rendered
+  // snapshot: current useRunState truth for live/review, or the generation receipt already checked
+  // by resolveHistory for an historical fold. A stale generation-fenced route returns above before
+  // Report can mount, so this fallback never weakens an explicit link fence.
+  const reportGeneration = historyActive ? currentHistory?.resolvedGeneration : generation
   const toastTimer = useRef(null)
   const showToast = (m) => {
     // Clear the previous timer so a second toast doesn't get hidden early by the first one's timeout.
@@ -1802,7 +1807,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               <ReportView state={state} runId={runId} onToast={showToast}
                 readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
                 observedSeq={historyActive ? history.resolvedSeq : seq}
-                expectedGeneration={routeState.generation}
+                expectedGeneration={reportGeneration}
                 readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence}
                 onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }}
                 canOpenPanel={panelAllowed}

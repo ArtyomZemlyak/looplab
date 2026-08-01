@@ -40,6 +40,21 @@ class ProjectStoreLockError(RuntimeError):
     """A project mutation could not obtain its required cross-process serialization guarantee."""
 
 
+class ProjectConflictError(RuntimeError):
+    """A run organization value changed after the caller observed it."""
+
+    def __init__(
+            self, run_id: str, field: str, expected: str | None, current: str | None):
+        self.run_id = run_id
+        self.field = field
+        self.expected = expected
+        self.current = current
+        super().__init__(f"{field} changed for run {run_id!r}")
+
+
+_UNCONDITIONAL = object()
+
+
 def _new_id() -> str:
     return "p_" + uuid.uuid4().hex[:10]
 
@@ -122,6 +137,16 @@ class ProjectStore:
         # best-effort fsync, so a concurrent engine/UI write and a FUSE/S3 mount don't corrupt or abort.
         atomic_write_text(self.path, json.dumps(data, indent=2))
 
+    @staticmethod
+    def _compare_run_value(
+            data: dict, collection: str, run_id: str, field: str, expected_current) -> None:
+        """Check one observed organization value while the caller holds ``_transaction``."""
+        if expected_current is _UNCONDITIONAL:
+            return
+        current = data[collection].get(run_id)
+        if current != expected_current:
+            raise ProjectConflictError(run_id, field, expected_current, current)
+
     # ------------------------------------------------------------------ queries
     def _index(self, data: dict) -> dict[str, dict]:
         # Safe to index by "id" unconditionally: `load` drops rows that lack one (see there).
@@ -201,10 +226,14 @@ class ProjectStore:
                         data["assignments"][run_id] = parent
             self._save(data)
 
-    def assign(self, run_id: str, project_id: str | None) -> None:
+    def assign(
+            self, run_id: str, project_id: str | None, *,
+            expected_current=_UNCONDITIONAL) -> None:
         """Put a run in a project (or unassign when project_id is None)."""
         with self._transaction():
             data = self.load()
+            self._compare_run_value(
+                data, "assignments", run_id, "project_id", expected_current)
             if project_id is None:
                 data["assignments"].pop(run_id, None)
             else:
@@ -254,10 +283,14 @@ class ProjectStore:
                                              if v != sid}
             self._save(data)
 
-    def assign_supertask(self, run_id: str, supertask_id: str | None) -> None:
+    def assign_supertask(
+            self, run_id: str, supertask_id: str | None, *,
+            expected_current=_UNCONDITIONAL) -> None:
         """Put a run in a super-task (or clear it when supertask_id is None)."""
         with self._transaction():
             data = self.load()
+            self._compare_run_value(
+                data, "supertask_assignments", run_id, "supertask_id", expected_current)
             if supertask_id is None:
                 data["supertask_assignments"].pop(run_id, None)
             else:
@@ -269,11 +302,14 @@ class ProjectStore:
         return self.load()["supertask_assignments"].get(run_id)
 
     # ------------------------------------------------------------------ run labels (UI display name)
-    def set_label(self, run_id: str, label: str | None) -> None:
+    def set_label(
+            self, run_id: str, label: str | None, *,
+            expected_current=_UNCONDITIONAL) -> None:
         """Give a run a display name (or clear it with None/empty). UI-only overlay — the run's
         directory id is never touched, so its event log and resume stay valid."""
         with self._transaction():
             data = self.load()
+            self._compare_run_value(data, "labels", run_id, "label", expected_current)
             label = (label or "").strip()
             if label:
                 data["labels"][run_id] = label

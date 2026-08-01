@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
-  clearLaunchTransport, createIdempotencyKey, getStartStatus, loadLaunchTransport,
-  preflightRunStart, saveLaunchTransport, startRun,
+  clearDamagedLaunchTransport, clearLaunchTransport, createIdempotencyKey, getStartStatus,
+  listLaunchTransports, loadLaunchTransport, preflightRunStart, saveLaunchTransport, startRun,
 } from './util.js'
 import {
   LAUNCH_RUNTIME_FIELDS, buildLaunchBody, createLaunchDraft,
@@ -72,7 +72,9 @@ export default function LaunchCard({
   const [starting, setStarting] = useState(false)
   const [checking, setChecking] = useState(false)
   const [unknownStart, setUnknownStart] = useState(null)
+  const [damagedRecovery, setDamagedRecovery] = useState(null)
   const [missingStart, setMissingStart] = useState(false)
+  const [reservedRunId, setReservedRunId] = useState('')
   const [errors, setErrors] = useState({})
   const [notice, setNotice] = useState('Review the proposal, then validate it before starting.')
   const [warnings, setWarnings] = useState([])
@@ -105,11 +107,17 @@ export default function LaunchCard({
     statusFlightRef.current = null
     setValidating(false); setValidation(null); setChecking(false)
     const saved = loadLaunchTransport(transportIdentity)
-    setStorageBlocked(false); setUnknownStart(null); setMissingStart(false); setErrors({})
+    setStorageBlocked(false); setUnknownStart(null); setDamagedRecovery(null)
+    setMissingStart(false); setReservedRunId(''); setErrors({})
     if (saved?.invalid) {
+      const damaged = listLaunchTransports().find(record => record.invalid
+        && record.identity === transportIdentity) || { identity: transportIdentity, storageKey: '', invalid: true }
+      setDamagedRecovery(damaged)
       setStorageBlocked(true)
-      setErrors({ form: 'Durable startup recovery storage is corrupt or unavailable. Reset this proposal before starting.' })
-      setNotice('Paid Start is blocked until its recovery identity can be stored safely.')
+      setErrors({ form: damaged.storageKey
+        ? 'A damaged startup recovery record may represent an unresolved paid Start. Inspect the run and provider activity before releasing it.'
+        : 'Startup recovery storage cannot be inspected safely. Restore session storage access and reload this proposal.' })
+      setNotice('Paid Start is blocked. Reset cannot remove this recovery record.')
     } else if (saved) {
       setUnknownStart({ runId: saved.runId, idempotencyKey: saved.idempotencyKey })
       setNotice(`Recovered unfinished startup “${saved.runId}” from this tab. Check it; no new launch will be sent.`)
@@ -124,7 +132,7 @@ export default function LaunchCard({
   const validatedCurrent = !!validation?.token && validation.fingerprint === fingerprint
   const settingsParsed = parseObjectJson(draft.settings_json, 'Settings')
   const operationBusy = validating || starting || checking
-  const locked = operationBusy || !!unknownStart
+  const locked = operationBusy || !!unknownStart || !!damagedRecovery
   const taskRows = summarizeLaunchTask(draft)
 
   const focusFirstError = next => requestAnimationFrame(() => {
@@ -169,7 +177,14 @@ export default function LaunchCard({
 
   const reset = () => {
     const saved = loadLaunchTransport(transportIdentity)
-    if (saved && !clearRecovery(saved.invalid ? null : saved)) return
+    if (saved?.invalid || damagedRecovery) {
+      setStorageBlocked(true)
+      setErrors({ form: 'Reset cannot remove a damaged startup recovery record. Inspect the run and provider activity, then use Release after inspection.' })
+      setNotice('Paid Start remains blocked; the damaged recovery identity was retained.')
+      requestAnimationFrame(() => errorRef.current?.focus())
+      return
+    }
+    if (saved && !clearRecovery(saved)) return
     validationRequestRef.current += 1
     setDraft(createLaunchDraft(spec)); setValidation(null); setErrors({}); setWarnings([])
     setPreview(null); setUnknownStart(null); setMissingStart(false); setStorageBlocked(false)
@@ -183,6 +198,13 @@ export default function LaunchCard({
       setValidation(null); setWarnings([]); setPreview(null); setErrors(built.errors)
       setNotice('Fix the highlighted fields before validation.')
       focusFirstError(built.errors); return
+    }
+    if (reservedRunId && String(built.body?.run_id || '').trim() === reservedRunId) {
+      setValidation(null); setWarnings([]); setPreview(null)
+      setErrors({ run_id: 'This unresolved run name remains reserved. Choose a new run name before validating.' })
+      setNotice('Choose a new run name for any later Start; the released identity may still have provider activity.')
+      requestAnimationFrame(() => { runIdRef.current?.focus(); runIdRef.current?.select() })
+      return
     }
     const requestId = validationRequestRef.current + 1
     validationRequestRef.current = requestId
@@ -372,14 +394,48 @@ export default function LaunchCard({
     if (!confirmed) return
     if (!clearRecovery(unknownStart)) return
     setUnknownStart(null); setMissingStart(false); setValidation(null)
-    if (paidUnknown) {
+    const releasedRunId = String(unknownStart.runId || '').trim()
+    setReservedRunId(releasedRunId)
+    if (releasedRunId && String(draft.run_id || '').trim() === releasedRunId) {
       setErrors({ run_id: 'This unresolved run name remains reserved. Choose a new run name before validating.' })
+    } else {
+      setErrors({})
+    }
+    if (paidUnknown) {
       setNotice('Local recovery released after explicit inspection. Choose a new run name; do not reuse the unresolved identity.')
       requestAnimationFrame(() => { runIdRef.current?.focus(); runIdRef.current?.select() })
     } else {
-      setErrors({})
-      setNotice('Recovery identity released after confirmation. Any later Start is a separate paid action; review its run name and validate again.')
+      setNotice('Recovery identity released after confirmation. Choose a new run name; any later Start is a separate paid action.')
+      requestAnimationFrame(() => { runIdRef.current?.focus(); runIdRef.current?.select() })
     }
+  }
+
+  const releaseDamagedRecovery = () => {
+    if (!damagedRecovery) return
+    if (!damagedRecovery.storageKey) {
+      setStorageBlocked(true)
+      setErrors({ form: 'The damaged recovery record cannot be addressed while session storage is unavailable. Restore access and reload.' })
+      setNotice('Nothing was released. Paid Start remains blocked.')
+      requestAnimationFrame(() => errorRef.current?.focus())
+      return
+    }
+    const prompt = 'This damaged record cannot be matched to a trustworthy startup outcome. Removing only the local fence does not prove that no provider work or cost occurred. Inspect the run list and provider usage first, then use a new run name for any later Start. Release this exact damaged record?'
+    const confirmed = typeof window === 'undefined' || window.confirm(prompt)
+    if (!confirmed) return
+    if (!clearDamagedLaunchTransport(damagedRecovery.storageKey)) {
+      setStorageBlocked(true)
+      setErrors({ form: 'The damaged recovery record changed or could not be removed. No new paid Start will be sent.' })
+      setNotice('Nothing was released. Reload and inspect the current recovery state.')
+      requestAnimationFrame(() => errorRef.current?.focus())
+      return
+    }
+    const releasedRunId = String(draft.run_id || '').trim()
+    setReservedRunId(releasedRunId); setDamagedRecovery(null); setStorageBlocked(false)
+    setUnknownStart(null); setMissingStart(false); setValidation(null); setWarnings([]); setPreview(null)
+    setErrors(releasedRunId
+      ? { run_id: 'Use a new run name after releasing an unverified recovery record.' } : {})
+    setNotice('Damaged recovery released after explicit inspection. Edit the run name and validate again before any Start.')
+    requestAnimationFrame(() => { runIdRef.current?.focus(); runIdRef.current?.select() })
   }
 
   const changeRuntime = (field, raw) => {
@@ -552,13 +608,20 @@ export default function LaunchCard({
       <strong>Startup being observed</strong><code>{unknownStart.runId}</code>
       <span>The recovery key stays hidden and no new launch will be sent.</span>
     </div>}
+    {damagedRecovery && <div className="asst-launch-recovery" role="alert">
+      <strong>Damaged startup recovery</strong>
+      <span>Its outcome cannot be trusted. Inspect the run list and provider activity before releasing this exact local fence.</span>
+    </div>}
     <div className="asst-launch-progress" role="status" aria-live="polite" aria-atomic="true">{notice}</div>
     <p className="asst-launch-cost"><strong>Validate is free:</strong> it makes no model/provider call.
       <strong> Start may incur cost</strong> when it launches provider-backed work.</p>
 
     <div className="asst-perm-actions asst-launch-actions">
       <button type="button" className="btn xs ghost" disabled={locked} onClick={reset}>Reset proposal</button>
-      {unknownStart
+      {damagedRecovery
+        ? <button type="button" className="btn xs ghost" disabled={operationBusy || !damagedRecovery.storageKey}
+          onClick={releaseDamagedRecovery}>Release after inspection</button>
+        : unknownStart
         ? <>
           <button type="button" className="btn xs primary" disabled={operationBusy} onClick={checkStartup}>
             {checking ? 'Checking…' : starting ? 'Waiting for Start…' : 'Check startup'}</button>

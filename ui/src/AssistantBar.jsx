@@ -8,7 +8,7 @@ import { pendingApprovalTarget } from './runIndex.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import { reconcilePendingPermissions } from './assistantPermission.js'
 import {
-  clearLaunchDraftSession, launchDraftSession, removeLaunchDraft, retainLaunchDraft,
+  clearLaunchDraftSession, launchDraftKey, launchDraftSession, removeLaunchDraft, retainLaunchDraft,
 } from './launchDraftStore.js'
 import { proposalLaunchChat } from './launchProvenance.js'
 import {
@@ -59,6 +59,15 @@ import { deadlineRequest } from './requestDeadline.js'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 const boundedRequest = (read, ms = 12000) => deadlineRequest(read, ms).promise
+const messagesOwnLaunchIdentity = (messages, sessionId, identity) => Array.isArray(messages)
+  && messages.some((message, messageIndex) => Array.isArray(message?.proposals)
+    && message.proposals.some((proposal, proposalIndex) => launchDraftKey({
+      sessionId,
+      messageId: message.turn_id || message.id,
+      messageIndex,
+      proposalId: proposal?.proposal_id,
+      proposalIndex,
+    }) === identity))
 
 // Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
 const FREEZE = { success: '⏸ run stopped (not finalized)',
@@ -501,20 +510,30 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // ── sessions (full view) ──
   const openSession = async (id, { recover = false, observeOnly = false } = {}) => {
     // Re-opening the session that is ALREADY live-streaming would abort its own stream (and downgrade
-    // to polling) — the thread is already on screen, so just no-op.
-    if (id === sidRef.current && runningRef.current) return
-    const seq = ++openSessionSeqRef.current
+    // to polling). An observational caller may still read a durable snapshot without replacing it.
+    const observingLiveSession = observeOnly && id === sidRef.current && runningRef.current
+    if (id === sidRef.current && runningRef.current && !observingLiveSession) {
+      return { ok: true, sessionId: id, messages: null, loaded: false }
+    }
+    const seq = observingLiveSession ? openSessionSeqRef.current : ++openSessionSeqRef.current
     try {
       // Keep the current transcript intact until the target is known to exist. The sequence fence
       // rejects a slow A response after the user has already selected B (or started a new chat).
       const s = await boundedRequest(signal => assistantGet(id, { signal }))
-      if (!mountedRef.current || seq !== openSessionSeqRef.current) return
+      if (!mountedRef.current || seq !== openSessionSeqRef.current) {
+        return { ok: false, sessionId: id, reason: 'superseded' }
+      }
+      const arr = s.messages == null ? [] : s.messages
+      if (!Array.isArray(arr)) throw new Error('Invalid Assistant session transcript')
+      if (observingLiveSession) {
+        if (sidRef.current !== id) return { ok: false, sessionId: id, reason: 'superseded' }
+        return { ok: true, sessionId: id, messages: arr, loaded: true }
+      }
       if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
       if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
       activateComposer(id)
       sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
       storageSet('ll.asstSid', id)
-      const arr = s.messages || []
       setMsgs(arr); if (s.meta?.mode) setMode(s.meta.mode)
       const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
       if (la) setPreview(previewText(la.content))
@@ -608,13 +627,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           }
         })
       }
+      return { ok: true, sessionId: id, messages: arr, loaded: true }
     } catch (e) {
-      if (!mountedRef.current || seq !== openSessionSeqRef.current) return
+      if (!mountedRef.current || seq !== openSessionSeqRef.current) {
+        return { ok: false, sessionId: id, reason: 'superseded' }
+      }
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
       // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
       // 404'd session). Drop it back to a fresh composer.
       if (e?.status === 404 && (!sidRef.current || sidRef.current === id)) newChat()
       else flash(e?.status === 404 ? 'This Assistant chat no longer exists' : 'Could not open this Assistant chat')
+      return { ok: false, sessionId: id, status: e?.status || null }
     }
   }
   openSessionRef.current = openSession
@@ -646,39 +669,65 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       window.removeEventListener('ll:open-assistant-session', onOpenAttentionSession)
     }
   }, [hidden]) // openSessionRef always points at the current render
+  const releaseOrphanedLaunchRecovery = (recovery, reason) => {
+    openFull()
+    const current = listLaunchTransports().find(item => item.identity === recovery.identity
+      || (recovery.storageKey && item.storageKey === recovery.storageKey))
+    if (!current) {
+      flash('Startup recovery changed in another view and was retained. Open Check startup again if it remains visible.')
+      return
+    }
+    const stored = current.invalid ? null : loadLaunchTransport(current.identity)
+    if (!current.invalid && (!stored || stored.invalid)) {
+      flash('Startup recovery changed while it was being inspected and was retained. Open it again.')
+      return
+    }
+    const orphanDescription = reason === 'missing-session'
+      ? 'The Assistant chat that owns this startup recovery no longer exists'
+      : reason === 'missing-proposal'
+        ? 'The exact Assistant proposal that owns this startup recovery no longer exists in the saved chat'
+        : 'This startup recovery cannot be matched to an Assistant session'
+    const recordDescription = current.invalid
+      ? 'The current local recovery record is damaged and cannot be checked automatically.'
+      : `The current local recovery is for "${stored.runId}".`
+    if (typeof window === 'undefined') {
+      flash('Startup recovery retained because explicit confirmation is unavailable.')
+      return
+    }
+    const confirmed = window.confirm(`${orphanDescription}. ${recordDescription} Removing it only releases this tab's local Start fence; it does not prove that no provider work or cost occurred. Inspect the run list and provider activity before any new Start. Have you inspected them and want to remove this exact local recovery record?`)
+    if (!confirmed) {
+      flash('Startup recovery retained. Inspect the run list and provider activity before any new Start.')
+      return
+    }
+    const cleared = current.invalid
+      ? clearDamagedLaunchTransport(current.storageKey)
+      : clearLaunchTransport(current.identity, undefined, stored)
+    flash(cleared
+      ? 'Local startup recovery released after explicit inspection acknowledgement. The original outcome is still not proven.'
+      : 'Startup recovery changed while it was being reviewed and was retained. Open it again.')
+  }
   const openLaunchRecovery = async () => {
     const recovery = launchRecoveries[0]
     if (!recovery) return
     const recoverySession = launchDraftSession(recovery.identity)
     if (!recoverySession) {
-      openFull()
-      const stored = loadLaunchTransport(recovery.identity)
-      if (!stored && !recovery.invalid) {
-        flash('Startup recovery changed in another view. Open Check startup again if it remains visible.')
-        return
-      }
-      const damaged = recovery.invalid || stored?.invalid
-      const confirmed = typeof window === 'undefined' || window.confirm(damaged
-        ? 'This damaged startup recovery cannot be matched to a run or checked automatically. Removing it only releases this tab\'s local Start fence; it does not prove that no provider work or cost occurred. Inspect the run list and provider activity before any new Start. Remove this damaged recovery record?'
-        : `Startup recovery for “${stored.runId}” no longer has an Assistant proposal to reopen. Removing it only releases this tab's local Start fence; it does not prove that the original Start failed. Inspect that run and provider activity before any new Start. Remove this recovery record?`)
-      if (!confirmed) {
-        flash('Startup recovery retained. Inspect the run list and provider activity before any new Start.')
-        return
-      }
-      const cleared = damaged
-        ? clearDamagedLaunchTransport(recovery.storageKey)
-        : clearLaunchTransport(recovery.identity, undefined, stored)
-      flash(cleared
-        ? 'Local startup recovery released after explicit inspection acknowledgement. The original outcome is still not proven.'
-        : 'Startup recovery changed while it was being reviewed and was retained. Open it again.')
+      releaseOrphanedLaunchRecovery(recovery, 'invalid-session')
       return
     }
-    if (sidRef.current !== recoverySession) await openSession(recoverySession)
+    const opened = await openSession(recoverySession, { observeOnly: true })
+    if (opened?.status === 404) {
+      releaseOrphanedLaunchRecovery(recovery, 'missing-session')
+      return
+    }
+    if (!opened?.ok) return
+    if (!messagesOwnLaunchIdentity(opened.messages, opened.sessionId, recovery.identity)) {
+      releaseOrphanedLaunchRecovery(recovery, 'missing-proposal')
+      return
+    }
     if (sidRef.current === recoverySession) {
       openSide()
       if (recovery.invalid) flash('This startup recovery record is damaged. Review the proposal recovery warning before any new Start.')
-    }
-    else flash('Could not reopen the Assistant session that owns this startup recovery.')
+    } else flash('Could not reopen the Assistant session that owns this startup recovery.')
   }
   // Restore the last session on mount so a full page reload never loses the conversation — and if its
   // last turn has no reply yet, recover the in-flight answer (the fix for "typed in the bar, reloaded,

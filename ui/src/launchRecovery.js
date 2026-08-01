@@ -1,8 +1,9 @@
 import { deadlineRequest } from './requestDeadline.js'
 
 const STARTED_STATUSES = new Set(['executing', 'succeeded'])
+const OK_STATUSES = new Set(['accepted', 'executing', 'succeeded'])
 const PENDING_STATUSES = new Set(['preparing', 'accepted', 'pending'])
-const RETRYABLE_STATUSES = new Set(['not_started', 'failed', 'rejected'])
+const RETRYABLE_STATUSES = new Set(['not_started', 'failed'])
 const MAX_STATUS_POLL_WINDOW_MS = 15_000
 const MAX_STATUS_POLL_DELAY_MS = 2_000
 const MAX_STATUS_POLLS = 24
@@ -25,23 +26,32 @@ export function launchStatusOutcome(result, expectedRunId) {
   if (!runId || runId !== String(expectedRunId || '')) {
     return { kind: 'unknown', reason: 'identity' }
   }
-  if (typeof result.started !== 'boolean'
+  if (typeof result.ok !== 'boolean'
+      || typeof result.started !== 'boolean'
       || typeof result.can_retry !== 'boolean'
       || typeof result.paid_effect_unknown !== 'boolean') {
     return { kind: 'unknown', runId, reason: 'protocol' }
   }
-  const status = String(result.status || result.state || '').toLowerCase()
+  if (typeof result.status !== 'string' || !result.status.trim()) {
+    return { kind: 'unknown', runId, reason: 'protocol' }
+  }
+  const status = result.status.trim().toLowerCase()
+  const expectedStarted = STARTED_STATUSES.has(status)
+  const expectedOk = OK_STATUSES.has(status)
+  const expectedCanRetry = RETRYABLE_STATUSES.has(status) && !result.paid_effect_unknown
+  if (result.ok !== expectedOk || result.started !== expectedStarted
+      || result.can_retry !== expectedCanRetry
+      || (expectedStarted && result.paid_effect_unknown)) {
+    return { kind: 'unknown', runId, status, reason: 'protocol' }
+  }
   if (result.paid_effect_unknown === true) {
     return { kind: 'unknown-paid', runId, status }
   }
-  if (STARTED_STATUSES.has(status) && result.started !== false && result.can_retry !== true) {
+  if (expectedStarted) {
     return { kind: 'started', runId, status }
   }
-  if (result.can_retry === true && RETRYABLE_STATUSES.has(status) && result.started !== true) {
+  if (expectedCanRetry) {
     return { kind: 'retryable', runId, status }
-  }
-  if (result.started === true || result.can_retry === true) {
-    return { kind: 'unknown', runId, status, reason: 'protocol' }
   }
   if (PENDING_STATUSES.has(status)) return { kind: 'pending', runId, status }
   return { kind: 'unknown', runId, status, reason: 'unverified' }

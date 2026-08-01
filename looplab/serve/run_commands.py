@@ -558,6 +558,13 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             raise HTTPException(400, f"{name} must be at most {limit} characters")
         return value
 
+    def _hypothesis_id(name: str = "id") -> str:
+        value = data.get(name)
+        if (not isinstance(value, str) or value != value.strip()
+                or any(unicodedata.category(ch).startswith("C") for ch in value)):
+            raise HTTPException(400, "hypothesis id must be canonical printable text")
+        return _text(name, limit=256)
+
     def _comment_id(value: object) -> str:
         if not isinstance(value, str) or COMMENT_ID_RE.fullmatch(value) is None:
             raise HTTPException(400, {
@@ -1179,11 +1186,11 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     elif event_type == EV_HYPOTHESIS_ADDED:
         data["statement"] = _text("statement")
         if data.get("id") is not None:
-            data["id"] = _text("id", limit=256)
+            data["id"] = _hypothesis_id()
         if data.get("source") is not None:
             data["source"] = _text("source", limit=128)
     elif event_type == EV_HYPOTHESIS_UPDATED:
-        data["id"] = _text("id", limit=256)
+        data["id"] = _hypothesis_id()
         status = _text("status", limit=64).lower()
         if status not in {"open", "abandoned", "deleted"}:
             raise HTTPException(400, "hypothesis status must be open, abandoned, or deleted")
@@ -2148,8 +2155,27 @@ class RunCommandService:
     @staticmethod
     def _public(record: dict) -> dict:
         hidden = {"data", "idempotency_key_digest", "payload_digest", "semantic_payload_digest",
-                  "attached_semantic_payload_digest", "spawn_claim_released"}
-        return {key: value for key, value in record.items() if key not in hidden}
+                  "attached_semantic_payload_digest", "spawn_claim_released", "subject"}
+        public = {key: value for key, value in record.items() if key not in hidden}
+        data = record.get("data")
+        generation = record.get("run_generation")
+        hypothesis_id = data.get("id") if isinstance(data, dict) else None
+        # Permanent deletion recovery must prove the exact semantic target before treating a terminal
+        # receipt as its own. Expose only this closed, normalized identity — never the arbitrary command
+        # payload or its secret-bearing idempotency material. Deriving it from the persisted immutable
+        # data also upgrades pre-existing durable records without rewriting them. A malformed/legacy
+        # record stays subject-less and clients therefore fail closed.
+        if (record.get("event_type") == EV_HYPOTHESIS_UPDATED
+                and isinstance(data, dict) and set(data) == {"id", "status"}
+                and data.get("status") == "deleted"
+                and isinstance(generation, str) and _RUN_GENERATION_RE.fullmatch(generation)
+                and isinstance(hypothesis_id, str) and hypothesis_id == hypothesis_id.strip()
+                and 0 < len(hypothesis_id) <= 256
+                and not any(unicodedata.category(ch).startswith("C") for ch in hypothesis_id)):
+            public["subject"] = {
+                "kind": "hypothesis", "id": hypothesis_id, "status": "deleted",
+            }
+        return public
 
     def _active_command_ids(self, rd: Path) -> list[str]:
         directory = self._directory(rd)
