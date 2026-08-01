@@ -52,6 +52,25 @@ copies, the byte-identical `_PathLocks` pair, zero `METRIC_READERS` consumers, t
 Line numbers in this document are anchored to the baseline commit above and will drift; treat
 them as starting points for `grep`, not as durable references.
 
+### 0.1 Post-baseline reconciliation and verification (2026-08-01)
+
+After the baseline was pinned, `master` advanced by one commit — `c92b89f` («perf: stop
+blocking the ASGI event loop, and make two hot paths sub-quadratic») — which closes the entire
+in-code `[PERF]`-marker backlog this review catalogues: the blocking async handlers (SR-08,
+including the span-scan item), the O(n²) cross-process `EventStore.read_all` validation
+(EV-07), the full-log read on the per-command append path (SC-08), and the invalid-pin
+strategist re-derivation (EC-15). Those findings are retained below exactly as they held at the
+baseline, each carrying a *Status (post-baseline)* note; theme T7 and the P5 plan reflect the
+fix. `c92b89f` also grew `serve/routers/*`, `api.js` and `eventstore.py`, so cited line numbers
+in those files lag the current tree by up to ~100 lines.
+
+Separately, all 188 findings were re-verified by a dedicated adversarial fact-checking pass
+(one verifier per section, re-reading the cited code and re-running every count and dead-code
+grep): 137 findings were confirmed as written; 47 carried factual corrections — miscounts,
+misquoted comments, misattributed locations — that are folded into the text below; and the only
+4 refutations were the post-baseline `c92b89f` fixes above. No finding was refuted at the
+baseline.
+
 ### Severity model
 
 - **HIGH** — structural debt that demonstrably multiplies maintenance cost today: an
@@ -80,8 +99,8 @@ router split out of `make_app`, the `util.js` → pure-models UI refactor and th
 three-way split all happened — and then accretion resumed at the residual centers. Today the
 tree holds one 5,880-line orchestrator that still embeds two whole subsystems that postdate the
 split (a ~1,000-line Card ledger and a ~500-line speculation-gate calibration envelope, ES-01),
-a 5,563-line `replay.py` in which the derived-Card projection (~2,900 lines, including one
-818-line function) now dwarfs the fold it was attached to (EV-01), a 4,103-line
+a 5,563-line `replay.py` in which the derived-Card projection (~2,200 lines — about 40% of
+the file, including one 818-line function) has outgrown the fold core it sits beside (EV-01), a 4,103-line
 `run_commands.py` spanning five separable subsystems (SC-01), a 2,896-line `claims.py`
 spanning six (EM-01), a 3,103-line router file carrying ~1,400 lines of distributed-storage
 machinery with zero HTTP content (SR-02), and — on the UI side — a 2,216-line `api.js` and
@@ -109,19 +128,21 @@ machine is copy-pasted nearly line-for-line between two components (UI-01).
 explicit one-spelling extractions that replaced counted copies, usually with the rationale
 written at the seam. The newer accretions (cross-run context builders, steward drivers,
 paid-work ledgers, resource-load hooks in the UI) simply haven't received the same treatment
-yet. Relatedly, roughly twenty **acknowledged-but-unfixed in-code review markers**
-(`CLAUDE REVIEW:`/`CODEX AGENT:` comments) ship in production describing known perf or design
-defects — twelve blocking-handler-on-event-loop notes in routers alone (SR-08), the O(events)
-re-fold apologies in the engine (ES-12, EC-02), the whole-repo source hash that revokes
-speculation receipts on comment-only commits (SE-01) — a queue of pre-diagnosed work that this
-document folds into its ledger so it stops living only in comments.
+yet. Relatedly, roughly thirty **acknowledged in-code review markers** shipped in production at the
+baseline (15 `CLAUDE REVIEW: [PERF]` + 14 `CODEX AGENT:` comments), each describing a diagnosed
+perf or design defect — the blocking-handler-on-event-loop notes in routers (SR-08), the
+O(events) re-fold apologies in the engine (ES-12, EC-02), the whole-repo source hash that
+revokes speculation receipts on comment-only commits (SE-01). Notably, the entire `[PERF]`
+subset was fixed on `master` by `c92b89f` immediately after this baseline (see §0.1); the
+`CODEX AGENT:` queue still ships and this document folds it into the ledger so it stops living
+only in comments.
 
 Alongside these, the review verified a concrete **dead-code inventory** (~25 items, §3), a
 handful of **layering violations** against the documented rules (the single core→agents import,
 tools→serve imports that sibling modules explicitly forbid, the lazy search↔engine cycle —
-XP-01, XP-03, XP-04, CO-07, TO-03, SE-07), and one systemic **unguarded seam**: ~20
+XP-01, XP-03, XP-04, CO-07, TO-03, SE-07), and one systemic **unguarded seam**: twelve
 underscore-private functions of `engine/memory.py`/`engine/claims.py` consumed across the
-package boundary by `tools/` with no registry guard, where a "safe" engine-internal rename
+package boundary by `tools/` (~20 import sites) with no registry guard, where a "safe" engine-internal rename
 silently turns every cross-run tool into a permanent `(cross-run tool unavailable)` (XP-01,
 TO-09).
 
@@ -151,7 +172,7 @@ The copies where drift is a correctness event, not a style problem:
 - **EV-05** tolerant-JSONL-prefix scan ×4–5 (equivalence maintained by comments).
 - **EV-06** `EventStore.append`/`append_many` duplicate the ~55-line critical section.
 - **RA-03** Docker hardening argv mirrored by comment (already drifted once).
-- **RA-06** direction validator present in only 2 of 8 task models (objective-flip risk).
+- **RA-06** direction validator present in only 2 of 9 task models (objective-flip risk).
 - **ES-11** `"(developer error:"` magic-string protocol at 6 consumer sites, no shared constant.
 - **XP-02** file-identity stat tuple ×10+ across five packages.
 - **UI-01** durable command lifecycle state machine copy-pasted between Dock and AssistantBar.
@@ -220,13 +241,17 @@ synthetic task adapters (RA-06).
 ### T7 — Acknowledged-but-unfixed in-code review markers
 
 `CLAUDE REVIEW:`/`CODEX AGENT:` comments shipping in production, each describing a diagnosed
-defect with a prescribed fix that was never applied: twelve async-handler-blocks-event-loop
-notes in routers (SR-08), the O(events) full-log read on the per-command append path (SC-08),
-the per-idle-turn ~8× full-log re-folds in `_run_card_session` (EC-02) and the engine spine's
-repeated fold apologies (ES-12), the strategist short-circuit defeat (EC-15), the per-candidate
-concept-projection rebuild in `card_score` (SE-04), and the gameable self-reported selection
-signals (SE-11). Recommendation: convert each into either a fix or a tracked issue — shipped
-annotations are where this class of debt goes to be forgotten.
+defect with a prescribed fix that had not been applied. At the baseline these included the
+twelve async-handler-blocks-event-loop notes in routers (SR-08), the O(events) full-log read on
+the per-command append path (SC-08), the O(n²) cross-process `read_all` validation (EV-07) and
+the strategist short-circuit defeat (EC-15) — all four closed on `master` by `c92b89f`
+immediately after the baseline, together with every `CLAUDE REVIEW: [PERF]` marker. Still
+shipping: the 14 `CODEX AGENT:` comments — the per-idle-turn ~8× full-log re-folds in
+`_run_card_session` (EC-02) alongside the engine spine's repeated fold apologies (ES-12), the
+per-candidate concept-projection rebuild in `card_score` (SE-04), and the gameable
+self-reported selection signals (SE-11). Recommendation: convert each remaining marker into
+either a fix or a tracked issue — shipped annotations are where this class of debt goes to be
+forgotten.
 
 ### Priority plan
 
@@ -251,9 +276,9 @@ annotations are where this class of debt goes to be forgotten.
 5. **P5 — decision items** (need an owner decision, not just a patch): speculation-gate
    source-hash → versioned manifest (SE-01); converge the three claim-identity systems (EM-06)
    and the two curation protocols (EM-03); CaseLibrary wire-or-delete (EM-11); cv.py/trust
-   seams wire-or-move (CT-12); the twelve blocking handlers (SR-08); read_all's O(n²)
-   cross-process validation tradeoff (EV-07); hypothesis-board shadow-family normalization
-   (EV-13).
+   seams wire-or-move (CT-12); hypothesis-board shadow-family normalization (EV-13). (Two items
+   originally slated here — the blocking handlers SR-08 and read_all's O(n²) validation EV-07 —
+   were fixed on `master` by `c92b89f` before this document merged.)
 
 ## 3. Verified dead-code inventory
 
@@ -275,13 +300,13 @@ itself. Full evidence in the referenced findings.
 | `_explored_concepts` | `search/card_selection.py:637` | zero references | SE-13, XP-08 |
 | `METRIC_READERS` registry (docstring falsely claims it is shared) | `adapters/tasks.py:99` | zero consumers; three parallel kind-enumerations live instead | RA-04 |
 | `perm_modes.decide()` (kind-only compat helper) | `tools/perm_modes.py:232` | tests-only; nothing left to be compatible with | TO-10 |
-| `VectorStore.delete`/`rebuild` protocol methods | `tools/vectorstore.py:246-256` | zero callers (documented future seam) | TO-10 |
+| `VectorStore.delete`/`rebuild` protocol methods | `tools/vectorstore.py:246-256` | rebuild: zero callers; delete: tests-only (documented future seam) | TO-10 |
 | `RunTools.parent` stored-but-never-read attribute | `tools/run_tools.py:66` | write-only | TO-10 |
 | Unreachable "paired core commit" fallback lattice (~80 lines) | `search/concept_projection.py` | `core/concepts.py` shipped; branches cannot execute | SE-05 |
 | `RunState.grouped_beliefs()` (60-line projection, self-described "no production consumer") | `core/models.py:2079` | tests+docs only | CO-11 |
 | `POST /api/research`, `GET …/agents_md` endpoints | `serve/routers/genesis.py`, `runs.py` | no UI/TUI caller; tests only — confirm no external consumers before removal | SR-13 |
 | `_portfolio_identity` compat wrapper | `serve/routers/cross_run.py:56` | tests-only | SR-13 |
-| Dead `state` parameter of `_persist_node_concepts` (rebound before first read) | `cli/inspect_cmds.py:108` | caller's fold wasted | CT-11 |
+| Dead `state` parameter of `_persist_node_concepts` (rebound before first read) | `cli/inspect_cmds.py:108` | parameter never read (the caller's fold itself is still consumed elsewhere) | CT-11 |
 | `Inspector.Agent` component (never rendered; tab removed) | `ui/src/Inspector.jsx:2128` | zero JSX references | UI-10 |
 | Speculative Card-kanban lanes self-described as unreachable | `ui/src/panels.jsx:1329` | dead configuration in the render path | UI-14 |
 
@@ -362,7 +387,7 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 
 *Locations:* `looplab/engine/orchestrator.py:1788-2018`, `looplab/engine/orchestrator.py:1880-1974`, `looplab/engine/orchestrator.py:2035-2038`
 
-*Evidence:* The "§4 decomposition" comment (2035-2038) claims run() reads as "a table of guarded steps", and the terminal/budget gates mostly do — but the creates branch (1788-2018) is a 230-line inline block containing: the runaway counter arithmetic, the speculation receipt-owned/raw split, the parallel-build chunk loop (1880-1974) with per-chunk re-fold, batch proposal, telemetry zip, reservation, node-less-card drop recording, task-group fan-out and the pause circuit breaker, followed by the serial per-create loop (1975-2017) with its own card-reservation cancellation cascade. Five distinct `continue`-with-counter-adjustment exits (`_created_no_terminal -= ...` at 1809, 1828, 1866, 1870) make the control flow hard to trace.
+*Evidence:* The "§4 decomposition" comment (2035-2038) claims run() reads as "a table of guarded steps", and the terminal/budget gates mostly do — but the creates branch (1788-2018) is a 230-line inline block containing: the runaway counter arithmetic, the speculation receipt-owned/raw split, the parallel-build chunk loop (1880-1974) with per-chunk re-fold, batch proposal, telemetry zip, reservation, node-less-card drop recording, task-group fan-out and the pause circuit breaker, followed by the serial per-create loop (1975-2017) with its own card-reservation cancellation cascade. Four distinct `continue`-with-counter-adjustment exits (`_created_no_terminal -= ...` at 1809, 1828, 1866, 1870) make the control flow hard to trace.
 
 *Recommendation:* Extract `_handle_create_actions(creates, state, ...) -> bool` (and within it `_run_parallel_build_chunks` and `_run_serial_creates`) as further §4 phase helpers, keeping every append and fold exactly in place, so the spine loop returns to gate-per-line readability.
 
@@ -442,7 +467,7 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 
 *Locations:* `looplab/engine/orchestrator.py:1254-1268`, `looplab/engine/orchestrator.py:3613-3728`, `looplab/engine/orchestrator.py:5692-5861`, `looplab/engine/orchestrator.py:460-481`
 
-*Evidence:* The lessons/holdout/workspace extraction pattern (documented in CLAUDE.md as an intentional monkeypatch seam) is implemented four different ways within one file: property pairs with setters (_lessons_seen_stamp, _prior_note_text, 3613-3635), plain one-line delegators (~30 of them for lessons/holdout/workspace, 3637-3728 and 5692-5861), staticmethod aliases (`_spent_pairs = staticmethod(LessonMemory.spent_pairs)`, 3665, 3699-3700), and read-through property shims for deprecated names (max_parallel/parallel_build, 460-481). This is documented design, but the argument that it still costs: every new LessonMemory/HoldoutGrader method requires a hand-written forwarder (with the correct @in_llm_lane decorator — three delegators carry it, easy to forget), and the four styles mean a reader must check per-name which forwarding semantics apply. The same monkeypatch-interception guarantee could be provided by one mechanism.
+*Evidence:* The lessons/holdout/workspace extraction pattern (documented in CLAUDE.md as an intentional monkeypatch seam) is implemented four different ways within one file: property pairs with setters (_lessons_seen_stamp, _prior_note_text, 3613-3635), plain one-line delegators (~30 of them for lessons/holdout/workspace, 3637-3728 and 5692-5861), staticmethod aliases (`_spent_pairs = staticmethod(LessonMemory.spent_pairs)`, 3665, 3699-3700), and read-through property shims for deprecated names (max_parallel/parallel_build, 460-481). This is documented design, but the argument that it still costs: every new LessonMemory/HoldoutGrader method requires a hand-written forwarder (with the correct @in_llm_lane decorator — eleven delegators carry it, easy to forget), and the four styles mean a reader must check per-name which forwarding semantics apply. The same monkeypatch-interception guarantee could be provided by one mechanism.
 
 *Recommendation:* Pick one forwarding style per sub-object and generate the delegators from a small name registry (a class-body loop or a tested __getattr__ with an explicit allow-list mirroring the existing registry-test pattern), including lane decoration as registry data. Keep the two deprecated-width properties as-is (they carry real semantics).
 
@@ -461,7 +486,7 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 
 Scope: `looplab/engine/`: strategy, research_cadence, novelty, speculation, ablation, confirm_phase, audit, resources, proposal_cues, train_monitor, asha_monitor, finalize, costs, signal_delivery.
 
-**Reviewer assessment.** This cluster implements the engine's periodic/advisory subsystems as mixins over one Engine object, with a consistently applied replay-safety discipline (at_node idempotence gates, paid-attempt receipts before provider calls, fold-ignored DIAGNOSTIC events for background monitors). The architecture is deliberate and mostly well-documented, but the cluster has accreted heavy near-duplication across sibling features that grew independently: two ~190-line cross-run context builders, two watchdog monitors with copy-pasted resume/loop scaffolding, two ablation paths sharing a verbatim ~55-line tail, a developer-crash terminal+pause pair spelled five times, and a triplicated durable-usage append/verify protocol. speculation.py's 500-line _run_card_session and strategy.py's multi-subsystem sprawl are the main under-decomposition hot spots; several files even carry embedded reviewer comments acknowledging the unfixed perf/structure debt.
+**Reviewer assessment.** This cluster implements the engine's periodic/advisory subsystems as mixins over one Engine object, with a consistently applied replay-safety discipline (at_node idempotence gates, paid-attempt receipts before provider calls, fold-ignored DIAGNOSTIC events for background monitors). The architecture is deliberate and mostly well-documented, but the cluster has accreted heavy near-duplication across sibling features that grew independently: two ~190-line cross-run context builders, two watchdog monitors with copy-pasted resume/loop scaffolding, two ablation paths sharing a near-identical ~45-line tail, a developer-crash terminal+pause pair spelled five times, and a triplicated durable-usage append/verify protocol. speculation.py's 500-line _run_card_session and strategy.py's multi-subsystem sprawl are the main under-decomposition hot spots; speculation.py carries embedded reviewer comments acknowledging its unfixed perf/structure debt.
 
 **Strengths worth preserving:**
 
@@ -497,7 +522,7 @@ Scope: `looplab/engine/`: strategy, research_cadence, novelty, speculation, abla
 
 *Locations:* `looplab/engine/speculation.py:644`, `looplab/engine/speculation.py:1351`, `looplab/engine/orchestrator.py:5233`, `looplab/engine/orchestrator.py:5453`, `looplab/engine/orchestrator.py:5665`
 
-*Evidence:* The invariant-critical two-event transaction (EV_NODE_FAILED with reason='developer_crash' + EV_PAUSE circuit-breaker, appended via append_many under a tail CAS) is hand-spelled in five places: speculation.py:644-659 (_create_precoded_node), speculation.py:1351-1364 and 1390-1396 (_close_developer_sentinel_once), and three orchestrator sites (5233/5453/5665). The pause reason strings already drift ('a Developer session crashed (LLM unreachable ...)', 'recovered a Developer crash before GPU dispatch', 'recovered a terminal Developer crash', 'crashed while building an injected node'). The CLAUDE.md invariant that a worker-written EV_PAUSE races EV_RESUME makes each copy a place where the transaction discipline can silently be gotten wrong.
+*Evidence:* The invariant-critical developer-crash transaction (EV_NODE_FAILED with reason='developer_crash' plus the EV_PAUSE circuit-breaker — appended via append_many under a tail CAS at the two speculation.py sites, as plain sequential appends at the two orchestrator sites 5453/5665, and as terminal + `_request_create_pause` at 5233 where the MAIN task appends the pause after the join) is hand-spelled in five places: speculation.py:644-659 (_create_precoded_node), speculation.py:1351-1364 and 1390-1396 (_close_developer_sentinel_once), and three orchestrator sites (5233/5453/5665). The pause reason strings already drift ('a Developer session crashed (LLM unreachable ...)', 'recovered a Developer crash before GPU dispatch', 'recovered a terminal Developer crash', 'crashed while building an injected node'). The CLAUDE.md invariant that a worker-written EV_PAUSE races EV_RESUME makes each copy a place where the transaction discipline can silently be gotten wrong.
 
 *Recommendation:* Extract one `_developer_crash_records(node_id, generation, code, reason_text)` builder (or a full `_append_developer_crash(...)` helper with the tail-CAS retry) used by all five sites. Reason wording can stay a parameter; the event pair, ordering, and CAS discipline become single-sourced.
 
@@ -587,17 +612,17 @@ Scope: `looplab/engine/`: strategy, research_cadence, novelty, speculation, abla
 
 *Locations:* `looplab/engine/speculation.py:1143`, `looplab/engine/speculation.py:1248`, `looplab/engine/speculation.py:51`, `looplab/engine/speculation.py:73`
 
-*Evidence:* _produce_card_build (1143-1179) and _produce_raw_card_stage (1248-1299) repeat the same wrapper: to_thread.run_sync(functools.partial(worker,...), abandon_on_cancel=False); except Exception -> synthesize a failure result with `f"{type(exc).__name__}: {exc}"[:2_048]`; store the result on self; finally clear the inflight flag and `notify.send_nowait(...)` swallowing (WouldBlock, ClosedResourceError, BrokenResourceError). The failure-result construction (12 fields) is itself duplicated inside _produce_raw_card_stage's except and _prepare_raw_card_stage's except (1231-1244 vs 1281-1292).
+*Evidence:* _produce_card_build (1143-1179) and _produce_raw_card_stage (1248-1299) repeat the same wrapper: to_thread.run_sync(functools.partial(worker,...), abandon_on_cancel=False); except Exception -> synthesize a failure result with `f"{type(exc).__name__}: {exc}"[:2_048]`; store the result on self; finally clear the inflight flag and `notify.send_nowait(...)` swallowing (WouldBlock, ClosedResourceError, BrokenResourceError). The failure-result construction (10–11 keyword fields against a 14-field dataclass) is itself duplicated inside _produce_raw_card_stage's except and _prepare_raw_card_stage's except (1231-1244 vs 1281-1292).
 
 *Recommendation:* Extract a generic `_run_isolated_producer(worker, on_result, inflight_clear, notify_key)` coroutine, and one `SpecRawStageResult.failure(...)` classmethod so the 12-field failure payload is built in one place.
 
 #### EC-13 · LOW · duplication · effort: small
 
-**Parser-resolution wrapper-chain walk copy-pasted in four modules**
+**Parser-resolution wrapper-chain walk duplicated outside its canonical helper**
 
 *Locations:* `looplab/engine/strategy.py:1121`, `looplab/engine/novelty.py:780`, `looplab/engine/lessons_distill.py:339`, `looplab/engine/lessons.py:284`
 
-*Evidence:* The idiom `next((p for o in (researcher, getattr(r,'inner',None), getattr(r,'fallback',None), developer) if (p := getattr(o,'parser',None))), 'tool_call')` appears in _verifier_soundness (strategy.py:1121-1123), _verified_failed_direction_reopen (novelty.py:780-785), lessons_distill.py:339-342, and lessons.py:284 — four hand-rolled copies of 'resolve the structured-output parser through the role wrapper chain'. research_cadence.py:564-566 dodges it by delegating to lessons._merge_prompt_opts, showing the intended single lookup path exists but is not used by the other sites. Given the codebase's own warning about duck-typed wrapper chains (foresight __getattr__ proxy trap), each copy is a chance to miss a wrapper link.
+*Evidence:* The idiom `next((p for o in (researcher, getattr(r,'inner',None), getattr(r,'fallback',None), developer) if (p := getattr(o,'parser',None))), 'tool_call')` appears in _verifier_soundness (strategy.py:1121-1123) and _verified_failed_direction_reopen (novelty.py:780-785); the canonical spelling is _merge_prompt_opts itself (lessons_distill.py:331-342), which research_cadence.py:564-566 correctly delegates to — so two hand-rolled copies bypass the intended single lookup path. lessons.py:280-289 (reflect_client) walks the same researcher→inner→fallback→developer chain but resolves the LLM *client* rather than the parser — a third variant of the chain-walk idiom. Given the codebase's own warning about duck-typed wrapper chains (foresight __getattr__ proxy trap), each copy is a chance to miss a wrapper link.
 
 *Recommendation:* Add `resolve_role_parser(*roles, default='tool_call')` next to the existing chain-walk in lessons.py (or agents/roles.py) and use it at all four sites.
 
@@ -621,6 +646,8 @@ Scope: `looplab/engine/`: strategy, research_cadence, novelty, speculation, abla
 
 *Recommendation:* Cache the validated pin (keyed on the pending_strategy dict identity/digest) so a pin that validates to empty pin_fields clears pin_drift in the cheap pre-check; the note can then be deleted.
 
+
+*Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): an `_invalid_pin_verdict` memo keyed on (pin JSON, card_driven_selection, policy registry) now short-circuits before `_strategy_ctx`, and the marker was rewritten as a past-tense why-comment — essentially this finding's own recommendation. The finding is retained as accurate at the baseline.
 
 ### 4.3 Engine — cross-run memory & knowledge
 
@@ -712,7 +739,7 @@ Scope: `looplab/engine/`: memory.py, lessons.py, claims.py, concept_registry.py,
 
 *Locations:* `looplab/engine/claims.py:1666`, `looplab/engine/claims.py:2462`, `looplab/engine/claim_steward.py:146`, `looplab/engine/concept_steward.py:181`, `looplab/engine/claims.py:1641`, `looplab/engine/claims.py:1697`, `looplab/engine/claims.py:2491`
 
-*Evidence:* Four functions (atlas_for_memory, cross_run_retrieve, claim_curation_snapshot, concept_curation_snapshot) each open with the same ~15-line block: build source_names by checking which of lessons/research_claims/capsules is None, then call project_governed_sources with a lambda that re-invokes the same function with _governance=governance. Separately, the task-scope filter (three _filter_claim_source_rows/_filter_capsule_rows calls comparing str(r.get('task_id')) == wanted) is repeated verbatim in claims_for_memory (1641-1646), atlas_for_memory (1697-1706), and cross_run_retrieve (2491-2498). The scope filter is an access boundary (the comment at 1698 notes a past leak when only one store was filtered) — exactly the kind of code that should have one spelling.
+*Evidence:* Four functions (atlas_for_memory, cross_run_retrieve, claim_curation_snapshot, concept_curation_snapshot) share the same '_governance is None → recurse via project_governed_sources with a self-invoking lambda' skeleton; atlas_for_memory and cross_run_retrieve additionally build source_names by None-checking lessons/research_claims/capsules (claim_curation_snapshot None-checks only lessons; concept_curation_snapshot passes a constant source_names). Separately, the task-scope filter (three _filter_claim_source_rows/_filter_capsule_rows calls comparing str(r.get('task_id')) == wanted) is repeated verbatim in claims_for_memory (1641-1646), atlas_for_memory (1697-1706), and cross_run_retrieve (2491-2498). The scope filter is an access boundary (the comment at 1698 notes a past leak when only one store was filtered) — exactly the kind of code that should have one spelling.
 
 *Recommendation:* Add a governed_projection decorator/helper that handles the source_names derivation + recursion, and a _scope_all_sources(lessons, research, capsules, task_id) helper so the access-boundary filter has a single implementation.
 
@@ -791,7 +818,7 @@ Scope: `looplab/engine/`: memory.py, lessons.py, claims.py, concept_registry.py,
 
 Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_index.py.
 
-**Reviewer assessment.** The events package is the best-engineered subsystem in the repo: fold() has already been refactored from a 63-way if/elif chain into a uniform handler registry (replay.py:182-193, _HANDLERS at 3713) with an explicit cross-arm _FoldCtx, an enforced folded/diagnostic partition in types.py, and a coherent corruption model in eventstore.py. The dominant structural debt is that replay.py (5,563 lines) is a god-module in which the derived Card-ledger projection (~2,900 lines including _derive_cards at ~820 lines) now dwarfs the fold itself, and that defensive-validation micro-patterns (hex-digest checks, bounded-int guards, request-queue purges, certificate invalidation) are copy-pasted rather than schema'd, with the log's own comments recording at least one real bug caused by exactly that drift.
+**Reviewer assessment.** The events package is the best-engineered subsystem in the repo: fold() has already been refactored from a 63-way if/elif chain into a uniform handler registry (replay.py:182-193, _HANDLERS at 3713) with an explicit cross-arm _FoldCtx, an enforced folded/diagnostic partition in types.py, and a coherent corruption model in eventstore.py. The dominant structural debt is that replay.py (5,563 lines) is a god-module in which the derived Card-ledger projection (~2,200 lines including _derive_cards at 818 lines) now rivals the fold itself, and that defensive-validation micro-patterns (hex-digest checks, bounded-int guards, request-queue purges, certificate invalidation) are copy-pasted rather than schema'd, with the log's own comments recording at least one real bug caused by exactly that drift.
 
 **Strengths worth preserving:**
 
@@ -803,11 +830,11 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 #### EV-01 · HIGH · under-decomposition · effort: large
 
-**_derive_cards is an ~820-line god-function and the Card subsystem consumes over half of replay.py**
+**_derive_cards is an ~820-line god-function and the Card subsystem consumes ~40% of replay.py**
 
 *Locations:* `looplab/events/replay.py:4746-5563`, `looplab/events/replay.py:2410-2903`, `looplab/events/replay.py:4070-4745`
 
-*Evidence:* _derive_cards (replay.py:4746-5563) is one 818-line function with 9+ numbered phases (identity registration, hash/native bridging, merge-alias resolution with nested _canon closure, verdicts, drop overlays, build-reservation status, enrichment apply, ranking, operator overlays, selection-readiness blockers), containing 6 nested closures (_card_id, _register_card_identity, _record_registration, _record_action_owner, _node_parent_generations, _canon) and its own mini-state (12+ local dicts/sets). Together with its supporting helpers (_bounded_card_* at 2410-2730, card handlers at 2731-2939, _card_added_snapshot/_card_added_ownership/_card_action_freshness/_card_sidecar_subject at 4214-4745) the Card ledger occupies roughly 2,900 of replay.py's 5,563 lines — more than the entire event-fold core. It is invoked exactly once, as a pure post-pass from _finalize_fold (3848), and reads only folded state, so it has no reason to live in the fold module.
+*Evidence:* _derive_cards (replay.py:4746-5563) is one 818-line function with 9+ numbered phases (identity registration, hash/native bridging, merge-alias resolution with nested _canon closure, verdicts, drop overlays, build-reservation status, enrichment apply, ranking, operator overlays, selection-readiness blockers), containing 6 nested closures (_card_id, _register_card_identity, _record_registration, _record_action_owner, _node_parent_generations, _canon) and its own mini-state (12+ local dicts/sets). Together with its supporting helpers (_bounded_card_* at 2410-2730, card handlers at 2731-2939, _card_added_snapshot/_card_added_ownership/_card_action_freshness/_card_sidecar_subject at 4214-4745) the Card ledger occupies roughly 2,200 of replay.py's 5,563 lines (~40% of the file). It is invoked exactly once, as a pure post-pass from _finalize_fold (3848), and reads only folded state, so it has no reason to live in the fold module.
 
 *Recommendation:* Extract the Card ledger into a sibling module (e.g. events/cards.py: fold-time bounded-receipt helpers + a derive_cards(st) post-pass) and decompose _derive_cards into its numbered phases as top-level pure functions taking/returning explicit small dataclasses (identity map, alias map, action-owner table). Keep _finalize_fold calling one entry point; behavior is unchanged because the pass is already pure over RunState.
 
@@ -871,6 +898,8 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Recommendation:* Decide the tradeoff explicitly: either adopt the bounded anchor for cross-process growth validation (as the note proposes, accepting detector-not-proof semantics that seq-density fencing already backstops), or maintain a rolling incremental hash checkpoint so re-validation is O(new bytes). Remove the standing TODO-style comment once decided.
 
+*Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): `read_all` now validates external growth with bounded head/tail windows on every poll and re-runs the full-prefix sha256 proof only on first external observation and each time the prefix doubles — amortized O(1) per appended byte; the review marker was replaced by a why-comment describing the shipped design. The finding is retained as accurate at the baseline.
+
 #### EV-08 · MEDIUM · under-decomposition · effort: medium
 
 **_on_node_created is a 226-line handler mixing node construction with ~100 lines of concept-envelope policy**
@@ -917,7 +946,7 @@ Scope: `looplab/events/`: eventstore.py, replay.py, types.py, projections, span_
 
 *Locations:* `looplab/events/digest.py:16-64`, `looplab/events/eventstore.py:364-525`, `looplab/events/comment_projection.py:239-333`
 
-*Evidence:* digest.py's numeric_params/knn_idw/param_distance (16-64) are generic ML-similarity primitives consumed exclusively by search/surrogate, search/panel, runtime/proxy and engine/novelty — nothing event-related; the module's own docstring positions it as a "reuse hub" placed here only to stay importable without cycles. Likewise eventstore.py carries read_jsonl_lenient(_with_health)/write_jsonl_atomic/replace_jsonl_rows_atomic_preserving_quarantine (364-525), which serve the lessons/memory/claims MUTABLE stores in engine/ and trust/ and explicitly contrast themselves with the event log's semantics. comment_projection.py's comments_page/history_page cursors (239-333) are HTTP pagination mechanics used only by serve routers. All are pure and layering-legal (events imports only core), but they dilute the package's stated identity (event store + fold + projections) and make eventstore.py a 1,224-line multi-purpose module.
+*Evidence:* digest.py's numeric_params/knn_idw/param_distance (16-64) are generic ML-similarity primitives consumed by search/surrogate, search/panel, runtime/proxy, engine/novelty and tools/run_tools (find_analogous) — nothing event-related; the module's own docstring positions it as a "reuse hub" placed here only to stay importable without cycles. Likewise eventstore.py carries read_jsonl_lenient(_with_health)/write_jsonl_atomic/replace_jsonl_rows_atomic_preserving_quarantine (364-525), which serve the lessons/memory/claims MUTABLE stores in engine/ and trust/ and explicitly contrast themselves with the event log's semantics. comment_projection.py's comments_page/history_page cursors (239-333) are HTTP pagination mechanics used only by serve routers. All are pure and layering-legal (events imports only core), but they dilute the package's stated identity (event store + fold + projections) and make eventstore.py a 1,224-line multi-purpose module.
 
 *Recommendation:* Move knn_idw/numeric_params/param_distance to core (e.g. core/similarity.py) and the mutable-store JSONL helpers to core (e.g. core/jsonlio.py), keeping re-export shims in the old locations (the repo already has the _LAYOUT meta-path shim pattern for exactly this). Low urgency; do it opportunistically when touching those helpers.
 
@@ -982,7 +1011,7 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 *Locations:* `looplab/core/llm.py:523-570`, `looplab/core/llm.py:572-657`, `looplab/core/llm.py:893-1011`, `looplab/core/llm.py:548-559`, `looplab/core/llm.py:618-630`, `looplab/core/llm.py:965-997`, `looplab/core/llm.py:365-394`, `looplab/core/llm.py:929-957`
 
-*Evidence:* `_accumulate_stream` (523-570), legacy `_read_stream` (572-657) and `complete_text_stream` (893-1011) each hand-roll SSE-delta accumulation. The tool-call slot-merge block (setdefault slot, id/name/arguments append) is duplicated line-for-line at 548-559 and 618-630. `complete_text_stream` separately re-implements `_sdk_chat`'s stream setup: the same `header_join = self.header_timeout + min(10.0, self.header_timeout)` computation (365 vs 929), the same own-and-close finally dance (386-394 vs 952-957), and the same `_is_stream_options_reject`/`_is_reasoning_reject` 400-retry pair (734-751 vs 973-981). Inside `complete_text_stream` the blocking-fallback block `delegated_to_fallback = True; text = self.complete_text(messages); if text: yield text; return` appears three times verbatim (965-970, 982-987, 992-997).
+*Evidence:* `_accumulate_stream` (523-570), legacy `_read_stream` (572-657) and `complete_text_stream` (893-1011) each hand-roll SSE-delta accumulation. The tool-call slot-merge block (setdefault slot, id/name/arguments append) is duplicated near-identically at 548-559 and 618-630 (the SDK path first converts via tc.model_dump()). `complete_text_stream` separately re-implements `_sdk_chat`'s stream setup: the same `header_join = self.header_timeout + min(10.0, self.header_timeout)` computation (365 vs 929), the same own-and-close finally dance (386-394 vs 952-957), and the same `_is_stream_options_reject`/`_is_reasoning_reject` 400-retry pair (734-751 vs 973-981). Inside `complete_text_stream` the blocking-fallback block `delegated_to_fallback = True; text = self.complete_text(messages); if text: yield text; return` appears three times verbatim (965-970, 982-987, 992-997).
 
 *Recommendation:* After deleting the legacy path (see dead-code finding), extract one `_open_bounded_stream()` helper (permit + bounded create + _streaming_body + close-on-exit) shared by `_sdk_chat` and `complete_text_stream`, one delta-merge helper for tool-call slots, and one `_fallback_to_blocking()` local for the triplicated block.
 
@@ -1002,7 +1031,7 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 *Locations:* `looplab/core/tracing.py:73-132`, `looplab/core/advisory_payloads.py:467-499`, `looplab/core/tracing.py:46-70`, `looplab/core/advisory_payloads.py:436-447`
 
-*Evidence:* `tracing.sanitize_trace_value` (73-132) and `advisory_payloads._tree` (467-499) are structurally the same function written twice: recursive walk with depth cap (5), per-container item cap (64), shared mutable char-budget cell (`remaining[0]`/`budget[0]`), int bounded to ±2^63 else stringified, non-finite float stringified, `is_secret_key_name(key)` → "***", strings through the redactor with a cap. They differ only in constants and which redaction entry point they call (`_trace_text` vs `_text`, both thin wrappers over `redact_persisted_text`). Both files also carry their own budgeted-text helper (`_trace_text`+budget bookkeeping in `_trace_messages` vs `_text`). A redaction fix landing in one walker (e.g. the total-items cap that only tracing has, `_TRACE_TREE_TOTAL_ITEMS_MAX`) silently misses the other durable boundary.
+*Evidence:* `tracing.sanitize_trace_value` (73-132) and `advisory_payloads._tree` (467-499) are structurally the same function written twice: recursive walk with depth cap (5), per-container item cap (64), shared mutable char-budget cell (`remaining[0]`/`budget[0]`), int bounded to ±2^63 else stringified, non-finite float stringified, `is_secret_key_name(key)` → "***", strings through the redactor with a cap. They differ only in constants and which redaction entry point they call (`_trace_text` vs `_text`, both thin wrappers over `redact_persisted_text`). Both files also carry their own budgeted-text helper (`_trace_text`+budget bookkeeping in `_trace_messages` vs `_text`). Both walkers enforce separately-maintained caps (tracing's `_TRACE_TREE_TOTAL_ITEMS_MAX` vs advisory's `_MAX_TREE_ITEMS` cell), so a redaction fix or cap change landing in one walker silently misses the other durable boundary.
 
 *Recommendation:* Move one parameterized `bounded_redacted_tree(value, *, max_chars, max_items, max_depth, max_total_items)` into redact.py (which both already import) and have tracing and advisory_payloads call it with their own constants.
 
@@ -1022,7 +1051,7 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 *Locations:* `looplab/core/models.py:689-757`, `looplab/core/models.py:779-924`, `looplab/core/advisory_payloads.py:249-265`, `looplab/core/fitness.py:113-118`, `looplab/core/models.py:1148-1161`, `looplab/core/models.py:1184-1191`
 
-*Evidence:* The same idiom — validate/bound a payload, `json.dumps(..., sort_keys=True, separators=(",", ":"), allow_nan=False)`, sha256, prefix — is written six times: `idea_proposal_digest` (with a 50-line private bounded walker `_complete`), `_card_action_digest` (with its own private `_number`/`_params`/`_space`/`_node_id` validators), `stable_advisory_ref`, `verifier_evidence_digest`, `hypothesis_statement_digest`, and `run_setup_key` (md5). The frozen preimages themselves must not change (versioned identities), but each site also re-invents the bounding/validation scaffolding around the dump, and two use bare md5 while others use sha256, so a reader must re-derive each one's guarantees from scratch.
+*Evidence:* The same idiom — validate/bound a payload, `json.dumps(..., sort_keys=True, separators=(",", ":"), allow_nan=False)`, sha256, prefix — is written four times: `idea_proposal_digest` (with a 50-line private bounded walker `_complete`), `_card_action_digest` (with its own private `_number`/`_params`/`_space`/`_node_id` validators), `stable_advisory_ref`, and `verifier_evidence_digest`; two sibling minters use ad-hoc variants — `hypothesis_statement_digest` (sha256 over a normalized string) and `run_setup_key` (md5 over a joined argv string; md5 also appears in `hypothesis_id`). The frozen preimages themselves must not change (versioned identities), but each site also re-invents the bounding/validation scaffolding around the dump, and md5 coexists with sha256 across the family, so a reader must re-derive each one's guarantees from scratch.
 
 *Recommendation:* Add one `canonical_json_digest(payload, *, prefix)` helper (dump+hash only, no bounding) and route the non-frozen call sites through it; leave the frozen v1/v2 preimage builders byte-identical but have them call the shared dump/hash tail. Document per-site why md5 remains where it does.
 
@@ -1038,11 +1067,11 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 #### CO-10 · LOW · over-engineering · effort: small
 
-**llm.py re-export shim freezes ~34 private helper names and its monkeypatch claim is subtly wrong**
+**llm.py re-export shim freezes ~32 private helper names and its monkeypatch claim is subtly wrong**
 
 *Locations:* `looplab/core/llm.py:59-69`, `looplab/core/llm_streaming.py:6-9`, `looplab/core/llm_streaming.py:123`, `looplab/core/llm_streaming.py:257`
 
-*Evidence:* llm.py re-imports ~34 underscore-private names from the three split siblings so "tests and callers import/monkeypatch them THROUGH this module" and both paths "keep resolving to the SAME objects". The 'same objects' claim holds for reads, but the monkeypatch claim does not hold for intra-sibling calls: `_stream_with_idle_guard` calls `_stream_raw_socket` through llm_streaming's own namespace (llm_streaming.py:123), so patching `looplab.core.llm._stream_raw_socket` rebinds only llm.py's alias and never reaches the live call — the exact silent-no-op failure mode the project's registry-guard convention exists to prevent, here with no guard. The shim also permanently publishes private helpers (`_backoff`, `_err_body`, `_tool_call_slot`, ...) as de-facto API surface of core.llm. The split itself is documented and sound; the blanket private re-export is the accidental-complexity part.
+*Evidence:* llm.py re-imports ~32 underscore-private names from the three split siblings so "tests and callers import/monkeypatch them THROUGH this module" and both paths "keep resolving to the SAME objects". The 'same objects' claim holds for reads, but the monkeypatch claim does not hold for intra-sibling calls: `_stream_with_idle_guard` calls `_stream_raw_socket` through llm_streaming's own namespace (llm_streaming.py:123), so patching `looplab.core.llm._stream_raw_socket` rebinds only llm.py's alias and never reaches the live call — the exact silent-no-op failure mode the project's registry-guard convention exists to prevent, here with no guard. The shim also permanently publishes private helpers (`_backoff`, `_err_body`, `_tool_call_slot`, ...) as de-facto API surface of core.llm. The split itself is documented and sound; the blanket private re-export is the accidental-complexity part.
 
 *Recommendation:* Trim the re-export list to the names tests actually import (grep-driven), patch the remaining tests to import from the owning sibling, and correct the docstrings' monkeypatch claim (patch the sibling module for intra-module call sites). Alternatively add a small source-scan test asserting every re-exported name is referenced somewhere outside core/, so the list can shrink safely over time.
 
@@ -1068,11 +1097,11 @@ Scope: `looplab/core/`: models.py, config.py, llm.py + siblings, tracing, parsin
 
 #### CO-13 · LOW · flat-code · effort: small
 
-**_check_trust_gate is a misnamed grab-bag validator for eight unrelated enum fields**
+**_check_trust_gate is a misnamed grab-bag validator for nine unrelated enum fields**
 
 *Locations:* `looplab/core/config.py:1322-1372`
 
-*Evidence:* The model_validator named `_check_trust_gate` validates trust_gate, merge_mode, novelty_mode, strategist_backend, eval_trust_mode, seed_mode, backend, developer_backend and llm_parser — eight independent closed-vocabulary fields — as a linear if-chain of hand-written `raise ValueError` blocks, each repeating the same "must be a|b|c, got {!r}" message format. New enum-ish fields keep being appended here (the comment trail shows three accretion waves).
+*Evidence:* The model_validator named `_check_trust_gate` validates trust_gate, merge_mode, novelty_mode, strategist_backend, eval_trust_mode, seed_mode, backend, developer_backend and llm_parser — nine independent closed-vocabulary fields — as a linear if-chain of hand-written `raise ValueError` blocks, each repeating the same "must be a|b|c, got {!r}" message format. New enum-ish fields keep being appended here (the comment trail shows three accretion waves).
 
 *Recommendation:* Replace with a declarative `_ENUM_FIELDS = {"trust_gate": ("audit","gate","block"), ...}` table iterated by one loop (message format preserved), with the two lazy-registry cases (developer_backend, llm_parser) resolved via callables in the same table. Rename to `_check_enum_fields`.
 
@@ -1147,7 +1176,7 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 
 *Locations:* `looplab/serve/reset_transaction.py:1-324`, `looplab/serve/deletion_transaction.py:1-265`, `looplab/serve/reset_route.py:476-884`, `looplab/serve/deletion_service.py:371-654`, `looplab/serve/run_commands.py:2417-2529`
 
-*Evidence:* reset_transaction.py and deletion_transaction.py each define: receipt-path derivation off srv.commands._sequence_path with the same lock-namespace check, _is_reparse + _regular_file/_regular_receipt, _validate_receipt with _RECEIPT_KEYS/_IMMUTABLE_FIELDS/phase tables, load-with-before/after-identity change detection, save with immutable-field enforcement, and marker/fence-to-receipt binding validators (validate_reset_binding vs _validate_fence_binding/_validate_fence_request). Their drivers (reset_route._reset_blocking, deletion_service.begin_or_resume_run_deletion) both roll a phase state machine forward under the same lock stack (commands.sequence → run_lifecycle_lock_http → engine_write_lock_http → config+events+span-index locks) and both re-spell the preflight ladder (active commands / spawn claim / finalize incomplete / liveness) that run_commands.reject_if_active and destructive_guard also implement — four spellings of the same quiescence checklist.
+*Evidence:* reset_transaction.py and deletion_transaction.py each define: receipt-path derivation off srv.commands._sequence_path with the same lock-namespace check, _is_reparse + _regular_file/_regular_receipt, _validate_receipt with _RECEIPT_KEYS/immutable-field/phase tables (_IMMUTABLE_RECEIPT_FIELDS vs _IMMUTABLE_FIELDS), load-with-before/after-identity change detection, save with immutable-field enforcement, and marker/fence-to-receipt binding validators (validate_reset_binding vs _validate_fence_binding/_validate_fence_request). Their drivers (reset_route._reset_blocking, deletion_service.begin_or_resume_run_deletion) both roll a phase state machine forward under the same lock stack (commands.sequence → run_lifecycle_lock_http → engine_write_lock_http → config+events+span-index locks) and both re-spell the preflight ladder (active commands / spawn claim / finalize incomplete / liveness) that run_commands.reject_if_active and destructive_guard also implement — four spellings of the same quiescence checklist.
 
 *Recommendation:* Extract a shared durable-operation kit: generic receipt store (validate/load/save with immutable fields + phase-transition table), fence-binding validator, and one preflight_quiescence(srv, rd, *, operation) helper. Reset/deletion keep their own phase enums and effects.
 
@@ -1170,6 +1199,8 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 *Evidence:* A literal 'CLAUDE REVIEW: [PERF]' comment block sits in production code at 3721-3726 stating that self._events(rd) (EventStore.read_all(): parse + Event-validate every row) is executed purely to read events[-1].seq, bypassing the incremental observation index (self._observe(rd).latest_seq) that was built specifically to avoid re-parsing the whole log per command. Both call sites (3727, 3788) still do the full read. The marker is a leftover finding that was neither fixed nor converted to a normal why-comment/issue.
 
 *Recommendation:* Replace both baselines with observation.latest_seq (the CAS expected_last_seq on append remains the correctness authority, as the comment itself notes), and remove the review-artifact comment.
+
+*Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): both call sites now read `self._observe(rd).latest_seq` from the incremental observation index, `self._events(rd)` is gone, and the marker was replaced by a why-comment. The finding is retained as accurate at the baseline.
 
 #### SC-09 · MEDIUM · mergeable-entities · effort: medium
 
@@ -1256,13 +1287,13 @@ Scope: `looplab/serve/`: run_commands.py, command_observation.py, engine_proc.py
 
 Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assistant, misc, reviews, genesis, org, attention, collaboration.
 
-**Reviewer assessment.** looplab/serve/routers/ is a 12.4k-line HTTP layer split from a former monolithic make_app, and the split preserved handler bodies verbatim rather than re-architecting: routers are correctly thin in places (control's reset delegates to reset_route.py, org delegates to deletion_service.py) but elsewhere entire durable-storage subsystems live inside router files — reports.py carries ~1400 lines of file-lease/fence/receipt machinery, control.py a ~640-line trace-clear state machine, runs.py a ~1000-line concept-lens ledger. The dominant systemic problem is that the (genuinely excellent) paid-work idempotency discipline was re-invented per endpoint: five-plus parallel claim/terminal/generation-fence protocols with byte-identical helper pairs, plus pervasive small-scale duplication (five _json_object copies, five bounded-JSON redactors, 26 hand-built generation-conflict envelopes). Security/robustness engineering at the read boundaries is consistently strong; the maintenance risk is concentrated in duplication and under-extraction, not in correctness design.
+**Reviewer assessment.** looplab/serve/routers/ is a 12.4k-line HTTP layer split from a former monolithic make_app, and the split preserved handler bodies verbatim rather than re-architecting: routers are correctly thin in places (control's reset delegates to reset_route.py, org delegates to deletion_service.py) but elsewhere entire durable-storage subsystems live inside router files — reports.py carries ~1400 lines of file-lease/fence/receipt machinery, control.py a ~640-line trace-clear state machine, runs.py a ~1000-line concept-lens ledger. The dominant systemic problem is that the (genuinely excellent) paid-work idempotency discipline was re-invented per endpoint: five-plus parallel claim/terminal/generation-fence protocols with byte-identical helper pairs, plus pervasive small-scale duplication (four _json_object router copies plus ~10 inline re-implementations, five bounded-JSON redactors, ~26 hand-built generation-conflict envelopes). Security/robustness engineering at the read boundaries is consistently strong; the maintenance risk is concentrated in duplication and under-extraction, not in correctness design.
 
 **Strengths worth preserving:**
 
 - Exceptional paid-work correctness discipline: every endpoint that spends money (report refresh, concept lens, scope reports, genesis, boss command) has explicit idempotency identities, durable claims before provider calls, honest 'indeterminate/ambiguous' states instead of silent rebilling, and generation fences against reset races — with the reasoning documented inline.
 - Consistent security hardening at read boundaries: symlink/reparse rejection, bounded reads with truncation receipts, redact-before-truncate ordering, path-traversal guards, and allow-list projections (reviews.py, misc.py authoring, runs.py artifacts/agents_md) are applied nearly everywhere untrusted bytes cross the wire.
-- Load-bearing why-comments are genuinely maintained: cache-locking rationale (attention.py, _OP_STAGE_NAMES), splice/race analyses (collaboration.py _assert_still_current), and provenance of past fixes make the non-obvious invariants auditable.
+- Load-bearing why-comments are genuinely maintained: cache-locking rationale (attention.py; runs.py's _OP_STAGE_NAMES), splice/race analyses (collaboration.py _assert_still_current), and provenance of past fixes make the non-obvious invariants auditable.
 - Bounded caches done right: attention projection cache, concept core/replay LRUs, summary cache, and scope revision caches all have explicit size ceilings, stat-identity invalidation, and documented race handling instead of unbounded dicts.
 - The build_router(srv) convention with documented registration-order constraints (misc.py's catch-all ordering, __init__.py) keeps the app composition explicit and testable.
 
@@ -1292,7 +1323,7 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Locations:* `looplab/serve/routers/control.py:420-1062`, `looplab/serve/routers/control.py:820-1062`
 
-*Evidence:* Fifteen nested helper closures (`_trace_clear_receipt_lstat` through `_apply_prepared_trace_clear`) plus the ~240-line `clear_node_trace` handler implement a complete write-ahead-receipt state machine (pending/succeeded/superseded, digest-CAS on spans.jsonl, recovery ownership) entirely inside `build_router`. The sibling destructive operations got dedicated modules — reset is one line delegating to `serve/reset_route.py::durable_reset_run` (control.py:413-418), deletion delegates to `deletion_service.py` (org.py:130-144) — so trace-clear is inconsistent with the codebase's own extraction pattern, and being closures it is untestable without building the whole app.
+*Evidence:* Seventeen nested helper closures (`_trace_clear_receipt_lstat` through `_apply_prepared_trace_clear`) plus the ~240-line `clear_node_trace` handler implement a complete write-ahead-receipt state machine (pending/succeeded/superseded, digest-CAS on spans.jsonl, recovery ownership) entirely inside `build_router`. The sibling destructive operations got dedicated modules — reset is one line delegating to `serve/reset_route.py::durable_reset_run` (control.py:413-418), deletion delegates to `deletion_service.py` (org.py:174-188) — so trace-clear is inconsistent with the codebase's own extraction pattern, and being closures it is untestable without building the whole app.
 
 *Recommendation:* Extract to looplab/serve/trace_clear.py with the same shape as reset_route.py (`durable_clear_node_trace(srv, ...)`), leaving a one-line route.
 
@@ -1312,7 +1343,7 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Locations:* `looplab/serve/routers/assistant.py:46-56`, `looplab/serve/routers/genesis.py:28-37`, `looplab/serve/routers/boss.py:452-479`, `looplab/serve/routers/org.py:18-25`, `looplab/serve/routers/control.py:222-227`, `looplab/serve/routers/control.py:293-298`, `looplab/serve/routers/misc.py:448-453`, `looplab/serve/routers/boss.py:845-849`
 
-*Evidence:* Identical `try: await request.json() except (ValueError, UnicodeDecodeError) -> 400; isinstance dict check -> 400` exists as four module-level `_json_object` copies (each with a docstring saying it 'mirrors routers/boss + control') and is additionally re-inlined in control.py (control, submit_command, resolve_activity_claims, resolve_start_claim, start_run, start_preflight), boss.py (chat_log_append, report_refresh), misc.py (put_settings, put_secret), and runs.py (`_concept_lens_json_body` adds only a byte cap). The comments themselves acknowledge the mirroring instead of sharing the function.
+*Evidence:* Identical `try: await request.json() except (ValueError, UnicodeDecodeError) -> 400; isinstance dict check -> 400` exists as four module-level `_json_object` copies (genesis and assistant carry a docstring saying it 'mirrors routers/boss + control'; boss's docstring mirrors routers/control, and org's nested copy has none) and is additionally re-inlined in control.py (control, submit_command, resolve_activity_claims, resolve_start_claim, start_run, start_preflight), boss.py (chat_log_append, report_refresh), misc.py (put_settings, put_secret), and runs.py (`_concept_lens_json_body` adds only a byte cap). The comments themselves acknowledge the mirroring instead of sharing the function.
 
 *Recommendation:* One `json_object(request, *, max_bytes=None)` helper in serve/protocol.py (or a new serve/http.py); the boss variant's extra field checks stay local.
 
@@ -1345,6 +1376,8 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 *Evidence:* Twelve 'CLAUDE REVIEW: [PERF]' comments in the routers document `async def` handlers doing blocking work directly on the ASGI event loop: unbounded `fcntl.flock` in org project mutators and misc put_settings/put_secret; full event-log fold + fsync in boss chat/chat_log_append/report_refresh; command-sequencer + full `read_all()` in runs derive_concept_lens and start_run; global store lock + lease I/O in reports generate preflight; plus the span_io unbounded-file-scan DoS note (runs.py:2112). The correct fix pattern (anyio.to_thread.run_sync around the sequenced section) already exists in the same files (/control at control.py:229-276, submit_command, chat_compact), so this is inconsistent application of an established remedy, with every SSE tick on the worker stalling under contention.
 
 *Recommendation:* Apply the existing to_thread offload pattern to the flagged handlers (a mechanical change per site), and bound or reject unindexed sids in span_io. Then delete the markers.
+
+*Status (post-baseline):* Fixed on `master` by commit `c92b89f` (2026-08-01, immediately after this review's baseline): all flagged handlers now offload their blocking sections via `anyio.to_thread.run_sync` (the assistant SSE drain was inverted to a no-pool-hop loop drain), the span_io fallback scan is bounded to the index's coverage boundary, and every `CLAUDE REVIEW: [PERF]` marker was removed. Behavioural tests pin the fix. The finding is retained as accurate at the baseline.
 
 #### SR-09 · MEDIUM · duplication · effort: small
 
@@ -1417,6 +1450,8 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 *Recommendation:* A `_boss_llm_call(rd, generation, fn)` wrapper (or decorator) owning the metered-client context and the two-except epilogue; each endpoint keeps only its prompt assembly.
 
 
+*Status (post-baseline):* Partially addressed on `master` by commit `c92b89f`: chat/suggest/command now share an extracted `_boss_prologue` helper (run_generation fetch + fold + prompt assembly, off-thread), so the remaining duplication is chiefly the four-copy error-shaping epilogue.
+
 ### 4.8 Search
 
 Scope: `looplab/search/`: policies, operators, concept analytics, card selection, speculation gate, wrappers.
@@ -1437,7 +1472,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Locations:* `looplab/search/speculation_quality.py:1945-1985`, `looplab/search/speculation_quality.py:759-831`, `looplab/search/speculation_quality.py:480-586`, `looplab/search/speculation_quality.py:2568-2581`, `looplab/search/scorer_fidelity.py:1-557`, `looplab/search/speculation_calibration.py:1-267`
 
-*Evidence:* speculation_quality.py (2,615) + scorer_fidelity.py (557) + speculation_calibration.py (267) exist solely to admit one Settings knob (speculation_depth>0). The validators re-implement the engine writer byte-for-byte: _validate_calibration_terminal hardcodes the exact 12-event finalization suffix and exact payload dicts (expected_types tuple at :759-772, expected_tail_data at :821-830); _validate_calibration_setup re-derives Engine._setup_phase's orjson config_hash/setup_manifest (:538-561). Any engine finalize/setup change breaks the gate in lockstep. speculation_implementation_digest (:1966) hashes RAW BYTES of every shipped .py file, and the module's own inline comment (:1961-1965) admits this 'makes comments, formatting and line-ending conversion revoke every previously issued receipt... turns review-only commits into an operational stop/resume outage and forces six fresh GPU calibration runs after documentation edits.' validated_speculation_gate_receipt (:2568) recomputes the ENTIRE gate — re-parsing all 6 run dirs (up to 64MB events each) and rerunning the 15-case scorer matrix — on every validation.
+*Evidence:* speculation_quality.py (2,615) + scorer_fidelity.py (556) + speculation_calibration.py (267) exist solely to admit one Settings knob (speculation_depth>0). The validators re-implement the engine writer byte-for-byte: _validate_calibration_terminal hardcodes the exact 12-event finalization suffix and exact payload dicts (expected_types tuple at :759-772, expected_tail_data at :821-830); _validate_calibration_setup re-derives Engine._setup_phase's orjson config_hash/setup_manifest (:538-561). Any engine finalize/setup change breaks the gate in lockstep. speculation_implementation_digest (:1966) hashes RAW BYTES of every shipped .py file, and the module's own inline comment (:1961-1965) admits this 'makes comments, formatting and line-ending conversion revoke every previously issued receipt... turns review-only commits into an operational stop/resume outage and forces six fresh GPU calibration runs after documentation edits.' validated_speculation_gate_receipt (:2568) recomputes the ENTIRE gate — re-parsing all 6 run dirs (up to 64MB events each) and rerunning the 15-case scorer matrix — on every validation.
 
 *Recommendation:* Adopt the fix the file's own comment proposes: a versioned semantic/runtime manifest (or explicit rollout protocol version) instead of raw-byte whole-package hashing. Extract the finalization/setup 'expected event shape' constants into the engine writer modules (finalize.py, orchestrator setup) and import them, so writer and validator share one spelling instead of two hand-synced copies. Cache/receipt the revalidation instead of full recomputation per check.
 
@@ -1467,7 +1502,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Locations:* `looplab/search/card_selection.py:764-770`, `looplab/search/card_selection.py:623-634`, `looplab/search/card_selection.py:1502-1512`, `looplab/search/card_selection.py:1532-1538`
 
-*Evidence:* card_score calls _coverage_inputs(state) — which runs current_concept_projection over every node/membership/receipt — once per candidate Card, making one election O(cards × nodes·concepts). The inline comment at :765-768 states exactly this and prescribes the fix ('Compute explored+rename once per selection snapshot and pass that immutable scoring context through every candidate score') yet the code was left unhoisted. Similarly _speculative_selection calls eligible_cards twice per election (forced branch :1504 and candidates :1533), each re-running _effective_policy_state + breedable ranking + debug_action.
+*Evidence:* card_score calls _coverage_inputs(state) — which runs current_concept_projection over every node/membership/receipt — once per candidate Card, making one election O(cards × nodes·concepts). The inline comment at :765-768 states exactly this and prescribes the fix ('Compute explored+rename once per selection snapshot and pass that immutable scoring context through every candidate score') yet the code was left unhoisted. A smaller double-work case exists on the forced-SEED path, where _forced_card_actions itself calls eligible_cards (:599) before the forced-branch call (:1505); the forced (:1504) and candidates (:1533) calls sit on mutually exclusive control paths and never both execute in one election.
 
 *Recommendation:* Compute (explored, rename) once in _selection_after_forced_gates and thread it into card_score via a scoring-context parameter; compute eligible_cards once per _speculative_selection invocation.
 
@@ -1497,7 +1532,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Locations:* `looplab/search/speculation_quality.py:1589-1592`, `looplab/search/speculation_quality.py:755`, `looplab/engine/orchestrator.py:1015-1026`, `looplab/search/speculation_calibration.py:1-8`
 
-*Evidence:* speculation_calibration.py's docstring says the scope identity lives there specifically to 'avoid importing the engine from the quality layer (and the resulting import cycle)'. Yet speculation_quality.py lazily imports looplab.engine.orchestrator (SPECULATION_CALIBRATION_PROFILE_DIGEST/_SETTINGS at :1589) and looplab.engine.finalize (incomplete_finalize_scope at :755), while engine/orchestrator.py lazily imports search.speculation_quality (:1015, :1026). The cycle exists, merely deferred to call time — the calibration module dodged it for two constants while the quality module reintroduced it for four others. No other search module imports engine.
+*Evidence:* speculation_calibration.py's docstring says the scope identity lives there specifically to 'avoid importing the engine from the quality layer (and the resulting import cycle)'. Yet speculation_quality.py lazily imports looplab.engine.orchestrator (SPECULATION_CALIBRATION_PROFILE_DIGEST/_SETTINGS at :1589) and looplab.engine.finalize (incomplete_finalize_scope at :755), while engine/orchestrator.py lazily imports search.speculation_quality (:1015, :1026). The cycle exists, merely deferred to call time — the calibration module dodged it for two constants while the quality module reintroduced it for three others (the two profile constants plus incomplete_finalize_scope). No other search module imports engine.
 
 *Recommendation:* Move SPECULATION_CALIBRATION_PROFILE_DIGEST/_SETTINGS into speculation_calibration.py (which already exists exactly to own such source-scoped identity), and move/export incomplete_finalize_scope through events/ or core so the search→engine edge disappears.
 
@@ -1507,7 +1542,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Locations:* `looplab/search/speculation_calibration.py:105-144`, `looplab/search/speculation_quality.py:281-314`, `looplab/search/speculation_quality.py:422-429`, `looplab/search/coverage.py:33-47`, `looplab/serve/launch.py:54`
 
-*Evidence:* _canonical_json (sort_keys, allow_nan=False, compact separators, same except-tuple) is defined identically in speculation_calibration.py:134, speculation_quality.py:300 and serve/launch.py:54. _strict_json_value (calibration :105) and _projection_value (coverage :33) are two strict-JSON normalizers with subtly different tolerances. _finite_metric exists three times with three DIFFERENT signatures/semantics under one name: events/replay.py:645, engine/memory.py:673 (returns bool), speculation_quality.py:422 (returns float|None) — a reader grepping the name gets three behaviors.
+*Evidence:* _canonical_json (sort_keys, allow_nan=False, compact separators, same except-tuple) is defined identically in speculation_calibration.py:134 and speculation_quality.py:300; serve/launch.py:54 carries a looser sibling under the same name (no allow_nan=False, default=str, never raises). _strict_json_value (calibration :105) and _projection_value (coverage :33) are two strict-JSON normalizers with subtly different tolerances. _finite_metric exists three times under one name with two behaviors: events/replay.py:645 and speculation_quality.py:422 both return float|None, while engine/memory.py:673 returns bool — a reader grepping the name still cannot assume one contract.
 
 *Recommendation:* Move _canonical_json and a finite-float coercer into core (e.g. core/atomicio or a small core/jsonutil) and import them; rename the bool variant in engine/memory to avoid the name collision.
 
@@ -1517,9 +1552,9 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Locations:* `looplab/search/concept_graph.py:96-240`, `looplab/search/concept_graph.py:512-709`, `looplab/search/concept_graph.py:793-1005`, `looplab/search/concept_graph.py:1123-1341`, `looplab/search/concept_graph.py:1437-1634`
 
-*Evidence:* Five separable responsibilities coexist: (1) the ConceptGraph DAG class + curated dense-retrieval skeleton (:96-391); (2) taggers incl. a threaded parallel-batch LLM harness with ContextVar plumbing (tag_nodes_llm :530-709); (3) pure analytics (concept_coverage/concept_metrics/uncovered_regions :793-1368); (4) serve-facing view projections — project_hierarchy, project_lens, derive_lens (an LLM lens-minting endpoint helper), default_lenses, concept_touch_counts (:1123-1341), consumed only by serve/concept_frame.py and serve/routers/runs.py; (5) LLM vocabulary consolidation + build_concept_map orchestration (:1437-1634). The Concept dataclass itself carries a DESIGN NOTE (:75-80) admitting the dual id-prefix/axes hierarchy encoding 'produced review #10, #11 and #12' bugs and should be unified. graded_novelty, lock_in, research_targeting, taxonomy_dedup and novelty_recall all reach into its private helpers (_experiment_nodes, _node_text).
+*Evidence:* Five separable responsibilities coexist: (1) the ConceptGraph DAG class + curated dense-retrieval skeleton (:96-391); (2) taggers incl. a threaded parallel-batch LLM harness with ContextVar plumbing (tag_nodes_llm :530-709); (3) pure analytics (concept_coverage/concept_metrics/uncovered_regions :793-1368); (4) serve-facing view projections — project_hierarchy, project_lens, derive_lens (an LLM lens-minting endpoint helper), default_lenses, concept_touch_counts (:1123-1341), consumed by serve/concept_frame.py, serve/routers/runs.py and tools/run_tools.py; (5) LLM vocabulary consolidation + build_concept_map orchestration (:1437-1634). The Concept dataclass itself carries a DESIGN NOTE (:75-80) admitting the dual id-prefix/axes hierarchy encoding 'produced review #10, #11 and #12' bugs and should be unified. graded_novelty, lock_in and novelty_recall reach into its private helpers (_experiment_nodes, _node_text); research_targeting and taxonomy_dedup import only public names.
 
-*Recommendation:* Split into concept_graph.py (structure + skeleton), concept_tagging.py (heuristic + LLM taggers), concept_analytics.py (coverage/metrics/alarms), and move the lens/hierarchy projections next to the other UI projections (events/ per the package map, or serve/). Promote _experiment_nodes/_node_text to public names since five sibling modules import them.
+*Recommendation:* Split into concept_graph.py (structure + skeleton), concept_tagging.py (heuristic + LLM taggers), concept_analytics.py (coverage/metrics/alarms), and move the lens/hierarchy projections next to the other UI projections (events/ per the package map, or serve/). Promote _experiment_nodes/_node_text to public names since three sibling modules import them.
 
 #### SE-10 · MEDIUM · inconsistency · effort: medium
 
@@ -1537,7 +1572,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Locations:* `looplab/search/card_selection.py:693-696`, `looplab/search/card_selection.py:778-781`
 
-*Evidence:* Two 'CODEX AGENT:' comments in card_score's helpers flag active defects: (1) :693-696 — a Card's coverage bonus is computed from card.concept_tags, 'self-reported by the same Researcher competing for selection. A plausible new slug earns maximal exploration bonus before independent classification'; (2) :778-781 — 'provenance-free model self-confidence is known by the foresight module to be outcome-uncorrelated (Pearson≈0, per foresight.py §21.12 comments), yet it carries 65% of this active selection signal' (foresight = 0.65*confidence + 0.35*priority). Both comments prescribe fixes (require an independent concept-source receipt; admit only verifier-calibrated confidence) that were not applied, so the exploit/explore stance ranks partly on gameable, known-uncorrelated inputs.
+*Evidence:* Two 'CODEX AGENT:' comments in card_score's helpers flag active defects: (1) :693-696 — a Card's coverage bonus is computed from card.concept_tags, 'self-reported by the same Researcher competing for selection. A plausible new slug earns maximal exploration bonus before independent classification'; (2) :778-781 — 'provenance-free model self-confidence is known by the foresight module to be outcome-uncorrelated, yet it carries 65% of this active selection signal' (the Pearson≈0 / §21.12 evidence lives in foresight.py's own comments) (foresight = 0.65*confidence + 0.35*priority). Both comments prescribe fixes (require an independent concept-source receipt; admit only verifier-calibrated confidence) that were not applied, so the exploit/explore stance ranks partly on gameable, known-uncorrelated inputs.
 
 *Recommendation:* Either implement the prescribed gating (verifier-calibrated confidence via ForesightPanelResearcher.verify_score plumbing; trusted post-classification tags for coverage) or demote these terms to tie-breaks, and convert the CODEX comments into tracked issues rather than shipped annotations.
 
@@ -1547,7 +1582,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 *Locations:* `looplab/search/scorer_fidelity.py:83-457`, `looplab/search/speculation_quality.py:2068-2076`, `looplab/search/speculation_quality.py:2568`
 
-*Evidence:* _node/_ready_card/_state (:83-162) are test-fixture builders duplicating the shape of tests/ factories; _merge_cases/_ablate_cases/_bandit_cases construct 15 hand-built RunStates and assert card_next_actions == GreedyTree.next_actions with self-raising AssertionErrors on matrix drift (:64-67, :453-456). This matrix is embedded into every gate receipt and recomputed both in speculation_quality_gate (:2070) and again inside validated_speculation_gate_receipt's full recompute (:2568) — a test suite run at runtime, twice per validation. The intent (receipt embeds proof the scorer matched at issue time) is legitimate, but 557 lines of fixtures maintained in production for a property the ordinary test suite also covers is heavy.
+*Evidence:* _node/_ready_card/_state (:83-162) are test-fixture builders duplicating the shape of tests/ factories; _merge_cases/_ablate_cases/_bandit_cases construct 15 hand-built RunStates and assert card_next_actions == GreedyTree.next_actions with self-raising AssertionErrors on matrix drift (:64-67, :453-456). This matrix is embedded into every gate receipt and recomputed both in speculation_quality_gate (:2070) and again inside validated_speculation_gate_receipt's full recompute (:2568) — a test suite run at runtime, twice per validation. The intent (receipt embeds proof the scorer matched at issue time) is legitimate, but 556 lines of fixtures maintained in production for a property the ordinary test suite also covers is heavy.
 
 *Recommendation:* If receipt-embedded proof must stay, shrink the runtime matrix to a digest of the offline test result or a handful of forced-gate cases; keep the full 15-case matrix in tests/ where the fixtures belong.
 
@@ -1586,7 +1621,7 @@ Scope: `looplab/search/`: policies, operators, concept analytics, card selection
 
 Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unified_agent.py, strategist.py, deep_research.py.
 
-**Reviewer assessment.** The agents package is a well-tested set of LLM personas (plain + tool-using Researcher, Developer wrappers, Strategist variants, DeepResearcher, pilot/triage) built around one shared loop (tool_loop.drive_tool_loop) and a facade module (agent.py) that intentionally preserves historical import/monkeypatch seams. The registry-guarded attr contracts (DEVELOPER_OUTPUT_ATTRS / RESEARCHER_HINT_ATTRS / forward_hints) are applied consistently and the two researcher variants share prompt fragments with byte-equality tests, so the classically dangerous duplication is under control. The real accretion points are elsewhere: drive_tool_loop has grown into a ~370-line, 23-parameter function fed by stringly-typed loop_opts dicts whose merge logic is duplicated (and has already caused a silently-swallowed TypeError bug per its own comments); roles.py is a god-module mixing prompts, registries, toy backends, a 137-line CUDA calibration blob, LLM backends and validation wrappers; and strategist.py's Strategy field set is manually synchronized across five parallel encodings with no registry test, contrary to the codebase's own registry-guarded-seam convention.
+**Reviewer assessment.** The agents package is a well-tested set of LLM personas (plain + tool-using Researcher, Developer wrappers, Strategist variants, DeepResearcher, pilot/triage) built around one shared loop (tool_loop.drive_tool_loop) and a facade module (agent.py) that intentionally preserves historical import/monkeypatch seams. The registry-guarded attr contracts (DEVELOPER_OUTPUT_ATTRS / RESEARCHER_HINT_ATTRS / forward_hints) are applied consistently and the two researcher variants share prompt fragments with byte-equality tests, so the classically dangerous duplication is under control. The real accretion points are elsewhere: drive_tool_loop has grown into a ~370-line, 26-parameter function fed by stringly-typed loop_opts dicts whose merge logic is duplicated (and has already caused a silently-swallowed TypeError bug per its own comments); roles.py is a god-module mixing prompts, registries, toy backends, a 137-line CUDA calibration blob, LLM backends and validation wrappers; and strategist.py's Strategy field set is manually synchronized across five parallel encodings with no registry test, contrary to the codebase's own registry-guarded-seam convention.
 
 **Strengths worth preserving:**
 
@@ -1598,11 +1633,11 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 #### AG-01 · HIGH · under-decomposition · effort: large
 
-**drive_tool_loop is a 370-line, 23-parameter god-function fed by stringly-typed loop_opts dicts whose merge logic is duplicated and has already caused a real bug**
+**drive_tool_loop is a 370-line, 26-parameter god-function fed by stringly-typed loop_opts dicts whose merge logic is duplicated and has already caused a real bug**
 
 *Locations:* `looplab/agents/tool_loop.py:204`, `looplab/agents/tool_loop.py:339-575`, `looplab/agents/tool_loop.py:734-772`, `looplab/agents/agent.py:156-162`, `looplab/agents/strategist.py:753-758`, `looplab/agents/deep_research.py:110-131`, `looplab/agents/deep_research.py:279-297`
 
-*Evidence:* drive_tool_loop (tool_loop.py:204-575) takes 23 keyword parameters and its single for-loop body inlines nine concerns: history compaction, plan re-injection, prose-stall forced emit, per-call JSON-args hardening, emit-validation bounce, cancellation stubs, tracing, the identical-result repeat ledger, stuck detection, and the emit_after/emit_force convergence machinery. Options travel as an untyped dict from loop_opts_from_settings and are **-spread at each call site. Both ToolUsingResearcher.__init__ (agent.py:156-162) and ToolUsingStrategist.__init__ (strategist.py:753-758) carry near-identical comments describing the SAME past bug: context_budget_chars arriving via both the ctor kwarg and loop_opts caused a double-keyword TypeError that the broad except silently swallowed, leaving 'the agentic Researcher DEAD in the default config' — fixed per-callsite with duplicated dict.setdefault merges instead of at the source. DeepResearcher meanwhile re-plumbs 9 of the same settings as individual ctor kwargs (deep_research.py:110-131, make_deep_researcher:287-297) precisely because the dict bundle can't express 'everything except self_plan and summary_client'.
+*Evidence:* drive_tool_loop (tool_loop.py:204-575) takes 26 parameters (4 positional + 22 keyword-only) and its single for-loop body inlines nine concerns: history compaction, plan re-injection, prose-stall forced emit, per-call JSON-args hardening, emit-validation bounce, cancellation stubs, tracing, the identical-result repeat ledger, stuck detection, and the emit_after/emit_force convergence machinery. Options travel as an untyped dict from loop_opts_from_settings and are **-spread at each call site. Both ToolUsingResearcher.__init__ (agent.py:156-162) and ToolUsingStrategist.__init__ (strategist.py:753-758) carry near-identical comments describing the SAME past bug: context_budget_chars arriving via both the ctor kwarg and loop_opts caused a double-keyword TypeError that the broad except silently swallowed, leaving 'the agentic Researcher DEAD in the default config' — fixed per-callsite with duplicated dict.setdefault merges instead of at the source. DeepResearcher meanwhile re-plumbs 9 of the same settings as individual ctor kwargs (deep_research.py:110-131, make_deep_researcher:287-297) precisely because the dict bundle can't express 'everything except self_plan and summary_client'.
 
 *Recommendation:* Introduce a typed LoopOptions dataclass (built once by loop_opts_from_settings, with a .replace()-style override for DeepResearcher's two divergences) so a duplicate keyword is impossible by construction and every option has one declaration point; then extract the per-tool-call execution block (args hardening, execute, cap, repeat-note, hooks — roughly lines 414-510) and the three forced-emit salvage paths into named helpers, keeping drive_tool_loop as the turn-level skeleton.
 
@@ -1632,7 +1667,7 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 *Locations:* `looplab/agents/unified_agent.py:199-252`, `looplab/agents/unified_agent.py:285-325`
 
-*Evidence:* Both methods repeat the same sequence with only content differing: pilot-client None guard, render(system prompt), messages build, inline emit_spec dict, _finalize/_fallback closures that coerce-or-default, conditional bind_state on _pilot_tools, the call-time 'from looplab.agents.agent import drive_tool_loop' seam import with the same comment, drive_tool_loop(max_turns=self._agent_max_turns, time_budget_s=self._agent_time_budget_s, **self._loop_opts), and the identical except BudgetExceeded raise / except Exception -> _fallback tail. Only the schema, finalize coercion and default result differ.
+*Evidence:* Both methods repeat the same sequence with only content differing: pilot-client None guard, render(system prompt), messages build, inline emit_spec dict, _finalize/_fallback closures that coerce-or-default, conditional bind_state on _pilot_tools, the call-time 'from looplab.agents.agent import drive_tool_loop' seam import (choose_action with the full six-line seam comment, triage_crash with a one-line pointer to it), drive_tool_loop(max_turns=self._agent_max_turns, time_budget_s=self._agent_time_budget_s, **self._loop_opts), and the identical except BudgetExceeded raise / except Exception -> _fallback tail. Only the schema, finalize coercion and default result differ.
 
 *Recommendation:* Extract a private _pilot_emit(self, messages, emit_spec, finalize, fallback, state=None) helper owning bind_state, the seam import, the loop kwargs and the exception tail; both methods keep their prompts/schemas/coercions (prompt strings untouched).
 
@@ -1642,7 +1677,7 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 *Locations:* `looplab/agents/agent.py:219-228`, `looplab/agents/deep_research.py:224-236`, `looplab/agents/roles.py:728-746`, `looplab/agents/strategist.py:717-722`
 
-*Evidence:* ToolUsingResearcher._fallback (agent.py:219-228: messages + 'Emit the Idea now.' -> parse_structured -> default draft Idea), DeepResearcher._forced (deep_research.py:224-236: messages + 'Emit the memo now.' -> parse_structured -> '(deep research produced no memo)'), LLMResearcher.propose's 2-attempt retry-with-error-feedback loop (roles.py:728-746), and LLMStrategist.decide's parse-or-rule fallback (strategist.py:717-722) are structural clones of one 'forced structured parse with a safe default' pattern, each re-stating the BudgetExceeded/ParseError handling.
+*Evidence:* ToolUsingResearcher._fallback (agent.py:219-228: messages + 'Emit the Idea now.' -> parse_structured -> default draft Idea), DeepResearcher._forced (deep_research.py:224-236: messages + 'Emit the memo now.' -> parse_structured -> '(deep research produced no memo)'), LLMResearcher.propose's 2-attempt retry-with-error-feedback loop (roles.py:728-746), and LLMStrategist.decide's parse-or-rule fallback (strategist.py:717-722) are structural clones of one 'forced structured parse with a safe default' pattern; all four re-state the ParseError handling, and two of them (DeepResearcher._forced, LLMStrategist.decide) also re-state the explicit BudgetExceeded-raise.
 
 *Recommendation:* Add one helper in tool_loop or core.parse — forced_structured(client, messages, model_cls, parser, nudge, on_fail) — keeping each caller's nudge wording and default factory as arguments (prompt strings stay byte-identical); the four sites shrink to one call each.
 
@@ -1682,7 +1717,7 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 *Locations:* `looplab/agents/agent.py:34-38`
 
-*Evidence:* The re-import block forwards 18 names 'because callers and tests import AND monkeypatch them THROUGH this module', but repo-wide grep shows _PLAN_TOOL_NAME, _REPEAT_NOTE, _TRUNC_NOTE, _plan_spec, _render_plan and _summarizer are never accessed via agent.* or 'from looplab.agents.agent import' anywhere (only _force_emit, _cap_tool_result, _flatten_transcript, _handoff_ctx and the public names are). The facade is documented and legitimate, but the blanket re-export of unused privates grows the two-path ambiguity (patching tool_loop._REPEAT_NOTE vs agent._REPEAT_NOTE would already diverge for constants, since re-imported strings are rebindings, not aliases).
+*Evidence:* The re-import block forwards 17 names 'because callers and tests import AND monkeypatch them THROUGH this module', but repo-wide grep shows _PLAN_TOOL_NAME, _REPEAT_NOTE, _TRUNC_NOTE, _plan_spec, _render_plan and _summarizer are never accessed via agent.* or 'from looplab.agents.agent import' anywhere (only _force_emit, _cap_tool_result, _flatten_transcript, _handoff_ctx and the public names are). The facade is documented and legitimate, but the blanket re-export of unused privates grows the two-path ambiguity (patching tool_loop._REPEAT_NOTE vs agent._REPEAT_NOTE would already diverge for constants, since re-imported strings are rebindings, not aliases).
 
 *Recommendation:* Trim the re-export list to the names with verified external consumers (the four privates above plus the public API), noting in the comment that new tool_loop privates are NOT auto-forwarded.
 
@@ -1701,7 +1736,7 @@ Scope: `looplab/agents/`: roles.py, tool_loop.py, agent.py, cli_agent.py, unifie
 
 Scope: `looplab/tools/`: ~25 ToolProviders.
 
-**Reviewer assessment.** looplab/tools/ is a well-disciplined collection of ~25 duck-typed ToolProviders with a genuinely minimal shared contract (_base.py fn_spec + RESULT_CAP) and a consistently enforced never-raise/soft-fail rule, strong path/secret/SSRF hardening, and unusually honest truncation/partial-source receipts. The structural problems concentrate in the two assistant-facing modules — machine_runs_tools.py (1659 lines mixing four providers with crash-recovery journaling and a command adapter, including a tools→serve layering violation its sibling modules explicitly forbid) and cross_run_tools.py (one ~856-line _execute function) — plus systematic re-implementation of two ceremonies (the permission decide/ask/deny gate ~6x, RESULT_CAP truncation ~7x) and two parallel stacks that should merge (three foreign-run reader wrappers; RepoTools vs RepoScoutTools; MemoryTools vs CrossRunTools over the same lessons ledger with contradictory scoping). The RunStateCache and edit_match extractions show the team already knows the consolidation pattern; it just hasn't been applied to the newer accretions.
+**Reviewer assessment.** looplab/tools/ is a well-disciplined collection of ~25 duck-typed ToolProviders with a genuinely minimal shared contract (_base.py fn_spec + RESULT_CAP) and a consistently enforced never-raise/soft-fail rule, strong path/secret/SSRF hardening, and unusually honest truncation/partial-source receipts. The structural problems concentrate in the two assistant-facing modules — machine_runs_tools.py (1659 lines mixing three providers with crash-recovery journaling and a command adapter, including a tools→serve layering violation its sibling modules explicitly forbid) and cross_run_tools.py (one ~856-line _execute function) — plus systematic re-implementation of two ceremonies (the permission decide/ask/deny gate ~6x, RESULT_CAP truncation ~7x) and two parallel stacks that should merge (three foreign-run reader wrappers; RepoTools vs RepoScoutTools; MemoryTools vs CrossRunTools over the same lessons ledger with contradictory scoping). The RunStateCache and edit_match extractions show the team already knows the consolidation pattern; it just hasn't been applied to the newer accretions.
 
 **Strengths worth preserving:**
 
@@ -1723,11 +1758,11 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 #### TO-02 · HIGH · over-engineering · effort: medium
 
-**machine_runs_tools.py is a 1659-line god-module: 4 providers + crash-recovery fence + command adapter, with _subtree defined three times**
+**machine_runs_tools.py is a 1659-line god-module: 3 providers + crash-recovery fence + command adapter, with _subtree defined three times**
 
 *Locations:* `looplab/tools/machine_runs_tools.py:92`, `looplab/tools/machine_runs_tools.py:288`, `looplab/tools/machine_runs_tools.py:1442`, `looplab/tools/machine_runs_tools.py:1485`, `looplab/tools/machine_runs_tools.py:1570`, `looplab/tools/machine_runs_tools.py:1197`, `looplab/tools/machine_runs_tools.py:1299`
 
-*Evidence:* One module holds: `_TurnMutationFence` (~150 lines of assistant-turn crash-recovery journaling), `_RunCommandAdapter` (~230 lines; its `submit` alone is ~100 lines of conflict/uncertainty handling), plus four unrelated providers (MachineRunsTools read-only, RunLauncherTools, RunControlTools, and rendering helpers). Concrete duplication inside: the parent-closure `_subtree` BFS is defined verbatim three times — as a closure in `_delete_node` (1442-1451), again in `_commit_delete_node_snapshot` (1485-1494), and inlined a third time in `_purge_node_snapshot` (1570-1578). The 'stale subject changed while awaiting permission' fence (read_all → tail seq → fold → compare attempt) is duplicated between `_reset_node` (1310-1332) and `_retag_node` (1362-1382). `_settings` (1197-1297) is a flat 100-line function containing three fully independent verbs (extend_budget / set_directive / set_trust_gate) already dispatched by name at line 1148 — the outer dispatch then re-dispatches inside. RunLauncherTools.specs embeds a ~70-line prompt (intentional per CLAUDE.md prompt-contract rule, but it inflates the module further).
+*Evidence:* One module holds: `_TurnMutationFence` (~150 lines of assistant-turn crash-recovery journaling), `_RunCommandAdapter` (~230 lines; its `submit` alone is ~100 lines of conflict/uncertainty handling), plus three unrelated providers (MachineRunsTools read-only, RunLauncherTools, RunControlTools) and module-level rendering helpers. Concrete duplication inside: the parent-closure `_subtree` BFS is defined verbatim three times — as a closure in `_delete_node` (1442-1451), again in `_commit_delete_node_snapshot` (1485-1494), and inlined a third time in `_purge_node_snapshot` (1570-1578). The 'stale subject changed while awaiting permission' fence (read_all → tail seq → fold → compare attempt) is duplicated between `_reset_node` (1310-1332) and `_retag_node` (1362-1382). `_settings` (1197-1297) is a flat 100-line function containing three fully independent verbs (extend_budget / set_directive / set_trust_gate) already dispatched by name at line 1148 — the outer dispatch then re-dispatches inside. RunLauncherTools.specs embeds a ~70-line prompt (intentional per CLAUDE.md prompt-contract rule, but it inflates the module further).
 
 *Recommendation:* Split the module: `_turn_fence.py` (_TurnMutationFence), `_run_command_adapter.py`, `run_launcher_tools.py`, `run_control_tools.py`. Extract `_subtree(state, root_id)` as one module-level function used by all three delete paths, extract the stale-node fence into a helper shared by _reset_node/_retag_node, and break _settings into three methods dispatched directly from execute().
 
@@ -1747,7 +1782,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 *Locations:* `looplab/tools/write_tools.py:215`, `looplab/tools/shell_tools.py:162`, `looplab/tools/shell_tools.py:213`, `looplab/tools/concept_tools.py:131`, `looplab/tools/knowledge_tools.py:220`, `looplab/tools/machine_runs_tools.py:1067`, `looplab/tools/mcp_tools.py:186`
 
-*Evidence:* Six providers each hand-roll the identical three-step authorization ritual: build an action dict, call `decide_action(mode, action)`, map 'deny' to a plan-mode refusal string, and on 'ask' call `self.approver(action) or "deny"` through `approval_allows`, returning a '(declined by the user: ...)' string. Sites: WriteTools._authorize (215-228), ShellTools.exec_argv (213-220) plus a second inline copy for kill_background (162-171), ConceptGovernanceTools._gate (131-142), KnowledgeWriteTools.execute inline (220-225), RunControlTools._gate (1067-1084, with generation capture interleaved), GatedMcpTools.execute (186-191). The bodies differ only in refusal wording and tool_kind; the `self.approver(action) or "deny"` idiom and `approval_allows` call are byte-identical in all six.
+*Evidence:* Six providers each hand-roll the identical three-step authorization ritual: build an action dict, call `decide_action(mode, action)`, map 'deny' to a plan-mode refusal string, and on 'ask' call `self.approver(action) or "deny"` through `approval_allows`, returning a '(declined by the user: ...)' string. Sites: WriteTools._authorize (215-228), ShellTools.exec_argv (213-220) plus a second inline copy for kill_background (162-171), ConceptGovernanceTools._gate (131-142), KnowledgeWriteTools.execute inline (220-225), RunControlTools._gate (1067-1084, with generation capture interleaved), GatedMcpTools.execute (186-191). The bodies differ only in refusal wording and tool_kind; the `approver(action) or "deny"` idiom and `approval_allows` call recur at all six sites in near-identical form (mcp_tools uses the private `_approver`/`_mode` names; machine_runs_tools adds a None-guard on the approver).
 
 *Recommendation:* Add `perm_modes.authorize(mode, approver, action, *, deny_msg=None) -> Optional[str]` (None = proceed, else the refusal string) and have all six sites delegate, keeping per-site wording via the parameter. Removes ~60 duplicated lines and guarantees future policy changes (e.g. remembered grants) apply everywhere at once.
 
@@ -1757,7 +1792,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 *Locations:* `looplab/tools/run_tools.py:649`, `looplab/tools/run_tools.py:762`, `looplab/tools/run_tools.py:821`, `looplab/tools/run_tools.py:903`, `looplab/tools/machine_runs_tools.py:735`, `looplab/tools/machine_runs_tools.py:751`
 
-*Evidence:* All three classes hold the same composition (`self._runs = RunStateCache(run_root)`; `self._reader = RunTools(max_chars=...)`) and the same delegation shape: resolve run_id via cache, return '(no such run: ...)' on miss, fetch `source_note`, `self._reader.bind_state(st, None)`, then prefix-and-forward to the inner RunTools tool. Compare SiblingRunTools._read/_code (run_tools.py:762-789), AllRunsTools._read/_code (903-919), MachineRunsTools._read_run/_read_experiment/_read_logs (machine_runs_tools.py:735-767) — the bodies differ only in the scope check and the tool name. The `_list_runs` renderers are likewise triplicated, including the identical multi-line 'PARTIAL SOURCE (read incomplete; later results unknown)' receipt and its explanatory comment pasted verbatim in all three (run_tools.py:755-758, 894-896; machine_runs_tools.py:729-732). The genuine differences (SiblingRunTools' fail-closed task_id boundary, AllRunsTools' no-filter policy, MachineRunsTools' liveness column) are small policy hooks on top of ~120 duplicated lines.
+*Evidence:* All three classes hold the same composition (`self._runs = RunStateCache(run_root)`; `self._reader = RunTools(max_chars=...)`) and the same delegation shape: resolve run_id via cache, return '(no such run: ...)' on miss, fetch `source_note`, `self._reader.bind_state(st, None)`, then prefix-and-forward to the inner RunTools tool. Compare SiblingRunTools._read/_code (run_tools.py:762-789), AllRunsTools._read/_code (903-919), MachineRunsTools._read_run/_read_experiment/_read_logs (machine_runs_tools.py:735-767) — the bodies differ only in the scope check and the tool name. The `_list_runs` renderers are likewise triplicated, including the identical 'PARTIAL SOURCE (read incomplete; later results unknown)' receipt string in all three (the explanatory comment is pasted verbatim in two of them; AllRunsTools carries the receipt without it) (run_tools.py:755-758, 894-896; machine_runs_tools.py:729-732). The genuine differences (SiblingRunTools' fail-closed task_id boundary, AllRunsTools' no-filter policy, MachineRunsTools' liveness column) are small policy hooks on top of ~120 duplicated lines.
 
 *Recommendation:* Extract a small base/mixin (e.g. `_ForeignRunReader` holding the cache+reader, `_delegate(run_id, tool, args, prefix)` and one `_run_line(...)` renderer with optional live/task columns); each class keeps only its scope predicate and specs. The task-boundary semantics stay where they are — only the plumbing merges.
 
@@ -1797,7 +1832,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 *Locations:* `looplab/tools/cross_run_tools.py:337`, `looplab/tools/cross_run_tools.py:360`, `looplab/tools/cross_run_tools.py:412`, `looplab/tools/cross_run_tools.py:537`, `looplab/tools/cross_run_tools.py:1121`, `looplab/tools/cross_run_tools.py:453`
 
-*Evidence:* CrossRunTools lazily imports private names from engine modules throughout: `_filter_claim_source_rows`, `_claim_source_rows`, `_safe_claim_source_summary`, `_safe_research_source_summary` (engine.claims), `_capsule_rows`, `_capsule_completeness`, `_capsule_fingerprint_scope_complete`, `_dedup_valid_capsules`, `_filter_capsule_rows`, `_capsule_source_summary`, `_portfolio_concept_overview_data` (engine.memory), plus `_TOMBSTONE` in concept_tools.py:224. Because the imports are lazy (intentional, to keep the import graph acyclic per concept_tools' docstring) AND `execute` swallows every exception into the generic '(cross-run tool unavailable)' string (cross_run_tools.py:453-471, deliberately hiding exception text), renaming any of these engine privates produces no import-time error and no red test in tools/ — every cross-run tool just starts answering 'unavailable'. This is exactly the silent-rename failure class CLAUDE.md's registry-guarded seams exist to prevent, but these seams are not registry-guarded, and an underscore prefix normally licenses engine maintainers to rename freely.
+*Evidence:* CrossRunTools lazily imports private names from engine modules throughout: `_filter_claim_source_rows`, `_claim_source_rows`, `_safe_claim_source_summary`, `_safe_research_source_summary` (engine.claims), `_capsule_rows`, `_capsule_completeness`, `_capsule_fingerprint_scope_complete`, `_dedup_valid_capsules`, `_filter_capsule_rows`, `_capsule_source_summary`, `_portfolio_concept_overview_data` (engine.memory), plus `_TOMBSTONE` in concept_tools.py:224. Because the imports are lazy (intentional, to keep the import graph acyclic per concept_tools' docstring) AND `execute` swallows every exception into the generic '(cross-run tool unavailable)' string (cross_run_tools.py:453-471, deliberately hiding exception text), renaming any of these engine privates produces no import-time error — every affected cross-run tool starts answering 'unavailable'; tests/test_cross_run_tools.py does then fail on missing content, but the failure is opaque (the generic unavailable string, not a NameError) and no registry-style source-scan pins the private-name list. This is exactly the silent-rename failure class CLAUDE.md's registry-guarded seams exist to prevent, but these seams are not registry-guarded, and an underscore prefix normally licenses engine maintainers to rename freely.
 
 *Recommendation:* Export a small public facade from engine (e.g. `engine.memory.capsule_views` / `engine.claims.claim_views` re-exporting the needed helpers under public names), or add a two-way source-scan test (like the existing registries) pinning the private names cross_run_tools/concept_tools import.
 
@@ -1807,7 +1842,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 *Locations:* `looplab/tools/perm_modes.py:232`, `looplab/tools/vectorstore.py:39`, `looplab/tools/vectorstore.py:246`, `looplab/tools/vectorstore.py:252`, `looplab/tools/run_tools.py:66`
 
-*Evidence:* Verified by whole-repo grep including tests/: (1) `perm_modes.decide(mode, tool_kind)` — the kind-only 'compatibility helper' — is called only from tests/test_perm_modes.py; every production site uses `decide_action`. It is labeled compatibility, but nothing is left to be compatible with. (2) `VectorStore.delete` and `VectorStore.rebuild` (protocol + InMemoryVectorStore implementations, vectorstore.py:246-256) have zero callers anywhere in the repo (no `.delete("kb"...)`/`.rebuild(` hits); the module docstring admits the persistent-backend seam is 'a documented FUTURE seam ... not a config change today', so two of the four protocol methods are speculative. (3) `RunTools.bind_state` stores `self.parent = parent` (run_tools.py:66) but no code in the repo reads a RunTools `.parent` attribute — the parent parameter exists only to satisfy the bind_state signature. Each item is small, but together they are API surface a reader must reason about for nothing.
+*Evidence:* Verified by whole-repo grep including tests/: (1) `perm_modes.decide(mode, tool_kind)` — the kind-only 'compatibility helper' — is called only from tests/test_perm_modes.py; every production site uses `decide_action`. It is labeled compatibility, but nothing is left to be compatible with. (2) `VectorStore.rebuild` (protocol + InMemoryVectorStore implementation, vectorstore.py:246-256) has zero callers anywhere in the repo; `VectorStore.delete` has zero production callers (one test exercises it: tests/test_vectorstore.py:29); the module docstring admits the persistent-backend seam is 'a documented FUTURE seam ... not a config change today', so two of the four protocol methods are speculative. (3) `RunTools.bind_state` stores `self.parent = parent` (run_tools.py:66) but no code in the repo reads a RunTools `.parent` attribute — the parent parameter exists only to satisfy the bind_state signature. Each item is small, but together they are API surface a reader must reason about for nothing.
 
 *Recommendation:* Delete `decide()` and retarget its test at `decide_action`; drop `delete`/`rebuild` from the Protocol (re-add with the first persistent backend) or mark them explicitly unused; stop storing `parent` in RunTools (accept-and-ignore, as MachineRunsTools does).
 
@@ -1817,7 +1852,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 *Locations:* `looplab/tools/cross_run_tools.py:941`, `looplab/tools/cross_run_tools.py:1142`, `looplab/tools/cross_run_tools.py:405`
 
-*Evidence:* find_concept_slugs and concept_card each independently reload all capsules (`_all_capsules` re-reads and re-dedups concept_capsules.jsonl per call, line 405-414), then build a full `canonicalize_concepts` map over every capsule (`canonical_by_capsule` at 943-947, `canonical_caps` at 1142-1146 — the same computation with a different container shape), and re-partition scope. `_scoped_capsules` similarly recomputes for every one of the other tools. Within one agent turn calling find_concept_slugs then concept_card (the documented workflow — find_concept_slugs' own spec tells the model to follow up with concept_card), the whole portfolio is re-canonicalized twice. There is no fingerprint cache analogous to RunStateCache even though the underlying files are the same governance snapshot the call already takes.
+*Evidence:* find_concept_slugs and concept_card each independently reload all capsules (`_all_capsules` re-reads and re-dedups concept_capsules.jsonl per call, line 405-414), then build a full `canonicalize_concepts` map over every capsule (`canonical_by_capsule` at 943-947, `canonical_caps` at 1142-1146 — the same computation with a different container shape), and re-partition scope. `_scoped_capsules` similarly recomputes for every one of the other tools. Within one agent turn calling find_concept_slugs then concept_card (the documented workflow — the follow-up is prescribed in find_concept_slugs' rendered output and in concept_card's spec), the whole portfolio is re-canonicalized twice. There is no fingerprint cache analogous to RunStateCache even though the underlying files are the same governance snapshot the call already takes.
 
 *Recommendation:* Cache the (capsules, canonical-sets) pair keyed by (capsule file sig, taxonomy governance_revision) on the provider instance — the revision is already fetched per call — and share the canonicalization structure between the two branches once they are extracted into methods.
 
@@ -1826,7 +1861,7 @@ Scope: `looplab/tools/`: ~25 ToolProviders.
 
 Scope: `looplab/runtime/` and `looplab/adapters/`.
 
-**Reviewer assessment.** The runtime package is battle-hardened with genuinely good single-choke-point discipline: run_argv owns process management (timeout/tree-kill/env-scrub/output caps) for all three execution paths, and the watchdog/salvage logic is carefully reasoned. However command_eval.run_command_eval has accreted into a ~265-line, 19-parameter god-function with two hand-mirrored branches, and the two untrusted Docker tiers duplicate their `docker run` hardening argv by comment-enforced copy-paste. On the adapters side, the TaskAdapter seam and the registry-guarded optional hooks are solid, but adapters/tasks.py has become the whole agent/LLM composition root (about 450 of its 798 lines have nothing to do with task adapters), the five synthetic demo tasks are copy-paste quintuplets missing the direction validator two other adapters have, and there is one dead registry (METRIC_READERS) whose docstring falsely claims it is shared.
+**Reviewer assessment.** The runtime package is battle-hardened with genuinely good single-choke-point discipline: run_argv owns process management (timeout/tree-kill/env-scrub/output caps) for all three execution paths, and the watchdog/salvage logic is carefully reasoned. However command_eval.run_command_eval has accreted into a ~265-line, 23-parameter (19 keyword) god-function with two hand-mirrored branches, and the two untrusted Docker tiers duplicate their `docker run` hardening argv by comment-enforced copy-paste. On the adapters side, the TaskAdapter seam and the registry-guarded optional hooks are solid, but adapters/tasks.py has become the whole agent/LLM composition root (about 450 of its 798 lines have nothing to do with task adapters), the five synthetic demo tasks are copy-paste quintuplets missing the direction validator two other adapters have, and there is one dead registry (METRIC_READERS) whose docstring falsely claims it is shared.
 
 **Strengths worth preserving:**
 
@@ -1848,7 +1883,7 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 #### RA-02 · HIGH · under-decomposition · effort: medium
 
-**run_command_eval is a ~265-line god-function with 19 parameters and two hand-mirrored eval branches**
+**run_command_eval is a ~265-line god-function with 23 parameters (19 keyword) and two hand-mirrored eval branches**
 
 *Locations:* `looplab/runtime/command_eval.py:736-1001`, `looplab/runtime/command_eval.py:825-930`, `looplab/runtime/command_eval.py:891-893`, `looplab/runtime/command_eval.py:952-954`, `looplab/runtime/command_eval.py:814`, `looplab/runtime/command_eval.py:848-852`
 
@@ -1862,7 +1897,7 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 *Locations:* `looplab/runtime/sandbox.py:1107-1153`, `looplab/runtime/command_eval.py:617-715`, `looplab/runtime/sandbox.py:1110-1113`, `looplab/runtime/command_eval.py:636-639`, `looplab/runtime/sandbox.py:1077-1080`, `looplab/runtime/sandbox.py:1150-1153`
 
-*Evidence:* Both untrusted tiers assemble near-identical argv: docker-CLI presence check with the same error text ('trust_mode=... needs the docker CLI...'), `docker run --rm --network X`, `--runtime`, gpu_args from docker_gpu_argv, `--pids-limit 1024` (same 'fork-bomb guard (review C1)' comment twice), `--cap-drop ALL --security-opt no-new-privileges`, `--memory/--cpus`, `-v root:/work -w`, `-e` env forwarding via docker_gpu_env, and the in-container `timeout -k 5 <secs>` prefix. command_eval.py:671-677 literally says 'mirror sandbox.DockerSandbox.run so BOTH untrusted Docker tiers...' — and the same comment records that the mirroring had already drifted once ('before this the solution.py path had NO memory/cpu bound'). Additionally SubprocessSandbox.run and DockerSandbox.run duplicate the identical timed-out RunResult tail (metric/extra_metrics/trials nulled on timeout) at 1077-1080 vs 1150-1153.
+*Evidence:* Both untrusted tiers assemble near-identical argv: docker-CLI presence check with the same error text ('trust_mode=... needs the docker CLI...'), `docker run --rm --network X`, `--runtime`, gpu_args from docker_gpu_argv, `--pids-limit 1024` (same 'fork-bomb guard (review C1)' comment twice), `--cap-drop ALL --security-opt no-new-privileges`, `--memory/--cpus`, `-v root:/work -w`, `-e` env forwarding via docker_gpu_env, and the in-container `timeout -k 5 <secs>` prefix. command_eval.py:671-677 literally says 'mirror sandbox.DockerSandbox.run so BOTH untrusted Docker tiers...' — and sandbox.py:1096-1097 records that the caps had already drifted once ('before this the solution.py path had NO memory/cpu bound and ran with default caps as root'). Additionally SubprocessSandbox.run and DockerSandbox.run duplicate the identical timed-out RunResult tail (metric/extra_metrics/trials nulled on timeout) at 1077-1080 vs 1150-1153.
 
 *Recommendation:* Extract a shared builder in sandbox.py, e.g. docker_run_base(image, network, runtime, gpu_args, mem, cpus, mount_root, env) -> list[str] plus a require_docker_cli(context) helper, and have both DockerSandbox.run and make_docker_wrap compose on top of it. Security hardening flags should have exactly one home.
 
@@ -1888,11 +1923,11 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 #### RA-06 · MEDIUM · mergeable-entities · effort: medium
 
-**Five synthetic task adapters are copy-paste skeletons, and the direction validator exists in only 2 of 8 task models**
+**Five synthetic task adapters are copy-paste skeletons, and the direction validator exists in only 2 of 9 task models**
 
 *Locations:* `looplab/adapters/toytask.py:17-45`, `looplab/adapters/regression.py:109-241`, `looplab/adapters/classification.py:80-140`, `looplab/adapters/timeseries.py:67-132`, `looplab/adapters/mlebench.py:146-284`, `looplab/adapters/repo_task.py:319-324`, `looplab/adapters/dataset_task.py:167-171`
 
-*Evidence:* toytask/regression/classification/timeseries/mlebench each re-implement the same trio: a seeded-Random Researcher whose propose() is draft-random-params-else-perturb-parent (RegressionResearcher, ClassificationResearcher, TimeSeriesResearcher, MLEBenchResearcher, RepoParamResearcher in repo_task.py:234 differ only in the perturbation arithmetic), a Developer whose implement() is str.format over an embedded template, and a pydantic Task repeating kind/id/goal/direction/comparison_contract/seed + _data() + columns() + build_roles() + llm_roles(). regression.py additionally holds two near-identical task classes (RegressionTask/CodeRegressionTask share _data/columns and all data fields). Meanwhile the `direction` field validator ('silently treating typos as minimize flips the objective') exists ONLY in RepoTask (repo_task.py:319) and DatasetTask (dataset_task.py:167) — grep confirms the other six task models accept direction="mxa" silently, causing exactly the objective-flip the validator's own comment warns about.
+*Evidence:* regression/classification/timeseries/mlebench each re-implement the same trio (toytask instead wires the shared ToyResearcher/ToyObjectiveDeveloper from agents/roles.py): a seeded-Random Researcher whose propose() is draft-random-params-else-perturb-parent (RegressionResearcher, ClassificationResearcher, TimeSeriesResearcher, MLEBenchResearcher, RepoParamResearcher in repo_task.py:234 differ only in the perturbation arithmetic), a Developer whose implement() is str.format over an embedded template, and a pydantic Task repeating kind/id/goal/direction/comparison_contract/seed + _data() + columns() + build_roles() + llm_roles(). regression.py additionally holds two near-identical task classes (RegressionTask/CodeRegressionTask share _data/columns and all data fields). Meanwhile the `direction` field validator ('silently treating typos as minimize flips the objective') exists ONLY in RepoTask (repo_task.py:319) and DatasetTask (dataset_task.py:167) — grep confirms the other seven of the nine registered task models accept direction="mxa" silently, causing exactly the objective-flip the validator's own comment warns about.
 
 *Recommendation:* At minimum, hoist a shared direction validator (a mixin or Annotated Literal["min","max"] type in core) onto every task model — small change, real correctness payoff. Optionally extract a SyntheticTaskBase (common fields + columns/build_roles conventions) and a parameterized PerturbResearcher to collapse the five skeletons; these are stable demo tasks so this half is lower priority.
 
@@ -1912,7 +1947,7 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 *Locations:* `looplab/runtime/proxy.py:1-88`, `looplab/runtime/jupyter.py:1-63`, `looplab/runtime/notebook.py:1-33`, `looplab/search/surrogate.py:46-73`
 
-*Evidence:* proxy.py (ProxyScorer) is a pure search policy over folded RunState — it imports only core.models and events.digest.knn_idw, no process/sandbox machinery — and is the direct sibling of search/surrogate.py's SurrogateResearcher (same knn_idw IDW core over the same (params->metric) history; the deliberate _numeric divergence is documented, but the two files living in different packages hides that relationship). jupyter.py is a jupyter-server-proxy launch spec for the serve UI (it even resolves ui/public/looplab.svg). notebook.py is an export renderer consumed only by cli/export_cmds.py. The remaining five modules (sandbox, command_eval, deps, bg_tasks) are the actual runtime tier.
+*Evidence:* proxy.py (ProxyScorer) is a pure search policy over folded RunState — it imports only core.models and events.digest.knn_idw, no process/sandbox machinery — and is the direct sibling of search/surrogate.py's SurrogateResearcher (same knn_idw IDW core over the same (params->metric) history; the deliberate _numeric divergence is documented, but the two files living in different packages hides that relationship). jupyter.py is a jupyter-server-proxy launch spec for the serve UI (it even resolves ui/public/looplab.svg). notebook.py is an export renderer consumed only by cli/export_cmds.py. The remaining modules (sandbox, command_eval, deps, bg_tasks, plus __init__) are the actual runtime tier.
 
 *Recommendation:* Move proxy.py to search/ (next to surrogate.py), notebook.py to the events/export or cli layer, and jupyter.py to serve/ — using the established _LAYOUT back-compat alias mechanism so old import paths keep resolving. Low urgency, but it makes the runtime package's contract ('process execution and sandboxing') true.
 
@@ -1941,7 +1976,7 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.py.
 
-**Reviewer assessment.** The CLI package and trust package are both well-documented and defensively engineered, but they sit at opposite ends of a decomposition spectrum: trust/ is a set of small, single-purpose modules with unusually rich precision/recall provenance comments, while looplab/cli has re-accreted two god-units after its documented package split — inspect_cmds.py (1701 lines, ~25 commands spanning read-only diagnostics, paid LLM stewardship and durable cross-run governance writes, under a docstring that still claims 'read-only') and run_cmds.run() (347 lines mixing config resolution, Genesis, a maintainer-only calibration envelope, snapshot publication and lifecycle triage). The dominant defect class is copy-paste within the CLI: the replay-critical prior-run triage appears three times, the paid-steward command skeleton three times, the memory-dir stat/governed-snapshot dance three times, the late-binding monkeypatch shim five times, and a read-only RunTools builder five times across four packages. The feared rot points were checked and are clean: all 200 _LAYOUT shim entries resolve to real modules, and no CLI command re-implements an events/ fold/digest/traceview projection (timings is a genuinely distinct spans aggregation).
+**Reviewer assessment.** The CLI package and trust package are both well-documented and defensively engineered, but they sit at opposite ends of a decomposition spectrum: trust/ is a set of small, single-purpose modules with unusually rich precision/recall provenance comments, while looplab/cli has re-accreted two god-units after its documented package split — inspect_cmds.py (1701 lines, ~25 commands spanning read-only diagnostics, paid LLM stewardship and durable cross-run governance writes, under a docstring that still claims 'read-only') and run_cmds.run() (347 lines mixing config resolution, Genesis, a maintainer-only calibration envelope, snapshot publication and lifecycle triage). The dominant defect class is copy-paste within the CLI: the replay-critical prior-run triage appears three times, the paid-steward command skeleton three times, the memory-dir stat/governed-snapshot dance twice (plus a simpler third variant), the late-binding monkeypatch shim five times, and a read-only RunTools builder five times across four packages. The feared rot points were checked and are clean: all 200 _LAYOUT shim entries resolve to real modules, and no CLI command re-implements an events/ fold/digest/traceview projection (timings is a genuinely distinct spans aggregation).
 
 **Strengths worth preserving:**
 
@@ -1988,17 +2023,17 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Locations:* `looplab/cli/inspect_cmds.py:1076-1143`, `looplab/cli/inspect_cmds.py:1199-1259`, `looplab/cli/inspect_cmds.py:1294-1354`, `looplab/cli/inspect_cmds.py:1112-1113`, `looplab/cli/inspect_cmds.py:1329-1330`
 
-*Evidence:* concept-steward, task-facets and claim-steward share an identical skeleton: reject deprecated --apply before any paid call, _governance_cli_read preflight over a curation log, Settings() + `if model: settings.llm_model = model` (including the SAME two-line why-comment about model_copy writing a phantom attr, duplicated verbatim at 1113 and 1330), _run_cli_steward(memory_dir, kind, action_id, prepare=lambda: _make_llm_client(settings), invoke=...), --json early-exit, curation_is_empty check, per-proposal printing, and _echo_cli_invocation. The core transaction is already extracted (_run_cli_steward), but ~40 lines of framing per command remain triplicated, as does the 4-line except-(GovernanceLedgerUnavailable|EventStoreLockError)/except-ValueError block that additionally appears verbatim in concept-merge (1032-1036), concept-split (1067-1071), claim-decide (1191-1195) and task-facets-set (1286-1290).
+*Evidence:* concept-steward, task-facets and claim-steward share an identical skeleton: reject deprecated --apply before any paid call, _governance_cli_read preflight over a curation log, Settings() + `if model: settings.llm_model = model` (including the SAME two-line why-comment about model_copy writing a phantom attr, duplicated verbatim at 1113 and 1330), _run_cli_steward(memory_dir, kind, action_id, prepare=lambda: _make_llm_client(settings), invoke=...), per-proposal printing, and _echo_cli_invocation; the --json early-exit and curation_is_empty check exist in concept-steward and claim-steward only (task-facets tests `if not facets` and has no JSON mode). The core transaction is already extracted (_run_cli_steward), but ~40 lines of framing per command remain triplicated, as does the 4-line except-(GovernanceLedgerUnavailable|EventStoreLockError)/except-ValueError block that additionally appears verbatim in concept-merge (1032-1036), concept-split (1067-1071), claim-decide (1191-1195) and task-facets-set (1286-1290).
 
 *Recommendation:* Add a second-tier helper (e.g. _steward_command(kind, memory_dir, action_id, model, apply, preflight, invoke, render)) that owns the --apply rejection, model override, preflight and invocation echo; and a @_governance_errors decorator/context manager for the repeated except block in the four deterministic governance writes.
 
 #### CT-05 · MEDIUM · duplication · effort: small
 
-**Memory-dir stat-resolution + governed-snapshot boilerplate triplicated**
+**Memory-dir stat-resolution + governed-snapshot boilerplate duplicated (plus a simpler third variant)**
 
 *Locations:* `looplab/cli/inspect_cmds.py:898-927`, `looplab/cli/inspect_cmds.py:1372-1391`, `looplab/cli/inspect_cmds.py:1587-1643`
 
-*Evidence:* cross-run-concepts, cross-run-digest and claims each define a local _snapshot() doing the same dance: p.stat().st_mode; S_ISREG -> (p, p.parent); S_ISDIR -> (p/"<canonical file>", p); compute `canonical = path.absolute() == (base/name).absolute()`; then call project_governed_sources(base, _project, include_concepts=..., source_names=..., source_paths=...) with the file-vs-dir split threaded through. ~25 lines each, differing only in the canonical filename (concept_capsules.jsonl vs lessons.jsonl) and the projection body. The partial-source WARNING rendering that follows is also near-duplicated across cross-run-concepts (937-944), cross-run-search (1436-1452), atlas (1505-1526) and claims (1672-1685).
+*Evidence:* cross-run-concepts, cross-run-digest and claims each define a local _snapshot(); cross-run-concepts (898-927) and claims (1587-1643) do the full same dance: p.stat().st_mode; S_ISREG -> (p, p.parent); S_ISDIR -> (p/"<canonical file>", p); compute `canonical = path.absolute() == (base/name).absolute()`; then call project_governed_sources(base, _project, include_concepts=..., source_names=..., source_paths=...) with the file-vs-dir split threaded through — ~25 lines each, differing only in the canonical filename (concept_capsules.jsonl vs lessons.jsonl) and the projection body. cross-run-digest's _snapshot (1372-1391) is a simpler dir-only variant (no S_ISREG branch, fixed source_names). The partial-source WARNING rendering that follows is also near-duplicated across cross-run-concepts (937-944), cross-run-search (1436-1452), atlas (1505-1526) and claims (1672-1685).
 
 *Recommendation:* Extract a resolve_memory_source(p, canonical_name) -> (path, base, source_names, source_paths) helper and a render_source_warnings(receipt) formatter; each command keeps only its _project body.
 
@@ -2008,7 +2043,7 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Locations:* `looplab/trust/verify.py:389-401`, `looplab/cli/inspect_cmds.py:392-402`, `looplab/engine/lessons_distill.py:181-185`, `looplab/engine/novelty.py:431-433`, `looplab/serve/report.py:117-119`
 
-*Evidence:* The 5-line pattern `rt = RunTools(); rt.bind_state(state, None); return CompositeTools([rt])` wrapped in try/except-return-None exists five times: trust/verify.py::_verify_tools, cli/inspect_cmds.py::_run_tools_for (whose docstring literally says "mirrors trust.verify._verify_tools"), engine/lessons_distill.py::_reflect_tools, engine/novelty.py (inline), serve/report.py. Each copy documents its kinship with a "mirrors …" comment instead of sharing code, so a change to the degrade-to-None contract or the bind_state(state, parent) signature must be found by grep in five places.
+*Evidence:* The 5-line pattern `rt = RunTools(); rt.bind_state(state, None); return CompositeTools([rt])` wrapped in try/except-return-None exists five times: trust/verify.py::_verify_tools, cli/inspect_cmds.py::_run_tools_for (whose docstring literally says "mirrors trust.verify._verify_tools"), engine/lessons_distill.py::_reflect_tools, engine/novelty.py (inline), serve/report.py. Two of the five copies document their kinship with a "mirrors …" comment instead of sharing code (trust/verify.py and inspect_cmds; the novelty.py inline copy also degrades to `idea` rather than None), so a change to the degrade-to-None contract or the bind_state(state, parent) signature must be found by grep in five places.
 
 *Recommendation:* Add one helper in looplab/tools (e.g. tools/run_tools.py::readonly_run_tools(state) -> Optional[CompositeTools]) and point all five callers at it. tools/ is importable from trust, engine, serve and cli without layering violations.
 
@@ -2038,7 +2073,7 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Locations:* `looplab/trust/verify.py:371-374`, `looplab/trust/verify.py:404-462`, `looplab/trust/verifier.py:218-260`, `looplab/trust/lesson_guard.py:70-88`
 
-*Evidence:* verify.py (D8 memo-claim verifier) and verifier.py (advisory criteria scorer) are separate modules whose names differ by two letters and whose internals overlap: near-identical output models (_VerdictOut{verdicts,notes} vs _Verdicts{verdicts,rationales}), the same agentic_struct(client, tools, msgs, Model, parser=…, loop_opts={"max_turns": 15}, fallback=parse_structured) invocation, the same supported/unsupported/unclear vocabulary, and each builds its own read-only RunTools (see the RunTools finding). lesson_guard.py adds a third _evidence_text whose comment says it "mirrors trust/verify.py::_evidence_text". The two modules do serve different purposes (evidence-identity checking vs repeated ordinal sampling), so a full merge is wrong — but the naming and the duplicated LLM-judging plumbing are a real navigation/maintenance hazard: grep for "verifier" lands in both, and a change to the judge-call contract (max_turns, fallback, parser) must be made in 2-3 places.
+*Evidence:* verify.py (D8 memo-claim verifier) and verifier.py (advisory criteria scorer) are separate modules whose names differ by two letters and whose internals overlap: near-identical output models (_VerdictOut{verdicts,notes} vs _Verdicts{verdicts,rationales}), the same agentic_struct(client, tools, msgs, Model, parser=…, loop_opts={"max_turns": 15}, fallback=parse_structured) invocation, an overlapping verdict vocabulary ('unclear' is shared; verifier.py's ordinal strong_no..strong_yes scale maps 'supported'/'unsupported' only as normalization aliases), and verify.py builds its own read-only RunTools while verifier.py accepts a caller-supplied `tools` parameter. lesson_guard.py adds a third _evidence_text whose comment says it "mirrors trust/verify.py::_evidence_text". The two modules do serve different purposes (evidence-identity checking vs repeated ordinal sampling), so a full merge is wrong — but the naming and the duplicated LLM-judging plumbing are a real navigation/maintenance hazard: grep for "verifier" lands in both, and a change to the judge-call contract (max_turns, fallback, parser) must be made in 2-3 places.
 
 *Recommendation:* Rename one module (e.g. verify.py -> memo_verify.py, keeping a _LAYOUT/back-compat alias as the repo already does for renames) and extract the shared judge-call helper (structured-judge invocation with agentic fallback) into one place both import.
 
@@ -2048,7 +2083,7 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Locations:* `looplab/trust/leakage.py:45-63`, `looplab/trust/reward_hack.py:224-336`, `looplab/trust/critic.py:16`, `looplab/trust/harden.py:78-89`, `looplab/engine/evaluate.py:785-795`
 
-*Evidence:* leakage detectors return {"detector": …, "leak": bool, …}; reward_hack and ExploitSuite.scan return [{"signal", "detail", "method", "confidence"}]; critic returns [{"issue", "detail"}]. engine/evaluate.py then normalizes them by hand: `sigs.append({"signal": "data_leakage:" + f["signal"], …})` and `sigs.append({"signal": "critic:" + c["issue"], …})` while reward_hack rows pass through unchanged. The signal namespace ("data_leakage:", "critic:") — which is_hard_signal keys gating decisions on — is thus assembled at the call site rather than owned by the detectors. This is contained (one consumer) but means any new consumer of the trust detectors must re-invent the same mapping, and the gate-relevant name of a critic finding is not discoverable in critic.py.
+*Evidence:* leakage detectors return {"detector": …, "leak": bool, …}; reward_hack returns [{"signal", "detail", "method", "confidence"}] and ExploitSuite.scan returns [{"signal", "detail"}]; critic returns [{"issue", "detail"}]. engine/evaluate.py then normalizes them by hand: `sigs.append({"signal": "data_leakage:" + f["signal"], …})` and `sigs.append({"signal": "critic:" + c["issue"], …})` while reward_hack rows pass through unchanged. The signal namespace ("data_leakage:", "critic:") — which is_hard_signal keys gating decisions on — is thus assembled at the call site rather than owned by the detectors. This is contained (one consumer) but means any new consumer of the trust detectors must re-invent the same mapping (critic.py's module docstring does name the `critic:hardcoded_metric` gate signal, but the mapping itself lives only in evaluate.py).
 
 *Recommendation:* Define one lightweight finding shape (signal, detail, method, confidence, plus optional detector-specific fields) in trust/, have each detector emit its already-namespaced signal (data_leakage:fit_on_test, critic:hardcoded_metric), and reduce evaluate.py to concatenation. The dict-based events stay wire-compatible.
 
@@ -2058,9 +2093,9 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Locations:* `looplab/cli/inspect_cmds.py:108-134`, `looplab/cli/inspect_cmds.py:554-563`
 
-*Evidence:* _persist_node_concepts(store, state, raw_tags, …) unconditionally rebinds its second argument at line 134 (`state = fold(events)`) — correctly, per the comment about re-folding inside the mutation transaction — so the value the caller passes is never read. The caller _persist_exact carefully computes `current = fold(current_events)` (line 544) and passes it (line 556) for nothing.
+*Evidence:* _persist_node_concepts(store, state, raw_tags, …) unconditionally rebinds its second argument at line 134 (`state = fold(events)`) — correctly, per the comment about re-folding inside the mutation transaction — so the value the caller passes is never read. The caller _persist_exact computes `current = fold(current_events)` (line 544) — that fold is still needed by `_retro_tag_finished` — but passes it (line 556) for nothing.
 
-*Recommendation:* Drop the parameter (or rename the local) so the signature stops implying the caller's fold matters; removes a redundant fold at the call site.
+*Recommendation:* Drop the parameter (or rename the local) so the signature stops implying the caller's fold matters; removes the pointless pass (the caller's fold stays — `_retro_tag_finished` consumes it; ~15 direct test call sites also pass a fold).
 
 #### CT-12 · LOW · over-engineering · effort: small
 
@@ -2068,7 +2103,7 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 *Locations:* `looplab/trust/cv.py:19-62`, `looplab/trust/reward_hack.py:161-221`, `looplab/trust/verify.py:52-56`, `looplab/trust/harden.py:124-146`
 
-*Evidence:* Verified by repo-wide grep: cv.py's kfold_indices/purged_walk_forward/consistent_cv/Evaluator are imported only by tests/test_cv_confirm.py; reward_hack.calibrate_detector + SEED_CALIBRATION_CORPUS only by tests/test_reward_hack.py; verify._source_ref only by tests/test_phase4_verify.py (its own docstring admits it is a test facade). Each is documented as an intentional seam — but docs/17 (2026-07-11, over a year ago at today's date) already listed the cv splitters as "tested, no live caller", and no adapter has arrived. harden's LLM-hacker plug is similarly unused, and its fallback rule name `exploit_{abs(hash(code)) % 10**6}` (harden.py:125) is nondeterministic across processes (salted str hash), so the same LLM-found exploit would persist under different names in the durable suite.
+*Evidence:* Verified by repo-wide grep: cv.py's kfold_indices/purged_walk_forward/consistent_cv/Evaluator are imported only by tests/test_cv_confirm.py; reward_hack.calibrate_detector + SEED_CALIBRATION_CORPUS only by tests/test_reward_hack.py; verify._source_ref only by tests/test_phase4_verify.py (its own docstring admits it is a test facade). Each is documented as an intentional seam — but docs/17 (2026-07-11, three weeks before this review) already listed the cv splitters as "tested, no live caller", and no adapter has arrived. harden's LLM-hacker plug is similarly unused, and its fallback rule name `exploit_{abs(hash(code)) % 10**6}` (harden.py:125) is nondeterministic across processes (salted str hash), so the same LLM-found exploit would persist under different names in the durable suite.
 
 *Recommendation:* Not deletion-on-sight (the seams are documented), but set a decision point: wire the cv splitters behind a temporal adapter or move them to a docs/example; if calibrate_detector is the operator's harness, expose it (a `looplab calibrate-detector` subcommand is ~15 lines); replace hash() with a content digest (hashlib) in _derive-pattern naming.
 
@@ -2107,7 +2142,7 @@ Scope: `looplab/cli/`, `looplab/trust/`, `looplab/__init__.py`, bench.py, sweep.
 
 Scope: import graph, cross-package duplication, dead top-level code, registries, tests.
 
-**Reviewer assessment.** The documented layering holds remarkably well for a 110k-line tree: events imports only core, the engine never touches serve, and process spawning/liveness is centralized in serve/engine_proc. The real cross-package problems are concentrated at two seams: the cross-run knowledge subsystem (engine/memory + claims + concept_registry), whose private underscore functions are consumed wholesale by tools/ and serve/ without any of the registry guards the project otherwise applies religiously, and the serve composition style (giant build_router closures wired together by late-bound srv.*_fn attributes). Cross-package duplication is mostly disciplined (jsonl reading, redaction, atomic writes are genuinely shared), with one systemic exception — the file-identity stat-tuple reimplemented in 10+ modules — plus smaller drift in metric formatting. The nine registry constants should not be unified into one mechanism; only their test scanners share extractable boilerplate.
+**Reviewer assessment.** The documented layering holds remarkably well for a ~123k-line tree: events imports only core, the engine never touches serve, and process spawning/liveness is centralized in serve/engine_proc. The real cross-package problems are concentrated at two seams: the cross-run knowledge subsystem (engine/memory + claims + concept_registry), whose private underscore functions are consumed wholesale by tools/ and serve/ without any of the registry guards the project otherwise applies religiously, and the serve composition style (giant build_router closures wired together by late-bound srv.*_fn attributes). Cross-package duplication is mostly disciplined (jsonl reading, redaction, atomic writes are genuinely shared), with one systemic exception — the file-identity stat-tuple reimplemented in 10+ modules — plus smaller drift in metric formatting. The nine registry constants should not be unified into one mechanism; only their test scanners share extractable boilerplate.
 
 **Strengths worth preserving:**
 
@@ -2119,13 +2154,13 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 
 #### XP-01 · HIGH · layering · effort: medium
 
-**tools/cross_run_tools.py consumes ~20 private (_-prefixed) engine functions across the package boundary**
+**tools/cross_run_tools.py consumes 12 private (_-prefixed) engine functions (~20 import sites) across the package boundary**
 
-*Locations:* `looplab/tools/cross_run_tools.py:232`, `looplab/tools/cross_run_tools.py:337`, `looplab/tools/cross_run_tools.py:348`, `looplab/tools/cross_run_tools.py:412`, `looplab/tools/cross_run_tools.py:424`, `looplab/tools/cross_run_tools.py:821`, `looplab/tools/cross_run_tools.py:928`, `looplab/tools/cross_run_tools.py:1121`, `looplab/serve/run_files.py:13`, `looplab/trust/harden.py:27`
+*Locations:* `looplab/tools/cross_run_tools.py:232`, `looplab/tools/cross_run_tools.py:337`, `looplab/tools/cross_run_tools.py:348`, `looplab/tools/cross_run_tools.py:412`, `looplab/tools/cross_run_tools.py:424`, `looplab/tools/cross_run_tools.py:821`, `looplab/tools/cross_run_tools.py:928`, `looplab/tools/cross_run_tools.py:1121`, `looplab/serve/run_files.py:13`
 
 *Evidence:* cross_run_tools.py lazily imports _capsule_fingerprint_scope_complete, _capsule_rows, _dedup_valid_capsules, _claim_source_rows, _filter_claim_source_rows, _filter_claim_assessments, _capsule_source_summary, _filter_capsule_rows, _portfolio_concept_overview_data from engine.memory/engine.claims/engine.concept_registry — private names of a 1600-line (memory.py) and 2896-line (claims.py) module used from a lower-layer package. tools/ also imports engine at 26 sites total (knowledge_tools.py:270, concept_tools.py:209-365) while engine imports tools back (15 sites), a package cycle held together only by function-local imports. Unlike every other duck-typed seam in this codebase (BACKGROUND_APPENDABLE, DEVELOPER_OUTPUT_ATTRS, PROMPT_KEYS...), this private cross-package surface has no registry or source-scan guard, so an engine-internal rename that looks safe (underscore = private) silently breaks the cross-run tools. serve/run_files.py:13 similarly imports events.eventstore._interprocess_lock at module level.
 
-*Recommendation:* Promote the functions cross_run_tools actually needs into a public read-model API (drop the underscore, add to engine/memory's public surface or a dedicated cross-run read-model module) so the boundary is explicit; alternatively guard the private-import list with the same registry+source-scan discipline used for the other seams. Rename _interprocess_lock to a public name since three packages depend on it.
+*Recommendation:* Promote the functions cross_run_tools actually needs into a public read-model API (drop the underscore, add to engine/memory's public surface or a dedicated cross-run read-model module) so the boundary is explicit; alternatively guard the private-import list with the same registry+source-scan discipline used for the other seams. Rename _interprocess_lock to a public name since four packages outside events (serve, cli, engine, tools) depend on it.
 
 #### XP-02 · MEDIUM · duplication · effort: medium
 
@@ -2223,7 +2258,7 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 
 *Locations:* `tests/conftest.py:1`, `tests/test_ablation.py:18`, `tests/test_agent_control.py:52`, `tests/test_build_recovery.py:32`, `tests/test_card_selection_integration.py:90`, `tests/test_end_to_end.py:26`
 
-*Evidence:* 29 test files each define a private `_engine(...)` factory around Engine(...); there are 204 direct Engine( constructions across 84 files, and ~29 files define their own scripted Researcher/Developer stub classes (16 distinct `class _*Developer`, 20+ `class _*Researcher` variants like _SeqResearcher/_BatchResearcher duplicated across files). CLAUDE.md acknowledges the symptom — 'Engine tests construct Engine(...) directly (~100 call sites) — keep its keyword API stable' — i.e. the production constructor API is frozen specifically because the test-side factory was never centralized.
+*Evidence:* 29 test files each define a private `_engine(...)` factory around Engine(...); there are 153 direct Engine( constructions across 78 files (204 counting subclass-named stub engines), and 17 files define their own scripted Researcher/Developer stub classes (12 distinct `class _*Developer` names, 13 distinct `class _*Researcher` names — with _Researcher/_BatchResearcher/_SeqResearcher re-defined in 11/6/4 files respectively). CLAUDE.md acknowledges the symptom — 'Engine tests construct Engine(...) directly (~100 call sites) — keep its keyword API stable' — i.e. the production constructor API is frozen specifically because the test-side factory was never centralized.
 
 *Recommendation:* Add a tests/factories.py (or conftest fixtures) with a canonical make_engine(run_dir, **overrides) plus the common scripted-role stubs; migrate opportunistically. This directly reduces the cost of ever evolving Engine's keyword API.
 
@@ -2242,12 +2277,12 @@ Scope: import graph, cross-package duplication, dead top-level code, registries,
 
 Scope: `ui/src/` + `ui/test/`.
 
-**Reviewer assessment.** The UI is a hand-rolled (no framework beyond React) event-sourced control plane with an unusually strong correctness culture: generation-fenced mutations, idempotency-keyed durable command envelopes in sessionStorage, allow-listed payload validation, and ~90 pure-model test files. The architecture note in util.js ("mega-refactor P5.2") shows deliberate extraction of pure models (timelineModel, runIndex, assistantRecovery, commandsmodel, etc.), which largely worked. The remaining structural debt is concentrated in five 1.6k-2.4k-line god files (api.js, panels.jsx, RunView.jsx, AssistantBar.jsx, Inspector.jsx, Dock.jsx) and in one large duplication: the durable run-command lifecycle state machine is implemented twice, nearly line-for-line, in Dock and AssistantBar. API paths used by the UI were cross-checked against looplab/serve/routers/* (commands/jobs/settings-schema/deletions/report_refresh/concepts-lens/scope-report all verified) — no client/server route mismatches found.
+**Reviewer assessment.** The UI is a hand-rolled (no framework beyond React) event-sourced control plane with an unusually strong correctness culture: generation-fenced mutations, idempotency-keyed durable command envelopes in sessionStorage, allow-listed payload validation, and ~90 pure-model test files. The architecture note in util.js ("mega-refactor P5.2") records the deliberate extraction of api.js/format.js/layout.js, alongside a real pure-model layer (timelineModel, runIndex, assistantRecovery, …), which largely worked. The remaining structural debt is concentrated in six 1.6k-2.4k-line god files (api.js, panels.jsx, RunView.jsx, AssistantBar.jsx, Inspector.jsx, Dock.jsx) and in one large duplication: the durable run-command lifecycle state machine is implemented twice, nearly line-for-line, in Dock and AssistantBar. API paths used by the UI were cross-checked against looplab/serve/routers/* (commands/jobs/settings-schema/deletions/report_refresh/concepts-lens/scope-report all verified) — no client/server route mismatches found.
 
 **Strengths worth preserving:**
 
 - Rigorous, uniformly applied mutation-safety discipline: every write is generation-fenced with idempotency keys, durable sessionStorage envelopes with strict allow-listed keys (api.js RUN_ENVELOPE_KEYS/LOCK_KEYS), and fail-closed recovery UIs — an unusually honest treatment of lost-response ambiguity for a web UI.
-- Pure-model extraction with deep test coverage: ~40 dependency-free .js model modules (timelineModel, runIndex, mergeIntent, assistantRecovery, runStartOverRecovery, conceptViewModel, settingsModel, ...) each paired with focused tests in ui/test (~90 files), keeping protocol logic testable outside React.
+- Pure-model extraction with deep test coverage: ~50 dependency-free .js model modules (timelineModel, runIndex, mergeIntent, assistantRecovery, runStartOverRecovery, conceptViewModel, settingsModel, ...) each paired with focused tests in ui/test (~90 files), keeping protocol logic testable outside React.
 - usePoll is a genuinely shared, well-designed polling primitive (serialized ticks, alive() fencing, abortable requests, opt-in visibility pause) that demonstrably replaced copy-pasted setInterval effects per its P5.2 note.
 - Client/server API surface is consistent: every path the UI constructs (commands, jobs, deletions, concepts/lens recovery, scope-report actions, report_refresh, reviews, comments) has a matching route in looplab/serve/routers/* — no orphaned endpoints found; review-mode read-only enforcement is centralized in api.js (assertNotReviewMutation + reviewReadPath + _authHeaders) rather than scattered per component.
 - Comments are load-bearing and honest, frequently citing prior arch-review findings and explaining replay/idempotency rationale inline — matching the repo-wide convention and making the dense recovery code auditable.
@@ -2278,7 +2313,7 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Locations:* `ui/src/RunView.jsx:177-1999`, `ui/src/RunView.jsx:650-903`, `ui/src/RunView.jsx:1318-1506`, `ui/src/RunView.jsx:461-511`
 
-*Evidence:* One component owns: route/fence state, the Start-over destructive-operation recovery saga (~250 lines: persistStartOverPhase/executeStartOver/finishStartOverHandoff/retryStartOver plus 4 coordinating effects at 852-903), merge-intent capture, pane layout with a manual focus-owner switchyard (workspaceFocusOwnerRef, 461-511), a config resource fetch, historical snapshot loading, hub dropdown menus, timeline wiring, and toast state. Additionally, five early-return screens (1318-1339, 1340-1379, 1380-1407, 1408-1439, 1440-1461, 1484-1506) each re-declare the same topbar/brand markup ('<div className="topbar run-head"><span className="brand">…') six times with small variations.
+*Evidence:* One component owns: route/fence state, the Start-over destructive-operation recovery saga (~250 lines: persistStartOverPhase/executeStartOver/finishStartOverHandoff/retryStartOver plus 4 coordinating effects at 852-903), merge-intent capture, pane layout with a manual focus-owner switchyard (workspaceFocusOwnerRef, 461-511), a config resource fetch, historical snapshot loading, hub dropdown menus, timeline wiring, and toast state. Additionally, six early-return screens (1318-1339, 1340-1379, 1380-1407, 1408-1439, 1440-1461, 1484-1506) each re-declare the same topbar/brand markup ('<div className="topbar run-head"><span className="brand">…') six times with small variations.
 
 *Recommendation:* Extract useStartOverRecovery(runId, generation) as a hook (it already has a pure-model sibling in runStartOverRecovery.js), and a RunShell({children, banner}) wrapper for the six early-return screens. Merge-intent handling can also move next to mergeIntent.js as a hook.
 
@@ -2318,17 +2353,17 @@ Scope: `ui/src/` + `ui/test/`.
 
 *Locations:* `ui/src/panels.jsx:306-313`, `ui/src/panels.jsx:443-450`, `ui/src/panels.jsx:208-217`, `ui/src/panels.jsx:1913-1924`, `ui/src/panels.jsx:1985-2019`, `ui/src/RunView.jsx:1079-1125`, `ui/src/Inspector.jsx:67-80`, `ui/src/Inspector.jsx:575-586`
 
-*Evidence:* The identical 8-10-line try/await CONTROL.<cmd>/commandFeedback({success,noop,executing,failure})/onToast/catch-toast wrapper appears in TrustPanel.quarantine, QueuePanel.cancel (both wrapping CONTROL.nodeAbort with only label text differing), ResearchPanel.steer, _CardKanban.addCard vs _HypothesisFallback.add (near-identical addHypothesis blocks), _HypothesisFallback.abandon/del, five branches of RunView.onNodeAction, Inspector.ResetBtn.doReset, and StagePipeline.rerun.
+*Evidence:* The identical 8-10-line try/await CONTROL.<cmd>/commandFeedback({success,noop,executing,failure})/onToast/catch-toast wrapper appears in TrustPanel.quarantine, QueuePanel.cancel (both wrapping CONTROL.nodeAbort with only label text differing), ResearchPanel.steer, _CardKanban.addCard vs _HypothesisFallback.add (near-identical addHypothesis blocks), _HypothesisFallback.abandon/del, four branches of RunView.onNodeAction (plus the merge-confirm handler at 1248), Inspector.ResetBtn.doReset, and StagePipeline.rerun.
 
 *Recommendation:* Add a small helper (e.g. submitCommand(promise, labels, onToast) returning the feedback) next to commandFeedback in api.js and replace the copies; label objects stay at call sites.
 
 #### UI-08 · MEDIUM · flat-code · effort: medium
 
-**Dock.jsx carries ~450 lines of pure narration data as two hand-synced parallel registries (NARR + NARR_VALID)**
+**Dock.jsx carries ~300 lines of pure narration data as two hand-synced parallel registries (NARR + NARR_VALID)**
 
 *Locations:* `ui/src/Dock.jsx:46-170`, `ui/src/Dock.jsx:182-255`, `ui/src/Dock.jsx:266-297`, `ui/src/Dock.jsx:628-653`
 
-*Evidence:* NARR (~110 event-type render entries) and NARR_VALID (~55 validator entries) are separate objects keyed by the same event types and must be updated in tandem; the file's own comments record past drift ('the duplicate keys here were dead: the later definitions always won. arch-review §5 P3'). GROUPS/TYPE2GROUP/GROUP_GLYPH/TYPE_GLYPH add two more per-type tables. All of this is pure data + pure functions (eventNarration, kindOf) living inside a 1,605-line component file, while the sibling pure module timelineModel.js already exists and is unit-tested.
+*Evidence:* NARR (94 event-type render entries) and NARR_VALID (64 validator entries) are separate objects keyed by the same event types and must be updated in tandem; the file's own comments record past drift ('the duplicate keys here were dead: the later definitions always won. arch-review §5 P3'). GROUPS/TYPE2GROUP/GROUP_GLYPH/TYPE_GLYPH add two more per-type tables. All of this is pure data + pure functions (eventNarration, kindOf) living inside a 1,605-line component file, while the sibling pure module timelineModel.js already exists and is unit-tested.
 
 *Recommendation:* Merge NARR/NARR_VALID into one table of {validate?, render} entries and move it (with GROUPS/kindOf/eventNarration) into timelineModel.js or a new narration.js so it gains direct unit-test coverage and Dock returns to being a component.
 
@@ -2354,7 +2389,7 @@ Scope: `ui/src/` + `ui/test/`.
 
 #### UI-11 · LOW · inconsistency · effort: small
 
-**runApiPath is documented as 'one constructor for every owner-style per-run endpoint' but ~20 endpoints in the same file bypass it**
+**runApiPath is documented as 'one constructor for every owner-style per-run endpoint' but ~15 endpoints in the same file bypass it**
 
 *Locations:* `ui/src/api.js:14-24`, `ui/src/api.js:685`, `ui/src/api.js:798`, `ui/src/api.js:825`, `ui/src/api.js:1571-1573`, `ui/src/api.js:1610-1639`, `ui/src/api.js:2184-2189`
 
