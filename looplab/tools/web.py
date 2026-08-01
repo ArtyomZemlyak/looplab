@@ -42,16 +42,17 @@ def _proxied(url: str) -> bool:
     because the peer check below is only meaningful when we connected to the TARGET ourselves.
     """
     try:
-        scheme = urllib.parse.urlparse(url).scheme.lower()
-        host = urllib.parse.urlparse(url).hostname or ""
-        if scheme not in urllib.request.getproxies():
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme.lower() not in urllib.request.getproxies():
             return False
-        # CLAUDE REVIEW: [EDGE-CASE] Passes the PORTLESS hostname, but urllib's ProxyHandler passes
-        # req.host (host:port) to proxy_bypass, and proxy_bypass_environment matches NO_PROXY entries
-        # against both forms. A NO_PROXY entry with an explicit port ("internal.corp:8080") makes
-        # urllib connect DIRECT while this returns True ("proxied") — so the peer check is skipped on
-        # a direct connection. Pass the same host:port urllib uses.
-        return not urllib.request.proxy_bypass(host)
+        host = parsed.hostname or ""
+        netloc = f"{host}:{parsed.port}" if parsed.port else host
+        # `host:port` when the url carries one, because that is what urllib's ProxyHandler passes
+        # (`req.host`) and `proxy_bypass_environment` matches NO_PROXY entries against BOTH forms.
+        # With the portless hostname, a NO_PROXY entry naming an explicit port
+        # ("internal.corp:8080") made urllib connect DIRECT while this answered "proxied" — skipping
+        # the peer check on exactly the direct connection it guards.
+        return not urllib.request.proxy_bypass(netloc)
     except Exception:  # noqa: BLE001 — an unreadable proxy env must not decide the fetch either way
         return False
 

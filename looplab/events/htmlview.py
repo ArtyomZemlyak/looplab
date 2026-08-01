@@ -62,14 +62,14 @@ def _agent_badge(report: dict | None) -> str:
     if report.get("fell_back"):
         return "<span style='color:#9a6700' title='agent failed validation; LLM fallback used'>↩ fallback</span>"
     if report.get("ok"):
-        # CLAUDE REVIEW: [EDGE-CASE] `att > 1` runs without a type guard on `attempts`, which the fold
-        # stores verbatim (replay._on_agent_validated: d.get("attempts"), no coercion). A corrupt/
-        # hand-edited agent_validated event with a string attempts (e.g. "2") makes `att > 1` raise
-        # TypeError (str vs int, py3), aborting render_html — and finalize swallows that, losing the
-        # ENTIRE tree.html. This file otherwise hardens against corrupt logs (see the _MAX_SPAN_DEPTH
-        # cap and the isinstance guard on `dur`); `attempts` needs the same isinstance(att, int) check.
+        # `isinstance` first, like the `dur` guard and the _MAX_SPAN_DEPTH cap elsewhere in this
+        # file: the fold stores `attempts` verbatim (`_on_agent_validated` does `d.get("attempts")`
+        # with no coercion), so a corrupt or hand-edited agent_validated row with a STRING attempts
+        # ("2") made `att > 1` raise TypeError and abort `render_html` — which finalize swallows,
+        # losing the ENTIRE tree.html over one bad field.
         att = report.get("attempts")
-        suffix = f" ×{att}" if att and att > 1 else ""
+        suffix = (f" ×{att}" if isinstance(att, int) and not isinstance(att, bool) and att > 1
+                  else "")
         return f"<span style='color:#1a7f37' title='agent output validated'>✓ agent{suffix}</span>"
     return "<span style='color:#b42318' title='agent output invalid, no fallback'>✗ agent</span>"
 

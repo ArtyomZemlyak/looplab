@@ -303,20 +303,26 @@ def test_projects_load_preserves_wellformed(tmp_path):
     assert ProjectStore(tmp_path / "p.json").load() == good
 
 
-def test_a_hand_edited_row_without_an_id_is_dropped_instead_of_500ing_every_mutator(tmp_path):
+def test_a_hand_edited_row_missing_id_or_name_is_dropped_instead_of_500ing_every_mutator(tmp_path):
     """`load()` shape-checked only the top-level containers. One hand-edited row missing "id" made
     `_index` KeyError inside every mutator that traverses the rows — rename/reparent/delete/assign
     returned a 500 instead of the documented ProjectError->400, and stayed broken until someone
-    fixed the file by hand. Same drop-the-malformed policy the top-level coercion already applies."""
+    fixed the file by hand. Same drop-the-malformed policy the top-level coercion already applies.
+
+    `name` is checked for the same reason: it is REQUIRED on the Project model, so an id-only row
+    survived an id-only filter and then 500'd anyway — `reparent` returns `Project(**p)` ->
+    ValidationError, and `rename(pid, "")` reads `p["name"]` (an empty new name short-circuits the
+    `or`) -> KeyError. `rename_supertask` reads `st["name"]` identically."""
     import json as _json
 
-    from looplab.serve.projects import ProjectStore
+    from looplab.serve.projects import ProjectError, ProjectStore
 
     path = tmp_path / "projects.json"
     path.write_text(_json.dumps({
-        "projects": [{"id": "p1", "name": "keep"}, {"name": "no id"}, "junk", None],
+        "projects": [{"id": "p1", "name": "keep"}, {"name": "no id"}, {"id": "p2"}, "junk", None],
         "assignments": {}, "labels": {},
-        "supertasks": [{"id": "s1"}, {"nope": 1}], "supertask_assignments": {},
+        "supertasks": [{"id": "s1", "name": "keep"}, {"id": "s2"}, {"nope": 1}],
+        "supertask_assignments": {},
     }), encoding="utf-8")
 
     store = ProjectStore(path)
@@ -324,3 +330,9 @@ def test_a_hand_edited_row_without_an_id_is_dropped_instead_of_500ing_every_muta
     assert [row["id"] for row in data["projects"]] == ["p1"]
     assert [row["id"] for row in data["supertasks"]] == ["s1"]
     assert store._index(data) == {"p1": {"id": "p1", "name": "keep"}}   # no KeyError
+
+    # The dropped rows now surface the DOCUMENTED 400-mapped error, not a 500 from deep inside.
+    for call in (lambda: store.rename("p2", ""), lambda: store.reparent("p2", None),
+                 lambda: store.rename_supertask("s2", "")):
+        with pytest.raises(ProjectError):
+            call()

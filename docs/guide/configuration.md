@@ -452,7 +452,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 | `memora_llm` | `LOOPLAB_MEMORA_LLM` | `true` | Write abstractions with the wired chat model (richer than lexical); results are **cached** by content hash and any endpoint failure degrades to lexical. Set `false` to force the deterministic lexical abstractor (zero LLM calls). No-op unless `memora` is on |
 | `memora_cache` | `LOOPLAB_MEMORA_CACHE` | — | JSON path for the LLM-abstraction cache. Blank = derived from `memory_dir` / `knowledge_dir`, else in-memory only. No-op unless `memora_llm` is on |
 | `memora_anchors` | `LOOPLAB_MEMORA_ANCHORS` | `6` | Max cue anchors kept per memory |
-| `memora_consolidate_threshold` | `LOOPLAB_MEMORA_CONSOLIDATE_THRESHOLD` | `0.86` | Cosine at/above which a new memory is consolidated into an existing entry |
+| `memora_consolidate_threshold` | `LOOPLAB_MEMORA_CONSOLIDATE_THRESHOLD` | `0.86` | Cosine at/above which a new memory is consolidated into an existing entry (0.0–1.0) |
 | `skills_dir` | `LOOPLAB_SKILLS_DIR` | — | Dir of `SKILL.md` files the Researcher can list/load |
 | `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files — see the [override-key table](llm-and-agents.md#prompt-override-keys-prompt_dir) for every `<key>.md` and who consumes it |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |

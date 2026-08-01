@@ -106,15 +106,15 @@ class ProjectStore:
         # the rows — rename/reparent/delete/assign surfaced a 500 instead of the documented
         # ProjectError->400, and stayed broken until someone fixed the file by hand. Same
         # drop-the-malformed policy the top-level coercion above already applies.
-        # CLAUDE REVIEW: [EDGE-CASE] This per-row filter only guarantees a string `id`, but the comment
-        # above claims it stops the `Project(**p)` ValidationError class. A hand-edited row with a valid
-        # `id` and NO `name` (name is required on the Project model) survives this filter and then 500s:
-        # `reparent` returns `Project(**p)` -> ValidationError, and `rename(pid, "")` hits `p["name"]`
-        # (empty new name short-circuits the `or`) -> KeyError. Both surface a 500 instead of the
-        # documented ProjectError->400, i.e. the exact failure this hardening was written to prevent.
+        # `name` is checked too, not just `id`. It is REQUIRED on the Project model, so a hand-edited
+        # row with a valid id and no name sailed past an id-only filter and then 500'd exactly the way
+        # this hardening exists to prevent: `reparent` returns `Project(**p)` -> ValidationError, and
+        # `rename(pid, "")` reads `p["name"]` (an empty new name short-circuits the `or`) -> KeyError.
+        # Both surfaced a 500 instead of the documented ProjectError -> 400.
         for key in ("projects", "supertasks"):
             data[key] = [row for row in data[key]
-                         if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]]
+                         if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
+                         and isinstance(row.get("name"), str) and row["name"]]
         return data
 
     def _save(self, data: dict) -> None:

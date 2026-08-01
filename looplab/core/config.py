@@ -1208,12 +1208,11 @@ class Settings(BaseSettings):
     memora_anchors: int = 6           # max cue anchors kept per memory
     # Cosine similarity at/above which a new case is CONSOLIDATED into an existing one (same evolving
     # topic) rather than stored as a separate entry. Only used when `memora` is on.
-    # CLAUDE REVIEW: [EDGE-CASE] unbounded 0..1 cosine knob with no Field bounds. Consumers compare
-    # `cosine(...) >= consolidate_threshold` (engine/memory.py, tools/knowledge_tools.py) and cosine is
-    # capped at 1.0, so a typo'd value >1.0 validates cleanly and SILENTLY DISABLES consolidation forever
-    # (a negative one consolidates everything). Its 0..1 sibling novelty_semantic_threshold carries
-    # Field(ge=0.5, le=1.0); this should be bounded the same way (e.g. ge=0.0, le=1.0) to fail loud.
-    memora_consolidate_threshold: float = 0.86
+    # BOUNDED like its 0..1 sibling `novelty_semantic_threshold`: consumers compare
+    # `cosine(...) >= consolidate_threshold` (engine/memory.py, tools/knowledge_tools.py) and cosine
+    # cannot exceed 1.0, so an unbounded typo above 1.0 validated cleanly and silently disabled
+    # consolidation forever — while a negative one consolidated everything. Fail loud instead.
+    memora_consolidate_threshold: float = Field(default=0.86, ge=0.0, le=1.0)
     # Where the LLM-abstraction cache lives (JSON). Blank (default) derives it from `memory_dir`
     # (`<memory_dir>/memora_cache.json`) or else `knowledge_dir` (`<knowledge_dir>/.memora_cache.json`);
     # with neither set the cache is in-memory only (per process). No-op unless `memora_llm` is on.

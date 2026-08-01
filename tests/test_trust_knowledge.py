@@ -160,3 +160,16 @@ def test_grep_guards_bad_and_long_pattern(tmp_path):
     assert grep("(", str(tmp_path)) == []                          # invalid regex -> []
     assert grep("a" * 2000, str(tmp_path)) == []                   # over-long pattern -> []
     assert [h.line for h in grep("hello", str(tmp_path))] == ["hello"]
+
+
+def test_a_string_attempts_field_cannot_destroy_the_whole_tree_html():
+    """The fold stores `attempts` verbatim (`_on_agent_validated` does `d.get("attempts")` with no
+    coercion), so a corrupt or hand-edited agent_validated row carrying a STRING made `att > 1`
+    raise TypeError and abort `render_html` — which finalize swallows, losing the ENTIRE tree.html
+    over one bad field. This module already hardens `dur` and span depth the same way."""
+    from looplab.events.htmlview import _agent_badge
+
+    assert "×" not in _agent_badge({"ok": True, "attempts": "2"})     # was: TypeError
+    assert "×" not in _agent_badge({"ok": True, "attempts": True})    # bools are not counts
+    assert "×" not in _agent_badge({"ok": True, "attempts": 1})       # a single try shows no count
+    assert "×3" in _agent_badge({"ok": True, "attempts": 3})          # a real retry count still shows

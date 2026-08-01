@@ -149,3 +149,24 @@ def test_the_pip_child_gets_the_same_value_aware_secret_screen_as_every_other_sp
     assert "DATABASE_URL" not in seen, "an inline-credential URL reached the pip child"
     assert seen["PIP_INDEX_URL"] == "https://tok:tok@private/simple"
     assert seen["LOOPLAB_LLM_BASE_URL"] == "https://api.test/v1" and seen["PATH"] == "/usr/bin"
+
+
+def test_no_proxy_with_an_explicit_port_is_recognised_as_a_direct_connection(monkeypatch):
+    """`proxy_bypass` was given the PORTLESS hostname, but urllib's ProxyHandler passes `req.host`
+    (host:port) and `proxy_bypass_environment` matches NO_PROXY entries against BOTH forms. A
+    NO_PROXY entry naming an explicit port made urllib connect DIRECT while `_proxied` answered
+    "proxied" — skipping the landed-peer check on exactly the direct connection it guards."""
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:8080"})
+    seen = []
+
+    def _bypass(host):
+        seen.append(host)
+        return host == "internal.corp:8443"          # a port-qualified NO_PROXY entry
+
+    monkeypatch.setattr(urllib.request, "proxy_bypass", _bypass)
+    assert web._proxied("https://internal.corp:8443/x") is False, seen
+    assert seen[-1] == "internal.corp:8443"
+
+    # A portless url still asks about the bare host, and a non-bypassed one is still proxied.
+    assert web._proxied("https://elsewhere.test/x") is True
+    assert seen[-1] == "elsewhere.test"
