@@ -2921,32 +2921,39 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # request unacknowledged so an additive budget extension can admit it exactly once.
             if await self._defer_for_node_budget(state):
                 return True
+            # CLAIM THE REQUEST BEFORE THE PAID PRODUCER, exactly as the fork branch above does and
+            # for the same reason. `_create_injected_node` can run a Developer session (real spend)
+            # and durably appends `node_created`; with the receipt written AFTER it, a crash inside
+            # that call left this request at the queue head, so resume re-served it and bought the
+            # session again — and a crash between the durable `node_created` and the receipt re-served
+            # too, where Card dedup then closed the SUCCEEDED inject as "materialization_failed" or
+            # minted a duplicate node. Receipt-first makes the failure at-most-once: a crash in the
+            # gap loses ONE queued inject intent instead of duplicating an already-charged experiment,
+            # and the operator can simply re-request it. Fold-safe: `_on_inject_done` advances only
+            # the inject cursor and `_on_node_created` only the node table, so the swap is
+            # order-tolerant (invariant #3 — the side effect is gated on its event).
+            self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
             try:
                 self._create_injected_node(req)
             except Exception as e:  # noqa: BLE001 - a malformed operator/API inject must not
-                # crash-loop the engine: without advancing the gate, every resume replays the same
-                # bad request and dies again, leaving the run unrecoverable. Record + skip it.
-                # The request is about to be marked done in this SAME invocation, so unlike an
-                # escaping serial build exception there may be no resume boundary to clean a partial
-                # reservation. Terminalize any surviving marker before advancing the request gate.
+                # crash-loop the engine: the gate has already advanced, so this only records WHY the
+                # (already-spent) request produced nothing. Terminalize any surviving build marker
+                # first: the failure happened inside this same invocation, so unlike an escaping
+                # serial build exception there may be no resume boundary to clean a partial
+                # reservation.
                 failed_state = fold(self.store.read_all())
                 if failed_state.buildings:
                     self._recover_interrupted_builds(failed_state)
-                self._append_inject_failure(
-                    state,
-                    error=str(e),
-                    reason="materialization_failed",
-                )
-                return True
-            # CLAUDE REVIEW: [REPLAY-SAFETY] The inject receipt is spent AFTER the paid work — the
-            # exact ordering the fork branch above reversed ("claim the request before the paid
-            # producer", at-most-once). A crash inside _create_injected_node re-serves this head on
-            # resume and buys the Developer session again; a crash between the durable node_created
-            # and this append re-serves too, where Card dedup closes the SUCCEEDED inject as
-            # "materialization_failed" (unchanged best) or mints a duplicate node (moved
-            # scored_against). Claim the inject_done receipt BEFORE _create_injected_node, as the
-            # fork path now does (invariant #3: side effect gated on its event so resume is idempotent).
-            self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
+                # NOT `_append_inject_failure`: that helper appends the failure AND the gate as one
+                # atomic pair, and returns early when the gate has already moved — which it has,
+                # three lines up. Append the diagnosis alone. `EV_INJECT_FAILED` is DIAGNOSTIC
+                # (fold-ignored), so it changes no state either way; it carries `idx` so the log,
+                # `looplab replay` and the trace still say which request produced nothing.
+                self.store.append(EV_INJECT_FAILED, {
+                    "idx": state.injects_done,
+                    "error": str(e)[:500],
+                    "reason": "materialization_failed",
+                })
             return True
         forced_ablate = self._pending_forced_ablation(state)
         if forced_ablate is not None:

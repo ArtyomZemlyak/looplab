@@ -994,12 +994,14 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.status = NodeStatus.failed
             n.terminal_event_seq = e.seq
             n.error = d.get("error", "")
-            # CLAUDE REVIEW: [REPLAY-SAFETY] `reason` is stored UNCOERCED (assignment skips pydantic
-            # validation), and `_card_debuggable_leaf_ids` later runs `node.error_reason not in
-            # {"idea_rejected", "card_dropped"}` (set membership) inside `_derive_cards` — so ONE
-            # node_failed row with an unhashable reason (list/dict) makes every fold/replay/resume
-            # raise TypeError forever. Same class as the totality fixes elsewhere; coerce with str().
-            n.error_reason = d.get("reason", "")
+            # COERCED, because assignment skips pydantic validation and `_card_debuggable_leaf_ids`
+            # later does `node.error_reason not in {"idea_rejected", "card_dropped"}` — a SET
+            # membership — inside `_derive_cards`. One node_failed row carrying an unhashable reason
+            # (a list/dict from a forged, foreign or hand-edited log) therefore made every
+            # fold/replay/resume of that run raise TypeError, forever. Same totality rule the rest of
+            # this handler follows.
+            _reason = d.get("reason", "")
+            n.error_reason = _reason if isinstance(_reason, str) else str(_reason)
             # Crash-triage verdict, when the LLM triage ran (signal-delivery §1): fold it onto
             # the node so the failure-reflection hint / digest can hand it to the next proposal.
             # Additive + reader-defaulted: absent on old logs / rule-triaged nodes -> stays "".
@@ -1414,11 +1416,13 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Retryable infrastructure refusals still charge any admitted setup/probe time above, but they are
     # not completed seed evidence. Excluding them from the resume memo lets an unchanged seed retry after
     # GPU discovery, a Card re-pin, or the container runtime is repaired.
-    # CLAUDE REVIEW: [REPLAY-SAFETY] `d.get("reason")` is hashed by this set membership, so an
-    # unhashable reason (list/dict) on one confirm_eval row raises TypeError out of the fold and
-    # bricks every replay/resume. The earlier `!= "aborted"` comparisons are safe; this one needs an
-    # isinstance(..., str) guard like the rest of this handler's reads.
-    retryable_infrastructure = d.get("reason") in {"gpu_unavailable", "gpu_unpinnable"}
+    # `isinstance` FIRST: this is a set membership, so it hashes the raw value, and an unhashable
+    # reason (a list/dict on one confirm_eval row) raised TypeError out of the fold and bricked every
+    # replay/resume of the run — the fold loop has no per-event try/except. The earlier `!= "aborted"`
+    # comparisons are safe; this one needs the same shape guard as the rest of this handler's reads.
+    _reason = d.get("reason")
+    retryable_infrastructure = (isinstance(_reason, str)
+                                and _reason in {"gpu_unavailable", "gpu_unpinnable"})
     if keyed and not retryable_infrastructure:               # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(nid, {})[seed] = _finite_metric(d.get("metric"))
 
@@ -3509,11 +3513,11 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
             or type(generation) is not int or generation != request["generation"]):
         return
     skipped = d.get("skipped")
-    # CLAUDE REVIEW: [REPLAY-SAFETY] Set membership hashes the raw event value: a forged/corrupt
-    # `skipped` that is a list/dict raises TypeError out of the fold and bricks every replay/resume of
-    # the run (the fold loop has no per-event try/except). Every other field this handler reads is
-    # shape-guarded; guard this one too (e.g. `isinstance(skipped, str) and skipped in ...`).
-    if skipped in {"producer_failed", "stale"}:
+    # `isinstance` FIRST: set membership hashes the raw event value, so a forged/corrupt `skipped`
+    # that is a list/dict raised TypeError out of the fold and bricked every replay/resume of the run
+    # (the fold loop has no per-event try/except). Every other field this handler reads is
+    # shape-guarded; this one is now too.
+    if isinstance(skipped, str) and skipped in {"producer_failed", "stale"}:
         st.card_builds_done += 1
         st.card_build_outcomes.append(skipped)
         if skipped == "producer_failed" and card_id not in st.card_build_producer_failed:

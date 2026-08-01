@@ -722,3 +722,65 @@ def test_an_unknown_inject_parent_is_rejected_rather_than_silently_dropped(tmp_p
     state = fold(eng.store.read_all())
     injected = [n for n in state.nodes.values() if n.id != 0]
     assert len(injected) == 1 and injected[0].parent_ids == []
+
+
+def test_a_crash_inside_inject_materialization_never_re_buys_the_request(tmp_path, monkeypatch):
+    """The inject receipt was spent AFTER the paid work — the exact ordering the fork branch
+    reversed. `_create_injected_node` can run a Developer session (real spend) and durably appends
+    `node_created`; with the receipt written after it, a PROCESS DEATH in that gap left the request
+    at the queue head, so resume re-served it and bought the session again. Receipt-first makes the
+    failure at-most-once: the gap loses one queued intent instead of duplicating a paid experiment.
+
+    A raised `Exception` is NOT the interesting case — the handler already caught that and advanced
+    the gate. The gap is the one no handler runs in, modelled here with a BaseException that escapes
+    `except Exception` exactly as a kill does.
+    """
+    import anyio
+
+    eng = _engine(tmp_path / "r")
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    eng.store.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 1.0}}})
+
+    calls = []
+
+    def _die_after_the_durable_node(req):
+        calls.append(req)
+        eng.store.append("node_created", {
+            "node_id": 0, "parent_ids": [], "operator": "manual",
+            "idea": {"operator": "manual", "params": {"x": 1.0}, "rationale": ""}, "code": "x=1"})
+        raise KeyboardInterrupt("the process died here")     # escapes `except Exception`
+
+    monkeypatch.setattr(eng, "_create_injected_node", _die_after_the_durable_node)
+
+    state = fold(eng.store.read_all())
+    try:
+        anyio.run(eng._serve_forced_requests, state)
+    except KeyboardInterrupt:
+        pass
+    assert len(calls) == 1
+
+    # A fresh process resumes by replay. The receipt is already spent, so the head does NOT re-serve.
+    resumed = fold(eng.store.read_all())
+    assert resumed.injects_done == 1, "the spent request stayed at the queue head"
+    assert anyio.run(eng._serve_forced_requests, resumed) is False
+    assert len(calls) == 1, "resume re-bought the inject the dead process had already paid for"
+    assert len(resumed.nodes) == 1, "and the node it did create is the only one"
+
+
+def test_an_inject_that_fails_to_materialize_still_records_why(tmp_path, monkeypatch):
+    """Moving the receipt ahead of the producer must not cost the diagnosis: a raised failure still
+    lands one `inject_failed` row naming the request index and reason."""
+    import anyio
+
+    eng = _engine(tmp_path / "r2")
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    eng.store.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 1.0}}})
+    monkeypatch.setattr(eng, "_create_injected_node", lambda req: (_ for _ in ()).throw(
+        RuntimeError("materialization blew up")))
+
+    state = fold(eng.store.read_all())
+    assert anyio.run(eng._serve_forced_requests, state) is True
+    failures = [e for e in eng.store.read_all() if e.type == "inject_failed"]
+    assert len(failures) == 1 and failures[0].data["reason"] == "materialization_failed"
+    assert failures[0].data["idx"] == 0 and "blew up" in failures[0].data["error"]
+    assert fold(eng.store.read_all()).injects_done == 1

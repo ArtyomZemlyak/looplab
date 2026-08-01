@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.core.models import Event
+from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.replay import fold
 from looplab.search.archive import DiversityArchive
@@ -3006,3 +3006,56 @@ def test_a_fat_gpu_inventory_row_is_bounded_not_parked_whole_in_run_state(tmp_pa
     assert "uuid" not in rows[1], "an oversized uuid must be DROPPED, not truncated to another GPU"
     assert "blob" not in rows[1]
     assert max(len(str(v)) for v in rows[1].values()) <= 256
+
+
+def test_an_unhashable_field_in_a_forged_row_never_bricks_the_fold(tmp_path):
+    """Four handlers tested a raw event value with SET MEMBERSHIP, which HASHES it. One row carrying
+    a list/dict in that field therefore raised TypeError out of `fold` — and the fold loop has no
+    per-event try/except, so every replay, resume and UI read of that run died there permanently.
+    Every other field these handlers read was already shape-guarded; a malformed row must be a
+    deterministic no-op, not a brick.
+
+    Each poisoned field is exercised at the line that hashes it, because the four sit behind
+    different preconditions and one combined log would short-circuit at the first raise.
+    """
+    from looplab.events.comment_projection import apply_comment_event
+    from looplab.events.replay import (
+        _FoldCtx, _derive_cards, _on_card_build_done, _on_confirm_eval)
+
+    # (1) node_failed.reason -> Node.error_reason, hashed one fold later by
+    #     `_card_debuggable_leaf_ids`'s `not in {"idea_rejected", "card_dropped"}` in `_derive_cards`.
+    s = EventStore(tmp_path / "a.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""},
+                              "code": "print(1)"})
+    s.append("node_failed", {"node_id": 0, "error": "boom", "reason": ["not", "a", "string"]})
+    state = fold(s.read_all())
+    assert state.nodes[0].status is NodeStatus.failed
+    assert isinstance(state.nodes[0].error_reason, str)     # coerced, so the later set test is safe
+    _derive_cards(state)                                    # was: TypeError, on every fold forever
+
+    # (2) confirm_eval.reason — driven straight at the handler, past its own generation/status gates.
+    confirmed = _state_with_one_evaluated_node()
+    poisoned_confirm = {"node_id": 0, "seed": 1, "metric": 0.5, "reason": {"unhashable": True}}
+    _on_confirm_eval(confirmed, Event(seq=9, type="confirm_eval", data=poisoned_confirm),
+                     poisoned_confirm, _FoldCtx())
+
+    # (3) card_build_done.skipped — needs a matching request head, else the handler returns first.
+    board = RunState(direction="min")
+    board.card_build_requests = [{"card_id": "c1", "generation": 0}]
+    poisoned = {"card_id": "c1", "generation": 0, "skipped": ["stale"]}
+    _on_card_build_done(board, Event(seq=9, type="card_build_done", data=poisoned), poisoned,
+                        _FoldCtx())
+    assert board.card_builds_done == 0, "an unhashable `skipped` must be inert, not a cursor advance"
+
+    # (4) comment_created.actor_kind, hashed by the projection `fold` calls through.
+    apply_comment_event({}, Event(seq=99, type="comment_created", data={
+        "comment_id": "y1", "actor_kind": ["deployment_owner"], "body": "hi"}))
+
+
+def _state_with_one_evaluated_node() -> RunState:
+    st = RunState(direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                       metric=1.0, status=NodeStatus.evaluated, feasible=True)
+    return st
