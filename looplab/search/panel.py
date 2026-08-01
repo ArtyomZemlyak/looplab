@@ -30,7 +30,15 @@ def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -
             continue
         pts.append((math.sqrt(sum((target[x] - p[x]) ** 2 for x in tkeys)), m))
     res = knn_idw(pts, k)
-    return None if res is None else res[0]
+    if res is None:
+        return None
+    pred = res[0]
+    # A NaN param survives `numeric_params` (isinstance-numeric), makes every distance NaN, and
+    # `knn_idw` documents that a NaN distance degrades to a NaN prediction. `propose` screens only
+    # for None, and `is_better` is a bare `<` — every NaN comparison is False — so a NaN would
+    # become `best_pred` and then be undisplaceable, handing the panel to the malformed candidate.
+    # Abstain instead: an uncomparable candidate is exactly the "no signal" case None already means.
+    return None if pred != pred else pred
 
 
 class PanelResearcher:
@@ -65,13 +73,20 @@ class PanelResearcher:
         # researcher — which may be THIS wrapper — so mirror them onto the base before the K-way
         # fan-out (roles.forward_hints owns the registry + `track_hypotheses` rule).
         forward_hints(self, self.base)
-        ideas = [self.base.propose(state, parent) for _ in range(self.k)]
         if self.k == 1:
-            return ideas[0]
+            return self.base.propose(state, parent)
+        # Build the history BEFORE the fan-out. It depends only on `state`, and the warmup gate below
+        # discards every proposal but the first — so ranking it after K blocking Researcher calls
+        # burned K-1 paid LLM calls per turn that the panel was structurally unable to use.
+        # `breedable_nodes()`, not `feasible_nodes()`: under `trust_gate=gate` a hard-flagged node
+        # keeps its inflated metric and stays FEASIBLE, so fitting on it teaches the k-NN to propose
+        # near the cheated params. Both sibling predictors already exclude it for this exact reason
+        # (search/surrogate.py, runtime/proxy.py); under `audit`/no flags the two pools are identical.
         hist = [(numeric_params(n.idea.params), n.metric)
-                for n in state.feasible_nodes() if n.metric is not None]
+                for n in state.breedable_nodes() if n.metric is not None]
         if len(hist) < self.warmup:
-            return ideas[0]            # not enough signal to rank -> first proposal
+            return self.base.propose(state, parent)   # not enough signal to rank -> one proposal
+        ideas = [self.base.propose(state, parent) for _ in range(self.k)]
         best, best_pred = None, None
         for idea in ideas:
             pred = _predict(idea.params, hist, self.bounds)
