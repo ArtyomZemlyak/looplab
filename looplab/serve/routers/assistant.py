@@ -27,8 +27,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from looplab.serve.assistant import (
-    REPO_ROOT as _ASSISTANT_REPO_ROOT, SHARE_DEFAULT_TTL_SECONDS, SessionStore, ShareError,
-    ShareStore, run_turn as _assistant_run_turn,
+    REPO_ROOT as _ASSISTANT_REPO_ROOT, SHARE_DEFAULT_TTL_SECONDS, SHARE_MAX_RECORDS,
+    SessionStore, ShareError, SHARE_TITLE_MAX_CHARS, ShareStore,
+    run_turn as _assistant_run_turn,
     safe_assistant_failure as _safe_assistant_failure,
     sanitize_assistant_message as _sanitize_assistant_message)
 from looplab.serve.engine_proc import _engine_alive
@@ -70,53 +71,243 @@ async def _json_options(request: Request) -> dict:
     return await _json_object(request)
 
 
-def _shared_text(value) -> str:
-    from looplab.core.redact import redact_secrets
-    return redact_secrets(str(value or ""))
+_SHARED_CONTENT_MAX_CHARS = 200_000
+_SHARED_ACTIVITY_TEXT_MAX_CHARS = 8_000
+_SHARED_TODO_TEXT_MAX_CHARS = 1_000
+_SHARED_ITEMS_MAX = 80
+_SHARED_TODOS_MAX = 100
+_SHARED_MESSAGES_MAX = 400
+_SHARED_TOTAL_TEXT_MAX_CHARS = 2_000_000
+_SHARED_STRUCTURE_MAX = 20_000
+_SHARED_READ_MAX_LINE_BYTES = 8 * 1024 * 1024
+_SHARED_READ_MAX_TOTAL_BYTES = 16 * 1024 * 1024
+_SHARED_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+_SHARED_UI_CONTEXT_SUFFIX = re.compile(r"\n*\[UI context:[^\]]*\]\s*$")
+_SHARE_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+# Tool arguments and provider-produced labels routinely contain absolute paths, run ids and usernames.
+# Public transcripts therefore never reflect either.  Only an exact known tool name can become one of
+# these fixed phrases; unknown/new tools disappear until deliberately reviewed and added here.
+_SHARED_TOOL_LABELS = {
+    "list_dir": "Listing files", "read_file": "Reading a file",
+    "find_files": "Searching files", "grep": "Searching file contents",
+    "list_runs": "Listing runs", "read_run": "Reading a run",
+    "read_run_experiment": "Reading run experiments", "read_run_logs": "Reading run logs",
+    "read_run_trace": "Reading a run trace", "cross_run_concept_map": "Reading shared research",
+    "cross_run_atlas": "Reading shared research", "cross_run_prior_attempts": "Reading shared research",
+    "cross_run_search": "Searching shared research", "concept_taxonomy": "Reading concept taxonomy",
+    "write_file": "Updating files", "edit_file": "Updating files", "apply_patch": "Updating files",
+    "delete_file": "Updating files", "revert_file": "Updating files",
+    "run_command": "Running a command", "run_tests": "Running checks",
+    "read_output": "Reading command output", "list_background": "Listing background work",
+    "kill_background": "Stopping background work", "remember": "Updating shared knowledge",
+    "concept_merge": "Updating concepts", "concept_purge": "Updating concepts",
+    "concept_split": "Updating concepts", "concept_edit_clear": "Updating concepts",
+    "finalize_run": "Updating a run", "stop_run": "Updating a run", "resume_run": "Updating a run",
+    "reset_node": "Updating a run", "retag_node": "Updating a run",
+    "set_run_concepts": "Updating a run", "delete_node": "Updating a run",
+    "delete_run": "Updating a run", "extend_budget": "Updating a run",
+    "set_directive": "Updating a run", "set_trust_gate": "Updating a run",
+    "propose_run": "Preparing a run", "task": "Delegating a subtask",
+    "write_todos": "Updating the plan",
+}
 
 
-def _shared_message(message: dict) -> dict:
+def _shared_units(value: str) -> int:
+    """JavaScript ``String.length`` units, so backend limits cannot exceed the browser validator."""
+    return sum(2 if ord(char) > 0xFFFF else 1 for char in value)
+
+
+def _shared_text_projection(value, max_chars: int = _SHARED_CONTENT_MAX_CHARS) -> tuple[str, bool]:
+    # Redact before truncation so a secret-shaped suffix cannot be cut into a form the redactor misses.
+    text = redact_secrets(str(value or ""))
+    used = 0
+    for index, char in enumerate(text):
+        used += 2 if ord(char) > 0xFFFF else 1
+        if used > max_chars:
+            return text[:index], True
+    return text, False
+
+
+def _shared_text(value, max_chars: int = _SHARED_CONTENT_MAX_CHARS) -> str:
+    return _shared_text_projection(value, max_chars)[0]
+
+
+def _shared_visible_content_projection(message: dict) -> tuple[str, bool]:
+    raw = str(message.get("content") or "")
+    if message.get("role") == "user":
+        # Strip the whole invisible suffix before redaction/truncation; truncating first could cut off
+        # its closing bracket and turn an otherwise removable private context block into visible text.
+        raw = _SHARED_UI_CONTEXT_SUFFIX.sub("", raw).rstrip()
+    return _shared_text_projection(raw)
+
+
+def _shared_visible_content(message: dict) -> str:
+    return _shared_visible_content_projection(message)[0]
+
+
+def _shared_message_projection(message: dict) -> tuple[dict, bool]:
     """Allow-list the fields rendered by the read-only shared transcript. Persisted assistant turns
     also contain mutation internals (absolute paths and full diff previews); merely dropping `raw`
     exposes those through the intentionally untokened share URL."""
+    content, truncated = _shared_visible_content_projection(message)
     out = {
-        "role": str(message.get("role") or "assistant"),
-        "content": _shared_text(message.get("content")),
+        "role": "user" if message.get("role") == "user" else "assistant",
+        "content": content,
     }
-    if isinstance(message.get("ts"), (int, float)):
-        out["ts"] = message["ts"]
-    if isinstance(message.get("mode"), str):
-        out["mode"] = message["mode"]
 
     def _labels(items):
-        return [{k: _shared_text(item.get(k)) for k in ("label", "tool") if item.get(k)}
-                for item in (items or []) if isinstance(item, dict)]
+        labels = []
+        omitted = False
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            tool = item.get("tool")
+            label = _SHARED_TOOL_LABELS.get(tool) if isinstance(tool, str) else None
+            if label is not None:
+                if len(labels) < _SHARED_ITEMS_MAX:
+                    labels.append({"label": label})
+                else:
+                    omitted = True
+        return labels, omitted
 
     if isinstance(message.get("steps"), list):
-        out["steps"] = _labels(message["steps"])
+        out["steps"], omitted = _labels(message["steps"])
+        truncated = truncated or omitted
     if isinstance(message.get("applied"), list):
-        out["applied"] = _labels(message["applied"])
+        out["applied"], omitted = _labels(message["applied"])
+        truncated = truncated or omitted
     if isinstance(message.get("todos"), list):
-        out["todos"] = [
-            {"content": _shared_text(t.get("content")),
-             "status": str(t.get("status") or "pending")}
-            for t in message["todos"] if isinstance(t, dict)
-        ]
-    if isinstance(message.get("tokens"), dict):
-        out["tokens"] = {str(k): v for k, v in message["tokens"].items()
-                         if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        todos = []
+        for item in message["todos"]:
+            if not isinstance(item, dict):
+                continue
+            if len(todos) >= _SHARED_TODOS_MAX:
+                truncated = True
+                continue
+            todo_content, omitted = _shared_text_projection(
+                item.get("content"), _SHARED_TODO_TEXT_MAX_CHARS)
+            truncated = truncated or omitted
+            status = item.get("status")
+            todos.append({"content": todo_content,
+                          "status": (status if isinstance(status, str)
+                                     and status in _SHARED_TODO_STATUSES else "pending")})
+        out["todos"] = todos
     if isinstance(message.get("activity"), list):
         activity = []
         for item in message["activity"]:
             if not isinstance(item, dict):
                 continue
             if item.get("type") == "text":
-                activity.append({"type": "text", "content": _shared_text(item.get("content"))})
-            elif item.get("type") == "tools":
-                activity.append({"type": "tools",
-                                 "labels": [_shared_text(v) for v in (item.get("labels") or [])]})
+                if len(activity) >= _SHARED_ITEMS_MAX:
+                    truncated = True
+                    continue
+                activity_content, omitted = _shared_text_projection(
+                    item.get("content"), _SHARED_ACTIVITY_TEXT_MAX_CHARS)
+                truncated = truncated or omitted
+                activity.append({"type": "text", "content": activity_content})
+            # ``activity.tools`` contains labels only, with no trustworthy tool id from which to choose
+            # a fixed public phrase.  Omit the segment instead of reflecting model/argument-derived text.
         out["activity"] = activity
-    return out
+    return out, truncated
+
+
+def _shared_message(message: dict) -> dict:
+    return _shared_message_projection(message)[0]
+
+
+def _complete_shared_messages(messages) -> list[dict]:
+    """The longest well-formed user->assistant prefix; never publish a staged, unanswered user turn."""
+    if not isinstance(messages, list):
+        return []
+    complete: list[dict] = []
+    pending = None
+    for message in messages:
+        if not isinstance(message, dict):
+            break
+        if pending is None:
+            if message.get("role") != "user":
+                break
+            pending = message
+        else:
+            if message.get("role") != "assistant":
+                break
+            complete.extend((pending, message))
+            pending = None
+    return complete
+
+
+def _shared_message_weight(message: dict) -> int:
+    total = _shared_units(message.get("content") or "")
+    for item in [*(message.get("steps") or []), *(message.get("applied") or [])]:
+        total += _shared_units(item.get("label") or "")
+    for item in message.get("todos") or []:
+        total += _shared_units(item.get("content") or "") + _shared_units(item.get("status") or "")
+    for item in message.get("activity") or []:
+        total += _shared_units(item.get("content") or "")
+    return total
+
+
+def _shared_text_structure_weight(value: str) -> int:
+    """Mirror the browser's conservative Markdown/DOM amplification estimate."""
+    total = 1  # one text/Markdown wrapper
+    for char in value:
+        if char in "\n\r":
+            total += 2
+        elif char in "*@[_`":
+            total += 1
+    return total
+
+
+def _shared_message_structure_weight(message: dict) -> int:
+    total = 6 + _shared_text_structure_weight(message.get("content") or "")
+    total += len(message.get("steps") or []) + len(message.get("applied") or [])
+    total += 2 * len(message.get("todos") or []) + 2 * len(message.get("activity") or [])
+    for item in message.get("activity") or []:
+        if item.get("type") == "text":
+            total += _shared_text_structure_weight(item.get("content") or "")
+        elif item.get("type") == "tools":
+            total += len(item.get("labels") or [])
+    return total
+
+
+def _shared_projection(messages, *, initial_text: int = 0) -> tuple[list[dict], bool]:
+    """Return the complete public projection plus any count/text/subitem-cap omission signal."""
+    complete = _complete_shared_messages(messages)
+    bounded = complete[:_SHARED_MESSAGES_MAX]
+    truncated = len(bounded) < len(complete)
+    projected: list[dict] = []
+    total = max(0, initial_text)
+    structure = 0
+    for index in range(0, len(bounded), 2):
+        pair_with_status = [_shared_message_projection(_sanitize_assistant_message(message))
+                            for message in bounded[index:index + 2]]
+        pair = [message for message, _omitted in pair_with_status]
+        if any(omitted for _message, omitted in pair_with_status):
+            truncated = True
+        weight = sum(_shared_message_weight(message) for message in pair)
+        pair_structure = sum(_shared_message_structure_weight(message) for message in pair)
+        if (total + weight > _SHARED_TOTAL_TEXT_MAX_CHARS
+                or structure + pair_structure > _SHARED_STRUCTURE_MAX):
+            truncated = True
+            break
+        projected.extend(pair)
+        total += weight
+        structure += pair_structure
+    return projected, truncated
+
+
+def _project_shared_messages(messages, *, initial_text: int = 0) -> list[dict]:
+    return _shared_projection(messages, initial_text=initial_text)[0]
+
+
+def _shared_title(messages: list[dict]) -> str:
+    if (messages and messages[0].get("role") == "user"
+            and isinstance(messages[0].get("content"), str)):
+        visible = " ".join(_shared_visible_content(messages[0]).split())
+        if visible:
+            return visible[:SHARE_TITLE_MAX_CHARS]
+    return "Shared chat"
 
 
 def build_router(srv) -> APIRouter:
@@ -136,7 +327,9 @@ def build_router(srv) -> APIRouter:
     # REAL result). "allow_always" is exact-action/scope, mode, and turn-epoch bound — never a broad
     # session→tool-kind bypass.
     _perm_lock = threading.Lock()
-    _delete_lock = threading.Lock()  # retries of the same idempotent DELETE must not race rmtree
+    # Share mint/revoke and deletion change one authorization lifecycle.  A single order here prevents
+    # a mint racing past DELETE's active-link check or an Unshare being lost behind a concurrent mint.
+    _session_lifecycle_lock = threading.RLock()
     _perm_reqs: dict = {}
     _perm_always = RememberedGrantStore()
     _asst_progress: dict = {}      # sid -> {steps:[label,…], updated} — live tool steps during a turn
@@ -144,6 +337,12 @@ def build_router(srv) -> APIRouter:
     _asst_turn_done: dict = {}     # sid -> threading.Event — deletion waits for the worker to quiesce
     _asst_epoch: dict = {}         # sid -> opaque random epoch owned by the active cancel event
     _deleting_sessions: set[str] = set()  # closes get→turn races while DELETE owns the session
+    # A share fence is intentionally only a tiny registry flag. Snapshot capture/projection and the
+    # capability-store fsync can be slow, so they must not hold ``_perm_lock`` and stall permission,
+    # progress, Stop, or unrelated chats. A fenced session cannot claim a new turn until mint either
+    # commits or rolls back; lifecycle operations serialize outside this registry via
+    # ``_session_lifecycle_lock`` (lock order is always lifecycle -> registry, never the reverse).
+    _share_fenced_sessions: set[str] = set()
     try:
         _configured_perm_timeout = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
     except (TypeError, ValueError):
@@ -154,6 +353,46 @@ def build_router(srv) -> APIRouter:
     _PERM_TIMEOUT = min(3600.0, max(1.0, _PERM_TIMEOUT))
     _SENSITIVE_SCOPE_KEY = re.compile(
         r"token|secret|credential|password|passwd|api[_-]?key|content|preview", re.I)
+
+    def _share_http_error(status_code: int, code: str, message: str, *, remediation: str = "",
+                          **extra) -> HTTPException:
+        detail = {"code": code, "message": message}
+        if remediation:
+            detail["remediation"] = remediation
+        detail.update(extra)
+        return HTTPException(status_code=status_code, detail=detail)
+
+    def _acknowledged_live_share_ids(body: dict) -> frozenset[str]:
+        raw = body.get("acknowledged_live_share_ids", [])
+        if not isinstance(raw, list) or len(raw) > SHARE_MAX_RECORDS:
+            raise _share_http_error(
+                400, "assistant_live_share_ack_invalid",
+                f"acknowledged_live_share_ids must be a list of at most {SHARE_MAX_RECORDS} ids.")
+        acknowledged: set[str] = set()
+        for value in raw:
+            if (not isinstance(value, str) or len(value) != 32
+                    or _SHARE_ID_RE.fullmatch(value) is None
+                    or value in acknowledged):
+                raise _share_http_error(
+                    400, "assistant_live_share_ack_invalid",
+                    "acknowledged_live_share_ids must contain unique lowercase capability ids.")
+            acknowledged.add(value)
+        return frozenset(acknowledged)
+
+    def _live_share_ack_required(active_count: int) -> HTTPException:
+        return _share_http_error(
+            409, "assistant_live_share_ack_required",
+            "The live public-link state changed before this message could be saved.",
+            remediation="Refresh the chat, review its live-link warning, and send again.",
+            active_live_share_count=max(0, int(active_count)))
+
+    def _rollback_share_token(token: str) -> None:
+        # The token has not crossed the response boundary yet.  Best-effort revocation makes a meta
+        # write failure atomic from the caller's perspective without letting rollback mask that error.
+        try:
+            _shares.revoke_token(token)
+        except Exception:  # noqa: BLE001 - do not expose an unpublished capability on rollback failure
+            pass
 
     def _public_scope(scope: object) -> dict:
         """Keep the exact digest private while exposing only bounded, redacted review metadata."""
@@ -265,6 +504,11 @@ def build_router(srv) -> APIRouter:
         with _perm_lock:
             if sid in _deleting_sessions:
                 raise HTTPException(409, "this session is being deleted")
+            if sid in _share_fenced_sessions:
+                raise HTTPException(409, {
+                    "code": "assistant_turn_share_in_progress",
+                    "message": "A public snapshot is being created for this chat. Try sending again in a moment.",
+                })
             existing = _asst_cancel.get(sid)
             # A set cancel flag means "stopping", not "finished": the old worker may still be inside
             # an uninterruptible model/tool call and may already own a durable run command.  Keep the
@@ -449,7 +693,24 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/assistant/sessions")
     def assistant_sessions():
-        return {"sessions": _asst.list()}
+        # ``meta.shared`` is only a legacy hint and can remain true after expiry or a failed cleanup.
+        # Derive all badges from active validated capability records, without returning a token/hash.
+        with _session_lifecycle_lock:
+            try:
+                summary = _shares.active_summary_by_session()
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            sessions = []
+            for meta in _asst.list():
+                active = summary.get(meta.get("id"), {})
+                count = int(active.get("share_count") or 0)
+                sessions.append({**meta, "shared": count > 0, "share_count": count,
+                                 "share_ids": list(active.get("share_ids") or []),
+                                 "live_share_ids": list(active.get("live_share_ids") or []),
+                                 "share_live": bool(active.get("share_live")) if count else False,
+                                 "share_expires_at": (active.get("share_expires_at")
+                                                      if count else None)})
+        return {"sessions": sessions}
 
     @router.post("/api/assistant/sessions")
     async def assistant_create(request: Request):
@@ -460,13 +721,27 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/assistant/sessions/{sid}")
     def assistant_get(sid: str):
-        try:
-            sess = _asst.get(sid)
-        except ValueError:
-            raise HTTPException(404, "no such session")
-        if sess is None:
-            raise HTTPException(404, "no such session")
-        sess = {**sess, "messages": [_sanitize_assistant_message(m) for m in sess["messages"]]}
+        with _session_lifecycle_lock:
+            try:
+                sess = _asst.get(sid)
+            except ValueError:
+                raise HTTPException(404, "no such session")
+            if sess is None:
+                raise HTTPException(404, "no such session")
+            try:
+                active = _shares.active_for_session(sid)
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            share_count = len(active)
+            share_expires_at = max(
+                (record["expires_at"] for record in active), default=None)
+            meta = {**sess["meta"], "shared": share_count > 0, "share_count": share_count,
+                    "share_ids": [record["id"] for record in active],
+                    "live_share_ids": [record["id"] for record in active if record["live"]],
+                    "share_expires_at": share_expires_at,
+                    "share_live": any(record["live"] for record in active)}
+            sess = {**sess, "meta": meta,
+                    "messages": [_sanitize_assistant_message(m) for m in sess["messages"]]}
         return sess
 
     @router.delete("/api/assistant/sessions/{sid}")
@@ -476,24 +751,58 @@ def build_router(srv) -> APIRouter:
             d = _asst._sdir(sid)
         except ValueError:
             raise HTTPException(404, "no such session")
-        with _delete_lock:
+        # Establish deletion ownership and cancel the worker while lifecycle excludes share mint and
+        # turn claim.  The potentially long worker wait happens *outside* lifecycle: reply persistence
+        # now needs that lock for its final capability check, so waiting while holding it would make
+        # DELETE and the worker deadlock until timeout.  `_deleting_sessions` closes both races while
+        # the lock is released.
+        with _session_lifecycle_lock:
+            try:
+                active_shares = _shares.active_for_session(sid)
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            if active_shares:
+                raise _share_http_error(
+                    409, "assistant_delete_shared",
+                    "This chat still has active public share links.",
+                    remediation="Unshare the chat, then delete it.",
+                    active_share_count=len(active_shares))
             # Stop an in-flight turn before removing its files: cancel the loop, unblock a worker parked
             # on a confirm, and prevent a request that already read the session from claiming a new turn.
             # Waiting for the worker closes the mutation-journal/reply race that could recreate material
             # after rmtree and turn a reported success into a partial deletion.
             with _perm_lock:
+                if sid in _deleting_sessions:
+                    raise HTTPException(409, {
+                        "code": "assistant_delete_busy",
+                        "message": "This chat is already being deleted. Try again shortly.",
+                    })
                 _deleting_sessions.add(sid)
                 cev = _asst_cancel.get(sid)
                 done = _asst_turn_done.get(sid)
                 if cev is not None:
                     cev.set()
                 _deny_session_perms_locked(sid)
-            try:
-                if cev is not None and (done is None or not done.wait(timeout=5.0)):
-                    raise HTTPException(409, {
-                        "code": "assistant_delete_busy",
-                        "message": "The live Assistant turn is still stopping. Try deleting this chat again shortly.",
-                    })
+        try:
+            if cev is not None and (done is None or not done.wait(timeout=5.0)):
+                raise HTTPException(409, {
+                    "code": "assistant_delete_busy",
+                    "message": "The live Assistant turn is still stopping. Try deleting this chat again shortly.",
+                })
+            with _session_lifecycle_lock:
+                # Defense in depth for another process/store writer: in-process share creation has
+                # already been fenced by `_deleting_sessions`, but never delete after a capability
+                # appeared while lifecycle was released for worker quiescence.
+                try:
+                    active_shares = _shares.active_for_session(sid)
+                except ShareError as exc:
+                    raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+                if active_shares:
+                    raise _share_http_error(
+                        409, "assistant_delete_shared",
+                        "This chat gained an active public share link while deletion was waiting.",
+                        remediation="Unshare the chat, then delete it.",
+                        active_share_count=len(active_shares))
                 if d.exists():
                     try:
                         shutil.rmtree(d)
@@ -518,9 +827,9 @@ def build_router(srv) -> APIRouter:
                     for k in [k for k, r in _perm_reqs.items()
                               if r.get("session") == sid and r.get("status") != "pending"]:
                         _perm_reqs.pop(k, None)
-            finally:
-                with _perm_lock:
-                    _deleting_sessions.discard(sid)
+        finally:
+            with _perm_lock:
+                _deleting_sessions.discard(sid)
         return {"ok": True}
 
     @router.post("/api/assistant/sessions/{sid}/share")
@@ -536,48 +845,132 @@ def build_router(srv) -> APIRouter:
         link follow the conversation?": the default false FREEZES it at the turns that exist now, so
         continuing to talk cannot retroactively publish what comes next."""
         body = await _json_options(request)
-        try:
-            sess = _asst.get(sid)
-        except ValueError:
-            raise HTTPException(404, "no such session")
-        if sess is None:
-            raise HTTPException(404, "no such session")
         live = body.get("live", False)
         if not isinstance(live, bool):
-            raise HTTPException(400, "live must be a boolean")
-        try:
-            token, record = _shares.create(
-                sid, message_count=len(sess["messages"]), live=live,
-                ttl_seconds=body.get("ttl_seconds", SHARE_DEFAULT_TTL_SECONDS))
-        except ShareError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        # `shared` stays on the meta purely so the owner's session list can show that a link exists
-        # (and offer to revoke it). It is no longer what authorizes a read.
-        _asst.update_meta(sid, shared=True)
+            raise _share_http_error(400, "assistant_share_invalid", "live must be a boolean")
+        with _session_lifecycle_lock:
+            # Install a per-session fence in one short registry transaction. It prevents a turn from
+            # staging its user message between our active-turn check and frozen ``upto`` while leaving
+            # the global permission/progress/cancel registry available during transcript reads,
+            # projection, capability-store fsync, and the legacy meta write.
+            with _perm_lock:
+                if sid in _deleting_sessions:
+                    raise _share_http_error(
+                        409, "assistant_share_session_deleting", "This chat is being deleted.",
+                        remediation="Wait for deletion to finish.")
+                if _asst_cancel.get(sid) is not None:
+                    raise _share_http_error(
+                        409, "assistant_share_turn_active",
+                        "A reply is still being generated for this chat.",
+                        remediation="Wait for the reply to finish or stop it before sharing.")
+                _share_fenced_sessions.add(sid)
+            try:
+                try:
+                    meta = _asst.validated_meta(sid)
+                except ValueError:
+                    raise _share_http_error(404, "assistant_session_not_found", "No such chat.")
+                if meta is None:
+                    raise _share_http_error(404, "assistant_session_not_found", "No such chat.")
+                # Apply physical row/aggregate limits before JSON materialization.  The old owner
+                # `_asst.get` path parsed every hidden/raw field first, so a hand-edited oversized
+                # transcript could exhaust the server merely by clicking Share.
+                bounded = _asst.bounded_complete_messages(
+                    sid, upto=None, max_messages=_SHARED_MESSAGES_MAX,
+                    max_line_bytes=_SHARED_READ_MAX_LINE_BYTES,
+                    max_total_bytes=_SHARED_READ_MAX_TOTAL_BYTES,
+                    report_incomplete=True)
+                if bounded is None:
+                    raise _share_http_error(
+                        503, "assistant_share_transcript_unavailable",
+                        "The chat transcript could not be read safely.",
+                        remediation="Try sharing again.")
+                complete, read_truncated, incomplete = bounded
+                if incomplete:
+                    raise _share_http_error(
+                        409, "assistant_share_turn_incomplete",
+                        "This chat ends with an incomplete Assistant turn.",
+                        remediation="Finish or recover the pending reply before sharing.")
+                share_title = _shared_title(complete)
+                public_title = _shared_text(share_title, SHARE_TITLE_MAX_CHARS)
+                _, projection_truncated = _shared_projection(
+                    complete, initial_text=_shared_units(public_title))
+                if not live:
+                    if read_truncated or projection_truncated:
+                        raise _share_http_error(
+                            413, "assistant_share_snapshot_too_large",
+                            "This chat is too large for a complete frozen public snapshot.",
+                            remediation="Create an explicitly live link or share a shorter chat.")
+                try:
+                    token, record = _shares.create(
+                        sid, message_count=len(complete), title=share_title, live=live,
+                        ttl_seconds=body.get("ttl_seconds", SHARE_DEFAULT_TTL_SECONDS))
+                except ShareError as exc:
+                    raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+                except OSError as exc:
+                    raise _share_http_error(
+                        503, "assistant_share_unavailable",
+                        "The public link store is unavailable. No link was published.",
+                        remediation="Try sharing again.") from exc
+                # This field remains a backward-compatible hint only.  If its write fails, invalidate
+                # the unpublished capability; the authoritative owner list is derived from ShareStore.
+                try:
+                    updated = _asst.update_meta(sid, shared=True)
+                except Exception as exc:  # noqa: BLE001 - disk/meta failures become a typed public error
+                    _rollback_share_token(token)
+                    raise _share_http_error(
+                        503, "assistant_share_metadata_unavailable",
+                        "The share could not be recorded safely. No link was published.",
+                        remediation="Try sharing again.") from exc
+                if updated is None:
+                    _rollback_share_token(token)
+                    raise _share_http_error(404, "assistant_session_not_found", "No such chat.")
+            finally:
+                with _perm_lock:
+                    _share_fenced_sessions.discard(sid)
         return {"ok": True, "url": f"#/assistant/shared/{token}", "session": sid,
+                "share_id": record["id"],
                 "expires_at": record["expires_at"], "live": record["live"]}
 
     @router.delete("/api/assistant/sessions/{sid}/share")
     def assistant_unshare(sid: str):
         """Revoke every link for this chat. Revocation exists so taking a share back does not mean
-        deleting the conversation; a revoked record is kept (not removed) so replaying the old token
-        keeps resolving to nothing instead of hitting a fresh link that reused its id."""
-        try:
-            _asst._sdir(sid)
-        except ValueError:
-            raise HTTPException(404, "no such session")
-        revoked = _shares.revoke_session(sid)
-        _asst.update_meta(sid, shared=False)
+        deleting the conversation; a bounded tombstone window keeps stale tokens resolving to nothing,
+        and any future id reuse still carries an unrelated fresh secret."""
+        with _session_lifecycle_lock:
+            try:
+                _asst._sdir(sid)
+            except ValueError:
+                raise _share_http_error(404, "assistant_session_not_found", "No such chat.")
+            try:
+                revoked = _shares.revoke_session(sid)
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            except OSError as exc:
+                raise _share_http_error(
+                    503, "assistant_unshare_unavailable",
+                    "The public links could not all be revoked safely.",
+                    remediation="Try unsharing again.") from exc
+            # Revocation is authoritative.  Never turn a successful revoke into an ambiguous failure
+            # merely because the legacy display hint could not be updated.
+            try:
+                _asst.update_meta(sid, shared=False)
+            except OSError:
+                pass
         return {"ok": True, "revoked": revoked}
 
     @router.get("/api/assistant/sessions/{sid}/shares")
     def assistant_shares(sid: str):
         """The owner's view of this chat's live links — never the tokens, only their terms."""
-        try:
-            _asst._sdir(sid)
-        except ValueError:
-            raise HTTPException(404, "no such session")
-        return {"shares": _shares.active_for_session(sid)}
+        with _session_lifecycle_lock:
+            try:
+                _asst._sdir(sid)
+            except ValueError:
+                raise _share_http_error(404, "assistant_session_not_found", "No such chat.")
+            try:
+                shares = _shares.active_for_session(sid)
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            return {"shares": shares}
 
     def _assistant_shared(token: str):
         record = _shares.resolve(token)
@@ -585,29 +978,37 @@ def build_router(srv) -> APIRouter:
             # One indistinguishable answer for unknown, expired, revoked and wrong-secret. Anything
             # more specific turns this public route into an oracle for which chats exist.
             raise HTTPException(404, "not shared")
-        try:
-            sess = _asst.get(record["session"])
-        except ValueError:
+        bounded = _asst.bounded_complete_messages(
+            record["session"], upto=record.get("upto"), max_messages=_SHARED_MESSAGES_MAX,
+            max_line_bytes=_SHARED_READ_MAX_LINE_BYTES,
+            max_total_bytes=_SHARED_READ_MAX_TOTAL_BYTES)
+        if bounded is None:
             raise HTTPException(404, "not shared")
-        if sess is None:
-            raise HTTPException(404, "not shared")
-        messages = sess["messages"]
-        upto = record.get("upto")
-        if upto is not None:
-            # A snapshot share is frozen at mint time: later turns are simply not part of what the
-            # owner published, so they never reach the wire.
-            messages = messages[:int(upto)]
+        messages, read_truncated = bounded
         # The shared route is intentionally untokened beyond the capability itself. Return only what
         # the read-only transcript renders; never expose raw prompts, diff previews, absolute paths,
         # refs, or launch proposals. Sanitize FIRST (like the owner GET at assistant_get): a legacy
         # raw failure bubble embeds the provider request URL / routed model / account id, which
         # redact_secrets does NOT strip — so without this the PUBLIC share leaks provider metadata
         # the authenticated route already hides.
-        meta = {"shared": True, "live": bool(record.get("live")),
-                "expires_at": record.get("expires_at"),
-                "title": _shared_text(sess["meta"].get("title") or "Shared chat")}
-        return {"meta": meta,
-                "messages": [_shared_message(_sanitize_assistant_message(m)) for m in messages]}
+        public_title = _shared_text(record["title"], SHARE_TITLE_MAX_CHARS)
+        projected, projection_truncated = _shared_projection(
+            messages, initial_text=_shared_units(public_title))
+        truncated = read_truncated or projection_truncated
+        payload = {"meta": {"shared": True, "live": record["live"],
+                            "expires_at": record["expires_at"],
+                            "truncated": truncated,
+                            # Titles are frozen from visible shared content at mint; mutable owner meta
+                            # can be derived from raw attachment instructions and is never public.
+                            "title": public_title},
+                   "messages": projected}
+        # Projection can be non-trivial.  Re-authenticate at the last possible point so an Unshare or
+        # expiry that landed while we read/redacted the transcript cannot return a stale authorized DTO.
+        confirmed = _shares.resolve(token)
+        identity = ("id", "session", "created_at", "expires_at", "live", "upto", "title")
+        if confirmed is None or any(confirmed.get(key) != record.get(key) for key in identity):
+            raise HTTPException(404, "not shared")
+        return payload
 
     @router.get("/api/assistant/shared")
     def assistant_shared_header(request: Request):
@@ -619,11 +1020,6 @@ def build_router(srv) -> APIRouter:
         token = request.headers.get(ASSISTANT_SHARE_HEADER, "")
         if not token:
             raise HTTPException(404, "not shared")
-        return _assistant_shared(token)
-
-    @router.get("/api/assistant/shared/{token}")
-    def assistant_shared_legacy(token: str):
-        # Backward-compatible API for older clients. The current UI uses the header route above.
         return _assistant_shared(token)
 
     @router.post("/api/assistant/sessions/{sid}/fork")
@@ -641,13 +1037,15 @@ def build_router(srv) -> APIRouter:
         """Everything a turn does BEFORE the model runs, for both endpoints: session fetch/404,
         empty-message check, history snapshot, mode normalization, claiming the single active-turn
         slot, persisting the user turn (with `raw`) and resolving settings. Returns the pinned
-        instruction/mode, prior history, turn owner, settings, turn id, and recovery flag."""
+        instruction/mode, prior history, turn owner, settings, turn id, recovery flag, and the live
+        capabilities explicitly acknowledged for reply-persistence fencing."""
         instruction = (body.get("instruction") or body.get("content") or "").strip()
         # `display` (optional) is the CLEAN text the user typed; `instruction` may carry an invisible
         # UI-context preamble (open run, #experiments, files) for the model. Persist the clean bubble so
         # a page reload doesn't reveal the preamble; the model still receives the full instruction.
         display = (body.get("display") or "").strip()
         mode = body.get("mode")
+        acknowledged_live_ids = _acknowledged_live_share_ids(body)
         try:
             sess = _asst.get(sid)
         except ValueError:
@@ -664,7 +1062,21 @@ def build_router(srv) -> APIRouter:
         # per session across BOTH endpoints. The cancel event makes the turn interruptible (Stop).
         cancel_ev = threading.Event()
         turn_epoch = secrets.token_hex(16)
-        _acquire_turn(sid, cancel_ev, turn_epoch)
+        # A temporarily unreadable capability store must not look private while accepting a durable
+        # reply: an older live link could become readable again and publish that reply after recovery.
+        # Serialize the strict store read with share/unshare/delete, then claim the turn while still
+        # holding lifecycle (the established order is lifecycle -> permission registry). Once claimed,
+        # a concurrent share sees the active turn and cannot slip between this check and the append.
+        with _session_lifecycle_lock:
+            try:
+                active_shares = _shares.active_for_session(sid)
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            current_live_ids = frozenset(
+                record["id"] for record in active_shares if record["live"])
+            if acknowledged_live_ids != current_live_ids:
+                raise _live_share_ack_required(len(current_live_ids))
+            _acquire_turn(sid, cancel_ev, turn_epoch)
         # Own the slot from here: any failure BEFORE the background work takes over must release it, or
         # the session wedges at 409 forever. `_asst.append` raises ValueError if a concurrent DELETE
         # rmtree'd the session dir between `_asst.get` above and here; `_llm_settings` can also raise.
@@ -726,7 +1138,8 @@ def build_router(srv) -> APIRouter:
         except Exception:
             _release_turn(sid, cancel_ev, turn_epoch)
             raise
-        return instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn, turn_epoch
+        return (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn, turn_epoch,
+                current_live_ids)
 
     def _make_progress_hooks(sid: str, cancel_ev: "threading.Event", q=None):
         """The per-turn `on_step`/`on_todos` callbacks. `q` (stream endpoint only) additionally mirrors
@@ -758,8 +1171,30 @@ def build_router(srv) -> APIRouter:
 
         return _on_step, _on_todos
 
+    def _append_reply_if_share_safe(sid: str, turn: dict, *, expected_len: int,
+                                    begin_live_ids: frozenset[str]) -> bool:
+        """Append only while the capability store remains authoritative for this turn.
+
+        Share creation is fenced while a turn is active, but a revoke/expiry may legitimately remove
+        acknowledged ids.  Therefore the current live set may shrink; it must never gain an
+        unacknowledged id.  If a live capability existed at begin, disappearance of the whole store is
+        ambiguous rather than proof of revocation and must leave the staged user turn recoverable.
+        """
+        with _session_lifecycle_lock:
+            try:
+                active_shares = _shares.active_for_session(
+                    sid, require_store=bool(begin_live_ids))
+            except ShareError as exc:
+                raise _share_http_error(exc.status_code, exc.code, str(exc)) from exc
+            current_live_ids = frozenset(
+                record["id"] for record in active_shares if record["live"])
+            if not current_live_ids.issubset(begin_live_ids):
+                raise _live_share_ack_required(len(current_live_ids))
+            return _asst.append_if_len(sid, turn, expected_len=expected_len)
+
     def _finish_turn(sid: str, history: list, instruction: str, client, res: dict,
-                     best_effort_persist: bool, cancelled=None) -> dict:
+                     best_effort_persist: bool, begin_live_ids: frozenset[str],
+                     cancelled=None) -> dict:
         """Everything a turn does AFTER the model ran, for both endpoints: token accounting, the
         stale-reply-safe conditional append, and first-turn titling. `best_effort_persist` keeps the
         non-stream endpoint's swallow-and-return behavior; the stream worker lets a persistence error
@@ -771,19 +1206,21 @@ def build_router(srv) -> APIRouter:
             # turn (len(history)+1) — atomically. If the user cancelled and sent a newer message,
             # appending unconditionally would interleave the transcripts (u1,u2,a1,a2) and recoverReply
             # could finalize turn 2's placeholder with turn 1's stale reply — drop the stale reply.
-            ok = _asst.append_if_len(
+            ok = _append_reply_if_share_safe(
                 sid, {"role": "assistant", "content": res.get("reply", ""),
                       "error_kind": res.get("error_kind"),
                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
                       "tokens": res.get("tokens")},
-                expected_len=len(history) + 1)
+                expected_len=len(history) + 1, begin_live_ids=begin_live_ids)
             if not ok:
                 res["reply"] = ""   # dropped as stale; the job result / done event still returns
 
         if best_effort_persist:
             try:
                 _persist()
+            except HTTPException:
+                raise
             except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
                 pass
         else:
@@ -813,14 +1250,16 @@ def build_router(srv) -> APIRouter:
         504ing), then persists the assistant reply. Soft-fails offline."""
         body = await _json_object(request)
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
-         turn_epoch) = _begin_turn(sid, body)
+         turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         try:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
             failure = _safe_assistant_failure(e)
             try:
-                _asst.append(sid, {"role": "assistant", "content": failure["reply"],
-                                   "error_kind": failure["error_kind"]})
+                _append_reply_if_share_safe(
+                    sid, {"role": "assistant", "content": failure["reply"],
+                          "error_kind": failure["error_kind"]},
+                    expected_len=len(history) + 1, begin_live_ids=begin_live_ids)
             finally:
                 _release_turn(sid, cancel_ev, turn_epoch)
             return {"ok": False, **failure, "mode": eff_mode}
@@ -840,7 +1279,9 @@ def build_router(srv) -> APIRouter:
                                            mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
                                            mutation_recovery=recover_turn)
                 return _finish_turn(sid, history, instruction, client, res,
-                                    best_effort_persist=True, cancelled=cancel_ev.is_set)
+                                    best_effort_persist=True,
+                                    begin_live_ids=begin_live_ids,
+                                    cancelled=cancel_ev.is_set)
             finally:
                 _release_turn(sid, cancel_ev, turn_epoch)
 
@@ -854,7 +1295,7 @@ def build_router(srv) -> APIRouter:
         import queue as _queue
         body = await _json_object(request)
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
-         turn_epoch) = _begin_turn(sid, body)
+         turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()
         try:
             client = srv.make_llm_client(s)
@@ -864,8 +1305,12 @@ def build_router(srv) -> APIRouter:
             # since _begin_turn already appended the user turn before make_llm_client.
             failure = _safe_assistant_failure(e)
             try:
-                _asst.append(sid, {"role": "assistant", "content": failure["reply"],
-                                   "error_kind": failure["error_kind"]})
+                _append_reply_if_share_safe(
+                    sid, {"role": "assistant", "content": failure["reply"],
+                          "error_kind": failure["error_kind"]},
+                    expected_len=len(history) + 1, begin_live_ids=begin_live_ids)
+            except HTTPException:
+                raise
             except Exception:  # noqa: BLE001 - a concurrent session DELETE must not turn this into a 500
                 pass
             finally:
@@ -911,7 +1356,9 @@ def build_router(srv) -> APIRouter:
                                            mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
                                            mutation_recovery=recover_turn)
                 res = _finish_turn(sid, history, instruction, client, res,
-                                   best_effort_persist=False, cancelled=cancel_ev.is_set)
+                                   best_effort_persist=False,
+                                   begin_live_ids=begin_live_ids,
+                                   cancelled=cancel_ev.is_set)
                 q.put((SSE_DONE, {k: res.get(k) for k in
                                   ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
             except Exception as e:  # noqa: BLE001

@@ -1647,6 +1647,19 @@ export async function get(path, options = {}) {
 export const deadlineGet = (path, timeout = 8000, options) =>
   deadlineRequest(signal => get(path, { cache: 'no-store', ...options, signal }), timeout)
 
+// A public Assistant capability is a separate principal. Never pass it through `get()`: an owner
+// opening their own snapshot would otherwise send both the share bearer and X-LoopLab-Token to an
+// intentionally unauthenticated route. This helper has no caller-supplied header merge by design.
+export const deadlineSharedAssistant = (shareToken, timeout = 8000) => deadlineRequest(async signal => {
+  const path = '/api/assistant/shared'
+  const r = await fetch(apiUrl(path), {
+    method: 'GET', cache: 'no-store', credentials: 'omit', signal,
+    headers: { 'X-LoopLab-Share': String(shareToken || '') },
+  })
+  if (!r.ok) await _throw(r, path)
+  return r.json()
+}, timeout)
+
 const artifactGenerationQuery = expectedGeneration => {
   if (!validRunGeneration(expectedGeneration)) {
     throw runGenerationError(
@@ -2624,12 +2637,42 @@ const abortedAssistantStream = () => {
   return error
 }
 
-export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal, display = null) {
+const ASSISTANT_LIVE_SHARE_ACK_MAX = 4096
+const assistantLiveShareAckIds = value => {
+  if (!Array.isArray(value) || value.length > ASSISTANT_LIVE_SHARE_ACK_MAX) {
+    const error = new Error('Invalid Assistant live-share acknowledgement list')
+    error.code = 'assistant_live_share_ack_invalid'
+    throw error
+  }
+  const seen = new Set()
+  const ids = []
+  for (const id of value) {
+    if (typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id) || seen.has(id)) {
+      const error = new Error('Invalid Assistant live-share acknowledgement id')
+      error.code = 'assistant_live_share_ack_invalid'
+      throw error
+    }
+    seen.add(id)
+    ids.push(id)
+  }
+  return ids
+}
+
+export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal, display = null,
+  acknowledgedLiveShareIds = []) {
+  const body = {
+    instruction,
+    mode,
+    acknowledged_live_share_ids: assistantLiveShareAckIds(acknowledgedLiveShareIds),
+  }
+  if (display != null) body.display = display
   const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
     { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
       // Recovery must send the persisted clean display even when it happens to equal `instruction`:
-      // the explicit three-field body is the exact durable-turn contract, not a newly composed send.
-      body: JSON.stringify(display != null ? { instruction, display, mode } : { instruction, mode }), signal })
+      // the explicit body is the exact durable-turn contract, not a newly composed send. The live-share
+      // acknowledgement is always present (including an empty array) so legacy omission cannot bypass
+      // the server's compare-before-stage privacy precondition.
+      body: JSON.stringify(body), signal })
   if (!r.ok) { await _throw(r, 'message_stream'); return null }
   if (signal?.aborted) throw abortedAssistantStream()
   // A 2xx only proves that the turn may have been accepted. Without a readable stream there is no

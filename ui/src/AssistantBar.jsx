@@ -169,6 +169,61 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv int
 const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
 const NEW_CHAT_COMPOSER_KEY = '__new__'
 const newComposerDraft = () => ({ input: '', files: [] })
+const ASSISTANT_SHARE_ID_RE = /^[0-9a-f]{32}$/
+const ASSISTANT_SHARE_URL_RE = /^#\/assistant\/shared\/([0-9a-f]{32})\.([A-Za-z0-9_-]{43})$/
+const ASSISTANT_SHARE_IDS_MAX = 4096
+const validAssistantShareId = value => typeof value === 'string' && ASSISTANT_SHARE_ID_RE.test(value)
+const boundedAssistantShareIds = value => {
+  if (!Array.isArray(value) || value.length > ASSISTANT_SHARE_IDS_MAX) return null
+  const ids = []
+  const seen = new Set()
+  for (const id of value) {
+    if (!validAssistantShareId(id) || seen.has(id)) return null
+    seen.add(id); ids.push(id)
+  }
+  return ids
+}
+const assistantShareIds = meta => boundedAssistantShareIds(meta?.share_ids)
+const assistantLiveShareIds = meta => boundedAssistantShareIds(meta?.live_share_ids)
+const validAssistantShareMeta = meta => {
+  const ids = assistantShareIds(meta)
+  const liveIds = assistantLiveShareIds(meta)
+  const shareSet = ids == null ? null : new Set(ids)
+  if (ids == null || liveIds == null
+      || liveIds.some(id => !shareSet.has(id))
+      || typeof meta.shared !== 'boolean' || meta.shared !== (ids.length > 0)
+      || !Number.isInteger(meta.share_count) || meta.share_count !== ids.length
+      || typeof meta.share_live !== 'boolean' || meta.share_live !== (liveIds.length > 0)) return false
+  return ids.length
+    ? Number.isFinite(meta.share_expires_at) && meta.share_expires_at > 0
+    : meta.share_expires_at == null
+}
+const assistantLiveShareAckRequired = error => error?.status === 409
+  && error?.code === 'assistant_live_share_ack_required'
+const assistantLiveShareRecoveryFailure = {
+  message: 'Saved Assistant turn paused because the live public-link set changed. Verify its status, then retry this exact turn.',
+  notice: 'Saved Assistant turn paused · live public-link status changed',
+  blocked: false,
+}
+const assistantShareReceipt = (value, expectedSession) => {
+  const shareId = value?.share_id
+  const match = typeof value?.url === 'string' ? ASSISTANT_SHARE_URL_RE.exec(value.url) : null
+  const expiresAt = value?.expires_at
+  if (value?.ok !== true || String(value?.session || '') !== String(expectedSession || '')
+      || value?.live !== false || !validAssistantShareId(shareId) || match?.[1] !== shareId
+      || !Number.isFinite(expiresAt) || expiresAt <= 0) return null
+  return { shareId, relativeUrl: value.url, expiresAt }
+}
+const validAssistantShareFallback = value => {
+  if (!value || !validAssistantShareId(value.shareId) || !Number.isFinite(value.expiresAt)
+      || value.expiresAt <= 0 || typeof value.url !== 'string') return false
+  try {
+    const parsed = new URL(value.url)
+    const match = ASSISTANT_SHARE_URL_RE.exec(parsed.hash)
+    return parsed.origin === location.origin && parsed.pathname === location.pathname
+      && !parsed.search && match?.[1] === value.shareId
+  } catch { return false }
+}
 const ASSISTANT_OVERLAY_MAX_PX = 1439
 const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 880))
 const clampAssistantWidth = (value, compact = window.innerWidth <= ASSISTANT_OVERLAY_MAX_PX) => {
@@ -281,19 +336,22 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const sessionsRequestSeqRef = useRef(0)
   const sessionDeleteTombstonesRef = useRef(new Map())
   const mutateSessionsLocally = React.useCallback(update => {
-    // Share controls can be used while the first list read is still loading. An empty local array is
-    // not list truth in that state, so let the caller start a fresh authoritative read instead.
-    if (!sessionsLoadedRef.current) return false
     // A locally confirmed mutation is newer than every list read already in flight. Fence those
     // responses so a slow refresh cannot resurrect a deleted chat or undo share-state truth.
     sessionsRequestSeqRef.current += 1
     setSessions(update)
-    setSessionsStatus(current => current === 'stale' ? current : 'ready')
+    // assistantGet can already have supplied one authoritative session row while the complete list is
+    // still loading. Apply exact share/unshare/delete receipts to that known row, but do not label the
+    // partial array "ready" (or its empty remainder "No chats yet") until a list read has succeeded.
+    if (sessionsLoadedRef.current) {
+      setSessionsStatus(current => current === 'stale' ? current : 'ready')
+    }
     return true
   }, [])
   const [shareUnknownSids, setShareUnknownSids] = useState(() => new Set())
   const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
   const [shareBusySid, setShareBusySid] = useState(null)
+  const [shareAckNotice, setShareAckNotice] = useState(null)
   const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
 
@@ -398,6 +456,50 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return next
     })
   }, [])
+  const applyAssistantShareMeta = React.useCallback((sessionId, meta) => {
+    const id = String(sessionId || '')
+    if (!id || !meta || String(meta.id || '') !== id
+        || sessionDeleteTombstonesRef.current.has(id)) {
+      if (id && !sessionDeleteTombstonesRef.current.has(id)) setShareUnknown(id, true)
+      return false
+    }
+    const shareMetaValid = validAssistantShareMeta(meta)
+    setShareUnknown(id, !shareMetaValid)
+    if (shareMetaValid) {
+      setShareCopyFallbacks(current => {
+        const fallback = current[id]
+        if (!fallback || (validAssistantShareFallback(fallback)
+            && meta.share_ids.includes(fallback.shareId))) return current
+        const next = { ...current }
+        delete next[id]
+        return next
+      })
+    }
+    const sessionMeta = shareMetaValid ? meta : {
+      ...meta,
+      // Keep the transcript readable, but never render malformed capability metadata as private.
+      shared: true, share_count: 0, share_ids: [], live_share_ids: [],
+      share_expires_at: null, share_live: false,
+    }
+    setSessions(current => {
+      const index = current.findIndex(session => String(session.id || '') === id)
+      if (index < 0) return [sessionMeta, ...current]
+      const next = [...current]
+      next[index] = { ...next[index], ...sessionMeta }
+      return next
+    })
+    return shareMetaValid
+  }, [setShareUnknown])
+  const refreshSessionShareMeta = React.useCallback(async sessionId => {
+    try {
+      const session = await boundedRequest(signal => assistantGet(sessionId, { signal }))
+      if (!mountedRef.current) return null
+      return applyAssistantShareMeta(sessionId, session?.meta) ? session : null
+    } catch {
+      if (mountedRef.current) setShareUnknown(sessionId, true)
+      return null
+    }
+  }, [applyAssistantShareMeta, setShareUnknown])
   useEffect(() => {
     const accessKey = runId == null ? null : String(runId)
     setRunAccessState({ runId: accessKey, access: getRunAccess(runId) })
@@ -453,6 +555,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const result = await boundedRequest(signal => assistantSessions({ signal }))
       if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current) return null
       if (!Array.isArray(result?.sessions)) throw new Error('Invalid Assistant session list.')
+      if (!result.sessions.every(session => validAssistantShareMeta(session))) {
+        throw new Error('Invalid Assistant public-link state.')
+      }
       const returnedIds = new Set(result.sessions.map(session => String(session?.id || '')))
       for (const [id, state] of sessionDeleteTombstonesRef.current) {
         if (state === 'confirmed' && !returnedIds.has(id)) {
@@ -462,17 +567,51 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const visibleSessions = result.sessions.filter(
         session => !sessionDeleteTombstonesRef.current.has(String(session?.id || '')),
       )
+      const visibleById = new Map(visibleSessions.map(session => [String(session?.id || ''), session]))
+      // A successful list read is the authoritative share view. Resolve ambiguous timed-out share /
+      // unshare actions, and discard an in-memory copy once the server says that capability is no
+      // longer active (expired, revoked, or removed in another tab).
+      setShareUnknownSids(current => {
+        if (![...current].some(id => visibleById.has(String(id)))) return current
+        const next = new Set(current)
+        for (const id of current) if (visibleById.has(String(id))) next.delete(id)
+        return next
+      })
+      setShareCopyFallbacks(current => {
+        let next = current
+        for (const id of Object.keys(current)) {
+          const session = visibleById.get(String(id))
+          const fallback = current[id]
+          if (!validAssistantShareFallback(fallback)
+              || !session?.share_ids.includes(fallback.shareId)) {
+            if (next === current) next = { ...current }
+            delete next[id]
+          }
+        }
+        return next
+      })
       sessionsLoadedRef.current = true
       setSessions(visibleSessions)
       setSessionsStatus('ready')
       return visibleSessions
     } catch {
       if (!mountedRef.current || requestSeq !== sessionsRequestSeqRef.current) return null
+      if (sidRef.current) setShareUnknown(sidRef.current, true)
       setSessionsStatus(sessionsLoadedRef.current ? 'stale' : 'error')
       return null
     }
-  }, [])
-  useEffect(() => { if (view === 'full') refreshSessions() }, [view, refreshSessions])
+  }, [setShareUnknown])
+  // Share privacy terms matter even in the compact bar: a legacy/API-created live link follows new
+  // replies. Re-check on session switches in every surface, and still load the list for New chat.
+  useEffect(() => {
+    if (sid || view === 'full') refreshSessions()
+  }, [view, sid, refreshSessions])
+  useEffect(() => {
+    if (!sid) return undefined
+    const refreshOnFocus = () => refreshSessions()
+    window.addEventListener('focus', refreshOnFocus)
+    return () => window.removeEventListener('focus', refreshOnFocus)
+  }, [sid, refreshSessions])
 
   // Autoscroll ONLY when the user is already near the bottom — don't yank them back down while they've
   // scrolled up to read earlier turns during a streaming reply.
@@ -591,6 +730,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
       const arr = s.messages == null ? [] : s.messages
       if (!Array.isArray(arr)) throw new Error('Invalid Assistant session transcript')
+      // assistant_get carries authoritative public-link terms, so compact views can warn about a
+      // live link immediately instead of briefly treating an unloaded session list as private.
+      applyAssistantShareMeta(id, s.meta)
       if (observingLiveSession) {
         if (sidRef.current !== id) return { ok: false, sessionId: id, reason: 'superseded' }
         return { ok: true, sessionId: id, messages: arr, loaded: true }
@@ -638,12 +780,35 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           }
           const recovery = assistantRecoveryPayload(latestTurn)
           if (!recovery) { exactState = 'settled'; exactFailure = unavailableAssistantRecovery; return }
+          // The exact retry acknowledges only capabilities observed on this fresh assistant_get. A
+          // missing/malformed list is not equivalent to "private": pause without issuing the POST.
+          if (!applyAssistantShareMeta(id, latest.meta)) {
+            exactState = 'settled'
+            exactFailure = assistantLiveShareRecoveryFailure
+            setShareAckNotice({ sid: id,
+              message: 'Saved turn not retried · live public-link status could not be verified.' })
+            refreshSessions()
+            return
+          }
+          const acknowledgedLiveShareIds = assistantLiveShareIds(latest.meta)
           exactState = 'posted'
           recoveryCtrl = new AbortController(); abortRef.current = recoveryCtrl
           // Re-read above before POST: if the old worker persisted its reply after our first GET, this
           // path observes it instead of accidentally appending a fresh duplicate turn.
           assistantMessageStream(id, recovery.instruction, recovery.mode, {},
-            recoveryCtrl.signal, recovery.display).catch(error => {
+            recoveryCtrl.signal, recovery.display, acknowledgedLiveShareIds).catch(error => {
+            if (assistantLiveShareAckRequired(error)) {
+              exactState = 'settled'
+              exactFailure = assistantLiveShareRecoveryFailure
+              if (mountedRef.current) {
+                setShareUnknown(id, true)
+                setShareAckNotice({ sid: id,
+                  message: 'Saved turn not retried · live public-link state changed. Verify it, then retry.' })
+                refreshSessions()
+                refreshSessionShareMeta(id)
+              }
+              return
+            }
             exactFailure = assistantRecoveryFailure(error)
           })
         }
@@ -853,6 +1018,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     if (shareActionSessionRef.current === id) {
       return { message: 'Wait for the current share action before deleting this chat' }
     }
+    const listedSession = sessions.find(session => session.id === id)
+    if (listedSession?.shared || shareUnknownSids.has(id) || shareCopyFallbacks[id]) {
+      return { message: 'Unshare this chat before deleting it so every public link is explicitly revoked' }
+    }
     if (deletingSessionsRef.current.has(id)) return { duplicate: true }
     return null
   }
@@ -946,9 +1115,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           restored.splice(Math.min(deletedIndex, restored.length), 0, deletedSession)
           return restored
         })
+        const shared = finalError?.code === 'assistant_delete_shared'
         const incomplete = finalError?.code === 'assistant_delete_incomplete'
         const stillStopping = finalError?.code === 'assistant_delete_busy'
-        const message = stillStopping
+        const message = shared
+          ? 'This chat still has an active public link. Unshare it first, then delete the chat.'
+          : stillStopping
           ? 'The live Assistant turn is still stopping. The chat is shown again; try deleting it again shortly.'
           : incomplete
           ? 'The server could not completely remove the chat. Close anything using its files and try again.'
@@ -957,7 +1129,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             : finalAmbiguous
               ? 'Neither bounded deletion attempt was confirmed. The chat is shown again for safety; retry or refresh.'
               : 'The chat was not deleted. It is shown again; you can cancel or try again.'
-        flash(stillStopping ? 'Assistant work is still stopping'
+        flash(shared ? 'Unshare this chat before deleting it'
+          : stillStopping ? 'Assistant work is still stopping'
           : incomplete ? 'Assistant chat was not completely removed' : 'Could not confirm chat deletion')
         if (mountedRef.current) setDeleteConfirmError(message)
       }
@@ -966,6 +1139,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       deletingSessionsRef.current.delete(id)
       deleteConfirmBusyRef.current = false
       if (mountedRef.current) setDeleteConfirmBusy(false)
+      // A pre-list local receipt fences the older list request. Start a fresh authoritative read so
+      // deleting or restoring a known row cannot leave the session resource permanently "loading".
+      if (mountedRef.current && !sessionsLoadedRef.current) refreshSessions()
       if (deleted && mountedRef.current) {
         const focusAfterDelete = deleteFocusAfterRef.current
         deleteTriggerRef.current = null
@@ -1518,18 +1694,51 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // Stream one instruction to the assistant. `userText` = the bubble shown; `instruction` = what the
   // model receives (run context + attached files appended, not shown in the bubble).
   const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null,
-    retryFiles = null, turnMode = null, clearComposer = false } = {}) => {
+    retryFiles = null, turnMode = null, clearComposer = false, acknowledgedShareMeta = null } = {}) => {
+    if (shareBusySid != null || shareActionSessionRef.current) {
+      flash('Wait for the current public-link action before sending another turn')
+      return
+    }
+    const guardedSid = sidRef.current || sid
+    if (guardedSid && shareUnknownSids.has(guardedSid)) {
+      flash('Messaging paused · retry or revoke the unknown public-link state first')
+      return
+    }
     if (turnCaptureRef.current || runningRef.current) { flash('Assistant is busy'); return }
+    let acknowledgedLiveShareIds = []
+    if (guardedSid) {
+      // A recovery check may have fetched newer metadata in this same event turn, before React can
+      // publish setSessions. Prefer that exact GET receipt, but only for its matching session.
+      const guardedSession = acknowledgedShareMeta != null
+        ? (String(acknowledgedShareMeta?.id || '') === String(guardedSid)
+            ? acknowledgedShareMeta : null)
+        : sessions.find(session => String(session?.id || '') === String(guardedSid))
+      if (!guardedSession || !validAssistantShareMeta(guardedSession)) {
+        // Do not infer "no live links" from a missing/stale row. Refresh both authoritative views and
+        // require a deliberate second send after the exact capabilities are visible.
+        setShareUnknown(guardedSid, true)
+        setShareAckNotice({ sid: guardedSid,
+          message: 'Nothing sent · live public-link status must be verified first. Your draft is preserved.' })
+        refreshSessions()
+        refreshSessionShareMeta(guardedSid)
+        flash('Messaging paused · verifying live public-link status')
+        return
+      }
+      acknowledgedLiveShareIds = [...assistantLiveShareIds(guardedSession)]
+      setShareAckNotice(current => current?.sid === guardedSid ? null : current)
+    }
     turnCaptureRef.current = true
     if (ensureVisible && view === 'bar') setView('side')
     const wasBar = view === 'bar' && !ensureVisible
+    const previewAtSend = preview
+    const hasNewAtSend = hasNew
     setPreview(''); setHasNew(false)
     const draftAtSend = composerDraftRef.current
     const inputAtSend = draftAtSend.input
     const atts = retryFiles != null ? [...retryFiles] : [...draftAtSend.files]
     const effectiveMode = turnMode || mode
     const sessionSeq = openSessionSeqRef.current
-    let id = sid
+    let id = guardedSid
     if (!id) {
       // Create the session FIRST; only then clear the attached-file chips — else a create failure
       // strands the user with their files already gone.
@@ -1548,8 +1757,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }
     // Keep the exact composer intact if creating the session failed. After durable creation, clear
     // only what this send captured: typing or file reads completed during the request remain as a draft.
+    let inputCleared = false
     if (clearComposer && composerDraftRef.current === draftAtSend && draftAtSend.input === inputAtSend) {
       setInput('')
+      inputCleared = true
     }
     if (retryFiles == null) {
       updateComposerFiles(draftAtSend, current => current.filter(file => !atts.includes(file)))
@@ -1559,12 +1770,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const ctxInfo = { run: context?.run || null, refs: context?.refs || [], files: atts.map(a => a.name) }
     const hasCtx = ctxInfo.run || ctxInfo.refs.length || ctxInfo.files.length
     const fullInstruction = instruction + filePreamble(atts)
+    const localAttempt = {}
     atBottomRef.current = true          // sending my own message: always scroll it into view
     setMsgs(m => [...m, { role: 'user', content: userText || instruction, context: hasCtx ? ctxInfo : null,
                           retryPayload: { instruction, raw: fullInstruction.trim(),
                             userText: userText || instruction, context, files: atts,
-                            mode: effectiveMode, historyLength: m.length } },
-                        { role: 'assistant', content: '', streaming: true }])
+                            mode: effectiveMode, historyLength: m.length }, localAttempt },
+                        { role: 'assistant', content: '', streaming: true, localAttempt }])
     const priorLen = msgs.length + 2
     setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
@@ -1617,11 +1829,48 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           patchLast({ content: streamedFailure })
           flash(safeErrorNotice(e))
         }),
-      }, ctrl.signal, userText || instruction)   // persist the CLEAN bubble, not the ctx-augmented instruction
+      }, ctrl.signal, userText || instruction,
+      acknowledgedLiveShareIds)   // persist the CLEAN bubble, not the ctx-augmented instruction
       if (!mountedRef.current || sidRef.current !== id) return
       // Stop may race with a terminal frame. Even if the stream resolved first, the turn is cancelled:
       // do not overwrite the "(stopped)" bubble that stop() already wrote.
       if (!runningRef.current) return
+      if (res?.ok === false) {
+        // A terminal SSE error is not a completed assistant turn. In particular, the backend's final
+        // live-share fence can reject the assistant append after the user turn was durably staged.
+        // Reconcile by GET only; never turn this terminal frame into a new logical POST.
+        const failureText = streamedFailure || normalizedFailureText(res.error || 'assistant reply not saved')
+        try {
+          const session = await boundedRequest(signal => assistantGet(id, { signal }))
+          if (!mountedRef.current || sidRef.current !== id || !runningRef.current) return
+          const durableMessages = session.messages
+          if (!Array.isArray(durableMessages)) throw new Error('Invalid Assistant session transcript')
+          const shareMetaValid = applyAssistantShareMeta(id, session.meta)
+          const latest = durableMessages[durableMessages.length - 1]
+          if (durableMessages.length >= priorLen && latest?.role === 'assistant' && latest.content) {
+            setMsgs(durableMessages)
+            setPreview(previewText(latest.content)); setHasNew(wasBar)
+            return
+          }
+          if (danglingAssistantTurn(durableMessages)) {
+            setMsgs([...durableMessages, { role: 'assistant', content: failureText,
+              streaming: false, recovering: false, recoveryNeeded: true }])
+            setPreview(previewText(failureText)); setHasNew(wasBar)
+            const acknowledged = new Set(acknowledgedLiveShareIds)
+            const liveStateChanged = shareMetaValid
+              && assistantLiveShareIds(session.meta).some(shareId => !acknowledged.has(shareId))
+            if (liveStateChanged) {
+              setShareAckNotice({ sid: id,
+                message: 'Reply not saved · live public-link state changed. Verify it, then retry the original turn.' })
+              flash('Reply not saved · retry the original turn after reviewing the live public link')
+            } else flash('Assistant reply not saved · retry the original turn')
+            return
+          }
+        } catch { /* retain the optimistic user turn as recoverable below */ }
+        patchLast({ content: failureText, streaming: false, recovering: false, recoveryNeeded: true })
+        flash('Assistant reply could not be confirmed · check the saved turn before retrying')
+        return
+      }
       const rawReply = streamedFailure || (res && res.reply) || acc || (res && res.ok === false && res.error ? `Assistant error: ${res.error}` : '(no reply)')
       const reply = assistantErrorInfo(rawReply) ? normalizedFailureText(rawReply) : rawReply
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
@@ -1629,6 +1878,40 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                   error_kind: res && res.error_kind })
       setPreview(previewText(reply)); setHasNew(wasBar)
     } catch (e) {
+      if (assistantLiveShareAckRequired(e)) {
+        // The backend rejected this before staging a turn. Remove only this optimistic pair, restore
+        // what the send consumed, and never route the 409 through ambiguous-turn polling or auto-retry.
+        if (mountedRef.current) {
+          setShareUnknown(id, true)
+          if (inputCleared && inputAtSend) {
+            const currentInput = draftAtSend.input
+            const restoredInput = !currentInput ? inputAtSend
+              : currentInput === inputAtSend || currentInput.startsWith(`${inputAtSend}\n\n`)
+                ? currentInput : `${inputAtSend}\n\n${currentInput}`
+            draftAtSend.input = restoredInput
+            if (composerDraftRef.current === draftAtSend) setInputState(restoredInput)
+          }
+          if (retryFiles == null && atts.length) {
+            updateComposerFiles(draftAtSend, current => {
+              const names = new Set(current.map(file => file.name))
+              return [...current, ...atts.filter(file => !names.has(file.name))]
+            })
+          }
+          if (sidRef.current === id) {
+            setMsgs(current => current.filter(message => message.localAttempt !== localAttempt))
+            setPreview(previewAtSend); setHasNew(hasNewAtSend)
+          }
+          const restored = inputCleared || (retryFiles == null && atts.length > 0)
+          setShareAckNotice({ sid: id, message: restored
+            ? 'Nothing sent · live public-link state changed. Your draft was restored; verify the warning, then send again.'
+            : 'Nothing sent · live public-link state changed. Verify the warning, then retry the original turn.' })
+          flash(restored ? 'Nothing sent · draft restored after public-link state changed'
+            : 'Nothing sent · public-link state changed')
+          refreshSessions()
+          refreshSessionShareMeta(id)
+        }
+        return
+      }
       // Only our own AbortController proves a quiet local stop/unmount. A transport/runtime can also
       // label a remote reset AbortError; that ambiguous accepted turn still requires reconciliation.
       if (!mountedRef.current || sidRef.current !== id || ctrl.signal.aborted) { /* handled in finally */ }
@@ -1664,6 +1947,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     { userText: goal ? `/new ${goal}` : '/new', ensureVisible: true, ...options })
 
   const retryTurn = async (assistantIndex) => {
+    if (shareBusySid != null || shareActionSessionRef.current) {
+      flash('Wait for the current public-link action before retrying this turn')
+      return
+    }
+    const guardedSid = sidRef.current || sid
+    if (guardedSid && shareUnknownSids.has(guardedSid)) {
+      flash('Retry paused · retry or revoke the unknown public-link state first')
+      return
+    }
     if (busy || commandBusy) { flash(commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
     if (historical) { flash(readOnlyAction); return }
     const failedTurn = msgs[assistantIndex]
@@ -1673,6 +1965,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       flash('This saved turn cannot be retried safely; start a new chat')
       return
     }
+    let acknowledgedShareMeta = null
     if (failedTurn?.recoveryNeeded) {
       const id = sidRef.current || sid
       if (!id) { flash('The saved Assistant session is no longer available'); return }
@@ -1682,6 +1975,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         // to the ordinary new-turn retry below.
         const session = await boundedRequest(signal => assistantGet(id, { signal }))
         if (!mountedRef.current || sidRef.current !== id) return
+        if (!applyAssistantShareMeta(id, session.meta)) {
+          setShareAckNotice({ sid: id,
+            message: 'Saved turn not retried · live public-link status could not be verified.' })
+          refreshSessions()
+          flash('Retry paused · verifying live public-link status')
+          return
+        }
+        acknowledgedShareMeta = session.meta
         const durableMessages = session.messages || []
         if (danglingAssistantTurn(durableMessages)) {
           await openSession(id, { recover: true })
@@ -1705,13 +2006,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const persisted = assistantRecoveryPayload(prior)
       if (!persisted) { flash('The saved Assistant turn cannot be retried safely'); return }
       runLLM(persisted.instruction, { userText: persisted.display, ensureVisible: true,
-        turnMode: persisted.mode })
+        turnMode: persisted.mode, acknowledgedShareMeta })
       return
     }
     if (prior.retryPayload) {
       const payload = prior.retryPayload
       runLLM(payload.instruction, { userText: payload.userText, ensureVisible: true,
-        context: payload.context || null, retryFiles: payload.files || [], turnMode: payload.mode || null })
+        context: payload.context || null, retryFiles: payload.files || [], turnMode: payload.mode || null,
+        acknowledgedShareMeta })
       return
     }
     if (prior.context?.files?.length) {
@@ -1723,7 +2025,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const contextRun = prior.context?.run || null
     const refs = Array.isArray(prior.context?.refs) ? prior.context.refs : []
     const ctx = uiRunContext(contextRun, refs)
-    runLLM(userText + ctx, { userText, ensureVisible: true, context: prior.context || null })
+    runLLM(userText + ctx, { userText, ensureVisible: true, context: prior.context || null,
+      acknowledgedShareMeta })
   }
 
   const openAssistantSettings = () => {
@@ -1734,6 +2037,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   const send = () => {
     if (historical) { flash(readOnlyAction); return }
+    if (shareBusySid != null || shareActionSessionRef.current) {
+      flash('Wait for the current public-link action before sending')
+      return
+    }
+    const guardedSid = sidRef.current || sid
+    if (guardedSid && shareUnknownSids.has(guardedSid)) {
+      flash('Messaging paused · retry or revoke the unknown public-link state first')
+      return
+    }
     const t = input.trim()
     const storedCommand = !!runId && (!!loadRunCommandLock(runId)
       || (!!loadAssistantRunTransport(runId) && !directFailure))
@@ -1907,8 +2219,54 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   if (hidden) return null
 
   // ── shared sub-renders ──────────────────────────────────────────────────────────────────────────
+  const currentSession = sessions.find(session => session.id === sid)
+  const shareUnknown = !!sid && shareUnknownSids.has(sid)
+  const shareCopy = sid ? shareCopyFallbacks[sid] || null : null
+  const currentShareAckNotice = shareAckNotice?.sid === sid ? shareAckNotice : null
+  const liveShareActive = currentSession?.share_live === true
+  const shareBusy = shareBusySid != null
+  const sharePaused = shareBusy || shareUnknown
+  const deletingCurrentSession = !!sid && deletingSessionsRef.current.has(sid)
+  const shareTurnIncomplete = busy || commandBusy || pending.length > 0
+    || runningRef.current || turnCaptureRef.current || msgs[msgs.length - 1]?.role === 'user'
+  const revokeCurrentShares = async () => {
+    const shareSid = sidRef.current || sid
+    if (!shareSid) return
+    if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
+    if (deletingSessionsRef.current.has(shareSid)) {
+      flash('This chat is being deleted')
+      return
+    }
+    shareActionSessionRef.current = shareSid
+    setShareBusySid(shareSid)
+    try {
+      const result = await boundedRequest(signal => assistantUnshare(shareSid, { signal }))
+      if (!mountedRef.current) return
+      setShareUnknown(shareSid, false)
+      clearShareCopy(shareSid)
+      mutateSessionsLocally(current => current.map(session => session.id === shareSid
+        ? { ...session, shared: false, share_count: 0,
+            share_ids: [], live_share_ids: [], share_expires_at: null, share_live: false } : session))
+      setShareAckNotice(current => current?.sid === shareSid ? null : current)
+      refreshSessions()
+      flash(result.revoked ? `Revoked ${result.revoked} link${result.revoked === 1 ? '' : 's'}.`
+        : 'No active links.')
+    } catch (error) {
+      if (!mountedRef.current) return
+      if (error?.status >= 400 && error.status < 500) flash('Revoke failed')
+      else {
+        setShareUnknown(shareSid, true)
+        refreshSessions()
+        flash('Revoke uncertain · retry to confirm')
+      }
+    } finally {
+      if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
+      if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
+    }
+  }
   const retryHandlerFor = (assistantIndex) => {
     if (historical) return null
+    if (sharePaused || shareActionSessionRef.current) return null
     if (msgs[assistantIndex]?.recoveryBlocked) return null
     const prior = [...msgs.slice(0, assistantIndex)].reverse().find(x => x.role === 'user')
     if (prior?.context?.files?.length && !prior.retryPayload) return null
@@ -1974,8 +2332,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   </div>
 
   const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
-    title={historical ? readOnlyShort : 'attach text file(s)'}
-    disabled={historical} onClick={() => fileRef.current?.click()}>
+    title={historical ? readOnlyShort : shareUnknown ? 'Messaging paused until public-link status is verified'
+      : shareBusy ? 'Wait for the current public-link action' : 'attach text file(s)'}
+    disabled={historical || sharePaused} onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
   // mode selector row — placed BELOW the input in the side + full composers.
@@ -1983,7 +2342,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     <div className="asst-modes">
       {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
         className={'asst-mode' + (x.id === mode ? ' on' : '')}
-        disabled={historical} title={historical ? readOnlyShort : x.hint}
+        disabled={historical || sharePaused} title={historical ? readOnlyShort
+          : shareUnknown ? 'Messaging paused until public-link status is verified' : x.hint}
         onClick={() => setMode(x.id)}>{x.label}</button>)}
     </div>
     <span className="asst-modehint muted">{activeMode.hint}</span>
@@ -2018,6 +2378,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         : staleDiagnostic
           ? 'Diagnostic link generation mismatch · Assistant paused. Open the current generation to continue.'
           : `History seq ${runAccess.seq} · Assistant paused. Return live to ask about or change this run.`}</div>}
+    {currentShareAckNotice && <div className="assistant-command-pending error" role="alert"
+      aria-live="assertive" aria-atomic="true">
+      <span>{currentShareAckNotice.message}</span>
+      <button type="button" className="btn sm ghost"
+        onClick={() => setShareAckNotice(current => current?.sid === sid ? null : current)}>
+        Dismiss
+      </button>
+    </div>}
     {(commandBusy || directFailure) && <div ref={commandStatusRef} tabIndex={-1}
       className={'assistant-command-pending' + (showDirectFailure ? ' error' : '')}
       role={directNeedsAlert ? 'alert' : 'status'} aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
@@ -2037,11 +2405,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
         aria-label="Assistant message" {...comboAria}
-        disabled={historical || commandBusy} onChange={changeInput} onKeyDown={onKey}
-        placeholder={historical ? readOnlyShort : placeholder} />
+        disabled={historical || commandBusy || sharePaused} onChange={changeInput} onKeyDown={onKey}
+        placeholder={historical ? readOnlyShort : shareUnknown
+          ? 'Public-link status unknown · messaging paused' : shareBusy
+            ? 'Finishing public-link action…' : placeholder} />
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
-        : <button className="btn sm primary" disabled={historical || commandBusy || (!input.trim() && files.length === 0)} onClick={send}>{commandBusy ? 'Waiting…' : 'Send'}</button>}
+        : <button className="btn sm primary"
+            disabled={historical || commandBusy || sharePaused || (!input.trim() && files.length === 0)}
+            onClick={send}>{shareUnknown ? 'Paused' : commandBusy || shareBusy ? 'Waiting…' : 'Send'}</button>}
     </div>
     {modeRow}
   </div>
@@ -2049,11 +2421,48 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const hiddenFileInput = <input ref={fileRef} type="file" multiple style={{ display: 'none' }}
     onChange={e => { onFiles(e.target.files); e.target.value = '' }} />
 
-  const currentSession = sessions.find(s => s.id === sid)
-  const shareUnknown = !!sid && shareUnknownSids.has(sid)
-  const shareCopy = sid ? shareCopyFallbacks[sid] || null : null
-  const shareBusy = shareBusySid != null
-  const deletingCurrentSession = !!sid && deletingSessionsRef.current.has(sid)
+  useEffect(() => {
+    const expiryMs = Number(currentSession?.share_expires_at) * 1000
+    if (!sid || !Number.isFinite(expiryMs) || expiryMs <= 0) return undefined
+    let timer = null
+    let cancelled = false
+    const arm = () => {
+      if (cancelled) return
+      const remaining = expiryMs - Date.now()
+      if (remaining <= 0) { refreshSessions(); return }
+      // Browsers cap one timeout at roughly 24.8 days; re-arm for longer (up to 90-day) links.
+      timer = window.setTimeout(arm, Math.min(remaining + 250, 2_147_000_000))
+    }
+    arm()
+    return () => { cancelled = true; if (timer != null) window.clearTimeout(timer) }
+  }, [sid, currentSession?.share_expires_at, refreshSessions])
+  useEffect(() => {
+    if (!sid || !shareCopy) return undefined
+    if (!validAssistantShareFallback(shareCopy)) {
+      clearShareCopy(sid)
+      setShareUnknown(sid, true)
+      refreshSessions()
+      return undefined
+    }
+    const expiryMs = shareCopy.expiresAt * 1000
+    let timer = null
+    let cancelled = false
+    const arm = () => {
+      if (cancelled) return
+      const remaining = expiryMs - Date.now()
+      if (remaining <= 0) {
+        // This exact capability is no longer copyable. Reconcile the session separately because a
+        // different frozen or live link may still be active for the same chat.
+        clearShareCopy(sid)
+        setShareUnknown(sid, true)
+        refreshSessions()
+        return
+      }
+      timer = window.setTimeout(arm, Math.min(remaining + 250, 2_147_000_000))
+    }
+    arm()
+    return () => { cancelled = true; if (timer != null) window.clearTimeout(timer) }
+  }, [sid, shareCopy, clearShareCopy, setShareUnknown, refreshSessions])
   return <>
     {hiddenFileInput}
     <output className="sr-only">
@@ -2076,14 +2485,32 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}
           aria-controls="assistant-command-listbox"
           aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
-          disabled={historical || commandBusy} onChange={changeInput} onKeyDown={onKey}
-          placeholder={historical ? readOnlyShort : runId
-            ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
-            : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
+          disabled={historical || commandBusy || sharePaused} onChange={changeInput} onKeyDown={onKey}
+          placeholder={historical ? readOnlyShort : shareUnknown
+            ? 'Public-link status unknown · messaging paused' : shareBusy
+              ? 'Finishing public-link action…' : runId
+                ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
+                : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
       </div>
       {attachBtn('cmdbar-attach')}
-      {busy
-        ? <span className="cmdbar-status thinking"><span className="cmdbar-pip" /> thinking…</span>
+      {shareUnknown
+        ? <span className="cmdbar-status thinking recovery error" role="alert"
+            aria-live="assertive" aria-atomic="true">
+            <span><span className="cmdbar-who">public-link status unknown</span> · messaging paused</span>
+            <button type="button" className="btn sm" onClick={refreshSessions}
+              disabled={shareBusy || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
+              Retry status
+            </button>
+            <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
+              disabled={shareBusy}>Unshare</button>
+          </span>
+        : busy
+        ? <span className={'cmdbar-status thinking' + (liveShareActive ? ' assistant-live-share' : '')}>
+            <span className="cmdbar-pip" />
+            {liveShareActive
+              ? <><span className="cmdbar-who">live public link</span> this reply remains public · thinking…</>
+              : ' thinking…'}
+          </span>
         : commandBusy
           ? <span ref={commandStatusRef} tabIndex={-1}
               className={'cmdbar-status thinking' + (canCheckDirect ? ' recovery' : '')}
@@ -2100,6 +2527,22 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 {canRetryDirect && <button className="btn sm" onClick={retryDirect}>Retry same command</button>}
                 <button className="btn sm ghost" onClick={dismissDirectFailure}>Dismiss</button>
               </span>
+          : currentShareAckNotice
+            ? <span className="cmdbar-status thinking recovery error" role="alert"
+                aria-live="assertive" aria-atomic="true">
+                <span><span className="cmdbar-who">nothing sent</span> · public-link state changed</span>
+                <button type="button" className="btn sm ghost"
+                  onClick={() => setShareAckNotice(current => current?.sid === sid ? null : current)}>
+                  Dismiss
+                </button>
+              </span>
+          : liveShareActive
+          ? <button className="cmdbar-status preview assistant-live-share" type="button"
+              title="This chat has a live public link. Open the full Assistant to revoke it."
+              onClick={openFull}>
+              <span className="cmdbar-who">live public link</span> new messages remain public
+              <span className="cmdbar-more"> ▸</span>
+            </button>
           : preview
           ? <button className="cmdbar-status preview" title="open the conversation" onClick={openSide}>
               <span className="cmdbar-who">assistant</span> {preview}<span className="cmdbar-more"> ▸</span></button>
@@ -2109,8 +2552,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {busy
         ? <button className="cmdbar-go stop" aria-label="Stop Assistant" title="stop the assistant" onClick={stop}>■</button>
         : <button className="cmdbar-go" aria-label="Send Assistant message"
-            title={commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort : 'send (Enter)'}
-            disabled={historical || commandBusy || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
+            title={shareUnknown ? 'Messaging paused until public-link status is verified'
+              : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort : 'send (Enter)'}
+            disabled={historical || commandBusy || sharePaused || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
       {visibleToast && <div className="cmdbar-toast" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
@@ -2131,6 +2575,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <b className="asst-drawer-ttl">Assistant</b>
         {ctxChip}
         {launchRecoveryButton}
+        {sid && (currentSession?.shared || shareCopy || shareUnknown)
+          && <button type="button" className={'btn sm assistant-share-state'
+            + (shareUnknown || liveShareActive ? ' warn' : '')}
+            title="Open the full Assistant to inspect or revoke public links"
+            onClick={openFull}>
+            {shareUnknown ? 'share status unknown · messaging paused' : liveShareActive
+              ? 'LIVE · new replies public' : 'snapshot public'}
+          </button>}
         <span className="spacer" style={{ flex: 1 }} />
         <button className="btn sm ghost" title="new chat" onClick={newChat}>＋ New</button>
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
@@ -2184,7 +2636,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               onClick={() => openSession(s.id)}>
               <span className="asst-sess-t">{s.title || 'Chat'}</span>
               <span className="asst-sess-m">{s.cleanup_required
-                ? 'Cleanup required · delete to retry' : fmtAgo(s.updated)}</span>
+                ? 'Cleanup required · delete to retry'
+                : s.shared
+                  ? `${Number(s.share_count) > 1 ? `${s.share_count} public links` : 'Public link'} ${s.share_live ? 'LIVE · new replies public' : 'active'}${s.share_expires_at ? ` · until ${fmtDate(s.share_expires_at)}` : ''}`
+                  : fmtAgo(s.updated)}</span>
             </button>
             <button type="button" className="asst-sess-x" onClick={(e) => requestDeleteSession(s, e)}
               aria-label={s.cleanup_required
@@ -2201,14 +2656,43 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           {sid && <button className="btn sm ghost" title="fork this chat into a new session" onClick={async () => {
             try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch { flash('Could not fork this Assistant chat') }
           }}>⑂ fork</button>}
+          {sid && (currentSession?.shared || shareCopy || shareUnknown)
+            && <span className={'pill assistant-share-state'
+              + (shareUnknown || liveShareActive ? ' warn' : '')}>
+              {shareUnknown ? 'share state unknown' : liveShareActive
+                ? 'LIVE public link · new replies public' : 'public snapshot active'}
+            </span>}
+          {shareUnknown && <button className="btn sm" type="button" onClick={refreshSessions}
+            disabled={shareBusy || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}
+            title="Verify the exact active public-link capabilities before messaging">
+            {sessionsStatus === 'loading' || sessionsStatus === 'refreshing' ? 'checking share…' : 'retry share status'}
+          </button>}
+          {sid && !currentSession && !shareCopy && !shareUnknown
+            && <button className="btn sm ghost" type="button"
+              disabled={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}
+              title="Verify that this chat has no existing public links before creating another"
+              onClick={refreshSessions}>
+              {sessionsStatus === 'loading' || sessionsStatus === 'refreshing'
+                ? 'checking share…' : 'retry share status'}
+            </button>}
           {/* A share link is a separate secret with an expiry — not this chat's id — and it is frozen
               at the turns that exist right now, so anything said afterwards stays private. "unshare"
               revokes every link for the chat without deleting the conversation. */}
-          {sid && !deletingCurrentSession && !currentSession?.shared && !shareUnknown && !shareCopy
-            && <button className="btn sm ghost" title="Copy read-only snapshot" disabled={shareBusy}
+          {sid && currentSession && !deletingCurrentSession && !currentSession.shared
+            && !shareUnknown && !shareCopy
+            && <button className="btn sm ghost"
+              title={shareTurnIncomplete
+                ? 'Wait for the current Assistant turn to finish before freezing a complete snapshot'
+                : 'Create and copy a frozen read-only snapshot'}
+              disabled={shareBusy || shareTurnIncomplete}
               onClick={async () => {
             const shareSid = sid
             if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
+            if (runningRef.current || turnCaptureRef.current || busy || commandBusy || pending.length > 0
+                || msgs[msgs.length - 1]?.role === 'user') {
+              flash('Wait for the Assistant reply to finish before creating a snapshot')
+              return
+            }
             if (deletingSessionsRef.current.has(shareSid)) {
               flash('This chat is being deleted')
               return
@@ -2218,13 +2702,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             try {
               const r = await boundedRequest(signal => assistantShare(shareSid, false, { signal }))
               if (!mountedRef.current) return
+              const receipt = assistantShareReceipt(r, shareSid)
+              if (!receipt) throw new Error('Invalid Assistant share receipt')
+              const url = location.origin + location.pathname + receipt.relativeUrl
               setShareUnknown(shareSid, false)
               mutateSessionsLocally(current => current.map(session => session.id === shareSid
-                ? { ...session, shared: true } : session))
+                ? { ...session, shared: true, share_count: 1,
+                    share_ids: [receipt.shareId], live_share_ids: [], share_expires_at: receipt.expiresAt,
+                    share_live: false } : session))
+              retainShareCopy(shareSid, {
+                url, expiresAt: receipt.expiresAt, shareId: receipt.shareId,
+              })
               refreshSessions()
-              const url = location.origin + location.pathname + r.url
               if (sidRef.current !== shareSid) {
-                retainShareCopy(shareSid, { url, expiresAt: r.expires_at })
                 flash('Snapshot created for the previous chat · reopen it to copy or revoke')
                 return
               }
@@ -2233,7 +2723,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 await navigator.clipboard.writeText(url)
               } catch {
                 if (!mountedRef.current) return
-                retainShareCopy(shareSid, { url, expiresAt: r.expires_at })
                 flash('Clipboard blocked · select the visible snapshot link and copy it manually')
                 return
               }
@@ -2241,13 +2730,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 if (mountedRef.current) flash('Snapshot link copied for the previous chat')
                 return
               }
-              clearShareCopy(shareSid)
-              flash(`Snapshot link copied · expires ${fmtDate(r.expires_at)}.`)
-              location.hash = r.url.replace(/^#/, '')   // navigate AFTER copying (the bar hides on the shared page)
+              flash(`Snapshot link copied · expires ${fmtDate(receipt.expiresAt)}.`)
             } catch (error) {
               if (!mountedRef.current) return
               if (error?.status >= 400 && error.status < 500) {
-                flash('Share failed')
+                flash(error?.code === 'assistant_share_snapshot_too_large'
+                  ? 'This chat is too large for a complete snapshot · fork or share a shorter chat'
+                  : ['assistant_share_in_progress', 'assistant_share_incomplete',
+                    'assistant_share_turn_active', 'assistant_share_turn_incomplete'].includes(error?.code)
+                    ? 'Wait for a complete Assistant reply before sharing' : 'Share failed')
               } else {
                 setShareUnknown(shareSid, true)
                 refreshSessions()
@@ -2257,49 +2748,30 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
               if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
             }
-          }}>{shareBusySid === sid ? 'working…' : '⤴ share'}</button>}
+          }}>{shareBusySid === sid ? 'working…' : '⤴ create snapshot'}</button>}
           {sid && !deletingCurrentSession && (currentSession?.shared || shareUnknown || shareCopy)
             && <button className="btn sm ghost" title="Revoke every share link" disabled={shareBusy}
-              onClick={async () => {
-            const shareSid = sid
-            if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
-            if (deletingSessionsRef.current.has(shareSid)) {
-              flash('This chat is being deleted')
-              return
-            }
-            shareActionSessionRef.current = shareSid
-            setShareBusySid(shareSid)
-            try {
-              const r = await boundedRequest(signal => assistantUnshare(shareSid, { signal }))
-              if (!mountedRef.current) return
-              setShareUnknown(shareSid, false)
-              clearShareCopy(shareSid)
-              mutateSessionsLocally(current => current.map(session => session.id === shareSid
-                ? { ...session, shared: false } : session))
-              refreshSessions()
-              flash(r.revoked ? `Revoked ${r.revoked} link${r.revoked === 1 ? '' : 's'}.` : 'No active links.')
-            } catch (error) {
-              if (!mountedRef.current) return
-              if (error?.status >= 400 && error.status < 500) flash('Revoke failed')
-              else {
-                setShareUnknown(shareSid, true)
-                refreshSessions()
-                flash('Revoke uncertain · retry to confirm')
-              }
-            } finally {
-              if (shareActionSessionRef.current === shareSid) shareActionSessionRef.current = null
-              if (mountedRef.current) setShareBusySid(current => current === shareSid ? null : current)
-            }
-          }}>{shareBusySid === sid ? 'working…' : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
+              onClick={revokeCurrentShares}>{shareBusySid === sid ? 'working…'
+                : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>
         {shareCopy && <div className="copy-link-fallback" role="status">
           <label htmlFor={`assistant-share-fallback-${sid}`}>
-            Snapshot link — shown once; copy before unsharing (expires {fmtDate(shareCopy.expiresAt)})
+            Frozen snapshot · expires {fmtDate(shareCopy.expiresAt)} · link remains visible in this tab
           </label>
           <input id={`assistant-share-fallback-${sid}`} readOnly value={shareCopy.url}
             onFocus={event => event.currentTarget.select()} />
+          <button type="button" className="btn sm" onClick={async () => {
+            try {
+              if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+              await navigator.clipboard.writeText(shareCopy.url)
+              flash('Snapshot link copied')
+            } catch { flash('Clipboard blocked · select the snapshot link and copy it manually') }
+          }}>Copy link</button>
+          <a className="btn sm" href={shareCopy.url} target="_blank" rel="noreferrer noopener">
+            Open snapshot
+          </a>
         </div>}
         <div className="asst-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
           aria-live="off" aria-busy={busy} tabIndex={0}

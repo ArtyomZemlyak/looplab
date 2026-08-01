@@ -145,8 +145,22 @@ class SessionStore:
         self._meta_lock = threading.RLock()
 
     def _sdir(self, sid: str) -> Path:
-        d = (self.dir / sid).resolve()
-        if d.parent != self.dir.resolve():        # path-traversal guard (sid must be a direct child)
+        # Session routes are destructive (DELETE ultimately feeds this path to ``rmtree``), while
+        # ``assistant/`` also contains non-session sidecars such as ``.shares`` and ``backups``.
+        # Merely checking "direct child" therefore lets a crafted sid erase those stores.  Keep the
+        # generated 16-hex namespace authoritative at this single path boundary and reject a symlink
+        # (or a junction resolving to a differently named sibling) before any caller touches disk.
+        if not isinstance(sid, str) or _SESSION_ID_RE.fullmatch(sid) is None:
+            raise ValueError("bad session id")
+        candidate = self.dir / sid
+        try:
+            if candidate.is_symlink():
+                raise ValueError("bad session id")
+            root = self.dir.resolve()
+            d = candidate.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("bad session id") from exc
+        if d.parent != root or d.name != sid:
             raise ValueError("bad session id")
         return d
 
@@ -255,6 +269,112 @@ class SessionStore:
         except OSError:
             return []
 
+    def validated_meta(self, sid: str) -> Optional[dict]:
+        """Return authoritative session metadata without materializing its transcript."""
+        meta = self._read_meta(sid)
+        return meta if self._valid_meta(sid, meta) else None
+
+    def bounded_complete_messages(
+            self, sid: str, *, upto: Optional[int], max_messages: int,
+            max_line_bytes: int, max_total_bytes: int,
+            report_incomplete: bool = False,
+            ) -> Optional[tuple[list[dict], bool] | tuple[list[dict], bool, bool]]:
+        """Read a bounded, complete public transcript prefix without blocking owner appends.
+
+        Public share limits must apply *before* JSON materialization: applying them after
+        :meth:`messages` lets one oversized/hidden JSONL field consume unbounded memory on every
+        anonymous request.  The append-only writer always emits one complete JSON object plus a
+        newline, so a lock-free binary reader can safely stop at a torn concurrent tail.  The boolean
+        reports that otherwise-public data was omitted; a lone live ``user`` at clean EOF is merely
+        an in-progress turn and is not public yet.  Minting can request a third boolean that reports
+        such an incomplete pair without changing the live public reader's truncation semantics.
+        """
+        if (isinstance(max_messages, bool) or not isinstance(max_messages, int)
+                or max_messages < 0 or max_messages % 2
+                or isinstance(max_line_bytes, bool) or not isinstance(max_line_bytes, int)
+                or max_line_bytes <= 0
+                or isinstance(max_total_bytes, bool) or not isinstance(max_total_bytes, int)
+                or max_total_bytes <= 0
+                or (upto is not None and (
+                    isinstance(upto, bool) or not isinstance(upto, int) or upto < 0 or upto % 2))):
+            raise ValueError("invalid bounded transcript limits")
+
+        try:
+            directory = self._sdir(sid)
+            if not directory.is_dir():
+                return None
+            path = directory / "messages.jsonl"
+            if path.is_symlink():
+                return None
+            if not path.exists():
+                # A newly-created, empty session legitimately has no transcript file yet.
+                empty = ([], False) if upto in (None, 0) else ([], True)
+                return (*empty, False) if report_incomplete else empty
+            resolved = path.resolve(strict=True)
+            if (resolved.parent != directory or resolved.name != "messages.jsonl"
+                    or not resolved.is_file()):
+                return None
+        except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError, ValueError):
+            return None
+
+        frozen = upto is not None
+        target = min(upto, max_messages) if frozen else max_messages + 2
+        truncated = bool(frozen and upto > max_messages)
+        complete: list[dict] = []
+        pending_user: Optional[dict] = None
+        decoded = 0
+        consumed = 0
+
+        try:
+            with open(resolved, "rb") as stream:
+                while decoded < target:
+                    remaining = max_total_bytes - consumed
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    # The extra byte is a sentinel only: it detects either a physical-row cap or the
+                    # aggregate cap without ever materializing the rest of an attacker-sized line.
+                    raw = stream.readline(min(max_line_bytes, remaining) + 1)
+                    if not raw:
+                        if frozen and decoded < target:
+                            truncated = True
+                        break
+                    if len(raw) > remaining or len(raw) > max_line_bytes:
+                        truncated = True
+                        break
+                    consumed += len(raw)
+                    if not raw.endswith(b"\n"):
+                        truncated = True
+                        break
+                    try:
+                        message = json.loads(raw)
+                    except (ValueError, UnicodeError, RecursionError):
+                        truncated = True
+                        break
+                    if not isinstance(message, dict):
+                        truncated = True
+                        break
+                    expected_role = "user" if pending_user is None else "assistant"
+                    if message.get("role") != expected_role:
+                        truncated = True
+                        break
+                    decoded += 1
+                    if pending_user is None:
+                        pending_user = message
+                        continue
+                    # A full pair beyond the public message budget is lookahead evidence only.
+                    if len(complete) >= max_messages:
+                        pending_user = None
+                        truncated = True
+                        break
+                    complete.extend((pending_user, message))
+                    pending_user = None
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            return None
+        if report_incomplete:
+            return complete, truncated, pending_user is not None
+        return complete, truncated
+
     def get(self, sid: str) -> Optional[dict]:
         meta = self._read_meta(sid)
         if meta is None:
@@ -328,134 +448,510 @@ class SessionStore:
 SHARE_DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 SHARE_MIN_TTL_SECONDS = 60
 SHARE_MAX_TTL_SECONDS = 90 * 24 * 3600
+SHARE_MAX_RECORDS = 4096
+SHARE_MAX_MESSAGE_COUNT = 1_000_000
+SHARE_TITLE_MAX_CHARS = 120
+# Revoked tombstones remain long enough for ordinary stale clients to keep seeing a dead capability.
+# After that, removing one is safe: a freshly minted record uses a random id AND a fresh secret hash,
+# so an old token still cannot authenticate even in the vanishingly unlikely event of id reuse.
+SHARE_REVOKED_RETENTION_SECONDS = SHARE_MAX_TTL_SECONDS
 
 
 class ShareError(ValueError):
-    """A share link could not be minted (bad expiry, unknown session)."""
+    """A share capability request failed before a token could be published."""
+
+    def __init__(self, message: str, *, code: str = "assistant_share_invalid",
+                 status_code: int = 400):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 class ShareStore:
     """One-file-per-capability share links under `<run_root>/assistant/.shares/`.
 
-    A record is `{id, session, token_hash, created_at, expires_at, revoked_at, live, upto}`. The
+    A record is `{id, session, token_hash, created_at, expires_at, revoked_at, live, upto, title}`. The
     token itself is never stored: `resolve` hashes the presented one and compares, so a leaked store
     cannot be replayed as a link. `.shares` sits under the assistant dir, which the server already
     reserves as a non-run id, and its name starts with a dot so it can never collide with a session
     id (`create` mints those from `token_hex`)."""
 
     def __init__(self, run_root):
-        self.dir = Path(run_root) / "assistant" / ".shares"
+        self.root = Path(run_root) / "assistant"
+        self.dir = self.root / ".shares"
         self._lock = threading.Lock()
+
+    def _safe_dir_locked(self, *, create: bool = False) -> Optional[Path]:
+        """Return the real, direct ``.shares`` directory or fail closed.
+
+        A directory symlink/junction is especially dangerous here: globbing it would enumerate an
+        unrelated tree and pruning could then delete arbitrary ``*.json`` files from that target.
+        Resolve the assistant root first and require the share store to remain its literal direct
+        child.  Normal pre-existing stores (including legacy records) keep working unchanged.
+        """
+        try:
+            if create:
+                self.root.mkdir(parents=True, exist_ok=True)
+            elif not self.root.is_dir():
+                return None
+            root = self.root.resolve(strict=True)
+            if not root.is_dir():
+                return None
+
+            if create:
+                try:
+                    self.dir.mkdir(exist_ok=False)
+                except FileExistsError:
+                    pass
+            elif not self.dir.exists():
+                return None
+
+            # Reject ordinary symlinks explicitly.  On Windows, directory junctions may not report
+            # as symlinks on every supported Python version, so the resolved-path equality is the
+            # authoritative check for both forms of redirection.
+            if self.dir.is_symlink():
+                return None
+            resolved = self.dir.resolve(strict=True)
+            expected = root / ".shares"
+            if resolved != expected or not resolved.is_dir():
+                return None
+            return resolved
+        except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError):
+            return None
+
+    def _store_entry_exists_locked(self) -> bool:
+        """Check the directory entry without following a symlink/junction target."""
+        try:
+            self.dir.lstat()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            # An unreadable entry is not safely equivalent to an absent store.
+            return True
+
+    @staticmethod
+    def _store_unavailable() -> ShareError:
+        return ShareError(
+            "Assistant share storage is unavailable",
+            code="assistant_share_store_unavailable",
+            status_code=503,
+        )
+
+    @staticmethod
+    def _now(value: Optional[float] = None) -> Optional[float]:
+        # Stored authorization timestamps are deliberately stricter than ``float(value)``: booleans
+        # and numeric-looking strings are not timestamps.  Accepting them would make a hand-edited or
+        # partially corrupted record silently regain authority under Python's coercion rules.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            return None
+        try:
+            current = time.time() if value is None else float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return current if current >= 0 and math.isfinite(current) else None
 
     @staticmethod
     def _digest(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    def _path(self, link_id: str) -> Optional[Path]:
+    def _path(self, link_id: str, directory: Path) -> Optional[Path]:
         # Validate the SHAPE before touching the filesystem: the id arrives inside an attacker-chosen
         # URL, and only a fixed-width hex string may become a pathname here.
         if not (len(link_id) == 32 and all(c in "0123456789abcdef" for c in link_id)):
             return None
-        return self.dir / f"{link_id}.json"
+        return directory / f"{link_id}.json"
 
-    @staticmethod
-    def _read(path: Path) -> Optional[dict]:
+    def _safe_record_path_locked(self, path: Path, *, strict_io: bool = False) -> Optional[Path]:
+        """Return a regular record path that is still inside the verified share directory."""
+        directory = self._safe_dir_locked()
+        if directory is None:
+            if strict_io:
+                raise self._store_unavailable()
+            return None
+        try:
+            if path.parent != directory or path.is_symlink():
+                if strict_io:
+                    raise self._store_unavailable()
+                return None
+            resolved = path.resolve(strict=True)
+            if resolved.parent != directory or resolved.name != path.name or not resolved.is_file():
+                if strict_io:
+                    raise self._store_unavailable()
+                return None
+            return resolved
+        except ShareError:
+            raise
+        except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError) as exc:
+            if strict_io:
+                raise self._store_unavailable() from exc
+            return None
+
+    def _read(self, path: Path, *, strict_io: bool = False) -> Optional[dict]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError as exc:
+            if strict_io:
+                raise self._store_unavailable() from exc
+            return None
+        except ValueError:
             return None
         return data if isinstance(data, dict) else None
 
-    def create(self, sid: str, *, message_count: int, ttl_seconds: int = SHARE_DEFAULT_TTL_SECONDS,
-               live: bool = False, now: Optional[float] = None) -> tuple[str, dict]:
+    def _validated_record(self, path: Path, record: Optional[dict] = None,
+                          *, strict_io: bool = False) -> Optional[dict]:
+        """Return one complete, fail-closed capability record.
+
+        These files are durable authorization state.  A NaN expiry, mismatched filename/id, malformed
+        snapshot bound, or non-boolean ``live`` must revoke access rather than silently becoming an
+        immortal/broader capability.  Extra keys are ignored by the exact public projection below.
+        """
+        path = self._safe_record_path_locked(path, strict_io=strict_io)
+        if path is None:
+            return None
+        record = self._read(path, strict_io=strict_io) if record is None else record
+        if not isinstance(record, dict):
+            return None
+        link_id = record.get("id")
+        session = record.get("session")
+        token_hash = record.get("token_hash")
+        # Records minted before share titles were introduced are still safe to honor, but their mutable
+        # session meta must never be consulted.  Give that one legacy shape a fixed public title;
+        # malformed explicit titles remain fail-closed.
+        title = "Shared chat" if "title" not in record else record.get("title")
+        if (not isinstance(link_id, str) or path.stem != link_id
+                or len(link_id) != 32 or any(c not in "0123456789abcdef" for c in link_id)
+                or not isinstance(session, str) or _SESSION_ID_RE.fullmatch(session) is None
+                or not isinstance(token_hash, str) or len(token_hash) != 64
+                or any(c not in "0123456789abcdef" for c in token_hash)
+                or not isinstance(title, str) or not title.strip()
+                or len(title) > SHARE_TITLE_MAX_CHARS):
+            return None
+        # ``_now(None)`` intentionally means wall-clock time for callers; a durable record must not
+        # inherit that convenience when a required timestamp is absent/null.
+        if record.get("created_at") is None or record.get("expires_at") is None:
+            return None
+        created = self._now(record.get("created_at"))
+        expires = self._now(record.get("expires_at"))
+        if created is None or expires is None:
+            return None
+        lifetime = expires - created
+        if not SHARE_MIN_TTL_SECONDS <= lifetime <= SHARE_MAX_TTL_SECONDS:
+            return None
+        revoked_raw = record.get("revoked_at")
+        revoked = None if revoked_raw is None else self._now(revoked_raw)
+        if revoked_raw is not None and (revoked is None or revoked < created):
+            return None
+        live = record.get("live")
+        upto = record.get("upto")
+        if not isinstance(live, bool):
+            return None
+        if live:
+            if upto is not None:
+                return None
+        elif (isinstance(upto, bool) or not isinstance(upto, int)
+              or not 0 <= upto <= SHARE_MAX_MESSAGE_COUNT or upto % 2):
+            return None
+        return {
+            "id": link_id,
+            "session": session,
+            "token_hash": token_hash,
+            "created_at": created,
+            "expires_at": expires,
+            "revoked_at": revoked,
+            "live": live,
+            "upto": upto,
+            "title": title,
+        }
+
+    def _paths_locked(self, *, expected_directory: Optional[Path] = None) -> list[Path]:
+        """Enumerate the verified store, distinguishing absence from an unsafe failed scan.
+
+        Returning an empty list for an I/O error is a privacy failure for live capabilities: owner
+        routes would say "not shared", the owner could add new replies, and a temporarily unreadable
+        link could become public again when the filesystem recovered.  A caller that already pinned a
+        directory also needs disappearance/replacement during its operation to fail closed.
+        """
+        directory = self._safe_dir_locked()
+        if directory is None:
+            if expected_directory is not None or self._store_entry_exists_locked():
+                raise self._store_unavailable()
+            return []
+        if expected_directory is not None and directory != expected_directory:
+            raise self._store_unavailable()
+        try:
+            paths = sorted(directory.glob("*.json"))
+        except (NotADirectoryError, OSError, RuntimeError) as exc:
+            raise self._store_unavailable() from exc
+        if self._safe_dir_locked() != directory:
+            raise self._store_unavailable()
+        return paths
+
+    def _remove(self, path: Path) -> bool:
+        path = self._safe_record_path_locked(path)
+        if path is None:
+            return False
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+
+    def _prune_locked(self, now: float, *, directory: Path,
+                      aggressive: bool = False) -> None:
+        """Bound the one-file registry without ever deleting an active capability.
+
+        Expired and malformed records are already unauthorized and can be removed immediately.
+        Revoked tombstones get a long normal retention window, but a capacity recovery may remove
+        them earlier because their old token hash can never authenticate a future fresh-secret record.
+        """
+        for path in self._paths_locked(expected_directory=directory):
+            record = self._validated_record(path, strict_io=True)
+            if record is None or record["expires_at"] <= now:
+                if not self._remove(path):
+                    raise self._store_unavailable()
+                continue
+            revoked = record["revoked_at"]
+            if revoked is not None and (
+                    aggressive or now - revoked >= SHARE_REVOKED_RETENTION_SECONDS):
+                if not self._remove(path):
+                    raise self._store_unavailable()
+        if self._safe_dir_locked() != directory:
+            raise self._store_unavailable()
+
+    def create(self, sid: str, *, message_count: int, title: str = "Shared chat",
+               ttl_seconds: int = SHARE_DEFAULT_TTL_SECONDS, live: bool = False,
+               now: Optional[float] = None) -> tuple[str, dict]:
         """Mint a link for `sid` and return `(token, public_record)`.
 
         `live=False` (the default) FREEZES the share at the turns that exist right now: `upto` is the
         transcript length at mint time and the reader never returns past it, so continuing the
         conversation cannot retroactively publish what the owner says next. `live=True` is the
         opt-in that keeps the link following the chat."""
+        if isinstance(ttl_seconds, bool):
+            raise ShareError("expiry must be a whole number of seconds")
         try:
             ttl = int(ttl_seconds)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ShareError("expiry must be a whole number of seconds") from exc
+        if isinstance(ttl_seconds, float) and not ttl_seconds.is_integer():
+            raise ShareError("expiry must be a whole number of seconds")
         if not SHARE_MIN_TTL_SECONDS <= ttl <= SHARE_MAX_TTL_SECONDS:
             raise ShareError(
                 f"expiry must be between {SHARE_MIN_TTL_SECONDS} and {SHARE_MAX_TTL_SECONDS} seconds")
-        ts = time.time() if now is None else now
-        self.dir.mkdir(parents=True, exist_ok=True)
-        link_id = secrets.token_hex(16)
-        # The secret is the whole capability; the id is only where the record lives.
-        token = f"{link_id}.{secrets.token_urlsafe(32)}"
-        record = {"id": link_id, "session": str(sid), "token_hash": self._digest(token),
-                  "created_at": ts, "expires_at": ts + ttl, "revoked_at": None,
-                  "live": bool(live), "upto": None if live else max(0, int(message_count))}
-        path = self._path(link_id)
-        assert path is not None                       # token_hex(16) is 32 hex chars by construction
+        if not isinstance(sid, str) or _SESSION_ID_RE.fullmatch(sid) is None:
+            raise ShareError("unknown Assistant session", code="assistant_share_session_invalid")
+        if not isinstance(live, bool):
+            raise ShareError("live must be a boolean")
+        if (not isinstance(title, str) or not title.strip()
+                or len(title) > SHARE_TITLE_MAX_CHARS):
+            raise ShareError("share title is invalid", code="assistant_share_title_invalid")
+        if (isinstance(message_count, bool) or not isinstance(message_count, int)
+                or not 0 <= message_count <= SHARE_MAX_MESSAGE_COUNT or message_count % 2):
+            raise ShareError(
+                "this transcript is too large to publish safely",
+                code="assistant_share_transcript_too_large", status_code=413)
+        ts = self._now(now)
+        if ts is None or not math.isfinite(ts + ttl):
+            raise ShareError("share expiry is unavailable", code="assistant_share_time_unavailable",
+                             status_code=503)
         with self._lock:
+            directory = self._safe_dir_locked(create=True)
+            if directory is None:
+                raise self._store_unavailable()
+            self._prune_locked(ts, directory=directory)
+            if len(self._paths_locked(expected_directory=directory)) >= SHARE_MAX_RECORDS:
+                self._prune_locked(ts, directory=directory, aggressive=True)
+            if len(self._paths_locked(expected_directory=directory)) >= SHARE_MAX_RECORDS:
+                raise ShareError(
+                    "share capability capacity is full; revoke or wait for existing links to expire",
+                    code="assistant_share_capacity", status_code=503)
+            for _ in range(32):
+                link_id = secrets.token_hex(16)
+                path = self._path(link_id, directory)
+                assert path is not None
+                try:
+                    # ``is_symlink`` catches a broken link for which ``exists`` is false.  Resolving
+                    # the missing leaf also confirms that its parent has not been redirected since
+                    # the directory boundary check above.
+                    if (not path.exists() and not path.is_symlink()
+                            and path.resolve(strict=False).parent == directory):
+                        break
+                except (NotADirectoryError, OSError, RuntimeError):
+                    pass
+                if self._safe_dir_locked() is None:
+                    raise self._store_unavailable()
+            else:  # practically unreachable, but never overwrite an existing capability on collision
+                raise ShareError("could not reserve a unique share capability",
+                                 code="assistant_share_capacity", status_code=503)
+            # The secret is the whole capability; the id is only where the record lives.
+            token = f"{link_id}.{secrets.token_urlsafe(32)}"
+            record = {"id": link_id, "session": sid, "token_hash": self._digest(token),
+                      "created_at": ts, "expires_at": ts + ttl, "revoked_at": None,
+                      "live": live, "upto": None if live else message_count, "title": title}
+            if self._safe_dir_locked() != directory:
+                raise self._store_unavailable()
             atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
         return token, self.public(record)
 
     @staticmethod
     def public(record: dict) -> dict:
-        """The owner-facing view: everything except the token digest."""
-        return {k: v for k, v in record.items() if k != "token_hash"}
+        """The exact owner-facing capability projection; never reflect unknown stored fields."""
+        return {key: record.get(key) for key in (
+            "id", "session", "created_at", "expires_at", "revoked_at", "live", "upto")}
 
     def resolve(self, token: str, *, now: Optional[float] = None) -> Optional[dict]:
         """The record this token grants, or None for unknown / expired / revoked / mismatched.
 
         One indistinguishable None for every failure: a reader must not be able to tell a revoked
         link from a never-existing one, which would turn this into a session-existence oracle."""
-        link_id, _, _secret = str(token or "").partition(".")
-        path = self._path(link_id)
-        if path is None:
+        token = str(token or "")
+        link_id, separator, secret = token.partition(".")
+        if (separator != "." or "." in secret or len(secret) != 43
+                or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+                       for c in secret)):
             return None
-        record = self._read(path)
-        if record is None or not secrets.compare_digest(
-                str(record.get("token_hash") or ""), self._digest(token)):
+        ts = self._now(now)
+        if ts is None:
             return None
-        if record.get("revoked_at") is not None:
-            return None
-        ts = time.time() if now is None else now
-        try:
-            if ts >= float(record.get("expires_at")):
+        with self._lock:
+            directory = self._safe_dir_locked()
+            path = self._path(link_id, directory) if directory is not None else None
+            if path is None:
                 return None
-        except (TypeError, ValueError):
-            return None                               # an unreadable expiry is an expired link
-        return record
+            record = self._validated_record(path)
+            if (record is None or ts < record["created_at"] or not secrets.compare_digest(
+                    record["token_hash"], self._digest(token))
+                    or record["revoked_at"] is not None or ts >= record["expires_at"]):
+                return None
+            return dict(record)
+
+    def revoke_token(self, token: str, *, now: Optional[float] = None) -> bool:
+        """Revoke exactly the freshly-minted capability named by ``token`` (rollback helper)."""
+        token = str(token or "")
+        link_id, separator, _secret = token.partition(".")
+        ts = self._now(now)
+        if separator != "." or ts is None:
+            return False
+        with self._lock:
+            directory = self._safe_dir_locked()
+            path = self._path(link_id, directory) if directory is not None else None
+            if path is None:
+                return False
+            record = self._validated_record(path)
+            if (record is None or not secrets.compare_digest(
+                    record["token_hash"], self._digest(token))):
+                return False
+            if record["revoked_at"] is not None:
+                return True
+            record["revoked_at"] = max(ts, record["created_at"])
+            if self._safe_record_path_locked(path) is None:
+                return False
+            atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
+            return True
 
     def revoke_session(self, sid: str, *, now: Optional[float] = None) -> int:
-        """Revoke EVERY link for `sid` and return how many were live. Revoking is a write, not a
-        delete: the record stays so a later presentation of the token still resolves to None rather
-        than to a fresh reservation of the same id."""
-        ts = time.time() if now is None else now
+        """Revoke EVERY link for `sid` and return how many were live.
+
+        A tombstone stays for the bounded retention window, so ordinary stale clients keep resolving
+        to nothing; later pruning is safe because a fresh record always has a fresh random id+secret.
+        """
+        if not isinstance(sid, str) or _SESSION_ID_RE.fullmatch(sid) is None:
+            return 0
+        ts = self._now(now)
+        if ts is None:
+            raise ShareError("share revocation time is unavailable",
+                             code="assistant_unshare_time_unavailable", status_code=503)
         revoked = 0
         with self._lock:
-            for path in sorted(self.dir.glob("*.json")) if self.dir.exists() else []:
-                record = self._read(path)
-                if (record is None or record.get("session") != str(sid)
-                        or record.get("revoked_at") is not None):
+            directory = self._safe_dir_locked()
+            if directory is None:
+                if self._store_entry_exists_locked():
+                    raise self._store_unavailable()
+                return 0
+            self._prune_locked(ts, directory=directory)
+            for path in self._paths_locked(expected_directory=directory):
+                record = self._validated_record(path, strict_io=True)
+                if (record is None or record["session"] != sid
+                        or record["revoked_at"] is not None or record["expires_at"] <= ts):
                     continue
-                record["revoked_at"] = ts
+                record["revoked_at"] = max(ts, record["created_at"])
+                if self._safe_record_path_locked(path) is None:
+                    raise self._store_unavailable()
                 atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True))
                 revoked += 1
+            if self._safe_dir_locked() != directory:
+                raise self._store_unavailable()
         return revoked
 
-    def active_for_session(self, sid: str, *, now: Optional[float] = None) -> list[dict]:
-        ts = time.time() if now is None else now
+    def active_for_session(self, sid: str, *, now: Optional[float] = None,
+                           require_store: bool = False) -> list[dict]:
+        if not isinstance(sid, str) or _SESSION_ID_RE.fullmatch(sid) is None:
+            return []
+        ts = self._now(now)
+        if ts is None:
+            raise ShareError(
+                "share expiry cannot be determined safely",
+                code="assistant_share_time_unavailable", status_code=503)
         out = []
-        for path in sorted(self.dir.glob("*.json")) if self.dir.exists() else []:
-            record = self._read(path)
-            if record is None or record.get("session") != str(sid):
-                continue
-            if record.get("revoked_at") is not None:
-                continue
-            try:
-                if ts >= float(record.get("expires_at")):
+        with self._lock:
+            directory = self._safe_dir_locked()
+            if directory is None:
+                if require_store or self._store_entry_exists_locked():
+                    raise self._store_unavailable()
+                return []
+            for path in self._paths_locked(expected_directory=directory):
+                record = self._validated_record(path, strict_io=True)
+                if (record is None or record["session"] != sid or ts < record["created_at"]
+                        or record["revoked_at"] is not None or ts >= record["expires_at"]):
                     continue
-            except (TypeError, ValueError):
-                continue
-            out.append(self.public(record))
+                out.append(self.public(record))
+            if self._safe_dir_locked() != directory:
+                raise self._store_unavailable()
         return out
+
+    def active_summary_by_session(self, *, now: Optional[float] = None) -> dict[str, dict]:
+        """One bounded scan for owner session-list badges; returns no token or digest material."""
+        ts = self._now(now)
+        if ts is None:
+            raise ShareError(
+                "share expiry cannot be determined safely",
+                code="assistant_share_time_unavailable", status_code=503)
+        summary: dict[str, dict] = {}
+        with self._lock:
+            directory = self._safe_dir_locked()
+            if directory is None:
+                if self._store_entry_exists_locked():
+                    raise self._store_unavailable()
+                return {}
+            for path in self._paths_locked(expected_directory=directory):
+                record = self._validated_record(path, strict_io=True)
+                if (record is None or ts < record["created_at"] or record["revoked_at"] is not None
+                        or ts >= record["expires_at"]):
+                    continue
+                item = summary.setdefault(record["session"], {
+                    "share_count": 0,
+                    "share_ids": [],
+                    "live_share_ids": [],
+                    "share_expires_at": None,
+                    "share_live": False,
+                })
+                item["share_count"] += 1
+                # Exact capability ids let owner clients reconcile stale create/revoke responses
+                # without ever exposing the bearer token or its digest.  Store capacity bounds this
+                # list globally, and `_paths_locked` gives it deterministic id order.
+                item["share_ids"].append(record["id"])
+                if record["live"]:
+                    item["share_live"] = True
+                    item["live_share_ids"].append(record["id"])
+                current_expiry = item["share_expires_at"]
+                if current_expiry is None or record["expires_at"] > current_expiry:
+                    item["share_expires_at"] = record["expires_at"]
+            if self._safe_dir_locked() != directory:
+                raise self._store_unavailable()
+        return summary
 
 
 # --------------------------------------------------------------------------- system prompt + toolset

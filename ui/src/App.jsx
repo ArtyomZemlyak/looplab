@@ -133,7 +133,7 @@ export default function App() {
   // recipients the "Unlock LoopLab controls" screen instead of the chat, defeating the share link.
   if (route.view === 'shared') return <RouteFocus label={routeLabel} routeKey={routeKey}>
     <LazyBoundary label="shared Assistant chat" mode="route" focusOnReady resetKey={routeKey}>
-      <SharedAssistant sid={route.id} onBack={back} />
+      <SharedAssistant sid={route.id} />
     </LazyBoundary>
   </RouteFocus>
   if (route.view === 'run') content = <LazyBoundary label={`run ${route.id}`} mode="route" focusOnReady resetKey={routeKey}>

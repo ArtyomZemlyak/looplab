@@ -6,19 +6,38 @@ import { permissionPresentation } from './assistantPermission.js'
 import LaunchCard from './LaunchCard.jsx'
 import { launchDraftKey } from './launchDraftStore.js'
 
-const RUN_MENTION = /@run:([^\s.,;:!?)]+)/g
-const runMentions = (s) => [...new Set([...(s || '').matchAll(RUN_MENTION)].map(m => m[1]))]
+const RUN_MENTION_MAX = 32
+const runMentions = value => {
+  const text = String(value || '')
+  const re = /@run:([^\s.,;:!?)\]]{1,255})(?=$|[\s.,;:!?)\]])/g
+  const seen = new Set()
+  const mentions = []
+  // Stop as soon as the chip budget is full. Besides bounding DOM, this avoids scanning the rest of
+  // a provider-controlled answer after it can no longer affect the UI.
+  let match
+  while (mentions.length < RUN_MENTION_MAX && (match = re.exec(text)) !== null) {
+    if (seen.has(match[1])) continue
+    seen.add(match[1])
+    mentions.push(match[1])
+  }
+  return mentions
+}
 
 // A live inline card for a run referenced with @run:<id> — so a running run shows up right in the chat
 // (a direct ask). Links to the run view; the dot pulses while its engine is live.
-function RunChip({ id, run }) {
+function RunChip({ id, run, interactive = true }) {
   const phase = run ? (run.phase || (run.finished ? 'finished' : 'running')) : '—'
-  return <a className="asst-runchip" href={`#/run/${encodeURIComponent(id)}`}
-    title={run ? (run.goal || id) : id}>
+  const content = <>
     <span className={'asst-run-dot' + (run && run.engine_running ? ' live' : '')} />
     <b>{id}</b>
     {run && <span className="muted"> {phase}{run.best_metric != null ? ' · ' + fmt(run.best_metric) : ''}</span>}
-  </a>
+  </>
+  return interactive
+    ? <a className="asst-runchip" href={`#/run/${encodeURIComponent(id)}`}
+        title={run ? (run.goal || id) : id}>{content}</a>
+    : <span className="asst-runchip inert" title="Run references are not links in a public transcript">
+        {content}
+      </span>
 }
 
 
@@ -59,25 +78,28 @@ function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
 }
 export function Turn({
   m, runsById, onRevert, onRetry, onOpenSettings, launchChat, readOnly = false,
+  audience = 'owner',
   launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, launchDisclosures,
   onLaunchDraft, onLaunchDisclosure, onLaunchStarted,
   revertState,
 }) {
-  const who = m.role === 'user' ? 'you' : 'assistant'
+  const publicAudience = audience === 'public'
+  const who = m.role === 'user' ? (publicAudience ? 'chat owner' : 'you') : 'assistant'
   const content = m.role === 'user' ? stripCtx(m.content) : m.content
   // Provider payloads can contain URLs, model routing, account ids and other implementation details.
   // Classify the raw persisted text, but render only the fixed, allow-listed copy returned here.
   const assistantError = m.role === 'assistant' && !m.streaming ? assistantErrorInfo(content, m.error_kind) : null
   const mentions = assistantError ? [] : runMentions(content)
   const hasLaunch = !readOnly && Array.isArray(m.proposals) && m.proposals.length > 0
-  return <div className={'feed-msg chat ' + m.role + (hasLaunch ? ' has-launch' : '')}>
+  return <div className={'feed-msg chat ' + m.role + (hasLaunch ? ' has-launch' : '')
+    + (publicAudience ? ' audience-public' : '')}>
     <div className="fm-body">
       <div className="chat-who">{who}</div>
       {/* Live, interleaved activity (Claude-Desktop style): prose the agent writes BETWEEN tool rounds
           renders as its own line; a run of consecutive tool calls collapses into one status line. */}
       {m.role === 'assistant' && Array.isArray(m.activity) && m.activity.length > 0 &&
         <div className="asst-activity">{m.activity.map((seg, i) => seg.type === 'text'
-          ? <Markdown key={i} text={seg.content} className="asst-inter" />
+          ? <Markdown key={i} text={seg.content} className="asst-inter" externalOnly={publicAudience} />
           : <div key={i} className="asst-status"><span className="asst-status-ic">⚙</span>
               {seg.labels.length > 3
                 ? <span> {seg.labels.length} steps · {seg.labels[seg.labels.length - 1]}</span>
@@ -109,11 +131,12 @@ export function Turn({
         {m.role === 'assistant'
           ? assistantError
             ? <AssistantErrorCard error={assistantError} onRetry={onRetry} onOpenSettings={onOpenSettings} />
-            : <><Markdown text={m.content || ''} className="chat-text" />{m.streaming && <span className="asst-cursor">▍</span>}</>
+            : <><Markdown text={m.content || ''} className="chat-text" externalOnly={publicAudience} />{m.streaming && <span className="asst-cursor">▍</span>}</>
           : <div className="chat-text">{content}</div>}
       </div>}
       {mentions.length > 0 && <div className="asst-runchips">
-        {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]} />)}
+        {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]}
+          interactive={!publicAudience} />)}
       </div>}
       {!readOnly && Array.isArray(m.proposals) && m.proposals.map((sp, i) => {
         const draftKey = launchDraftKey({ sessionId: launchSessionId, messageId: launchMessageId,

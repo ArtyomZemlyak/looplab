@@ -520,7 +520,8 @@ button { font: inherit; }
 .asst-drawer { position: fixed; top: 0; right: 0; bottom: 44px; width: min(400px, 92vw); z-index: 55;
   display: flex; flex-direction: column; background: var(--bg-1); border-left: 1px solid var(--line);
   box-shadow: -8px 0 24px rgba(0,0,0,.35); }
-.asst-drawer-h { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.asst-drawer-h { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.asst-drawer-h .assistant-share-state.warn { order: 2; flex: 1 0 100%; justify-content: center; }
 .asst-drawer-ttl { font-size: 13px; }
 .asst-modes.sm { display: inline-flex; gap: 2px; }
 .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
@@ -1451,6 +1452,14 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .feed-msg.chat.user .chat-bubble { background: color-mix(in srgb, var(--accent) 88%, var(--bg));
   color: var(--accent-solid-ink); border-top-right-radius: 4px; }
 .feed-msg.chat.user .chat-text { color: var(--accent-solid-ink); white-space: pre-wrap; }
+/* A public reader is not the author. Keep participant separation, but remove the owner UI's
+   bright "this is mine" treatment and label the speaker explicitly in the component. */
+.feed-msg.chat.audience-public.user .chat-who { color: var(--fg-mut); }
+.feed-msg.chat.audience-public.user .chat-bubble {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-2)); color: var(--fg);
+  border: 1px solid var(--accent-dim); }
+.feed-msg.chat.audience-public.user .chat-text { color: var(--fg); }
+.feed-msg.chat .chat-text, .feed-msg.chat .asst-inter { overflow-wrap: anywhere; word-break: break-word; }
 
 /* collapse a long agent reply (the "wall of text") to a clamp with a fade + show-more toggle */
 .feed-msg.chat .chat-bubble.clamp { max-height: 132px; overflow: hidden;
@@ -2177,6 +2186,12 @@ pre.code.event-json { max-height: 220px; }
   .art-list { flex: 0 0 auto; width: 100%; max-height: 34dvh; padding: 0 0 8px;
     border-right: 0; border-bottom: 1px solid var(--line); }
   .asst-view.asst-full { height: 100dvh; flex-direction: column; }
+  .asst-full .asst-main-h, .asst-shared .asst-main-h { flex-wrap: wrap;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+  .asst-full .asst-main-h .ttl, .asst-shared .asst-main-h .ttl {
+    flex: 1 1 180px !important; min-width: 0; }
+  .asst-shared-terms { flex: 1 1 100%; justify-content: flex-start; }
+  .asst-drawer-h .assistant-share-state { order: 2; flex: 1 0 100%; justify-content: center; }
   .asst-full .asst-side { width: 100%; max-height: min(32dvh, 220px); border-right: 0;
     border-bottom: 1px solid var(--line); }
   .asst-full .asst-sessions { display: flex; flex: none; overflow: auto; gap: 6px; }
@@ -2192,6 +2207,8 @@ pre.code.event-json { max-height: 220px; }
 .asst-runchip { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; text-decoration: none;
   color: var(--fg); background: var(--bg-1); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; }
 .asst-runchip:hover { border-color: var(--accent-dim); }
+.asst-runchip.inert { cursor: default; border-style: dashed; }
+.asst-runchip.inert:hover { border-color: var(--line); }
 .asst-run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-mut); flex: none; }
 .asst-run-dot.live { background: var(--best); box-shadow: 0 0 0 0 color-mix(in srgb, var(--best) 60%, transparent);
   animation: asstPulse 1.6s infinite; }
@@ -2337,6 +2354,13 @@ pre.code.event-json { max-height: 220px; }
 .asst-main-h { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
 .asst-main-h .ttl { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asst-full .asst-feed { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+.asst-shared { height: 100dvh; min-height: 100svh; }
+.asst-shared-terms { display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  min-width: 0; flex-wrap: wrap; }
+.assistant-share-state.warn { border-color: color-mix(in srgb, var(--working) 55%, var(--line));
+  color: var(--working-text); }
+.cmdbar-status.assistant-live-share { color: var(--working-text);
+  border-color: color-mix(in srgb, var(--working) 55%, var(--line)); }
 
 /* Delete-chat: clearly clickable trash on each session row. */
 .asst-sess { display: flex; align-items: center; gap: 6px; }
@@ -2459,6 +2483,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .copy-link-fallback label { white-space: nowrap; }
 .copy-link-fallback input { min-width: 0; flex: 1; height: 28px; padding: 3px 7px; border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: 11px ui-monospace, Consolas, monospace; }
+.copy-link-fallback .btn { margin-left: 0; white-space: nowrap; }
+.copy-link-fallback input + .btn { margin-left: auto; }
 .route-generation-detail { display: flex; align-items: center; flex-wrap: wrap; max-width: 100%; gap: 9px;
   color: var(--fg-mut); }
 .route-generation-detail code { padding: 4px 7px; border: 1px solid var(--line-2); border-radius: var(--radius-sm);
@@ -2626,6 +2652,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .history-banner .btn { margin-left: 0; }
   .route-state-notice, .copy-link-fallback { flex-wrap: wrap; padding-inline: 9px; }
   .copy-link-fallback label { flex-basis: 100%; white-space: normal; }
+  .copy-link-fallback input { flex-basis: 100%; }
+  .copy-link-fallback input + .btn { margin-left: 0; }
+  .copy-link-fallback .btn { flex: 1 1 120px; justify-content: center; }
   .cmp-cols { flex-direction: column; }
   .code-tools { flex-wrap: wrap; }
   .code-search { flex-basis: 100%; }
@@ -2652,7 +2681,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .chart-tools .btn, .chart-grp .btn, .metric-group-toggle,
   .run-metric-chip, .reset-stage-option, .ctx-chip, .data-table .btn.xs, .chip .chip-x,
   .grp-pill, .grp-tab, .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go,
-  .cmdbar-drawer-btn, .asst-mode, .asst-side-panel .btn.sm, .asst-sess-open, .asst-sess-x,
+  .cmdbar-drawer-btn, .asst-mode, .asst-side-panel .btn.sm, .asst-full .asst-main-h .btn,
+  .asst-shared .asst-main-h .btn, .asst-sess-open, .asst-sess-x,
   .asst-session-resource .btn { min-height: 44px; }
   .grp-pill { height: 44px; }
   .route-state-notice .btn, .copy-link-fallback .btn,
@@ -2666,7 +2696,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .asst-launch-global-label { display: none; }
   .cmdbar-in, .asst-inrow textarea.text { font-size: 16px; }
   .asst-in { padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--bg-1); }
-  .asst-full .asst-feed, .asst-side-panel .asst-drawer-feed {
+  .asst-full .asst-feed, .asst-shared .asst-feed, .asst-side-panel .asst-drawer-feed {
     padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
     scroll-padding-block-end: calc(132px + env(safe-area-inset-bottom, 0px));
   }
