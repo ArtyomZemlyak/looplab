@@ -387,17 +387,33 @@ class _RunCommandAdapter:
                 "run_generation_changed",
                 "The run was reset or replaced after this mutation was formed; no mutation was applied.")
 
+    @staticmethod
+    def _reject_unresolved_reset(rd: Path, operation: str) -> None:
+        from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
+        try:
+            marker = load_run_reset_marker(rd)
+        except RunResetStorageError as exc:
+            raise _MutationRecoveryBlocked(
+                "run_reset_fence_unavailable",
+                f"Cannot {operation} because Replay ownership cannot be verified.") from exc
+        if marker is not None:
+            raise _MutationRecoveryBlocked(
+                "run_reset_in_progress",
+                f"Cannot {operation} while Replay {marker['operation_id']} is unresolved.")
+
     @contextmanager
     def destructive_guard(self, rd: Path, operation: str, *, expected_generation: str):
         """Use the server's per-run command sequencer when this provider runs in the UI server."""
         guard = getattr(self.service, "destructive_guard", None)
         if callable(guard):
             with guard(rd, operation) as canonical:
+                self._reject_unresolved_reset(canonical, operation)
                 self._require_generation(canonical, expected_generation)
                 yield canonical
             return
         # Standalone/unit-tool use has no AppState command coordinator. Preserve the historical tool
         # surface there; the live check below remains mandatory and is re-run immediately before I/O.
+        self._reject_unresolved_reset(rd, operation)
         self._require_generation(rd, expected_generation)
         yield rd
 
@@ -1183,20 +1199,31 @@ class RunControlTools:
                 with self._commands.mutation_guard(
                         rd, "set the trust gate", expected_generation=generation) as rd:
                     store = EventStore(rd / "events.jsonl")
-                    store.append(EV_TRUST_GATE_CHANGED, {"trust_gate": tg, "source": "assistant"})
                     # Mirror the UI PUT /config path: the fold already applies the event, but also update
                     # config.snapshot.json so a later RESUME re-enters with the new gate and the settings panel
                     # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
                     snap = rd / "config.snapshot.json"
                     if snap.exists():
-                        try:
-                            import json as _json
-                            from looplab.core.atomicio import atomic_write_text
-                            cfg = _json.loads(snap.read_text(encoding="utf-8"))
-                            cfg["trust_gate"] = tg
-                            atomic_write_text(snap, _json.dumps(cfg, indent=2))
-                        except (OSError, ValueError):
-                            pass
+                        from looplab.serve.run_files import run_config_write_lock
+                        # Global order is config -> events. Reset takes the same pair in that order,
+                        # preventing an event->config/config->event deadlock while also closing the
+                        # reset-marker race for this dual write.
+                        with run_config_write_lock(snap):
+                            store.append(
+                                EV_TRUST_GATE_CHANGED,
+                                {"trust_gate": tg, "source": "assistant"})
+                            try:
+                                import json as _json
+                                from looplab.core.atomicio import atomic_write_text
+                                cfg = _json.loads(snap.read_text(encoding="utf-8"))
+                                cfg["trust_gate"] = tg
+                                atomic_write_text(snap, _json.dumps(cfg, indent=2))
+                            except (OSError, ValueError):
+                                pass
+                    else:
+                        store.append(
+                            EV_TRUST_GATE_CHANGED,
+                            {"trust_gate": tg, "source": "assistant"})
                     return f"(trust_gate set to {tg} for {rid})"
         return f"(unknown settings tool: {name})"
 
@@ -1448,6 +1475,7 @@ class RunControlTools:
         # wins, no child can enter while the source-of-truth logs are rewritten.
         with (_interprocess_lock(rd / "engine.lock"),
               _interprocess_lock(Path(str(evp) + ".lock"))):
+            self._commands._reject_unresolved_reset(rd, "purge nodes")
             source_store = EventStore(evp)
             events = source_store.read_all()
             source_bytes = evp.read_bytes()
@@ -1589,6 +1617,9 @@ class RunControlTools:
         # are held, keeping the two open lock files until their contexts release on Windows.
         retired_start_record = None
         with _interprocess_lock(engine_lock), _interprocess_lock(event_lock):
+            # Reset publishes its marker while owning this same event lock. Rechecking here closes
+            # the standalone-tool marker-check -> delete race as well as the UI-server path.
+            self._commands._reject_unresolved_reset(rd, "delete run")
             if not event_path.exists():
                 return f"(run {rid} changed before delete could commit — refresh and retry)"
             events = EventStore(event_path).read_all()

@@ -19,6 +19,8 @@ import {
   decodePortfolioViews, normalizeCompareColumns, portfolioViewSignature, upsertPortfolioView,
 } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
+import { getRunAccess, listStartOverRunAccesses } from './runMode.js'
+import { listRunStartOverRecoveries } from './runStartOverRecovery.js'
 
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
@@ -284,10 +286,12 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
 
 // Per-run "⋮" dropdown: open / rename / move (project) / assign (super-task) / delete.
 function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename,
-  onDelete, onReconcile, onClose, onBusyChange }) {
+  onDelete, onReconcile, onClose, onBusyChange, mutationLocked = false }) {
   const menuRef = useRef(null)
   const [busy, error, mutate] = useMutation()
-  useEffect(() => { menuRef.current?.querySelector('[role="menuitem"]')?.focus() }, [])
+  useEffect(() => {
+    menuRef.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus()
+  }, [])
   useEffect(() => {
     onBusyChange?.(busy)
     return () => onBusyChange?.(false)
@@ -296,7 +300,8 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
   const act = async action => { if (await mutate(action, onReconcile)) onClose(true) }
   const onKeyDown = event => {
     if (busy && event.key === 'Tab') { event.preventDefault(); return }
-    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
+    const items = [...(menuRef.current?.querySelectorAll(
+      '[role="menuitem"]:not(:disabled)') || [])]
     if (event.key === 'Escape') { event.preventDefault(); close(true); return }
     const current = Math.max(0, items.indexOf(document.activeElement))
     const next = nextRovingIndex(event.key, current, items.length)
@@ -310,27 +315,38 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       onClick={e => e.stopPropagation()} onClickCapture={e => { if (busy) { e.preventDefault(); e.stopPropagation() } }} onKeyDown={onKeyDown}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
       <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onOpen(r.run_id) }}>↗ Open</button>
-      <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onRename(r) }}><OpIcon name="pencil" size={12} /> Rename</button>
+      {mutationLocked && <div className="mi-label" role="status">
+        Start over unresolved · open this run to recover it
+      </div>}
+      <button type="button" role="menuitem" tabIndex={-1} className="mi"
+        disabled={mutationLocked} title={mutationLocked ? 'Recover Start over before renaming this run' : undefined}
+        onClick={() => { close(false); onRename(r) }}><OpIcon name="pencil" size={12} /> Rename</button>
       <div className="mi-sep" />
       <div className="mi-label">Move to project</div>
       <div className="mi-scroll">
-        <button type="button" role="menuitem" tabIndex={-1} className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => act(() => onMove(r.run_id, UNASSIGNED))}>○ — unassigned —</button>
+        <button type="button" role="menuitem" tabIndex={-1} disabled={mutationLocked}
+          className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => act(() => onMove(r.run_id, UNASSIGNED))}>○ — unassigned —</button>
         {projects.map(p => <button type="button" role="menuitem" tabIndex={-1} key={p.id} className={'mi' + (r.project_id === p.id ? ' on' : '')}
+          disabled={mutationLocked}
           onClick={() => act(() => onMove(r.run_id, p.id))}><OpIcon name="folder" className="t-ic" /> {p.name}</button>)}
         {!projects.length && <div className="mi-empty">no projects yet</div>}
       </div>
       <div className="mi-sep" />
       <div className="mi-label">Super-task</div>
       <div className="mi-scroll">
-        <button type="button" role="menuitem" tabIndex={-1} className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => act(() => onSetSuper(r.run_id, UNASSIGNED))}>○ — none —</button>
+        <button type="button" role="menuitem" tabIndex={-1} disabled={mutationLocked}
+          className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => act(() => onSetSuper(r.run_id, UNASSIGNED))}>○ — none —</button>
         {supertasks.map(s => <button type="button" role="menuitem" tabIndex={-1} key={s.id} className={'mi' + (r.supertask_id === s.id ? ' on' : '')}
+          disabled={mutationLocked}
           onClick={() => act(() => onSetSuper(r.run_id, s.id))}><OpIcon name="target" className="t-ic" /> {s.name}</button>)}
         <button type="button" role="menuitem" tabIndex={-1} className="mi accent" onClick={() => { close(false); onManageSupers() }}>＋ New / manage…</button>
       </div>
       {busy && <div className="muted" role="status">Saving…</div>}
       {error && <div className="flag" role="alert">{error}</div>}
       <div className="mi-sep" />
-      <button type="button" role="menuitem" tabIndex={-1} className="mi danger" onClick={() => onDelete(r)}>✕ Delete run…</button>
+      <button type="button" role="menuitem" tabIndex={-1} className="mi danger"
+        disabled={mutationLocked} title={mutationLocked ? 'Recover Start over before deleting this run' : undefined}
+        onClick={() => onDelete(r)}>✕ Delete run…</button>
     </div>
   </>
 }
@@ -438,6 +454,13 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const projectsDialogRef = useRef(null)
   const listBusy = !!listMutation?.busy
   const navigationBusy = listBusy || projectBusy || menuBusy
+  const startOverRecoveryByRun = new Map([
+    ...listStartOverRunAccesses(), ...listRunStartOverRecoveries(),
+  ].map(item => [item.runId, item]))
+  const runListAuthoritative = runsState === 'ready' || runsState === 'stale'
+  const missingStartOverRecoveries = [...startOverRecoveryByRun.values()]
+    .filter(item => !runListAuthoritative
+      || !(runs || []).some(run => run.run_id === item.runId))
   const closeRunMenu = (restore = false) => {
     setRunMenu(null)
     if (restore) focusSoon(runMenuTriggerRef.current)
@@ -739,6 +762,18 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           <button className="btn sm ghost" disabled={navigationBusy} title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
         </div>
       </div>
+      {missingStartOverRecoveries.map(item => <div key={item.runId}
+        className="notice run-start-over-list-recovery"
+        role={item.kind === 'corrupt' ? 'alert' : 'status'}>
+        <span><b>Start over recovery</b> · <code>{item.runId}</code>{runListAuthoritative
+          ? ' is temporarily absent from the run list.'
+          : ' is not loaded in the run list yet.'} {item.kind === 'corrupt'
+            ? 'Its saved recovery evidence is invalid.'
+            : 'Its exact request is still preserved in this tab.'}</span>
+        <button type="button" className="btn sm primary" onClick={() => onOpen(item.runId)}>
+          Open recovery
+        </button>
+      </div>)}
 
       <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
         {projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}
@@ -887,9 +922,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               names={{ projects: projName, supertasks: stName }}
               onColumns={setCompareColumns} onRemove={toggleCompare} />
           </LazyBoundary>}
-          {view === 'list' && runs && displayedRuns.map(r => (
+          {view === 'list' && runs && displayedRuns.map(r => {
+            const startOverLocked = getRunAccess(r.run_id).mode === 'start-over'
+            return (
             <div className={'run-card' + (compareIds.has(r.run_id) ? ' compare-selected' : '')}
-                 key={r.run_id} draggable={!navigationBusy}
+                 key={r.run_id} draggable={!navigationBusy && !startOverLocked}
                  onPointerDownCapture={() => { compareDragGuardRef.current = null }}
                  onPointerUp={() => { compareDragGuardRef.current = null }}
                  onPointerCancel={() => { compareDragGuardRef.current = null }}
@@ -932,6 +969,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                    }}
                    aria-label={`Open run ${r.label || r.run_id}`}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
+                  {startOverLocked && <span className="pill warn" style={{ marginLeft: 6 }}>Start over recovery</span>}
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}
                   {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}><OpIcon name="target" className="t-ic" /> {stName[r.supertask_id]}</span>}</div>
                 <div className="goal">{r.goal}</div>
@@ -954,10 +992,12 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                 {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects} supertasks={superdata.supertasks}
                   onOpen={onOpen} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
                   onRename={openRunRename} onDelete={removeRun} onReconcile={reconcileAll}
-                  onClose={closeRunMenu} onBusyChange={setMenuBusy} />}
+                  onClose={closeRunMenu} onBusyChange={setMenuBusy}
+                  mutationLocked={startOverLocked} />}
               </div>
             </div>
-          ))}
+            )
+          })}
           {view === 'list' && displayedRuns.length < visible.length && <div className="run-list-more">
             <button type="button" className="btn sm"
               onClick={() => setListLimit(listLimit + LIST_PAGE_SIZE)}>Show more</button>

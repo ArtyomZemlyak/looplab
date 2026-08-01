@@ -20,17 +20,19 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
   stateRef.current = resource.state
 
   const write = useCallback((state, mode = 'push', { forceGeneration = false } = {}) => {
-    if (typeof window === 'undefined') return
+    if (typeof window === 'undefined') return false
     const nextHash = hashWithRunRouteState(window.location.hash, state, { reviewMode, forceGeneration })
-    if (nextHash === window.location.hash) return
+    if (nextHash === window.location.hash) return true
     const href = `${window.location.pathname}${window.location.search}${nextHash}`
     try {
       window.history[mode === 'replace' ? 'replaceState' : 'pushState'](window.history.state, '', href)
       hydratedHashRef.current = nextHash
+      return true
     } catch {
       // WebKit throttles history writes (~100 per 30s); a per-keystroke filter (mode:'replace') can
       // trip it and throw SecurityError. The in-memory route state already updated, so typing must
       // continue — swallow the URL-sync failure and leave hydratedHashRef so a later hydrate reconciles.
+      return false
     }
   }, [reviewMode])
 
@@ -78,11 +80,12 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
     return candidate
   }, [generation, reviewMode, write])
 
-  const openCurrentGeneration = useCallback(() => {
+  const openCurrentGeneration = useCallback(({ mode = 'push' } = {}) => {
     const state = emptyRunRouteState()
+    if (!write(state, mode)) return false
     stateRef.current = state
     setResource(value => ({ ...value, state, issues: [] }))
-    write(state, 'push')
+    return true
   }, [write])
   const clearIssues = useCallback(() => {
     setResource(value => ({ ...value, issues: [] }))

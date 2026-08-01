@@ -408,7 +408,9 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {refreshButtonLabel}</button>}
         {readOnly && <span className="history-inline">{readOnlyReason === 'review'
           ? 'Read-only review · report refresh disabled'
-          : `Snapshot seq ${historySeq} · report refresh disabled`}</span>}
+          : readOnlyReason === 'start-over'
+            ? 'Start over unresolved · report refresh disabled'
+            : `Snapshot seq ${historySeq} · report refresh disabled`}</span>}
         <span className="spacer" style={{ flex: 1 }} />
         <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} /> Print / PDF</button>
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best, exportContext), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>

@@ -55,6 +55,8 @@ const generationId = value => value === null
   || (typeof value === 'string' && /^[0-9a-f]{64}$/.test(value))
 const paidLensReadOnlyMessage = access => access?.mode === 'review'
   ? 'Paid lens actions are disabled in a review link; no provider request was sent.'
+  : access?.mode === 'start-over'
+    ? 'Start over is unresolved. Paid lens actions stay locked; no provider request was sent.'
   : access?.mode === 'stale-link'
     ? 'Earlier-generation link: open the current generation before a paid lens. No provider request was sent.'
     : 'Paid lens actions are disabled in a historical snapshot; return to live first. No provider request was sent.'

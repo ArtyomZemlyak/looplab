@@ -26,6 +26,8 @@ import typer
 
 from looplab import __version__
 from looplab.core.config import Settings
+from looplab.core.run_reset import (
+    RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import EventStore
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import (
@@ -224,6 +226,20 @@ def _engine_singleton(run_dir: Path):
             typer.echo(f"could not acquire {run_dir}/engine.lock — treating the run as already "
                        f"owned ({type(exc).__name__}: {exc})", err=True)
             acquired = False
+        if acquired:
+            try:
+                # Reset publishes its owner while holding the same event/config writer locks, then
+                # releases engine.lock for the exact child. Check immediately after acquisition so
+                # a waiting direct resume cannot steal that handoff; the matching child is admitted
+                # by its inherited operation id.
+                assert_run_reset_write_allowed(run_dir)
+            except RunResetFenceError as exc:
+                raise RuntimeError(
+                    f"Cannot start an engine for {run_dir}: Replay {exc.operation_id} is unresolved. "
+                    "Retry or observe that exact Replay operation first.") from exc
+            except RunResetStorageError as exc:
+                raise RuntimeError(
+                    f"Cannot start an engine for {run_dir}: Replay ownership cannot be verified.") from exc
         yield acquired
     finally:
         if acquired:

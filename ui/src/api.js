@@ -1260,12 +1260,13 @@ export async function appendAction(runId, action, options = {}) {
   return CONTROL.raw(runId, action.type, action.data || {})
 }
 
-// round-7 "Replay": reset a run IN PLACE — the server archives its event log + spans and re-spawns a
-// fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.
-export const resetRun = (rid, expectedGeneration) =>
+// Generation-fenced, operation-idempotent Replay: archive the finished generation and re-spawn the
+// same run id. The durable operation id lets an unknown browser outcome rejoin the exact request.
+export const resetRun = (rid, expectedGeneration, operationId, options = {}) =>
   post(`/api/runs/${encodeURIComponent(rid)}/reset`, {
     expected_generation: expectedGeneration,
-  })
+    operation_id: operationId,
+  }, { ...options, allowRunMutationModes: ['start-over', 'stale-link', 'history'] })
 
 // Clear ONE node's trace only for the exact run + node lifecycle the operator inspected. Never
 // substitute a later observed generation here: the confirmation belongs to the rendered snapshot,
@@ -1507,9 +1508,9 @@ export async function get(path, options = {}) {
 }
 export const deadlineGet = (path, timeout = 8000, options) =>
   deadlineRequest(signal => get(path, { cache: 'no-store', ...options, signal }), timeout)
-export async function post(path, body, { signal } = {}) {
+export async function post(path, body, { signal, allowRunMutationModes = [] } = {}) {
   assertNotReviewMutation(path)
-  assertRunMutationAllowed(path)
+  assertRunMutationAllowed(path, { allowModes: allowRunMutationModes })
   const r = await fetch(apiUrl(path), {
     method: 'POST', signal,
     headers: _authHeaders({ 'Content-Type': 'application/json' }),

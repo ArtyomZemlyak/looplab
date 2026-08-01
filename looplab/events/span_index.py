@@ -35,12 +35,15 @@ from typing import Optional
 import orjson
 
 from looplab.core.atomicio import atomic_write_bytes
+from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
+from looplab.events.eventstore import _interprocess_lock
 from looplab.events.traceview import _normalize_span, _strip_span_io
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
 _SCHEMA = 6
 _INDEX_NAME = "spans.index.jsonl"
+_INDEX_LOCK_NAME = ".spans-index.lock"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
 # span bytes have grown by this factor since the last write. Bounds a live run's total index-write
 # volume to ~O(n) (a handful of full-object PUTs on S3/geesefs) instead of ~O(n²) full rewrites every
@@ -56,7 +59,36 @@ _CACHE_MAX = 3
 _SCAN_CHUNK_BYTES = 1024 * 1024
 
 _CACHE: "OrderedDict[str, SpanIndex]" = OrderedDict()
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
+
+
+@contextmanager
+def span_index_write_guard(
+        spans_path: str | os.PathLike, *, required: bool = False):
+    """Serialize persisted span-index writers with whole-run archive/reset.
+
+    The process lock protects the in-memory cache and the file lock covers another UI server process.
+    Reset takes this same guard before publishing its writer marker and keeps it through artifact
+    archive, so a cold trace GET cannot recreate generation-A derived data behind the archive.
+    """
+    path = Path(spans_path)
+    with _LOCK:
+        manager = _interprocess_lock(
+            path.with_name(_INDEX_LOCK_NAME), required=required)
+        try:
+            manager.__enter__()
+        except OSError:
+            if required:
+                raise
+            # The index is an optional accelerator. A read-only/FUSE mount that cannot even create
+            # the advisory lock must keep trace reads functional; reset passes ``required=True`` and
+            # therefore still refuses to archive without this cross-process serialization.
+            yield
+            return
+        try:
+            yield
+        finally:
+            manager.__exit__(None, None, None)
 
 
 def _scan_light_stream(stream, base: int, size: int, *,
@@ -437,6 +469,15 @@ class SpanIndex:
             return  # nothing to persist (no identity yet, or an empty/traceless spans.jsonl)
         if self._persisted_covers > 0 and self.covers < self._persisted_covers * _PERSIST_GROWTH:
             return
+        # ``get_index`` holds ``span_index_write_guard`` here. Reset publishes its marker while
+        # holding that same guard, so this check and the following replace cannot straddle archive.
+        # An unreadable marker is also fail-closed for this optional cache write: trace reads may
+        # continue from memory/source, but they must not mutate a run whose reset owner is unknown.
+        try:
+            if load_run_reset_marker(self.path.parent) is not None:
+                return
+        except RunResetStorageError:
+            return
         header = {"_idx": _SCHEMA, "covers": self.covers,
                   "dev": self.identity[0], "ino": self.identity[1]}
         parts = [orjson.dumps(header)]
@@ -528,7 +569,7 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
     persisted index or rebuilds on a cold miss. Thread-safe."""
     p = Path(spans_path)
     key = str(p)
-    with _LOCK:
+    with span_index_write_guard(p):
         # OPEN FIRST, then `fstat` that same descriptor. `stat(path)` followed by `open(path)`
         # resolves the pathname twice: a rewrite in between would cache-key and validate inode A
         # while the probe — and every later read — observed inode B, i.e. a trace view stitched from

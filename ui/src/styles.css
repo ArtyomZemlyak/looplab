@@ -1073,6 +1073,15 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .modal-b { padding: 14px; flex: 1 1 auto; min-height: 0; overflow-y: auto;
   overscroll-behavior: contain; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.start-over-overlay { align-items: center; z-index: 210; }
+.start-over-dialog { width: min(520px, 92%); }
+.start-over-copy { margin: 0; color: var(--fg); line-height: 1.55; }
+.start-over-copy code { overflow-wrap: anywhere; }
+.start-over-cost-note { margin: 12px 0 0; padding: 10px 11px; border: 1px solid
+  color-mix(in srgb, var(--working) 42%, var(--line-2)); border-radius: 8px;
+  background: color-mix(in srgb, var(--working) 8%, var(--bg-2)); color: var(--fg-dim);
+  line-height: 1.45; }
+.start-over-dialog .modal-actions .btn { min-height: 44px; }
 
 /* ---------- inject-experiment dialog ---------- */
 .panel-b .sf-field { margin-bottom: 10px; }
@@ -2344,6 +2353,19 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   border-bottom-color: color-mix(in srgb, var(--fail) 52%, var(--line));
   background: color-mix(in srgb, var(--fail) 9%, var(--bg-1));
 }
+.run-start-over-notice.accepted, .run-start-over-notice.pending,
+.run-start-over-notice.submitting {
+  border-bottom-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-1));
+}
+.run-start-over-notice.unknown, .run-start-over-notice.error {
+  border-bottom-color: color-mix(in srgb, var(--fail) 52%, var(--line));
+  background: color-mix(in srgb, var(--fail) 9%, var(--bg-1));
+}
+.run-start-over-list-recovery { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin: 8px 12px 0; border-color: color-mix(in srgb, var(--fail) 45%, var(--line));
+  background: color-mix(in srgb, var(--fail) 8%, var(--bg-1)); }
+.run-start-over-list-recovery > span { min-width: 0; overflow-wrap: anywhere; }
 .run-config-notice.stale, .run-config-notice.retrying {
   border-bottom-color: color-mix(in srgb, var(--working) 52%, var(--line));
   background: color-mix(in srgb, var(--working) 9%, var(--bg-1));
@@ -2378,6 +2400,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 
 @media (max-width: 900px) {
   html, body, #root { min-width: 0; overflow-x: hidden; }
+  .run-start-over-notice .btn { min-height: 44px; padding: 8px 11px; }
+  .run-start-over-list-recovery { align-items: stretch; flex-direction: column; }
+  .run-start-over-list-recovery .btn { min-height: 44px; justify-content: center; }
 
   .app-shell-main > .app > .topbar:first-of-type {
     min-height: calc(56px + env(safe-area-inset-top, 0px));
@@ -2481,6 +2506,15 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .dock-foot { align-items: stretch; }
   .dock-foot .transport { width: 100%; justify-content: flex-start; }
   .dock-foot .transport .btn { min-height: 44px; padding: 8px 11px; }
+  .start-over-overlay { padding: max(12px, env(safe-area-inset-top, 0px))
+    max(12px, env(safe-area-inset-right, 0px))
+    max(12px, env(safe-area-inset-bottom, 0px))
+    max(12px, env(safe-area-inset-left, 0px)); }
+  .start-over-overlay > .start-over-dialog { width: 100%; height: auto;
+    max-height: calc(100dvh - 24px); margin: 0;
+    border: 1px solid var(--line-2); border-radius: 12px; }
+  .start-over-dialog .modal-actions { flex-direction: column; }
+  .start-over-dialog .modal-actions .btn { width: 100%; min-height: 44px; justify-content: center; }
   .transport-message { align-items: flex-start; flex-basis: 100%; max-width: 100%; }
   .dock-body.chat-body { max-height: min(42dvh, 320px); }
   .history-banner { flex-wrap: wrap; padding: 7px 9px; }

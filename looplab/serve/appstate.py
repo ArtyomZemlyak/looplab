@@ -55,6 +55,8 @@ _LIFECYCLE_LOCK_PREFIX = ".looplab-lifecycle-"
 # `control._trace_clear_receipt_path` builds
 # `<run-root>/.trace-clear.<run-digest>.tc_<operation-id>.json`.
 _TRACE_CLEAR_RECEIPT_PREFIX = ".trace-clear."
+# Whole-run Replay receipts are also root-side service files keyed by a run-path digest.
+_RESET_RECEIPT_PREFIX = ".looplab-reset-receipt-"
 
 # Fields that can contain verbatim source, captured process output, private host paths, or an internal
 # model-facing prompt. `state_payload` feeds both the public /state GET and headerless EventSource SSE,

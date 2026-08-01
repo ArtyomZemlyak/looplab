@@ -24,16 +24,17 @@ from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import (
     atomic_write_bytes, atomic_write_text, strict_atomic_write_bytes,
     strict_atomic_write_text)
-from looplab.core.config import Settings, migrate_config_snapshot
+from looplab.core.config import Settings
 from looplab.events.eventstore import (
     MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, decode_event_record)
 from looplab.events.replay import fold
 from looplab.events.traceview import trace_file_revision
 from looplab.events.types import EV_APPROVAL_GRANTED, EV_RESUME_REQUESTED, EV_SPEC_APPROVED
-from looplab.serve.appstate import _RESERVED_RUN_IDS, _TRACE_CLEAR_RECEIPT_PREFIX
+from looplab.serve.appstate import (
+    _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.engine_proc import (
-    _claim_and_spawn_resume, _clear_run_launching, _engine_alive, _engine_liveness,
-    _fresh_resume_launch_pending, _fresh_run_launch_pending, _mark_run_launching,
+    _claim_and_spawn_resume, _engine_alive, _engine_liveness,
+    _fresh_resume_launch_pending,
     _resolve_task_file, engine_write_lock_http, run_lifecycle_lock_http)
 from looplab.serve.launch import (
     idempotency_key_digest,
@@ -46,7 +47,7 @@ from looplab.serve.launch import (
 from looplab.serve.protocol import (
     COLLABORATION_EVENTS, CONTROL_EVENTS, EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE)
 from looplab.serve.run_commands import normalize_control
-from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+from looplab.serve.reset_route import durable_reset_run
 
 
 _TRACE_CLEAR_OPERATION_RE = re.compile(r"^tc_[0-9a-f]{32}$")
@@ -414,228 +415,7 @@ def build_router(srv) -> APIRouter:
         """round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and
         re-spawn a fresh run on the same run-id. The prior artifacts are RENAMED (not deleted) so the
         history is recoverable."""
-        raw = await request.body()
-        if raw:
-            try:
-                body = json.loads(raw)
-            except (ValueError, UnicodeDecodeError) as exc:
-                raise HTTPException(400, "reset body must be valid JSON") from exc
-            if not isinstance(body, dict):
-                raise HTTPException(400, "reset body must be a JSON object")
-        else:
-            body = {}
-        expected_generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
-        if expected_generation is not None and (
-                not isinstance(expected_generation, str)
-                or re.fullmatch(r"[0-9a-f]{64}", expected_generation) is None):
-            raise HTTPException(400, "expected_generation must be a lowercase SHA-256 token")
-        # Browser mutations must be generation-fenced. Keep the bodyless no-Origin route as a
-        # deprecated CLI compatibility seam; first-party fetch POSTs carry Origin and always send
-        # the generation below.
-        if expected_generation is None and request.headers.get("origin"):
-            raise HTTPException(428, "expected_generation is required for browser Replay")
-        rd = _run_dir(run_id)
-        # The command sequencer protects command-aware work/current spawn leases; the lifecycle
-        # lock additionally serializes durable resume reconciliation and CLI-compatible launch
-        # markers. Keep this lock order (command → lifecycle) everywhere to avoid inversion.
-        # CLAUDE REVIEW: [PERF] reset_run is `async def` yet everything below runs BLOCKING on the
-        # event loop: destructive_guard/sequence acquire a cross-process flock with a timeout of up
-        # to 60s, run_lifecycle_lock_http another flock, plus full-log folds (srv.state), cost
-        # flushing, a chain of renames and a Popen. While any of that waits, every concurrent
-        # SSE tick/poll on this worker is frozen — the exact hazard the /control handler above
-        # documents and offloads via anyio.to_thread.run_sync. This handler (and start_run below)
-        # needs the same offload; only the body parse needs the event loop.
-        with srv.commands.destructive_guard(rd, "reset run") as rd:
-            with run_lifecycle_lock_http(rd):
-                current_generation = srv.commands.run_generation(rd)
-                if expected_generation is not None and expected_generation != current_generation:
-                    raise HTTPException(409, {
-                        "code": "run_generation_changed",
-                        "expected_generation": expected_generation,
-                        "current_generation": current_generation or None,
-                        "message": "The run was reset or replaced before Replay was submitted.",
-                        "remediation": "Reload the run before replaying it.",
-                    })
-                known_alive = _known_engine_liveness(rd, "reset the run")
-                if (known_alive or _engine_alive(rd) or _fresh_resume_launch_pending(rd)
-                        or _fresh_run_launch_pending(rd)
-                        or not srv.state(rd).finished):
-                    raise HTTPException(
-                        409, "run is still active or launching — stop it first "
-                             "(Replay resets a finished run)")
-                task_file = _task_file_for(rd)
-                if not task_file:
-                    raise HTTPException(
-                        400, "run is not resettable — no task.snapshot.json or ui_meta.json")
-
-                flush_durable_costs = getattr(srv, "flush_durable_run_costs", None)
-                if not callable(flush_durable_costs):
-                    raise HTTPException(
-                        503, "cannot reset run: durable run-cost recovery is unavailable")
-                try:
-                    durable_costs_flushed = flush_durable_costs(rd)
-                except Exception as exc:  # noqa: BLE001 - fail closed on unknown evidence
-                    raise HTTPException(
-                        503, "cannot reset run: durable run-cost recovery failed") from exc
-                if durable_costs_flushed is not True:
-                    raise HTTPException(
-                        409, "cannot reset run: run-cost evidence is pending, busy, "
-                             "malformed, or conflicting")
-
-                def _outbox_archiveable(path: Path) -> bool:
-                    """Validate the entry itself; only true absence or a real directory is safe."""
-                    try:
-                        entry = path.lstat()
-                    except FileNotFoundError:
-                        return False
-                    except OSError as exc:
-                        raise HTTPException(
-                            409, "cannot reset run: run-cost outbox metadata is inaccessible") from exc
-                    try:
-                        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
-                            raise HTTPException(
-                                409, "cannot reset run: run-cost outbox is a symlink or "
-                                     "reparse point or is not a directory")
-                        is_junction = getattr(path, "is_junction", None)
-                        if callable(is_junction) and is_junction():
-                            raise HTTPException(
-                                409, "cannot reset run: run-cost outbox is a junction/reparse point")
-                    except HTTPException:
-                        raise
-                    except OSError as exc:
-                        raise HTTPException(
-                            409, "cannot reset run: run-cost outbox type is inaccessible") from exc
-                    return True
-
-                outbox_path = rd / ".llm-usage-outbox"
-                _outbox_archiveable(outbox_path)
-                # Archive auxiliaries first and the event source of truth last. Command/start records
-                # deliberately survive so lost-response idempotency never re-applies to generation B.
-                names = (
-                    ".llm-usage-outbox", "spans.jsonl", "spans.index.jsonl",
-                    "readmodel.sqlite-wal", "readmodel.sqlite-shm", "readmodel.sqlite",
-                    "nodes", "chat.jsonl", "events.jsonl",
-                )
-
-                def _present(path: Path) -> bool:
-                    return os.path.lexists(path)
-
-                def _archive_temp(archived: Path) -> Path:
-                    return archived.with_name(f"{archived.name.upper()}.tmp")
-
-                stamp = int(time.time() * 1000)
-                while any(
-                        _present(candidate)
-                        for name in names
-                        for candidate in (
-                            rd / f"{name}.reset-{stamp}",
-                            _archive_temp(rd / f"{name}.reset-{stamp}"))):
-                    stamp += 1
-                moved: list[tuple[Path, Path]] = []
-
-                def _rollback_archives() -> list[str]:
-                    failures: list[str] = []
-                    restored: list[tuple[Path, Path]] = []
-                    for original, archived in reversed(moved):
-                        try:
-                            if _present(archived):
-                                archived.replace(original)
-                            elif not _present(original):
-                                failures.append(original.name)
-                            if _present(original) and not _present(archived):
-                                restored.append((original, archived))
-                        except OSError:
-                            failures.append(original.name)
-                    # A Windows/network layer may publish an implementation-owned, case-variant
-                    # shadow after replace returns. Stamp collision checks prove this exact name did
-                    # not pre-exist, so remove only the temp derived from entries this transaction
-                    # successfully restored; never glob or touch an older approved archive.
-                    deadline = time.monotonic() + 0.1
-                    while restored and time.monotonic() < deadline:
-                        for _original, archived in restored:
-                            temp = _archive_temp(archived)
-                            if _present(temp):
-                                try:
-                                    temp.unlink()  # files/symlinks only; directories fail closed below
-                                except OSError:
-                                    pass
-                        time.sleep(0.01)
-                    for original, archived in restored:
-                        if _present(_archive_temp(archived)):
-                            failures.append(f"{original.name}.tmp")
-                    return failures
-
-                try:
-                    for name in names:
-                        source = rd / name
-                        if not _present(source):
-                            continue
-                        if name == ".llm-usage-outbox":
-                            _outbox_archiveable(source)
-                        archived = rd / f"{name}.reset-{stamp}"
-                        source.rename(archived)
-                        moved.append((source, archived))
-                except (OSError, HTTPException) as exc:
-                    rollback_failures = _rollback_archives()
-                    detail = f"could not archive run for Replay; no engine was started: {exc}"
-                    if rollback_failures:
-                        detail += f"; rollback also failed for {rollback_failures}"
-                    raise HTTPException(500, detail) from exc
-
-                # The identity signature already prevents reuse across Replay.  Evict explicitly too:
-                # a light trace for a large run can occupy hundreds of MB and must not linger until the
-                # replacement engine has written enough state for the next trace request.
-                srv.invalidate_trace_view(rd)
-
-                env: Optional[dict] = None
-                spawn_args = ["run", str(task_file), "--out", str(rd)]
-                snap = rd / "config.snapshot.json"
-                if snap.exists():
-                    try:
-                        cfg = json.loads(snap.read_text(encoding="utf-8"))
-                        if isinstance(cfg, dict):
-                            cfg = migrate_config_snapshot(cfg)
-                            env = srv.settings.settings_env({
-                                key: value for key, value in cfg.items()
-                                if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS
-                                and value is not None
-                            })
-                            # settings_env intentionally omits None. Pin the canonical aliases at CLI
-                            # precedence so parallel_build/max_parallel cannot re-promote them on Replay.
-                            for key in ("eval_parallel", "llm_parallel"):
-                                if cfg.get(key) is None:
-                                    spawn_args.extend(["--set", f"{key}=null"])
-                    except (OSError, json.JSONDecodeError, ValueError):
-                        env = None
-
-                spawned = False
-                popen_attempted = False
-                try:
-                    # Stamp both pre-lock launch fences before Popen while both serializers are held.
-                    _mark_run_launching(rd)
-                    srv.commands.begin_external_spawn(rd, "reset")
-                    popen_attempted = True
-                    pid = _spawn_engine(spawn_args, env=env, run_dir=rd)
-                    spawned = True
-                    srv.commands.record_external_spawn(rd, "reset", pid)
-                except BaseException as exc:
-                    if not spawned:
-                        _clear_run_launching(rd)
-                        try:
-                            srv.commands.cancel_external_spawn(rd, "reset")
-                        finally:
-                            rollback_failures = _rollback_archives()
-                        if rollback_failures:
-                            raise HTTPException(
-                                500, "could not launch Replay; rollback also failed for "
-                                     f"{rollback_failures}")
-                        if popen_attempted and isinstance(exc, Exception):
-                            raise HTTPException(
-                                500, f"could not launch Replay: {exc}") from exc
-                    # After Popen, never roll archives back beneath a possibly-live child. The
-                    # preclaim/marker intentionally remain fail-closed if PID persistence failed.
-                    raise
-                return {"ok": True}
+        return await durable_reset_run(srv, run_id, request, spawn_engine=_spawn_engine)
 
     def _trace_clear_receipt_lstat(path: Path) -> Optional[os.stat_result]:
         try:
@@ -1471,7 +1251,8 @@ def build_router(srv) -> APIRouter:
         if not isinstance(body, dict):
             raise HTTPException(400, "resolve-claim body must be a JSON object")
         rd = (root / run_id).resolve()
-        if rd == root or rd.parent != root or rd.name.lower() in _RESERVED_RUN_IDS:
+        if (rd == root or rd.parent != root or rd.name.lower() in _RESERVED_RUN_IDS
+                or rd.name.lower().startswith(_RESET_RECEIPT_PREFIX)):
             raise HTTPException(400, "bad run_id")
         confirmation = str(body.get("confirmation") or "")
         return await anyio.to_thread.run_sync(
@@ -1605,6 +1386,12 @@ def build_router(srv) -> APIRouter:
                         return JSONResponse(public)
                     if same_key or public["status"] not in {"not_started", "failed"}:
                         _raise_existing_start(public, same_key=same_key)
+
+            # A crashed Replay can temporarily leave the direct run directory without events.jsonl.
+            # That absence is not an available run name: the durable marker still owns the namespace.
+            # Keep lost-response observation of an already-owned keyed start above, but fence every
+            # genuinely new reservation before it writes task/chat metadata or publishes a spawn claim.
+            srv.commands._reject_unresolved_reset(rd, "start a run with this id")
 
             current_rd = requested_rd.resolve()
             if requested_rd.is_symlink() or current_rd != rd or current_rd.parent != root:

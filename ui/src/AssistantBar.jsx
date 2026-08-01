@@ -167,12 +167,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [runAccess, setRunAccessState] = useState(() => getRunAccess(runId))
   const historical = !!runId && runAccess.readOnly
   const staleDiagnostic = historical && runAccess.mode === 'stale-link'
-  const readOnlyAction = staleDiagnostic
-    ? 'This diagnostic link targets an earlier run generation — open the current generation to act'
-    : `History seq ${runAccess.seq} is read-only — return live to act`
-  const readOnlyShort = staleDiagnostic
-    ? 'Stale diagnostic link · open the current generation'
-    : `History seq ${runAccess.seq} · return live`
+  const startOverLocked = historical && runAccess.mode === 'start-over'
+  const reviewLocked = historical && runAccess.mode === 'review'
+  const readOnlyAction = startOverLocked
+    ? 'Start over must be resolved before asking the Assistant to change this run'
+    : reviewLocked ? 'This review link is read-only'
+      : staleDiagnostic
+        ? 'This diagnostic link targets an earlier run generation — open the current generation to act'
+        : `History seq ${runAccess.seq} is read-only — return live to act`
+  const readOnlyShort = startOverLocked
+    ? 'Start over unresolved · recover the exact request'
+    : reviewLocked ? 'Read-only review'
+      : staleDiagnostic
+        ? 'Stale diagnostic link · open the current generation'
+        : `History seq ${runAccess.seq} · return live`
   const [input, setInputState] = useState('')
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
@@ -1476,7 +1484,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   useEffect(() => {
     const onNewRun = (event) => {
       event.preventDefault()
-      if (busy || commandBusy || historical) { flash(historical ? 'Return live before starting a run from this context' : commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
+      if (busy || commandBusy || historical) { flash(historical ? readOnlyAction : commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
       const goal = String(event.detail?.goal || '').trim()
       const command = goal ? `/new ${goal}` : '/new '
       const existing = input.trim()
@@ -1489,7 +1497,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     window.addEventListener('ll:new-run', onNewRun)
     onReady?.()
     return () => window.removeEventListener('ll:new-run', onNewRun)
-  }, [busy, commandBusy, historical, input, onReady])
+  }, [busy, commandBusy, historical, readOnlyAction, input, onReady])
 
   useEffect(() => {
     if (!Object.keys(launchDrafts).length) return
@@ -1675,7 +1683,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   </div>
 
   const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
-    title={historical ? 'Unavailable while viewing history' : 'attach text file(s)'}
+    title={historical ? readOnlyShort : 'attach text file(s)'}
     disabled={historical} onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
@@ -1709,9 +1717,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div className="chat-in asst-in">
-    {historical && <div className="assistant-history-lock">{staleDiagnostic
-      ? 'Diagnostic link generation mismatch · Assistant paused. Open the current generation to continue.'
-      : `History seq ${runAccess.seq} · Assistant paused. Return live to ask about or change this run.`}</div>}
+    {historical && <div className="assistant-history-lock">{startOverLocked
+      ? 'Start over unresolved · Assistant paused until the exact request is recovered.'
+      : reviewLocked ? 'Read-only review · Assistant actions are unavailable.'
+        : staleDiagnostic
+          ? 'Diagnostic link generation mismatch · Assistant paused. Open the current generation to continue.'
+          : `History seq ${runAccess.seq} · Assistant paused. Return live to ask about or change this run.`}</div>}
     {(commandBusy || directFailure) && <div ref={commandStatusRef} tabIndex={-1}
       className={'assistant-command-pending' + (showDirectFailure ? ' error' : '')}
       role={directNeedsAlert ? 'alert' : 'status'} aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
@@ -1803,7 +1814,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {busy
         ? <button className="cmdbar-go stop" aria-label="Stop Assistant" title="stop the assistant" onClick={stop}>■</button>
         : <button className="cmdbar-go" aria-label="Send Assistant message"
-            title={commandBusy ? 'Waiting for the current run command' : historical ? 'Return live to use Assistant' : 'send (Enter)'}
+            title={commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort : 'send (Enter)'}
             disabled={historical || commandBusy || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>

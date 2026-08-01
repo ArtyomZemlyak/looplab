@@ -19,6 +19,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import sys
 import threading
 import time
@@ -30,6 +31,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from fastapi import HTTPException
+import orjson
 from pydantic import ValidationError
 
 from looplab.core.concepts import (
@@ -42,12 +44,14 @@ from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
     Event, Idea, IdeaEmission, durable_idea_payload, effective_card_footprint,
 )
+from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.comment_projection import (
     COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
     normalize_comment_text)
 from looplab.events.eventstore import (
-    EventStore, EventStoreConcurrencyError, EventStoreLockError, iter_event_jsonl)
+    MAX_EVENT_BATCH_BYTES, EventStore, EventStoreConcurrencyError, EventStoreLockError,
+    decode_event_record, event_sequence_continues, iter_event_jsonl)
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
@@ -1408,12 +1412,81 @@ class RunCommandService:
         """
         return run_generation_token(iter_event_jsonl(self._events_path(rd)))
 
+    def run_generation_if_present(self, rd: Path) -> str:
+        """Observe a generation while a fenced reset may temporarily have no event log.
+
+        Ordinary command paths require ``events.jsonl`` and continue to use ``run_generation``.
+        Replay removes that file before its matching child writes the replacement's first event, so
+        its completion poll needs a missing-safe read without relaxing direct-child or reparse checks.
+        """
+        root = self.srv.root.resolve()
+        requested = Path(rd)
+        try:
+            run_info = requested.lstat()
+            canonical = requested.resolve()
+        except (FileNotFoundError, OSError) as exc:
+            raise HTTPException(404, "no such run") from exc
+        run_attributes = int(getattr(run_info, "st_file_attributes", 0) or 0)
+        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        if (canonical == root or canonical.parent != root or not stat.S_ISDIR(run_info.st_mode)
+                or requested.is_symlink()
+                or bool(run_attributes & reparse_flag)):
+            raise HTTPException(404, "no such run")
+
+        events = canonical / "events.jsonl"
+        try:
+            info = events.lstat()
+        except FileNotFoundError:
+            return ""
+        except OSError as exc:
+            raise HTTPException(409, "run event path cannot be validated") from exc
+        attributes = int(getattr(info, "st_file_attributes", 0) or 0)
+        try:
+            invalid = (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                       or bool(attributes & reparse_flag) or events.resolve().parent != canonical)
+        except OSError as exc:
+            raise HTTPException(409, "run event path cannot be validated") from exc
+        if invalid:
+            raise HTTPException(409, "run events.jsonl must be a regular in-run file")
+        try:
+            with open(events, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if ((info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                        or not stat.S_ISREG(opened.st_mode)):
+                    raise HTTPException(503, "run event identity changed during observation")
+                raw = stream.readline(MAX_EVENT_BATCH_BYTES + 1)
+        except FileNotFoundError:
+            # A reset child has not written the first event yet, or an exact reset observation raced
+            # the no-replace archive move. Both mean "not visible yet", never "no such run".
+            return ""
+        except OSError as exc:
+            raise HTTPException(503, "run generation cannot be observed safely") from exc
+        if not raw:
+            return ""
+        if len(raw) > MAX_EVENT_BATCH_BYTES:
+            raise HTTPException(503, "replacement event prelude exceeds its safety limit")
+        if not raw.endswith(b"\n"):
+            # A torn first append is not a durable EventStore record. The exact child must also be
+            # proven dead before this empty observation can ever authorize the same Popen again.
+            return ""
+        try:
+            value = orjson.loads(raw.strip())
+            if not isinstance(value, dict):
+                raise ValueError("first event record is not an object")
+            decoded = decode_event_record(value)
+            if not event_sequence_continues(decoded, 0):
+                raise ValueError("replacement event sequence does not begin at zero")
+        except Exception as exc:  # noqa: BLE001 - complete malformed evidence must fail closed
+            raise HTTPException(503, "replacement generation evidence is malformed") from exc
+        return run_generation_token(decoded)
+
     @contextmanager
     def run_activity(self, rd: Path, kind: str, *, generation: str):
         """Lease a run generation for server-side work that can append while reset is possible."""
         token = secrets.token_hex(16)
         path = self._directory(rd) / f".activity_{token}.json"
         with self.sequence(rd):
+            self._reject_unresolved_reset(rd, f"start {kind} activity")
             if self.run_generation(rd) != generation:
                 raise HTTPException(409, {
                     "code": "run_generation_changed",
@@ -1762,6 +1835,32 @@ class RunCommandService:
 
     def cancel_external_spawn(self, rd: Path, owner: str) -> None:
         self._clear_spawn_claim(rd, f"external:{owner}")
+
+    def cancel_external_preclaim(self, rd: Path, owner: str) -> bool:
+        """Retire only an exact PID-less lease known by the caller to precede Popen.
+
+        The reset caller may use this only while holding ``sequence(rd)`` and while its durable
+        receipt is still ``phase=archived``: reset saves ``popen_pending`` before invoking Popen, so
+        that phase proves this exact PID-less row is the begin_external_spawn crash window. PID-less
+        rows in every later phase remain uncertain and must never pass through this escape hatch.
+        """
+        path = self._spawn_claim_path(rd)
+        row = self._load(path)
+        allowed = {
+            "command_id", "created_at", "expires_at", "pid",
+            "quarantined", "quarantined_at",
+        }
+        if (not path.exists() or not isinstance(row, dict)
+                or set(row) - allowed
+                or row.get("command_id") != f"external:{owner}"
+                or "pid" not in row or row.get("pid") is not None
+                or row.get("process_identity") is not None):
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
 
     def observe_external_spawn(self, rd: Path, owner: str) -> str:
         """Observe the spawn claim correlated to ``owner`` without ever starting a process.
@@ -2280,6 +2379,25 @@ class RunCommandService:
         _created, _name, path, record = min(candidates, key=lambda item: (item[0], item[1]))
         return path, record
 
+    @staticmethod
+    def _reject_unresolved_reset(rd: Path, operation: str) -> None:
+        """Fail closed while a durable whole-run Replay owns this run namespace."""
+        try:
+            marker = load_run_reset_marker(rd)
+        except RunResetStorageError as exc:
+            raise HTTPException(503, {
+                "code": "run_reset_fence_unavailable",
+                "message": f"Cannot {operation} because Replay ownership cannot be verified.",
+                "remediation": "Inspect the saved Replay evidence before changing this run.",
+            }) from exc
+        if marker is not None:
+            raise HTTPException(409, {
+                "code": "run_reset_in_progress",
+                "operation_id": marker["operation_id"],
+                "message": f"Cannot {operation} while Replay is unresolved.",
+                "remediation": "Observe or retry that exact Replay operation first.",
+            })
+
     def reject_if_active(self, rd: Path, operation: str, *,
                          allow_incomplete_finalize: bool = False) -> None:
         """Fail closed when a legacy mutation would overtake a durable command intent.
@@ -2287,6 +2405,7 @@ class RunCommandService:
         Caller must hold ``sequence(rd)`` so the check and its own append/spawn are one ordering
         boundary.
         """
+        self._reject_unresolved_reset(rd, operation)
         pending_finalize = self._finalize_incomplete(rd)
         if pending_finalize and not allow_incomplete_finalize:
             raise HTTPException(409, {
@@ -2347,6 +2466,20 @@ class RunCommandService:
                     409,
                     f"cannot {operation}: a paid call is waiting for durable run-cost accounting")
         with self.sequence(rd):
+            try:
+                reset_marker = load_run_reset_marker(rd)
+            except RunResetStorageError as exc:
+                raise HTTPException(503, {
+                    "code": "run_reset_fence_unavailable",
+                    "message": f"Cannot {operation} because Replay ownership cannot be verified.",
+                }) from exc
+            if reset_marker is not None:
+                raise HTTPException(409, {
+                    "code": "run_reset_in_progress",
+                    "operation_id": reset_marker["operation_id"],
+                    "message": f"Cannot {operation} while Replay is unresolved.",
+                    "remediation": "Observe or retry that exact Replay operation first.",
+                })
             active = self._active_command_ids(rd)
             if active:
                 sample = ", ".join(active[:3])
@@ -2823,6 +2956,11 @@ class RunCommandService:
             existing = self._read_existing(path)
             if existing is not None:
                 record = self._check_duplicate(existing, key_digest, payload_digest)
+                # A terminal same-key record is immutable observation history and remains readable
+                # across Replay. A nonterminal record would restart a worker below, so it is a write
+                # path and must honor the same namespace fence as a genuinely new command.
+                if record.get("status") not in TERMINAL_STATUSES:
+                    self._reject_unresolved_reset(rd, "resume this run command")
                 generation_match, current_generation = self._record_generation_match(rd, record)
                 if generation_match is not True:
                     if record.get("status") not in TERMINAL_STATUSES:
@@ -2843,6 +2981,7 @@ class RunCommandService:
                 # reset, replaying a lost response with the SAME key/payload must resolve the old
                 # durable record, never reject it or apply it to the replacement generation. Only a
                 # genuinely brand-new record is bound to the generation observed by its caller.
+                self._reject_unresolved_reset(rd, "submit a new run command")
                 current_generation = self.run_generation(rd)
                 if not current_generation:
                     raise HTTPException(409, {
@@ -3076,6 +3215,7 @@ class RunCommandService:
             record = self._reconcile_observation(rd, path, record)
             if record.get("status") == "succeeded":
                 return self._public(record)
+            self._reject_unresolved_reset(rd, "retry this run command")
             if (record.get("event_type") not in COLLABORATION_EVENTS
                     and self._recent_spawn_claim(rd)):
                 raise HTTPException(409, {
@@ -3145,6 +3285,8 @@ class RunCommandService:
                 # Terminal cross-generation/legacy records are observation-only history.
             else:
                 record = self._reconcile_observation(rd, path, record)
+            if record.get("status") not in TERMINAL_STATUSES:
+                self._reject_unresolved_reset(rd, "resume this run command")
         if record.get("status") not in TERMINAL_STATUSES:
             self._start_worker(rd, path, record)
             record = self._load(path) or record
@@ -3476,6 +3618,17 @@ class RunCommandService:
             if spec is None:
                 self._terminal(path, record, "rejected", error=_error(
                     "invalid_command", f"unknown control event: {event_type!r}"))
+                return
+            try:
+                self._reject_unresolved_reset(rd, "execute this run command")
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                self._terminal(path, record, "failed", error=_error(
+                    str(detail.get("code") or "run_reset_in_progress"),
+                    str(detail.get("message") or "Replay owns this run namespace."),
+                    str(detail.get("remediation") or (
+                        "Observe the saved Replay operation before retrying this command.")),
+                    retryable=exc.status_code >= 500))
                 return
 
             observation = self._observe(rd)

@@ -3,6 +3,8 @@
 // mutation.  Server authorization remains authoritative; this guard prevents the current UI from
 // accidentally targeting the live run while a historical snapshot is on screen.
 
+import { loadRunStartOverIntent } from './runStartOverRecovery.js'
+
 export const liveHistory = () => ({
   status: 'live', requestedSeq: null, requestedGeneration: null,
   resolvedSeq: null, resolvedGeneration: null, data: null, error: null,
@@ -84,7 +86,23 @@ export function clearRunAccess(runId) {
 }
 
 export function getRunAccess(runId) {
-  return accessByRun.get(String(runId)) || { readOnly: false, seq: null, mode: 'live' }
+  const key = String(runId)
+  const published = accessByRun.get(key)
+  if (published) return published
+  // RunView may be unmounted while the user returns to the run list. Recover the destructive lock
+  // directly from this tab's durable envelope so rename/move/delete cannot bypass it during Back,
+  // a route switch, or a full reload on the list screen.
+  const recovery = loadRunStartOverIntent(key)
+  if (recovery.kind === 'active' || recovery.kind === 'corrupt') {
+    return { readOnly: true, seq: null, mode: 'start-over', recoveryKind: recovery.kind }
+  }
+  return { readOnly: false, seq: null, mode: 'live' }
+}
+
+export function listStartOverRunAccesses() {
+  return [...accessByRun.entries()]
+    .filter(([, access]) => access?.mode === 'start-over')
+    .map(([runId, access]) => ({ runId, kind: access.recoveryKind || 'active' }))
 }
 
 export function runIdFromApiPath(path) {
@@ -93,19 +111,25 @@ export function runIdFromApiPath(path) {
   try { return decodeURIComponent(m[1]) } catch { return m[1] }
 }
 
-export function assertRunMutationAllowed(path) {
+export function assertRunMutationAllowed(path, { allowModes = [] } = {}) {
   const runId = runIdFromApiPath(path)
   if (!runId) return
   const access = getRunAccess(runId)
   if (!access.readOnly) return
+  if (allowModes.includes(access.mode)) return
   const review = access.mode === 'review'
   const staleLink = access.mode === 'stale-link'
+  const startOver = access.mode === 'start-over'
   const error = new Error(review
     ? 'This review link is read-only'
     : staleLink
       ? 'This diagnostic link targets an earlier run generation — open the current generation before acting'
+      : startOver
+        ? 'Start over is unresolved — retry or finish that exact request before changing the run'
       : `Historical snapshot seq ${access.seq} is read-only — return to live to act`)
-  error.code = review ? 'REVIEW_READ_ONLY' : staleLink ? 'STALE_LINK_READ_ONLY' : 'HISTORICAL_READ_ONLY'
+  error.code = review ? 'REVIEW_READ_ONLY'
+    : staleLink ? 'STALE_LINK_READ_ONLY'
+      : startOver ? 'START_OVER_RECOVERY_LOCK' : 'HISTORICAL_READ_ONLY'
   error.runId = runId
   error.seq = access.seq
   throw error

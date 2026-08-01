@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, workingId, resetRun, getRunCommand, retryRunCommand, runCommand,
+import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
   commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
   loadRunTransport, saveRunTransport, clearRunTransport, isTransientCommandReadError,
@@ -16,6 +16,7 @@ import { DataTable } from './accessibility.jsx'
 import { tracePartial, traceUnavailable } from './traceProjection.js'
 import { crossRunPriorNarration } from './crossRunPrior.js'
 import { buildingGenerations, buildingMarkers } from './buildingModel.js'
+import { useDialogFocus } from './useDialogFocus.js'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -853,9 +854,17 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false,
   publishTransport = null, filter = '', onFilterChange = null, kindFilters = [],
   onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null,
-  collapseControlRef = null }) {
+  collapseControlRef = null, startOverState = null, onStartOver = null }) {
   const log = timeline.rows
   const collapseButtonRef = useRef(null)
+  const startOverDialogRef = useRef(null)
+  const [startOverDialogIntent, setStartOverDialogIntent] = useState(null)
+  const closeStartOverDialog = () => setStartOverDialogIntent(null)
+  const restoreDockFocus = () => requestAnimationFrame(() => {
+    const target = collapseButtonRef.current || document.querySelector('[data-route-main]')
+    target?.focus?.({ preventScroll: true })
+  })
+  useDialogFocus(startOverDialogRef, closeStartOverDialog, !!startOverDialogIntent)
   const setCollapseButtonRef = element => {
     collapseButtonRef.current = element
     if (typeof collapseControlRef === 'function') collapseControlRef(element)
@@ -882,6 +891,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const [runCommandLock, setRunCommandLock] = useState(() => loadRunCommandLock(runId))
   const externalTransportPending = runCommandLock?.source === 'assistant' ? runCommandLock : null
   const transportBusy = !!transportPending || !!externalTransportPending
+  const runActionBusy = transportBusy || !!startOverState?.lifecycleBlocked
+  const startOverDisabled = transportBusy || !!startOverState?.blocked
   // Expansion is view-owned rather than row-owned: virtual rows may unmount offscreen, but a user's
   // open reasoning/trace card must still be open when that retained event comes back into view.
   const [eventExpansion, setEventExpansion] = useState(() => new Map())
@@ -1030,6 +1041,15 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // state only hides duplicate controls; it never promotes a run to finished by itself.
   const lifecycle = runLifecycle(live || {})
   const mode = lifecycle.mode
+  useEffect(() => {
+    if (!startOverDialogIntent) return
+    if (startOverDisabled || mode !== 'finished'
+        || startOverDialogIntent.runId !== String(runId)
+        || startOverDialogIntent.expectedGeneration !== expectedGeneration) {
+      setStartOverDialogIntent(null)
+      restoreDockFocus()
+    }
+  }, [startOverDialogIntent, startOverDisabled, mode, runId, expectedGeneration])
   const transportLabels = (action) => ({
     stop: { success: 'Stopped — frozen, not finalized', noop: 'Run was already stopped',
       executing: 'Stop requested — waiting for the run to freeze', failure: 'Stop failed' },
@@ -1316,13 +1336,26 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     clearRunCommandLock(runId, identity)
     setTransportPending(null)
   }
-  const onReplay = async () => {
-    if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
-    try {
-      await resetRun(runId, expectedGeneration)
-      onToast?.('replaying from scratch')
-    } catch { onToast?.('Reset could not be submitted. Reload the run and try again.') }
+  const submitStartOver = () => {
+    const intent = startOverDialogIntent
+    if (!intent || startOverDisabled || mode !== 'finished' || !onStartOver
+        || intent.runId !== String(runId)
+        || intent.expectedGeneration !== expectedGeneration) {
+      closeStartOverDialog()
+      onToast?.('Start over was not submitted because the run changed before confirmation.')
+      return
+    }
+    closeStartOverDialog()
+    onStartOver(intent.expectedGeneration)
+    // Confirmation immediately removes the trigger as the run enters recovery. The dialog hook can
+    // restore only to a still-connected node, so provide a stable Dock/workspace fallback.
+    restoreDockFocus()
   }
+  const startOverLabel = String(
+    startOverDialogIntent?.label || live?.label || live?.run_id || runId)
+  const startOverIdentity = startOverLabel === String(runId)
+    ? <code>{runId}</code>
+    : <><b>“{startOverLabel}”</b> <span className="muted">(run <code>{runId}</code>)</span></>
   // Publish only from the committed layout and bind the callable to this exact run generation. A
   // functional identity cleanup prevents an old StrictMode/unmount cleanup from erasing a newer
   // controller. The parent also receives busy/failure reactively, so a prominent canvas recovery CTA
@@ -1523,10 +1556,49 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
               <button className="btn sm danger" aria-label="Finalize run"
                 title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
             {!transportBusy && !transportFailure && mode === 'finished' && <>
-              <button className="btn sm primary" aria-label="Resume finished run" title="Reopen and continue" onClick={onResume}><OpIcon name="play" size={13} /></button>
-              <button className="btn sm" aria-label="Replay run from scratch" title="Restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
+              <button className="btn sm primary" aria-label="Resume finished run"
+                title={runActionBusy ? 'Another run lifecycle action must be resolved first' : 'Reopen and continue'}
+                disabled={runActionBusy} onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm danger start-over-trigger" aria-haspopup="dialog"
+                aria-label="Start run over" title={startOverDisabled
+                  ? startOverState?.disabledReason || 'Resolve the existing Start over outcome first'
+                  : 'Archive this generation and start again from the saved task and settings'}
+                disabled={startOverDisabled} onClick={() => setStartOverDialogIntent({
+                  runId: String(runId),
+                  expectedGeneration: String(expectedGeneration || ''),
+                  label: String(live?.label || live?.run_id || runId),
+                })}>
+                <OpIcon name="replay" size={13} /> Start over…</button></>}
           </div>}
         </div>
+      </div>}
+      {startOverDialogIntent && <div className="overlay start-over-overlay"
+        onMouseDown={event => { if (event.target === event.currentTarget) closeStartOverDialog() }}>
+        <section ref={startOverDialogRef} className="modal start-over-dialog" role="alertdialog"
+          aria-modal="true" aria-labelledby="start-over-title"
+          aria-describedby="start-over-description start-over-cost-note"
+          tabIndex={-1}>
+          <div className="modal-h">
+            <b id="start-over-title">Start this run over?</b>
+          </div>
+          <div className="modal-b">
+            <p id="start-over-description" className="start-over-copy">
+              {startOverIdentity} will start again from its saved task and settings. Current events,
+              nodes, traces, and chat leave the live view and remain archived on disk.
+            </p>
+            <p id="start-over-cost-note" className="start-over-cost-note">
+              The engine starts immediately and may use provider and evaluation budget.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn sm" data-dialog-initial-focus
+                onClick={closeStartOverDialog}>Keep current run</button>
+              <button type="button" className="btn sm danger"
+                disabled={startOverDisabled || mode !== 'finished'
+                  || startOverDialogIntent.expectedGeneration !== expectedGeneration}
+                onClick={submitStartOver}>Archive &amp; start over</button>
+            </div>
+          </div>
+        </section>
       </div>}
     </div>
   )

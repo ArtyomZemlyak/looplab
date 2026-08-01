@@ -5,7 +5,7 @@ import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
 import { useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
-import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
+import { deadlineGet, get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback, createIdempotencyKey, resetRun,
   storageGet, storageSet } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
@@ -27,6 +27,10 @@ import {
 } from './mergeIntent.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { createInspectorDraftStore } from './inspectorDraftStore.js'
+import {
+  clearRunStartOverIntent, createRunStartOverIntent, loadRunStartOverIntent,
+  saveRunStartOverIntent,
+} from './runStartOverRecovery.js'
 
 const lazyNamed = (load, name) => lazy(() => load().then(module => ({
   default: name === 'default' ? module.default : module[name],
@@ -110,6 +114,10 @@ const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k
 // Historical overlays must derive only from the exact folded snapshot. Panels that fetch current
 // config, raw detail, another run, or a sidecar stay closed so `seq + panel` cannot create a hybrid.
 const HISTORY_SAFE_PANELS = new Set(['sensitivity', 'importance', 'failures', 'pareto', 'data'])
+const START_OVER_SAFE_PANELS = new Set([
+  'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data',
+  'compare', 'crossrun', 'artifacts', 'registry', 'memory', 'events', 'gpu',
+])
 const LIVE_INSPECT_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 const READ_ONLY_INSPECT_TABS = ['Overview', 'Code', 'Trust', 'Cost']
 
@@ -118,7 +126,16 @@ const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
 // Heal old persisted splitter values instead of allowing a technically scrollable ~15 px sliver.
 const MIN_DOCK_HEIGHT = 200
 const RUN_CONFIG_REQUEST_TIMEOUT_MS = 15_000
+const START_OVER_REQUEST_TIMEOUT_MS = 15_000
+const START_OVER_AUTO_RETRY_LIMIT = 3
 const hubMenuId = label => `panel-hub-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+const restoredStartOverState = runId => {
+  const restored = loadRunStartOverIntent(runId)
+  if (restored.kind !== 'active' || restored.intent.phase !== 'submitting') return restored
+  // A submitting marker can only outlive its component when the response was lost to navigation or
+  // reload. Keep the same operation identity so an explicit retry rejoins instead of duplicating it.
+  return { ...restored, intent: { ...restored.intent, phase: 'unknown' } }
+}
 
 function DagEmptyOverlay({ presentation, transport, onAction }) {
   if (!presentation) return null
@@ -160,6 +177,29 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const { live, seq, generation, eventCount: liveEventCount, connected,
     status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
+  const retryRunRef = useRef(retryRun)
+  retryRunRef.current = retryRun
+  const [startOverRecovery, setStartOverRecovery] = useState(
+    () => reviewMode ? { kind: 'none', intent: null } : restoredStartOverState(runId))
+  const [startOverRouteSyncAttempt, setStartOverRouteSyncAttempt] = useState(0)
+  const [startOverRouteSyncFailed, setStartOverRouteSyncFailed] = useState(false)
+  const startOverRequestRef = useRef(null)
+  const startOverAutoRetryRef = useRef({ operationId: null, count: 0 })
+  const startOverNoticeRef = useRef(null)
+  useEffect(() => {
+    startOverRequestRef.current?.controller?.abort()
+    startOverRequestRef.current = null
+    startOverAutoRetryRef.current = { operationId: null, count: 0 }
+    setStartOverRecovery(reviewMode
+      ? { kind: 'none', intent: null }
+      : restoredStartOverState(runId))
+    setStartOverRouteSyncAttempt(0)
+    setStartOverRouteSyncFailed(false)
+    return () => {
+      startOverRequestRef.current?.controller?.abort()
+      startOverRequestRef.current = null
+    }
+  }, [runId, reviewMode])
   const gen = generation?.slice(0, 8) || 'unknown'
   const route = useRunRouteState({ generation, reviewMode })
   const { state: routeState, generationMismatch, generationPending } = route
@@ -218,7 +258,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const reportTimelineActivated = timelineActivation.runId === runId && timelineActivation.active
   const reportTimelineFocusPending = timelineActivation.runId === runId
     && timelineActivation.focusPending
+  // A finished run's primary lifecycle actions, including Start over, live in Dock. Keep them visible
+  // on the default Report landing instead of hiding them behind an unrelated diagnostics expander.
   const timelineDeferred = view === 'report' && panel !== 'events' && !reportTimelineActivated
+    && !live?.finished
   // One owner-only paged controller feeds both Dock and EventExplorer. Opening the explorer therefore
   // adds no second raw-log scan, cursor stream, retained window, or competing generation fence.
   const timeline = useTimeline(runId, {
@@ -229,10 +272,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [history, setHistory] = useState(liveHistory)
   const [historyRetry, setHistoryRetry] = useState(0)
   const readOnlyMode = reviewMode || historyActive || routeFenceBlocked
+  const startOverMutationBlocked = startOverRecovery.kind === 'active'
+    || startOverRecovery.kind === 'corrupt'
+  const mutationReadOnlyMode = readOnlyMode || startOverMutationBlocked
+  const mutationReadOnlyReason = reviewMode ? 'review'
+    : startOverMutationBlocked ? 'start-over' : 'history'
   const reviewEvidence = reviewMode && (reviewMeta?.scopes || []).includes('evidence')
   const panelAllowed = (name) => {
     if (reviewMode) return reviewPanelAllowed(name, reviewEvidence)
     if (historyActive) return HISTORY_SAFE_PANELS.has(name)
+    if (startOverMutationBlocked) return START_OVER_SAFE_PANELS.has(name)
     return true
   }
   const setSelectedId = (value, options = {}) => route.update(current => {
@@ -273,10 +322,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     // current truth confirms it. Publish in the same layout-effect phase as useRunState's observed
     // generation so the persistent Assistant/Dock cannot see generation B with generation A's old
     // live access during the commit-to-passive-effect window.
-    setRunAccess(runId, { readOnly: readOnlyMode, seq: viewSeq,
-      mode: reviewMode ? 'review' : routeFenceBlocked ? 'stale-link' : historyActive ? 'history' : 'live' })
-    return () => clearRunAccess(runId)
-  }, [runId, reviewMode, readOnlyMode, viewSeq, historyActive, routeFenceBlocked])
+    setRunAccess(runId, { readOnly: mutationReadOnlyMode, seq: viewSeq,
+      mode: reviewMode ? 'review' : startOverMutationBlocked ? 'start-over'
+        : routeFenceBlocked ? 'stale-link' : historyActive ? 'history' : 'live' })
+    // An unresolved destructive operation outlives this route. Leave its published access lock in
+    // place when navigating Back; getRunAccess also reconstructs it from session storage after reload.
+    return () => { if (!startOverMutationBlocked) clearRunAccess(runId) }
+  }, [runId, reviewMode, mutationReadOnlyMode, viewSeq, historyActive, routeFenceBlocked,
+    startOverMutationBlocked])
   const [toast, setToast] = useState(null)
   const [routeNotice, setRouteNotice] = useState('')
   const [copyFallback, setCopyFallback] = useState('')
@@ -576,6 +629,260 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     setToast(m)
     toastTimer.current = setTimeout(() => setToast(null), 5000)
   }
+  const startOverIntent = startOverRecovery.kind === 'active'
+    ? startOverRecovery.intent : null
+  const startOverRequestPending = !!startOverRequestRef.current
+  const startOverHandoff = !!(startOverIntent?.replacementGeneration && generation
+    && generation === startOverIntent.replacementGeneration)
+  // A verified replacement can itself be superseded by a later Start over in another tab. The
+  // saved operation is resolved at that point, so keeping its envelope as an eternal mutation lock
+  // would make the current generation impossible to open. Do not confuse the still-visible source
+  // generation with that case: it is expected while the verified replacement is starting.
+  const startOverReplacementSuperseded = !!(startOverIntent?.replacementGeneration && generation
+    && generation !== startOverIntent.replacementGeneration
+    && generation !== startOverIntent.expectedGeneration)
+  const persistStartOverPhase = (
+    intent, phase, replacementGeneration = intent.replacementGeneration,
+  ) => {
+    const next = createRunStartOverIntent(
+      intent.runId, intent.expectedGeneration, intent.operationId, phase, Date.now(),
+      replacementGeneration)
+    if (!next) return null
+    const stored = saveRunStartOverIntent(next, undefined, intent.operationId)
+    if (!stored) {
+      const restored = loadRunStartOverIntent(intent.runId)
+      if (restored.kind === 'active'
+          && restored.intent.operationId !== intent.operationId) {
+        setStartOverRecovery(restored)
+        return null
+      }
+    }
+    setStartOverRecovery({
+      kind: 'active', intent: next, storageUnavailable: !stored,
+    })
+    return next
+  }
+  const clearStartOverRecovery = (intent) => {
+    if (clearRunStartOverIntent(intent.runId, undefined, intent.operationId)) {
+      setStartOverRouteSyncFailed(false)
+      setStartOverRecovery({ kind: 'none', intent: null })
+      return true
+    }
+    const restored = loadRunStartOverIntent(intent.runId)
+    setStartOverRecovery(restored.kind === 'none'
+      ? { kind: 'corrupt', intent: null }
+      : restored)
+    return false
+  }
+  const executeStartOver = async (intent, { initialRequest = false } = {}) => {
+    if (!intent || startOverRequestRef.current) return
+    if (!persistStartOverPhase(intent, 'submitting')) {
+      showToast('The saved Start over identity changed. No request was submitted.')
+      return
+    }
+    const controller = new AbortController()
+    const request = {
+      runId: intent.runId,
+      expectedGeneration: intent.expectedGeneration,
+      operationId: intent.operationId,
+      controller,
+    }
+    startOverRequestRef.current = request
+    const timeout = setTimeout(() => controller.abort(), START_OVER_REQUEST_TIMEOUT_MS)
+    try {
+      const result = await resetRun(
+        intent.runId, intent.expectedGeneration, intent.operationId, { signal: controller.signal })
+      if (startOverRequestRef.current !== request) return
+      const replacementGeneration = String(result?.generation || '')
+      if (!result || result.ok !== true || result.operation_id !== intent.operationId
+          || result.expected_generation !== intent.expectedGeneration
+          || !/^[0-9a-f]{64}$/.test(replacementGeneration)
+          || replacementGeneration === intent.expectedGeneration
+          || (intent.replacementGeneration
+            && replacementGeneration !== intent.replacementGeneration)) {
+        const error = new Error('The server returned an invalid Start over response.')
+        error.code = 'start_over_protocol_error'
+        throw error
+      }
+      startOverRequestRef.current = null
+      startOverAutoRetryRef.current = { operationId: intent.operationId, count: 0 }
+      persistStartOverPhase(intent, 'accepted', replacementGeneration)
+      showToast('Start over accepted. Opening the new run generation…')
+      retryRunRef.current()
+    } catch (error) {
+      if (startOverRequestRef.current !== request) return
+      startOverRequestRef.current = null
+      const status = Number(error?.status)
+      const generationChanged = error?.code === 'run_generation_changed'
+      const foreignResetConflict = error?.code === 'reset_operation_conflict'
+        && String(error?.detail?.operation_id || '')
+        && String(error.detail.operation_id) !== intent.operationId
+      const pendingReceipt = status === 425 && error?.code === 'reset_pending'
+        && error?.detail?.operation_id === intent.operationId
+        && error?.detail?.expected_generation === intent.expectedGeneration
+        && ['pending', 'accepted'].includes(error?.detail?.status)
+      if (pendingReceipt) {
+        persistStartOverPhase(intent, 'pending')
+        showToast('The server saved this exact Start over request. Checking its outcome…')
+        retryRunRef.current()
+        return
+      }
+      // Only the original response can prove a pre-mutation rejection. A later retry receiving a
+      // 4xx does not disprove that the first request is still finishing or already crossed archive.
+      const authoritativeRejection = initialRequest && (
+        [400, 401, 403, 422, 428].includes(status)
+        || generationChanged
+        || foreignResetConflict
+        || error?.code === 'replay_task_invalid'
+        || error?.code === 'replay_config_invalid'
+        || error?.code === 'replay_config_unavailable')
+      if (authoritativeRejection && clearStartOverRecovery(intent)) {
+        showToast(foreignResetConflict
+          ? 'Another Start over operation already owns this run. This request was not submitted.'
+          : error?.message || 'Start over was rejected; the run was not changed.')
+        retryRunRef.current()
+        return
+      }
+      persistStartOverPhase(intent, 'unknown')
+      showToast(generationChanged
+        ? 'The run changed, but this operation is not yet verified. Retry the exact request.'
+        : 'Start-over outcome is not confirmed. Retry this exact request before doing anything else.')
+      retryRunRef.current()
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+  const submitStartOver = (confirmedGeneration) => {
+    if (reviewMode || startOverRecovery.kind !== 'none'
+        || confirmedGeneration !== generation
+        || !/^[0-9a-f]{64}$/.test(confirmedGeneration || '')) {
+      showToast('Start over was not submitted because the run changed before confirmation.')
+      return
+    }
+    const intent = createRunStartOverIntent(
+      runId, confirmedGeneration, createIdempotencyKey().toLowerCase())
+    if (!intent || !saveRunStartOverIntent(intent)) {
+      setStartOverRecovery({ kind: 'unavailable', intent: null })
+      showToast('Start over was not submitted because recovery storage is unavailable.')
+      return
+    }
+    setStartOverRouteSyncFailed(false)
+    startOverAutoRetryRef.current = { operationId: intent.operationId, count: 0 }
+    setStartOverRecovery({ kind: 'active', intent })
+    executeStartOver(intent, { initialRequest: true })
+  }
+  const finishStartOverHandoff = (intent, { superseded = false } = {}) => {
+    if (!intent) return false
+    startOverRequestRef.current?.controller?.abort()
+    startOverRequestRef.current = null
+    if (!route.openCurrentGeneration({ mode: 'replace' })) {
+      setStartOverRouteSyncFailed(true)
+      showToast(superseded
+        ? 'Start over is verified, but the current run address could not be opened. Retry.'
+        : 'The new run is ready, but its address could not be updated. Retry opening it.')
+      return false
+    }
+    setStartOverRouteSyncFailed(false)
+    landedRef.current = false
+    deepLinkLandingRef.current = false
+    largeOverviewAppliedRef.current = false
+    setSelectedGroup(null)
+    setConceptHighlight(null)
+    setCompactInspectorOpen(false)
+    setCompactTimelineOpen(false)
+    setTransportController(null)
+    setTimelineActivation({ runId: null, active: false, focusPending: false })
+    setRouteNotice('')
+    if (clearStartOverRecovery(intent)) {
+      showToast(superseded
+        ? 'Start over completed, and the run changed again. The current generation is open.'
+        : 'Previous run generation archived. The new run is open.')
+    } else {
+      showToast('The current run is open, but saved recovery evidence could not be cleared safely.')
+    }
+    requestAnimationFrame(() => {
+      ;(routeMainRef.current || document.querySelector('[data-route-main]'))
+        ?.focus?.({ preventScroll: true })
+    })
+    return true
+  }
+  const retryStartOver = () => {
+    if (!startOverIntent || startOverRequestRef.current) return
+    if (startOverReplacementSuperseded) {
+      finishStartOverHandoff(startOverIntent, { superseded: true })
+      return
+    }
+    if (startOverHandoff) {
+      setStartOverRouteSyncAttempt(value => value + 1)
+      return
+    }
+    executeStartOver(startOverIntent)
+  }
+  const retryStartOverStorage = () => {
+    const restored = loadRunStartOverIntent(runId)
+    setStartOverRecovery(restored)
+    showToast(restored.kind === 'unavailable'
+      ? 'Recovery storage is still unavailable in this tab.'
+      : 'Recovery storage is available again.')
+    if (restored.kind === 'none') {
+      requestAnimationFrame(() => {
+        ;(routeMainRef.current || document.querySelector('[data-route-main]'))
+          ?.focus?.({ preventScroll: true })
+      })
+    }
+  }
+  useLayoutEffect(() => {
+    if (!startOverIntent?.replacementGeneration || !generation
+        || generation !== startOverIntent.replacementGeneration) return
+    // This mismatch belongs to the exact destructive intent saved before POST, so replacing its
+    // stale diagnostic URL is safe. Unrelated stale links still stop at the normal generation fence.
+    finishStartOverHandoff(startOverIntent)
+  }, [runId, generation, startOverIntent?.expectedGeneration,
+    startOverIntent?.operationId, startOverIntent?.replacementGeneration,
+    startOverIntent?.phase, startOverRouteSyncAttempt])
+  useEffect(() => {
+    if (!startOverIntent || startOverIntent.phase !== 'pending') return undefined
+    const tracker = startOverAutoRetryRef.current
+    if (tracker.operationId !== startOverIntent.operationId) {
+      tracker.operationId = startOverIntent.operationId
+      tracker.count = 0
+    }
+    if (tracker.count >= START_OVER_AUTO_RETRY_LIMIT) {
+      persistStartOverPhase(startOverIntent, 'unknown')
+      showToast('Start over is still unresolved. Use Retry exact request to check it again.')
+      return undefined
+    }
+    tracker.count += 1
+    const timer = setTimeout(
+      () => executeStartOver(startOverIntent), 900 + tracker.count * 450)
+    return () => clearTimeout(timer)
+  }, [startOverIntent?.operationId, startOverIntent?.phase, startOverIntent?.updatedAt])
+  useEffect(() => {
+    if (!startOverIntent || startOverIntent.phase !== 'accepted'
+        || (generation && generation !== startOverIntent.expectedGeneration)) return
+    const age = Date.now() - startOverIntent.updatedAt
+    if (age >= 45_000) {
+      showToast('Start over is verified, but the replacement run is taking longer than expected to open.')
+      return
+    }
+    const timer = runStatus === 'loading'
+      ? setTimeout(() => {
+          showToast('Start over is verified, but the replacement run is taking longer than expected to open.')
+        }, Math.max(1000, 45_000 - age))
+      : setTimeout(() => retryRunRef.current(), 900)
+    return () => clearTimeout(timer)
+  }, [runStatus, generation, startOverIntent?.operationId,
+    startOverIntent?.expectedGeneration, startOverIntent?.replacementGeneration,
+    startOverIntent?.phase, startOverIntent?.updatedAt])
+  useEffect(() => {
+    if (startOverRecovery.kind === 'none') return undefined
+    const frame = requestAnimationFrame(() => {
+      if (!document.querySelector('[aria-modal="true"]')) {
+        startOverNoticeRef.current?.focus?.({ preventScroll: true })
+      }
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [startOverRecovery.kind])
   // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
   // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
   const groupMembers = useMemo(() => {
@@ -688,7 +995,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     setInspectTab(effectiveInspectTab, { mode: 'replace', preserveIssues: true })
   }, [inspectTab, effectiveInspectTab])
   useEffect(() => {
-    if (!live2 || selectedId == null || (historyActive && history.status !== 'ready')) return
+    if (startOverHandoff || !live2 || selectedId == null
+        || (historyActive && history.status !== 'ready')) return
     if (nodeIsActive(live2.nodes?.[selectedId], live2)) return
     setRouteNotice(current => [current, `Experiment #${selectedId} is not available in this run state.`]
       .filter(Boolean).join(' '))
@@ -696,7 +1004,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       inspectTab: 'Overview', commentId: null }),
       { mode: 'replace', preserveIssues: true })
     setCompactInspectorOpen(false)
-  }, [live2, selectedId, historyActive, history.status])
+  }, [live2, selectedId, historyActive, history.status, startOverHandoff])
   const currentSelectedAttempt = selectedId == null ? null : live2?.nodes?.[selectedId]?.attempt
   const commentAttemptMatches = !routeState.commentId
     || (Number.isSafeInteger(routeState.nodeGeneration)
@@ -733,7 +1041,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     return feedback
   }
   const onNodeAction = async (action, arg, context = null) => {
-    if (readOnlyMode) { showToast(reviewMode ? 'This review link is read-only' : `Historical snapshot seq ${viewSeq} is read-only`); return }
+    if (mutationReadOnlyMode) {
+      showToast(startOverMutationBlocked
+        ? 'Start over must be resolved before changing this run.'
+        : reviewMode ? 'This review link is read-only'
+          : `Historical snapshot seq ${viewSeq} is read-only`)
+      return
+    }
     if (action === 'merge' && mergeSubmittingRef.current) {
       showToast('A merge is already being submitted'); return
     }
@@ -797,7 +1111,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // action is the sole mutation boundary for context-menu, keyboard, canvas, and drag gestures.
   const onCanvasSelect = (id) => {
     if (mergeFrom != null && mergeSubmittingRef.current) { showToast('A merge is already being submitted'); return }
-    if (readOnlyMode && mergeFrom != null) {
+    if (mutationReadOnlyMode && mergeFrom != null) {
       closeMergeChooser(false); return
     }
     if (mergeFrom != null && id != null && id !== mergeFrom) {
@@ -983,6 +1297,68 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     return () => cancelAnimationFrame(frame)
   }, [routeFocusPhase, route.navigationRevision])
 
+  if (!live && startOverRecovery.kind !== 'none' && !startOverIntent) return <div className="app">
+    <div className="topbar run-head">
+      <span className="brand"><span className="dot">◉</span> LoopLab</span>
+      {onBack && <button className="btn sm ghost" onClick={onBack}>← runs</button>}
+    </div>
+    <main ref={startOverNoticeRef} className="run-resource-state" data-route-main tabIndex={-1}
+      aria-labelledby="run-state" role="alert">
+      <div className="resource-state-icon" aria-hidden="true">!</div>
+      <h1 id="run-state">{startOverRecovery.kind === 'unavailable'
+        ? 'Start over recovery storage is unavailable'
+        : 'Saved Start over recovery is invalid'}</h1>
+      <p>{startOverRecovery.kind === 'unavailable'
+        ? 'This tab cannot safely preserve a Start over request. No request can be submitted until recovery storage works again.'
+        : 'LoopLab cannot identify an earlier Start over request safely. Run changes remain locked until its saved recovery evidence is resolved.'}</p>
+      <div className="resource-state-actions">
+        {startOverRecovery.kind === 'unavailable' && <button type="button"
+          className="btn primary" onClick={retryStartOverStorage}>Try storage again</button>}
+        {onBack && <button type="button" className="btn" onClick={onBack}>Back to runs</button>}
+      </div>
+    </main>
+    {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
+  </div>
+  if (!live && startOverIntent) return <div className="app">
+    <div className="topbar run-head">
+      <span className="brand"><span className="dot">◉</span> LoopLab</span>
+      {onBack && <button className="btn sm ghost" onClick={onBack}>← runs</button>}
+    </div>
+    <main ref={startOverNoticeRef} className="run-resource-state" data-route-main tabIndex={-1}
+      aria-labelledby="run-state" role={runStatus === 'error' ? 'alert' : 'status'}>
+      {runStatus === 'loading' && <div className="history-spinner" aria-hidden="true" />}
+      <h1 id="run-state">{startOverRequestPending
+        ? 'Submitting the same Start over request…'
+        : runStatus === 'not_found'
+          ? 'Run files are switching…'
+          : runStatus === 'error'
+            ? 'Start over status is unavailable'
+            : startOverIntent.phase === 'unknown'
+              ? 'Start over outcome is not confirmed'
+              : startOverIntent.phase === 'pending'
+                ? 'Checking the saved Start over request…'
+              : 'Starting this run over…'}</h1>
+      <p>{runStatus === 'error'
+        ? `${runError || 'The server could not read this run.'} Recovery remains locked so another operation cannot overlap it.`
+        : runStatus === 'not_found'
+          ? 'The previous event log may already be archived while the replacement generation is starting. The exact request identity is preserved.'
+          : startOverIntent.phase === 'unknown'
+            ? 'The result is not confirmed. Retry the exact saved request; LoopLab will not create a second Start over operation.'
+            : startOverIntent.phase === 'pending'
+              ? 'The server preserved this exact request. LoopLab is checking the same operation automatically; no duplicate will be created.'
+            : startOverIntent.phase === 'submitting'
+              ? 'The exact request is being submitted. No archive is assumed until the server returns its matching operation receipt.'
+              : 'The server accepted this exact operation. Waiting for the replacement run to become readable.'}</p>
+      <div className="resource-state-actions">
+        <button type="button" className="btn primary" onClick={retryStartOver}
+          disabled={startOverRequestPending}>
+          {startOverRequestPending ? 'Waiting for response…'
+            : 'Retry exact request'}
+        </button>
+      </div>
+    </main>
+    {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
+  </div>
   if (!live) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
@@ -1010,6 +1386,38 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <h1 id="run-state">Opening run…</h1><p>Loading the latest search state.</p>
       </>}
     </main>
+  </div>
+  if (routeFenceBlocked && startOverIntent) return <div className="app">
+    <div className="topbar run-head">
+      <span className="brand"><span className="dot">◉</span> LoopLab</span>
+      {onBack && <button className="btn sm ghost" onClick={onBack}>← runs</button>}
+    </div>
+    <main ref={startOverNoticeRef} className="run-resource-state stale-route-state"
+      data-route-main tabIndex={-1} aria-labelledby="run-state" role="alert">
+      <div className="resource-state-icon" aria-hidden="true">↻</div>
+      <h1 id="run-state">{startOverReplacementSuperseded
+        ? 'Start over completed, and the run changed again'
+        : startOverHandoff
+          ? 'Opening the verified replacement run…'
+          : 'The run changed while Start over is unresolved'}</h1>
+      <p>{startOverReplacementSuperseded
+        ? 'The exact saved operation produced its verified replacement generation. A newer generation is now visible, so this resolved recovery record can be cleared before opening the current run.'
+        : startOverHandoff
+          ? startOverRouteSyncFailed
+            ? 'The matching operation receipt is verified, but this page could not update its address. Changes remain locked.'
+            : 'The matching operation receipt is verified. Updating this diagnostic address to the new generation.'
+          : 'A different generation is visible, but that alone does not prove which operation created it. Retry the exact saved request to read its receipt.'}</p>
+      <div className="resource-state-actions">
+        <button type="button" className="btn primary" onClick={retryStartOver}
+          disabled={startOverRequestPending}>
+          {startOverRequestPending ? 'Waiting for response…'
+            : startOverReplacementSuperseded ? 'Open current run'
+              : startOverHandoff ? 'Retry opening new run' : 'Retry exact request'}
+        </button>
+        {onBack && <button type="button" className="btn" onClick={onBack}>Back to runs</button>}
+      </div>
+    </main>
+    {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
   </div>
   if (routeFenceBlocked) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
@@ -1213,6 +1621,42 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           {configNoticeStatus === 'retrying' ? 'Retrying…' : 'Retry'}
         </button>
       </div>}
+      {!reviewMode && startOverRecovery.kind !== 'none' && <div
+        ref={startOverNoticeRef} tabIndex={-1}
+        className={`route-state-notice run-start-over-notice ${
+          startOverRecovery.kind === 'active' ? startOverIntent?.phase || '' : 'error'}`}
+        role={startOverRecovery.kind === 'active' && startOverIntent?.phase !== 'unknown'
+          ? 'status' : 'alert'} aria-live="polite" aria-atomic="true">
+        <OpIcon name="alert" size={13} />
+        <span>{startOverRecovery.kind === 'active'
+          ? startOverReplacementSuperseded
+            ? 'The saved Start over operation is verified, and a newer run generation is already visible. Open the current run to clear the resolved recovery lock.'
+            : startOverHandoff && startOverRouteSyncFailed
+              ? 'The new run is ready, but this page could not update its address. Changes stay locked until the current generation is opened safely.'
+            : startOverIntent.phase === 'submitting'
+            ? 'Submitting this exact Start over request. No archive is assumed yet; other changes are locked.'
+            : startOverIntent.phase === 'pending'
+              ? 'The server saved this exact Start over request. Checking the same operation automatically; other changes remain locked.'
+            : startOverIntent.phase === 'accepted'
+              ? 'Start over was accepted. Waiting for the new run generation…'
+              : 'Start-over outcome is not confirmed. Retry the exact saved request; all other changes are locked.'
+          : startOverRecovery.kind === 'unavailable'
+            ? 'Start over is disabled because this tab cannot preserve recovery state.'
+            : 'Saved Start over recovery state is invalid. Changes are locked because an earlier request cannot be identified safely. Close this tab and reopen LoopLab only after confirming no Start over is still running.'}
+          {startOverRecovery.storageUnavailable
+            ? ' This tab can still observe the current request, but its recovery record could not be updated.'
+            : ''}
+        </span>
+        {startOverRecovery.kind === 'active' && <button type="button" className="btn xs"
+          onClick={retryStartOver} disabled={startOverRequestPending}>
+          {startOverRequestPending ? 'Waiting for response…'
+            : startOverReplacementSuperseded ? 'Open current run'
+              : startOverHandoff && startOverRouteSyncFailed ? 'Retry opening new run'
+                : 'Retry exact request'}
+        </button>}
+        {startOverRecovery.kind === 'unavailable' && <button type="button" className="btn xs"
+          onClick={retryStartOverStorage}>Try storage again</button>}
+      </div>}
       {(routeNotice || route.issues.length > 0) && <div className="route-state-notice" role="status">
         <OpIcon name="info" size={13} />
         <span>{[...route.issues, routeNotice].filter(Boolean).join(' ')}</span>
@@ -1244,7 +1688,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
 
       {/* All actions now run through the chat (type a /command or just say what to do). The approval
           phase shows an inline reminder of the exact command to type. */}
-      {!readOnlyMode && (live.phase === 'approval' || live.phase === 'spec_approval') &&
+      {!mutationReadOnlyMode && (live.phase === 'approval' || live.phase === 'spec_approval') &&
         <div className="topbar" role={approvalCommand ? 'status' : 'alert'}
           style={{ background: 'rgba(74,163,255,.12)', borderBottom: '1px solid var(--accent-dim)' }}>
           {approvalCommand ? <>
@@ -1297,12 +1741,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           </div>)}
           <span className="panel-sep" />
           <button className={'btn sm ghost' + (panel === 'config' ? ' on' : '')}
-                  disabled={readOnlyMode}
+                  disabled={mutationReadOnlyMode}
                   onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>Settings</button>
         </div>
       </div>
 
-      {mergeFrom != null && !readOnlyMode && <form className="merge-destination-bar"
+      {mergeFrom != null && !mutationReadOnlyMode && <form className="merge-destination-bar"
         aria-label={`Choose a merge destination for experiment ${mergeFrom}`} onSubmit={submitMergeTarget}>
         <label htmlFor="merge-destination-select">Merge <b>#{mergeFrom}</b> with</label>
         <select ref={mergeSelectRef} id="merge-destination-select" value={mergeTarget} disabled={mergeSubmitting}
@@ -1338,10 +1782,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         ? <div className="main"><div className="report-scroll">
             <LazyBoundary label="run report" resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
               <ReportView state={state} runId={runId} onToast={showToast}
-                readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+                readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
                 observedSeq={historyActive ? history.resolvedSeq : seq}
                 expectedGeneration={routeState.generation}
-                readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
+                readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence}
                 onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }}
                 canOpenPanel={panelAllowed}
                 onPickNode={(id) => {
@@ -1381,8 +1825,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               compact={compactWorkspace}
               groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
               onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}
-              onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
-              mergeArm={readOnlyMode ? null : mergeFrom}
+              onAutoCollapse={autoCollapse} onNodeAction={mutationReadOnlyMode ? null : onNodeAction}
+              mergeArm={mutationReadOnlyMode ? null : mergeFrom}
               selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter}
               highlightIds={conceptHighlight} />
           </LazyBoundary>
@@ -1431,10 +1875,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                          traceClearRecoveryStore={traceClearRecoveryStore}
                         traceClearRecoverySnapshot={traceClearRecoverySnapshot}
                         publishTraceClearRecovery={publishTraceClearRecovery}
-                        readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+                        readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
                         expectedGeneration={generation} commentsRevision={state?.comments_revision}
                         focusCommentId={commentAttemptMatches ? routeState.commentId : null}
-                        readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence} />}
+                        readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence} />}
                 </LazyBoundary>
               </aside>
             </>}
@@ -1466,7 +1910,22 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           kindFilters={routeState.timelineKinds}
           onKindFiltersChange={value => route.update(current => ({ ...current, timelineKinds: value }))}
           onToast={showToast}
-          readOnly={historyActive}
+          startOverState={{
+            blocked: startOverRecovery.kind !== 'none'
+              || !/^[0-9a-f]{64}$/.test(generation || ''),
+            lifecycleBlocked: startOverRecovery.kind === 'active'
+              || startOverRecovery.kind === 'corrupt',
+            disabledReason: startOverRecovery.kind === 'active'
+              ? 'Resolve the existing Start over outcome first'
+              : startOverRecovery.kind === 'unavailable'
+                ? 'Start over needs working recovery storage in this tab'
+                : startOverRecovery.kind === 'corrupt'
+                  ? 'Saved Start over recovery evidence is invalid'
+                  : 'Wait for the current run generation before starting over',
+            phase: startOverIntent?.phase || null,
+          }}
+          onStartOver={submitStartOver}
+          readOnly={mutationReadOnlyMode}
           publishTransport={setTransportController}
           collapsed={timelineCollapsed}
           collapseControlRef={timelineCollapseRef}
@@ -1487,7 +1946,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
-      {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} readOnly={readOnlyMode} />}
+      {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
       {panel === 'hypotheses' && panelAllowed('hypotheses') && <HypothesisBoard state={state}
         runId={runId} runGeneration={generation} onSelect={selectNode} onToast={showToast}

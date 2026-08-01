@@ -23,6 +23,9 @@ from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings, settings_from_snapshot)
 from looplab.core.node_evidence import metrics_attempt_receipt, node_attempt
+from looplab.core.run_reset import (
+    RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
+    load_run_reset_marker)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock,
@@ -65,6 +68,9 @@ from looplab.serve.paid_work import (
     RunCostAccountingPending, metered_run_client, run_directory_identity)
 from looplab.serve.public_cards import PublicCardsProjectionMetadata
 from looplab.serve.run_commands import run_generation_token
+from looplab.serve.run_files import run_config_thread_lock as _shared_run_config_thread_lock
+from looplab.serve.reset_transaction import (
+    ResetReceiptError, reconcile_run_reset_observation)
 
 # Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
 # (run dir, task.snapshot.json mtime_ns, size), so the normalize+validate work runs once per snapshot
@@ -105,7 +111,6 @@ _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 # streaming-bounded transport is /log-page (per-page byte + row limits).
 _LEGACY_LOG_MAX_ROWS = 100_000
 _LEGACY_LOG_MAX_BYTES = 64 * 1024 * 1024        # ~64 MiB aggregate response ceiling for the flat array
-_RUN_CONFIG_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
 _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
     "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
     "capacity", "internal",
@@ -206,11 +211,8 @@ def _run_config_revision(snapshot: dict) -> str:
 
 
 def _run_config_thread_lock(snapshot_path: Path) -> threading.Lock:
-    """Bound same-process serialization without retaining one lock for every historical run."""
-    identity = os.path.normcase(os.path.abspath(snapshot_path)).encode(
-        "utf-8", errors="surrogatepass")
-    stripe = int.from_bytes(hashlib.sha256(identity).digest()[:2], "big")
-    return _RUN_CONFIG_LOCK_STRIPES[stripe % len(_RUN_CONFIG_LOCK_STRIPES)]
+    """Compatibility seam around the shared config writer stripe."""
+    return _shared_run_config_thread_lock(snapshot_path)
 
 
 def _concept_lens_idempotency_key(raw: str) -> str:
@@ -698,7 +700,28 @@ def build_router(srv) -> APIRouter:
         """Keep every trace read-failure envelope on one truthful, versioned contract."""
         return {"schema": TRACE_PROJECTION_SCHEMA, **shape,
                 "projection": unavailable_projection()}
-    _state_payload = srv.state_payload
+    _base_state_payload = srv.state_payload
+
+    def _state_payload(rd: Path, upto_seq: Optional[int] = None) -> dict:
+        """Serve state and reconcile only the exact durable reset operation that owns its marker."""
+        if upto_seq is not None:
+            return _base_state_payload(rd, upto_seq)
+        try:
+            marker = load_run_reset_marker(rd)
+        except RunResetStorageError:
+            # Reads remain available when ownership storage is damaged; every writer still fails
+            # closed on the same marker. Do not make a diagnostic state request destructive.
+            marker = None
+        if marker is not None:
+            try:
+                # Reconcile before folding so a request that waited behind Replay cannot publish a
+                # generation-A payload after generation B has already committed.
+                with srv.commands.sequence(rd):
+                    reconcile_run_reset_observation(srv, rd)
+            except (HTTPException, OSError, ResetReceiptError, RunResetStorageError):
+                # The exact POST remains the recovery authority while observation is incomplete.
+                pass
+        return _base_state_payload(rd, upto_seq)
     concept_core_cache = _ConceptCoreCache()
     concept_replay_cache = _ConceptReplayCache()
 
@@ -2696,6 +2719,7 @@ def build_router(srv) -> APIRouter:
             # every other client (including SSE) for the duration; offload to a worker thread.
             with (_run_config_thread_lock(snap),
                   _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
+                assert_run_reset_write_allowed(rd)
                 # Checked INSIDE the lock: reset can land between the request arriving and the write.
                 if (expected_generation is not None
                         and srv.commands.run_generation(rd) != expected_generation):
@@ -2709,6 +2733,18 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(503, {
                 "code": "run_config_lock_unavailable",
                 "message": "Run configuration locking is unavailable; no settings were written.",
+            }) from exc
+        except RunResetFenceError as exc:
+            raise HTTPException(409, {
+                "code": "run_reset_in_progress",
+                "operation_id": exc.operation_id,
+                "message": "Replay is replacing this run; settings were not written.",
+                "remediation": "Observe or retry that exact Replay operation first.",
+            }) from exc
+        except RunResetStorageError as exc:
+            raise HTTPException(503, {
+                "code": "run_reset_fence_unavailable",
+                "message": "Replay ownership cannot be verified; settings were not written.",
             }) from exc
     @router.get("/api/runs/{run_id}/cost")
     def run_cost(run_id: str):

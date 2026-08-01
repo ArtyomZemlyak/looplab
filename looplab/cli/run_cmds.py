@@ -31,6 +31,7 @@ from looplab.events.replay import fold
 from looplab.adapters.tasks import validate_task
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
+from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile, _load_task, _print_result,
                          _require_run_dir, app)
@@ -585,14 +586,18 @@ def run(
             # This existing prefix is still the authority until the new snapshots are published.
             # Refuse a stale/missing/different receipt before replacing either snapshot.
             _preflight_speculation_authority(eng, prior_events)
-            atomic_write_text(out / "config.snapshot.json",
-                              json.dumps(settings.masked_snapshot(), indent=2))
-            # Self-describing run: write the RESOLVED task dict (after file + flags) as canonical JSON
-            # so `resume` (CLI or UI) can re-enter from the run dir alone without the original file.
-            try:
-                atomic_write_text(out / "task.snapshot.json", json.dumps(task_dict, indent=2))
-            except OSError:
-                pass
+            config_snapshot = out / "config.snapshot.json"
+            with run_config_write_lock(config_snapshot):
+                atomic_write_text(
+                    config_snapshot, json.dumps(settings.masked_snapshot(), indent=2))
+                # Self-describing run: write the RESOLVED task dict (after file + flags) as canonical
+                # JSON so `resume` (CLI or UI) can re-enter without the original file. Keep it in the
+                # same reset-aware config transaction: a direct `looplab run` must not refresh either
+                # snapshot while Replay has archived generation A but not proven generation B.
+                try:
+                    atomic_write_text(out / "task.snapshot.json", json.dumps(task_dict, indent=2))
+                except OSError:
+                    pass
         # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
         # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
         # no-ops a re-run with a bigger --max-nodes, and (worse) makes a run that finished with
