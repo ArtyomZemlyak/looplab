@@ -5072,3 +5072,33 @@ def test_genesis_prior_reports_are_redacted_untrusted_user_json(tmp_path, monkey
         draft_payload = json.loads(draft_messages[0]["content"].split("\n", 1)[1])
         assert "DRAFT OVERRIDE SYSTEM" in draft_payload["draft"]["rationale"]
         assert secret not in draft_payload["draft"]["rationale"]
+
+
+def test_a_scope_report_read_never_probes_liveness_or_spawns_an_engine(tmp_path, monkeypatch):
+    """`_scope_run_ids` needs only run_id -> task/project/supertask, but it called the FULL /api/runs
+    handler, which probes every run's engine lock and runs the best-effort resume reconciler — so a
+    report GET (the staleness check included) could SPAWN an engine process. A read must not mutate
+    the workspace."""
+    import looplab.serve.routers.runs as runs_router
+
+    _build_run(tmp_path, "demo", writer=None)
+    probes, reconciles = [], []
+    monkeypatch.setattr(runs_router, "_engine_liveness",
+                        lambda rd: (probes.append(str(rd)), None)[1])
+    monkeypatch.setattr(runs_router, "reconcile_pending_resume",
+                        lambda rd, **kw: reconciles.append(str(rd)))
+
+    app = make_app(tmp_path)
+    srv = app.state.looplab
+    assert srv.list_runs_membership_fn is not None, "the membership projection must be bound"
+
+    rows = srv.list_runs_membership_fn()
+    assert probes == [], f"the membership read probed engine liveness for {probes}"
+    assert reconciles == [], f"the membership read ran the resume reconciler for {reconciles}"
+    assert rows and all(
+        set(r) == {"run_id", "task_id", "project_id", "supertask_id"} for r in rows), rows
+
+    # …and the runs LIST still reports the live facts it is responsible for.
+    full = srv.list_runs_fn()
+    assert probes, "only the report projection skips the probe — the runs list must still do it"
+    assert all("engine_running" in r for r in full)

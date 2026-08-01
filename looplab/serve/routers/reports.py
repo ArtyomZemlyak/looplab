@@ -1575,13 +1575,11 @@ def build_router(srv) -> APIRouter:
     def _scope_run_ids(scope_type: str, scope_id: str) -> list:
         """The runs a scope covers. project = the folder AND everything nested under it; task = same
         task_id; supertask = assigned to that super-task."""
-        # CLAUDE REVIEW: [PERF] Every scope-report request (GET staleness check included) invokes
-        # the FULL /api/runs handler: it stats + potentially re-folds every run in the workspace
-        # AND runs the per-run engine-liveness lock probe and the best-effort resume reconciler
-        # (which can SPAWN an engine process) — heavy work and a mutation side effect for what this
-        # caller needs, which is only the run_id -> task/project/supertask membership columns. A
-        # membership-only projection (no _alive probe) would make report reads side-effect free.
-        summaries = srv.list_runs_fn()
+        # The MEMBERSHIP projection, not the full /api/runs handler. That handler additionally runs
+        # a per-run engine-liveness lock probe and the best-effort resume reconciler — which can
+        # SPAWN an engine process — so every scope-report GET (the staleness check included) was
+        # paying for live facts it never reads, and mutating the workspace to get them.
+        summaries = (srv.list_runs_membership_fn or srv.list_runs_fn)()
         if scope_type == "task":
             return [s["run_id"] for s in summaries if s.get("task_id") == scope_id]
         if scope_type == "supertask":

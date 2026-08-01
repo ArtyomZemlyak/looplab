@@ -769,8 +769,11 @@ def build_router(srv) -> APIRouter:
     # content metadata fields, so size+mtime alone can return generation A's summary for generation B.
     _summary_cache = srv.summary_cache   # run_id -> (ino, ctime_ns, size, mtime_ns, summary)
 
-    @router.get("/api/runs")
-    def list_runs():
+    def _run_summaries() -> list:
+        """The mtime-cached per-run fold summaries, WITHOUT the live-fact overlay.
+
+        Split out so scope reports can read run membership without the `_alive` lock probe and its
+        best-effort resume re-spawn — a report GET must not mutate the workspace."""
         out = []
         root = srv.root
         for rd in sorted(root.iterdir()) if root.exists() else []:
@@ -826,6 +829,24 @@ def build_router(srv) -> APIRouter:
                 out.append(summary)
             except Exception:  # noqa: BLE001 - a half-written run shouldn't break the list
                 continue
+        return out
+
+    def list_runs_membership() -> list:
+        """Only the columns `reports._scope_run_ids` joins on. Side-effect free by construction."""
+        pdata = srv.projects.load()
+        assignments = pdata["assignments"]
+        st_assign = pdata.get("supertask_assignments", {})
+        return [{"run_id": s["run_id"], "task_id": s.get("task_id"),
+                 "project_id": assignments.get(s["run_id"]),
+                 "supertask_id": st_assign.get(s["run_id"])}
+                for s in _run_summaries()]
+
+    srv.list_runs_membership_fn = list_runs_membership
+
+    @router.get("/api/runs")
+    def list_runs():
+        out = _run_summaries()
+        root = srv.root
         # Overlay project membership (kept OUT of the summary cache — assignments change
         # independently of the event log, so a finished/cached run can still be re-filed).
         pdata = srv.projects.load()
