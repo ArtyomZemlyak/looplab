@@ -60,6 +60,7 @@ const booleanChoice = (parsedSettings, key) => {
 
 export default function LaunchCard({
   spec, chat = [], onStarted, retainedDraft = null, onDraftChange, launchIdentity = '',
+  retainedConfigOpen = false, onConfigOpenChange,
 }) {
   const original = useMemo(() => createLaunchDraft(spec), [spec])
   const transportIdentity = useMemo(() => String(
@@ -82,7 +83,7 @@ export default function LaunchCard({
   const [storageBlocked, setStorageBlocked] = useState(false)
   // Keep the proposal SIMPLE by default: the editable run settings are collapsed so a user can just Start.
   // "Configure settings" reveals them; they also auto-reveal whenever there is an error to fix.
-  const [configOpen, setConfigOpen] = useState(false)
+  const [configOpen, setConfigOpen] = useState(() => retainedConfigOpen === true)
   const reactId = useId().replace(/:/g, '')
   const titleId = `launch-${reactId}-title`
   const errorId = `launch-${reactId}-errors`
@@ -450,11 +451,17 @@ export default function LaunchCard({
   }
 
   const errorEntries = Object.entries(errors)
+  const hasErrors = errorEntries.length > 0
   const taskInvalid = errorEntries.some(([path]) => path === 'task' || path.startsWith('task.'))
   const settingsInvalid = errorEntries.some(([path]) => path === 'settings' || path.startsWith('settings.'))
+  useEffect(() => {
+    if (!hasErrors || configOpen) return
+    setConfigOpen(true)
+    onConfigOpenChange?.(true)
+  }, [configOpen, hasErrors, onConfigOpenChange])
   // Reveal the editable config on explicit request OR whenever there is an error to fix (so a collapsed
   // field is never the reason an error can't be seen/focused).
-  const showConfig = configOpen || errorEntries.length > 0
+  const showConfig = configOpen || hasErrors
   return <form className="asst-launch" aria-labelledby={titleId} aria-busy={operationBusy ? 'true' : 'false'}
     onSubmit={event => { event.preventDefault(); validate() }}>
     <div className="asst-launch-h" id={titleId}>
@@ -474,7 +481,11 @@ export default function LaunchCard({
       </div>)}
     </dl>}
     <button type="button" className="btn xs ghost asst-launch-configtoggle" aria-expanded={showConfig}
-      disabled={locked} onClick={() => setConfigOpen(open => !open)}>
+      disabled={locked} onClick={() => {
+        const next = !configOpen
+        setConfigOpen(next)
+        onConfigOpenChange?.(next)
+      }}>
       {showConfig ? '▾ Hide settings' : '⚙ Configure settings'}</button>
 
     {showConfig && <>

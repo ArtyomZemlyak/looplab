@@ -59,7 +59,8 @@ function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
 }
 export function Turn({
   m, runsById, onRevert, onRetry, onOpenSettings, launchChat, readOnly = false,
-  launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, onLaunchDraft, onLaunchStarted,
+  launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, launchDisclosures,
+  onLaunchDraft, onLaunchDisclosure, onLaunchStarted,
   revertState,
 }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
@@ -68,7 +69,8 @@ export function Turn({
   // Classify the raw persisted text, but render only the fixed, allow-listed copy returned here.
   const assistantError = m.role === 'assistant' && !m.streaming ? assistantErrorInfo(content, m.error_kind) : null
   const mentions = assistantError ? [] : runMentions(content)
-  return <div className={'feed-msg chat ' + m.role}>
+  const hasLaunch = !readOnly && Array.isArray(m.proposals) && m.proposals.length > 0
+  return <div className={'feed-msg chat ' + m.role + (hasLaunch ? ' has-launch' : '')}>
     <div className="fm-body">
       <div className="chat-who">{who}</div>
       {/* Live, interleaved activity (Claude-Desktop style): prose the agent writes BETWEEN tool rounds
@@ -118,7 +120,9 @@ export function Turn({
           messageIndex: launchMessageIndex, proposalId: sp.proposal_id, proposalIndex: i })
         return <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
           retainedDraft={launchDrafts?.[draftKey]}
+          retainedConfigOpen={launchDisclosures?.[draftKey] === true}
           onDraftChange={draft => onLaunchDraft?.(draftKey, draft)}
+          onConfigOpenChange={open => onLaunchDisclosure?.(draftKey, open)}
           onStarted={() => onLaunchStarted?.(draftKey)} />
       })}
     </div>

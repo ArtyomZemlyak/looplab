@@ -2210,6 +2210,9 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-global { flex: none; white-space: nowrap; color: var(--working);
   border-color: color-mix(in srgb, var(--working) 65%, var(--line)); }
 .asst-launch-global:hover { border-color: var(--working); color: var(--fg); }
+.asst-launch-global-count { display: inline-grid; min-width: 18px; height: 18px; padding: 0 4px;
+  place-items: center; border-radius: 999px; background: var(--working); color: var(--bg);
+  font-size: 10px; font-weight: 750; }
 .asst-launch-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
 .asst-launch-state { margin-left: auto; color: var(--fg-mut); font-size: 10.5px; text-transform: uppercase;
   letter-spacing: .35px; }
@@ -2220,12 +2223,14 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-section h4 { margin: 0 0 2px; font-size: 12px; letter-spacing: .2px; }
 .asst-launch-section > label, .asst-launch-field > label, .asst-launch-advanced > label {
   color: var(--fg-dim); font-size: 11px; font-weight: 650; }
-.asst-launch-section input.text, .asst-launch-section select.text { min-height: 34px; width: 100%; }
+.asst-launch-section input.text, .asst-launch-section select.text { min-width: 0; min-height: 34px;
+  width: 100%; max-width: 100%; }
 .asst-launch-source { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0;
-  padding: 0; border: 0; }
+  min-width: 0; padding: 0; border: 0; }
 .asst-launch-source legend { width: 100%; color: var(--fg-dim); font-size: 11px; font-weight: 650; }
 .asst-launch-source label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
 .asst-launch-json.text { min-height: 150px; max-height: 320px; resize: vertical; width: 100%;
+  min-width: 0; max-width: 100%;
   font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.4; tab-size: 2; }
 .asst-launch-help { color: var(--fg-mut); font-size: 10.5px; line-height: 1.35; }
 .asst-launch-summary { display: grid; gap: 3px; margin: 3px 0 0; font-size: 11.5px; }
@@ -2256,6 +2261,7 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-progress { color: var(--fg-mut); min-height: 16px; font-size: 11px; }
 .asst-launch-cost { margin: -4px 0 0; color: var(--fg-mut); font-size: 10.5px; line-height: 1.4; }
 .asst-launch-cost strong { color: var(--fg-dim); }
+.asst-launch-configtoggle { align-self: flex-start; }
 .asst-launch-actions { margin-top: 0; }
 .asst-launch input:focus-visible, .asst-launch textarea:focus-visible, .asst-launch select:focus-visible,
 .asst-launch summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2313,7 +2319,7 @@ pre.code.event-json { max-height: 220px; }
 /* Composer shared by side + full: attach + textarea + send/stop, mode selector BELOW it. */
 .asst-in { border-top: 1px solid var(--line); padding: 8px 10px; flex: none; position: relative; }
 .asst-inrow { display: flex; align-items: flex-end; gap: 6px; position: relative; }  /* relative: anchors the /command hint pop above the composer input */
-.asst-inrow .text { flex: 1; min-height: 40px; max-height: 200px; resize: vertical; width: auto; }
+.asst-inrow .text { flex: 1; min-width: 0; min-height: 40px; max-height: 200px; resize: vertical; width: auto; }
 .asst-moderow { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
 .asst-modehint { font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asst-files { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
@@ -2652,6 +2658,17 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .detail-resource-notice .btn { min-width: 44px; min-height: 44px; }
   .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go, .cmdbar-drawer-btn, .asst-sess-x,
   .asst-session-resource .btn { min-width: 44px; }
+  .cmdbar-ic, .asst-launch-global, .asst-inrow > .btn {
+    min-width: 44px; min-height: 44px; justify-content: center;
+  }
+  .asst-launch-global { padding-inline: 8px; }
+  .asst-launch-global-label { display: none; }
+  .cmdbar-in, .asst-inrow textarea.text { font-size: 16px; }
+  .asst-in { padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--bg-1); }
+  .asst-full .asst-feed, .asst-side-panel .asst-drawer-feed {
+    padding-bottom: max(18px, env(safe-area-inset-bottom, 0px));
+    scroll-padding-block-end: calc(132px + env(safe-area-inset-bottom, 0px));
+  }
   .metric-group-grid { grid-template-columns: minmax(0, 1fr) !important; }
   .react-flow__controls button { width: 44px; height: 44px; }
 }
@@ -2659,6 +2676,33 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 @media (max-width: 480px) {
   /* Keep all four workspace destinations legible after Back, Copy and Energy claim the first row. */
   .run-head .view-toggle { flex: 1 0 100%; width: 100%; max-width: 100%; }
+  /* The compact command dock needs two deliberate rows. A recovery action plus four touch targets
+     otherwise consumes the entire row and collapses the actual composer to a few characters. */
+  .cmdbar-wrap { padding-inline: 8px; }
+  .cmdbar-dock { flex-wrap: wrap; }
+  .cmdbar-dock > :is(.cmdbar-ic, .asst-launch-global, .cmdbar-attach, .cmdbar-drawer-btn) { order: 1; }
+  .cmdbar-dock > .cmdbar-attach { margin-left: auto; }
+  .cmdbar-dock > .cmdbar-status { order: 2; flex: 1 0 100%; max-width: 100%;
+    flex-wrap: wrap; white-space: normal; }
+  .cmdbar-dock > .cmdbar-field { order: 3; flex: 1 1 calc(100% - 50px); }
+  .cmdbar-dock > .cmdbar-go { order: 3; }
+
+  .asst-launch { width: 100%; gap: 8px; padding: 8px; }
+  .feed-msg.chat.assistant.has-launch { width: 100%; max-width: 100%; }
+  .asst-launch-h { align-items: flex-start; }
+  .asst-launch-state { flex: 1 0 100%; margin-left: 0; }
+  .asst-launch-configtoggle { width: 100%; min-height: 44px; justify-content: center; }
+  .asst-launch-section { padding: 8px; }
+  .asst-launch :is(input.text, select.text, textarea.text) { min-width: 0; max-width: 100%; font-size: 16px; }
+  .asst-launch-source { gap: 6px; }
+  .asst-launch-source label { flex: 1 0 100%; min-height: 44px; padding: 7px 8px;
+    border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+  .asst-launch-source input { width: 18px; height: 18px; flex: none; }
+  .asst-launch-advanced summary, .asst-launch-preview summary {
+    display: flex; min-height: 44px; align-items: center;
+  }
+  .asst-launch-actions { align-items: stretch; flex-direction: column; }
+  .asst-launch-actions .btn { width: 100%; justify-content: center; }
 }
 
 /* Optional reading-first density. Compact remains the default for power users; this mode raises

@@ -69,6 +69,16 @@ const messagesOwnLaunchIdentity = (messages, sessionId, identity) => Array.isArr
       proposalIndex,
     }) === identity))
 
+const retainLaunchDisclosure = (store, key, open, limit = 50) => {
+  if (!key) return store || {}
+  const next = { ...(store || {}) }
+  delete next[key]
+  if (open) next[key] = true
+  const keys = Object.keys(next)
+  for (const stale of keys.slice(0, Math.max(0, keys.length - limit))) delete next[stale]
+  return next
+}
+
 // Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
 const FREEZE = { success: '⏸ run stopped (not finalized)',
   noop: '⏸ run already stopped', executing: 'Stop requested — waiting for freeze' }
@@ -234,6 +244,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // Editable Genesis task/settings can be sensitive.  Retain them only in this mounted Assistant's
   // memory so side/full/bar remounts are lossless without writing payloads or validation tokens to web storage.
   const [launchDrafts, setLaunchDrafts] = useState({})
+  const [launchDisclosures, setLaunchDisclosures] = useState({})
   const [launchRecoveries, setLaunchRecoveries] = useState(() => listLaunchTransports())
   const [busy, setBusy] = useState(false)
   const [directPending, setDirectPending] = useState(null) // retained while an accepted direct command executes
@@ -886,6 +897,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     let deleted = false
     const acceptDeletedSession = () => {
       setLaunchDrafts(current => clearLaunchDraftSession(current, id))
+      setLaunchDisclosures(current => clearLaunchDraftSession(current, id))
       composerDraftsRef.current.delete(id)
       setShareUnknown(id, false)
       clearShareCopy(id)
@@ -1809,13 +1821,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // timer/state. This avoids a one-frame stale announcement between route commit and useEffect.
   const visibleToast = assistantRunChanged(toastRunIdRef.current, runId) ? null : toast
   const nextLaunchRecovery = launchRecoveries[0]
+  const launchRecoveryLabel = nextLaunchRecovery?.invalid ? 'Review startup recovery' : 'Check startup'
   const launchRecoveryButton = launchRecoveries.length > 0
     ? <button type="button" className="btn sm asst-launch-global" onClick={openLaunchRecovery}
+        aria-label={`${launchRecoveryLabel}${launchRecoveries.length > 1 ? ` (${launchRecoveries.length})` : ''}`}
         title={nextLaunchRecovery?.invalid
           ? 'Review a damaged durable startup recovery record'
           : 'Reopen the Assistant proposal that owns this durable startup identity'}>
-        {nextLaunchRecovery?.invalid ? 'Review startup recovery' : 'Check startup'}
-        {launchRecoveries.length > 1 ? ` (${launchRecoveries.length})` : ''}
+        <OpIcon name="alert" size={13} />
+        <span className="asst-launch-global-label">{launchRecoveryLabel}</span>
+        {launchRecoveries.length > 1 && <span className="asst-launch-global-count">{launchRecoveries.length}</span>}
       </button>
     : null
   useEffect(() => {
@@ -1929,9 +1944,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         revertState={revertState}
         launchSessionId={sid} launchMessageId={m.turn_id || m.id} launchMessageIndex={i}
         launchDrafts={launchDrafts}
+        launchDisclosures={launchDisclosures}
         onLaunchDraft={(key, draft) => setLaunchDrafts(current => retainLaunchDraft(current, key, draft))}
+        onLaunchDisclosure={(key, open) => setLaunchDisclosures(
+          current => retainLaunchDisclosure(current, key, open))}
         onLaunchStarted={key => {
           setLaunchDrafts(current => removeLaunchDraft(current, key))
+          setLaunchDisclosures(current => retainLaunchDisclosure(current, key, false))
           // Starting a run means the user wants to ACT on it — lift the read-only 'plan' default straight to
           // full 'Auto' (the assistant drives the run without asking) so the common path is frictionless.
           // A mode the user EXPLICITLY chose (ask / auto-edit / auto) is preserved rather than overridden.
