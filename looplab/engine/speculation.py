@@ -1581,15 +1581,17 @@ class SpeculationMixin:
                                 roles,
                                 send,
                             )
-                        # CLAUDE REVIEW: [EDGE-CASE] rollback is asymmetric vs the raw-stage path
-                        # (which rolls back only an in-memory flag). Here the DURABLE
-                        # `card_build_attempted` receipt was appended just above and is NOT undone on a
-                        # start_soon failure — only `_spec_build_inflight` is discarded. The producer
-                        # never ran, yet on the next service turn `_serve_card_builds` finds an
-                        # unreconciled attempt (no inflight marker, no result) and closes the head
-                        # `producer_failed`, permanently barring an unbilled Card from speculative
-                        # re-election. start_soon only raises during task-group teardown, so this is a
-                        # shutdown-only, conservative-degrade edge, but the receipt outlives its cause.
+                        # ACCEPTED asymmetry, stated. The rollback below discards only the in-memory
+                        # `_spec_build_inflight`; the DURABLE `card_build_attempted` receipt appended
+                        # just above is NOT undone, so if the producer never started, the next service
+                        # turn sees an unreconciled attempt (no inflight marker, no result) and closes
+                        # the head `producer_failed` — barring an unbilled Card from speculative
+                        # re-election. It stands because `start_soon` raises only during task-group
+                        # TEARDOWN: the process is already stopping, nothing else will consume that
+                        # head this run, and the degrade is conservative (a Card is skipped, never
+                        # double-built). Undoing it would mean a compensating durable append on the
+                        # shutdown path — more machinery, and more failure surface, than the edge it
+                        # closes.
                         except BaseException:
                             self._spec_build_inflight.discard(key)
                             raise

@@ -1529,15 +1529,15 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "agent_drives_actions": False,
     "concurrent_research": False,
     "deep_repair": False,
-    # CLAUDE REVIEW: [QUALITY] possible gap — `merge_mode` is absent. options.py's docstring names it as a
-    # product-vs-library divergence in the SAME breath as report_every ("merge_mode='auto', report_every=3"),
-    # and report_every IS in this map. Settings defaults "auto", which resolves to "ensemble" for a
-    # code-generating developer (orchestrator.__init__ L715) — a PAID code-recombination merge producing a
-    # DIFFERENT merged solution than the frozen legacy default "mean" (EngineOptions/orchestrator._DEFAULTS).
-    # So a pre-field snapshot resumed on an LLM backend silently gains ensemble merges it never did — the
-    # exact "add paid calls / a different selection policy to an old run" this map guards against, with a
-    # pointable before-value ("mean"). Add `"merge_mode": "mean"` here IF merge_mode postdates 2026-06-23
-    # (unverifiable in this squashed history — confirm against the real commit before acting).
+    # `merge_mode` meets all three conditions below, confirmed against the commits: the field was
+    # introduced 2026-06-24 (bb421e0f), one day AFTER the cutoff, so a pre-cutoff snapshot carries no
+    # such key; it arrived defaulting to "mean" and only later flipped to "auto" (a8b37944,
+    # 2026-07-03), which `orchestrator.__init__` resolves to "ensemble" for a code-generating
+    # developer — a PAID code-recombination merge producing a DIFFERENT merged solution; and the
+    # before-the-field value is pointable and still frozen as the library default in
+    # `EngineOptions` / `orchestrator._DEFAULTS`. Without this entry a pre-field snapshot resumed on
+    # an LLM backend silently gained ensemble merges it never did.
+    "merge_mode": "mean",
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour

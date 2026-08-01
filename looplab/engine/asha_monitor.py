@@ -319,6 +319,8 @@ class AshaMonitorMixin:
         completed sibling endpoints for diagnostics, and record advisory `EV_ASHA_RANK` transitions.
         Opt-in tree-kill requires persistent underperformance against enough sibling observations at the
         same declared resource. Exits with the eval; a per-tick hiccup skips only that tick."""
+        # Local: `evaluate` imports this module, so a module-level import would be a cycle.
+        from looplab.engine.evaluate import _watch_limiter
         import anyio
 
         from looplab.engine.train_monitor import claim_watchdog_kill, read_training_tail_raw
@@ -337,7 +339,8 @@ class AshaMonitorMixin:
         # resumed curve looks like a first observation and never emits the recovery edge. Modern rows
         # retain endpoint/resource truth separately; legacy rows safely map their single bit to endpoint.
         try:
-            prior_rows = await anyio.to_thread.run_sync(self.store.read_all)
+            prior_rows = await anyio.to_thread.run_sync(
+                self.store.read_all, limiter=_watch_limiter())
             for event in reversed(prior_rows):
                 data = getattr(event, "data", None) or {}
                 if (getattr(event, "type", None) == EV_ASHA_RANK
@@ -365,12 +368,14 @@ class AshaMonitorMixin:
                 return
             try:
                 tail = await anyio.to_thread.run_sync(
-                    lambda: read_training_tail_raw(workdir, snapshot=log_snapshot))
+                    lambda: read_training_tail_raw(workdir, snapshot=log_snapshot),
+                    limiter=_watch_limiter())
                 sample = latest_intermediate_sample(tail, workdir, metric_spec)
                 if sample is None:
                     continue
                 value = sample.value
-                state = await anyio.to_thread.run_sync(lambda: fold(self.store.read_all()))
+                state = await anyio.to_thread.run_sync(
+                    lambda: fold(self.store.read_all()), limiter=_watch_limiter())
                 population = sibling_final_metrics(state, node_id)
                 if len(population) < min_siblings:
                     continue                    # not enough finished peers to rank against yet

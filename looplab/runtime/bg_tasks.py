@@ -210,11 +210,17 @@ class BackgroundManager:
             _kill_tree(t["proc"])
         finally:
             deadline_lock.release()
-        # CLAUDE REVIEW: [EDGE-CASE] No exit-time descendant sweep, unlike the sandbox path which
-        # gained _reap_process_group precisely because a leader can exit 0 leaving nohup'd/daemonized
-        # descendants running. Here _enforce_deadline returns as soon as poll() is not None, so
-        # descendants of an exited leader escape both the tree-kill AND the wall-clock cap forever;
-        # reaping via poll()/_reap without sweeping the group first also forecloses the sandbox's fix.
+        # NO exit-time descendant sweep here, unlike the sandbox path's `_reap_process_group`, and
+        # deliberately so on both counts.
+        #   * On the ORDINARY-exit path this method returns at the pre-check, so a background command
+        #     that exits 0 leaving nohup'd/daemonized descendants leaves them running. An eval's
+        #     descendants are never intentional; a `run_background` command's may be exactly what the
+        #     operator asked for, and killing them would be this manager overriding that intent. The
+        #     tree-kill stays scoped to where a kill was authorized: the deadline above, and `kill()`.
+        #   * On the KILL path a sweep would be redundant — `_kill_tree` already issues the same
+        #     guarded `killpg` over the whole group — and it would mask the retry this loop depends
+        #     on: a tree-kill that was a NO-OP must leave the process alive so the next watcher/read
+        #     sweep tries again (see `t["timed_out"]`'s "do not use as an early-return latch" note).
 
     def _evict_finished(self) -> None:
         """Drop the OLDEST finished tasks (insertion order) once more than `max_finished` are retained,

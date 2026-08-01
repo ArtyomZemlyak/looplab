@@ -415,6 +415,8 @@ class TrainingMonitorMixin:
         With no LLM client wired it degrades to trace-only observation. Exits when the eval finishes
         (`cancel`, or the task group is cancelled); a per-tick hiccup skips the tick and never disables the
         watcher for the rest of a long eval."""
+        # Local: `evaluate` imports this module, so a module-level import would be a cycle.
+        from looplab.engine.evaluate import _watch_limiter
         import anyio
 
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_TRAIN_MONITOR_ALERT
@@ -429,7 +431,8 @@ class TrainingMonitorMixin:
         # resume may restart the observer inside the same node generation. Recover its last
         # durable state so the first healthy verdict can close a pre-crash warning instead of losing it.
         try:
-            prior_rows = await anyio.to_thread.run_sync(self.store.read_all)
+            prior_rows = await anyio.to_thread.run_sync(
+                self.store.read_all, limiter=_watch_limiter())
             for event in reversed(prior_rows):
                 data = getattr(event, "data", None) or {}
                 if (getattr(event, "type", None) == EV_TRAIN_MONITOR_ALERT
@@ -451,7 +454,8 @@ class TrainingMonitorMixin:
                 return
             try:
                 tail = await anyio.to_thread.run_sync(
-                    lambda: read_training_tail(workdir, snapshot=log_snapshot))
+                    lambda: read_training_tail(workdir, snapshot=log_snapshot),
+                    limiter=_watch_limiter())
                 # KNOWN BLIND SPOT of this changed-digest gate: a HUNG training (process alive, no
                 # new log output) holds the digest constant forever, so the LLM is never consulted
                 # again and the hang is never judged here. The STALL watchdog in `run_argv` is what

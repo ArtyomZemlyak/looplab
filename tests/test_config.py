@@ -355,6 +355,18 @@ def test_legacy_snapshot_resume_does_not_switch_on_paid_work_the_run_never_did()
     kept = settings_from_snapshot(modern)
     assert kept.foresight is True and kept.concept_pivot is True and kept.lessons_every == 4
 
+    # `merge_mode` belongs here too, and was missing. It was introduced 2026-06-24 (bb421e0f), one
+    # day AFTER the 2026-06-23 snapshot cutoff, so a pre-cutoff snapshot carries no such key; it
+    # arrived defaulting to "mean" and only later flipped to "auto" (a8b37944, 2026-07-03), which the
+    # engine resolves to "ensemble" for a code-generating developer — a PAID code-recombination merge
+    # producing a DIFFERENT merged solution. Without the entry, resuming a legacy run on an LLM
+    # backend silently gained ensemble merges it never did.
+    assert resumed.merge_mode == "mean", "a legacy run resumed into paid ensemble merges"
+    assert live.merge_mode == "auto"                                # today's product default
+    assert Settings(merge_mode="ensemble").masked_snapshot()["merge_mode"] == "ensemble"
+    assert settings_from_snapshot(
+        Settings(merge_mode="ensemble").masked_snapshot()).merge_mode == "ensemble"   # never overridden
+
     # Deliberate omissions: guessing these would REMOVE behaviour an old run really had.
     assert "debug_depth" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS
     assert "foresight_panel" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS
@@ -372,3 +384,41 @@ def test_foresight_min_confidence_is_bounded_like_its_siblings():
     for bad in (5.0, -0.1, 1.5):
         with pytest.raises(Exception):
             Settings(foresight_min_confidence=bad)
+
+
+def test_watchdog_ticks_do_not_share_the_thread_pool_the_evals_pin():
+    """Every `to_thread.run_sync` in the engine draws on anyio's shared 40-token default limiter, and
+    each in-flight eval's `_run_eval` worker holds a token for the eval's whole (often multi-hour)
+    duration. At `eval_parallel` near or above 40 — the config allows up to 1024, and 0 = AUTO = GPU
+    count — the evals pin every token and the liveness ticks queue BEHIND them: operator abort/reset
+    detection and both watchdog kill signals go blind exactly when a kill matters, while
+    over-admitted evals sit on reserved GPUs waiting. The ticks are short reads, so they get their own
+    small pool that is always immediately schedulable."""
+    import inspect
+
+    import anyio
+
+    from looplab.engine import asha_monitor, evaluate, train_monitor
+    from looplab.core.config import Settings
+
+    limiter = evaluate._watch_limiter()
+    assert isinstance(limiter, anyio.CapacityLimiter)
+    assert limiter is evaluate._watch_limiter()                     # one pool, not one per call
+    assert limiter.total_tokens == evaluate._WATCH_THREADS
+    # Strictly smaller than the shared default it exists to escape, and strictly positive.
+    assert 0 < evaluate._WATCH_THREADS < 40
+    # The ceiling this protects against is real: eval_parallel is allowed far past the shared pool.
+    assert Settings(eval_parallel=1024).eval_parallel == 1024
+
+    # Every periodic tick that can deliver an intervention or a kill goes through it.
+    for source, marker in (
+        (inspect.getsource(evaluate.EvaluateMixin._evaluate),
+         "run_sync(\n                                _intervention_seen"),
+        (inspect.getsource(train_monitor.TrainingMonitorMixin._monitor_training),
+         "read_training_tail(workdir"),
+        (inspect.getsource(asha_monitor.AshaMonitorMixin._monitor_asha),
+         "read_training_tail_raw(workdir"),
+    ):
+        assert marker in source, marker
+        tick = source.split(marker, 1)[1][:200]
+        assert "_watch_limiter()" in tick, (marker, tick)

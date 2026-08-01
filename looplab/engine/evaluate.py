@@ -27,6 +27,23 @@ from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import snapshot_training_logs
+
+# Watchdog/monitor ticks get their OWN thread pool, separate from anyio's shared 40-token default.
+# Every `to_thread.run_sync` in the engine draws on that default, and an in-flight eval holds a token
+# for its whole (often multi-hour) duration — so at high `eval_parallel` the evals pin the pool and
+# every liveness poll (operator abort/reset detection, the train and ASHA kill signals) queues behind
+# them, going blind exactly when a kill matters. These ticks are short reads; a small pool is enough,
+# and is what keeps them immediately schedulable. Process-wide and lazily built so importing this
+# module never touches the event loop.
+_WATCH_THREADS = 8
+_WATCH_LIMITER: "anyio.CapacityLimiter | None" = None
+
+
+def _watch_limiter() -> "anyio.CapacityLimiter":
+    global _WATCH_LIMITER
+    if _WATCH_LIMITER is None:
+        _WATCH_LIMITER = anyio.CapacityLimiter(_WATCH_THREADS)
+    return _WATCH_LIMITER
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import GpuPinUnenforceable
@@ -345,17 +362,17 @@ class EvaluateMixin:
                             await anyio.sleep(0.3)
                             if cancel.is_set():
                                 return
-                            # CLAUDE REVIEW: [EDGE-CASE] Every engine run_sync shares anyio's default
-                            # 40-token thread limiter, and each in-flight eval's `_run_eval` worker
-                            # holds one token for the eval's whole (often multi-hour) duration. At
-                            # eval_parallel >= ~40 (config allows up to 1024; 0 = AUTO = GPU count)
-                            # evals pin all tokens, so this watcher tick — and the train/ASHA monitor
-                            # ticks that deliver kill_signal — queue behind them: operator abort/reset
-                            # and both watchdog kills go blind until an eval finishes on its own, and
-                            # over-admitted evals idle reserved GPUs while queued. Use a dedicated
-                            # CapacityLimiter for watcher/monitor ticks. (orchestrator.py:699's
-                            # 40-token note covers only build fan-out, not this liveness loss.)
-                            intervention = await anyio.to_thread.run_sync(_intervention_seen)
+                            # Its OWN limiter, never anyio's shared default. Every `run_sync` in the
+                            # engine draws on that shared 40-token pool, and each in-flight eval's
+                            # `_run_eval` worker holds a token for the eval's whole (often multi-hour)
+                            # duration — so at `eval_parallel` near or above 40 (the config allows up
+                            # to 1024; 0 = AUTO = GPU count) the evals pin every token and this tick
+                            # queues BEHIND them. Operator abort/reset and both watchdog kills then go
+                            # blind until an eval finishes on its own, and over-admitted evals sit on
+                            # reserved GPUs while queued. A tick is a short poll, so a small dedicated
+                            # pool is always immediately available for it.
+                            intervention = await anyio.to_thread.run_sync(
+                                _intervention_seen, limiter=_watch_limiter())
                             if intervention is not None:
                                 superseded = intervention == "reset"
                                 operator_card_dropped = intervention == "card_drop"
