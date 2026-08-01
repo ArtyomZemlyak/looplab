@@ -995,3 +995,34 @@ def test_set_run_concepts_rejects_empty(tmp_path):
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto", command_service=commands)
     out = t.execute("set_run_concepts", {"run_id": "r1", "concepts": []})
     assert "at least one concept" in out and not commands.calls
+
+
+def test_a_purge_leaves_a_dense_log_that_can_still_be_appended_to(tmp_path):
+    """The purge filtered logical rows WITHOUT renumbering, so every surviving event after a purged
+    one — the trailing `pause`, later sibling nodes — sat behind a seq GAP. The event store's dense
+    fence (`event_sequence_continues`: "no legitimate workflow produces a monotonic gap") reads that
+    as CORRUPTION: `read_all` silently drops everything past the gap and the next append or resume
+    raises EventLogCorruptionError. A purge could brick the run it was cleaning."""
+    from looplab.events.eventstore import iter_jsonl
+
+    rd = tmp_path / "dense"
+    # Node 1 sits in the MIDDLE, so purging it leaves survivors on both sides of the hole.
+    _run(rd, nodes=(0, 1, 2)).append("pause", {})
+    tool = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                           approver=lambda _action: "allow_once",
+                           command_service=_RecordingCommands(tmp_path))
+    assert "deleted node(s) [1, 2]" in tool.execute(
+        "delete_node", {"run_id": "dense", "node_id": 1, "purge": True})
+
+    seqs = [row["seq"] for row in iter_jsonl(rd / "events.jsonl")]
+    assert seqs == list(range(len(seqs))), f"the purge left a seq gap: {seqs}"
+
+    store = EventStore(rd / "events.jsonl")
+    survivors = store.read_all()
+    assert len(survivors) == len(seqs), "events past the gap were silently dropped by the fence"
+    assert survivors[-1].type == "pause", "the trailing event did not survive the purge"
+
+    # …and the run is still WRITABLE: this is what a resume does first.
+    appended = store.append("resume", {})
+    assert appended.seq == len(seqs)
+    assert set(fold(store.read_all()).nodes) == {0}

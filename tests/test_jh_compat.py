@@ -69,7 +69,10 @@ def test_durable_append_line_written_then_fsync_error_does_not_reuse_seq(tmp_pat
     with pytest.raises(OSError, match="sync receipt unavailable"):
         store.append("paid_work_claimed", {"attempt": 1}, require_durable=True)
 
-    assert store._seq == 1
+    # The COMPLETE line is on disk here, so `_disk_last_seq` already blocks reuse and the in-memory
+    # reservation is not the mechanism (it is now taken only for a TORN partial, which `_disk_last_seq`
+    # cannot see — reserving unconditionally opened a durable GAP whenever the buffered write never
+    # reached the file at all). What must hold is the CONTRACT below: the written seq is never reused.
     assert store._cache == []
     assert store._cache_bytes == 0
     assert [event.seq for event in store.read_all()] == [0, 1]
@@ -255,3 +258,82 @@ def test_oom_repair_directive_says_reduce_memory(tmp_path):
     assert "memory" in oom.lower() and "batch" in oom.lower()      # actionable memory-reduction
     timeout = eng._repair_error_context("timeout", "")
     assert "memory" not in timeout.lower()                          # the two directives stay distinct
+
+
+def test_an_append_whose_bytes_never_landed_does_not_open_a_durable_seq_gap(tmp_path, monkeypatch):
+    """`f.write` is BUFFERED, so a flush/fsync that raises (ENOSPC, EIO) can mean NOTHING reached the
+    file. Reserving the seq anyway made this store's NEXT append write seq+1 onto a tail still at
+    seq-1 — and the dense fence (`event_sequence_continues`) classifies that gap as CORRUPTION: the
+    next append returns SUCCESS while its event is invisible to the fold, and every append after it
+    raises EventLogCorruptionError. A self-inflicted brick, and `append_many` reserves the whole
+    batch's last seq, up to 4096 at a time."""
+    import looplab.events.eventstore as eventstore_module
+    from looplab.events.eventstore import EventStore, iter_jsonl
+    from looplab.events.replay import fold
+
+    path = tmp_path / "events.jsonl"
+    store = EventStore(path)
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+
+
+    class _NoSpace:
+        """A handle whose buffered write is silently discarded and whose flush then fails."""
+        def __init__(self, real):
+            self._real = real
+
+        def write(self, _data):
+            return len(_data)                # accepted into a buffer that never reaches the file
+
+        def flush(self):
+            raise OSError(28, "No space left on device")
+
+        def fileno(self):
+            return self._real.fileno()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self._real.close()
+            return False
+
+    def _open(p, mode="r", *a, **kw):
+        handle = open(p, mode, *a, **kw)
+        return _NoSpace(handle) if "a" in mode and str(p) == str(path) else handle
+
+    # A module-level `open` shadows the builtin for code in that module (local -> global -> builtins).
+    monkeypatch.setattr(eventstore_module, "open", _open, raising=False)
+    with pytest.raises(OSError):
+        store.append("pause", {})
+    monkeypatch.undo()
+
+    # Nothing landed, so the next append must take the seq that was never written — not skip past it.
+    nxt = store.append("resume", {})
+    assert nxt.seq == 1, f"a durable gap was opened: next seq is {nxt.seq}, disk holds [0]"
+    assert [row["seq"] for row in iter_jsonl(path)] == [0, 1]
+    assert len(fold(store.read_all()).nodes) == 0        # …and the log still folds at all
+
+
+def test_a_durable_append_syncs_the_parent_directory_too(tmp_path, monkeypatch):
+    """`require_durable` is the "this claim survives a crash before the external side effect" flag,
+    but syncing only the FILE CONTENTS left the directory ENTRY unsynced. When the append is the one
+    that created events.jsonl — or an earlier best-effort append created the link and it has not been
+    flushed — a power loss can lose the WHOLE FILE despite the strict receipt, so a durable paid claim
+    vanishes and is re-billed. `strict_atomic_write_bytes` has always paired the two."""
+    import looplab.events.eventstore as eventstore_module
+    from looplab.events.eventstore import EventStore
+
+    parents = []
+    monkeypatch.setattr(eventstore_module, "strict_fsync_parent", lambda p: parents.append(str(p)))
+
+    path = tmp_path / "fresh" / "events.jsonl"
+    path.parent.mkdir()
+    store = EventStore(path)
+    store.append("run_started", {"run_id": "r"})               # best-effort: no parent sync
+    assert parents == []
+
+    store.append("paid_work_claimed", {"attempt": 1}, require_durable=True)
+    assert parents == [str(path)], parents
+
+    store.append_many([("pause", {}), ("resume", {})], require_durable=True)
+    assert parents == [str(path), str(path)], parents

@@ -213,14 +213,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             "lessons": [research_lesson_receipt(lz, state) for lz in lessons]})
         # Hygiene deferred to run end: the read path dedups/quarantines already, and a full-file
         # rewrite of the shared store every few nodes would race other runs' appends for nothing.
-        # CLAUDE REVIEW: [BUG] Unguarded advisory WRITE into the run() spine — the asymmetric twin of the
-        # OSError guard the sibling READ path (`maybe_refresh_lessons`) was explicitly hardened with.
-        # `_append_lessons` -> `append_jsonl_bytes_locked` raises OSError on an unwritable SHARED
-        # `memory_dir/lessons.jsonl` (read-only/full/quota'd network mount, distinct from the writable run
-        # dir whose events.jsonl append at L191 just succeeded). That OSError propagates through
-        # `_run_cadences` (unwrapped at orchestrator.py:1707) and FAILS the run — contradicting this module's
-        # own "best-effort memory (…the store misses one batch)" stance two comments up. The EV_LESSONS_DISTILLED
-        # gate has already advanced so it is not a tight crash-loop, but every later distill cadence re-crashes.
+        # The append itself is best-effort — `append_lessons` guards the OSError an unwritable shared
+        # store raises and discloses it as `lessons_store_unavailable` — so this call cannot fail the
+        # run, matching the "the store misses one batch" stance two comments up.
         self._e._append_lessons(lessons, hygiene=False)
         return fold(self._e.store.read_all())
 

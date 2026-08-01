@@ -20,7 +20,7 @@ from typing import Any, Iterator, Optional, Sequence
 
 import orjson
 
-from looplab.core.atomicio import best_effort_fsync, strict_fsync
+from looplab.core.atomicio import best_effort_fsync, strict_fsync, strict_fsync_parent
 from looplab.core.models import Event
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
@@ -833,6 +833,32 @@ class EventStore:
         except OSError:
             pass  # best-effort healing; a read still tolerates the torn tail
 
+    def _uncertain_append_needs_reservation(self, seq: int) -> bool:
+        """Whether an append that failed mid-sync left bytes only a SEQ RESERVATION can fence.
+
+        Three outcomes, and only one of them needs the reservation:
+        * the complete record landed — `_disk_last_seq` sees it, which already prevents reuse, so
+          reserving adds nothing;
+        * nothing landed — the buffer never reached the file, and reserving would open a durable gap;
+        * a TORN partial landed — invisible to `_disk_last_seq` (it skips undecodable lines) yet
+          occupying that seq, so the reservation is the only thing stopping the next append from
+          writing a DUPLICATE seq behind the partial line.
+
+        A complete append always ends in a newline, so "the file does not end in one" is exactly the
+        torn case. An unreadable file answers True: reserving is the conservative direction.
+        """
+        try:
+            if self._disk_last_seq() >= seq:
+                return False
+            with open(self.path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                if f.tell() == 0:
+                    return False
+                f.seek(-1, os.SEEK_END)
+                return f.read(1) != b"\n"
+        except OSError:
+            return True
+
     def _mark_uncertain_append(self, seq: int) -> None:
         """Fence a seq whose bytes were accepted but whose sync was unconfirmed.
 
@@ -842,14 +868,17 @@ class EventStore:
         truth instead of letting this long-lived store reuse the seq.
         """
         with self._read_lock:
-            # CLAUDE REVIEW: [BUG] Reserving a seq whose bytes never landed (buffered f.write
-            # succeeded but flush/fsync raised BEFORE reaching the file — e.g. ENOSPC) makes this
-            # store's NEXT append write seq+1 onto a disk tail still at seq-1: a durable GAP the
-            # restored dense fence (event_sequence_continues) then classifies as corruption. That
-            # next append RETURNS SUCCESS while its event is invisible to fold (read_all only records
-            # _divergence), and every later append raises EventLogCorruptionError — self-inflicted
-            # brick. append_many's _mark_uncertain_append(events[-1].seq) reserves up to 4096 seqs.
-            self._seq = max(self._seq, seq)
+            # Reserve ONLY when bytes may actually be on disk. `f.write` is BUFFERED, so a flush or
+            # fsync that raised (ENOSPC, EIO) can mean NOTHING reached the file — and reserving then
+            # made this store's next append write seq+1 onto a tail still at seq-1. The restored dense
+            # fence (`event_sequence_continues`) classifies that gap as corruption: the next append
+            # RETURNS SUCCESS while its event is invisible to the fold, and every append after it
+            # raises EventLogCorruptionError. A self-inflicted brick, and `append_many` passes
+            # `events[-1].seq`, so it could reserve up to 4096 seqs at once.
+            #
+            # Disk truth decides, in `_uncertain_append_needs_reservation`.
+            if self._uncertain_append_needs_reservation(seq):
+                self._seq = max(self._seq, seq)
             self._cache = []
             self._cache_bytes = 0
             self._cache_mtime_ns = None
@@ -931,16 +960,17 @@ class EventStore:
                     # reports failure. Reserve its seq on every exceptional exit.
                     accepted = True
                     f.flush()
-                    # CLAUDE REVIEW: [BUG] Durability gap for require_durable: strict_fsync syncs the
-                    # FILE CONTENTS but never the parent DIRECTORY entry. When this append is the one
-                    # that created events.jsonl (or the dir link created by an earlier best-effort
-                    # append has not yet been flushed), a power loss can lose the whole file even
-                    # though this record's bytes were strictly synced — exactly the "paid_work_claimed
-                    # survives a crash before the external side effect" contract this flag exists for.
-                    # core.atomicio ships strict_fsync_parent() for precisely this (strict_atomic_write_bytes
-                    # calls it), but append() does not, so a durable paid claim can vanish and be re-billed.
+                    # `require_durable` syncs the file CONTENTS *and* the parent DIRECTORY entry.
+                    # Content-only was a real durability gap: when this append is the one that created
+                    # events.jsonl (or an earlier best-effort append created the link and it has not
+                    # been flushed), a power loss can lose the WHOLE FILE even though this record's
+                    # bytes were strictly synced — which is exactly the "paid_work_claimed survives a
+                    # crash before the external side effect" contract the flag exists for, so a
+                    # durable paid claim could vanish and be re-billed. `strict_atomic_write_bytes`
+                    # has always paired the two this way.
                     if require_durable:
                         strict_fsync(f.fileno())
+                        strict_fsync_parent(self.path)
                     else:
                         best_effort_fsync(f.fileno())  # read tolerates a torn final line
                     written_stat = os.fstat(f.fileno())
@@ -1033,11 +1063,11 @@ class EventStore:
                     f.write(payload)
                     accepted = True
                     f.flush()
-                    # CLAUDE REVIEW: [BUG] Same parent-directory durability gap as append() above: a
-                    # require_durable batch strictly syncs its contents but not the events.jsonl dir
-                    # entry, so a first-created log can be lost on power loss despite the receipt.
+                    # Parent-directory sync for the same reason as `append` above: a first-created
+                    # log can otherwise be lost on power loss despite a strictly-synced receipt.
                     if require_durable:
                         strict_fsync(f.fileno())
+                        strict_fsync_parent(self.path)
                     else:
                         best_effort_fsync(f.fileno())
                     written_stat = os.fstat(f.fileno())

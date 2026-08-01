@@ -90,15 +90,12 @@ class LessonPriorsMixin:
         # Researcher only; the Developer render drops them below).
         notes: list[str] = []
         npath = base / "meta_notes.jsonl"
-        # CLAUDE REVIEW: [BUG] These `read_jsonl_lenient` reads RAISE OSError on an unreadable shared store
-        # (permissions / transient FS fault) — the exact hazard `maybe_refresh_lessons` documents and wraps
-        # in try/except because "an unreadable shared store crash-looped the run". This helper is UNGUARDED
-        # and relies on every caller wrapping it, but the RUN-START loader (orchestrator.py:2571,
-        # `_load_reflection_priors_both`) is NOT wrapped, while its `_lessons_store_stamp` at L2565 swallows the
-        # same OSError. So an unreadable memory_dir crashes the run during DETERMINISTIC setup — before the
-        # first node — on every start AND resume: a true crash-loop, strictly worse than the refresh case the
-        # sibling guard was written for. The read should degrade to "no prior" here (or the run-start caller
-        # must guard like the refresh path), not fail the run.
+        # These `read_jsonl_lenient` reads RAISE OSError on an unreadable shared store (permissions, a
+        # transient FS fault). This helper deliberately does NOT swallow it: `maybe_refresh_lessons`
+        # needs the exception so it can disclose the skip AND decline to advance its stamp. Both
+        # callers guard it — the mid-run refresh has always, and the RUN-START loader
+        # (`orchestrator._reentry_repin`) now does too, which is what stopped an unreadable memory_dir
+        # from failing the run during deterministic setup on every start and resume.
         for o in read_jsonl_lenient(npath):
             if not isinstance(o, dict):
                 continue

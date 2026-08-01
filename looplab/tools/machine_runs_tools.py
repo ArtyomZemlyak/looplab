@@ -1585,17 +1585,19 @@ class RunControlTools:
             # only one nested member names the purged node. Rewriting logical rows also removes the
             # internal storage wrapper while preserving every surviving event and sequence.
             recs = list(iter_event_jsonl(evp))
-            # CLAUDE REVIEW: [BUG] Filters logical rows WITHOUT renumbering seq, so a surviving event
-            # after any purged one (e.g. the trailing `pause`, or later sibling nodes) leaves a seq
-            # GAP — and eventstore's restored dense fence (`event_sequence_continues`: "no legitimate
-            # workflow produces a monotonic gap") now treats that gap as corruption: the fold below
-            # (`read_all`) silently DROPS every surviving event after the gap, and the next
-            # append/resume raises EventLogCorruptionError. The purge can brick the run. Renumber the
-            # kept rows to a dense 0..N-1 sequence before writing (or teach the fence that purge is a
-            # legitimate gap-producing rewrite).
             kept = [record for record in recs
                     if not (isinstance(record.get("data"), dict)
                             and record["data"].get("node_id") in subtree)]
+            # RENUMBER to a dense 0..N-1 run. Filtering alone left a seq GAP after every purged
+            # event — the trailing `pause`, later sibling nodes — and the event store's dense fence
+            # (`event_sequence_continues`: "no legitimate workflow produces a monotonic gap") reads
+            # that as CORRUPTION: `read_all` silently drops every surviving event past the gap, and
+            # the next append or resume raises EventLogCorruptionError. A purge could brick the run
+            # it was cleaning. This whole path is already a full rewrite of the log (the backup taken
+            # below is what makes it recoverable), so renumbering costs nothing extra, and seq is
+            # POSITIONAL identity — nothing in the fold keys off an absolute value.
+            for position, record in enumerate(kept):
+                record["seq"] = position
 
             spans = rd / "spans.jsonl"
             kept_spans = None
