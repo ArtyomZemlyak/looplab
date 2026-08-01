@@ -975,13 +975,18 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # kill: fall through to the psutil path, which walks the tree by PID and so never touches the
     # engine. Returning outright instead would leave the whole tree running — trading "we killed
     # ourselves" for "the eval keeps burning a GPU the scheduler already released".
-    # CLAUDE REVIEW: [DOCS-MISMATCH] The comment above claims the psutil path "walks the tree by PID
-    # and so never touches the engine" — but for a DEAD leader (leader exits in the 250ms wait window,
-    # the same race the returncode fence documents for the non-same-group case) psutil's
-    # parent.children(recursive=True) finds NOTHING: the live descendants were reparented to
-    # init/subreaper. So on the same_group route a dead-leader tree is killed by NO path at all
-    # (killpg disqualified, psutil empty), yet the comment/docs assert "the tree still dies". State
-    # the residual gap, or snapshot children() BEFORE the exit.
+    #
+    # RESIDUAL GAP, stated rather than papered over: that rescue reaches the tree only while the
+    # LEADER is still a process we can enumerate from. If a same-group leader exited during the
+    # 250 ms `proc.wait` window (`_tee_drain` — the same race the `returncode` fence documents for
+    # the non-same-group case) its live descendants were reparented to init/a subreaper, so
+    # `parent.children(recursive=True)` returns NOTHING and that tree is killed by no path at all:
+    # killpg is disqualified, psutil finds an empty tree, the last resort is leader-only. It cannot
+    # be closed from here — `_kill_tree` runs after the fact, so there is no earlier moment to
+    # snapshot descendants from, and the only alternative, sweeping every process in the group, is
+    # sweeping the ENGINE's own group, exactly what the disqualification above exists to prevent.
+    # The fix belongs at the SPAWN site: `start_new_session=True` (run_argv) makes the leader its own
+    # group leader, and then the atomic killpg below is what runs and the gap never opens.
     same_group = False
     if os.name != "nt":
         try:
@@ -998,18 +1003,24 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     try:
         import psutil  # optional (extras: proc) — Windows tree kill, or a POSIX fallback if killpg failed
 
-        # CLAUDE REVIEW: [BUG] psutil tree-kill aborts on the FIRST vanished child: child.kill()
-        # raises psutil.NoSuchProcess for a child that exited between the children() snapshot and the
-        # kill (routine with churning DataLoader workers), escaping to the enclosing `except: pass` —
-        # skipping ALL remaining children AND parent.kill(). Since this is the designated kill path
-        # for the same_group case (whose last-resort fallback is only proc.kill() = leader-only),
-        # one racing worker exit leaks every other descendant in the engine's own group where no
-        # later group sweep can reach them. Wrap each child.kill()/parent.kill() in its own
-        # try/except psutil.NoSuchProcess.
         parent = psutil.Process(proc.pid)
+        # Each kill guarded ON ITS OWN. A child that exits between the `children()` snapshot and its
+        # own `kill()` raises NoSuchProcess — routine with churning DataLoader workers — and under a
+        # single shared try/except that one vanished worker escaped to the enclosing `except: pass`,
+        # skipping every REMAINING child AND `parent.kill()`. This is the designated kill path for
+        # the same_group case, whose last-resort fallback is a leader-only `proc.kill()`, so the
+        # survivors were leaked into the engine's own group where no later group sweep can reach
+        # them. AccessDenied is swallowed for the same reason: it means this one process cannot be
+        # killed, never that the rest of the tree should be spared.
         for child in parent.children(recursive=True):
-            child.kill()
-        parent.kill()
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        try:
+            parent.kill()
+        except psutil.NoSuchProcess:
+            pass
         return
     except Exception:
         pass

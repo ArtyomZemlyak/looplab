@@ -49,7 +49,8 @@ from looplab.engine.lessons_priors import (  # noqa: F401
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import JsonlCaseLibrary
 from looplab.events.replay import fold
-from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED
+from looplab.events.types import (
+    EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_LESSONS_STORE_UNAVAILABLE)
 
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
@@ -142,11 +143,29 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             return
         from looplab.events.eventstore import _interprocess_lock
         base = Path(self._e.memory_dir)
-        base.mkdir(parents=True, exist_ok=True)
         path = base / "lessons.jsonl"
         payload = b"\n".join(orjson.dumps(lz) for lz in lessons)
-        with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-            append_jsonl_bytes_locked(path, payload)
+        # BEST-EFFORT, the write twin of `maybe_refresh_lessons`'s read guard. The SHARED store lives
+        # on a DIFFERENT filesystem from the run dir — a read-only / full / quota'd network mount
+        # raises OSError here while the run's own events.jsonl append moments earlier succeeded — and
+        # unguarded that propagated out of `maybe_distill_lessons` through `_run_cadences` into the
+        # run() spine and FAILED the run, contradicting this subsystem's own "the store misses one
+        # batch" stance. The EV_LESSONS_DISTILLED gate has already advanced, so every LATER distill
+        # cadence re-crashed the same way. Disclosed, not swallowed: cross-run propagation is what is
+        # lost, and the lessons themselves are already in this run's own event log.
+        # OSError ONLY, deliberately: `required=True` makes an unavailable interprocess lock raise
+        # EventStoreLockError, and THAT strictness is a safety contract, not a bug — "no lock, no
+        # unlocked mutation of a file every concurrent run appends to" (see
+        # tests/test_claim_source_health.py::test_lesson_append_refuses_to_mutate_without_required_lock).
+        # Degrading there would be indistinguishable from silently dropping the lock requirement.
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+                append_jsonl_bytes_locked(path, payload)
+        except OSError as e:  # noqa: BLE001 - advisory cross-run memory cannot fail the run
+            self._e.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
+                "mode": "write", "count": len(lessons), "error": str(e)[:300]})
+            return
         if hygiene:
             # D2 hygiene: consolidate the store after appending — merge duplicate claims into
             # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size. The

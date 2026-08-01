@@ -176,6 +176,36 @@ def test_lesson_append_refuses_to_mutate_without_required_lock(tmp_path, monkeyp
     assert not (tmp_path / "lessons.jsonl").exists()
 
 
+def test_an_unwritable_shared_store_degrades_the_append_instead_of_failing_the_run(
+        tmp_path, monkeypatch):
+    """The SHARED lessons store lives on a DIFFERENT filesystem from the run dir, so a read-only /
+    full / quota'd mount raises OSError from the append while the run's own events.jsonl append
+    moments earlier succeeded. Unguarded that propagated out of `maybe_distill_lessons` through
+    `_run_cadences` into the run() spine and FAILED the run — and since the EV_LESSONS_DISTILLED
+    gate had already advanced, every LATER distill cadence re-crashed the same way."""
+    from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE
+
+    appended = []
+
+    class _Store:
+        def append(self, type_, data):
+            appended.append((type_, data))
+
+    class _Engine:
+        memory_dir = str(tmp_path)
+        store = _Store()
+
+    def _no_space(path, payload):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("looplab.engine.lessons.append_jsonl_bytes_locked", _no_space)
+    LessonMemory(_Engine()).append_lessons([_lesson("lost to a full mount", "r")], hygiene=False)
+
+    assert [t for t, _ in appended] == [EV_LESSONS_STORE_UNAVAILABLE]     # disclosed, not silent
+    assert appended[0][1]["mode"] == "write" and appended[0][1]["count"] == 1
+    assert "No space left" in appended[0][1]["error"]
+
+
 def test_claim_decision_holds_both_evidence_locks_through_fsync(tmp_path, monkeypatch):
     import threading
 

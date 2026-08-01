@@ -646,3 +646,59 @@ def test_kill_tree_last_resort_never_group_kills_a_same_group_child(monkeypatch,
     while time.monotonic() < deadline and proc.poll() is None:
         time.sleep(0.05)
     assert proc.poll() is not None, "the fallback neither group-killed nor plain-killed the child"
+
+
+def test_a_vanished_child_does_not_abort_the_rest_of_the_psutil_tree_kill(monkeypatch):
+    """`child.kill()` raises NoSuchProcess for a child that exited between the `children()` snapshot
+    and the kill — routine with churning DataLoader workers. Under one shared try/except that
+    escaped to the enclosing `except Exception: pass`, skipping every REMAINING child AND
+    `parent.kill()`. This is the designated kill path for the same_group case, whose last-resort
+    fallback is a leader-only `proc.kill()`, so one racing worker exit leaked every other descendant
+    into the engine's own process group where no later group sweep can reach them."""
+    import os
+    import sys
+    import types
+
+    from looplab.runtime.sandbox import _kill_tree
+
+    killed: list[str] = []
+
+    class _NoSuchProcess(Exception):
+        pass
+
+    class _AccessDenied(Exception):
+        pass
+
+    class _P:
+        def __init__(self, name, *, alive=True, denied=False):
+            self.name, self.alive, self.denied = name, alive, denied
+
+        def children(self, recursive=False):
+            return kids
+
+        def kill(self):
+            if not self.alive:
+                raise _NoSuchProcess(self.name)
+            if self.denied:
+                raise _AccessDenied(self.name)
+            killed.append(self.name)
+
+    # worker0 vanished first, worker1 is unkillable — neither may spare the rest of the tree.
+    kids = [_P("worker0", alive=False), _P("worker1", denied=True), _P("worker2"), _P("worker3")]
+    leader = _P("leader")
+
+    fake = types.ModuleType("psutil")
+    fake.NoSuchProcess = _NoSuchProcess
+    fake.AccessDenied = _AccessDenied
+    fake.Process = lambda pid: leader
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+
+    class _Popen:
+        returncode = None            # never reaped -> the pid fence lets the kill through
+        pid = os.getpid()            # shares OUR group -> same_group, so killpg is disqualified
+
+        def kill(self):
+            killed.append("last_resort_leader_only")
+
+    _kill_tree(_Popen())
+    assert killed == ["worker2", "worker3", "leader"], killed

@@ -325,6 +325,15 @@ EV_ASHA_RANK = "asha_rank"
 # fold-ignored — the fork cursor already advanced, so this only makes the drop legible in the event
 # log, `looplab replay` and the trace; it never re-serves the request or changes selection.
 EV_FORK_UNFULFILLED = "fork_unfulfilled"
+# The SHARED cross-run lessons store (`memory_dir/lessons.jsonl`, `meta_notes.jsonl`) could not be
+# read or written — permissions, a full/quota'd/read-only network mount, a transient FS fault. That
+# store is a DIFFERENT filesystem from the run dir, so a run whose own events.jsonl appends succeed
+# can still lose every cross-run prior. Cross-run memory is advisory ("the store misses one batch"),
+# so both sides degrade instead of failing the run; this row is how the degrade stays legible in the
+# event log, `looplab replay` and the trace. `mode` is "read" or "write". DIAGNOSTIC / fold-ignored:
+# it changes no state, and the read side deliberately does NOT advance `lessons_refreshed`, so the
+# next cadence retries the same still-unread store rather than treating it as read.
+EV_LESSONS_STORE_UNAVAILABLE = "lessons_store_unavailable"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
@@ -385,6 +394,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_TRAIN_MONITOR_ALERT,
     EV_ASHA_RANK,
     EV_FORK_UNFULFILLED,
+    EV_LESSONS_STORE_UNAVAILABLE,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
 })

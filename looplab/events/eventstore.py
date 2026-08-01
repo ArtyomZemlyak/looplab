@@ -239,9 +239,19 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: boo
     """Best-effort exclusive cross-process lock (msvcrt on Windows, fcntl on POSIX). The live UI
     server appends control events to the SAME events.jsonl the engine subprocess writes; without
     serialization their appends can interleave into a torn line (which `iter_jsonl` truncates at,
-    silently dropping later events). Degrades to a no-op if locking is unavailable unless
-    ``required`` is set. A non-blocking caller gets ``InterprocessLockContended`` when another owner
-    holds the byte/inode instead of waiting behind it."""
+    silently dropping later events). A non-blocking caller gets ``InterprocessLockContended`` when
+    another owner holds the byte/inode instead of waiting behind it.
+
+    Two DIFFERENT failures, deliberately treated differently — the docstring used to describe only
+    the first and readers took "degrades to a no-op if locking is unavailable" as universal:
+    * a locking CAPABILITY gap (no fcntl/msvcrt, or a filesystem that reports advisory locks as
+      unsupported) degrades to an unlocked no-op for an ordinary caller, and raises
+      ``EventStoreLockError`` when ``required`` is set;
+    * an inaccessible lock PATH (the sibling ``.lock`` cannot be opened) raises for EVERY caller —
+      wrapped in ``EventStoreLockError`` when ``required``, re-raised as the bare ``OSError``
+      otherwise. It does not degrade. A mount where events.jsonl is appendable but its ``.lock``
+      cannot be created therefore aborts the append rather than running it unlocked, which is the
+      long-standing engine-writer behaviour and is preserved on purpose."""
     f = None
     locked = False
     try:
@@ -250,13 +260,10 @@ def _interprocess_lock(lock_path: Path, *, required: bool = False, blocking: boo
         except OSError as exc:
             if required:
                 raise EventStoreLockError(lock_path, exc) from exc
-            # CLAUDE REVIEW: [DOCS-MISMATCH] The docstring promises "degrades to a no-op if locking is
-            # unavailable unless required is set", but here a non-required (ordinary engine) caller
-            # re-RAISES when the lock FILE cannot be opened, aborting the append instead of degrading.
-            # Only the flock() capability gap below (OSError/ImportError/...) degrades to no-op; an
-            # inaccessible lock path does not. On a mount where events.jsonl is appendable but the
-            # sibling .lock cannot be created, engine appends would crash rather than run unlocked.
-            raise  # preserve the existing engine-writer behavior for an inaccessible lock path
+            # An inaccessible lock PATH never degrades, for a `required` or an ordinary caller alike
+            # — see the docstring's two-failure split. This preserves the existing engine-writer
+            # behavior: abort the append rather than run it unlocked.
+            raise
         try:
             if os.name == "nt":
                 import msvcrt

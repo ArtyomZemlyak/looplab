@@ -628,3 +628,29 @@ def test_lessons_summary_feeds_the_merged_display_statement_not_the_raw_seed(tmp
     prompt = "\n".join(fake.prompts)
     assert "MERGEDBELIEF" in prompt                            # the consolidated display statement is fed
     assert "RAWSEED" not in prompt                             # never the raw first-member seed
+
+
+def test_an_unreadable_shared_store_does_not_crash_loop_the_run_at_startup(tmp_path, monkeypatch):
+    """`_reentry_repin` loads the cross-run priors during DETERMINISTIC setup, before the first node,
+    on every start AND resume. `_load_reflection_priors_both` reads the shared store through
+    `read_jsonl_lenient`, which RAISES OSError on an unreadable lessons.jsonl / meta_notes.jsonl —
+    while `_lessons_store_stamp` one line up already swallows the same OSError. Unguarded that
+    failed the run at startup every single time: a true crash-loop, strictly worse than the mid-run
+    refresh case the sibling guard in `maybe_refresh_lessons` was written for."""
+    from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE
+
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), lessons_refresh_every=2)
+    _seed_lessons(mem, [{"task_id": eng.task.id, "statement": "unreachable", "run_id": "other"}])
+    # The stamp is taken (and committed) BEFORE the read, so it is the value the first refresh
+    # cadence would compare against — it must NOT survive a failed load.
+    monkeypatch.setattr("looplab.engine.lessons_priors.read_jsonl_lenient",
+                        lambda *a, **kw: (_ for _ in ()).throw(OSError(13, "Permission denied")))
+
+    eng._reentry_repin()                                    # was: OSError out of run() setup
+
+    rows = [e for e in eng.store.read_all() if e.type == EV_LESSONS_STORE_UNAVAILABLE]
+    assert len(rows) == 1 and rows[0].data["mode"] == "read"
+    assert rows[0].data["phase"] == "run_start" and "Permission denied" in rows[0].data["error"]
+    assert eng._prior_note_text == ""                        # degraded to "no prior", not crashed
+    assert eng._lessons_seen_stamp is None                   # so the next cadence RETRIES the store

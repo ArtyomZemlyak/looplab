@@ -35,6 +35,7 @@ from looplab.events.types import (
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_FORK_UNFULFILLED, EV_HOST_GRADING,
     EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_FINALIZE_STEP,
+    EV_LESSONS_STORE_UNAVAILABLE,
     EV_NODE_BUILDING,
     EV_HYPOTHESIS_MERGED, EV_NODE_FAILED, EV_PAUSE,
     EV_NOVELTY_REJECTED,
@@ -2568,8 +2569,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # scan builds both — the two role pools share every untagged lesson, so re-reading/re-embedding
         # the store per role is wasted work.
         _rid = _entry.run_id or None
-        self._prior_note_text, self._dev_prior_note_text = \
-            self._load_reflection_priors_both(exclude_run_id=_rid)
+        # BEST-EFFORT, exactly like the refresh path (`lessons.maybe_refresh_lessons`) this mirrors.
+        # `_load_reflection_priors_both` reads the SHARED store through `read_jsonl_lenient`, which
+        # RAISES OSError on an unreadable lessons.jsonl / meta_notes.jsonl (permissions, a transient
+        # FS fault) — while `_lessons_store_stamp` one line up already swallows the same OSError.
+        # Unguarded, that failed the run during DETERMINISTIC setup, before the first node, on every
+        # start AND every resume: a true crash-loop, strictly worse than the mid-run refresh case the
+        # sibling guard was written for. The stamp is reset to None so the first refresh cadence
+        # retries the store instead of reading the pre-read stamp as "already seen, unchanged".
+        try:
+            self._prior_note_text, self._dev_prior_note_text = \
+                self._load_reflection_priors_both(exclude_run_id=_rid)
+        except (OSError, ValueError) as e:  # noqa: BLE001 - an advisory prior cannot fail the run
+            self._lessons_seen_stamp = None
+            self.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
+                "mode": "read", "phase": "run_start", "error": str(e)[:300]})
         return entry_finished
 
     def _recover_interrupted_builds(self, state: RunState) -> bool:

@@ -137,6 +137,22 @@ def test_profile_nan_is_missing_and_unhashable_ok():
     assert c2["n_unique"] == 2
 
 
+def test_an_oversized_json_integer_does_not_crash_the_profiler():
+    """Python ints are arbitrary-precision and JSON integers are unbounded, so a cell like 10**400 is
+    a FINITE int that sails past any NaN/inf gate — and then `sum(nonnull)/len(nonnull)` raises
+    OverflowError ("integer division result too large for a float"), taking the profiler and the
+    leakage front-end down over one oversized cell."""
+    c = profile_column([1, 2, 10 ** 400])
+    assert c["dtype"] == "categorical"      # degraded, not crashed
+    assert "mean" not in c and "std" not in c
+    assert c["n_missing"] == 0              # the value is still a value, just not a usable stat
+
+    # A column of ordinary ints keeps its numeric stats — the guard must not widen to plain ints.
+    assert profile_column([1, 2, 3])["mean"] == 2.0
+    # …and the whole dataset front-end survives the same column.
+    assert profile_dataset({"huge": [10 ** 400]})["huge"]["dtype"] == "categorical"
+
+
 # #21/#22 — grep rejects a bad/over-long (ReDoS) pattern and caps file size
 def test_grep_guards_bad_and_long_pattern(tmp_path):
     from looplab.tools.retrieval import grep
