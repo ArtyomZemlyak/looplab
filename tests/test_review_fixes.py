@@ -329,3 +329,45 @@ def test_lifecycle_lock_is_required_and_reports_503(tmp_path, monkeypatch):
         r = getattr(client, method)(path)
         assert r.status_code == 503, f"{path} degraded to an unlocked {method} instead of failing"
     assert (rd / "events.jsonl").is_file(), "a lock failure must never destroy run bytes"
+
+
+def test_a_scripted_reset_still_works_without_a_browser_generation_or_a_config_snapshot(tmp_path):
+    """Two regressions from the durable-Replay rewrite, both hit before any real work.
+
+    `expected_generation` became unconditionally required, but the previous handler required it only
+    for BROWSERS (Origin present → 428 "required for browser Replay") and let a scripted caller —
+    the CLI, operator tooling, a test client — omit it. And `config.snapshot.json` became a hard
+    requirement, yet only the CLI writes one: a run driven through `Engine(...)`, and every run that
+    predates self-describing runs, has none, and the rest of the server treats that as supported
+    ("run has no config.snapshot.json (it predates self-describing runs)"). Either alone made
+    Replay 400/409 on those runs before it could evaluate a single precondition."""
+    pytest.importorskip("fastapi")
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    (rd / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t","direction":"min"}}\n'
+        '{"seq":1,"type":"run_finished","data":{}}\n', encoding="utf-8")
+    (rd / "task.snapshot.json").write_text(
+        (Path(__file__).resolve().parents[1] / "examples" / "toy_task.json").read_text(
+            encoding="utf-8"), encoding="utf-8")
+    assert not (rd / "config.snapshot.json").exists()
+
+    client = TestClient(make_app(tmp_path))
+    scripted = client.post("/api/runs/demo/reset")
+    assert scripted.status_code != 400, scripted.json()          # was: expected_generation required
+    detail = scripted.json().get("detail")
+    code = detail.get("code") if isinstance(detail, dict) else None
+    assert code != "replay_config_unavailable", detail           # was: config snapshot required
+
+    # The BROWSER contract is untouched: a missing generation is still 428, not a silent pass.
+    browser = client.post("/api/runs/demo/reset", headers={"Origin": "http://testserver"})
+    assert browser.status_code == 428
+    # ...and a malformed one is still rejected outright.
+    assert client.post("/api/runs/demo/reset", headers={"Origin": "http://testserver"},
+                       json={"expected_generation": "ABC"}).status_code == 400

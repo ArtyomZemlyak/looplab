@@ -263,19 +263,31 @@ def _prepare_receipt(
     task_bytes = _read_bounded_regular(
         task_source, _TASK_MAX_BYTES, code="replay_task_invalid", label="task snapshot")
 
+    # `config.snapshot.json` is OPTIONAL. Only the CLI writes it — a run driven straight through
+    # `Engine(...)`, and every run that predates self-describing runs, has none, and the rest of the
+    # server treats that as a supported state (`runs.py`: "run has no config.snapshot.json (it
+    # predates self-describing runs)"). Requiring it here made Replay 409 on exactly those runs.
+    # Absent snapshot means "no recorded settings", so the replacement engine starts from the same
+    # defaults the original did; a snapshot that EXISTS but is malformed is still a hard 409, because
+    # then a real recorded configuration cannot be reproduced and replaying under defaults would
+    # silently change the run.
     snap = rd / "config.snapshot.json"
-    config_bytes = _read_bounded_regular(
-        snap, _CONFIG_MAX_BYTES, code="replay_config_unavailable", label="configuration snapshot")
-    try:
-        raw_config = json.loads(config_bytes.decode("utf-8"))
-        if not isinstance(raw_config, dict):
-            raise ValueError("config snapshot must be an object")
-        effective_config = settings_from_snapshot(raw_config).masked_snapshot()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(409, {
-            "code": "replay_config_invalid",
-            "message": "Replay configuration is invalid; Replay did not archive or restart the run.",
-        }) from exc
+    if os.path.lexists(snap):
+        config_bytes = _read_bounded_regular(
+            snap, _CONFIG_MAX_BYTES, code="replay_config_unavailable",
+            label="configuration snapshot")
+        try:
+            raw_config = json.loads(config_bytes.decode("utf-8"))
+            if not isinstance(raw_config, dict):
+                raise ValueError("config snapshot must be an object")
+            effective_config = settings_from_snapshot(raw_config).masked_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(409, {
+                "code": "replay_config_invalid",
+                "message": "Replay configuration is invalid; Replay did not archive or restart the run.",
+            }) from exc
+    else:
+        effective_config = settings_from_snapshot({}).masked_snapshot()
 
     stage_suffix = task_source.suffix or ".json"
     task_stage = rd / f".looplab-reset-task-{operation_id}{stage_suffix}"
@@ -901,14 +913,12 @@ async def durable_reset_run(
     # The durable operation id gets the same split, and a supplied one is validated either way. It
     # exists so a caller whose request outcome became unknown can REJOIN that exact operation rather
     # than start a second one against the same generation — which `reset_receipts_for_run` below
-    # rejects as `reset_operation_conflict`. A browser persists its id to get that; a scripted caller
-    # has nowhere to persist one, so the server DERIVES it below from (run, generation) — a random id
-    # per request would make an ordinary retry collide with its own predecessor's receipt.
+    # rejects as `reset_operation_conflict`. A supplied id is honoured; an ABSENT one is DERIVED below
+    # from (run, generation) rather than rejected, so the generation fence still gets to answer first
+    # (a stale-tab Replay must read as 409 run_generation_changed, not 400 operation_id).
     if operation_id is not None and (
             not isinstance(operation_id, str)
             or RUN_RESET_OPERATION_RE.fullmatch(operation_id) is None):
-        raise HTTPException(400, "operation_id must be a lowercase UUID")
-    if operation_id is None and browser:
         raise HTTPException(400, "operation_id must be a lowercase UUID")
 
     root = srv.root.resolve()
@@ -956,8 +966,8 @@ async def durable_reset_run(
             })
     if operation_id is None:
         # DERIVED, not random: "replay THIS generation of THIS run" is one operation, so a retry
-        # after an unknown outcome must land on the same receipt and rejoin — which is exactly what a
-        # browser gets by persisting its id. A fresh random id per request would instead be a SECOND
+        # after an unknown outcome must land on the same receipt and rejoin — exactly what a browser
+        # gets by persisting its own id. A fresh random id per request would instead be a SECOND
         # operation against the same generation, and the ownership check below correctly rejects that
         # as `reset_operation_conflict`. The generation is part of the key, so the next Replay (of the
         # replacement generation) is a genuinely new operation with a new id.
