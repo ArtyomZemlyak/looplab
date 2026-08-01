@@ -581,3 +581,57 @@ def test_invalid_unicode_is_omitted_and_receipted_without_breaking_the_wire_json
         "unit": "items", "total": 2, "returned": 1, "omitted": 1, "complete": False,
     }
     json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+
+
+def test_field_admission_encodes_each_field_once_not_the_whole_card_per_field():
+    """`/state` and every SSE frame project up to PUBLIC_CARD_MAX_COUNT cards, and admission
+    re-serialized the ENTIRE accumulated candidate once per field — O(fields x card_bytes) of
+    json.dumps per card. The running budget must be byte-IDENTICAL in what it admits."""
+    import looplab.serve.public_cards as pc
+
+    row = {
+        "id": "spoof", "status": "evaluated", "verdict": "tested", "actionable": True,
+        "statement": "a direction worth a few hundred bytes " + ("s" * 400),
+        "rationale": "why " + ("r" * 600), "created_at_node": 3, "priority": 1, "pinned": True,
+        "scored_against": 7, "operator": "improve", "params": {"lr": 0.2, "wd": 0.01},
+        "concept_tags": [f"tag-{i}" for i in range(12)],
+    }
+    reference = pc._dto(row, "card-ref")
+
+    sizes = []
+    real_dumps = pc.json.dumps
+
+    class _CountingJson:
+        loads = staticmethod(pc.json.loads)
+
+        @staticmethod
+        def dumps(obj, **kw):
+            out = real_dumps(obj, **kw)
+            sizes.append(len(out))
+            return out
+
+    original = pc.json
+    pc.json = _CountingJson
+    try:
+        dto = pc._dto(row, "card-ref")
+    finally:
+        pc.json = original
+
+    assert dto == reference, "the running budget changed which fields are admitted"
+    whole = len(real_dumps(dto, ensure_ascii=False, separators=(",", ":")))
+    oversized = [n for n in sizes if n > whole // 2]
+    assert not oversized, (
+        f"{len(oversized)} of {len(sizes)} serializations covered most of the {whole}-byte card — "
+        "admission is still re-encoding the accumulated candidate once per field")
+
+
+def test_the_running_budget_still_refuses_a_field_that_would_overflow_the_card_cap():
+    """The bound itself must survive the rewrite: an oversized field is dropped, not admitted."""
+    import looplab.serve.public_cards as pc
+
+    row = {"id": "spoof", "status": "evaluated", "verdict": "tested", "actionable": True,
+           "statement": "short", "rationale": "x" * (PUBLIC_CARD_MAX_BYTES * 2)}
+    dto = pc._dto(row, "card-big")
+    encoded = json.dumps(dto, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(encoded) <= PUBLIC_CARD_MAX_BYTES, len(encoded)
+    assert dto["id"] == "card-big" and dto["status"] == "evaluated"   # identity survives the drop

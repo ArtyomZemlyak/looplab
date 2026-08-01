@@ -1081,17 +1081,24 @@ def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
     )
 
 
-# CLAUDE REVIEW: [PERF] Per-field admission below re-serializes the ENTIRE accumulated candidate
-# for each of the ~45 _FIELDS (O(fields x card_bytes) json.dumps per card, bounded by the 8 KiB
-# card cap), and `_card_projection_receipt` then re-projects every field a second time for the
-# lossless check. With PUBLIC_CARD_MAX_COUNT=256 admitted cards this is tens of MB of json.dumps
-# per /state response and per SSE frame — additive to the O(total source cards) nsmallest cost
-# already flagged in public_cards_projection. A running byte budget (serialize each field once,
-# add its encoded size) would keep the same bound at O(fields) serializations per card.
+def _encoded_pair_cost(name: str, value) -> int:
+    """UTF-8 bytes that appending `name: value` adds to a NON-EMPTY JSON object.
+
+    `json.dumps({name: value})` is `{"name":<v>}`; appending the same pair to an existing object
+    replaces the opening brace with a comma and drops the closing brace, so the delta is exactly
+    that encoding's length minus one. Exact, not an estimate — which is what lets the running
+    budget below make byte-identical admission decisions to the whole-candidate re-serialization
+    it replaces.
+    """
+    return len(json.dumps({name: value}, ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8")) - 1
+
+
 def _dto(card, authoritative_id: str, omit_fields=frozenset()) -> dict:
     # fixed admission order keeps identity/lifecycle available; rich optional fields enter
     # only while the complete UTF-8 JSON representation remains inside the per-card SSE envelope.
     out: dict = {"id": authoritative_id}
+    used = len(json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     concept_source_claimed_complete = False
     for name in _FIELDS[1:]:
         if name in omit_fields:      # audience-scoped: never admitted, so never certified either
@@ -1104,10 +1111,15 @@ def _dto(card, authoritative_id: str, omit_fields=frozenset()) -> dict:
             # source completeness is end-to-end on the public DTO. Start fail-closed and
             # restore True only after the exact tag set itself survives size/ref projection below.
             value = {**value, "complete": False}
-        candidate = {**out, name: value}
-        encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(encoded) <= PUBLIC_CARD_MAX_BYTES:
-            out = candidate
+        # A RUNNING budget. Re-serializing the whole accumulated candidate once per field made a
+        # single card O(fields x card_bytes) of json.dumps, and /state plus every SSE frame projects
+        # up to PUBLIC_CARD_MAX_COUNT cards. Each field is encoded exactly once instead. `_FIELDS`
+        # entries are unique and none of them is "id", so every pair is a genuine append and the
+        # delta above is exact.
+        cost = _encoded_pair_cost(name, value)
+        if used + cost <= PUBLIC_CARD_MAX_BYTES:
+            out[name] = value
+            used += cost
     if out.get("selection_ready") is True:
         identity = out.get("identity")
         provenance = out.get("selection_provenance")
