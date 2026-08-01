@@ -158,7 +158,10 @@ _LAYOUT = {
     "operators": "search",
     "options": "engine",
     "orchestrator": "engine",
-    "panel": "search",   # a Researcher wrapper (search policy), not a UI component — see ADR layering
+    # A Researcher wrapper (a search policy), not a UI component. NOTE this entry only aliases
+    # the FLAT `looplab.panel`; `_CompatFinder` refuses dotted names, so `looplab.serve.panel`
+    # is deliberately NOT aliased — the in-repo callers were repointed instead.
+    "panel": "search",
     "parse": "core",
     "patch": "tools",
     "perm_modes": "tools",

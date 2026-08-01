@@ -13,7 +13,7 @@ in the default config. Two guards:
      inner researcher, set every registry attr + `track_hypotheses` on the OUTERMOST object
      (engine-style), call propose, and assert the INNER researcher observed every one. The same
      delivery check runs against the OTHER forwarding wrappers the registry docstring enumerates
-     (SurrogateResearcher, serve's PanelResearcher).
+     (SurrogateResearcher, search's PanelResearcher).
 
 Offline (fake clients only).
 """
@@ -176,7 +176,7 @@ def test_surrogate_wrapper_forwards_hints_to_its_fallback():
     _assert_registry_delivery(SurrogateResearcher({}, fallback=inner), inner)
 
 
-def test_serve_panel_wrapper_forwards_hints_to_its_base():
+def test_panel_wrapper_forwards_hints_to_its_base():
     # Same for the empirical PanelResearcher: hints must reach the base before the K-way fan-out.
     from looplab.search.panel import PanelResearcher
     inner = _RecordingResearcher()

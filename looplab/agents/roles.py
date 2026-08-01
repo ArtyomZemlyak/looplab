@@ -283,7 +283,7 @@ def forward_hints(src, dst) -> None:
     propose(). hasattr-guarded: an attr the engine never set is left untouched on `dst`. Without
     this, a wrapper silently dropped every engine hint on its delegation path. Callers:
     `UnifiedAgent.propose`, `ForesightPanelResearcher._forward_hints`,
-    `SurrogateResearcher.propose`, and serve's `PanelResearcher.propose` — one helper, so the
+    `SurrogateResearcher.propose`, and search's `PanelResearcher.propose` — one helper, so the
     rule can't drift per-wrapper (tests/test_hint_forwarding.py wires the real chains)."""
     for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
         if hasattr(src, attr):

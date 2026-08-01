@@ -281,7 +281,7 @@ def test_merge_prompt_opts_unwraps_researcher_chain():
 
 
 def test_merge_prompt_opts_reads_through_panel_and_unified_facade():
-    # H7: the serve PanelResearcher and the UnifiedAgent facade now expose read-through
+    # H7: the search PanelResearcher and the UnifiedAgent facade now expose read-through
     # `parser`/`prompts` (panel also `client`), so a panel(unified(inner)) chain — where the walker
     # sees only the OUTERMOST object — still yields the inner researcher's configured values instead
     # of silently falling back to the (None, "tool_call") defaults.
