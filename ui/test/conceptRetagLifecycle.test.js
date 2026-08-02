@@ -11,8 +11,12 @@ const inspector = () => readFile(new URL('../src/Inspector.jsx', import.meta.url
 
 test('ConceptTags is keyed on run/node/attempt so its draft resets on selection change', async () => {
   const src = await inspector()
-  assert.ok(src.includes('<ConceptTags key={`${runId}:${n.id}:${n.attempt}`}'),
-    'the concept re-tag editor must be remounted per run/node/attempt identity')
+  // The key gained the run GENERATION, which is strictly stronger: after a start-over the run id,
+  // node id and attempt can all repeat, so without it a draft opened before the reset could submit
+  // against the rebuilt node. An `includes` of the old exact string could not see that improvement
+  // and simply stopped holding.
+  assert.match(src, /<ConceptTags key=\{`\$\{runId\}:\$\{expectedGeneration \|\| '\?'\}:\$\{n\.id\}:\$\{n\.attempt\}`\}/,
+    'the concept re-tag editor must be remounted per run/generation/node/attempt identity')
 })
 
 test('concept re-tag Edit is gated on a settled (terminal) node lifecycle, not projection alone', async () => {

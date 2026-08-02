@@ -62,11 +62,18 @@ test('shared table/chart contract is responsive and touch targets remain explici
 
 test('list and map use native links for the primary open-run action', async () => {
   const [list, map] = await Promise.all([source('RunList.jsx'), source('MapView.jsx')])
-  assert.match(list, /<a className="run-card-main" href=\{`#\/run\/\$\{encodeURIComponent\(r\.run_id\)\}`\}/)
+  // Anchored on the ELEMENT and its href rather than on one exact attribute order and line break:
+  // the card link has since gained `data-run-open-id`, `draggable` and an `aria-disabled` fence, and
+  // a single-line regex silently stopped matching all of it. What must hold is that the primary
+  // open-run affordance is a real <a> carrying a real, encoded route — so middle-click, Ctrl-click
+  // and "copy link address" work — not that its attributes sit in a particular order.
+  assert.match(list, /<a className="run-card-main"[\s\S]{0,400}?href=\{`#\/run\/\$\{encodeURIComponent\(r\.run_id\)\}`\}/)
   assert.doesNotMatch(list, /role="link"/)
-  assert.match(map, /<a className="run-node nodrag nopan" href=\{`#\/run\/\$\{encodeURIComponent\(run\.run_id\)\}`\}/)
+  assert.match(map, /<a className="run-node nodrag nopan"[\s\S]{0,400}?href=\{`#\/run\/\$\{encodeURIComponent\(run\.run_id\)\}`\}/)
   assert.match(map, /<button type="button" className="grp-tab nodrag nopan"/)
-  assert.match(list, /followClientRoute\(event, \(\) => onOpen\(r\.run_id\)\)/)
+  // The click handler still has to defer to the browser for modified clicks; only the callback it
+  // wraps was renamed (`onOpen` -> `openRun`).
+  assert.match(list, /followClientRoute\(event, \(\) => openRun\(r\.run_id\)\)/)
   assert.match(map, /followClientRoute\(event, open\)/)
 })
 

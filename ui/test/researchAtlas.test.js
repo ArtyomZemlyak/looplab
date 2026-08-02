@@ -1161,7 +1161,13 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
 
   assert.match(app, /lazy\(\(\) => import\('\.\/ResearchAtlas\.jsx'\)\)/)
   assert.match(app, /h === '#\/research-atlas'[\s\S]*canonicalHash: '#\/atlas'/)
-  assert.match(app, /const researchAtlas = \(\) => \{ location\.hash = '#\/atlas' \}/)
+  // The route helpers now go through `navigateWithListState`, which preserves the run-list scroll
+  // and selection across the round trip; assigning `location.hash` directly was the old spelling and
+  // the assertion below it (the owner gate) never ran once this stopped matching. What matters is
+  // that Atlas navigates to the canonical hash the same way its sibling routes do.
+  assert.match(app, /const researchAtlas = useCallback\(snapshot => \{\s*navigateWithListState\('#\/atlas', snapshot, null\)/)
+  assert.match(app, /const settings = useCallback\(snapshot => \{\s*navigateWithListState\('#\/settings', snapshot, null\)/,
+    'Atlas must navigate like its sibling owner routes, not by a private mechanism')
   assert.match(app, /history\.replaceState\(history\.state, '', route\.canonicalHash\)/)
   assert.match(app, /route\.view === 'research-atlas'/)
   assert.match(app, /onResearchAtlas=\{researchAtlas\}/)

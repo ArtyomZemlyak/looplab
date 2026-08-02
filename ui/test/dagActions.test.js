@@ -26,8 +26,14 @@ test('every mutable DAG experiment exposes a named native menu trigger', async (
     'concept selection cannot leak across semantic generations')
   assert.match(dag, /focusable: false,/, 'React Flow must not add a second anonymous tab stop around the card')
   assert.match(dag, /onOpenActions: onNodeAction \? openActions : null/)
-  assert.match(runView, /onNodeAction=\{readOnlyMode \? null : onNodeAction\}/,
+  // The gate was renamed AND widened: `mutationReadOnlyMode` is `readOnlyMode` plus lost run
+  // authority plus an in-progress start-over. Pinning the old name meant this assertion stopped
+  // running exactly when the gate grew the conditions most worth checking.
+  assert.match(runView, /onNodeAction=\{mutationReadOnlyMode \? null : onNodeAction\}/,
     'history and review modes must not expose mutating node actions')
+  assert.match(runView, /const mutationReadOnlyMode = readOnlyMode \|\| runAuthorityBlocked \|\| startOverMutationBlocked/,
+    'a run whose authority was lost, or that is mid start-over, must not offer node mutations either')
+  assert.match(runView, /const readOnlyMode = reviewMode \|\| historyActive \|\| routeFenceBlocked/)
   assert.match(groups, /<button type="button" className="grp-pill"/)
   assert.match(groups, /aria-label=\{`Collapse group \$\{label\}; \$\{countDescription\}`\}/)
   assert.match(dag, /totalCount: groups\.get\(cell\.key\)\?\.length \?\? cell\.ids\.length/)
