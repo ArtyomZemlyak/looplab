@@ -1411,12 +1411,14 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             <span className={(sliderVal >= liveSeq) ? 'live-tag' : 'hist-tag'}>{(sliderVal >= liveSeq) ? `live · ${liveSeq}` : `replay · ${sliderVal}/${liveSeq}`}</span>
           </div>
           <div className="kind-chips">
-            {GROUPS.map(([g, label]) => <button key={g}
-              className={'kind-chip k-' + g + (kinds.has(g) ? ' on' : '')} aria-pressed={kinds.has(g)}
-              onClick={() => toggleKind(g)}>
-              <OpIcon name={GROUP_GLYPH[g]} size={12} /> {label}</button>)}
-            {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
             <input className="text feed-filter" aria-label="Filter loaded events" placeholder="filter events…" value={filter} onChange={e => onFilterChange?.(e.target.value)} />
+            <div className="kind-chip-strip">
+              {GROUPS.map(([g, label]) => <button key={g}
+                className={'kind-chip k-' + g + (kinds.has(g) ? ' on' : '')} aria-pressed={kinds.has(g)}
+                onClick={() => toggleKind(g)}>
+                <OpIcon name={GROUP_GLYPH[g]} size={12} /> {label}</button>)}
+              {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
+            </div>
           </div>
         </div>}
         <div className="timeline-pagebar">

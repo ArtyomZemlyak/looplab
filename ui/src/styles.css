@@ -1370,6 +1370,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .dock-body.chat-body { overflow: hidden; }
 
 .kind-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 8px; border-bottom: 1px solid var(--line); align-items: center; }
+.kind-chip-strip { display: contents; }
 .kind-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; cursor: pointer;
   background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg-mut); }
 .kind-chip:hover { color: var(--fg); }
@@ -2673,6 +2674,13 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .asst-side-panel { width: 100vw !important; max-width: 100vw; }
   .dock-foot > .muted { display: none; }
   .dock-foot { align-items: stretch; }
+  .dock-controls { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .kind-chips { display: grid; grid-template-columns: minmax(120px, .9fr) minmax(0, 1.1fr);
+    flex-wrap: initial; gap: 6px; }
+  .kind-chips .feed-filter { width: 100%; min-width: 0; height: 44px; margin: 0; }
+  .kind-chip-strip { display: flex; min-width: 0; gap: 5px; overflow-x: auto; overflow-y: hidden;
+    overscroll-behavior-inline: contain; scrollbar-width: thin; }
+  .kind-chip-strip .kind-chip { flex: 0 0 auto; }
   .dock-foot .transport { width: 100%; justify-content: flex-start; }
   .dock-foot .transport .btn { min-height: 44px; padding: 8px 11px; }
   .start-over-overlay { padding: max(12px, env(safe-area-inset-top, 0px))
