@@ -21,6 +21,18 @@ from looplab.serve.server import make_app  # noqa: E402
 from looplab.tools.shell_tools import ShellTools  # noqa: E402
 from looplab.tools.write_tools import WriteTools  # noqa: E402
 
+from looplab.serve.routers.assistant import ASSISTANT_SHARE_HEADER  # noqa: E402
+
+
+def _read_share(client, token):
+    """Read a public share the way the browser does.
+
+    The bearer travels in the `X-LoopLab-Share` HEADER, not in the path: the share URL keeps the
+    secret in its fragment precisely so ordinary origin/proxy access logs never record it. Sending
+    it as `/api/assistant/shared/<token>` hits no route at all (404), which silently retires every
+    privacy assertion below instead of checking it."""
+    return client.get("/api/assistant/shared", headers={ASSISTANT_SHARE_HEADER: token})
+
 ALLOW = lambda a: "allow_once"   # noqa: E731
 DENY = lambda a: "deny"          # noqa: E731
 
@@ -73,7 +85,7 @@ def test_message_stream_persists_raw_and_share_strips_it(tmp_path, monkeypatch):
     assert msgs[0]["content"] == "question"                      # clean bubble for the UI
     assert msgs[0]["raw"] == "question\n[FILE dump]"             # full text kept for later turns
     token = client.post(f"/api/assistant/sessions/{sid}/share").json()["url"].rsplit("/", 1)[1]
-    shared = client.get(f"/api/assistant/shared/{token}").json()["messages"]
+    shared = _read_share(client, token).json()["messages"]
     assert all("raw" not in m for m in shared)                   # a share link shows bubbles only
 
 
@@ -96,11 +108,18 @@ def test_shared_assistant_allowlists_applied_action_fields(tmp_path, monkeypatch
                        json={"instruction": "do it", "mode": "auto"}).status_code == 200
     token = client.post(f"/api/assistant/sessions/{sid}/share").json()["url"].rsplit("/", 1)[1]
 
-    messages = client.get(f"/api/assistant/shared/{token}").json()["messages"]
+    messages = _read_share(client, token).json()["messages"]
     payload = str(messages)
     assert "abs_path" not in payload and "preview" not in payload and "proposals" not in payload
     assert "C:/Users/me" not in payload and secret not in payload
-    assert messages[-1]["applied"] == [{"label": "updated config", "tool": "write_file"}]
+    # The allow-list is now a FIXED-PHRASE table keyed by exact tool name, not a passthrough of the
+    # model-supplied `label` plus the raw tool id. Tool arguments and provider-produced labels
+    # routinely carry absolute paths, run ids and usernames, so a public transcript reflects neither:
+    # `write_file` becomes its canonical phrase and the model's own wording is dropped entirely.
+    applied = messages[-1]["applied"]
+    assert applied == [{"label": "Updating files"}], applied
+    assert "updated config" not in payload      # the model's own label never reaches the public view
+    assert "write_file" not in payload          # nor the raw tool id
 
 
 # ---- revert_file is a mutation: mode/approver gated + recorded ----------------------------------

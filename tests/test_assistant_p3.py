@@ -15,6 +15,18 @@ from looplab.runtime.bg_tasks import BackgroundManager  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 from looplab.tools.shell_tools import ShellTools  # noqa: E402
 
+from looplab.serve.routers.assistant import ASSISTANT_SHARE_HEADER  # noqa: E402
+
+
+def _read_share(client, token):
+    """Read a public share the way the browser does.
+
+    The bearer travels in the `X-LoopLab-Share` HEADER, not in the path: the share URL keeps the
+    secret in its fragment precisely so ordinary origin/proxy access logs never record it. Sending
+    it as `/api/assistant/shared/<token>` hits no route at all (404), which silently retires every
+    privacy assertion below instead of checking it."""
+    return client.get("/api/assistant/shared", headers={ASSISTANT_SHARE_HEADER: token})
+
 
 def test_slash_command_expansion():
     assert expand_command("/review") != "/review" and "git_diff" in expand_command("/review")
@@ -209,14 +221,14 @@ def test_session_share_roundtrip(tmp_path):
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
     # The session id is NOT a capability: presenting it as one reads nothing.
-    assert client.get(f"/api/assistant/shared/{sid}").status_code == 404
+    assert _read_share(client, sid).status_code == 404
     r = client.post(f"/api/assistant/sessions/{sid}/share").json()
     assert r["ok"] and r["live"] is False and r["expires_at"] > 0
     token = r["url"].rsplit("/", 1)[1]
     assert sid not in token                       # the link is its own secret, not the chat's id
-    shared = client.get(f"/api/assistant/shared/{token}").json()
+    shared = _read_share(client, token).json()
     assert shared["meta"]["shared"] is True
-    assert client.get(f"/api/assistant/shared/{sid}").status_code == 404
+    assert _read_share(client, sid).status_code == 404
 
 
 def test_background_closes_handle_after_exit(tmp_path):
@@ -503,12 +515,18 @@ def test_a_snapshot_share_never_publishes_later_turns(tmp_path):
     store = SessionStore(tmp_path)
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    # A COMPLETE exchange: sharing now refuses a chat that ends on an unanswered user turn
+    # (`assistant_share_turn_incomplete`), so a bare user message would test that guard instead of
+    # the snapshot boundary this test is about.
     store.append(sid, {"role": "user", "content": "published"})
+    store.append(sid, {"role": "assistant", "content": "answered"})
     _r, token = _share(client, sid)                       # default: snapshot
     store.append(sid, {"role": "user", "content": "written after sharing"})
-    body = client.get(f"/api/assistant/shared/{token}").json()
+    store.append(sid, {"role": "assistant", "content": "answered later"})
+    body = _read_share(client, token).json()
     contents = [m["content"] for m in body["messages"]]
-    assert contents == ["published"]                      # the later turn is simply not shared
+    assert contents == ["published", "answered"]          # the later turns are simply not shared
+    assert "written after sharing" not in str(body)
     assert body["meta"]["live"] is False
 
 
@@ -517,11 +535,15 @@ def test_an_explicitly_live_share_does_follow_the_conversation(tmp_path):
     store = SessionStore(tmp_path)
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    # Complete exchanges both sides of the share, for the same reason as the snapshot test above.
     store.append(sid, {"role": "user", "content": "first"})
+    store.append(sid, {"role": "assistant", "content": "reply one"})
     _r, token = _share(client, sid, live=True)            # the opt-in, never the default
     store.append(sid, {"role": "user", "content": "second"})
-    body = client.get(f"/api/assistant/shared/{token}").json()
-    assert [m["content"] for m in body["messages"]] == ["first", "second"]
+    store.append(sid, {"role": "assistant", "content": "reply two"})
+    body = _read_share(client, token).json()
+    assert [m["content"] for m in body["messages"]] == [
+        "first", "reply one", "second", "reply two"]      # a live share DOES follow the chat
     assert body["meta"]["live"] is True
 
 
@@ -529,9 +551,9 @@ def test_a_share_can_be_revoked_without_deleting_the_chat(tmp_path):
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
     _r, token = _share(client, sid)
-    assert client.get(f"/api/assistant/shared/{token}").status_code == 200
+    assert _read_share(client, token).status_code == 200
     assert client.delete(f"/api/assistant/sessions/{sid}/share").json()["revoked"] == 1
-    assert client.get(f"/api/assistant/shared/{token}").status_code == 404
+    assert _read_share(client, token).status_code == 404
     assert client.get(f"/api/assistant/sessions/{sid}").status_code == 200   # the chat is intact
     assert client.get(f"/api/assistant/sessions/{sid}/shares").json()["shares"] == []
 
@@ -557,8 +579,7 @@ def test_the_share_secret_is_stored_only_as_a_digest(tmp_path):
     assert token not in stored                            # a leaked store cannot be replayed
     assert token.split(".", 1)[1] not in stored
     # A guessed id with the wrong secret opens nothing.
-    assert client.get(
-        f"/api/assistant/shared/{token.split('.')[0]}.wrong").status_code == 404
+    assert _read_share(client, f"{token.split('.')[0]}.wrong").status_code == 404
 
 
 def test_the_deadline_precheck_never_reaps_the_child_it_is_only_inspecting():
