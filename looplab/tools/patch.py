@@ -255,13 +255,15 @@ def apply_patch(diff_text: str, repo_dir: str, allow: list[str],
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as pf:
             pf.write(diff_text)
+        from looplab.runtime.sandbox import git_subprocess_env
+        git_env = git_subprocess_env()
         chk = subprocess.run(["git", "apply", "--check", patch_name],
-                             cwd=str(repo), capture_output=True, text=True)
+                             cwd=str(repo), capture_output=True, text=True, env=git_env)
         if chk.returncode != 0:
             return {"applied": False, "paths": g["paths"], "rejected": [],
                     "error": chk.stderr.strip()}
         ap = subprocess.run(["git", "apply", patch_name],
-                            cwd=str(repo), capture_output=True, text=True)
+                            cwd=str(repo), capture_output=True, text=True, env=git_env)
         return {"applied": ap.returncode == 0, "paths": g["paths"], "rejected": [],
                 "error": "" if ap.returncode == 0 else ap.stderr.strip()}
     finally:

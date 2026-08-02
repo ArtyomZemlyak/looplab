@@ -49,6 +49,7 @@ _RESERVED_RUN_IDS = {
     "reports", "assistant", ".reviews", ".reviews.lock", ".command-locks",
     "ui_settings.json", "ui_settings.json.lock",
     "secrets.json", "secrets.json.lock",
+    ".settings-launch.lock",
     "projects.json", "projects.json.lock",
 }
 # `engine_proc._lifecycle_lock_path` builds `<run-root>/.looplab-lifecycle-<digest>.lock`.

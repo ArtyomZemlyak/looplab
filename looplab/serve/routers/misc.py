@@ -36,7 +36,7 @@ from looplab.core.config import Settings
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import (
-    SettingsRevisionConflict, _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS,
+    _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS,
 )
 from looplab.serve.settings_ui_schema import (
     SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_ETAG, SETTINGS_UI_SCHEMA_VERSION,
@@ -78,7 +78,7 @@ _AUTHOR_RECEIPT_FIELDS = frozenset({
 })
 _AUTHOR_THREAD_LOCK = threading.Lock()
 _ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
-_SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_ENV))})$"
+_SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_API_FIELDS))})$"
 
 
 def _valid_author_name(value: object) -> bool:
@@ -141,6 +141,19 @@ class SettingsUISchemaResponse(BaseModel):
     revision: str
 
 
+class CredentialStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["none", "stored", "environment", "dotenv"]
+    stored: bool
+    effective: bool
+    active: bool
+    clearable: bool
+    status: Literal[
+        "active", "missing", "unbound", "incomplete", "endpoint_mismatch", "ambient_override",
+    ]
+
+
 class SettingsSnapshotResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -149,6 +162,7 @@ class SettingsSnapshotResponse(BaseModel):
     defaults: dict[str, Any]
     settings_revision: str
     secret_revision: str
+    credential: CredentialStatusResponse
 
 
 class LLMHealthRequest(BaseModel):
@@ -194,6 +208,8 @@ class SettingsUpdateResponse(BaseModel):
     settings: dict[str, Any]
     overrides: dict[str, Any]
     settings_revision: str
+    secret_revision: str
+    credential: CredentialStatusResponse
 
 
 class SecretUpdateRequest(BaseModel):
@@ -201,6 +217,9 @@ class SecretUpdateRequest(BaseModel):
 
     key: str = Field(pattern=_SECRET_KEY_PATTERN)
     value: str | None = None
+    expected_settings_revision: Annotated[Optional[str], Field(min_length=1, max_length=256)] = None
+    expected_secret_revision: Annotated[Optional[str], Field(min_length=1, max_length=256)] = None
+    # Compatibility with the previous secret-only CAS field.
     expected_revision: Annotated[Optional[str], Field(min_length=1, max_length=256)] = None
 
 
@@ -210,7 +229,9 @@ class SecretUpdateResponse(BaseModel):
     ok: bool
     key: str
     set: bool
+    settings_revision: str
     secret_revision: str
+    credential: CredentialStatusResponse
 
 
 class AuthoringOperationRequest(BaseModel):
@@ -308,6 +329,16 @@ def _expected_revision(body: dict) -> Optional[str]:
         return None
     if not isinstance(revision, str) or not revision or len(revision) > 256:
         raise HTTPException(400, "expected_revision must be a non-empty opaque string")
+    return revision
+
+
+def _expected_named_revision(body: dict, name: str) -> Optional[str]:
+    """Parse one optional named opaque CAS token."""
+    if name not in body or body[name] is None:
+        return None
+    revision = body[name]
+    if not isinstance(revision, str) or not revision or len(revision) > 256:
+        raise HTTPException(400, f"{name} must be a non-empty opaque string")
     return revision
 
 
@@ -1084,16 +1115,18 @@ def build_router(srv) -> APIRouter:
         # prevent a concurrent rename (or secret env mutation) between payload and token reads.
         # This is the only two-resource lock site; its fixed UI-then-secret order avoids lock cycles.
         with store.ui_settings_transaction(), store.secret_transaction():
-            store.refresh_env_secrets()
-            s = Settings()                    # build once; Settings() also reads .env from disk
-            defaults = s.model_dump()
+            overrides = store.load_ui_settings()
+            s, credential = store.settings_and_credential(overrides)
+            defaults = Settings().model_dump()
             defaults.pop("llm_api_key", None)
+            defaults.pop("llm_api_key_base_url", None)
             response = {
-                "settings": store.resolved_settings(s),
-                "overrides": store.load_ui_settings(),
+                "settings": s.masked_snapshot(),
+                "overrides": overrides,
                 "defaults": defaults,
                 "settings_revision": store.ui_settings_revision(),
                 "secret_revision": store.secret_revision(),
+                "credential": credential,
             }
         return response
 
@@ -1128,7 +1161,9 @@ def build_router(srv) -> APIRouter:
         # until it was released. Same offload `/control` and `submit_command` already use; the JSON
         # parse and shape checks above stay on the loop because they are cheap and need `await`.
         def _apply() -> dict:
-            with store.ui_settings_transaction():
+            # Settings and credential status are one UI→secret snapshot. Endpoint-only saves can
+            # deactivate an old binding, and the response must say so immediately (no stale green UI).
+            with store.settings_write_transaction():
                 current_revision = store.ui_settings_revision()
                 if expected_revision is not None and expected_revision != current_revision:
                     raise _revision_conflict("settings", expected_revision, current_revision)
@@ -1181,8 +1216,10 @@ def build_router(srv) -> APIRouter:
                     raise HTTPException(422, f"invalid settings: {exc}") from exc
                 # PATCH-like contract: omission preserves opaque overrides; explicit null/default removes one.
                 revision = store.write_ui_settings(overrides)
-                return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides,
-                        "settings_revision": revision}
+                resolved, credential = store.settings_and_credential(overrides)
+                return {"ok": True, "settings": resolved.masked_snapshot(), "overrides": overrides,
+                        "settings_revision": revision,
+                        "secret_revision": store.secret_revision(), "credential": credential}
         return await anyio.to_thread.run_sync(_apply)
 
     @router.put(
@@ -1192,32 +1229,82 @@ def build_router(srv) -> APIRouter:
     )
     async def put_secret(request: Request):
         """Store (or clear) a secret credential securely. The value is written owner-only to
-        secrets.json (never ui_settings.json / a run snapshot) and applied to the server + spawned
-        engines as env. The response only reports whether a value is now set — never the value."""
+        secrets.json (never ui_settings.json / a run snapshot), atomically bound to the current
+        endpoint, and exposed only to an authorized child spawn. The response never returns it."""
         try:
             body = await request.json()
         except Exception as exc:
             raise HTTPException(400, "secret payload must be valid JSON") from exc
         if not isinstance(body, dict):
             raise HTTPException(400, "secret payload must be a JSON object")
-        expected_revision = _expected_revision(body)
+        allowed_body = {
+            "key", "value", "expected_revision",
+            "expected_settings_revision", "expected_secret_revision",
+        }
+        unknown = sorted(str(name) for name in body if name not in allowed_body)
+        if unknown:
+            raise HTTPException(400, "unknown secret payload field(s): " + ", ".join(unknown))
+        expected_settings_revision = _expected_named_revision(body, "expected_settings_revision")
+        expected_secret_revision = _expected_named_revision(body, "expected_secret_revision")
+        legacy_secret_revision = _expected_revision(body)
         key = body.get("key")
-        if key not in _SECRET_ENV:
-            raise HTTPException(400, f"unknown secret {key!r} (known: {sorted(_SECRET_ENV)})")
+        if key not in _SECRET_API_FIELDS:
+            raise HTTPException(
+                400, f"unknown secret {key!r} (known: {sorted(_SECRET_API_FIELDS)})")
         value = body.get("value")
         if value is not None and not isinstance(value, str):
             raise HTTPException(400, "value must be a string (or null to clear)")
-        # OFF the event loop, same reason as put_settings: `store_secret` opens
-        # `secret_transaction()` -> `_interprocess_lock(required=True)` -> an unbounded blocking
-        # `fcntl.flock`, then does mkstemp/fsync/rename disk I/O inline.
-        try:
-            revision = await anyio.to_thread.run_sync(
-                lambda: store.store_secret(
-                    key, (value or "").strip(), expected_revision=expected_revision))
-        except SettingsRevisionConflict as exc:
-            raise _revision_conflict("secret", exc.expected, exc.current) from exc
-        return {"ok": True, "key": key, "set": bool((value or "").strip()),
-                "secret_revision": revision}
+        clean_value = (value or "").strip()
+        if clean_value and (
+                expected_settings_revision is None or expected_secret_revision is None):
+            raise HTTPException(428, detail={
+                "code": "credential_revision_precondition_required",
+                "message": (
+                    "Saving a credential requires both the Settings and credential revisions "
+                    "from the latest Settings snapshot."),
+                "required": ["expected_settings_revision", "expected_secret_revision"],
+            })
+        # The old one-token contract remains accepted only for clear/backcompat. A nonempty write
+        # must never bind a key to an endpoint snapshot the caller did not prove it reviewed.
+        if not clean_value and expected_secret_revision is None:
+            expected_secret_revision = legacy_secret_revision
+
+        def _apply_secret() -> dict:
+            # Fixed UI -> secret -> launch order matches PUT /settings. Endpoint, both CAS tokens,
+            # pair publication and returned status are one logical transaction, and the write cannot
+            # cross a child process's credential-snapshot -> Popen boundary.
+            with store.settings_write_transaction():
+                settings_revision = store.ui_settings_revision()
+                secret_revision = store.secret_revision()
+                if (expected_settings_revision is not None
+                        and expected_settings_revision != settings_revision):
+                    raise _revision_conflict(
+                        "settings", expected_settings_revision, settings_revision)
+                if (expected_secret_revision is not None
+                        and expected_secret_revision != secret_revision):
+                    raise _revision_conflict("secret", expected_secret_revision, secret_revision)
+                endpoint = None
+                if clean_value:
+                    from looplab.core.llm import normalize_llm_base_url
+                    try:
+                        endpoint = normalize_llm_base_url(
+                            store.resolve_settings(store.load_ui_settings()).llm_base_url)
+                    except Exception as exc:  # noqa: BLE001 - do not reflect URL parser details
+                        raise HTTPException(
+                            422, "current LLM endpoint is not valid for credential binding") from exc
+                new_secret_revision = store._store_secret_locked(
+                    key, clean_value, binding=endpoint)
+                _settings, credential = store.settings_and_credential(store.load_ui_settings())
+                return {
+                    "ok": True,
+                    "key": key,
+                    "set": bool(clean_value),
+                    "settings_revision": settings_revision,
+                    "secret_revision": new_secret_revision,
+                    "credential": credential,
+                }
+
+        return await anyio.to_thread.run_sync(_apply_secret)
 
     # ------------------------------------------------------------------ task catalogue
     @router.get("/api/tasks")
@@ -1269,13 +1356,21 @@ def build_router(srv) -> APIRouter:
 
     def _llm_health_effective_identity(settings: Settings, timeout_s: float) -> str:
         """Process-keyed identity of the actual probe inputs, including URL/key, without a verifier."""
-        secret = (settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local") or "x"
+        from looplab.core.llm import (
+            bound_api_key_for, client_kwargs_for, resolve_llm_target,
+        )
+        target = resolve_llm_target(settings)
+        target_kwargs = client_kwargs_for(target, timeout=timeout_s)
+        secret = bound_api_key_for(
+            settings, target.base_url, api_key=target_kwargs.get("api_key"),
+            api_key_base_url=target_kwargs.get("api_key_base_url"))
         header_timeout = min(float(getattr(settings, "llm_header_timeout", timeout_s)), timeout_s)
         canonical = json.dumps({
-            "model": settings.llm_model,
-            "base_url": str(settings.llm_base_url).rstrip("/"),
+            "model": target.model,
+            "base_url": str(target.base_url).rstrip("/"),
             "api_key": secret,
-            "temperature": settings.llm_temperature,
+            "api_key_base_url": target_kwargs.get("api_key_base_url"),
+            "temperature": target.temperature,
             "trust_env": bool(getattr(settings, "llm_trust_env", False)),
             "header_timeout": header_timeout,
             "wall_timeout": timeout_s,
@@ -1494,9 +1589,15 @@ def build_router(srv) -> APIRouter:
                 current_effective_identity=current_effective_identity)
 
         try:
-            client = srv.make_llm_client(
-                settings, timeout=timeout_s, max_retries=0, stream=False,
-                disable_reasoning=True, wall_timeout=timeout_s, cache=False)
+            from looplab.core.llm import make_llm_client_for
+
+            def _probe_factory(current_settings, **target_kwargs):
+                return srv.make_llm_client(
+                    current_settings, **target_kwargs, max_retries=0, stream=False,
+                    disable_reasoning=True, wall_timeout=timeout_s, cache=False)
+
+            client = make_llm_client_for(
+                settings, timeout=timeout_s, factory=_probe_factory)
         except Exception as exc:  # noqa: BLE001
             return _preflight_failure(exc, effective_identity)
 

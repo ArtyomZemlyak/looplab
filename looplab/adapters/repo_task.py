@@ -400,8 +400,10 @@ class RepoTask(BaseModel):
         if not self.onboard or settings.backend != "llm":
             return None
         from looplab.adapters.tasks import make_llm_client
+        from looplab.core.llm import make_llm_client_for
         repo_path = self.editable_path or (self.editables[0].path if self.editables else "")
-        return LLMOnboarder(make_llm_client(settings), repo_path, self.goal,
+        return LLMOnboarder(make_llm_client_for(
+            settings, role="developer", factory=make_llm_client), repo_path, self.goal,
                             self.direction, self.onboard_command, self.onboard_timeout)
 
     @staticmethod

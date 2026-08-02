@@ -12,7 +12,7 @@ import types
 import typing
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of the LLM first-byte (response-headers) default — see core/llm.py.
@@ -332,7 +332,18 @@ class Settings(BaseSettings):
         promotes its file/typed/--set sub-layers before combining them into the init source.
         """
         def _with_parallel_aliases(source):
-            return lambda: canonicalize_parallelism_source(source())
+            def _read():
+                values = canonicalize_parallelism_source(source())
+                # Credential components are a record, not independently mergeable settings. If a
+                # winning source supplies only one half, insert an explicit None for its peer so a
+                # lower-priority source can never complete an attacker-controlled mixed pair.
+                pair = {"llm_api_key", "llm_api_key_base_url"}
+                present = pair.intersection(values)
+                if present and present != pair:
+                    values = dict(values)
+                    values[next(iter(pair - present))] = None
+                return values
+            return _read
 
         return (
             _with_parallel_aliases(init_settings),
@@ -1274,6 +1285,14 @@ class Settings(BaseSettings):
     # API key as a reference, never serialized as a value (ADR-11). Local servers
     # ignore it; default to a placeholder.
     llm_api_key: SecretStr | None = None
+    # Runtime-only endpoint binding for the shared credential. A key is usable only when this
+    # canonical URL exactly matches the transport target. It is deliberately absent from run/UI
+    # snapshots: the owner-side secret store persists key + binding together, while an operator who
+    # supplies LOOPLAB_LLM_API_KEY directly must also supply LOOPLAB_LLM_API_KEY_BASE_URL.
+    llm_api_key_base_url: str | None = None
+    # Set only by a trusted source-aware resolver after it has selected key+binding as one record.
+    # Config files, task payloads and --set cannot populate PrivateAttr.
+    _llm_credential_pair_trusted: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -1442,6 +1461,7 @@ class Settings(BaseSettings):
             d["llm_api_key"] = "***"
         else:
             d["llm_api_key"] = None
+        d.pop("llm_api_key_base_url", None)
         # The snapshot's own FORMAT version — not a Settings field (it is never settable by env or
         # file, and it describes the document, not the run). `settings_from_snapshot` fails closed on
         # a version it does not understand; see CONFIG_SNAPSHOT_SCHEMA.
@@ -1592,5 +1612,6 @@ def settings_from_snapshot(data: dict) -> Settings:
             "would silently drop settings this build does not know. Upgrade LoopLab to resume it.")
     migrated = migrate_config_snapshot(data)
     migrated.pop("llm_api_key", None)
+    migrated.pop("llm_api_key_base_url", None)
     migrated.pop(CONFIG_SNAPSHOT_SCHEMA_KEY, None)   # a document marker, never a Settings field
     return Settings(**migrated)

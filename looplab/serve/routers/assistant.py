@@ -1252,7 +1252,8 @@ def build_router(srv) -> APIRouter:
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
          turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         try:
-            client = srv.make_llm_client(s)
+            from looplab.core.llm import make_llm_client_for
+            client = make_llm_client_for(s, factory=srv.make_llm_client)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
             failure = _safe_assistant_failure(e)
             try:
@@ -1298,7 +1299,8 @@ def build_router(srv) -> APIRouter:
          turn_epoch, begin_live_ids) = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()
         try:
-            client = srv.make_llm_client(s)
+            from looplab.core.llm import make_llm_client_for
+            client = make_llm_client_for(s, factory=srv.make_llm_client)
         except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
             # Persist an assistant error bubble too (mirror the non-stream endpoint) so a page reload
             # shows the failure instead of a DANGLING user turn — the user's message with no reply,

@@ -24,6 +24,7 @@ from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, Ev
 from looplab.events.replay import fold
 from looplab.events.types import EV_FINALIZE_STEP, EV_NODE_CONCEPTS, EV_RUN_FINISHED
 from looplab.cli import _engine_singleton, _print_result, _require_run_dir, app
+from looplab.core.llm import apply_llm_model_override
 
 
 def _governance_cli_error(exc: GovernanceLedgerUnavailable | EventStoreLockError):
@@ -382,11 +383,12 @@ def inspect(run_dir: Path = typer.Argument(...)):
         _print_result(fold(EventStore(events).read_all()))
 
 
-def _make_llm_client(*args, **kwargs):
+def _make_llm_client(settings):
     """Late-bound `make_llm_client` (mirrors export_cmds) so a test patching `looplab.cli.make_llm_client`
     also stubs these diagnostics — a frozen `from looplab.cli import make_llm_client` would not."""
     from looplab import cli
-    return cli.make_llm_client(*args, **kwargs)
+    from looplab.core.llm import make_llm_client_for
+    return make_llm_client_for(settings, factory=cli.make_llm_client)
 
 
 def _run_tools_for(state):
@@ -423,7 +425,7 @@ def _settings_for_run(run_dir=None, model=None):
     if settings is None:
         settings = Settings()
     if model is not None:
-        settings.llm_model = model
+        apply_llm_model_override(settings, model)
     return settings
 
 
@@ -1109,8 +1111,7 @@ def concept_steward_cmd(
     _governance_cli_read(_preflight)
     settings = Settings()
     if model:
-        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
-        #                              phantom attr and silently kept the default endpoint (--model no-op)
+        apply_llm_model_override(settings, model)
     out = _run_cli_steward(
         memory_dir, "concept", action_id,
         prepare=lambda: _make_llm_client(settings),
@@ -1230,7 +1231,7 @@ def task_facets_cmd(
         lambda: read_curation_rows(Path(memory_dir) / "task_facets_curation_log.jsonl"))
     settings = Settings()
     if model:
-        settings.llm_model = model
+        apply_llm_model_override(settings, model)
     out = _run_cli_steward(
         memory_dir, "facets", action_id,
         prepare=lambda: _make_llm_client(settings),
@@ -1326,8 +1327,7 @@ def claim_steward_cmd(
     _governance_cli_read(_preflight)
     settings = Settings()
     if model:
-        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
-        #                              phantom attr and silently kept the default endpoint (--model no-op)
+        apply_llm_model_override(settings, model)
     out = _run_cli_steward(
         memory_dir, "claim", action_id,
         prepare=lambda: _make_llm_client(settings),

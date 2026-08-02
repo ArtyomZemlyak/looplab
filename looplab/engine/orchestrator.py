@@ -271,6 +271,7 @@ _SPECULATION_CALIBRATION_PROFILE_OVERRIDES: dict[str, object] = {
     "prompt_dir": None,
     # Never inherit/persist a credential even though the toy profile constructs no LLM client.
     "llm_api_key": None,
+    "llm_api_key_base_url": None,
 }
 SPECULATION_CALIBRATION_PROFILE_SETTINGS = _declared_settings_json_defaults()
 SPECULATION_CALIBRATION_PROFILE_SETTINGS.update(
@@ -5752,6 +5753,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         import os
         import subprocess
         import time
+        from looplab.runtime.sandbox import git_subprocess_env
+
+        git_env = git_subprocess_env()
 
         def _diff_digest(root: str) -> "str | None":
             # Incrementally hash `git diff HEAD` (staged + unstaged) so a multi-GB tracked-file diff
@@ -5759,7 +5763,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             proc = None
             try:
                 proc = subprocess.Popen(["git", "-C", root, "diff", "HEAD"],
-                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        env=git_env)
                 fd = proc.stdout.fileno()
                 h, read, truncated, deadline = hashlib.sha256(), 0, False, time.monotonic() + 15
                 while read < _DIFF_DIGEST_CAP:
@@ -5798,7 +5803,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 p = Path(src)
                 root = str(p if p.is_dir() else p.parent)
                 r = subprocess.run(["git", "-C", root, "status", "--porcelain"],
-                                   capture_output=True, text=True, timeout=10)
+                                   capture_output=True, text=True, timeout=10, env=git_env)
                 dirty = [ln[:200] for ln in r.stdout.splitlines() if ln.strip()][:500]
                 if r.returncode == 0 and dirty:
                     entry = {"source": src, "dirty": dirty}

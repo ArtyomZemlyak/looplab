@@ -306,8 +306,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # Fail here, before any role is built, when a role is bound to a connection profile whose
     # credential variable is unset. Every CLI path (run/resume, and the UI, which spawns them)
     # funnels through this constructor, so this is the one gate that catches it — and catching it at
-    # the first paid call instead would mean discovering the missing key partway into a run. A no-op
-    # without profiles and for the offline backend, which builds no clients at all.
+    # the first paid call instead would mean discovering the missing key partway into a run. Optional
+    # offline consumers (embedding/Memora) retain their own hash/lexical fallback and are not strict.
     validate_bound_profiles(settings)
     narrow_speculation_runtime = bool(
         speculation_gate_calibration or settings.speculation_gate_receipt)
@@ -407,6 +407,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # A7 Strategist (optional adaptive meta-control) + live Developer-backend swap factory.
     from looplab.agents.strategist import make_strategist
     from looplab.adapters.tasks import make_developer_factory
+    from looplab.core.llm import make_llm_client_for
     if _unified:
         # The unified agent IS the strategist: its `.decide()` delegates to the strategy-stage
         # backend it built internally (None when strategist_backend="off"). One identity, replay
@@ -417,7 +418,6 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # existed this call passed only a temperature, so the Strategist was pinned to the shared
         # `llm_model` no matter how the other roles were pointed. Blank fields resolve back to the
         # shared values, so a run that sets neither is unchanged.
-        from looplab.core.llm import make_llm_client_for
         # `factory=make_llm_client` is this MODULE's name, which tests and operator tooling
         # monkeypatch; building through core's own binding instead would route past that seam.
         strat_client = (make_llm_client_for(settings, role="strategist",
@@ -437,12 +437,14 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     from looplab.agents.deep_research import make_deep_researcher
     # Deep-Research is researcher-flavored (breadth-seeking ideation), so it honors researcher_temperature.
     deep_researcher = (make_deep_researcher(
-        settings, client=make_llm_client(settings, temperature=settings.researcher_temperature), task=task)
+        settings, client=make_llm_client_for(
+            settings, role="researcher", factory=make_llm_client), task=task)
                        if settings.backend == "llm" else None)
     # Agent-authored run report (Workstream A): reachable only with an LLM backend; reuses the run's
     # LLM client. None in toy mode -> the UI shows the deterministic report only.
     from looplab.serve.report import make_report_writer
-    report_writer = (make_report_writer(settings, client=make_llm_client(settings))
+    report_writer = (make_report_writer(
+        settings, client=make_llm_client_for(settings, factory=make_llm_client))
                      if settings.backend == "llm" else None)
     dev_factory = make_developer_factory(task, settings) if settings.backend == "llm" else None
     proxy_scorer = None

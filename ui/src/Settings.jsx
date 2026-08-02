@@ -14,6 +14,23 @@ import { installNavigationLossGuard } from './navigationLossGuard.js'
 import { publish as publishSettingsLaunchGuard } from './settingsLaunchGuard.js'
 
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
+const CREDENTIAL_SOURCE_LABELS = {
+  stored: 'Stored secret',
+  environment: 'Process environment',
+  dotenv: '.env file',
+  none: 'None',
+}
+const CREDENTIAL_STATUS_LABELS = {
+  active: 'Matches base URL',
+  missing: 'No shared key',
+  incomplete: 'Incomplete pair',
+  unbound: 'Unbound',
+  endpoint_mismatch: 'Base URL mismatch',
+  ambient_override: 'Ambient override',
+}
+const credentialBindingProblem = credential => credential?.status === 'incomplete'
+  || credential?.status === 'unbound'
+  || credential?.status === 'endpoint_mismatch'
 const SETTINGS_READ_TIMEOUT_MS = 15_000
 const SETTINGS_WRITE_TIMEOUT_MS = 15_000
 // The server permits a 60s provider wall limit plus bounded teardown. The browser must keep the
@@ -36,7 +53,7 @@ const navigationWarning = (busy, unknown = false, healthRecovery = false) => bus
 
 const launchGuardState = ({
   loaded, loadError, invalidCount, unsaved, mutationBusy, mutationUnknown,
-  healthRecoveryBlocked,
+  healthRecoveryBlocked, credentialBlockedReason,
 }) => {
   if (mutationBusy === 'saving') return {
     blocked: true,
@@ -73,6 +90,11 @@ const launchGuardState = ({
     status: 'unknown',
     reason: 'An active LLM provider outcome is unresolved. Resolve or acknowledge it before starting a run.',
   }
+  if (credentialBlockedReason) return {
+    blocked: true,
+    status: 'invalid',
+    reason: `The saved LLM credential is not ready: ${credentialBlockedReason}`,
+  }
   if (loadError) return {
     blocked: true,
     status: 'load-error',
@@ -104,6 +126,91 @@ const releaseHealthRequest = active => {
   if (!active || active.released) return
   active.released = true
   active.finishAction?.(active.mutation)
+}
+
+function CredentialState({
+  credential, writeError = '', onRefresh, refreshing = false, refreshDisabled = false,
+}) {
+  if (!credential) return null
+  const ambient = credential.source === 'environment' || credential.source === 'dotenv'
+    || credential.status === 'ambient_override'
+  const ambientEffective = ambient && credential.effective
+  const bindingProblem = credentialBindingProblem(credential)
+  const bindingNotice = credential.status === 'endpoint_mismatch'
+    ? {
+        title: 'Shared-key base URL mismatch',
+        text: 'The shared key is bound to a different normalized base endpoint. Shared-target actions will fail server preflight until the endpoint and key are saved as one verified pair. A profile with its own bound credential is validated separately.',
+      }
+      : credential.status === 'unbound'
+        ? {
+          title: 'Shared credential is unbound',
+          text: 'A shared key is available, but it has no verified binding to the base endpoint. Shared-target actions will fail server preflight until a verified pair is saved. Profile credentials are validated separately.',
+        }
+        : credential.status === 'incomplete'
+          ? {
+            title: 'Shared credential pair is incomplete',
+            text: credential.source === 'stored'
+              ? 'The stored shared pair has an endpoint binding but no API key. Enter a key to complete it, or clear the incomplete pair for a local endpoint that needs no credential. Profile credentials are validated separately.'
+              : `The ambient shared source has an endpoint binding but no API key. Complete or remove that pair in the ${CREDENTIAL_SOURCE_LABELS[credential.source] || 'ambient source'}. A key entered here is only a stored fallback; profile credentials are validated separately.`,
+          }
+          : null
+  const ambientNotice = ambient
+    ? ambientEffective
+      ? {
+          title: 'Ambient credential is read-only',
+          text: `The effective key comes from ${CREDENTIAL_SOURCE_LABELS[credential.source] || 'an ambient source'} and cannot be changed or cleared here. ${credential.stored
+            ? 'Stored credential material remains only a fallback while this override exists.'
+            : 'You can enter a key below to store a fallback without replacing this override.'}`,
+        }
+      : {
+          title: 'Ambient source has no effective key',
+          text: `${CREDENTIAL_SOURCE_LABELS[credential.source] || 'An ambient source'} controls credential resolution for this process, but it does not currently supply an API key. ${credential.stored
+            ? 'Stored credential material remains inactive while this ambient source is selected.'
+            : 'A key entered below will be stored only as a fallback and will not replace the ambient source.'}`,
+        }
+    : null
+  return <>
+    <dl className="settings-credential-state" aria-label="Shared credential store state">
+      {[
+        ['Stored material', credential.stored],
+        ['Shared key', credential.effective],
+        ['Matches base URL', credential.active],
+      ].map(([label, value]) => <div key={label}>
+        <dt>{label}</dt>
+        <dd className={value ? 'is-yes' : 'is-no'}>{value ? 'Yes' : 'No'}</dd>
+      </div>)}
+      <div className="is-wide">
+        <dt>Source</dt>
+        <dd>{CREDENTIAL_SOURCE_LABELS[credential.source]}</dd>
+      </div>
+      <div className="is-wide">
+        <dt>Status</dt>
+        <dd>{CREDENTIAL_STATUS_LABELS[credential.status]}</dd>
+      </div>
+    </dl>
+    {writeError && <div id="settings-credential-write-warning"
+      className="settings-credential-notice is-danger" role="alert">
+      <div>
+        <strong>Replacement key not accepted</strong>
+        <span>{writeError} The typed replacement is excluded; provider checks and launches continue to use the server-resolved saved/profile configuration.</span>
+      </div>
+      {onRefresh && <button type="button" className="btn sm ghost"
+        disabled={refreshing || refreshDisabled} onClick={onRefresh}>
+        {refreshing ? 'Refreshing…' : 'Refresh server state'}
+      </button>}
+    </div>}
+    {bindingNotice && <div id="settings-credential-status-warning"
+      className={'settings-credential-notice ' + (bindingProblem ? 'is-danger' : 'is-info')}
+      role={bindingProblem ? 'alert' : 'note'}>
+      <strong>{bindingNotice.title}</strong>
+      <span>{bindingNotice.text}</span>
+    </div>}
+    {ambientNotice && <div id="settings-credential-ambient-note"
+      className="settings-credential-notice is-info" role="note">
+      <strong>{ambientNotice.title}</strong>
+      <span>{ambientNotice.text}</span>
+    </div>}
+  </>
 }
 
 const LLM_HEALTH_RECOVERY_KEY = 'looplab.llm-health-recovery.v1'
@@ -162,6 +269,7 @@ export function LlmHealth({
   finishAction,
   reloadSavedSettings,
   onRecoveryChange,
+  providerBlockedReason = '',
 }) {
   const [status, setStatus] = useState(null)
   const [busyContext, setBusyContext] = useState(null)
@@ -171,10 +279,12 @@ export function LlmHealth({
   const identityChanged = !previousIdentity
     || previousIdentity.savedSettingsRevision !== savedSettingsRevision
     || previousIdentity.savedSecretRevision !== savedSecretRevision
+    || previousIdentity.providerBlockedReason !== providerBlockedReason
   if (identityChanged) {
     identityRef.current = {
       savedSettingsRevision,
       savedSecretRevision,
+      providerBlockedReason,
       version: (previousIdentity?.version || 0) + 1,
     }
   }
@@ -234,7 +344,8 @@ export function LlmHealth({
   }, [])
 
   const startCheck = (replayOnly = false) => {
-    if (actionBlocked || requestRef.current || !revisionsReady) return
+    if (actionBlocked || requestRef.current || !revisionsReady
+        || (providerBlockedReason && !replayOnly)) return
     const mutation = beginAction?.('testing-llm')
     if (!mutation) return
     const requestedContext = contextVersion
@@ -401,7 +512,8 @@ export function LlmHealth({
     startCheck(visibleStatus?.reconcilable === true)
   }
   const startNewAfterUnknown = () => {
-    if (actionBlocked || requestRef.current || !revisionsReady || !visibleStatus?.terminalUnknown) return
+    if (actionBlocked || providerBlockedReason || requestRef.current
+        || !revisionsReady || !visibleStatus?.terminalUnknown) return
     if (!window.confirm('The previous provider outcome is unresolved and may already be billed. Start a new active LLM check that may bill again?')) return
     // `startCheck` replaces the old recovery record only after it owns the shared mutation token.
     // If another same-tick action won that token, keep the terminal warning and its UUID intact.
@@ -418,18 +530,22 @@ export function LlmHealth({
     ? 'An active provider check is in progress. Leaving may not stop provider work or billing.'
     : reloading
       ? 'Reloading the saved configuration without contacting the provider.'
-    : visibleStatus?.configurationChanged
-      ? 'Reload the server-resolved active LLM configuration before checking again.'
+      : visibleStatus?.configurationChanged
+        ? 'Reload the server-resolved active LLM configuration before checking again.'
       : visibleStatus?.terminalUnknown
         ? 'The previous outcome is unresolved. A new check is available only as a separate confirmed action because it may bill again.'
-      : visibleStatus?.reconcilable
-        ? visibleStatus.previousConfiguration
-          ? 'Requests only the operation result from the previous saved configuration. The current active LLM cannot be contacted by this action.'
-          : 'Requests only the previous operation result. It cannot start a new provider call if that result expired or the server restarted.'
-    : revisionsReady
-      ? 'Starts one explicit check of the server-resolved active LLM. Unsaved edits and typed API keys are excluded; environment or .env configuration may override the saved store. The browser does not auto-retry.'
-      : 'Load saved settings before testing the active LLM.'
+        : visibleStatus?.reconcilable
+          ? visibleStatus.previousConfiguration
+            ? 'Requests only the operation result from the previous saved configuration. The current active LLM cannot be contacted by this action.'
+            : 'Requests only the previous operation result. It cannot start a new provider call if that result expired or the server restarted.'
+          : providerBlockedReason
+            ? providerBlockedReason
+            : revisionsReady
+              ? 'Starts one explicit check of the server-resolved active LLM. Unsaved edits and typed API keys are excluded; environment or .env configuration may override the saved store. The browser does not auto-retry.'
+              : 'Load saved settings before testing the active LLM.'
   const activeReplayOnly = busy && requestRef.current?.replayOnly === true
+  const providerActionBlocked = !!providerBlockedReason
+    && !visibleStatus?.configurationChanged && !visibleStatus?.reconcilable
   const healthActionNote = reloading || visibleStatus?.configurationChanged
     ? 'Reload only · no provider request'
     : activeReplayOnly || visibleStatus?.reconcilable
@@ -438,12 +554,16 @@ export function LlmHealth({
         ? 'A new check requires confirmation and may bill again'
         : busy
           ? 'Provider check in progress and may be billed'
-          : 'One provider request may be billed'
+          : providerBlockedReason
+            ? 'Provider test blocked by credential state'
+            : 'One provider request may be billed'
   const healthDescription = ['llm-health-action-note',
+    providerBlockedReason ? 'llm-health-block-note' : '',
     unsavedCount > 0 ? 'llm-health-draft-note' : ''].filter(Boolean).join(' ')
   return <span className="llm-health">
     <button type="button" className="btn sm"
-            disabled={actionBlocked || busy || !revisionsReady || visibleStatus?.terminalUnknown}
+            disabled={actionBlocked || busy || !revisionsReady || visibleStatus?.terminalUnknown
+              || providerActionBlocked}
             onClick={check} title={buttonTitle}
             aria-describedby={healthDescription}>
       {busy ? (activeReplayOnly ? 'Checking previous result…' : 'Testing active LLM…')
@@ -454,7 +574,8 @@ export function LlmHealth({
         : <><OpIcon name="bolt" className="t-ic" /> Test active LLM</>}
     </button>
     {visibleStatus?.terminalUnknown && <button type="button" className="btn sm warn"
-      disabled={actionBlocked || busy || !revisionsReady} onClick={startNewAfterUnknown}
+      disabled={actionBlocked || !!providerBlockedReason || busy || !revisionsReady}
+      onClick={startNewAfterUnknown}
       aria-describedby="llm-health-action-note"
       title="Requires confirmation because this creates a new provider operation that may be billed.">
       Start new check (may bill)
@@ -465,6 +586,9 @@ export function LlmHealth({
       Dismiss warning
     </button>}
     <span id="llm-health-action-note" className="llm-health-note">{healthActionNote}</span>
+    {providerBlockedReason && <span id="llm-health-block-note" className="llm-health-note is-blocked">
+      {providerBlockedReason}
+    </span>}
     {unsavedCount > 0 && <span id="llm-health-draft-note" className="llm-health-note">
       {countLabel(unsavedCount, 'draft change')} excluded
     </span>}
@@ -506,7 +630,8 @@ export default function Settings({ onBack }) {
   const [saved, setSaved] = useState(null)
   const [agentControl, setAgentControl] = useState({})
   const [savedAC, setSavedAC] = useState({})
-  const [secretState, setSecretState] = useState({})
+  const [credential, setCredential] = useState(null)
+  const [credentialWriteError, setCredentialWriteError] = useState('')
   const [revisions, setRevisions] = useState({ settings: '', secret: '' })
   const [loadError, setLoadError] = useState('')
   const [toast, setToast] = useState(null)
@@ -523,6 +648,7 @@ export default function Settings({ onBack }) {
   const allowNavigationRef = useRef(false)
   const settingsHashRef = useRef(typeof location === 'undefined' ? '#/settings' : location.hash)
   const searchInputRef = useRef(null)
+  const providerHeadingRef = useRef(null)
 
   const load = (reloadSchema = false, preserveExisting = false) => {
     const owner = ++loadRef.current
@@ -542,7 +668,8 @@ export default function Settings({ onBack }) {
       const control = settings.agent_control || {}
       setAgentControl(control)
       setSavedAC(control)
-      setSecretState({ llm_api_key: !!settings.llm_api_key })
+      setCredential(data.credential)
+      setCredentialWriteError('')
       setRevisions({ settings: data.settings_revision, secret: data.secret_revision })
       return true
     }).catch(() => {
@@ -618,6 +745,10 @@ export default function Settings({ onBack }) {
   // status callback lands in an effect. Read both so a same-tick Save/clear/navigation cannot slip
   // through that render gap.
   const healthRecoveryBlocked = healthRecoveryActive || !!readHealthRecovery()
+  // The card above describes only the shared fallback pair. Named profiles and role/stage targets
+  // can use different bound credentials, so the server's target-aware health/start preflight is the
+  // authority. Client-side blocking on the shared pair would reject valid profiled configurations.
+  const credentialBlockedReason = ''
   const navigationUnsafe = unsaved || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked
   const launchDefaultsLoaded = !!form && !!schema && !!defaults && !!saved
     && typeof revisions.settings === 'string' && revisions.settings.length > 0
@@ -639,6 +770,7 @@ export default function Settings({ onBack }) {
         mutationBusy,
         mutationUnknown,
         healthRecoveryBlocked,
+        credentialBlockedReason: '',
       }),
     })
   }, [healthRecoveryBlocked, invalidCount, launchDefaultsLoaded, loadError,
@@ -685,6 +817,9 @@ export default function Settings({ onBack }) {
     setToast(message)
     toastTimer.current = setTimeout(() => setToast(null), 2500)
   }
+  const focusProviderHeading = () => {
+    requestAnimationFrame(() => providerHeadingRef.current?.focus())
+  }
   // State-driven `disabled` attributes render one tick after a click. The token closes that gap so
   // save and secret-clear can never issue overlapping writes, even under a same-tick double click.
   const beginMutation = kind => {
@@ -700,13 +835,14 @@ export default function Settings({ onBack }) {
     setMutationBusy('')
   }
   const rememberUnknown = (stage, submittedForm, submittedControl = {},
-    uncertainKeys = [], uncertainControlKeys = []) => {
+    uncertainKeys = [], uncertainControlKeys = [], ordinarySettingsAccepted = false) => {
     // Never copy a credential into recovery metadata, logs or error UI. The controlled password
     // field already owns the in-memory draft; recovery retains only its non-secret comparison shape.
     const normalizedSubmitted = schema
       ? toForm(fromForm(submittedForm, schema), schema) : submittedForm
     setMutationUnknown({ stage, submittedForm: publicSubmittedForm(normalizedSubmitted),
       submittedControl, uncertainKeys, uncertainControlKeys,
+      ordinarySettingsAccepted,
       preserveSecret: stage === 'secret-set' || stage === 'secret-conflict' })
   }
   const focusFirstInvalid = () => {
@@ -734,15 +870,15 @@ export default function Settings({ onBack }) {
         const next = reconcileUnknownRecord(
           current, recovery.submittedForm, acceptedForm, recovery.uncertainKeys,
         )
-        // GET can report only that a credential exists, never which replacement won. Retain the
-        // password-box draft for deliberate review; Test active LLM never sends it. The server
-        // resolves the active credential, including any environment/.env override.
+        // GET reports only credential provenance/state, never the secret or which typed replacement
+        // won. Retain the password-box draft for deliberate review; Test active LLM never sends it.
         if (recovery.preserveSecret) next.llm_api_key = current?.llm_api_key || ''
         return next
       })
       setAgentControl(current => reconcileUnknownRecord(
         current, recovery.submittedControl, acceptedControl, recovery.uncertainControlKeys))
-      setSecretState({ llm_api_key: !!settings.llm_api_key })
+      setCredential(data.credential)
+      setCredentialWriteError('')
       setRevisions({ settings: data.settings_revision, secret: data.secret_revision })
       setMutationUnknown(null)
       show(recovery.preserveSecret
@@ -750,6 +886,7 @@ export default function Settings({ onBack }) {
         : recovery.stage.endsWith('-conflict')
         ? 'Current server settings loaded; review the retained draft before saving again'
         : 'Settings refreshed from the server; the unknown write was not replayed')
+      focusProviderHeading()
     } catch {
       show('Could not refresh authoritative settings; the previous outcome is still unknown')
     } finally {
@@ -766,72 +903,118 @@ export default function Settings({ onBack }) {
       focusFirstInvalid()
       return
     }
+    const rawSubmittedForm = form
+    const rawApiKey = String(rawSubmittedForm?.llm_api_key || '')
+    const apiKey = rawApiKey.trim()
+    const whitespaceOnlyApiKey = rawApiKey.length > 0 && !apiKey
+    const submittedForm = whitespaceOnlyApiKey
+      ? { ...rawSubmittedForm, llm_api_key: '' }
+      : rawSubmittedForm
+    if (whitespaceOnlyApiKey) {
+      // The secret endpoint trims too, so an all-whitespace draft can never be persisted. Normalize
+      // the controlled field now, but only if the operator has not typed a replacement since click.
+      setForm(current => current?.llm_api_key === rawApiKey
+        ? { ...current, llm_api_key: '' }
+        : current)
+    }
     const mutation = beginMutation('saving')
     if (!mutation) { show('A settings update is already in progress'); return }
-    const submittedForm = form
     const submittedControl = agentControl
-    const submittedSettingsRevision = revisions.settings
-    const submittedSecretRevision = revisions.secret
-    const apiKey = (submittedForm.llm_api_key || '').trim()
+    const submittedRevisions = { ...revisions }
     let settingsPatch = null
     try {
       settingsPatch = settingsSavePayload(submittedForm, submittedControl, saved, savedAC, schema)
       const settingsChanged = Object.keys(settingsPatch).length > 0
-      // PATCH only edits since this tab's baseline; replaying the full stale form
-      // would overwrite disjoint settings saved by another tab after this one loaded.
-      const result = validateSettingsSaveAck(await boundedSettingsWrite(
-        signal => saveSettings(settingsPatch, {
-          signal, expectedRevision: submittedSettingsRevision,
-        })), schema)
-      const acceptedForm = toForm(result.settings, schema)
-      const acceptedControl = result.settings.agent_control || {}
+      let acceptedForm = saved
+      let acceptedControl = savedAC
+      let acceptedRevisions = submittedRevisions
+      if (settingsChanged) {
+        // PATCH only edits since this tab's baseline; replaying the full stale form would overwrite
+        // disjoint settings saved by another tab after this one loaded. A secret-only draft skips
+        // this request entirely so it cannot manufacture a fake settings revision.
+        const result = validateSettingsSaveAck(await boundedSettingsWrite(
+          signal => saveSettings(settingsPatch, {
+            signal, expectedRevision: submittedRevisions.settings,
+          })), schema)
+        acceptedForm = toForm(result.settings, schema)
+        acceptedControl = result.settings.agent_control || {}
+        acceptedRevisions = {
+          settings: result.settings_revision,
+          secret: result.secret_revision,
+        }
 
-      // Commit the ordinary-settings ACK immediately. If the independent secret write fails, the
-      // accepted baseline must not be resent, while the API-key input remains available to retry.
-      setSaved(acceptedForm)
-      setSavedAC(acceptedControl)
-      setRevisions(current => ({ ...current, settings: result.settings_revision }))
-      const formBeforeSecretAck = apiKey
-        ? { ...acceptedForm, llm_api_key: submittedForm.llm_api_key }
-        : acceptedForm
-      setForm(current => reconcileAcceptedRecord(current, submittedForm, formBeforeSecretAck))
-      setAgentControl(current => reconcileAcceptedRecord(current, submittedControl, acceptedControl))
+        // Commit the ordinary-settings ACK immediately. If the independent secret write fails, the
+        // accepted baseline must not be resent, while the API-key input remains available to retry.
+        setSaved(acceptedForm)
+        setSavedAC(acceptedControl)
+        setCredential(result.credential)
+        setRevisions(acceptedRevisions)
+        const formBeforeSecretAck = apiKey
+          ? { ...acceptedForm, llm_api_key: submittedForm.llm_api_key }
+          : acceptedForm
+        setForm(current => reconcileAcceptedRecord(current, submittedForm, formBeforeSecretAck))
+        setAgentControl(current => reconcileAcceptedRecord(
+          current, submittedControl, acceptedControl,
+        ))
+      }
       if (apiKey) {
         let resultSecret
         try {
           resultSecret = validateSecretSaveAck(await boundedSettingsWrite(
             signal => saveSecret('llm_api_key', apiKey, {
-              signal, expectedRevision: submittedSecretRevision,
+              signal,
+              expectedSettingsRevision: acceptedRevisions.settings,
+              expectedSecretRevision: acceptedRevisions.secret,
             })), 'llm_api_key')
         } catch (error) {
-          if (error?.code === 'secret_revision_conflict') {
-            rememberUnknown('secret-conflict', submittedForm, submittedControl)
+          if (error?.code === 'secret_revision_conflict'
+              || error?.code === 'settings_revision_conflict') {
+            rememberUnknown(
+              'secret-conflict', submittedForm, submittedControl, [], [], settingsChanged,
+            )
             return
           }
           if (unknownTransport(error)) {
-            rememberUnknown('secret-set', submittedForm, submittedControl)
+            rememberUnknown(
+              'secret-set', submittedForm, submittedControl, [], [], settingsChanged,
+            )
             return
           }
-          const prefix = settingsChanged
-            ? 'Settings saved, but the API key was not stored: '
-            : 'API key was not stored: '
-          show(prefix + (error.message || error))
+          setCredentialWriteError(
+            `${settingsChanged ? 'The endpoint/settings changes were accepted, but the' : 'The'} replacement API key was rejected. The previous server-resolved credential state remains authoritative; no new key is assumed. The typed draft is retained but is not part of that credential.`,
+          )
+          show((settingsChanged
+            ? 'Endpoint/settings saved, but the replacement API key was rejected: '
+            : 'Replacement API key was rejected: ') + (error.message || error))
           return
         }
-        setSecretState(current => ({ ...current, llm_api_key: resultSecret.set === true }))
-        setRevisions(current => ({ ...current, secret: resultSecret.secret_revision }))
+        setCredential(resultSecret.credential)
+        setRevisions({
+          settings: resultSecret.settings_revision,
+          secret: resultSecret.secret_revision,
+        })
         if (resultSecret.set !== true) {
+          setCredentialWriteError(
+            `${settingsChanged ? 'The endpoint/settings changes were accepted, but the server' : 'The server'} did not confirm the replacement API key. The previous server-resolved credential state remains authoritative; no new key is assumed. The typed draft is retained but is not part of that credential.`,
+          )
           show(settingsChanged
-            ? 'Settings saved, but the API key was not stored'
-            : 'API key was not stored')
+            ? 'Endpoint/settings saved, but the replacement API key was not confirmed'
+            : 'The replacement API key was not confirmed')
           return
         }
+        setCredentialWriteError('')
         // Clear only the submitted credential. A replacement typed while either request was in
         // flight remains an unsaved edit instead of being erased by the older acknowledgement.
         setForm(current => reconcileAcceptedRecord(current, submittedForm, acceptedForm))
-      }
+      // An ordinary-settings ACK carries a credential snapshot from the same locked server state,
+      // so it can clear an old write fence. A no-op cannot: keep the warning until an ACK or reload.
+      } else if (settingsChanged) setCredentialWriteError('')
       const savedParts = [settingsChanged ? 'Submitted settings saved' : '', apiKey ? 'API key stored securely' : ''].filter(Boolean)
-      show(`${savedParts.join(' · ') || 'No persisted changes'} — applied to new runs`)
+      if (whitespaceOnlyApiKey) {
+        show(settingsChanged
+          ? 'Submitted settings saved; whitespace-only API-key draft discarded — settings applied to new runs'
+          : 'Whitespace-only API-key draft discarded; no server changes were made')
+      } else show(`${savedParts.join(' · ') || 'No persisted changes'} — applied to new runs`)
     } catch (error) {
       if (settingsPatch && error?.code === 'settings_revision_conflict') {
         rememberUnknown(
@@ -857,23 +1040,45 @@ export default function Settings({ onBack }) {
       show('Acknowledge or resolve the LLM provider warning before changing its credential')
       return
     }
-    if (!window.confirm('Clear the stored API key now? This is immediate, separate from Save, and cannot be undone. Any typed replacement stays as an unsaved draft.')) return
+    if (!credential?.clearable) {
+      show('The effective credential is read-only here and cannot be cleared')
+      return
+    }
+    const clearingIncompletePair = credential.status === 'incomplete'
+      && credential.source === 'stored'
+    const clearingAmbientFallback = credential.stored
+      && (credential.source === 'environment' || credential.source === 'dotenv')
+    const clearPrompt = clearingIncompletePair
+      ? 'Clear the incomplete stored credential pair now? This removes its orphan endpoint binding immediately. Any typed replacement stays as an unsaved draft.'
+      : clearingAmbientFallback
+        ? 'Clear the stored fallback API key and endpoint binding now? The ambient source remains untouched. This is immediate, separate from Save, and cannot be undone. Any typed replacement stays as an unsaved draft.'
+      : 'Clear the stored API key and its endpoint binding now? This is immediate, separate from Save, and cannot be undone. Any typed replacement stays as an unsaved draft.'
+    if (!window.confirm(clearPrompt)) return
     const mutation = beginMutation('clearing secret')
     if (!mutation) { show('A settings update is already in progress'); return }
     const submittedForm = form
-    const submittedSecretRevision = revisions.secret
+    const submittedRevisions = { ...revisions }
     try {
       const resultSecret = validateSecretSaveAck(await boundedSettingsWrite(
         signal => saveSecret(key, '', {
-          signal, expectedRevision: submittedSecretRevision,
+          signal,
+          expectedSettingsRevision: submittedRevisions.settings,
+          expectedSecretRevision: submittedRevisions.secret,
         })), key)
-      setSecretState(current => ({ ...current, [key]: false }))
-      setRevisions(current => ({ ...current, secret: resultSecret.secret_revision }))
-      show(submittedForm?.[key]
-        ? 'Stored API key cleared; the typed replacement remains an unsaved draft'
-        : 'API key cleared')
+      setCredential(resultSecret.credential)
+      setCredentialWriteError('')
+      setRevisions({
+        settings: resultSecret.settings_revision,
+        secret: resultSecret.secret_revision,
+      })
+      if (resultSecret.set === false && resultSecret.credential.stored === false) {
+        show(submittedForm?.[key]
+          ? `${clearingIncompletePair ? 'Incomplete stored credential pair' : clearingAmbientFallback ? 'Stored fallback API key and endpoint binding' : 'Stored API key and endpoint binding'} cleared; the typed replacement remains an unsaved draft`
+          : `${clearingIncompletePair ? 'Incomplete stored credential pair' : clearingAmbientFallback ? 'Stored fallback API key and endpoint binding' : 'Stored API key and endpoint binding'} cleared`)
+      } else show('The server did not clear the stored credential material')
     } catch (error) {
-      if (error?.code === 'secret_revision_conflict') {
+      if (error?.code === 'secret_revision_conflict'
+          || error?.code === 'settings_revision_conflict') {
         rememberUnknown('secret-clear-conflict', submittedForm)
       }
       else if (unknownTransport(error)) rememberUnknown('secret-clear', submittedForm)
@@ -898,6 +1103,23 @@ export default function Settings({ onBack }) {
   const clearSearch = () => {
     setQuery('')
     requestAnimationFrame(() => searchInputRef.current?.focus())
+  }
+  const reloadSavedSettings = async () => {
+    if (unsaved && !window.confirm('Reload saved settings and discard the current draft changes?')) {
+      return false
+    }
+    const mutation = beginMutation('reloading settings')
+    if (!mutation) return false
+    try {
+      const reloaded = await load(false, true)
+      if (!reloaded) {
+        show('Saved settings could not be reloaded; current values and warnings were kept')
+      } else {
+        show('Server state refreshed; saved credential status is up to date')
+        focusProviderHeading()
+      }
+      return reloaded
+    } finally { finishMutation(mutation) }
   }
   const requestBack = () => {
     if (navigationUnsafe && !window.confirm(navigationWarning(
@@ -974,26 +1196,24 @@ export default function Settings({ onBack }) {
 
         <section className="settings-provider-check" aria-labelledby="settings-provider-check-heading">
           <div className="settings-provider-check-copy">
-            <strong id="settings-provider-check-heading">Saved LLM connection</strong>
+            <strong ref={providerHeadingRef} id="settings-provider-check-heading" tabIndex={-1}>
+              Saved LLM connection
+            </strong>
             <span>Optional connectivity check for the provider configuration used by new runs.</span>
           </div>
+          <CredentialState credential={credential} writeError={credentialWriteError}
+            onRefresh={mutationUnknown ? reconcileUnknown : reloadSavedSettings}
+            refreshing={mutationBusy === 'reloading settings' || mutationBusy === 'reconciling'}
+            refreshDisabled={!!mutationBusy && mutationBusy !== 'reloading settings'
+              && mutationBusy !== 'reconciling'} />
           <LlmHealth savedSettingsRevision={revisions.settings} savedSecretRevision={revisions.secret}
             unsavedCount={unsavedKeys.size}
             actionBlocked={!!mutationBusy || !!mutationUnknown}
             actionKind={mutationBusy}
+            providerBlockedReason={credentialBlockedReason}
             beginAction={beginMutation} finishAction={finishMutation}
             onRecoveryChange={setHealthRecoveryActive}
-            reloadSavedSettings={async () => {
-              if (unsaved && !window.confirm('Reload saved settings and discard the current draft changes?')) return false
-              const mutation = beginMutation('reloading settings')
-              if (!mutation) return false
-              try {
-                const reloaded = await load(false, true)
-                if (!reloaded) show('Saved settings could not be reloaded; current values and the provider warning were kept')
-                return reloaded
-              }
-              finally { finishMutation(mutation) }
-            }} />
+            reloadSavedSettings={reloadSavedSettings} />
         </section>
 
         {loadError && <div className="notice resource-error settings-stale-warning" role="alert">
@@ -1009,11 +1229,15 @@ export default function Settings({ onBack }) {
           <span>{mutationUnknown.stage === 'settings-conflict'
             ? 'Your draft is retained. Refresh the current server state before deliberately saving it against the new revision.'
             : mutationUnknown.stage === 'secret-conflict'
-              ? 'Ordinary settings were accepted, but another credential update won. The typed replacement is retained and is not sent by Test active LLM; the server resolves its active credential.'
+              ? mutationUnknown.ordinarySettingsAccepted
+                ? 'The endpoint/settings changes were accepted, but another credential update won. The typed replacement is retained. The previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
+                : 'Another credential update won before this replacement. The typed replacement is retained. The previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
             : mutationUnknown.stage === 'secret-clear-conflict'
               ? 'Another credential update won before this clear. Refresh before deciding whether to clear the current credential.'
             : mutationUnknown.stage === 'secret-set'
-            ? 'Ordinary settings were accepted, but the API-key replacement could not be confirmed. The typed draft is retained and is not sent by Test active LLM; the server resolves its active credential.'
+              ? mutationUnknown.ordinarySettingsAccepted
+                ? 'The endpoint/settings changes were accepted, but the API-key replacement could not be confirmed. The typed draft is retained; the previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
+                : 'The API-key replacement could not be confirmed. The typed draft is retained; the previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
             : mutationUnknown.stage === 'secret-clear'
               ? 'The API-key clear may or may not have reached the server. Do not repeat it blindly.'
               : 'The settings save may or may not have reached the server. Current edits are kept and will not be replayed automatically.'}</span>
@@ -1025,7 +1249,7 @@ export default function Settings({ onBack }) {
         <SettingsForm form={form} onChange={onChange} dirty={dirty} unsaved={unsavedKeys}
                       errors={validationErrors}
                       agentControl={agentControl} onToggleAgent={onToggleAgent}
-                      secretState={secretState} onClearSecret={onClearSecret}
+                      credential={credential} onClearSecret={onClearSecret}
                       secretActionDisabled={!!mutationBusy || !!mutationUnknown || healthRecoveryBlocked}
                       interactionDisabled={mutationBusy === 'reloading settings'}
                       mode={mode} query={query} schema={schema}

@@ -23,7 +23,9 @@ from looplab.core.config import Settings
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
 SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 158
-SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = 192
+# Includes the runtime-only credential endpoint binding. It deliberately remains outside the
+# curated catalogue below, but still counts here so every future Settings addition stays review-gated.
+SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = 193
 SETTINGS_UI_SCHEMA_KEYSET_REVISION = "be65b2a2a25565d8d54381ec1418642e81fa0b2e41eb9b0f76c36299f6d0aa99"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})

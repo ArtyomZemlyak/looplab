@@ -73,6 +73,38 @@ const opaqueRevision = value => typeof value === 'string' && value.length > 0 &&
   && !/[\u0000-\u001f\u007f]/.test(value)
 const configRevision = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const resourceError = () => { throw new TypeError('Invalid settings resource') }
+const CREDENTIAL_SOURCES = new Set(['stored', 'environment', 'dotenv', 'none'])
+const CREDENTIAL_STATUSES = new Set([
+  'active', 'missing', 'incomplete', 'unbound', 'endpoint_mismatch', 'ambient_override',
+])
+
+export function validateCredentialState(value) {
+  if (!settingsRecord(value) || Object.keys(value).length > 8
+      || !CREDENTIAL_SOURCES.has(value.source)
+      || !CREDENTIAL_STATUSES.has(value.status)
+      || typeof value.stored !== 'boolean'
+      || typeof value.effective !== 'boolean'
+      || typeof value.active !== 'boolean'
+      || typeof value.clearable !== 'boolean'
+      // `clearable` describes owner-stored fallback material, not the effective source. An ambient
+      // source stays read-only while a separately stored fallback pair may still be deleted.
+      || (value.clearable !== value.stored)
+      || (value.source === 'none'
+        && (value.stored || value.effective || value.active || value.status !== 'missing'))
+      || (value.source === 'stored'
+        && (!value.stored || ['missing', 'ambient_override'].includes(value.status)))
+      || (value.active && !value.effective)
+      || (value.status === 'active' && (!value.effective || !value.active))
+      || (value.status === 'missing' && (value.effective || value.active))
+      || (value.status === 'incomplete'
+        && (value.effective || value.active || value.source === 'none'))
+      || (['unbound', 'endpoint_mismatch'].includes(value.status)
+        && (!value.effective || value.active))
+      || (value.status === 'ambient_override'
+        && (!['environment', 'dotenv'].includes(value.source)
+          || !value.stored || !value.effective || !value.active || !value.clearable))) resourceError()
+  return value
+}
 
 function boundedJson(value, budget = { nodes: 0 }, depth = 0) {
   budget.nodes += 1
@@ -165,6 +197,7 @@ export function validateSettingsResource(value, schema) {
       || !opaqueRevision(value.settings_revision) || !opaqueRevision(value.secret_revision)) {
     resourceError()
   }
+  validateCredentialState(value.credential)
   validateSettingsRecord(value.settings, schema, { complete: true })
   validateSettingsRecord(value.defaults, schema, { complete: true, allowMissingSecret: true })
   validateSettingsRecord(value.overrides, schema, { allowEmpty: true })
@@ -173,7 +206,9 @@ export function validateSettingsResource(value, schema) {
 
 export function validateSettingsSaveAck(value, schema) {
   if (!settingsRecord(value) || value.ok !== true || Object.keys(value).length > 16
-      || !opaqueRevision(value.settings_revision)) resourceError()
+      || !opaqueRevision(value.settings_revision)
+      || !opaqueRevision(value.secret_revision)) resourceError()
+  validateCredentialState(value.credential)
   validateSettingsRecord(value.settings, schema, { complete: true })
   validateSettingsRecord(value.overrides, schema, { allowEmpty: true })
   return value
@@ -181,8 +216,11 @@ export function validateSettingsSaveAck(value, schema) {
 
 export function validateSecretSaveAck(value, expectedKey) {
   if (!settingsRecord(value) || value.ok !== true || value.key !== expectedKey
-      || typeof value.set !== 'boolean' || !opaqueRevision(value.secret_revision)
+      || typeof value.set !== 'boolean' || !opaqueRevision(value.settings_revision)
+      || !opaqueRevision(value.secret_revision)
       || Object.keys(value).length > 8) resourceError()
+  const credential = validateCredentialState(value.credential)
+  if (value.set !== credential.stored) resourceError()
   return value
 }
 

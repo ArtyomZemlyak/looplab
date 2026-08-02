@@ -17,7 +17,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 
 def _on_shared_hub() -> bool:
@@ -229,6 +229,10 @@ _spawned_engine_pids: set[int] = set()
 # the guarded cancellation check around `_spawn_engine`, which also uses the gate for every spawn.
 _engine_spawn_gate = threading.RLock()
 
+
+class EngineSpawnOutcomeUnknown(RuntimeError):
+    """A spawner was entered, so an exception cannot prove that no child was created."""
+
 # Resume, reset, and delete are one lifecycle transaction per run.  engine.lock fences a RUNNING
 # engine, but it does not cover the claim -> Popen -> child-lock startup gap.  Pair a process-local
 # RLock with a sibling interprocess lock whose inode survives deletion of the run directory; this
@@ -374,8 +378,12 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
                   run_dir: Optional[Path] = None) -> Optional[int]:
     cmd = [sys.executable, "-m", "looplab.cli", *cli_args]
     kw: dict = {"cwd": str(Path(__file__).resolve().parents[2])}
-    if env:
-        kw["env"] = {**os.environ, **env}
+    # The engine receives no ambient secret merely because its server parent had one. The caller's
+    # explicit overlay contains only source-verified shared/profile pairs plus ordinary run values.
+    from looplab.runtime.sandbox import is_secret_env
+    clean_parent = {key: value for key, value in os.environ.items()
+                    if not is_secret_env(key, value)}
+    kw["env"] = {**clean_parent, **(env or {})}
     if os.name == "nt":
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # detached, survives request
     else:
@@ -569,7 +577,8 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                             spawn_engine: Optional[Callable[..., Optional[int]]] = None,
                             liveness: Optional[Callable[[Path], Optional[bool]]] = None,
                             on_spawn: Optional[Callable[[Optional[int]], None]] = None,
-                            before_spawn: Optional[Callable[[], None]] = None) -> bool:
+                            before_spawn: Optional[Callable[[], Optional[dict]]] = None,
+                            launch_env: Optional[Callable[[], Any]] = None) -> bool:
     """Atomically claim one pending resume in the event log, then launch its detached CLI.
 
     The additive `resume_requested(launch_claim=True)` record is a process-wide bounded lease. It
@@ -638,34 +647,58 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                 # retain a waiter instead of assuming it will necessarily fold/serve this request.
                 should_wait = True
                 break
-            # Cancellation and Popen share this gate with shutdown/reaping. Either the child is fully
-            # registered before cancellation, or cancellation wins and no child is created.
-            with _engine_spawn_gate:
-                if cancel_event is not None and cancel_event.is_set():
-                    return False
-                if before_spawn is not None:
-                    before_spawn()
+            # Acquire the settings publication context BEFORE the engine gate. Every direct engine
+            # spawn uses launch -> engine-gate order; entering UI/secret/launch while holding the gate
+            # would deadlock with a settings writer waiting for a different launch to finish Popen.
+            popen_boundary_entered = False
+
+            def _spawn(secret_env: Optional[dict]) -> bool:
+                nonlocal popen_boundary_entered
+                # The just-in-time source-validated pair (including empty revocation tombstones)
+                # must outrank an ordinary overlay captured before the resume wait began.
+                spawn_env = {**(env or {}), **(secret_env or {})}
                 # Keep the router's historical spawn patch seam without changing the default: direct
                 # callers and the reconciler still resolve this module's live `_spawn_engine` binding.
                 spawner = spawn_engine or _spawn_engine
-                pid = spawner(waiter_args, env=env, run_dir=rd)
-                # This callback is deliberately after Popen. A persistence failure here is therefore
-                # not a safe-to-retry pre-spawn failure; the caller must retain its quarantine claim.
-                if on_spawn is not None:
-                    on_spawn(pid)
-            return True
+                # Cancellation and Popen share this gate with shutdown/reaping. Either the child is
+                # fully registered before cancellation, or cancellation wins and no child is created.
+                with _engine_spawn_gate:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return False
+                    popen_boundary_entered = True
+                    pid = spawner(waiter_args, env=spawn_env or None, run_dir=rd)
+                    # Deliberately after Popen: persistence failure is not safe-to-retry pre-spawn.
+                    if on_spawn is not None:
+                        on_spawn(pid)
+                    return True
+
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            try:
+                if launch_env is not None:
+                    with launch_env() as secret_env:
+                        spawned = _spawn(secret_env)
+                else:
+                    spawned = _spawn(before_spawn() if before_spawn is not None else None)
+            except BaseException as exc:
+                if popen_boundary_entered:
+                    raise EngineSpawnOutcomeUnknown(
+                        "resume process creation may have succeeded") from exc
+                raise
+            return spawned
         else:
             return False       # a hot writer won every CAS; the intent stays durably pending
     if should_wait and wait_on_alive and not (cancel_event is not None and cancel_event.is_set()):
         _spawn_engine_after_exit(
             waiter_args, run_dir=rd, env=env, cancel_event=cancel_event,
-            before_spawn=before_spawn)
+            before_spawn=before_spawn, launch_env=launch_env)
     return False
 
 
 def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
                              cancel_event: Optional[threading.Event] = None,
-                             before_spawn: Optional[Callable[[], None]] = None) -> bool:
+                             before_spawn: Optional[Callable[[], Optional[dict]]] = None,
+                             launch_env: Optional[Callable[[], Any]] = None) -> bool:
     """P1-1 on-load reconciler (NO standing daemon): re-spawn the engine for a run whose durable resume
     intent was recorded but never served — either a detached spawn died before the engine ran or the
     request landed in an old engine's post-finish tail. Returns True if it re-spawned. Idempotent
@@ -705,7 +738,8 @@ def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
     try:
         return _claim_and_spawn_resume(
             rd, cli_args, now=now,
-            cancel_event=cancel_event, wait_on_alive=True, before_spawn=before_spawn)
+            cancel_event=cancel_event, wait_on_alive=True, before_spawn=before_spawn,
+            launch_env=launch_env)
     except Exception:  # noqa: BLE001 - best-effort recovery must not break startup or the run list
         return False
 
@@ -713,7 +747,8 @@ def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
 def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
                              env: Optional[dict] = None,
                              cancel_event: Optional[threading.Event] = None,
-                             before_spawn: Optional[Callable[[], None]] = None) -> bool:
+                             before_spawn: Optional[Callable[[], Optional[dict]]] = None,
+                             launch_env: Optional[Callable[[], Any]] = None) -> bool:
     """Spawn once after the current owner exits iff a durable resume intent remains pending."""
     key = str(run_dir.resolve())
     with _resume_after_exit_lock:
@@ -777,7 +812,8 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
                     return
                 if _claim_and_spawn_resume(
                         run_dir, cli_args, env=env, cancel_event=cancel_event,
-                        wait_on_alive=False, before_spawn=before_spawn):
+                        wait_on_alive=False, before_spawn=before_spawn,
+                        launch_env=launch_env):
                     return
                 # A different CLI can acquire engine.lock between our dead probe and claim. Keep
                 # this same registered waiter through that handoff rather than recursively trying to
@@ -819,7 +855,9 @@ _PENDING_RECHECK_S = 0.25
 
 
 def install_resume_reconcile_hooks(
-        app, root: Path, *, before_spawn: Optional[Callable[[], None]] = None) -> threading.Event:
+        app, root: Path, *,
+        before_spawn: Optional[Callable[[Path], Optional[dict]]] = None,
+        launch_env: Optional[Callable[[Path], Any]] = None) -> threading.Event:
     """Recover durable resume intents on startup, without requiring a dashboard list poll."""
     timers: list[threading.Timer] = []
     shutdown = threading.Event()
@@ -858,12 +896,17 @@ def install_resume_reconcile_hooks(
                 continue
             cli_args = _cli_args_for_resume_state(
                 rd, ["resume", str(rd), "--task-file", str(task_file)], state)
+            prepare_spawn = ((lambda run_dir=rd: before_spawn(run_dir))
+                             if before_spawn is not None else None)
+            prepare_launch = ((lambda run_dir=rd: launch_env(run_dir))
+                              if launch_env is not None else None)
             startup_liveness = _spawn_liveness(rd)
             if startup_liveness is True:
                 # A server restart loses the old in-memory tail waiter; reinstall it while the
                 # engine still owns the run. The durable launch claim arbitrates multiple workers.
                 _spawn_engine_after_exit(
-                    cli_args, run_dir=rd, cancel_event=shutdown, before_spawn=before_spawn)
+                    cli_args, run_dir=rd, cancel_event=shutdown,
+                    before_spawn=prepare_spawn, launch_env=prepare_launch)
                 continue
             if startup_liveness is None:
                 # Do not create one 20 Hz waiter thread per malformed/reparse/unsupported run at
@@ -878,14 +921,20 @@ def install_resume_reconcile_hooks(
             if delay <= 0:
                 try:
                     reconcile_pending_resume(
-                        rd, now=now, cancel_event=shutdown, before_spawn=before_spawn)
+                        rd, now=now, cancel_event=shutdown, before_spawn=prepare_spawn,
+                        launch_env=prepare_launch)
                 except Exception:  # noqa: BLE001 - one broken run cannot abort server startup
                     pass
                 continue
             def _reconcile_unless_shutdown(run_dir=rd):
                 if not shutdown.is_set():
+                    prepare = ((lambda: before_spawn(run_dir))
+                               if before_spawn is not None else None)
+                    launch = ((lambda: launch_env(run_dir))
+                              if launch_env is not None else None)
                     reconcile_pending_resume(
-                        run_dir, cancel_event=shutdown, before_spawn=before_spawn)
+                        run_dir, cancel_event=shutdown, before_spawn=prepare,
+                        launch_env=launch)
             timer = threading.Timer(delay + 0.01, _reconcile_unless_shutdown)
             timer.daemon = True
             timers.append(timer)

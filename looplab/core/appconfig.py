@@ -35,6 +35,8 @@ from typing import Any, Optional
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
 
+_RUNTIME_CREDENTIAL_FIELDS = {"llm_api_key", "llm_api_key_base_url"}
+
 
 def _read_doc(path: Path) -> dict:
     """Parse a YAML or JSON document into a dict. YAML is a superset of JSON, so a single
@@ -112,6 +114,9 @@ def parse_sets(pairs: list[str]) -> dict:
         if key not in valid:
             raise ValueError(f"unknown setting {key!r}; see `looplab init` or "
                              f"docs/guide/configuration.md for the full list")
+        if key in _RUNTIME_CREDENTIAL_FIELDS:
+            raise ValueError(
+                f"{key} is runtime-only; configure one key+endpoint pair through environment")
         out[key] = coerce_scalar(value.strip())
     return out
 
@@ -153,6 +158,11 @@ def build_settings(file_settings: dict, typed_overrides: dict, sets: dict) -> Se
     ``__init__`` kwargs above env, so the merged dict wins only where it actually sets a value."""
     # These layers all become one Pydantic "init" source. Promote aliases BEFORE flattening them,
     # otherwise a file canonical value can shadow a higher-priority CLI legacy override.
+    for source in (file_settings, typed_overrides, sets):
+        forbidden = sorted(_RUNTIME_CREDENTIAL_FIELDS.intersection(source or {}))
+        if forbidden:
+            raise ValueError(
+                "runtime credentials cannot be set in a run config/flag: " + ", ".join(forbidden))
     merged = flatten_parallelism_layers([
         canonicalize_parallelism_source(file_settings),
         canonicalize_parallelism_source(typed_overrides),
@@ -248,7 +258,7 @@ def _render_default(name: str, field) -> str:
         val = field.get_default(call_default_factory=True)
     except TypeError:   # older pydantic without the kwarg
         val = field.get_default()
-    if val is PydanticUndefined or name == "llm_api_key":
+    if val is PydanticUndefined or name in {"llm_api_key", "llm_api_key_base_url"}:
         val = None
     if isinstance(val, tuple):
         val = list(val)
@@ -291,7 +301,9 @@ def render_template(kind: str = "dataset") -> str:
     # documenting the knob without emitting an active value that would replace the default (esp. a `null`
     # that silently turns the feature off). Uncomment + edit to point elsewhere, or set `null` to disable.
     _COMMENTED_KNOBS = {"knowledge_dir", "memory_dir"}
-    shown = {k for k, _, _ in common} | {"llm_api_key"}
+    # Credentials and their endpoint binding are runtime-only. The generated run config must not
+    # advertise either as a normal persisted knob.
+    shown = {k for k, _, _ in common} | {"llm_api_key", "llm_api_key_base_url"}
     lines: list[str] = [
         "# LoopLab run config. Run it with:  looplab run looplab.yaml",
         "#",

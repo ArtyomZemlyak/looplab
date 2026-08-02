@@ -27,6 +27,13 @@ from looplab.tools._base import RESULT_CAP
 from looplab.core.redact import redact_secrets
 
 
+# A configured compressor that cannot be constructed must not silently fall back to the main
+# (potentially paid) client. The sentinel lets ``None`` retain its documented legacy meaning
+# (no compressor configured -> use the loop client) while selecting deterministic truncation for
+# an explicitly configured-but-unavailable compressor.
+_SUMMARY_LOCAL_ONLY = object()
+
+
 class CompositeTools:
     """Merge several tool providers (each with .specs()/.execute()) into one toolset,
     so the Researcher can use knowledge + skills + memory tools together."""
@@ -307,8 +314,15 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     current_plan = ""
     started = time.monotonic()
     # D11: history compression runs on the dedicated cheap compressor when configured, else the
-    # loop's own client. Loop-invariant: build once, not per turn.
-    summarize = _summarizer(summary_client or client) if auto_summary else None
+    # loop's own client. A configured compressor that failed validation/construction is different:
+    # use the deterministic local truncation fallback instead of spending against the main client.
+    # Loop-invariant: build once, not per turn.
+    if not auto_summary:
+        summarize = None
+    elif summary_client is _SUMMARY_LOCAL_ONLY:
+        summarize = lambda _text: ""
+    else:
+        summarize = _summarizer(summary_client or client)
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
@@ -767,6 +781,6 @@ def loop_opts_from_settings(settings) -> dict:
             # Role-resolved, so the compressor can sit on its own provider WITH its own credential;
             # its own fields still win, so this is the same client as before without profiles.
             opts["summary_client"] = make_llm_client_for(settings, role="compressor")
-        except Exception:  # noqa: BLE001 — a bad compressor config degrades to the main client
-            pass
+        except Exception:  # noqa: BLE001 - invalid optional config stays local, never bills main
+            opts["summary_client"] = _SUMMARY_LOCAL_ONLY
     return opts

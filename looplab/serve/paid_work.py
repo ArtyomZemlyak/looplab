@@ -131,7 +131,8 @@ def metered_run_client(srv, settings, run_dir, generation):
     activity_ctx.__enter__()
     retained = False
     try:
-        client = srv.make_llm_client(settings)
+        from looplab.core.llm import make_llm_client_for
+        client = make_llm_client_for(settings, factory=srv.make_llm_client)
         ledger = bind_run_client_cost(client, EventStore(run_dir / "events.jsonl"))
         try:
             yield client

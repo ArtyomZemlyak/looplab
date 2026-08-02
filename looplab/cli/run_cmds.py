@@ -387,6 +387,15 @@ def run(
         settings = appconfig.build_settings(file_settings, typed, sets)
     except ValidationError as e:
         raise typer.BadParameter(f"invalid settings: {e}")
+    set_profile_replaced = bool({"llm_profile", "llm_profiles"} & sets)
+    effective_model_override = (sets["llm_model"] if "llm_model" in sets else
+                                model if not set_profile_replaced else None)
+    if effective_model_override is not None:
+        # --set is the final precedence layer. An explicit profile replacement there wins over the
+        # typed --model flag; otherwise make the highest-precedence model spelling effective inside
+        # the active profile while retaining that profile's endpoint and credential binding.
+        from looplab.core.llm import apply_llm_model_override
+        apply_llm_model_override(settings, str(effective_model_override))
     if speculation_gate_calibration:
         # This guard precedes Genesis client construction/authoring.  The bootstrap must be provably
         # offline; merely resolving to a ToyTask after a model-authored Genesis call is insufficient.
@@ -423,7 +432,9 @@ def run(
     if genesis and goal is not None:
         from looplab.engine import genesis as _genesis
         try:
-            client = make_llm_client(settings)
+            from looplab.core.llm import make_llm_client_for
+            client = make_llm_client_for(
+                settings, role="strategist", factory=make_llm_client)
         except Exception as e:  # noqa: BLE001 - no endpoint configured/reachable
             raise typer.BadParameter(
                 f"Genesis needs an LLM to author the task ({e}). Point LOOPLAB_LLM_BASE_URL/--model "

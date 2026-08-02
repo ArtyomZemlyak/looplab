@@ -287,6 +287,7 @@ def _base_settings_fingerprint() -> tuple[Settings, str]:
                 "settings")
     dump = base.model_dump(mode="json")
     dump.pop("llm_api_key", None)
+    dump.pop("llm_api_key_base_url", None)
     return base, _sha(dump)
 
 
@@ -318,6 +319,7 @@ def _resolved_settings(task: dict, saved: dict, file_settings: dict,
         _reject(422, "invalid_launch_settings", f"launch settings are invalid: {exc}", "settings")
     dump = resolved.model_dump(mode="json")
     dump.pop("llm_api_key", None)
+    dump.pop("llm_api_key_base_url", None)
     return dump, inferred, base_digest
 
 
@@ -381,7 +383,6 @@ def _launch_token(run_id: str, task: dict, settings: dict, source: dict | None,
 
 def preflight_start(srv, body: Any) -> LaunchPreflight:
     """Validate and resolve one launch request without any mutation or provider/model operation."""
-    srv.settings.refresh_env_secrets()
     if not isinstance(body, dict):
         _reject(400, "invalid_launch_request", "start body must be a JSON object")
     unknown_top = sorted(str(key) for key in body if key not in _START_FIELDS)

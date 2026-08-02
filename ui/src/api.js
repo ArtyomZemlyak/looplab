@@ -2126,11 +2126,19 @@ export const saveSettings = (settings, { expectedRevision, ...options } = {}) =>
   send('/api/settings', 'PUT', {
     settings, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
   }, options)
-// Store (or clear, value='') a secret credential. Goes to the dedicated owner-only secret store,
-// NOT ui_settings.json — the value is never echoed back (the GET reports it only as masked "***").
-export const saveSecret = (key, value, { expectedRevision, ...options } = {}) =>
+// Store (or clear, value='') a secret credential. The write is fenced by the exact settings +
+// secret snapshot displayed by the owner: accepting only one revision could bind a key to an
+// endpoint the user never reviewed. The value itself is never echoed back.
+export const saveSecret = (key, value, {
+  expectedSettingsRevision, expectedSecretRevision, ...options
+} = {}) =>
   send('/api/settings/secret', 'PUT', {
-    key, value, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
+    key,
+    value,
+    ...(expectedSettingsRevision == null
+      ? {} : { expected_settings_revision: expectedSettingsRevision }),
+    ...(expectedSecretRevision == null
+      ? {} : { expected_secret_revision: expectedSecretRevision }),
   }, options)
 // Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
 // change (only changed fields are sent). A live engine keeps its in-memory copy until restart.

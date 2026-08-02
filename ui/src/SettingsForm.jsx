@@ -32,9 +32,15 @@ function changeDot(unsaved, changed) {
 }
 
 const safeId = value => String(value).replace(/[^a-zA-Z0-9_-]/g, '-')
+const credentialSourceLabel = source => ({
+  stored: 'stored settings',
+  environment: 'process environment',
+  dotenv: '.env file',
+  none: 'no source',
+}[source] || 'unknown source')
 
 function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted, onToggleAgent,
-                 secretSet, onClearSecret, secretActionDisabled, readOnly, rolePills,
+                 secretSet, credential, onClearSecret, secretActionDisabled, readOnly, rolePills,
                  interactionDisabled = false }) {
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
@@ -47,6 +53,16 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
     readOnly ? readOnlyId : '']
     .filter(Boolean).join(' ') || undefined
   let input
+  const storedCredential = credential ? credential.stored : !!secretSet
+  const effectiveCredential = credential?.effective === true
+  const activeCredential = credential?.active === true
+  const ambientCredential = credential
+    && (credential.source === 'environment' || credential.source === 'dotenv')
+  const ambientEffectiveCredential = ambientCredential && effectiveCredential
+  const storedFallbackUnderAmbient = ambientCredential && storedCredential
+  const clearableCredential = credential ? credential.clearable : storedCredential
+  const incompleteStoredCredential = credential?.source === 'stored'
+    && credential.status === 'incomplete'
 
   if (f.type === 'bool') {
     input = <label className="switch" title={`Toggle ${f.label}`}>
@@ -67,13 +83,36 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
       <input id={inputId} name={f.key} className="text" type="password" autoComplete="new-password"
              value={value ?? ''} aria-describedby={describedBy}
              disabled={readOnly || interactionDisabled}
-             placeholder={secretSet ? 'Stored — leave blank to keep' : 'Not set'}
+             placeholder={ambientCredential
+               ? ambientEffectiveCredential
+                 ? 'Ambient shared key matches base URL — enter to store a fallback'
+                 : 'Ambient source has no key — enter to store a fallback'
+               : storedCredential
+                 ? incompleteStoredCredential
+                   ? 'API key missing — enter to complete the pair'
+                   : 'Stored — leave blank to keep'
+                 : 'Not set'}
              onChange={e => set(e.target.value)} />
-      {secretSet && onClearSecret &&
-        <button type="button" className="btn sm ghost" aria-label={`Clear stored ${f.label}`}
-                title="Remove the stored key immediately (separate from Save)"
+      {storedCredential && clearableCredential && onClearSecret &&
+        <button type="button" className="btn sm ghost"
+                aria-label={incompleteStoredCredential
+                  ? 'Clear incomplete stored credential pair'
+                  : storedFallbackUnderAmbient
+                    ? `Clear stored fallback ${f.label} and endpoint binding`
+                  : `Clear stored ${f.label} and endpoint binding`}
+                title={incompleteStoredCredential
+                  ? 'Remove the orphan stored endpoint binding immediately (separate from Save)'
+                  : storedFallbackUnderAmbient
+                    ? 'Remove the stored fallback key and endpoint binding; the ambient source remains untouched'
+                  : 'Remove the stored key and endpoint binding immediately (separate from Save)'}
                 disabled={secretActionDisabled}
                 onClick={() => onClearSecret(f.key)}>Clear now</button>}
+      {ambientCredential && <span className="sf-secret-readonly"
+        title={ambientEffectiveCredential
+          ? `The effective credential comes from the ${credentialSourceLabel(credential.source)} and cannot be changed or cleared here.${storedFallbackUnderAmbient ? ' The separate stored fallback can be cleared.' : ''}`
+          : `The ${credentialSourceLabel(credential.source)} controls credential resolution but currently supplies no effective key; it cannot be changed or cleared here.${storedFallbackUnderAmbient ? ' The separate stored fallback can be cleared.' : ''}`}>
+        Ambient source · read-only
+      </span>}
     </div>
   } else {
     const numeric = f.type === 'int' || f.type === 'float'
@@ -104,10 +143,26 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
       Fixed when this run started. Create a new run to use a different value; resume and replay keep this recorded value.
     </div>}
     {hasDescription && <div id={helpId} className="sf-help">
-      {f.type === 'secret' && <span className="sf-secret-state">
+      {f.type === 'secret' && (credential ? <span className="sf-secret-state">
+        Stored material: {storedCredential ? 'yes' : 'no'} · Shared key: {effectiveCredential ? 'yes' : 'no'} · Matches base URL: {activeCredential ? 'yes' : 'no'}.{' '}
+        {ambientCredential
+          ? ambientEffectiveCredential
+            ? `The effective key comes from the ${credentialSourceLabel(credential.source)} and is read-only here. A value entered above is stored only as a fallback pair while that override exists. ${storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : ''}`
+            : `The ${credentialSourceLabel(credential.source)} controls credential resolution but supplies no effective key. A value entered above is stored only as an inactive fallback pair while that ambient source remains selected. ${storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : ''}`
+          : incompleteStoredCredential
+            ? 'The stored pair is missing its API key. Enter a value to complete and rebind it to the saved endpoint, or use Clear now to remove the incomplete pair. '
+          : storedCredential
+            ? 'Enter a value only to replace the stored key. '
+            : 'No credential is stored. '}
+        {storedCredential && clearableCredential
+          ? storedFallbackUnderAmbient
+            ? 'Clear now removes only the stored fallback; the ambient source remains untouched. '
+            : 'Clear now is immediate and separate from Save. '
+          : ''}
+      </span> : <span className="sf-secret-state">
         {secretSet ? 'A credential is stored. Enter a value only to replace it. ' : 'No credential is stored. '}
         Clear now is immediate and separate from Save.{' '}
-      </span>}
+      </span>)}
       {f.help}
     </div>}
     {f.warning && <div id={warningId} className={`sf-warning${f.warningTone === 'info' ? ' info' : ''}`} role="note">
@@ -117,7 +172,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
 }
 
 function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, agentControl,
-                      onToggleAgent, secretState, onClearSecret, secretActionDisabled, readOnlyKeys,
+                      onToggleAgent, secretState, credential, onClearSecret, secretActionDisabled, readOnlyKeys,
                       panelId, labelledBy, searchable, rolePills, interactionDisabled }) {
   const headingId = `${idPrefix}-heading-${safeId(group.title)}`
   return <section className="sf-group" id={panelId}
@@ -131,7 +186,8 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
       {group.fields.map(f => <Field key={f.key} idPrefix={idPrefix} f={f} value={form[f.key]}
         changed={dirty?.has(f.key)} unsaved={unsaved?.has(f.key)} error={errors?.[f.key]} onChange={onChange}
         granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent}
-        secretSet={secretState?.[f.key]} onClearSecret={onClearSecret}
+        secretSet={secretState?.[f.key]} credential={f.type === 'secret' ? credential : null}
+        onClearSecret={onClearSecret}
         secretActionDisabled={secretActionDisabled}
         readOnly={readOnlyKeys?.has(f.key)} rolePills={rolePills}
         interactionDisabled={interactionDisabled} />)}
@@ -140,7 +196,7 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
 }
 
 export default function SettingsForm({ form, onChange, dirty, unsaved, errors, only, agentControl, onToggleAgent,
-                                       secretState, onClearSecret, secretActionDisabled, readOnlyKeys, hideSecret,
+                                       secretState, credential, onClearSecret, secretActionDisabled, readOnlyKeys, hideSecret,
                                        mode = 'all', query = '', schema,
                                        focusKey = '', focusRequest = 0, interactionDisabled = false }) {
   const groups = filterSettingsGroups(schema.groups, { mode, query, only, hideSecret })
@@ -198,7 +254,8 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
                               aria-label="Matching settings">
     {groups.map(gr => <GroupPanel key={gr.title} group={gr} idPrefix={idPrefix} form={form}
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
-      onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
+      onToggleAgent={onToggleAgent} secretState={secretState} credential={credential}
+      onClearSecret={onClearSecret}
       secretActionDisabled={secretActionDisabled}
       readOnlyKeys={readOnlyKeys} searchable rolePills={rolePills}
       interactionDisabled={interactionDisabled} />)}
@@ -233,7 +290,8 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
     </div>
     <GroupPanel key={group.title} group={group} idPrefix={idPrefix} form={form}
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
-      onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
+      onToggleAgent={onToggleAgent} secretState={secretState} credential={credential}
+      onClearSecret={onClearSecret}
       secretActionDisabled={secretActionDisabled}
       readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} rolePills={rolePills}
       interactionDisabled={interactionDisabled} />

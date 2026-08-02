@@ -359,7 +359,8 @@ def _agent_model(backend: str, model: str) -> str:
 # core symbols). Kept importable here because dozens of call sites + tests spell
 # `from looplab.adapters.tasks import make_llm_client`.
 from looplab.core.llm import (  # noqa: E402,F401
-    LlmTarget, client_kwargs_for, make_llm_client, resolve_llm_target)
+    LlmTarget, client_kwargs_for, make_llm_client, make_llm_client_for,
+    resolve_llm_target)
 
 
 def _memora_cache_path(settings):
@@ -388,7 +389,8 @@ def _make_abstractor(settings):
     cache_path = None
     if getattr(settings, "memora_llm", False):
         try:
-            complete = chat_completer(make_llm_client(settings))
+            complete = chat_completer(make_llm_client_for(
+                settings, factory=make_llm_client))
         except Exception:  # noqa: BLE001 — a client we can't build just means lexical abstractions
             complete = None
         cache_path = _memora_cache_path(settings)
@@ -522,7 +524,8 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     from looplab.agents.strategist import make_strategist
     from looplab.agents.unified_agent import UnifiedAgent
     split = settings.model_copy(update={"unified_agent": False})
-    researcher, developer = make_roles(task, split, run_dir)   # H3 per-role models applied inside
+    researcher, developer = make_roles(
+        task, split, run_dir, _developer_role="implement")   # H3/stage target applied inside
 
     from looplab.core.llm import resolve_llm_target
 
@@ -541,8 +544,8 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
         target = resolve_llm_target(settings, role=role)
         if target not in cache:
             # Through THIS module's `make_llm_client` name: it is a documented monkeypatch seam.
-            cache[target] = make_llm_client(
-                settings, **client_kwargs_for(target, role=role))
+            cache[target] = make_llm_client_for(
+                settings, role=role, factory=make_llm_client)
         return cache[target]
 
     # A stage keeps the client `make_roles` already gave its role unless it resolves somewhere else.
@@ -562,7 +565,8 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     # reads after every call. Equal targets keep the historical single-object path byte for byte.
     repair_developer = None
     if t_repair != t_implement:
-        repair_developer = make_roles(task, split, run_dir)[1]
+        repair_developer = make_roles(
+            task, split, run_dir, _developer_role="repair")[1]
         _set_role_client(repair_developer, client_for(role="repair"))
 
     # Strategy stage: mirror cli._engine's strategist wiring exactly (off => None => no strategy
@@ -601,7 +605,7 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
                         loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
 
 
-def make_roles(task: TaskAdapter, settings, run_dir=None):
+def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: str = "developer"):
     """Pick role backends from config (ADR-7): toy optimizer or a live LLM. When a
     knowledge_dir is configured, the LLM Researcher is wrapped with the agentic
     retrieval toolset (ADR-16) — same developer, tool-using researcher.
@@ -616,7 +620,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     if getattr(settings, "unified_agent", False):
         agent = build_unified_agent(task, settings, run_dir)
         return agent, agent
-    client = make_llm_client(settings)
+    client = make_llm_client_for(settings, factory=make_llm_client)
     # Honest runtime brief: when the engine will auto-install deps (and trust permits), tell tasks
     # that support it they MAY use torch/xgboost/etc. + the real hardware — so a neural-net idea
     # isn't silently downgraded to sklearn. `task_runtime_caps` returns None for offline/synthetic
@@ -678,9 +682,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         # very case). So the developer-stage overrides applied further down never reached it and the
         # agent silently ran on the shared `llm_model`/`llm_base_url` while the operator saw
         # `developer_model` accepted. Resolve them HERE, at the constructor that actually owns them.
-        dev_base_url = settings.developer_base_url or settings.llm_base_url
-        agent_model = _agent_model(settings.developer_backend,
-                                   settings.developer_model or settings.llm_model)
+        dev_target = resolve_llm_target(settings, role=_developer_role)
+        dev_base_url = dev_target.base_url
+        agent_model = _agent_model(settings.developer_backend, dev_target.model)
         # Drop a self-contained provider config in the agent's workdir so OpenCode talks
         # to the local Ollama endpoint and never fetches the external model registry.
         workdir_files = {}
@@ -783,16 +787,14 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # The test is "does this role resolve anywhere other than the client built above?" — one
     # comparison covering the per-role fields, a temperature-only override (which used to need its own
     # clause to avoid being a silent no-op), and a connection PROFILE with its own endpoint and
-    # credential. The baseline is what `make_llm_client(settings)` actually produced, i.e. the RAW
-    # shared values: resolving the baseline instead folded `llm_profile` into both sides, so the
-    # default profile could never make a role differ and "move the whole run to another provider"
-    # moved neither of the two roles that make almost every call.
-    base = LlmTarget(settings.llm_model, settings.llm_base_url, settings.llm_temperature, None)
-    for _role, _obj in (("researcher", researcher), ("developer", developer)):
+    # credential. The baseline is the resolved default target: `llm_profile` moves ordinary calls as
+    # one connection, while an explicit per-role profile/field still causes the corresponding rebind.
+    base = resolve_llm_target(settings)
+    for _role, _obj in (("researcher", researcher), (_developer_role, developer)):
         _target = resolve_llm_target(settings, role=_role)
         if _target != base:
             # Built through THIS module's `make_llm_client` — a documented monkeypatch seam that a
             # helper calling core's own binding would route straight past.
-            _set_role_client(_obj, make_llm_client(
-                settings, **client_kwargs_for(_target, role=_role)))
+            _set_role_client(_obj, make_llm_client_for(
+                settings, role=_role, factory=make_llm_client))
     return researcher, developer

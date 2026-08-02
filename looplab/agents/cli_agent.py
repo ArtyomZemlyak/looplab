@@ -101,6 +101,88 @@ def _resolve_launcher(name: str) -> list[str]:
 _PROMPT_FILE = "LOOPLAB_TASK.md"
 
 
+def _seed_copy_ignore(seed_root: str | Path) -> Callable[[str, list[str]], set[str]]:
+    """Build a fail-closed ignore callback for one agent seed tree.
+
+    ``copytree`` normally follows links.  A harmless-looking link such as ``notes.txt -> ~/.env``
+    would therefore copy an operator secret into the remote agent's workdir before the path-name
+    filter ever saw the target.  Preserve only relative symlinks whose fully-resolved target stays
+    inside this seed and is itself non-secret; skip junctions and opaque reparse points entirely.
+    """
+    import shutil
+    import stat
+
+    from looplab.core._pathsafe import looks_secret
+
+    try:
+        resolved_root = Path(seed_root).resolve(strict=True)
+    except (OSError, RuntimeError):
+        resolved_root = None
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        build_ignored = shutil.ignore_patterns(
+            ".git", "__pycache__", "*.pyc", ".venv", "node_modules",
+        )(directory, names)
+        ignored = set(build_ignored)
+        parent = Path(directory)
+        try:
+            resolved_parent = parent.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return set(names)
+        if (resolved_root is None
+                or (resolved_parent != resolved_root
+                    and resolved_root not in resolved_parent.parents)):
+            return set(names)
+
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        for name in names:
+            if name in ignored:
+                continue
+            candidate = parent / name
+            if looks_secret(candidate):
+                ignored.add(name)
+                continue
+            try:
+                info = candidate.lstat()
+                is_link = stat.S_ISLNK(info.st_mode)
+                is_junction_fn = getattr(candidate, "is_junction", None)
+                is_junction = bool(is_junction_fn()) if callable(is_junction_fn) else False
+            except (OSError, RuntimeError):
+                ignored.add(name)
+                continue
+
+            # Windows junctions and other opaque reparse tags are not portable symlinks and can
+            # redirect traversal outside the seed without exposing a target we can safely validate.
+            is_opaque_reparse = bool(
+                reparse_flag
+                and getattr(info, "st_file_attributes", 0) & reparse_flag
+                and not is_link
+            )
+            if is_junction or is_opaque_reparse:
+                ignored.add(name)
+                continue
+            if not is_link:
+                continue
+
+            try:
+                raw_target = Path(os.readlink(candidate))
+                resolved_target = candidate.resolve(strict=True)
+            except (OSError, RuntimeError):
+                ignored.add(name)
+                continue
+            # An absolute link would still point at the ORIGINAL host path after copying. Relative
+            # links retain their meaning inside the throwaway mirror, provided the source target is
+            # within the mirrored root and isn't a credential path.
+            if (raw_target.is_absolute() or raw_target.drive
+                    or (resolved_target != resolved_root
+                        and resolved_root not in resolved_target.parents)
+                    or looks_secret(resolved_target)):
+                ignored.add(name)
+        return ignored
+
+    return _ignore
+
+
 # --- presets ------------------------------------------------------------------
 # OpenCode: `opencode run "<prompt>" --model <provider>/<model>`; reads the Ollama
 # provider from an opencode.json the caller drops in the workdir (see make_roles).
@@ -219,11 +301,12 @@ class CliAgentDeveloper:
             wd = Path(d)
             if self.seed_dirs:                   # RepoTask: seed the worktree from the repo(s)
                 import shutil
-                ig = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv",
-                                            "node_modules")
                 for s in self.seed_dirs:         # each editable repo at its subdir
                     dst = wd if s["name"] in (".", "") else wd / s["name"]
-                    shutil.copytree(s["path"], dst, dirs_exist_ok=True, ignore=ig)
+                    shutil.copytree(
+                        s["path"], dst, dirs_exist_ok=True, symlinks=True,
+                        ignore=_seed_copy_ignore(s["path"]),
+                    )
             else:
                 (wd / "solution.py").write_text(seed_code, encoding="utf-8")
             for name, content in self.workdir_files.items():
@@ -232,7 +315,12 @@ class CliAgentDeveloper:
             seed_sha = (_git_seed(wd)
                         if (self.patch_gate or self.seed_dirs or self.spec.needs_git)
                         else None)
-            env = {**os.environ, **self.spec.env(self.host)}
+            # External coding tools are not an LLM transport owned by our binding guard. Give them
+            # no ambient secret; their explicit endpoint variables are non-secret and added after.
+            from looplab.runtime.sandbox import is_secret_env
+            env = {key: value for key, value in os.environ.items()
+                   if not is_secret_env(key, value)}
+            env.update(self.spec.env(self.host))
             prompt = (self.brief + "\n\n" + message).strip()
             base = self._launch_base()
             argv_message, via_file = self._prompt_delivery(prompt, base)
@@ -384,18 +472,23 @@ def _git(cwd: Path, *args: str) -> int:
     """Run a git command in `cwd`; return its exit code (-1 if git is unavailable).
     Explicit UTF-8/replace: git emits UTF-8, and the default cp1252 decode on Windows
     would raise UnicodeDecodeError (not OSError) and escape the guard."""
+    from looplab.runtime.sandbox import git_subprocess_env
+
     try:
         return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
-                              timeout=60).returncode
+                              timeout=60, env=git_subprocess_env()).returncode
     except (OSError, subprocess.TimeoutExpired):   # missing git OR a hung git -> treat as failure
         return -1
 
 
 def _git_out(cwd: Path, *args: str) -> str:
+    from looplab.runtime.sandbox import git_subprocess_env
+
     try:
         p = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, timeout=60,
-                           text=True, encoding="utf-8", errors="replace")
+                           text=True, encoding="utf-8", errors="replace",
+                           env=git_subprocess_env())
         return p.stdout or ""
     except (OSError, subprocess.TimeoutExpired):
         return ""

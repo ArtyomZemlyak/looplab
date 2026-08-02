@@ -9,6 +9,7 @@ coroutines to that loop with `run_coroutine_threadsafe`. Importing this module f
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from typing import Optional
 
@@ -123,8 +124,12 @@ def connect_server(name: str, spec: dict):
     """Build a live handle from a server config entry (stdio via command/args, or streamable HTTP via
     url). Returns None for a spec shape we don't support."""
     if spec.get("command"):
+        from looplab.runtime.sandbox import is_secret_env
+        clean_parent = {key: value for key, value in os.environ.items()
+                        if not is_secret_env(key, value)}
+        child_env = {**clean_parent, **(spec.get("env") or {})}
         params = StdioServerParameters(command=spec["command"], args=spec.get("args") or [],
-                                       env=spec.get("env") or None)
+                                       env=child_env)
         return _ServerHandle(name, lambda: stdio_client(params))
     if spec.get("url"):
         from mcp.client.streamable_http import streamablehttp_client

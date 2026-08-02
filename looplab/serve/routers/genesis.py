@@ -105,11 +105,15 @@ def build_router(srv) -> APIRouter:
         # so a model configured through a connection PROFILE silently fell back to the bare default
         # model; `llm_api_key` is never in ui_settings at all (secrets live in the secret store), so
         # that filter entry was dead; and skipping `srv.llm_settings` skipped its
-        # `store.refresh_env_secrets()`, so a key saved after server start worked on /genesis but
-        # could fail here. `None` because a research brief belongs to no run yet.
+        # `store.resolve_settings()`, so a key saved after server start works here too. `None`
+        # because a research brief belongs to no run yet.
         s = srv.llm_settings(None)
+        model = s.llm_model
         try:
-            client = srv.make_llm_client(s)
+            from looplab.core.llm import make_llm_client_for, resolve_llm_target
+            model = resolve_llm_target(s, role="researcher").model
+            client = make_llm_client_for(
+                s, role="researcher", factory=srv.make_llm_client)
             msgs = [
                 {"role": "system", "content": RESEARCH_BRIEF_SYSTEM},
                 {"role": "user", "content": f"Research topic for an autonomous ML run:\n\n{topic}"},
@@ -119,7 +123,7 @@ def build_router(srv) -> APIRouter:
             # retries) and stall EVERY other client — including the live SSE streams — until it returns.
             text = await anyio.to_thread.run_sync(lambda: client.complete_text(msgs))
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
-            return {"ok": False, **safe_provider_failure(e), "model": s.llm_model}
+            return {"ok": False, **safe_provider_failure(e), "model": model}
         saved = None
         if body.get("save"):
             kd = srv.settings.load_ui_settings().get("knowledge_dir") or Settings().knowledge_dir
@@ -130,7 +134,7 @@ def build_router(srv) -> APIRouter:
                 fp = d / f"research-{slug}.md"
                 fp.write_text(f"# Research brief: {topic}\n\n{text}\n", encoding="utf-8")
                 saved = str(fp)
-        return {"ok": True, "text": text, "model": s.llm_model, "saved": saved}
+        return {"ok": True, "text": text, "model": model, "saved": saved}
 
     # ------------------------------------------------------------------ genesis (pre-run BOSS)
     def _normalize_genesis(spec: "_GenesisSpec", draft: dict) -> dict:
@@ -296,7 +300,9 @@ def build_router(srv) -> APIRouter:
         _soft = {"run_id": "", "task": {}, "task_file": "", "settings": {}, "rationale": "", "setup_steps": []}
         gset = srv.llm_settings(None)   # carries the agent-loop limits (unlimited by default)
         try:
-            client = srv.make_llm_client(gset)
+            from looplab.core.llm import make_llm_client_for
+            client = make_llm_client_for(
+                gset, role="strategist", factory=srv.make_llm_client)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
             failure = safe_provider_failure(e)
             return {"ok": False, **failure,

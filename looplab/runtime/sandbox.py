@@ -50,6 +50,23 @@ def is_secret_env(name: str, value: str = "") -> bool:
     return bool(SECRET_ENV.search(str(name or ""))) or bool(
         _CREDENTIAL_URL_VALUE.match(str(value or "")))
 
+
+def git_subprocess_env() -> dict[str, str]:
+    """Credential-free host environment for trusted local Git plumbing.
+
+    Git is not a passive executable: repository/global config may invoke hooks, fsmonitor, textconv,
+    credential helpers or external diff programs. Drop every ambient secret and every raw ``GIT_*``
+    override, then restore only the vetted config/identity subset required by local Git operations.
+    """
+    from looplab.core.gitenv import git_config_env
+
+    clean = {
+        key: value for key, value in os.environ.items()
+        if not is_secret_env(key, value) and not str(key).upper().startswith("GIT_")
+    }
+    clean.update({str(key): str(value) for key, value in git_config_env().items()})
+    return clean
+
 # A sane wall-clock ceiling for any single subprocess run. A "timeout" larger than this is a
 # misconfiguration, not an intent, so it is clamped rather than trusted — one eval must not be able
 # to wedge the loop for a week (or forever) on a fat-fingered/hostile value.

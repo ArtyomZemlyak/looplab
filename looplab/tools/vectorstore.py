@@ -9,7 +9,6 @@ tests; production embeddings go through LiteLLM (`ollama/nomic-embed-text`).
 """
 from __future__ import annotations
 
-import os
 import hashlib
 import http.client
 import json
@@ -20,6 +19,18 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol
 
 Vector = list[float]
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Credentialed embedding requests never follow a redirect to another authority."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+_DIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _NoRedirectHandler())
+_TRUST_ENV_OPENER = urllib.request.build_opener(_NoRedirectHandler())
 
 
 @dataclass
@@ -68,12 +79,14 @@ class LLMEmbedder:
     _BREAKER_MISSES = 3
 
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
-                 api_key: str = "x", timeout: float = 30.0, dim_fallback: int = 64):
+                 api_key: str = "x", timeout: float = 30.0, dim_fallback: int = 64,
+                 trust_env: bool = False):
         self.model = model
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or "x"
         self.timeout = timeout
         self.dim_fallback = dim_fallback
+        self._opener = _TRUST_ENV_OPENER if trust_env else _DIRECT_OPENER
         self._dim: Optional[int] = None     # committed on first success (or first fallback)
         self._live: Optional[bool] = None    # None=untried, True=endpoint works, False=degraded to hash
         self._misses = 0                     # CONSECUTIVE `_call` failures; reset by any success
@@ -89,7 +102,7 @@ class LLMEmbedder:
                 headers={"Content-Type": "application/json",
                          "Authorization": f"Bearer {self.api_key}"},
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError,
                 json.JSONDecodeError, http.client.HTTPException):
@@ -164,11 +177,15 @@ def make_embedder(settings) -> Callable[[str], Vector]:
     # to another provider's host. `resolve_llm_target` binds the credential to the endpoint it came
     # with, so reading model/base_url/key off a single target cannot re-open that.
     try:
-        from looplab.core.llm import resolve_llm_target, role_profile
+        from looplab.core.llm import (
+            bound_api_key_for, client_kwargs_for, normalize_llm_base_url,
+            resolve_llm_target, role_profile,
+        )
         target = resolve_llm_target(settings, role="embed")
-        profile_model = role_profile(settings, "embed").get("model")
-    except Exception:  # noqa: BLE001 — embedding must never crash a run; fall back to the raw fields
-        target, profile_model = None, None
+        embed_profile = role_profile(settings, "embed")
+        profile_model = embed_profile.get("model")
+    except Exception:  # noqa: BLE001 — invalid connection state degrades without touching a network
+        return hash_embed
     # The gate stays "is an embedding model configured at all" — the resolved model can't serve as
     # one, since it falls back to the shared chat model. A profile bound to `embed` counts, so a
     # complete connection expressed only as a profile no longer silently leaves retrieval on
@@ -176,19 +193,22 @@ def make_embedder(settings) -> Callable[[str], Vector]:
     model = getattr(settings, "embed_model", None) or profile_model
     if not model:
         return hash_embed
-    if target is not None:
-        base = target.base_url
-    else:
-        base = getattr(settings, "embed_base_url", None) or getattr(settings, "llm_base_url", "") or ""
-    key = getattr(settings, "llm_api_key", None)
+    # A role/stage endpoint override deliberately drops a profile credential. Unlike a required chat
+    # client, embeddings are optional, so fail closed to local hashing instead of probing the override
+    # unauthenticated or aborting the run.
+    if target.credential_mode == "none" and embed_profile.get("api_key_env"):
+        return hash_embed
     try:
-        key = key.get_secret_value() if key is not None and hasattr(key, "get_secret_value") else (key or "x")
-    except Exception:
-        key = "x"
-    env = target.api_key_env if target is not None else None
-    if env:
-        key = os.environ.get(env) or key
-    return LLMEmbedder(model, base_url=base, api_key=key)
+        kwargs = client_kwargs_for(target, role="embed")
+        base = normalize_llm_base_url(target.base_url)
+        key = bound_api_key_for(
+            settings, base, api_key=kwargs.get("api_key"),
+            api_key_base_url=kwargs.get("api_key_base_url"))
+    except Exception:  # noqa: BLE001 — missing/mismatched credentials fail closed to lexical search
+        return hash_embed
+    return LLMEmbedder(
+        model, base_url=base, api_key=key,
+        trust_env=bool(getattr(settings, "llm_trust_env", False)))
 
 
 def cosine(a: Vector, b: Vector) -> float:

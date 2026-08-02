@@ -2805,14 +2805,20 @@ def build_router(srv) -> APIRouter:
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             from looplab.serve.scope_report import generate_scope_report as _gen
             s = srv.llm_settings(None)
+            try:
+                from looplab.core.llm import resolve_llm_target
+                scope_model = resolve_llm_target(s).model
+            except Exception:  # noqa: BLE001 - construction below owns the public soft-failure path
+                scope_model = s.llm_model
             # No provider call without a durable "a paid attempt starts here" row: a kill between
             # acceptance and this process's next write would otherwise leave an action ledger that
             # cannot say whether anything was ever billed for this scope.
-            if not _stamp_scope_action_usage(_attempted_scope_usage(s.llm_model)):
+            if not _stamp_scope_action_usage(_attempted_scope_usage(scope_model)):
                 return {"ok": False, **_SCOPE_STORAGE_ERROR}
             client = None
             try:
-                client = srv.make_llm_client(s)
+                from looplab.core.llm import make_llm_client_for
+                client = make_llm_client_for(s, factory=srv.make_llm_client)
                 # Paid cross-run synthesis is an interactive bounded operation. Global agent settings
                 # may be unlimited for autonomous engine work; this endpoint supplies finite defaults,
                 # and generate_scope_report independently enforces hard maxima.
@@ -2828,7 +2834,7 @@ def build_router(srv) -> APIRouter:
             finally:
                 # A tool loop that failed HALFWAY still spent every call it made before raising, so
                 # the observation belongs in the `finally`, not the success path.
-                usage = _observed_scope_usage(client, s.llm_model)
+                usage = _observed_scope_usage(client, scope_model)
             # Spend joins the ledger BEFORE the report may be published. Unlike the pre-call stamp
             # this must NOT abandon the run: the model has already been paid for, and throwing the
             # generated report away would waste that spend on top of failing to record it. Instead
@@ -2850,7 +2856,7 @@ def build_router(srv) -> APIRouter:
                        rid: frozen_probe_receipts[rid] for rid in omitted},
                    "context_schema": _SCOPE_CONTEXT_SCHEMA,
                    "context_digest": frozen_context_digest,
-                   "model": s.llm_model, "content": content}
+                   "model": scope_model, "content": content}
             try:
                 with _scope_store_lock(_reports_dir):
                     # Narrow the optimistic-check window at the actual publication boundary.

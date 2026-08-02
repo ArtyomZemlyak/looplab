@@ -24,6 +24,7 @@ from contextlib import contextmanager
 import threading
 import time
 from typing import Callable, NamedTuple, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 # The LIVE transport runs on the openai SDK over an httpx client. Both are declared runtime deps
 # (pyproject `dependencies`), but the import is GUARDED: `core.config` imports `DEFAULT_HEADER_TIMEOUT_S`
@@ -74,6 +75,130 @@ STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client goes non
 # Default first-byte (response-headers) window, seconds. The single source: config.py's
 # `Settings.llm_header_timeout` imports this constant as its field default.
 DEFAULT_HEADER_TIMEOUT_S = 45.0
+
+
+def normalize_llm_base_url(value: str) -> str:
+    """Return the one canonical spelling accepted for a credential-bearing LLM endpoint.
+
+    The binding is intentionally stricter than a general-purpose URL parser. Userinfo, query and
+    fragment components can redirect the apparent authority or make two visually similar strings
+    mean different requests; whitespace/control characters and explicit default ports create
+    alternate spellings of the same destination. Refuse those forms instead of guessing.
+    """
+    original = str(value or "")
+    raw = original.strip()
+    if (not raw or raw != original
+            or any(ch.isspace() or ord(ch) < 0x21 or ord(ch) == 0x7F for ch in raw)
+            or "\\" in raw or "%" in raw):
+        raise LLMError(
+            "LLM base URL is empty or contains whitespace/control/escaped characters")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise LLMError("LLM base URL is malformed") from exc
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        raise LLMError("LLM base URL must be an absolute http(s) URL")
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise LLMError("LLM base URL must not contain userinfo")
+    if parsed.query or parsed.fragment:
+        raise LLMError("LLM base URL must not contain a query or fragment")
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        raise LLMError("LLM base URL must omit the scheme's default port")
+    try:
+        host = parsed.hostname.rstrip(".").encode("idna").decode("ascii").lower()
+    except (UnicodeError, ValueError) as exc:
+        raise LLMError("LLM base URL contains an invalid hostname") from exc
+    if not host:
+        raise LLMError("LLM base URL contains an invalid hostname")
+    if ":" not in host:
+        labels = host.split(".")
+        if any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
+               or any(not (char.isascii() and (char.isalnum() or char == "-"))
+                      for char in label)
+               for label in labels):
+            raise LLMError("LLM base URL contains an invalid hostname")
+    if ":" in host:  # IPv6 literals are emitted in their required bracketed authority form.
+        host = f"[{host}]"
+    authority = host if port is None else f"{host}:{port}"
+    path = (parsed.path or "").rstrip("/")
+    if path.startswith("//") or any(part in {".", ".."} for part in path.split("/")):
+        raise LLMError("LLM base URL contains an ambiguous path")
+    return urlunsplit((scheme, authority, path, "", ""))
+
+
+class _NoCredential:
+    """Internal sentinel: an endpoint override deliberately gets no shared credential fallback."""
+
+    def __repr__(self) -> str:  # keep patched-factory diagnostics content-free
+        return "NO_CREDENTIAL"
+
+
+NO_CREDENTIAL = _NoCredential()
+
+
+def _secret_value(value) -> str:
+    if value is None:
+        return ""
+    try:
+        return str(value.get_secret_value())
+    except AttributeError:
+        return str(value)
+
+
+def _ambient_shared_pair() -> tuple[str, str]:
+    """Resolve process env pair, else dotenv pair, without cross-source field merging."""
+    names = {
+        "key": "LOOPLAB_LLM_API_KEY",
+        "binding": "LOOPLAB_LLM_API_KEY_BASE_URL",
+    }
+    process = {str(name).upper(): str(value) for name, value in os.environ.items()}
+    if any(name in process for name in names.values()):
+        return process.get(names["key"], ""), process.get(names["binding"], "")
+    try:
+        from dotenv import dotenv_values
+        dotenv = {str(name).upper(): ("" if value is None else str(value))
+                  for name, value in dotenv_values(".env").items()}
+    except Exception:  # noqa: BLE001 - absent/unreadable dotenv is no credential source
+        dotenv = {}
+    if any(name in dotenv for name in names.values()):
+        return dotenv.get(names["key"], ""), dotenv.get(names["binding"], "")
+    return "", ""
+
+
+def bound_api_key_for(settings, base_url: str, *, api_key=None,
+                      api_key_base_url: str | None = None) -> str:
+    """Resolve a key for ``base_url`` and fail before transport on an unbound/mismatched secret."""
+    target = normalize_llm_base_url(base_url)
+    if api_key is NO_CREDENTIAL:
+        return "x"
+    if api_key is None:
+        if getattr(settings, "_llm_credential_pair_trusted", False):
+            key = _secret_value(getattr(settings, "llm_api_key", None))
+            binding = getattr(settings, "llm_api_key_base_url", None)
+        else:
+            # Never infer provenance from already-merged Settings fields. Plain Settings instances
+            # may have combined init/file/env/dotenv values; reselect one atomic ambient tier here.
+            key, binding = _ambient_shared_pair()
+    else:
+        key = _secret_value(api_key)
+        binding = api_key_base_url
+    if bool(key) != bool(binding):
+        raise LLMError("LLM credential source contains an incomplete key+endpoint pair")
+    if not key:
+        return "local"
+    if not binding:
+        raise LLMError(
+            "LLM credential is unbound; set its exact endpoint binding before network use")
+    try:
+        bound = normalize_llm_base_url(binding)
+    except LLMError as exc:
+        raise LLMError("LLM credential has an invalid endpoint binding") from exc
+    if bound != target:
+        raise LLMError(
+            "LLM credential is bound to a different endpoint; refusing to construct transport")
+    return key
 
 # Provider usage is untrusted JSON.  A signed 64-bit ceiling is far above any real context/call
 # count, remains exactly representable by the durable integer stores used by LoopLab, and prevents a
@@ -332,7 +457,9 @@ class OpenAICompatibleClient:
         return openai.OpenAI(
             base_url=self.base_url, api_key=self.api_key, max_retries=0,
             timeout=httpx.Timeout(read=self.timeout, connect=self.header_timeout, write=30.0, pool=10.0),
-            http_client=httpx.Client(trust_env=self._trust_env))
+            # Never forward an Authorization header across an HTTP redirect. Endpoint changes are
+            # explicit configuration changes and must pass the credential-binding guard again.
+            http_client=httpx.Client(trust_env=self._trust_env, follow_redirects=False))
 
     def _sdk_chat(self, payload: dict, use_stream: bool) -> dict:
         """The single transport seam: one openai-SDK chat call, returned in the legacy body shape
@@ -1382,6 +1509,9 @@ class LlmTarget(NamedTuple):
     base_url: str
     temperature: float | None
     api_key_env: str | None
+    # shared = guarded shared key; profile = api_key_env bound to this target; none = deliberate
+    # no-credential endpoint override. Default preserves four-argument construction compatibility.
+    credential_mode: str = "shared"
 
 
 # The role names `Settings.role_profiles` accepts. REGISTRY-GUARDED, like the project's other
@@ -1454,7 +1584,7 @@ def resolve_llm_target(settings, *, role: str | None = None) -> LlmTarget:
     profiles = getattr(settings, "llm_profiles", None) or {}
     if not profiles and role is None:
         return LlmTarget(settings.llm_model, settings.llm_base_url,
-                         getattr(settings, "llm_temperature", None), None)
+                         getattr(settings, "llm_temperature", None), None, "shared")
     stage_models = getattr(settings, "agent_stage_models", None) or {}
     stage_urls = getattr(settings, "agent_stage_base_urls", None) or {}
     profile = role_profile(settings, role)
@@ -1476,13 +1606,43 @@ def resolve_llm_target(settings, *, role: str | None = None) -> LlmTarget:
         temperature = profile.get("temperature")
     if temperature is None:
         temperature = getattr(settings, "llm_temperature", None)
+    profile_env = profile.get("api_key_env") or None
+    profile_key_travels = bool(profile_env and (
+        normalize_llm_base_url(base_url) == normalize_llm_base_url(profile_url)))
+    shared_endpoint = (
+        normalize_llm_base_url(base_url) == normalize_llm_base_url(settings.llm_base_url))
+    # Dropping a profile key because an override redirected the endpoint must not silently fall back
+    # to the shared key. A genuinely shared endpoint with no profile credential keeps the shared path.
+    credential_mode = ("profile" if profile_key_travels else
+                       "none" if profile_env or not shared_endpoint else "shared")
     return LlmTarget(
         model=(stage_models.get(role or "") or role_model or profile.get("model")
                or settings.llm_model),
         base_url=base_url,
         temperature=temperature,
-        api_key_env=(profile.get("api_key_env") or None) if base_url == profile_url else None,
+        api_key_env=profile_env if profile_key_travels else None,
+        credential_mode=credential_mode,
     )
+
+
+def apply_llm_model_override(settings, model: str):
+    """Apply a CLI default-model override without discarding an active profile connection.
+
+    A default profile owns model, endpoint and credential as one connection. Writing only
+    ``settings.llm_model`` leaves the profile model ahead of it in the resolver and makes a visible
+    ``--model`` flag a no-op. Updating a copied active profile keeps its endpoint/key binding while
+    making the requested model effective and durable in run snapshots.
+    """
+    profile_name = getattr(settings, "llm_profile", None)
+    profiles = getattr(settings, "llm_profiles", None) or {}
+    active = profiles.get(profile_name) if profile_name else None
+    if isinstance(active, dict):
+        updated_profiles = dict(profiles)
+        updated_profiles[profile_name] = {**active, "model": model}
+        settings.llm_profiles = updated_profiles
+    else:
+        settings.llm_model = model
+    return settings
 
 
 def client_kwargs_for(target: LlmTarget, *, role: str | None = None,
@@ -1501,13 +1661,30 @@ def client_kwargs_for(target: LlmTarget, *, role: str | None = None,
     kwargs: dict = {"model": target.model, "base_url": target.base_url,
                     "temperature": target.temperature, "timeout": timeout}
     if target.api_key_env:
+        if target.api_key_env in {"LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL"}:
+            raise LLMError(
+                f"profile api_key_env {target.api_key_env} aliases the shared credential; "
+                "use the shared target or a dedicated profile variable")
         value = os.environ.get(target.api_key_env)
         if not value:
             raise LLMError(
                 f"role {role!r} is bound to a connection profile whose api_key_env "
                 f"{target.api_key_env} is unset or empty (endpoint {target.base_url}). Set that "
                 "environment variable, or drop the binding.")
+        binding_env = f"{target.api_key_env}_BASE_URL"
+        binding = os.environ.get(binding_env)
+        if not binding:
+            raise LLMError(
+                f"role {role!r} profile credential {target.api_key_env} is missing its "
+                f"same-source endpoint binding {binding_env}")
+        if normalize_llm_base_url(binding) != normalize_llm_base_url(target.base_url):
+            raise LLMError(
+                f"role {role!r} profile credential {target.api_key_env} is bound to a different "
+                "endpoint")
         kwargs["api_key"] = value
+        kwargs["api_key_base_url"] = binding
+    elif target.credential_mode == "none":
+        kwargs["api_key"] = NO_CREDENTIAL
     return kwargs
 
 
@@ -1519,40 +1696,122 @@ def make_llm_client_for(settings, *, role: str | None = None, timeout: float | N
     re-export is a monkeypatch seam (`adapters.tasks`, `cli`, `serve.server`) keeps that seam alive;
     omitted, this module's own binding is used."""
     target = resolve_llm_target(settings, role=role)
+    configured_profile_env = role_profile(settings, role).get("api_key_env")
+    if target.credential_mode == "none" and configured_profile_env:
+        raise LLMError(
+            f"role {role!r} overrides the endpoint of profile credential "
+            f"{configured_profile_env}; bind that role to a matching profile")
     build = factory if factory is not None else make_llm_client
     return build(settings, **client_kwargs_for(target, role=role, timeout=timeout))
 
 
-def validate_bound_profiles(settings) -> None:
-    """Fail a run BEFORE its first paid call when a bound profile's credential is missing.
+def llm_credential_consumers(settings) -> tuple[bool, set[str | None]]:
+    """Return strict, required credential consumers for this engine configuration.
 
-    Only profiles some role actually points at are checked: a machine-wide profile map may well
-    describe providers this run never touches. A no-op when no profiles are configured, and skipped
-    entirely for the offline backend, which builds no clients at all."""
-    if getattr(settings, "backend", "toy") != "llm":
+    ``None`` is the default/profile target used by the baseline role client and run report. The
+    leading bool remains for callers that can describe a truly raw shared client; all in-tree engine
+    clients now resolve through a role/default target, so it is currently false. Optional clients
+    with a documented local fallback are listed separately below.
+    """
+    live_backend = getattr(settings, "backend", "toy") == "llm"
+    roles: set[str | None] = set()
+    if live_backend:
+        roles.update({None, "researcher"})
+        if getattr(settings, "unified_agent", False):
+            roles.update({"propose", "implement", "repair", "pilot"})
+            if getattr(settings, "strategist_backend", "off") in {"llm", "agent"}:
+                roles.add("strategy")
+        else:
+            roles.add("developer")
+            if getattr(settings, "strategist_backend", "off") in {"llm", "agent"}:
+                roles.add("strategist")
+    return False, roles
+
+
+def llm_optional_credential_consumers(settings) -> set[str | None]:
+    """Return targets whose credential failure deliberately falls back to a local implementation."""
+    roles: set[str | None] = set()
+    live_backend = getattr(settings, "backend", "toy") == "llm"
+    if (getattr(settings, "memora", False) and getattr(settings, "memora_llm", False)):
+        roles.add(None)
+    if (live_backend and (getattr(settings, "compressor_model", None)
+                          or role_profile(settings, "compressor").get("model"))):
+        roles.add("compressor")
+    if (getattr(settings, "embed_model", None)
+            or role_profile(settings, "embed").get("model")):
+        roles.add("embed")
+    # A live backend already requires the default target; Memora must not downgrade that requirement.
+    roles.difference_update(llm_credential_consumers(settings)[1])
+    return roles
+
+
+def validate_bound_profiles(settings) -> None:
+    """Fail before engine construction when an active credential target is unusable."""
+    shared_active, checked = llm_credential_consumers(settings)
+    if not shared_active and not checked:
         return
-    profiles = getattr(settings, "llm_profiles", None) or {}
-    if not profiles:
-        return
-    # RESOLVED, not read straight off `role_profiles`: the preflight must demand exactly the
-    # credentials the clients will actually ask for. Reading the bindings raw made it fail a run over
-    # a key no client resolves to (a role whose endpoint is overridden elsewhere drops the profile's
-    # key), and it would silently stop matching the moment resolution grew another rule.
-    checked = [None, *sorted(getattr(settings, "role_profiles", None) or {})]
-    missing = []
-    for role in checked:
-        env = resolve_llm_target(settings, role=role).api_key_env
-        if env and not os.environ.get(env):
-            missing.append(f"{role or 'the default profile'} needs {env}")
-    if missing:
-        raise LLMError("connection profile credentials are missing: " + "; ".join(dict.fromkeys(missing)))
+    failures = []
+    # External coding-agent processes are deliberately launched with every secret-looking
+    # environment variable removed. They may use their own local credential store, but a
+    # LoopLab-managed shared/profile key can never reach them. Reject that contradictory setup
+    # before the run starts instead of validating a credential the selected Developer then loses.
+    if getattr(settings, "developer_backend", "default") != "default":
+        external_roles = ({"implement", "repair"}
+                          if getattr(settings, "unified_agent", False)
+                          else {"developer"})
+        for role in sorted(external_roles):
+            target = resolve_llm_target(settings, role=role)
+            # A dedicated role-profile key is an explicit promise that LoopLab will supply that
+            # exact variable to this consumer, which the external-process isolation contract
+            # forbids. A shared key may legitimately serve the in-process validation fallback while
+            # the coding tool authenticates from its own store, so do not reject that combination.
+            if target.api_key_env:
+                failures.append(
+                    f"external developer backend {settings.developer_backend!r} cannot use the "
+                    f"LoopLab-managed credential selected for {role!r}; external coding tools are "
+                    "launched without inherited secrets. Remove api_key_env from that role's "
+                    "profile, then use a credentialless/local endpoint or configure the coding "
+                    "tool's own credential store.")
+    if shared_active:
+        try:
+            # Compatibility path for an explicitly declared raw shared client.
+            bound_api_key_for(settings, settings.llm_base_url)
+        except LLMError as exc:
+            failures.append(f"the shared target: {exc}")
+    for role in sorted(checked, key=lambda item: item or ""):
+        target = resolve_llm_target(settings, role=role)
+        env = target.api_key_env
+        if env:
+            try:
+                client_kwargs_for(target, role=role)
+            except LLMError as exc:
+                failures.append(str(exc))
+            continue
+        if target.credential_mode == "shared":
+            try:
+                bound_api_key_for(settings, target.base_url)
+            except LLMError as exc:
+                failures.append(f"{role or 'the default target'}: {exc}")
+        elif target.credential_mode == "none":
+            # `resolve_llm_target` deliberately drops api_key_env after an endpoint override. Keep
+            # the original profile intent in the preflight decision: otherwise a profile key bound
+            # to A plus a role/stage override to B passed whenever no shared key happened to exist,
+            # spawned the engine, and only then made an unauthenticated request to B.
+            configured_profile_env = role_profile(settings, role).get("api_key_env")
+            if configured_profile_env:
+                failures.append(
+                    f"{role or 'the default target'} overrides the endpoint of profile credential "
+                    f"{configured_profile_env}; bind that role to a matching profile")
+    if failures:
+        raise LLMError("LLM credential preflight failed: " + "; ".join(dict.fromkeys(failures)))
 
 
 def make_llm_client(settings, *, model: str | None = None,
                     base_url: str | None = None,
                     timeout: float | None = None,
                     temperature: float | None = None,
-                    api_key: str | None = None,
+                    api_key=None,
+                    api_key_base_url: str | None = None,
                     max_retries: int | None = None,
                     stream: bool | None = None,
                     disable_reasoning: bool = False,
@@ -1566,7 +1825,14 @@ def make_llm_client(settings, *, model: str | None = None,
     `api_key` overrides the shared `settings.llm_api_key` for ONE client — the per-role credential
     path (`make_llm_client_for`). Probe controls are additive and preserve every ordinary caller's
     historical defaults."""
-    key = api_key or (settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local")
+    endpoint = normalize_llm_base_url(base_url or settings.llm_base_url)
+    # A direct endpoint override is not permission to send the shared key there. Role/profile callers
+    # either pass an explicitly bound key or the NO_CREDENTIAL sentinel; protect ad-hoc callers too.
+    if (api_key is None and base_url is not None
+            and endpoint != normalize_llm_base_url(settings.llm_base_url)):
+        api_key = NO_CREDENTIAL
+    key = bound_api_key_for(
+        settings, endpoint, api_key=api_key, api_key_base_url=api_key_base_url)
     mdl = model or settings.llm_model
     reasoning = ({} if disable_reasoning else
                  reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
@@ -1583,7 +1849,7 @@ def make_llm_client(settings, *, model: str | None = None,
     if wall_timeout is not None:
         extra["wall_timeout"] = wall_timeout
     return OpenAICompatibleClient(
-        model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
+        model=mdl, base_url=endpoint, api_key=key,
         temperature=(temperature if temperature is not None else settings.llm_temperature),
         accountant=CostAccountant(),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding

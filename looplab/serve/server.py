@@ -596,11 +596,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         return response
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
     settings_store = SettingsStore(root)
-    settings_store.prime_env()   # apply stored secrets to this process's env (env/.env still wins)
+    settings_store.prime_env()   # compatibility hook; stored credential pairs stay process-local
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop).
     sweep_stale_lifecycle_locks(root)   # F22: GC orphaned per-run lifecycle lock files at startup
     resume_cancel = install_resume_reconcile_hooks(
-        app, root, before_spawn=settings_store.refresh_env_secrets)
+        app, root, launch_env=settings_store.launch_env_for_run)
     # Shutdown handlers run in registration order. Cancel/join resume timers + tail waiters first,
     # then reap every child that was registered before cancellation won the spawn gate.
     install_reap_hooks(app)

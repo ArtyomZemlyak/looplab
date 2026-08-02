@@ -64,7 +64,8 @@ from looplab.events.types import (
     EV_SPEC_APPROVED)
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.engine_proc import (
-    _claim_and_spawn_resume, _engine_alive, _engine_liveness, _resolve_task_file, _spawn_engine)
+    EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
+    _resolve_task_file, _spawn_engine)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.core.redact import redact_secrets
 
@@ -3571,8 +3572,20 @@ class RunCommandService:
             raise RuntimeError("run has no task.snapshot.json or usable ui_meta.json")
         # The CLI's resume path is stop-aware: it preserves a pending run_abort and appends EV_RESUME
         # only for ordinary paused/finished continuation.  Never append run_reopened here.
-        self.srv.settings.refresh_env_secrets()
-        return self.spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
+        popen_boundary_entered = False
+        try:
+            with self.srv.settings.launch_env_for_run(rd) as secret_env:
+                # This is the conservative process boundary: an injected spawner can fail either
+                # before or after the OS accepted Popen, and context release can fail after return.
+                popen_boundary_entered = True
+                return self.spawn_engine(
+                    ["resume", str(rd), "--task-file", str(task_file)],
+                    env=secret_env, run_dir=rd)
+        except BaseException as exc:
+            if popen_boundary_entered:
+                raise EngineSpawnOutcomeUnknown(
+                    "engine process creation may have succeeded") from exc
+            raise
 
     def _claim_restart_spawn(self, rd: Path) -> bool:
         """Claim and spawn the replacement owner for a folded restart, never the old owner.
@@ -3592,7 +3605,7 @@ class RunCommandService:
             wait_on_alive=False,
             spawn_engine=self.spawn_engine,
             liveness=self._engine_state,
-            before_spawn=self.srv.settings.refresh_env_secrets,
+            launch_env=lambda: self.srv.settings.launch_env_for_run(rd),
         )
 
     def _postcondition(
@@ -3836,10 +3849,16 @@ class RunCommandService:
                 try:
                     launched = self._claim_restart_spawn(rd)
                 except Exception as exc:  # noqa: BLE001 - durable intent remains startup-recoverable
+                    uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
                     self._terminal(path, record, "failed", error=_error(
-                        "spawn_failed", f"could not start the replacement run engine: {exc}",
-                        "fix the cause; startup recovery or this command's retry can serve the same intent",
-                        retryable=True))
+                        "resume_start_uncertain" if uncertain else "spawn_failed",
+                        ("replacement run engine creation crossed an uncertain process boundary"
+                         if uncertain else f"could not start the replacement run engine: {exc}"),
+                        ("observe the durable resume launch claim; startup recovery may finish the "
+                         "same intent, so do not submit another restart"
+                         if uncertain else
+                         "fix the cause; startup recovery or this command's retry can serve the same intent"),
+                        retryable=not uncertain))
                     return
                 if launched:
                     record["replacement_launch_claimed"] = True
@@ -3860,11 +3879,18 @@ class RunCommandService:
                     try:
                         pid = self._spawn(rd)
                     except Exception as exc:  # noqa: BLE001 - Popen/task failures become records
-                        self._clear_spawn_claim(rd, command_id)
+                        uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
+                        if not uncertain:
+                            self._clear_spawn_claim(rd, command_id)
                         self._terminal(path, record, "failed", error=_error(
-                            "spawn_failed", f"could not start the run engine: {exc}",
-                            "fix the cause, then POST this command id's /retry endpoint (same intent)",
-                            retryable=True))
+                            "engine_start_uncertain" if uncertain else "spawn_failed",
+                            ("run engine creation crossed an uncertain process boundary"
+                             if uncertain else f"could not start the run engine: {exc}"),
+                            ("observe the retained spawn claim; retry only after liveness or "
+                             "definitive PID death clears the duplicate-start hazard"
+                             if uncertain else
+                             "fix the cause, then POST this command id's /retry endpoint (same intent)"),
+                            retryable=not uncertain))
                         return
                     spawned_now = True
                     record["spawned_by_command"] = True
@@ -4012,12 +4038,18 @@ class RunCommandService:
                             try:
                                 launched = self._claim_restart_spawn(rd)
                             except Exception as exc:  # noqa: BLE001
+                                uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
                                 self._terminal(path, record, "failed", error=_error(
-                                    "spawn_failed",
-                                    f"could not start the replacement run engine: {exc}",
-                                    ("fix the cause; startup recovery or this command's retry can "
+                                    "resume_start_uncertain" if uncertain else "spawn_failed",
+                                    ("replacement run engine creation crossed an uncertain process "
+                                     "boundary" if uncertain else
+                                     f"could not start the replacement run engine: {exc}"),
+                                    ("observe the durable resume launch claim; startup recovery may "
+                                     "finish the same intent, so do not submit another restart"
+                                     if uncertain else
+                                     "fix the cause; startup recovery or this command's retry can "
                                      "serve the same intent"),
-                                    retryable=True))
+                                    retryable=not uncertain))
                                 return
                             if launched:
                                 record["replacement_launch_claimed"] = True
@@ -4041,11 +4073,18 @@ class RunCommandService:
                             try:
                                 pid = self._spawn(rd)
                             except Exception as exc:  # noqa: BLE001
-                                self._clear_spawn_claim(rd, command_id)
+                                uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
+                                if not uncertain:
+                                    self._clear_spawn_claim(rd, command_id)
                                 self._terminal(path, record, "failed", error=_error(
-                                    "spawn_failed", f"could not restart the run engine: {exc}",
-                                    "fix the cause, then POST this command id's /retry endpoint",
-                                    retryable=True))
+                                    "engine_start_uncertain" if uncertain else "spawn_failed",
+                                    ("run engine restart crossed an uncertain process boundary"
+                                     if uncertain else f"could not restart the run engine: {exc}"),
+                                    ("observe the retained spawn claim; retry only after liveness or "
+                                     "definitive PID death clears the duplicate-start hazard"
+                                     if uncertain else
+                                     "fix the cause, then POST this command id's /retry endpoint"),
+                                    retryable=not uncertain))
                                 return
                             record["spawned_by_command"] = True
                             record["engine_pid"] = pid

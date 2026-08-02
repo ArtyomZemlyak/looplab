@@ -31,9 +31,12 @@ def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
     """Ping the configured LLM endpoint to verify it's reachable and tool-calling works."""
     settings = Settings()
     if model is not None:
-        settings.llm_model = model
-    client = make_llm_client(settings)
-    typer.echo(f"endpoint={settings.llm_base_url} model={settings.llm_model}")
+        from looplab.core.llm import apply_llm_model_override
+        apply_llm_model_override(settings, model)
+    from looplab.core.llm import make_llm_client_for, resolve_llm_target
+    target = resolve_llm_target(settings)
+    client = make_llm_client_for(settings, factory=make_llm_client)
+    typer.echo(f"endpoint={target.base_url} model={target.model}")
     try:
         txt = client.complete_text([{"role": "user", "content": "Reply with one word: ready"}])
         typer.echo(f"text OK: {txt.strip()[:80]!r}")

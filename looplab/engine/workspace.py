@@ -218,6 +218,7 @@ class WorkspaceSeeder:
         Returns the number of tracked files copied, or -1 when a full copytree was used."""
         import shutil
         import subprocess
+        from looplab.runtime.sandbox import git_subprocess_env
         src = Path(src); dst = Path(dst)
         tracked = None
         if mode != "all":
@@ -227,7 +228,8 @@ class WorkspaceSeeder:
             # git returns a non-empty tracked set; otherwise (non-git / nothing tracked) fall back.
             try:
                 out = subprocess.run(["git", "-C", str(src), "ls-files", "-z"],
-                                     capture_output=True, text=True, timeout=120)
+                                     capture_output=True, text=True, timeout=120,
+                                     env=git_subprocess_env())
                 if out.returncode == 0:
                     files = [p for p in out.stdout.split("\0") if p]
                     if files:

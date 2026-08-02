@@ -25,9 +25,8 @@ def global_settings(store: SettingsStore) -> "Settings":
     authoring paths, run-less Genesis) also need the same resolved values. Keeping this separate from the
     per-run snapshot overlay prevents those surfaces from silently falling back to environment-only state.
     """
-    store.refresh_env_secrets()
     overrides = {key: value for key, value in store.load_ui_settings().items() if value is not None}
-    return Settings(**overrides)
+    return store.resolve_settings(overrides)
 
 
 def _client_tokens(client) -> Optional[dict]:
@@ -51,28 +50,24 @@ def _client_tokens(client) -> Optional[dict]:
 
 
 def llm_settings(store: SettingsStore, rd: Optional[Path] = None) -> "Settings":
-    """Settings for the UI-side LLM calls (chat/command/suggest/report). ONE source of truth per
-    run: when the run has a `config.snapshot.json`, its llm_model/base_url/temperature WIN — so
-    chat (and the action-router) speak with the SAME model the run was launched with, which keeps
-    the conversation reproducible and the trace honest even if the UI server's own env points at a
-    different model. Falls back to the UI's saved LLM overrides + env when there's no snapshot (or
-    for a run-less call). The api_key is NEVER read from the snapshot (it's masked there) — it
-    always comes from the server env."""
-    store.refresh_env_secrets()
-    # The agentic tool-loop limits ride along so the UI-side agents (boss/genesis/scope-report)
-    # honor the same per-run / global caps as the engine agents — unlimited by default.
-    _keys = ("llm_model", "llm_base_url", "llm_temperature",
-             "agent_max_turns", "agent_time_budget_s")
-    over = {k: v for k, v in store.load_ui_settings().items() if v is not None}
+    """Settings for UI-side LLM calls (chat/command/suggest/report).
+
+    A run's complete snapshot is the source of truth, including named profiles and role/stage
+    routing. Only the current runtime credential pair is rebound, because secrets are deliberately
+    absent from snapshots and rotation/revocation must remain immediate. A legacy run with no
+    snapshot falls back to current global UI settings; an existing malformed/newer snapshot fails
+    closed instead of routing run content to a different current provider.
+    """
     if rd is not None:
         try:
-            cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
-            for k in _keys:
-                if cfg.get(k) is not None:
-                    over[k] = cfg[k]
-        except (OSError, json.JSONDecodeError, ValueError):
-            pass   # no/!readable snapshot -> keep the UI/env defaults
-    return Settings(**over)
+            raw = (rd / "config.snapshot.json").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return global_settings(store)
+        cfg = json.loads(raw)
+        if not isinstance(cfg, dict):
+            raise ValueError("config snapshot must contain an object")
+        return store.resolve_snapshot_settings(cfg)
+    return global_settings(store)
 
 
 def _node_context(st, nid: Optional[int]) -> str:

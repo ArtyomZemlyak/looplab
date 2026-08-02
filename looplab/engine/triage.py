@@ -23,6 +23,7 @@ def _dir_fingerprint(path) -> str:
     (relpath, size, mtime_ns) — cheap and deterministic, catches edits/adds/removes without
     reading file contents. A missing path fingerprints as 'absent'."""
     import subprocess
+    from looplab.runtime.sandbox import git_subprocess_env
     p = Path(path)
     if not p.exists():
         return "absent"
@@ -31,7 +32,8 @@ def _dir_fingerprint(path) -> str:
     # with no diagnostic. A timeout just falls through to the stat-based fingerprint below.
     try:
         r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"], timeout=_GIT_TIMEOUT_S,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env=git_subprocess_env())
         if r.returncode == 0 and r.stdout.strip():
             return "git:" + r.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
@@ -54,12 +56,14 @@ def _shallow_fingerprint(path) -> str:
     never a recursive walk. Catches add/remove/replace at the root; deep edits to immutable
     inputs aren't the resume-drift concern (the editable repos are, and those are deep-hashed)."""
     import subprocess
+    from looplab.runtime.sandbox import git_subprocess_env
     p = Path(path)
     if not p.exists():
         return "absent"
     try:                                              # bounded — see _dir_fingerprint
         r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"], timeout=_GIT_TIMEOUT_S,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env=git_subprocess_env())
         if r.returncode == 0 and r.stdout.strip():
             return "git:" + r.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):

@@ -170,7 +170,7 @@ def _save_receipt(
 
 def _frozen_launch(
         srv, rd: Path, record: dict[str, Any], *, operation_id: str
-        ) -> tuple[list[str], dict[str, str]]:
+        ) -> tuple[list[str], dict[str, str], dict[str, Any]]:
     stage = rd / record["task_stage"]
     task_bytes = _read_bounded_regular(
         stage, _TASK_MAX_BYTES, code="reset_frozen_inputs_unavailable", label="task snapshot")
@@ -195,12 +195,13 @@ def _frozen_launch(
     for key in sorted(_ALLOWED_FIELDS - _SECRET_FIELDS):
         if effective.get(key) is None:
             spawn_args.extend(["--set", f"{key}=null"])
-    env = srv.settings.settings_env({
+    launch_settings = {
         key: value for key, value in effective.items()
         if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS and value is not None
-    })
+    }
+    env = srv.settings.ordinary_settings_env(launch_settings)
     env[RUN_RESET_OPERATION_ENV] = operation_id
-    return spawn_args, env
+    return spawn_args, env, launch_settings
 
 
 def _validate_reset_quiescence(srv, rd: Path, expected_generation: str) -> None:
@@ -522,6 +523,7 @@ def _reset_blocking(
 
     spawn_args: Optional[list[str]] = None
     spawn_env: Optional[dict[str, str]] = None
+    launch_settings: Optional[dict[str, Any]] = None
     with srv.commands.sequence(rd):
         try:
             receipt = load_reset_receipt(receipt_path)
@@ -783,7 +785,7 @@ def _reset_blocking(
                             validate_reset_binding(
                                 srv, rd, locked_marker, receipt_path, receipt)
 
-                        spawn_args, spawn_env = _frozen_launch(
+                        spawn_args, spawn_env, launch_settings = _frozen_launch(
                             srv, rd, receipt, operation_id=operation_id)
                         receipt = _archive_forward(
                             rd, receipt_path, receipt, operation_id=operation_id)
@@ -830,58 +832,94 @@ def _reset_blocking(
                         "message": "Replay's writer fence cannot be verified.",
                     }) from exc
 
-            # Release engine.lock before Popen; command + lifecycle ownership still serialize the
-            # exact preclaim -> process -> receipt boundary.
-            assert spawn_args is not None and spawn_env is not None and receipt is not None
-            try:
-                pid = spawn_engine(spawn_args, env=spawn_env, run_dir=rd)
-                srv.commands.record_external_spawn(rd, f"reset:{operation_id}", pid)
-                receipt = _save_receipt(receipt_path, {
-                    **receipt,
-                    "status": "accepted",
-                    "phase": "popen_returned",
-                    "updated_at": time.time(),
-                }, operation_id=operation_id)
-            except BaseException as exc:
-                uncertain = {
-                    **receipt,
-                    "status": "pending",
-                    "phase": "launch_uncertain",
-                    "updated_at": time.time(),
-                }
-                try:
-                    receipt = _save_receipt(
-                        receipt_path, uncertain, operation_id=operation_id)
-                except HTTPException:
-                    pass
-                raise HTTPException(503, {
-                    **receipt_result(receipt),
-                    "code": "reset_launch_uncertain",
-                    "message": "Replay crossed the process-launch boundary without a confirmed "
-                               "replacement generation.",
-                    "remediation": "Retry this exact operation; never submit a new Replay.",
-                }) from exc
+    # The durable receipt and exact PID-less claim above serialize duplicates after command,
+    # lifecycle, engine, config, event and span locks are all released. launch_env then snapshots the
+    # current credential pair and holds only its publication fence across Popen.
+    assert (spawn_args is not None and spawn_env is not None
+            and launch_settings is not None and receipt is not None)
+    popen_boundary_entered = False
+    try:
+        with srv.settings.launch_env(launch_settings) as current_env:
+            env = {**current_env, **spawn_env}
+            # From this assignment onward, failure cannot prove whether the OS accepted Popen.
+            popen_boundary_entered = True
+            pid = spawn_engine(spawn_args, env=env, run_dir=rd)
 
-            deadline = time.monotonic() + min(
-                3.0, max(0.1, float(getattr(srv.commands, "startup_timeout", 1.0))))
-            while True:
-                try:
-                    receipt, completed = complete_reset_if_observed(
-                        srv, rd, receipt_path, receipt)
-                except (ResetReceiptError, RunResetStorageError) as exc:
-                    raise HTTPException(503, {
-                        "code": "reset_outcome_unknown",
-                        "operation_id": operation_id,
-                        "message": "Replay replacement evidence could not be committed.",
-                    }) from exc
-                if completed:
-                    return receipt_result(receipt)
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.05)
-            _pending(
-                receipt,
-                "Replay launch was accepted, but its replacement generation is not yet visible.")
+        # record_external_spawn requires the sequencer, but the process call itself never holds it.
+        with srv.commands.sequence(rd):
+            srv.commands.record_external_spawn(rd, f"reset:{operation_id}", pid)
+            receipt = _save_receipt(receipt_path, {
+                **receipt,
+                "status": "accepted",
+                "phase": "popen_returned",
+                "updated_at": time.time(),
+            }, operation_id=operation_id)
+    except BaseException as exc:
+        if not popen_boundary_entered:
+            # Snapshot/validation failed before Popen. Restore the exact retryable phase and retire
+            # the PID-less claim under the sequencer; no paid child effect can have occurred.
+            try:
+                with srv.commands.sequence(rd):
+                    receipt = _save_receipt(receipt_path, {
+                        **receipt,
+                        "status": "pending",
+                        "phase": "archived",
+                        "updated_at": time.time(),
+                    }, operation_id=operation_id)
+                    srv.commands.cancel_external_spawn(rd, f"reset:{operation_id}")
+            except Exception:  # noqa: BLE001 - the retained claim/receipt remains fail-closed
+                pass
+            unavailable = isinstance(exc, EventStoreLockError)
+            raise HTTPException(503 if unavailable else 409, {
+                **receipt_result(receipt),
+                "code": ("reset_launch_fence_unavailable" if unavailable
+                         else "reset_prelaunch_credentials_changed"),
+                "message": (
+                    "Replay archived the prior generation, but the current launch credential "
+                    "could not be authorized before process start."),
+                "remediation": "Fix Settings if needed, then retry this exact Replay operation.",
+            }) from exc
+
+        uncertain = {
+            **receipt,
+            "status": "pending",
+            "phase": "launch_uncertain",
+            "updated_at": time.time(),
+        }
+        try:
+            with srv.commands.sequence(rd):
+                receipt = _save_receipt(
+                    receipt_path, uncertain, operation_id=operation_id)
+        except Exception:  # noqa: BLE001 - preserve launch uncertainty and the spawn claim
+            pass
+        raise HTTPException(503, {
+            **receipt_result(receipt),
+            "code": "reset_launch_uncertain",
+            "message": "Replay crossed the process-launch boundary without a confirmed "
+                       "replacement generation.",
+            "remediation": "Retry this exact operation; never submit a new Replay.",
+        }) from exc
+
+    deadline = time.monotonic() + min(
+        3.0, max(0.1, float(getattr(srv.commands, "startup_timeout", 1.0))))
+    while True:
+        try:
+            receipt, completed = complete_reset_if_observed(
+                srv, rd, receipt_path, receipt)
+        except (ResetReceiptError, RunResetStorageError) as exc:
+            raise HTTPException(503, {
+                "code": "reset_outcome_unknown",
+                "operation_id": operation_id,
+                "message": "Replay replacement evidence could not be committed.",
+            }) from exc
+        if completed:
+            return receipt_result(receipt)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    _pending(
+        receipt,
+        "Replay launch was accepted, but its replacement generation is not yet visible.")
 
 
 async def durable_reset_run(

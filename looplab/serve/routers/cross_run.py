@@ -775,8 +775,9 @@ def build_router(srv) -> APIRouter:
                 return client
         except Exception:  # noqa: BLE001
             pass
-        from looplab.core.llm import make_llm_client
-        return make_llm_client(srv.llm_settings())
+        from looplab.core.llm import make_llm_client_for
+        settings = srv.llm_settings()
+        return make_llm_client_for(settings, factory=srv.make_llm_client)
 
     def _steward_response(record: dict, portfolio_id: str) -> dict:
         invocation = _public_cross_run_row({key: record.get(key) for key in
