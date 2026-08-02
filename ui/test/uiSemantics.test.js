@@ -80,8 +80,13 @@ test('run view modes are truthful toggles and merge has one explicit confirmatio
   assert.match(runView, /aria-pressed=\{view === 'dag'\}/)
   assert.match(runView, /aria-pressed=\{view === 'report'\}/)
   assert.match(runView, /aria-pressed=\{panel === 'overview'\} aria-expanded=\{panel === 'overview'\}/)
-  assert.match(runView, /onOpenPanel=\{p => \{ if \(panelAllowed\(p\)\) setPanel\(p\) \}\}[\s\S]*?canOpenPanel=\{panelAllowed\}/,
-    'Report caveat links must expose and recheck the same owner/history/review panel policy')
+  // The handler grew a return-focus capture, so the caveat link can hand focus back when the panel
+  // closes. The policy check it guards is unchanged and still precedes every state write — which is
+  // the property this assertion exists for, and which the old one-line spelling stopped seeing.
+  assert.match(runView, /onOpenPanel=\{\(p, returnFocus\) => \{\s*if \(!panelAllowed\(p\)\) return;?\s*panelReturnFocusRef\.current = returnFocus \|\| null;?\s*setPanel\(p\)/,
+    'Report caveat links must recheck the owner/history/review panel policy before any state write')
+  assert.match(runView, /canOpenPanel=\{panelAllowed\}/,
+    'and must EXPOSE the same policy, so a disallowed caveat link is not rendered as actionable')
   assert.match(runView, /<form className="merge-destination-bar"/)
   assert.match(runView, /<label htmlFor="merge-destination-select">/)
   assert.match(runView, /<select ref=\{mergeSelectRef\} id="merge-destination-select"[\s\S]*?autoFocus>/)
@@ -183,7 +188,10 @@ test('compact Assistant blocks background pointers and traps focus in the side d
   assert.match(assistant, /ASSISTANT_OVERLAY_MAX_PX = 1439/)
   assert.match(assistant, /useMediaQuery\(`\(max-width: \$\{ASSISTANT_OVERLAY_MAX_PX\}px\)`\)/)
   assert.match(assistant, /assistantMaxWidth = compact => Math\.max\(320, window\.innerWidth - \(compact \? 120 : 880\)\)/)
-  assert.match(assistant, /useDialogFocus\(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden\)/)
+  // The call gained an explicit layer priority, which is what keeps the Assistant drawer from
+  // trapping focus underneath a modal opened above it — exactly the property this test is named
+  // for. A regex ending at the third argument could not see it.
+  assert.match(assistant, /useDialogFocus\(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden,\s*\{ priority: DIALOG_PRIORITY\.ASSISTANT_SIDE \}\)/)
   assert.match(assistant, /className="asst-side-backdrop" aria-hidden="true"[\s\S]*?onPointerDown=\{collapseToBar\}/)
   assert.match(assistant, /role=\{compactAssistant \? 'dialog' : undefined\} aria-modal=\{compactAssistant \? 'true' : undefined\}/)
   assert.match(assistant, /\{!compactAssistant && <div className="asst-resize" role="separator"/,
@@ -193,8 +201,22 @@ test('compact Assistant blocks background pointers and traps focus in the side d
   assert.match(assistant, /if \(next === 'side'\) requestAnimationFrame\(\(\) => inputRef\.current\?\.focus/)
   assert.match(css, /\.asst-side-backdrop \{ position: fixed; inset: 0; z-index: 190;/)
   assert.match(css, /\.asst-side-panel \{[^}]*z-index: 191;/)
-  assert.match(css, /\.overlay \{[^}]*z-index: 190;/,
-    'modal layers must block the fixed Attention trigger below z-index 180')
+  // The shared modal layer moved to 205 so it covers the docked and full Assistant (191/200), which
+  // is stated in the rule's own comment. Assert the ORDERING rather than one magic number, since
+  // that is what the stacking has to preserve, and pin the number too so a change is deliberate.
+  assert.match(css, /\.overlay \{[\s\S]*?z-index: 205;/,
+    'the shared modal layer must sit above the docked/full Assistant, not below it')
+  const zIndex = (selector, pattern) => {
+    const match = css.match(pattern)
+    assert.ok(match, `${selector} no longer declares a z-index this test can read`)
+    return Number(match[1])
+  }
+  const overlay = zIndex('.overlay', /\.overlay \{[\s\S]*?z-index: (\d+);/)
+  const sidePanel = zIndex('.asst-side-panel', /\.asst-side-panel \{[^}]*z-index: (\d+);/)
+  const backdrop = zIndex('.asst-side-backdrop', /\.asst-side-backdrop \{ position: fixed; inset: 0; z-index: (\d+);/)
+  assert.ok(backdrop < sidePanel && sidePanel < overlay,
+    `stacking inverted: backdrop ${backdrop}, side panel ${sidePanel}, modal overlay ${overlay} — a `
+    + 'modal must cover the Assistant drawer, and the drawer must cover its own backdrop')
   assert.match(css, /@media \(max-width: 1439px\)[\s\S]*?body\.asst-side-open \.app-shell-main \{ margin-right: 0; \}/)
 })
 
@@ -271,7 +293,10 @@ test('Config restart is one server-owned durable command and config load failure
   assert.match(restart, /await CONTROL\.restart\(submittedRunId\)/)
   assert.doesNotMatch(restart, /CONTROL\.pause|CONTROL\.resume|getRunCommand|setTimeout/)
   assert.doesNotMatch(panels, /restartPending|setRestartPending/)
-  assert.match(panels, /setLoadError\('Run settings could not be loaded\.[\s\S]*?\[runId, expectedGeneration, loadNonce\]/,
+  // The dep list gained `draftScope`, so a retained draft belonging to a different scope cannot be
+  // re-applied over a fresh load. Pinning the exact old array made the assertion fail on the
+  // addition rather than on anything being missing.
+  assert.match(panels, /setLoadError\('Run settings could not be loaded\.[\s\S]*?\[runId, expectedGeneration, loadNonce, draftScope\]/,
     'a retry must re-run the load effect, and the load must also re-run when the generation moves')
   assert.match(panels, /loadError[\s\S]*?role="alert"[\s\S]*?setLoadNonce\(value => value \+ 1\)/)
 })
