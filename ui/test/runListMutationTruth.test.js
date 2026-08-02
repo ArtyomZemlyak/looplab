@@ -52,7 +52,8 @@ test('prompt dialogs retain their draft, focus layer, and controls until success
   assert.match(modal, /disabled=\{busy\} onClick=\{onClose\}/)
   assert.match(prompt, /await mutate\(\(\) => onSubmit\(v\.trim\(\)\), onReconcile\)[\s\S]*onClose\(\)/,
     'close happens only after the authoritative request resolves')
-  assert.match(prompt, /readOnly=\{busy\}/)
+  assert.match(prompt, /readOnly=\{busy \|\| blocked\}/,
+    'a blocked row must not accept a new value either, not only a busy one')
   assert.match(prompt, /disabled=\{!ok \|\| busy\}/)
   assert.match(prompt, /role="alert"/)
   assert.doesNotMatch(submitProject.slice(0, submitProject.indexOf('await createProject')), /setProjModal|restoreProjectModalFocus/)

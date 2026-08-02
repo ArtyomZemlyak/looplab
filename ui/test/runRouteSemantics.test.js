@@ -27,7 +27,7 @@ test('RunView URL state is authoritative and stale generations lock every mutati
   assert.match(runView, /const viewSeq = routeState\.sequence/)
   assert.match(runView, /const selectedId = routeState\.nodeId/)
   assert.match(runView, /useLayoutEffect\(\(\) => \{[\s\S]*?setRunAccess\(runId,/)
-  assert.match(runView, /mode: reviewMode \? 'review' : routeFenceBlocked \? 'stale-link'/)
+  assert.match(runView, /mode: reviewMode \? 'review' : startOverMutationBlocked \? 'start-over'\n\s*: routeFenceBlocked \? 'stale-link'/)
   assert.match(runView, /enabled: !reviewMode && !routeFenceBlocked/)
   assert.match(runView, /timelineFilter: value \}\), \{ mode: 'replace' \}\)/)
   assert.match(runView, /kindFilters=\{routeState\.timelineKinds\}/)
@@ -131,15 +131,17 @@ test('historical Inspector and Report detail reads carry the exact run generatio
   const [runView, inspector, report] = await Promise.all([
     source('RunView.jsx'), source('Inspector.jsx'), source('Report.jsx'),
   ])
-  assert.match(runView, /expectedGeneration=\{routeState\.generation\}/g)
-  assert.match(inspector, /query\.push\(`expected_generation=\$\{expectedGeneration\}`\)/)
-  assert.match(report, /params\.set\('expected_generation', expectedGeneration\)/)
+  assert.match(runView, /expectedGeneration=\{generation\}/g,
+    'every historical detail read must carry the run generation the route resolved')
+  assert.match(inspector, /query\.push\(`expected_generation=\$\{encodeURIComponent\(expectedGeneration\)\}`\)/)
+  assert.match(report, /params\.set\('expected_generation', solutionGeneration\)/)
 })
 
 test('minted review links carry only scope-safe canonical context after the bearer', async () => {
   const [panels, api] = await Promise.all([source('CollabPanel.jsx'), source('api.js')])
   assert.match(panels, /reviewRouteStateForScope\(\{ \.\.\.\(reviewRouteState \|\| \{\}\),/)
-  assert.match(panels, /generation: result\.generation/)
+  assert.match(panels, /generation: expectedGeneration \}, \{ evidence: includeEvidence \}\)/,
+    'a minted link must carry the generation the OWNER validated, not one echoed back by the mint')
   assert.match(panels, /hashWithRunRouteState\(target\.hash, scopedState,/)
   assert.match(api, /splitRouteHash\(loc\.hash \|\| ''\)\.path/)
 })

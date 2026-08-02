@@ -33,12 +33,12 @@ test('destructive and drag/drop writes stay authoritative, bounded, and recovera
     'an ambiguous write must never be replayed automatically')
 
   assert.match(projectDelete, /confirm\([\s\S]*await mutateList\('delete-project'/)
-  assert.match(projectDelete, /await deleteProject\(id\); await refresh\(\)/)
+  assert.match(projectDelete, /mutateList\('delete-project', `Deleting project [\s\S]*?\(\) => deleteProject\(id\), refresh\)/)
   assert.match(projectDelete, /if \(removed && sel === id\) setSel\(ALL\)/,
     'the selected project changes only after authoritative deletion')
-  assert.match(drop, /if \(!runId \|\| listBusy\) return/)
+  assert.match(drop, /if \(!run \|\| listBusy\) return/)
   assert.match(menuMove, /return mutateList\('move-run'/)
-  assert.match(menuMove, /await assignRun\([\s\S]*await refresh\(\)/)
+  assert.match(menuMove, /mutateList\('move-run'[\s\S]*?\(\) => assignRun\(/)
   assert.match(drop, /setDragRun\(null\)[\s\S]*await moveRun\(runId, project_id\)/,
     'menu and drag/drop must share one authoritative move contract')
   assert.match(runDelete, /confirm\([\s\S]*setRunMenu\(null\)[\s\S]*await mutateList\('delete-run'/)
