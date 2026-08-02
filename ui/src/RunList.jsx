@@ -1013,8 +1013,19 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
     () => indexProjects(proj.projects), [proj.projects])
   const projName = useMemo(() => Object.fromEntries(proj.projects.map(p => [p.id, p.name])), [proj.projects])
 
-  const scoped = useMemo(() => scopeRuns(runs || [], sel, proj.projects),
-    [runs, sel, proj.projects])
+  // A restored project id is only trustworthy once it exists in an authoritative or last-good
+  // project tree. Applying it to the empty initial placeholder creates a misleading direct-only
+  // scope (and often a false "No runs here"). Keep the saved intent in `sel`, withhold actionable
+  // results until it can be verified, and let the operator explicitly choose All runs if needed.
+  const customProjectSelected = sel !== ALL && sel !== UNASSIGNED
+  const projectScopeVerified = !customProjectSelected
+    || (['ready', 'stale'].includes(projectsState) && !!projectById[sel])
+  const projectScopeBlocked = customProjectSelected && !projectScopeVerified
+  const projectScopeMissing = projectScopeBlocked && projectsState === 'ready'
+  const projectScopePending = projectScopeBlocked && !projectScopeMissing
+
+  const scoped = useMemo(() => projectScopeBlocked ? [] : scopeRuns(runs || [], sel, proj.projects),
+    [projectScopeBlocked, runs, sel, proj.projects])
   const projectCounts = useMemo(() => projectRunCounts(runs || [], proj.projects),
     [runs, proj.projects])
   const count = id => projectCounts.get(id) || 0
@@ -1026,10 +1037,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
 
   // List and Map consume this exact same derived result set.  Map no longer performs an independent
   // fetch, so switching representation cannot silently reset scope or show stale assignments.
-  const filtered = useMemo(() => filterRuns(runs || [], {
+  const filtered = useMemo(() => projectScopeBlocked ? [] : filterRuns(runs || [], {
     project: sel, projects: proj.projects, query, task: taskFilter,
     supertask: stFilter, status: statusFilter,
-  }), [runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
+  }), [projectScopeBlocked, runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
   const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
   const displayedRuns = visible.slice(0, listLimit)
   const displayedRunOrder = displayedRuns.map(run => run.run_id).join('\u001f')
@@ -1073,7 +1084,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   }, [runs, view, compareRuns.length])
   useEffect(() => {
     if (projectsState === 'ready' && sel !== ALL && sel !== UNASSIGNED
-        && !proj.projects.some(project => project.id === sel)) setSel(ALL)
+        && !proj.projects.some(project => project.id === sel)) {
+      setViewMessage('Saved project no longer exists. Switched to All runs.')
+      setSel(ALL)
+    }
     if (superState === 'ready' && stFilter !== ALL && stFilter !== UNASSIGNED
         && !superdata.supertasks.some(task => task.id === stFilter)) setStFilter(ALL)
   }, [projectsState, proj.projects, sel, superState, superdata.supertasks, stFilter])
@@ -1261,9 +1275,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
   const scope = useMemo(() => {
     if (stFilter !== ALL && stFilter !== UNASSIGNED) return { type: 'supertask', id: stFilter, label: (stName[stFilter] || stFilter) }
     if (taskFilter !== ALL) return { type: 'task', id: taskFilter, label: 'task ' + taskFilter }
+    if (projectScopeBlocked) return null
     if (sel !== ALL && sel !== UNASSIGNED) return { type: 'project', id: sel, label: (projName[sel] || sel) }
     return null
-  }, [stFilter, taskFilter, sel, stName, projName])
+  }, [projectScopeBlocked, stFilter, taskFilter, sel, stName, projName])
 
   const toggle = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   const refresh = () => Promise.all([loadProjects(), loadRuns()])
@@ -1546,8 +1561,9 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           <button aria-pressed={view === 'list'} className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" /> List</button>
           <button aria-pressed={view === 'map'} className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
           <button aria-pressed={view === 'compare'} className={view === 'compare' ? 'on' : ''}
-            disabled={compareRuns.length < 2}
-            title={compareRuns.length < 2 ? 'Select at least two runs from List' : 'Compare selected runs'}
+            disabled={projectScopeBlocked || compareRuns.length < 2}
+            title={projectScopeBlocked ? 'Restore the saved project or use All runs first'
+              : compareRuns.length < 2 ? 'Select at least two runs from List' : 'Compare selected runs'}
             onClick={() => setView('compare')}>Compare · {compareRuns.length}</button>
         </div>
         {/* Slash remains a power-user shortcut; New run above is the first-use primary action. */}
@@ -1644,6 +1660,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
             <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(ALL)}>All runs</button>
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
               <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(p.id)}>{p.name}</button></React.Fragment>)}
+            {projectScopePending && <><span className="sep">/</span>
+              <span className="crumb" title={`Saved project ${sel}`}>Saved project unavailable</span></>}
+            {projectScopeMissing && <><span className="sep">/</span>
+              <span className="crumb" title={`Saved project ${sel}`}>Saved project removed</span></>}
             {sel === UNASSIGNED && <><span className="sep">/</span><span className="crumb">Unassigned</span></>}
             <span style={{ flex: 1 }} />
             {scope && <div className="view-toggle crumb-report">
@@ -1720,7 +1740,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
               </button>
             </div>
           </div>}
-          {compareIds.size > 0 && view !== 'compare' && <div className="compare-selection" role="status">
+          {!projectScopeBlocked && compareIds.size > 0 && view !== 'compare' && <div className="compare-selection" role="status">
             <b>{compareRuns.length}/8 selected</b>
             <span className="muted">{compareRuns.length < 2
               ? 'Select one more run to compare.' : 'Ready to compare run details.'}</span>
@@ -1731,8 +1751,18 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
           <ResourceNotice state={runsState} label="Runs" retry={loadRuns} />
           <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
           {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
+          {projectScopePending && <div className="notice resource-warning" role="status">
+            <span><b>Saved project cannot be verified yet.</b> Runs stay hidden to preserve this scope.</span>
+            <button type="button" className="btn sm" disabled={navigationBusy}
+              onClick={() => chooseProject(ALL)}>Use All runs</button>
+          </div>}
+          {projectScopeMissing && <div className="notice resource-warning" role="alert">
+            <span><b>Saved project no longer exists.</b> Switching to All runs.</span>
+          </div>}
           {(!compactNav || !projectsOpen) && mutationNotice}
-          {runsState === 'ready' && runs && !scoped.length && <div className="notice resource-empty">No runs here.
+          {!projectScopeBlocked && ['ready', 'stale'].includes(runsState) && runs && !scoped.length
+            && <div className="notice resource-empty">
+            {runsState === 'stale' ? 'No runs in the last loaded data here.' : 'No runs here.'}
             {sel === ALL
               ? <button className="btn sm primary" disabled={navigationBusy}
                   onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
@@ -1743,7 +1773,13 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
             {runsState === 'stale' ? 'No runs in the last loaded data match the filters.' : 'No runs match the filters.'}
             {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy} onClick={clearFilters}>Clear filters</button>}
           </div>}
-          {view === 'map' && ['ready', 'stale'].includes(projectsState) && runs && mapRuns.length > 0 && <div className="map-stage">
+          {view === 'map' && (!['ready', 'stale'].includes(projectsState) || projectScopeBlocked) && runs
+            && <div className="notice resource-warning" role="status">
+              <span>Map needs the project list before it can place runs reliably.</span>
+              <button type="button" className="btn sm" onClick={() => setView('list')}>Show List</button>
+            </div>}
+          {view === 'map' && ['ready', 'stale'].includes(projectsState) && !projectScopeBlocked
+            && runs && mapRuns.length > 0 && <div className="map-stage">
             <LazyBoundary label="run map" resetKey={`map:${sel}`}>
               <MapView onOpen={id => { if (!navigationBusy) openRun(id) }} runs={mapRuns} projects={proj.projects}
                 collapsed={mapCollapsed} onToggle={toggleMapCluster}
@@ -1756,7 +1792,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas,
                 scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
             </LazyBoundary>
           </div>}
-          {view === 'compare' && compareRuns.length > 1 && <LazyBoundary label="run comparison"
+          {view === 'compare' && !projectScopeBlocked && compareRuns.length > 1 && <LazyBoundary label="run comparison"
             resetKey={compareRuns.map(run => run.run_id).join(':')}>
             <RunCompare runs={compareRuns} columns={compareColumns}
               names={{ projects: projName, supertasks: stName }}
