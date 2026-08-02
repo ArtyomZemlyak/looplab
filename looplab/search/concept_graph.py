@@ -1005,23 +1005,11 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
             "direction": direction, "rows": rows, "rollup": rollup}
 
 
-def _normalized_rename_map(raw) -> dict[str, str]:
-    """Normalize both sides before a read projection follows consolidation links."""
-    return normalized_concept_renames(raw)
-
-
 def _canonical_with_rename(raw, rename: dict) -> str:
     """Normalize `raw` and resolve a bounded, cycle-guarded consolidation rename chain (the same shape the
     /concepts frame's canonical_concept uses). "" for a malformed id, a cycle, or an over-long chain."""
     canonical, _problem = resolve_concept(raw, rename)
     return canonical or ""
-
-
-def _canon_set(node_id, node_concepts: dict, rename: dict) -> set:
-    ids = node_concepts.get(node_id)
-    if not isinstance(ids, (list, tuple)):
-        return set()
-    return {c for c in (_canonical_with_rename(x, rename) for x in ids) if c}
 
 
 def node_concept_delta(state, node_id) -> dict:

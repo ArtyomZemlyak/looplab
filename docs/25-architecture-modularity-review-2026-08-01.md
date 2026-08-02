@@ -301,13 +301,13 @@ itself. Full evidence in the referenced findings.
 | `CaseLibrary` (VectorStore-backed episodic store, ~105 lines) | `engine/memory.py:1496` | tests-only; `JsonlCaseLibrary` is the real store | EM-11 |
 | `apply_concept_curation` (~60 lines, bypasses CAS discipline) | `engine/concept_steward.py:355` | tests-only; contradicts the module's own invariant | EM-14 |
 | `_acquire_gpu`/`_release_gpu` single-GPU wrappers | `engine/resources.py:440` | tests-only; replacement already planned in docs/23 | EC-14 |
-| `locked_claim_evidence_snapshot` (~60-line lock context manager) | `engine/claims.py:1577` | zero references | XP-08 |
-| `claim_governance_snapshot` | `engine/governance_health.py:557` | zero references | XP-08 |
-| `build_digest` | `serve/scope_report.py:601` | zero references | XP-08 |
-| `_scope_action_lease_marker_exists` | `serve/routers/reports.py:418` | zero references | SR-13, XP-08 |
-| `_normalized_rename_map`, `_canon_set` | `search/concept_graph.py:1008,1020` | zero references (refactor leftovers) | XP-08 |
-| `_explored_concepts` | `search/card_selection.py:637` | zero references | SE-13, XP-08 |
-| `METRIC_READERS` registry (docstring falsely claims it is shared) | `adapters/tasks.py:99` | zero consumers; three parallel kind-enumerations live instead | RA-04 |
+| `locked_claim_evidence_snapshot` (~60-line lock context manager) | `engine/claims.py` | **DELETED** (2026-08-02) | XP-08 |
+| `claim_governance_snapshot` | `engine/governance_health.py` | **DELETED** (2026-08-02) | XP-08 |
+| `build_digest` | `serve/scope_report.py` | **DELETED** (2026-08-02) | XP-08 |
+| `_scope_action_lease_marker_exists` | `serve/routers/reports.py` | **DELETED** (2026-08-02) | SR-13, XP-08 |
+| `_normalized_rename_map`, `_canon_set` | `search/concept_graph.py` | **DELETED** (2026-08-02) | XP-08 |
+| `_explored_concepts` | `search/card_selection.py` | **DELETED** (2026-08-02) | SE-13, XP-08 |
+| `METRIC_READERS` registry (docstring falsely claimed it was shared) | `adapters/tasks.py` | **DELETED** (2026-08-02) | RA-04 |
 | `perm_modes.decide()` (kind-only compat helper) | `tools/perm_modes.py:232` | tests-only; nothing left to be compatible with | TO-10 |
 | `VectorStore.delete`/`rebuild` protocol methods | `tools/vectorstore.py:246-256` | rebuild: zero callers; delete: tests-only (documented future seam) | TO-10 |
 | `RunTools.parent` stored-but-never-read attribute | `tools/run_tools.py:66` | write-only | TO-10 |

@@ -1574,56 +1574,6 @@ def load_claim_lessons(memory_dir) -> list[dict]:
     return _load_claim_source_path(Path(memory_dir) / "lessons.jsonl", research=False)
 
 
-def locked_claim_evidence_snapshot(memory_dir, *, structured: bool = True):
-    """Context manager yielding one cross-file evidence snapshot locked until its caller commits.
-
-    This is intentionally separate from ordinary read projections: governance needs lessons.jsonl and
-    research_claims.jsonl to stay unchanged from evidence-digest validation through decision append.
-    Lock order matches ``project_governed_sources``: claim policy, then evidence paths.
-    """
-    from contextlib import ExitStack, contextmanager
-    from pathlib import Path
-
-    from looplab.engine.governance_health import _empty_governance_snapshot, _read_governance_locked
-    from looplab.events.eventstore import _interprocess_lock
-
-    @contextmanager
-    def _snapshot():
-        base = Path(memory_dir)
-        if observed_path_missing(base):
-            governance = _empty_governance_snapshot()
-            lessons = load_claim_lessons(base)
-            research = load_research_claims(base)
-            assessments = claim_assessments(
-                lessons, research_claims=research,
-                decisions=governance["decisions"], structured=structured)
-            assessments.lessons_snapshot = lessons
-            assessments.research_claims_snapshot = research
-            assessments.decisions_snapshot = governance["decisions"]
-            yield assessments
-            return
-        paths = sorted(
-            (base / "lessons.jsonl", base / "research_claims.jsonl"), key=lambda p: str(p))
-        claim_path = base / "claim_decisions.jsonl"
-        with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
-            with ExitStack() as stack:
-                for source_path in paths:
-                    stack.enter_context(_interprocess_lock(
-                        Path(str(source_path) + ".lock"), required=True))
-                governance = _read_governance_locked(base, include_concepts=False)
-                lessons = load_claim_lessons(base)
-                research = load_research_claims(base)
-                assessments = claim_assessments(
-                    lessons, research_claims=research,
-                    decisions=governance["decisions"], structured=structured)
-                assessments.lessons_snapshot = lessons
-                assessments.research_claims_snapshot = research
-                assessments.decisions_snapshot = governance["decisions"]
-                yield assessments
-
-    return _snapshot()
-
-
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
                       scope_task: str = "", fuzzy: bool = False,
                       structured: bool = False) -> list[dict]:

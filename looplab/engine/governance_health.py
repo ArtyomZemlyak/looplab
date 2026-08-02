@@ -554,19 +554,6 @@ def read_curation_rows(
     return normalized
 
 
-def claim_governance_snapshot(memory_dir) -> dict:
-    """Freeze the claim-decision projection and its CAS revision under the writer lock."""
-    return project_governed_sources(
-        memory_dir,
-        lambda governance: {
-            "decisions": governance["decisions"],
-            "revision": governance["claim_revision"],
-            "status": "complete",
-            "complete": True,
-        },
-    )
-
-
 def cross_run_governance_snapshot(memory_dir) -> dict:
     """Freeze alias, split and claim policy plus matching revisions at one lock point.
 

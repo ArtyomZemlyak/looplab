@@ -416,10 +416,6 @@ def _read_scope_lease_marker(
     return marker
 
 
-def _scope_action_lease_marker_exists(reports_dir: Path, action_id: str) -> bool:
-    return _read_scope_action_lease_marker(reports_dir, action_id) is not None
-
-
 def _open_scope_action_lease(path: Path, *, create: bool) -> int:
     flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     if create:

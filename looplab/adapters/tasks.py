@@ -96,11 +96,6 @@ def kinds() -> list[str]:
     return list(_KINDS)
 
 
-# The metric READERS (how to read a printed metric). "auto" = the agent writes the reader adapter
-# (the old `onboard` mode). Shared by normalize + the EvalSpec.metric.reader validator.
-METRIC_READERS = {"stdout_json", "stdout_regex", "file_json", "file_regex", "host_score", "adapter", "auto"}
-
-
 def normalize_task(data: dict) -> dict:
     """Front-end for the COMPOSABLE task schema — the single place old and new spellings converge.
 

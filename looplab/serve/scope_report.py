@@ -598,13 +598,6 @@ def _build_digest_projection(scope_label: str, briefs: list[dict],
     return digest, included, receipt
 
 
-def build_digest(scope_label: str, briefs: list) -> str:
-    """Return valid bounded JSON evidence; report prose is data, never prompt instructions."""
-    projected, coverage = _project_briefs(briefs)
-    digest, _included, _receipt = _build_digest_projection(scope_label, projected, coverage)
-    return digest
-
-
 def _deterministic(scope_label: str, briefs: list, coverage: dict | None = None) -> dict:
     """Offline / no-model fallback: an honest metrics-only rollup so the panel still shows something."""
     n_rep = sum(1 for b in briefs if isinstance(b.get("report"), dict) and b["report"])

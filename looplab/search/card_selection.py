@@ -634,12 +634,6 @@ def _coverage_inputs(state: RunState) -> tuple[set[str], dict[str, str | None]]:
     return explored, projection.rename
 
 
-def _explored_concepts(state: RunState) -> set[str]:
-    """Exact current concepts allowed to affect the selection-bearing coverage score."""
-
-    return _coverage_inputs(state)[0]
-
-
 # §21.4 grades are a CLASSIFICATION, not a monotone novelty ORDER: level 0 is `novel` and level 5 is
 # `wrongly_abandoned` (a direction this run already FAILED), so scoring `level / 5` ranked the grades
 # exactly backwards. Credit each grade by how much of the space it leaves unexplored instead
