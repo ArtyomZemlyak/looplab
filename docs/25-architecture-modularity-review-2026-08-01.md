@@ -322,17 +322,20 @@ idiom working against itself:
   an alert unbounded, uncoerced, and with an empty-string fallback — so a malformed body rendered
   `[object Object]`, and an envelope carrying neither field rendered a blank alert.
 
-*Resolution:* 29 of 30 fixed, each by re-pointing the anchor at the property rather than the
+*Resolution:* all 30 fixed, each by re-pointing the anchor at the property rather than the
 spelling, and by asserting the improvement that broke it. Where a count or an exact array was the
 anchor (`4` route-level mains, an exact effect dep list, a `z-index` literal), it was replaced by
 the relation that must hold — every route-main focusable and named; the deps that carry the meaning
 with additions permitted; backdrop < drawer < modal overlay — so the next legitimate change reports
 the values instead of a bare regex miss.
 
-*Remaining:* `inspectorDetailResource`. Its stale assertion is identified (a retry no longer blanks
-the surface; the alert stays and its button relabels to "Retrying…" and disables), but correcting it
-lets the test run on into a separate hang. Left failing FAST and deliberately rather than
-half-fixed, because a 30 s harness timeout in CI is worse than a fast red.
+*All 30 fixed; the UI suite is 648/648.* The last one, `inspectorDetailResource`, held two stale
+behaviours at once: that a retry blanks the surface back to "Loading…" (it does not — the alert
+stays and its button relabels to "Retrying…" and disables, so the operator keeps the message they
+were reading), and that "focus recovery" means focus on the alert CONTAINER. It is focus RETENTION:
+after the retry fails, focus stays on the Retry button inside the re-rendered alert. Requiring the
+container would yank focus off the control the operator just used. The assertion now names the
+button and separately forbids the failure that matters — focus falling back to `document.body`.
 
 *Recommendation:* the idiom is worth keeping, but a source-regex assertion should anchor on the
 smallest thing that carries the meaning, and any assertion that can pass vacuously — an `indexOf`
