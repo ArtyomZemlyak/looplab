@@ -94,7 +94,7 @@ def test_run_turn_surfaces_interstitial_text(tmp_path):
 
 
 def test_message_stream_emits_text_event(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _InterFake())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _InterFake())
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
     texts, event = [], None
@@ -109,7 +109,7 @@ def test_message_stream_emits_text_event(tmp_path, monkeypatch):
 
 
 def test_message_stream_endpoint(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _StreamFake())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _StreamFake())
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
     tokens, done = [], None
@@ -189,7 +189,7 @@ def test_the_sse_drain_does_not_consume_a_threadpool_worker_per_event(tmp_path, 
     pool at all: its cost must not scale with the number of events it forwards."""
     import anyio.to_thread
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _ManyTokenFake())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _ManyTokenFake())
     hops = []
     real_run_sync = anyio.to_thread.run_sync
 

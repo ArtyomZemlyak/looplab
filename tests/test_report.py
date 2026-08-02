@@ -448,7 +448,7 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(report_mod, "generate_report",
                         lambda st, c, **kw: {"headline": "live", "at_node": len(st.nodes),
                                              "trigger": kw.get("trigger", "")})
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     generation = client.get("/api/runs/demo/state").json()["generation"]
     r = _settled(client, _refresh_report(client, generation=generation).json())
     assert r["ok"] is True and r["content"]["headline"] == "live"
@@ -959,7 +959,7 @@ def test_report_refresh_async_job_path(tmp_path, monkeypatch):
     monkeypatch.setattr(report_mod, "generate_report",
                         lambda st, c, **kw: {"headline": "live", "at_node": len(st.nodes),
                                              "trigger": kw.get("trigger", "")})
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     client = TestClient(make_app(tmp_path))                     # reads the inline wait at construction
     r = _refresh_report(client).json()
     assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block
@@ -1634,7 +1634,7 @@ def test_command_endpoint_returns_action(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
     from looplab.serve.server import _Action, _Plan
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _Plan(actions=[_Action(action="promote", node_id=2)]))
     r = client.post("/api/runs/demo/command", json={"instruction": "promote node 2"}).json()
@@ -1648,7 +1648,7 @@ def test_command_endpoint_guidance_becomes_steering_hint(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
     from looplab.serve.server import _Action, _Plan
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured",
         lambda *a, **k: _Plan(reply="Got it — I'll have the researcher try those.", actions=[
             _Action(action="hint", text="use log1p-transformed targets + volume features",
@@ -1702,7 +1702,7 @@ def test_chat_uses_the_runs_snapshot_model_not_ui_env(tmp_path, monkeypatch):
             captured["model"] = s.llm_model
         def complete_text(self, msgs): return "ok"
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Cap(s))
     r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]}).json()
     assert captured["model"] == "deepseek/deepseek-v4-flash"     # the RUN's model, not the UI env
     assert r["trace"]["model"] == "deepseek/deepseek-v4-flash"   # and the trace reports it honestly
@@ -1733,7 +1733,7 @@ def test_boss_grounds_on_digest_and_uses_run_tools_then_acts(tmp_path, monkeypat
             return "advice"
 
     fake = _FakeBoss()
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: fake)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: fake)
     r = client.post("/api/runs/demo/command", json={"instruction": "focus on feature engineering"}).json()
     assert r["ok"] and r["actions"][0]["type"] == "hint" and "log1p" in r["actions"][0]["data"]["text"]
     # the boss's prompt was grounded on the digest (the working set), not just the single best node —
@@ -1766,7 +1766,7 @@ def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
             captured["all"] = "\n".join(m["content"] for m in msgs)
             return "ok"
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Cap(s))
     client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert "Latest run report" in captured["all"]
     assert "Quadratic solved near-optimally" in captured["all"]       # the headline reached the boss
@@ -1794,7 +1794,7 @@ def test_chat_compact_summarizes_and_reports_tokens(tmp_path, monkeypatch):
             captured["user"] = msgs[-1]["content"]
             return "recap: agreed to try MLPs; budget raised by 10."
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Cap(s))
     r = client.post("/api/runs/demo/chat-compact", json={"messages": [
         {"role": "user", "content": "try some neural nets"},
         {"role": "assistant", "content": "added two MLP baselines"}]}).json()
@@ -1831,7 +1831,7 @@ def test_command_reply_carries_token_usage(tmp_path, monkeypatch):
             return "here's my take"
 
     # Force the advisory fallback: structured plan parse + tool-loop both unavailable.
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Cap(s))
     monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no structured output")))
     r = client.post("/api/runs/demo/command",
@@ -1857,7 +1857,7 @@ def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):
             captured["sys"] = msgs[0]["content"]
             return "ok"
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Cap(s))
     r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.json()["ok"]                          # did not crash on the non-list field
     sysp = captured["sys"]
@@ -1885,7 +1885,7 @@ def test_command_async_job_path(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")          # always take the async path
     _build_run(tmp_path, "demo", writer=None)
     from looplab.serve.server import _Action, _Plan
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _Plan(actions=[_Action(action="promote", node_id=2)]))
     client = TestClient(make_app(tmp_path))                     # reads the inline wait at construction
@@ -1970,7 +1970,7 @@ def test_genesis_proposes_and_normalizes_spec(tmp_path, monkeypatch):
     through, only known non-secret setting overrides kept."""
     client = TestClient(make_app(tmp_path))
     from looplab.serve.server import _GenesisSpec
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr(
         "looplab.core.parse.parse_structured",
         lambda *a, **k: _GenesisSpec(
@@ -1995,7 +1995,7 @@ def test_genesis_run_id_dedupes_against_existing(tmp_path, monkeypatch):
     (d / "events.jsonl").write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
     client = TestClient(make_app(tmp_path))
     from looplab.serve.server import _GenesisSpec
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _GenesisSpec(run_id="nomad-minimax",
                                                      task={"kind": "mlebench_real", "competition": "x"}))
@@ -2009,7 +2009,7 @@ def test_genesis_dedup_ignores_empty_leftover_dir(tmp_path, monkeypatch):
     (tmp_path / "nomad-minimax").mkdir()                                 # empty, no events.jsonl
     client = TestClient(make_app(tmp_path))
     from looplab.serve.server import _GenesisSpec
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _GenesisSpec(run_id="nomad-minimax",
                                                      task={"kind": "mlebench_real", "competition": "x"}))
@@ -2040,7 +2040,7 @@ def test_genesis_authors_repo_task_with_setup_steps(tmp_path, monkeypatch):
                  "metric": {"kind": "stdout_json", "key": "acc"},
                  "setup": ["pip", "install", "-r", "requirements.txt"]},
     }
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr(
         "looplab.core.parse.parse_structured",
         lambda *a, **k: _GenesisSpec(
@@ -2095,7 +2095,7 @@ def test_genesis_boss_scouts_repo_before_planning(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / "README.md").write_text("BEST TRAIN: python train.py --epochs 50\n", encoding="utf-8")
     boss = _ToolBoss(repo)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: boss)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: boss)
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/genesis", json={"instruction": f"optimize my repo at {repo}, metric recall@100"}).json()
     assert r["ok"] is True
@@ -2117,7 +2117,7 @@ def test_genesis_async_job_path(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / "README.md").write_text("BEST TRAIN: python train.py\n", encoding="utf-8")
     boss = _ToolBoss(repo)
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: boss)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: boss)
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/genesis", json={"instruction": f"optimize my repo at {repo}"}).json()
     assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block

@@ -29,7 +29,7 @@ def _genesis_spec(monkeypatch, task: dict, settings: dict | None = None):
     client, so the route falls back to parse_structured — the same pattern as the test_report.py
     genesis tests) and return the normalized spec card."""
     from looplab.serve.server import _GenesisSpec
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _GenesisSpec(run_id="p10-run", task=task,
                                                      settings=dict(settings or {}),
@@ -330,7 +330,7 @@ def test_chat_gets_advisory_stalled_wording(tmp_path, monkeypatch):
             captured["sys"] = msgs[0]["content"]
             return "ok"
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Cap(s))
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.json()["ok"]
@@ -388,7 +388,7 @@ def test_command_keeps_imperative_stalled_wording(tmp_path, monkeypatch):
         captured["sys"] = msgs[0]["content"]
         return _Plan(reply="on it")
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: object())
     monkeypatch.setattr("looplab.core.parse.parse_structured", _cap_parse)
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/runs/demo/command", json={"instruction": "status?"}).json()

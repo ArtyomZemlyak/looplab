@@ -2582,7 +2582,7 @@ def test_boss_command_flags_stalled_run(tmp_path, monkeypatch):
             return {"tool_calls": [{"id": "e", "function": {
                 "name": "emit", "arguments": {"reply": "ok", "actions": []}}}]}
     cap = _Capture()
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: cap)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: cap)
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/runs/z/command", json={"instruction": "what now?"}).json()
     assert r["ok"] is True
@@ -3703,7 +3703,7 @@ def test_boss_command_retry_with_the_same_key_does_not_pay_twice(tmp_path, monke
             return {"tool_calls": [{"id": "e", "function": {
                 "name": "emit", "arguments": {"reply": "ok", "actions": []}}}]}
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Slow())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _Slow())
     client = TestClient(make_app(tmp_path))
     head = {"Idempotency-Key": "one-click"}
     out: dict = {}
@@ -3736,7 +3736,7 @@ def test_boss_command_without_a_key_keeps_the_historical_behaviour(tmp_path, mon
             return {"tool_calls": [{"id": "e", "function": {
                 "name": "emit", "arguments": {"reply": "ok", "actions": []}}}]}
 
-    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _C())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _C())
     client = TestClient(make_app(tmp_path))
     assert client.post("/api/runs/z/command", json={"instruction": "go"}).json()["ok"] is True
     assert client.post("/api/runs/z/command", json={"instruction": "go"}).json()["ok"] is True
