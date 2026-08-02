@@ -19,6 +19,15 @@ const dispatchOpenAttention = () => {
   }
 }
 
+const ATTENTION_PREFERENCE_FAILURE = 'This browser could not verify the saved attention preference.'
+
+function isPlainRunActivation(event) {
+  if (!event || event.defaultPrevented || (event.button != null && event.button !== 0)
+      || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false
+  const target = String(event.currentTarget?.target || '').toLowerCase()
+  return (!target || target === '_self') && !event.currentTarget?.hasAttribute?.('download')
+}
+
 function itemTime(seconds) {
   if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null
   const date = new Date(seconds * 1000)
@@ -92,7 +101,7 @@ const SEVERITY_LABEL = Object.freeze({
   action: 'Needs action', warning: 'Warning', danger: 'Urgent', success: 'Resolved',
 })
 
-function AttentionItem({ item, unread, sourceStale, onAcknowledge, onMarkRead, onDismiss,
+function AttentionItem({ item, unread, sourceStale, onOpenRun, onMarkRead, onDismiss,
   onOpenPermission }) {
   const timestamp = itemTime(item.created)
   const stale = item.stale || sourceStale
@@ -122,7 +131,7 @@ function AttentionItem({ item, unread, sourceStale, onAcknowledge, onMarkRead, o
     <div className="attention-item-actions">
       {runHref && <a className="attention-button primary" href={runHref}
         aria-label={`${actionLabel} for ${item.contextLabel || item.runId}`}
-        onClick={() => onAcknowledge(item.id)}>{actionLabel}</a>}
+        onClick={event => onOpenRun(event, item.id, runHref)}>{actionLabel}</a>}
       {item.source === 'permission' && <button type="button" className="attention-button primary"
         aria-label={permissionActionLabel}
         onClick={() => onOpenPermission(item)}>{actionLabel}</button>}
@@ -156,6 +165,7 @@ export default function AttentionCenter() {
   const actionHeadingRef = useRef(null)
   const recentHeadingRef = useRef(null)
   const focusRequestRef = useRef(null)
+  const pendingHandoffRef = useRef(null)
   const channelRef = useRef(null)
   const seenItemIdsRef = useRef(new Set())
   const baselinedSourcesRef = useRef({ run: false, permission: false })
@@ -164,10 +174,24 @@ export default function AttentionCenter() {
   const drawerId = useId()
 
   const close = useCallback(() => {
+    pendingHandoffRef.current = null
     focusRequestRef.current = null
     setOpen(false)
   }, [])
+  const closeForHandoff = useCallback(handoff => {
+    focusRequestRef.current = null
+    pendingHandoffRef.current = handoff
+    setOpen(false)
+  }, [])
   useDialogFocus(dialogRef, close, open, { priority: DIALOG_PRIORITY.ATTENTION })
+  // Run the destination action only after the dialog focus trap has torn down and restored its
+  // opener. Route/Assistant focus can then take ownership without a late Attention cleanup winning.
+  useEffect(() => {
+    if (open || !pendingHandoffRef.current) return
+    const handoff = pendingHandoffRef.current
+    pendingHandoffRef.current = null
+    handoff()
+  }, [open])
 
   const jumpToSection = useCallback(section => {
     const heading = section === 'action' ? actionHeadingRef.current : recentHeadingRef.current
@@ -290,7 +314,8 @@ export default function AttentionCenter() {
       return next
     }, { broadcast: broadcastInvalidation })
     if (!result.ok || !result.state) {
-      setNotificationFeedback('This browser could not verify the saved attention preference.')
+      setNotificationFeedback(ATTENTION_PREFERENCE_FAILURE)
+      setLiveMessage(ATTENTION_PREFERENCE_FAILURE)
       return false
     }
     setPreferences({ state: result.state, available: true, valid: true })
@@ -298,10 +323,22 @@ export default function AttentionCenter() {
     return true
   }, [broadcastInvalidation, setLiveMessage])
 
-  const acknowledge = useCallback(async id => {
-    await persistIds('acknowledged', [id], '')
-    close()
-  }, [close, persistIds])
+  const acknowledgeInBackground = useCallback(id => {
+    void persistIds('acknowledged', [id], '').catch(() => {
+      setNotificationFeedback(ATTENTION_PREFERENCE_FAILURE)
+      setLiveMessage(ATTENTION_PREFERENCE_FAILURE)
+    })
+  }, [persistIds, setLiveMessage])
+
+  const openRun = useCallback((event, id, href) => {
+    if (!isPlainRunActivation(event) || typeof href !== 'string' || !href.startsWith('#/run/')) return
+    event.preventDefault()
+    closeForHandoff(() => {
+      if (location.hash === href) document.querySelector('[data-route-main]')?.focus({ preventScroll: true })
+      else location.hash = href
+      acknowledgeInBackground(id)
+    })
+  }, [acknowledgeInBackground, closeForHandoff])
 
   const markRead = useCallback(async id => {
     focusRequestRef.current = { ids: [id], section: 'action' }
@@ -334,14 +371,15 @@ export default function AttentionCenter() {
   }, [activeActionCount, actionCountExact, persistIds, stillActionPhrase,
     uncertainActionPhrase, unreadComplete, unreadCount, unreadItems])
 
-  const openPermission = useCallback(async item => {
+  const openPermission = useCallback(item => {
     if (item?.source !== 'permission' || !/^[0-9a-f]{16}$/.test(item.session || '')) return
-    await persistIds('acknowledged', [item.id], '')
-    close()
-    window.dispatchEvent(new CustomEvent('ll:open-assistant-session', {
-      detail: { session: item.session },
-    }))
-  }, [close, persistIds])
+    closeForHandoff(() => {
+      window.dispatchEvent(new CustomEvent('ll:open-assistant-session', {
+        detail: { session: item.session },
+      }))
+      acknowledgeInBackground(item.id)
+    })
+  }, [acknowledgeInBackground, closeForHandoff])
 
   const enableNotifications = useCallback(async () => {
     if (notificationBusy) return
@@ -591,7 +629,7 @@ export default function AttentionCenter() {
               ? <ul className="attention-list">{actionItems.map(item => <AttentionItem key={item.id}
                   item={item} unread={!acknowledgedIds.has(item.id)}
                   sourceStale={item.source === 'run' ? runStale : permissionsStale}
-                  onAcknowledge={acknowledge} onMarkRead={markRead}
+                  onOpenRun={openRun} onMarkRead={markRead}
                   onDismiss={dismiss} onOpenPermission={openPermission} />)}</ul>
               : <p className="attention-empty">{actionEmptyCopy}</p>}
           </section>
@@ -622,7 +660,7 @@ export default function AttentionCenter() {
               ? <ul className="attention-list">{recentItems.map(item => <AttentionItem key={item.id}
                   item={item} unread={!acknowledgedIds.has(item.id)}
                   sourceStale={item.source === 'run' ? runStale : permissionsStale}
-                  onAcknowledge={acknowledge} onMarkRead={markRead}
+                  onOpenRun={openRun} onMarkRead={markRead}
                   onDismiss={dismiss} onOpenPermission={openPermission} />)}</ul>
               : <p className="attention-empty">{recentEmptyCopy}</p>}
           </section>
