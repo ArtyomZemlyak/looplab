@@ -398,7 +398,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     menuRef.current?.querySelector('[role="menuitem"]')?.focus({ preventScroll: true })
   }, [menu?.focusToken])
   useLayoutEffect(() => {
-    if (!menu || !menuRef.current) return
+    // Compact workspaces keep the menu inside the graph surface. Clamping it to the visual
+    // viewport lets later docked siblings paint over the final actions on narrow screens.
+    if (!menu || !menuRef.current || compact) return
     const rect = menuRef.current.getBoundingClientRect()
     const viewport = visibleViewportBounds()
     const x = Math.max(viewport.left + 8,
@@ -409,7 +411,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     if (x !== menu.x || y !== menu.y || maxHeight !== menu.maxHeight) {
       setMenu(current => current ? { ...current, x, y, maxHeight } : current)
     }
-  }, [menu])
+  }, [compact, menu])
   useEffect(() => {
     if (!menu) return undefined
     const viewport = window.visualViewport
@@ -740,7 +742,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     {menu && <>
       <div className="menu-backdrop" onClick={() => closeMenu(true)} onContextMenu={(e) => { e.preventDefault(); closeMenu(true) }} />
       <div ref={menuRef} className="node-menu" role="menu" aria-label={`Actions for experiment #${menu.nodeId}`}
-           style={{ left: menu.x, top: menu.y, maxHeight: menu.maxHeight }}
+           style={compact
+             ? { position: 'absolute', left: 8, right: 8, top: 'auto', bottom: 8, maxHeight: 'calc(100% - 16px)' }
+             : { left: menu.x, top: menu.y, maxHeight: menu.maxHeight }}
            onClick={e => e.stopPropagation()} onKeyDown={onMenuKeyDown}
            onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) closeMenu(false) }}>
         <div className="nm-h" role="presentation">experiment #{menu.nodeId}</div>

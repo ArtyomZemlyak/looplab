@@ -2176,6 +2176,7 @@ pre.code.event-json { max-height: 220px; }
   .overlay { padding: 0; align-items: stretch; }
   .overlay > .panel, .overlay > .modal { width: 100% !important; max-width: none; max-height: 100dvh;
     height: 100dvh; margin: 0; border: 0; border-radius: 0; }
+  .overlay > .panel .panel-close { min-width: 44px; min-height: 44px; }
   .overlay > .modal > .modal-b {
     padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
   }
@@ -2570,7 +2571,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-menu, .more-menu, .run-head > .fx-switch .fx-menu {
     position: fixed; inset: auto 8px 8px 8px; width: auto; min-width: 0;
     max-height: min(72dvh, 520px); overflow-y: auto; z-index: 96; }
-  .run-menu .mi, .panel-bar .btn { min-height: 44px; }
+  .run-menu .mi, .panel-bar .btn, .node-menu .nm-item { min-height: 44px; }
+  .node-menu { z-index: 96; }
   .menu-backdrop { background: color-mix(in srgb, var(--bg) 44%, transparent); z-index: 95; }
   .run-head > .fx-switch .th-backdrop {
     background: color-mix(in srgb, var(--bg) 44%, transparent); z-index: 95;
@@ -2719,7 +2721,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .grp-pill, .grp-tab, .run-card .ic, .cmdbar-attach, .asst-attach, .cmdbar-go,
   .cmdbar-drawer-btn, .asst-mode, .asst-side-panel .btn.sm, .asst-full .asst-main-h .btn,
   .asst-full .asst-side-h .btn, .asst-shared .asst-main-h .btn, .asst-sess-open, .asst-sess-x,
-  .asst-session-resource .btn { min-height: 44px; }
+  .asst-session-resource .btn,
+  .feed-msg .fm-main, .feed-msg .fm-tw { min-height: 44px; }
+  .feed-msg .fm-tw { min-width: 44px; }
   .grp-pill { height: 44px; }
   .route-state-notice .btn, .copy-link-fallback .btn,
   .detail-resource-notice .btn { min-width: 44px; min-height: 44px; }
