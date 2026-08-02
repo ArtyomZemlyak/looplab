@@ -1711,6 +1711,31 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 
 *Recommendation:* Extract to looplab/serve/trace_clear.py with the same shape as reset_route.py (`durable_clear_node_trace(srv, ...)`), leaving a one-line route.
 
+*Resolution (2026-08-02):* `looplab/serve/trace_clear.py` owns the whole machine —
+`durable_clear_node_trace(srv, run_id, nid, body, *, known_engine_liveness)` plus the seventeen
+helpers as module functions. `routers/control.py` keeps the route docstring (it is the OpenAPI
+description) and a two-line delegate, and drops ten now-unused imports; the file goes 1691 → 1064
+lines. The only edits to the moved bodies are mechanical: `srv` threaded explicitly where it was
+captured, `srv.run_dir` in place of the captured `_run_dir`, and `known_engine_liveness` passed in
+so the router's fail-closed liveness verdict keeps ONE definition and ONE patch seam across its
+four call sites.
+
+Verified by a 45-case byte-level differential (validation ladder, every fence refusal, the receipt
+path hazards, and each recovery terminal) run against a `git worktree` of the pre-extraction tree:
+**byte-identical**. The harness has teeth — five deliberate breaks (complete-without-the-source-check,
+drop the recovery re-confirm, resolve liveness locally instead of through the router helper, skip the
+sibling-pending scan, alter the snapshot bytes) were each caught.
+
+The point of the finding was not the line count but the sentence *"being closures it is untestable
+without building the whole app"*, so the extraction ships `tests/test_trace_clear_service.py` — 39
+tests that drive the state machine against a stub `srv` with no ASGI app, no engine, and no run.
+That instrument reaches the states HTTP tests cannot construct: a write-ahead record whose process
+died before the replacement, one that died after it, one whose trace has since moved to a third
+state, and one whose recorded counts contradict a recomputation even though both digests still
+match. Each pins the same property — an unconfirmed or unreconstructable outcome never authorizes
+another deletion. Six independent breaks in the production module were each caught by exactly the
+test that guards the property they broke.
+
 #### SR-04 · MEDIUM · under-decomposition · effort: medium
 
 **runs.py concept-lens subsystem (~1000 lines) with a triplicated generation-fence preamble**

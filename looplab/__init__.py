@@ -229,6 +229,7 @@ _LAYOUT = {
     "timeseries": "adapters",
     "tool_loop": "agents",
     "toytask": "adapters",
+    "trace_clear": "serve",      # durable write-ahead trace-clear state machine (doc 25 SR-03)
     "traceview": "events",
     "tracing": "core",
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
