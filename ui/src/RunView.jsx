@@ -750,6 +750,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [toast, setToast] = useState(null)
   const [routeNotice, setRouteNotice] = useState('')
   const [attemptFenceNotice, setAttemptFenceNotice] = useState('')
+  const routeNoticeRef = useRef(null)
+  const attemptFenceFocusPendingRef = useRef(false)
   // Route warnings belong only to the address that produced them. Back/Forward or a newly opened
   // deep link starts a fresh navigation; route.update() intentionally does not bump this value, so a
   // mismatch handler can canonicalize its own URL without erasing the warning it just raised.
@@ -1834,7 +1836,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }, [inspectTab, effectiveInspectTab])
   useEffect(() => {
     if (startOverHandoff || !live2 || selectedId == null
-        || (historyActive && history.status !== 'ready')) return
+        || (historyActive && hist == null)) return
     if (nodeIsActive(live2.nodes?.[selectedId], live2)) return
     setRouteNotice(current => [current, `Experiment #${selectedId} is not available in this run state.`]
       .filter(Boolean).join(' '))
@@ -1843,10 +1845,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       { mode: 'replace', preserveIssues: true,
         forceGeneration: routeState.nodeGeneration != null })
     setCompactInspectorOpen(false)
-  }, [live2, selectedId, historyActive, history.status, startOverHandoff,
+  }, [live2, selectedId, historyActive, hist, startOverHandoff,
     routeState.nodeGeneration])
   const currentSelectedAttempt = selectedId == null ? null : live2?.nodes?.[selectedId]?.attempt
-  const exactNodeAttemptMismatch = routeState.nodeGeneration != null
+  const nodeAttemptEvidenceReady = !historyActive || hist != null
+  const exactNodeAttemptMismatch = nodeAttemptEvidenceReady && routeState.nodeGeneration != null
     && live2?.nodes?.[selectedId] != null
     && routeState.nodeGeneration !== currentSelectedAttempt
   const commentAttemptMatches = !routeState.commentId
@@ -1854,15 +1857,27 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       && routeState.nodeGeneration === currentSelectedAttempt)
   useLayoutEffect(() => {
     if (!exactNodeAttemptMismatch) return
-    setAttemptFenceNotice(routeState.commentId
-      ? `The linked comment belongs to attempt ${routeState.nodeGeneration}, but experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}. The newer attempt was not opened.`
-      : `The link targets attempt ${routeState.nodeGeneration}, but experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}. The newer attempt was not opened.`)
+    if (compactInspectorRef.current?.contains(document.activeElement)) {
+      attemptFenceFocusPendingRef.current = true
+    }
+    setAttemptFenceNotice(historyActive
+      ? routeState.commentId
+        ? `The linked comment targets attempt ${routeState.nodeGeneration}, but this historical snapshot contains attempt ${currentSelectedAttempt ?? 'unavailable'} for experiment #${selectedId}. The requested attempt was not opened.`
+        : `The link targets attempt ${routeState.nodeGeneration}, but this historical snapshot contains attempt ${currentSelectedAttempt ?? 'unavailable'} for experiment #${selectedId}. The requested attempt was not opened.`
+      : routeState.commentId
+        ? `The linked comment belongs to attempt ${routeState.nodeGeneration}, but experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}. The newer attempt was not opened.`
+        : `The link targets attempt ${routeState.nodeGeneration}, but experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}. The newer attempt was not opened.`)
     route.update(current => ({ ...current, nodeId: null, nodeGeneration: null,
       inspectTab: 'Overview', commentId: null }),
       { mode: 'replace', preserveIssues: true, forceGeneration: true })
     setCompactInspectorOpen(false)
   }, [exactNodeAttemptMismatch, routeState.nodeGeneration, routeState.commentId,
-    selectedId, currentSelectedAttempt])
+    selectedId, currentSelectedAttempt, historyActive])
+  useLayoutEffect(() => {
+    if (!attemptFenceFocusPendingRef.current || !attemptFenceNotice) return
+    attemptFenceFocusPendingRef.current = false
+    ;(routeNoticeRef.current || routeMainRef.current)?.focus({ preventScroll: true })
+  }, [attemptFenceNotice])
   useLayoutEffect(() => {
     // An in-app DAG selection is a new, current target even though it uses route.update() rather than
     // browser navigation. Retire only the attempt-fence warning; unrelated route notices remain.
@@ -1997,15 +2012,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
   }, [mergeFrom])
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
-  const focusNode = (id, tab, eventSeq, { preserveGroup = false } = {}) => {
+  const focusNode = (id, tab, eventSeq, {
+    preserveGroup = false, nodeGeneration = null, preserveExactSequence = false,
+  } = {}) => {
     const value = Number(eventSeq)
-    const targetSeq = eventSeq == null || value >= seq ? null
-      : Number.isSafeInteger(value) && value >= 0 ? value : null
+    const validEventSeq = Number.isSafeInteger(value) && value >= 0 ? value : null
+    const targetSeq = eventSeq == null ? null
+      : preserveExactSequence ? validEventSeq
+        : validEventSeq != null && validEventSeq < seq ? validEventSeq : null
+    const targetNodeGeneration = Number.isSafeInteger(nodeGeneration) && nodeGeneration >= 0
+      ? nodeGeneration : null
     route.update(current => {
       const nextTab = tab || current.inspectTab
       const preserveComment = id === current.nodeId && nextTab === 'Comments'
       return { ...current, view: 'dag', nodeId: id,
-        nodeGeneration: preserveComment ? current.nodeGeneration : null,
+        nodeGeneration: preserveComment ? current.nodeGeneration : targetNodeGeneration,
         inspectTab: nextTab,
         commentId: preserveComment ? current.commentId : null,
         sequence: reviewMode ? null : targetSeq }
@@ -2713,7 +2734,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {startOverRecovery.kind === 'unavailable' && <button type="button" className="btn xs"
           onClick={retryStartOverStorage}>Try storage again</button>}
       </div>}
-      {(routeNotice || attemptFenceNotice || route.issues.length > 0) && <div className="route-state-notice" role="status">
+      {(routeNotice || attemptFenceNotice || route.issues.length > 0) && <div
+        ref={routeNoticeRef} className="route-state-notice" role="status" tabIndex={-1}>
         <OpIcon name="info" size={13} />
         <span>{[...route.issues, routeNotice, attemptFenceNotice].filter(Boolean).join(' ')}</span>
         <button type="button" className="btn xs ghost" aria-label="Dismiss link-state notice"

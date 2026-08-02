@@ -260,6 +260,22 @@ function eventNode(e) {
   return d.node_id ?? d.parent_id ?? null
 }
 
+function eventNodeAttempt(e) {
+  const data = e?.data || {}
+  const raw = Object.hasOwn(data, 'generation')
+    ? data.generation : (e?.type === 'node_repaired' ? data.attempt : 0)
+  return Number.isSafeInteger(raw) && raw >= 0 ? raw : null
+}
+
+function verifiableCreatedAttempt(e, currentAttempt) {
+  const attempt = eventNodeAttempt(e)
+  if (attempt == null) return null
+  // An unstamped legacy row is definitely attempt zero only while the current node is still attempt
+  // zero. Older servers also left rebuild rows unstamped, so after a reset the prefix snapshot must
+  // resolve that row instead of guessing which lifecycle it represents.
+  return (Object.hasOwn(e?.data || {}, 'generation') || currentAttempt === 0) ? attempt : null
+}
+
 // Coarse "kind" per event type: drives the icon, the accent color, and the filter chips. One place so
 // the legend, the row, and the filter all agree.
 // [key, label] — the icon is a monochrome glyph (GROUP_GLYPH), not an emoji (round-7 readability pass).
@@ -674,8 +690,8 @@ function OpTrace({ runId, traceId }) {
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
-function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuilding = null,
-  expansion = null, onExpansionChange = null }) {
+function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt = null, autoOpen, runId,
+  readOnly = false, liveBuilding = null, expansion = null, onExpansionChange = null }) {
   const [localOpen, setLocalOpen] = useState(autoOpen)
   const localTouched = useRef(false)
   const controlled = expansion != null
@@ -711,10 +727,9 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   // This removes the special zero/default request path without changing the first response window.
   const [nodeTraceLimit, setNodeTraceLimit] = useState(512)
   const loadMoreNodeTrace = () => setNodeTraceLimit(value => Math.min(value * 2, NODE_TRACE_CAP_MAX))
-  const rawTraceGeneration = Object.hasOwn(e.data || {}, 'generation')
-    ? e.data.generation : (e.type === 'node_repaired' ? e.data?.attempt : 0)
-  const traceGeneration = Number.isInteger(rawTraceGeneration) && rawTraceGeneration >= 0
-    ? rawTraceGeneration : null
+  // Keep the inline evidence on the same attempt as the row destination. An unstamped legacy
+  // node_created after a reset is ambiguous, so it keeps its rationale but does not guess a trace.
+  const traceGeneration = e.type === 'node_created' ? nodeCreatedAttempt : eventNodeAttempt(e)
   // `liveBuilding` is a plain object {nodeId: generation} of every concurrent build
   // (`buildingGenerations()` builds it with `const generations = {}`), so it is read with
   // BRACKETS, never `.get()`. This row live-polls its trace only when it IS one of those
@@ -774,7 +789,8 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
             aria-label={`${open ? 'Collapse' : 'Expand'} details for event ${e.seq}`}
             onClick={() => changeOpen(!open, true)}>{open ? '▾' : '▸'}</button>}
           <button type="button" className="fm-main" onClick={() => onFocusEvent(e)}
-            title={nid != null ? `open node #${nid} @ seq ${e.seq}` : `jump to seq ${e.seq}`}>
+            aria-label={`${narr}. ${focusLabel}`}
+            title={focusLabel}>
             <span className="fm-narr">{narr}</span>
             {nid != null && <span className="ev-go">↗</span>}
           </button>
@@ -1004,13 +1020,47 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     commit(value); setDrag(null)
   }
 
-  const focusEvent = (e) => {
+  const eventDestination = (e) => {
     const nid = eventNode(e)
-    if (nid == null) { setViewSeq(e.seq); return }
-    const opensLiveTrace = e.type === 'node_created' && atLiveView
-    // Trace is a live sidecar. A node-created row clicked during replay must keep the exact historical
-    // sequence and use snapshot-safe Overview instead of silently jumping the whole workspace to live.
-    onFocus?.(Number(nid), opensLiveTrace ? 'Trace' : 'Overview', opensLiveTrace ? null : e.seq)
+    if (nid == null) return { nodeId: null, sequence: e.seq,
+      opensHistoricalSnapshot: e.seq < liveSeq }
+    const nodeId = Number(nid)
+    const currentAttempt = live?.nodes?.[nodeId]?.attempt
+    const nodeGeneration = e.type === 'node_created'
+      ? verifiableCreatedAttempt(e, currentAttempt) : null
+    const opensLiveTrace = !readOnly && e.type === 'node_created' && atLiveView
+      && timeline.generation === expectedGeneration && nodeGeneration != null
+      && nodeGeneration === currentAttempt
+    // Trace is a live sidecar. A replay row, or a stale attempt still present in the live feed, must
+    // keep its exact historical sequence and use snapshot-safe Overview.
+    const preserveExactSequence = e.type === 'node_created' && !opensLiveTrace
+    return { nodeId, nodeGeneration, opensLiveTrace, preserveExactSequence,
+      opensHistoricalSnapshot: preserveExactSequence || e.seq < liveSeq,
+      tab: opensLiveTrace ? 'Trace' : 'Overview', sequence: opensLiveTrace ? null : e.seq }
+  }
+  const focusEvent = (e) => {
+    const destination = eventDestination(e)
+    if (destination.nodeId == null) { setViewSeq(destination.sequence); return }
+    onFocus?.(destination.nodeId, destination.tab, destination.sequence,
+      { nodeGeneration: destination.nodeGeneration,
+        preserveExactSequence: destination.preserveExactSequence })
+  }
+  const eventFocusLabel = (e, destination = eventDestination(e)) => {
+    if (destination.nodeId == null) {
+      return destination.opensHistoricalSnapshot
+        ? `Open event ${e.seq} in a read-only snapshot` : `Jump to event ${e.seq}`
+    }
+    if (e.type !== 'node_created') {
+      return destination.opensHistoricalSnapshot
+        ? `Open experiment #${destination.nodeId} from event ${e.seq} in a read-only snapshot`
+        : `Open experiment #${destination.nodeId} from event ${e.seq}`
+    }
+    if (destination.opensLiveTrace) {
+      return `Open current attempt ${destination.nodeGeneration} trace for experiment #${destination.nodeId}`
+    }
+    const attempt = destination.nodeGeneration == null
+      ? 'recorded attempt' : `attempt ${destination.nodeGeneration}`
+    return `Open ${attempt} for experiment #${destination.nodeId} at event ${e.seq} in a read-only snapshot`
   }
   const toggleKind = (g) => setKinds(s => { const n = new Set(s); n.has(g) ? n.delete(g) : n.add(g); return n })
   const searchableLog = useMemo(() => log.map(event => {
@@ -1471,7 +1521,10 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
               onJumpToLive={returnToLive}
               renderRow={event => {
                 const key = timelineEventKey(event)
-                return <EventRow e={event} onFocusEvent={focusEvent} runId={runId}
+                const destination = eventDestination(event)
+                return <EventRow e={event} onFocusEvent={focusEvent}
+                  focusLabel={eventFocusLabel(event, destination)}
+                  nodeCreatedAttempt={destination.nodeGeneration} runId={runId}
                   readOnly={readOnly} liveBuilding={liveBuilding} autoOpen={false}
                   expansion={eventExpansion.get(key) || CLOSED_EXPANSION}
                   onExpansionChange={next => setEventExpansion(current => {
