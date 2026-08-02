@@ -111,6 +111,17 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 - **Prompt strings are contracts.** Changes to prompt text alter agent behavior — never "clean up"
   prompt wording as part of a refactor. Several prompts are routed through the PromptStore
   (`render(prompts, key, default)`); grep for `render(` to find overridable prompts.
+- **An HTTP-contract change must move its tests in the SAME change.** Changing a route's verb,
+  path, required params, response shape, or refusal codes silently retires every test that still
+  speaks the old contract: the request 404s, 422s, or raises `ImportError` on a renamed private,
+  and the assertion below it never runs. This is worse than a red test, because the properties
+  these tests guard are disproportionately the security ones — token gating, share allow-listing,
+  provider-error redaction, path-traversal allow-lists. A single day of contract hardening left
+  23 such tests stranded across `test_server`/`test_assistant_*`/`test_attention`, and every one
+  read as "a regression" when the production code was fine. When you change a contract: grep the
+  suite for the old spelling, re-point it, and RE-VERIFY the property still holds rather than
+  making the test green. If a refusal code now depends on a race, pin the fail-closed SET, not one
+  member.
 - **Duck-typed seams are REGISTRY-GUARDED** — a rename that used to break silently is now a red
   test. The registries (each with a two-way source-scan test): TaskAdapter hooks
   `adapters/tasks.py::TASK_OPTIONAL_HOOKS`; role outputs `agents/roles.py::DEVELOPER_OUTPUT_ATTRS`
