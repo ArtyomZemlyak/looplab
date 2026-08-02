@@ -396,6 +396,21 @@ def test_start_status_header_is_owner_gated_no_store_and_mismatch_rejected(
 
 
 def test_concurrent_same_key_returns_one_start_identity_and_one_popen(tmp_path, monkeypatch):
+    """One start identity and ONE Popen, whichever way the two requests interleave.
+
+    The second request has two legitimate landings, and which one it gets is a real race rather than
+    a stable contract. Preparation publishes the durable claim under the run sequencer and then
+    RELEASES every lock before holding the settings fence across Popen, so a request that arrives:
+
+    * after the winner's record reads accepted/executing/succeeded replays it as 200; or
+    * inside that unlocked Popen window sees a claim that may already have crossed Popen, and must
+      fail closed with `start_uncertain` — "observe it, do not submit another launch".
+
+    So this pins the fail-closed SET rather than one member of it, per CLAUDE.md. What is NOT
+    negotiable, and is asserted unconditionally: exactly one Popen, and every response — replayed or
+    refused — carries the SAME start_id, so the loser can observe the winner instead of relaunching.
+    A refusal that omitted the id, or one whose code invites a retry, would be a real regression and
+    fails here."""
     client = TestClient(make_app(tmp_path))
     calls = []
     monkeypatch.setattr(
@@ -407,9 +422,69 @@ def test_concurrent_same_key_returns_one_start_identity_and_one_popen(tmp_path, 
     with ThreadPoolExecutor(max_workers=2) as pool:
         responses = list(pool.map(lambda _index: client.post("/api/start", json=payload), range(2)))
 
-    assert [response.status_code for response in responses] == [200, 200]
-    assert len({response.json()["start_id"] for response in responses}) == 1
-    assert len(calls) == 1
+    assert len(calls) == 1, "an idempotency key must never buy two launches"
+    codes = sorted(response.status_code for response in responses)
+    assert codes in ([200, 200], [200, 409]), (
+        f"unexpected landing {codes}: exactly one request wins, and the other either replays the "
+        "winner (200) or fails closed on the unresolved claim (409)")
+    assert 200 in codes, "at least one request must actually start the run"
+
+    identities = set()
+    for response in responses:
+        body = response.json()
+        if response.status_code == 200:
+            identities.add(body["start_id"])
+            continue
+        detail = body["detail"]
+        # The ONE refusal this race may produce. `run_id_conflict`/`idempotency_key_reused` would
+        # mean the key was not honoured at all, and anything inviting a retry would license the
+        # second Popen this test exists to forbid.
+        assert detail["code"] == "start_uncertain", detail
+        assert "do not submit another launch" in detail["remediation"]
+        identities.add(detail["start_id"])
+    assert len(identities) == 1, (
+        f"the two requests were given different start identities {identities}; the loser cannot "
+        "observe a startup it was never told the id of")
+
+
+def test_a_second_request_inside_the_popen_window_fails_closed_on_the_winners_claim(
+        tmp_path, monkeypatch):
+    """The interesting half of the race above, made DETERMINISTIC by pinning the winner in Popen.
+
+    The natural race lands here only sometimes, so on its own it cannot prove the refusal keeps its
+    shape. Here the fake spawner blocks INSIDE Popen — exactly the window where the sequencer has
+    been released and the claim is unresolved — so the second request always meets it."""
+    from threading import Event as ThreadEvent
+
+    client = TestClient(make_app(tmp_path))
+    calls = []
+    in_popen, release = ThreadEvent(), ThreadEvent()
+
+    def _blocking_spawn(args, **kwargs):
+        in_popen.set()
+        assert release.wait(timeout=30), "the second request never reached the claim"
+        return _finish_spawn(calls, args, kwargs)
+
+    monkeypatch.setattr("looplab.serve.routers.control._spawn_engine", _blocking_spawn)
+    payload = {**_validated(client, "pinned"), "idempotency_key": "one-operation"}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner = pool.submit(client.post, "/api/start", json=payload)
+        assert in_popen.wait(timeout=30), "the winner never reached Popen"
+        loser = client.post("/api/start", json=payload)   # lands in the unlocked claim window
+        release.set()
+        first = winner.result(timeout=30)
+
+    assert first.status_code == 200
+    assert len(calls) == 1, "the second request bought a second launch"
+    assert loser.status_code == 409
+    detail = loser.json()["detail"]
+    assert detail["code"] == "start_uncertain"
+    # The refusal must hand back the WINNER's identity and steer to observation, not to a retry:
+    # a retry here is precisely the duplicate paid launch the idempotency key exists to prevent.
+    assert detail["start_id"] == first.json()["start_id"]
+    assert detail["paid_effect_unknown"] is True
+    assert "do not submit another launch" in detail["remediation"]
 
 
 def test_initial_response_uses_known_pid_as_positive_executing_evidence(tmp_path, monkeypatch):
