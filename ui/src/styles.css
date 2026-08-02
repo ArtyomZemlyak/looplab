@@ -877,7 +877,7 @@ table.tbl tr.best-row td { color: var(--best); }
    narrow card rows, and an export action that never depends on hover or horizontal page scroll. */
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important;
   margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important;
-  white-space: nowrap !important; border: 0 !important; }
+  inset: 0 auto auto 0 !important; white-space: nowrap !important; border: 0 !important; }
 .data-table-region { min-width: 0; margin: 6px 0; border: 1px solid var(--line); border-radius: 8px;
   background: var(--bg-1); }
 .data-table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
