@@ -1762,6 +1762,8 @@ pre.code.event-json { max-height: 220px; }
 
 /* ── Panel bar (Workstream D): grouped by importance + process ─────────────────── */
 .panel-bar .menu { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.panel-hubs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.settings-panel-btn { flex: none; }
 .panel-sep { width: 1px; height: 16px; background: var(--line-2); margin: 0 6px; display: inline-block; }
 .panel-bar .btn.on { color: var(--fg); background: var(--bg-3); }
 
@@ -2558,17 +2560,41 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
     white-space: normal; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.35; }
   .topbar.run-head > .live { order: 2; flex: 0 0 auto; align-self: flex-start; max-width: 100%; white-space: normal; }
   .topbar.run-head > .muted b { display: block; color: var(--fg); }
+  /* A long benchmark brief must not consume the compact workspace. Keep two useful lines visible,
+     while making the whole summary a large, explicit disclosure instead of hiding text permanently. */
+  .run-head > .run-goal {
+    position: relative; appearance: none; border: 0; border-radius: var(--radius-sm);
+    padding: 0 0 18px; background: transparent; color: var(--fg-dim); font: inherit;
+    text-align: left; cursor: pointer;
+  }
+  .run-head > .run-goal .run-goal-text {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  .run-head > .run-goal.expanded .run-goal-text {
+    display: block; -webkit-line-clamp: unset; overflow: visible;
+  }
+  .run-head > .run-goal .run-goal-toggle {
+    position: absolute; left: 0; bottom: 0; color: var(--accent); font-size: 11px;
+    font-weight: 600; line-height: 16px;
+  }
+  .run-head > .run-goal:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .run-head button, .history-banner .btn, .run-resource-state .btn { min-height: 44px; }
+  .run-head > .run-metric-chip.alarm { display: inline-flex; order: 3; align-self: flex-start; }
   .copy-view-label { display: none; }
   .copy-view-btn { min-width: 44px; justify-content: center; }
   .concept-bar { padding-block: 6px; }
   .cb-chips { flex-wrap: nowrap; max-height: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
   .cb-chip { flex: 0 0 auto; max-width: min(78vw, 320px); min-height: 44px; }
   .cb-chip-main, .cb-drill { min-height: 44px; }
-  .panel-bar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
-  .panel-bar::-webkit-scrollbar { display: none; }
-  .panel-bar.hub-open { overflow: visible; }
-  .panel-bar .menu { flex-wrap: nowrap; min-width: max-content; }
+  .panel-bar { overflow: visible; flex-wrap: nowrap; }
+  .panel-bar .menu { flex: 1 1 auto; width: 100%; min-width: 0; flex-wrap: nowrap; }
+  .panel-hubs { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto;
+    overscroll-behavior-inline: contain; scrollbar-width: none; }
+  .panel-hubs > .more-wrap { flex: none; }
+  .panel-hubs > .more-wrap > .btn { white-space: nowrap; }
+  .panel-hubs::-webkit-scrollbar { display: none; }
+  .panel-bar .panel-sep, .panel-bar .settings-panel-btn { flex: none; }
   /* Dropdowns become viewport-clamped bottom sheets on compact screens. They cannot be clipped by
      the horizontal panel bar or a scrolling run list, and long menus remain reachable in landscape. */
   .run-menu, .more-menu, .run-head > .fx-switch .fx-menu {
@@ -2580,7 +2606,12 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-head > .fx-switch .th-backdrop {
     background: color-mix(in srgb, var(--bg) 44%, transparent); z-index: 95;
   }
-  .workspace-pane-toggle { display: inline-flex; top: auto; bottom: 52px; }
+  .workspace-pane-toggle { display: inline-flex; top: auto; bottom: 52px; min-height: 44px; }
+  .react-flow__controls button { width: 44px; height: 44px; }
+  .grp-control .text, .grp-control .btn, .map-toggles .btn { min-height: 44px; }
+  .grp-pill::before, .grp-tab::before, .grp-super .btn-chev::before {
+    content: ''; position: absolute; inset: -10px;
+  }
   .side.compact-drawer .pane-grip .btn {
     min-width: 44px; min-height: 44px; justify-content: center; padding: 8px;
   }
@@ -2772,6 +2803,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .chat-dock .dock-tabs > .dock-collapse { grid-column: 3; grid-row: 1 / span 2; }
   /* Keep all four workspace destinations legible after Back, Copy and Energy claim the first row. */
   .run-head .view-toggle { flex: 1 0 100%; width: 100%; max-width: 100%; }
+  .panel-bar .panel-sep { display: none; }
+  .panel-hubs > .more-wrap > .btn { padding-inline: 4px; }
   /* The compact command dock needs two deliberate rows. A recovery action plus four touch targets
      otherwise consumes the entire row and collapses the actual composer to a few characters. */
   .cmdbar-wrap { padding-inline: 8px; }

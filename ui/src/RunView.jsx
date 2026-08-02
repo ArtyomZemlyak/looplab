@@ -319,6 +319,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     enabled: !reviewMode && !routeFenceBlocked && !timelineDeferred,
   })
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
+  const [compactGoalExpanded, setCompactGoalExpanded] = useState(false)
+  useEffect(() => setCompactGoalExpanded(false), [runId, generation, compactWorkspace])
   const [history, setHistory] = useState(liveHistory)
   const [historyRetry, setHistoryRetry] = useState(0)
   const readOnlyMode = reviewMode || historyActive || routeFenceBlocked
@@ -1970,9 +1972,23 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
         <span className="pill phase">{displayedPhase}</span>
-        <span className="muted" title={state.goal}>
-          <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>{state.goal || state.task_id}
-        </span>
+        {compactWorkspace
+          ? <button type="button"
+              className={'muted run-goal' + (compactGoalExpanded ? ' expanded' : '')}
+              title={state.goal || state.task_id} aria-expanded={compactGoalExpanded}
+              aria-label={compactGoalExpanded ? 'Show less task' : 'Show full task'}
+              aria-controls="run-goal-text" aria-describedby="run-goal-meta run-goal-text"
+              onClick={() => setCompactGoalExpanded(value => !value)}>
+              <b id="run-goal-meta">{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>
+              <span id="run-goal-text" className="run-goal-text">{state.goal || state.task_id}</span>
+              <span className="run-goal-toggle" aria-hidden="true">
+                {compactGoalExpanded ? 'show less' : 'show full task'}
+              </span>
+            </button>
+          : <span className="muted" title={state.goal || state.task_id}>
+              <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>
+              {state.goal || state.task_id}
+            </span>}
         <span className={'live ' + (reviewMode ? 'off' : liveStatus)}
           role={reviewMode ? undefined : 'status'} aria-live={reviewMode ? undefined : 'polite'}
           aria-atomic={reviewMode ? undefined : true}>
@@ -1982,9 +1998,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           {historyActive && <span aria-hidden="true"> · history</span>}
         </span>
         <span className="spacer" />
-        {/* round-8: keep only COMPACT at-a-glance metrics here (eval, tokens) + alerts; the fuller
-            set (strategy + rationale, hints, dedup) moved to the Overview tab so this header stays a
-            SINGLE non-wrapping line. Clicking a metric opens Overview for the detail. */}
+        {/* Wide workspaces keep only the two compact at-a-glance metrics here; the fuller set moved
+            to Overview. Compact layouts trade those optional chips for canvas space, while urgent
+            reward-hack alerts remain visible and every metric is one tap away through Overview. */}
         {evalSec > 0 && <button type="button" className="chip run-metric-chip" disabled={historyActive}
           title={historyActive ? 'Historical mode — return live to open Overview' : 'eval time — open Overview for the budget bar'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
@@ -2107,38 +2123,40 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div className="menu">
           {/* 4 consolidated hubs — each a dropdown of related panels; the hub lights when its open
               panel is active. Report/Overview live in the view-toggle above; Settings is dedicated. */}
-          {HUBS.map(([label, items]) => <div className="more-wrap" key={label}>
-            <button type="button" className={'btn sm ghost' + (HUB_OF[panel] === label ? ' on' : '')}
-                    aria-haspopup="menu" aria-expanded={openHub === label} aria-controls={hubMenuId(label)}
-                    disabled={!items.some(([key]) => panelAllowed(key))}
-                    title={!items.some(([key]) => panelAllowed(key)) ? 'No panels in this group are available in the current view' : undefined}
-                    onClick={event => { hubTriggerRef.current = event.currentTarget; setOpenHub(o => o === label ? null : label) }}>{label} ▾</button>
-            {openHub === label && <>
-              <div className="menu-backdrop" aria-hidden="true" onClick={() => closeHub(true)} />
-              <div ref={hubMenuRef} id={hubMenuId(label)} className="run-menu more-menu" role="menu"
-                aria-label={`${label} panels`} onClick={e => e.stopPropagation()} onKeyDown={onHubKeyDown}
-                onBlur={event => {
-                  if (event.relatedTarget !== hubTriggerRef.current && !event.currentTarget.contains(event.relatedTarget)) closeHub(false)
-                }}>
-                {items.map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
-                  key={k} className={'mi' + (panel === k ? ' on' : '')}
-                  disabled={!panelAllowed(k)}
-                  title={!panelAllowed(k)
-                    ? reviewMode
-                      ? k === 'compare' && !reviewEvidence
-                        ? 'Requires a review link with redacted evidence'
-                        : 'Unavailable in read-only review'
-                      : 'Unavailable while viewing a historical snapshot'
-                    : undefined}
-                  onClick={() => {
-                    if (!panelAllowed(k)) return
-                    panelReturnFocusRef.current = hubTriggerRef.current; closeHub(false); setPanel(k)
-                  }}>{l}</button>)}
-              </div>
-            </>}
-          </div>)}
+          <div className="panel-hubs">
+            {HUBS.map(([label, items]) => <div className="more-wrap" key={label}>
+              <button type="button" className={'btn sm ghost' + (HUB_OF[panel] === label ? ' on' : '')}
+                      aria-haspopup="menu" aria-expanded={openHub === label} aria-controls={hubMenuId(label)}
+                      disabled={!items.some(([key]) => panelAllowed(key))}
+                      title={!items.some(([key]) => panelAllowed(key)) ? 'No panels in this group are available in the current view' : undefined}
+                      onClick={event => { hubTriggerRef.current = event.currentTarget; setOpenHub(o => o === label ? null : label) }}>{label} ▾</button>
+              {openHub === label && <>
+                <div className="menu-backdrop" aria-hidden="true" onClick={() => closeHub(true)} />
+                <div ref={hubMenuRef} id={hubMenuId(label)} className="run-menu more-menu" role="menu"
+                  aria-label={`${label} panels`} onClick={e => e.stopPropagation()} onKeyDown={onHubKeyDown}
+                  onBlur={event => {
+                    if (event.relatedTarget !== hubTriggerRef.current && !event.currentTarget.contains(event.relatedTarget)) closeHub(false)
+                  }}>
+                  {items.map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
+                    key={k} className={'mi' + (panel === k ? ' on' : '')}
+                    disabled={!panelAllowed(k)}
+                    title={!panelAllowed(k)
+                      ? reviewMode
+                        ? k === 'compare' && !reviewEvidence
+                          ? 'Requires a review link with redacted evidence'
+                          : 'Unavailable in read-only review'
+                        : 'Unavailable while viewing a historical snapshot'
+                      : undefined}
+                    onClick={() => {
+                      if (!panelAllowed(k)) return
+                      panelReturnFocusRef.current = hubTriggerRef.current; closeHub(false); setPanel(k)
+                    }}>{l}</button>)}
+                </div>
+              </>}
+            </div>)}
+          </div>
           <span className="panel-sep" />
-          <button className={'btn sm ghost' + (panel === 'config' ? ' on' : '')}
+          <button className={'btn sm ghost settings-panel-btn' + (panel === 'config' ? ' on' : '')}
                   disabled={mutationReadOnlyMode}
                   onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>Settings</button>
         </div>
@@ -2237,8 +2255,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             {groupDetailsOpen ? 'Group' : `Inspector · #${selectedId}`}
           </button>}
         {compactWorkspace && showInspector &&
-          <button className="workspace-scrim" onClick={closeCompactInspector}
-                  aria-label="Close inspector panel" />}
+          <button type="button" className="workspace-scrim" tabIndex={-1}
+                  onClick={closeCompactInspector}
+                  aria-label={`Close ${groupDetailsOpen ? 'group' : 'inspector'} panel`} />}
         {!compactWorkspace && hasInspectorContext && !showInspector
           ? <button ref={sideRailRef} className="side-rail" title="show panel"
               onClick={() => setSideC(false)}>‹ {groupDetailsOpen ? 'group' : 'inspector'}</button>

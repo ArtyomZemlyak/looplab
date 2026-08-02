@@ -714,10 +714,13 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                 : collapsed.has(activeGroupActionKey) ? 'expand' : 'collapse'
               : 'choose group'}
           </button>
-          <button className="btn sm ghost" title="collapse all groups" onClick={() => onCollapseAll && onCollapseAll(groupKeys)}>⊟ all</button>
-          <button className="btn sm ghost" title="expand all groups" onClick={() => onExpandAll && onExpandAll()}>⊞ all</button>
+          <button className="btn sm ghost" aria-label="Collapse all groups"
+                  title="collapse all groups" onClick={() => onCollapseAll && onCollapseAll(groupKeys)}>⊟ all</button>
+          <button className="btn sm ghost" aria-label="Expand all groups"
+                  title="expand all groups" onClick={() => onExpandAll && onExpandAll()}>⊞ all</button>
           {(groupMode === 'theme' || groupMode === 'niche') && onAutoCollapse &&
-            <button className="btn sm ghost" title="auto-collapse settled groups (keeps the champion, selected, and active groups open)"
+            <button className="btn sm ghost" aria-label="Auto-collapse settled groups"
+                    title="auto-collapse settled groups (keeps the champion, selected, and active groups open)"
                     onClick={() => onAutoCollapse(true)}>⊟ settled</button>}
         </>}
       </Panel>
@@ -725,7 +728,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           bottom-right) covers this row and you can't click 🗺 again to hide it. */}
       <Panel position="bottom-right" className="map-toggles"
         style={{ marginBottom: showMap && !compact ? 152 : 0 }}>
-        <button aria-pressed={showLegend} className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
+        <button aria-pressed={showLegend}
+                aria-label={showLegend ? 'Hide operator legend' : 'Show operator legend'}
+                className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
                 onClick={() => setShowLegend(v => !v)}>ⓘ ops</button>
         <button aria-pressed={!compact && showMap} disabled={compact}
                 aria-label={compact ? 'Overview map unavailable on compact screens'
