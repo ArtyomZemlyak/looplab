@@ -789,13 +789,16 @@ def test_concept_steward_endpoints(tmp_path, monkeypatch):
         def complete_text(self, m):
             return "{}"
 
-    import looplab.core.llm as _llm
-    monkeypatch.setattr(_llm, "make_llm_client", lambda *a, **k: _C())
+    # The steward builds through `make_llm_client_for(settings, factory=srv.make_llm_client)`, so the
+    # SERVER re-export is the seam. Patching `core.llm` left the real factory in place and the route
+    # answered `steward_failed: steward:unavailable` — a failure the test then read as its own.
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda *a, **k: _C())
     client = TestClient(make_app(tmp_path))
     assert client.post("/api/cross-run/concept-steward", params={
         "apply": True, "action_id": "steward-apply-forbidden"}).status_code == 422
     r = client.post("/api/cross-run/concept-steward", params={"action_id": "steward-proposal-1"})
-    assert r.status_code == 200 and r.json()["proposals"]["merges"][0]["to_concept"] == "data/hard-negative-mining"
+    assert r.status_code == 200, r.text
+    assert r.json()["proposals"]["merges"][0]["to_concept"] == "data/hard-negative-mining"
     assert r.json()["receipt"] is None and r.json()["invocation"]["outcome"] == "proposed"
     # The LLM proposal is audited but never mutates meaning; an operator must select a typed action.
     from looplab.engine.concept_registry import load_concept_aliases

@@ -323,11 +323,24 @@ def test_lifecycle_lock_is_required_and_reports_503(tmp_path, monkeypatch):
             return
         raise EventStoreLockError(path, OSError("locking unsupported"))
 
-    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
     client = TestClient(make_app(tmp_path))
-    for method, path in (("post", "/api/runs/demo/reset"), ("delete", "/api/runs/demo")):
-        r = getattr(client, method)(path)
-        assert r.status_code == 503, f"{path} degraded to an unlocked {method} instead of failing"
+    # Read the deletion identity BEFORE breaking the lock: bodyless DELETE is a 409 stub now, and
+    # the real route is the deletion transaction — which must reach the lock to fail on it, not be
+    # turned away for a missing precondition.
+    from looplab.serve.run_commands import run_generation_token
+    events = eventstore.EventStore(rd / "events.jsonl").read_all()
+    delete_body = {
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "expected_generation": run_generation_token(events),
+        "expected_seq": events[-1].seq if events else -1,
+    }
+    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    responses = [
+        ("reset", client.post("/api/runs/demo/reset")),
+        ("delete", client.post("/api/runs/demo/deletions", json=delete_body)),
+    ]
+    for label, r in responses:
+        assert r.status_code == 503, f"{label} degraded to an unlocked mutation instead of failing"
     assert (rd / "events.jsonl").is_file(), "a lock failure must never destroy run bytes"
 
 

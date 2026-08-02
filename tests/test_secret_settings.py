@@ -17,6 +17,26 @@ from looplab.serve.server import make_app  # noqa: E402
 from looplab.serve.settings_store import SettingsStore, _REVISION_KEY  # noqa: E402
 
 
+def _put_secret(client, value, *, settings_revision=None, secret_revision=None):
+    """Save a credential with the two preconditions a nonempty write now REQUIRES.
+
+    A credential is stored bound to the endpoint the caller reviewed, so saving one is a
+    precondition write: both `expected_settings_revision` (the endpoint) and
+    `expected_secret_revision` (the credential) must come from one Settings snapshot. Omitting
+    either is a 428 before any CAS runs, so a test that omits them asserts the precondition error
+    rather than the storage, masking, env-priming or CAS behaviour it was written for. Clearing
+    needs no precondition — there is no endpoint to bind."""
+    snapshot = client.get("/api/settings").json()
+    body = {"key": "llm_api_key", "value": value}
+    if value:
+        body["expected_settings_revision"] = (
+            snapshot["settings_revision"] if settings_revision is None else settings_revision)
+        body["expected_secret_revision"] = (
+            snapshot["secret_revision"] if secret_revision is None else secret_revision)
+    return client.put("/api/settings/secret", json=body)
+
+
+
 @pytest.fixture
 def _restore_key():
     """The server applies the secret to the real process env; snapshot + restore so it can't leak
@@ -34,19 +54,30 @@ def _restore_key():
 def test_secret_stored_masked_and_applied(tmp_path, _restore_key):
     client = TestClient(make_app(tmp_path))
 
-    r = client.put("/api/settings/secret", json={"key": "llm_api_key", "value": "sk-secret-123"})
+    r = _put_secret(client, "sk-secret-123")
     assert r.status_code == 200
     assert r.json()["ok"] is True and r.json()["key"] == "llm_api_key" and r.json()["set"] is True
     assert isinstance(r.json()["secret_revision"], str) and r.json()["secret_revision"]
 
-    # persisted to the dedicated owner-only file, never ui_settings.json
+    # persisted to the dedicated owner-only file, never ui_settings.json — as a PAIR: the key and
+    # the endpoint it is bound to, so it can never be replayed against a different host.
     stored = json.loads((tmp_path / "secrets.json").read_text(encoding="utf-8"))
-    assert stored == {"llm_api_key": "sk-secret-123", _REVISION_KEY: r.json()["secret_revision"]}
+    assert stored == {
+        "llm_api_key": "sk-secret-123",
+        "llm_api_key_base_url": "http://localhost:11434/v1",
+        _REVISION_KEY: r.json()["secret_revision"],
+    }
     if (tmp_path / "ui_settings.json").exists():
         assert "llm_api_key" not in json.loads((tmp_path / "ui_settings.json").read_text(encoding="utf-8"))
 
-    # applied to the process env (so a spawned engine inherits it)
-    assert os.environ.get("LOOPLAB_LLM_API_KEY") == "sk-secret-123"
+    # NEVER installed process-globally. It used to be exported to os.environ so a child would
+    # inherit it, which also handed it to every unrelated subprocess this server spawns — including
+    # sandboxed candidate code. Children now receive it through the fenced per-spawn overlay
+    # (`SettingsStore.launch_env_for_run`) instead, so assert the absence: a regression that
+    # restores the export must fail here.
+    assert "LOOPLAB_LLM_API_KEY" not in os.environ
+    resolved = SettingsStore(tmp_path).resolve_settings()
+    assert resolved.llm_api_key.get_secret_value() == "sk-secret-123"   # owner-side calls still see it
 
     # the API echoes the secret ONLY as the mask — never the value
     settings = client.get("/api/settings").json()["settings"]
@@ -56,15 +87,20 @@ def test_secret_stored_masked_and_applied(tmp_path, _restore_key):
 
 def test_secret_clear_and_reject_unknown(tmp_path, _restore_key):
     client = TestClient(make_app(tmp_path))
-    client.put("/api/settings/secret", json={"key": "llm_api_key", "value": "sk-zzz"})
-    assert os.environ.get("LOOPLAB_LLM_API_KEY") == "sk-zzz"
+    _put_secret(client, "sk-zzz")
+    assert SettingsStore(tmp_path).resolve_settings().llm_api_key.get_secret_value() == "sk-zzz"
+    assert "LOOPLAB_LLM_API_KEY" not in os.environ      # owner-side only, never process-global
 
     # an empty value clears it from both the store and the env
-    r = client.put("/api/settings/secret", json={"key": "llm_api_key", "value": ""})
+    r = _put_secret(client, "")
     assert r.json()["set"] is False
     assert json.loads((tmp_path / "secrets.json").read_text(encoding="utf-8")) == {
         _REVISION_KEY: r.json()["secret_revision"]}
+    # Clearing drops the endpoint binding with the key: a bound pair must never outlive its key.
+    assert "llm_api_key_base_url" not in json.loads(
+        (tmp_path / "secrets.json").read_text(encoding="utf-8"))
     assert "LOOPLAB_LLM_API_KEY" not in os.environ
+    assert SettingsStore(tmp_path).resolve_settings().llm_api_key is None
     assert client.get("/api/settings").json()["settings"]["llm_api_key"] is None
 
     # an unknown secret key is rejected
@@ -76,16 +112,12 @@ def test_secret_cas_rejects_old_delayed_write_without_leaking_values(tmp_path, _
     loaded = client.get("/api/settings").json()
     old_revision = loaded["secret_revision"]
 
-    newer = client.put("/api/settings/secret", json={
-        "key": "llm_api_key", "value": "sk-newer-value", "expected_revision": old_revision,
-    })
+    newer = _put_secret(client, "sk-newer-value", secret_revision=old_revision)
     assert newer.status_code == 200
     new_revision = newer.json()["secret_revision"]
     assert new_revision != old_revision
 
-    delayed = client.put("/api/settings/secret", json={
-        "key": "llm_api_key", "value": "sk-old-delayed", "expected_revision": old_revision,
-    })
+    delayed = _put_secret(client, "sk-old-delayed", secret_revision=old_revision)
     assert delayed.status_code == 409
     detail = delayed.json()["detail"]
     assert detail["code"] == "secret_revision_conflict"
@@ -108,9 +140,7 @@ def test_secret_cas_is_serialized_across_store_instances(tmp_path, _restore_key)
     revision = clients[0].get("/api/settings").json()["secret_revision"]
 
     def save(client, value):
-        return client.put("/api/settings/secret", json={
-            "key": "llm_api_key", "value": value, "expected_revision": revision,
-        })
+        return _put_secret(client, value, secret_revision=revision)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = (
@@ -128,37 +158,58 @@ def test_secret_cas_is_serialized_across_store_instances(tmp_path, _restore_key)
     assert stored[_REVISION_KEY] == accepted["secret_revision"]
 
 
-def test_stored_secret_primes_env_on_app_start(tmp_path, _restore_key, monkeypatch):
-    # A secret saved in a prior session is loaded into the env when the server next starts.
-    # cwd = tmp_path (no local .env) so prime_env has nothing to defer to and primes the store.
+def test_server_start_reads_a_stored_secret_without_exporting_it(tmp_path, _restore_key, monkeypatch):
+    """A credential saved in a prior session is usable again — and still never process-global.
+
+    This used to assert that startup PRIMED `os.environ`. That export is gone on purpose: it handed
+    the owner's key to every subprocess the server spawns, sandboxed candidate code included.
+    Startup now only makes the stored pair resolvable to owner-side calls, and children receive it
+    through the fenced per-spawn overlay instead.
+    """
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "secrets.json").write_text(json.dumps({"llm_api_key": "sk-from-disk"}), encoding="utf-8")
+    (tmp_path / "secrets.json").write_text(json.dumps({
+        "llm_api_key": "sk-from-disk",
+        "llm_api_key_base_url": "http://localhost:11434/v1",
+    }), encoding="utf-8")
     os.environ.pop("LOOPLAB_LLM_API_KEY", None)
     TestClient(make_app(tmp_path))
-    assert os.environ.get("LOOPLAB_LLM_API_KEY") == "sk-from-disk"
+    assert "LOOPLAB_LLM_API_KEY" not in os.environ
+    resolved = SettingsStore(tmp_path).resolve_settings()
+    assert resolved.llm_api_key.get_secret_value() == "sk-from-disk"
 
 
 def test_worker_refreshes_rotated_and_revoked_stored_secret(tmp_path, _restore_key, monkeypatch):
-    """A sibling process's atomic file update invalidates this worker before its next paid action."""
+    """A sibling process's atomic file update invalidates this worker before its next paid action.
+
+    The refresh returns a PER-SPAWN overlay now instead of mutating `os.environ`, so rotation and
+    revocation are observed in what the next child would be handed. Revocation is an explicit empty
+    tombstone, not an omission: a child with its own `.env` must not fall back to a key the owner
+    just revoked.
+    """
     monkeypatch.chdir(tmp_path)
     secret_path = tmp_path / "secrets.json"
+    endpoint = "http://localhost:11434/v1"
+    rd = tmp_path / "worker-run"
+    rd.mkdir()
+    (rd / "config.snapshot.json").write_text(
+        json.dumps({"llm_base_url": endpoint}), encoding="utf-8")
     atomic_write_text(secret_path, json.dumps({
-        "llm_api_key": "sk-worker-old", _REVISION_KEY: "revision-old",
+        "llm_api_key": "sk-worker-old", "llm_api_key_base_url": endpoint,
+        _REVISION_KEY: "revision-old",
     }))
     os.environ.pop("LOOPLAB_LLM_API_KEY", None)
     worker = SettingsStore(tmp_path)
-    worker.prime_env()
-    assert os.environ["LOOPLAB_LLM_API_KEY"] == "sk-worker-old"
+    assert worker.refresh_env_secrets(rd)["LOOPLAB_LLM_API_KEY"] == "sk-worker-old"
 
     atomic_write_text(secret_path, json.dumps({
-        "llm_api_key": "sk-worker-new", _REVISION_KEY: "revision-new",
+        "llm_api_key": "sk-worker-new", "llm_api_key_base_url": endpoint,
+        _REVISION_KEY: "revision-new",
     }))
-    worker.refresh_env_secrets()
-    assert os.environ["LOOPLAB_LLM_API_KEY"] == "sk-worker-new"
+    assert worker.refresh_env_secrets(rd)["LOOPLAB_LLM_API_KEY"] == "sk-worker-new"
 
     atomic_write_text(secret_path, json.dumps({_REVISION_KEY: "revision-cleared"}))
-    worker.refresh_env_secrets()
-    assert "LOOPLAB_LLM_API_KEY" not in os.environ
+    assert worker.refresh_env_secrets(rd)["LOOPLAB_LLM_API_KEY"] == ""
+    assert "LOOPLAB_LLM_API_KEY" not in os.environ    # never process-global, at any point
 
 
 def test_worker_refresh_preserves_operator_owned_environment(
@@ -215,7 +266,9 @@ def test_stored_secret_reaches_disk_before_the_rename_publishes_it(tmp_path, _re
     monkeypatch.setattr(store_module.os, "replace", watched_replace)
 
     store = SettingsStore(tmp_path)
-    store.store_secret("llm_api_key", "sk-durable")
+    # A nonempty credential is stored only as a PAIR, so the binding is part of the durable write
+    # this test times: without it the store refuses before any temp file is created.
+    store.store_secret("llm_api_key", "sk-durable", binding="http://localhost:11434/v1")
 
     assert order == ["sync", "replace"], order
     assert store.load_secrets()["llm_api_key"] == "sk-durable"

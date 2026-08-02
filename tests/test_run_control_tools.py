@@ -12,6 +12,7 @@ import pytest
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.serve.run_commands import run_generation_token
+from looplab.serve.server import make_app
 from looplab.tools.machine_runs_tools import RunControlTools
 
 
@@ -24,6 +25,8 @@ class _RecordingCommands:
         self.error = error
         self.append = append
         self.calls = []
+        self.deletions = []
+        self._host = None
 
     def run_generation(self, rd):
         return run_generation_token(EventStore(rd / "events.jsonl").read_all())
@@ -34,6 +37,32 @@ class _RecordingCommands:
             EventStore(rd / "events.jsonl").append(event_type, data)
         return {"id": f"cmd-{len(self.calls)}", "status": self.status,
                 "event_type": event_type, "error": self.error}
+
+    def begin_or_resume_deletion(self, rd, *, operation_id, expected_generation, expected_seq):
+        """Delegate to the REAL deletion transaction; the tool refuses to delete without it.
+
+        Agent-issued deletion goes through the durable transaction now (`durable_deletion_available`
+        gates the tool entirely), so a double that omits this method turns every delete test into an
+        assertion about `run_deletion_service_unavailable`. Reimplementing it here would be worse
+        still: the engine-liveness, launch-pending and start-record guards these tests exist to pin
+        live INSIDE the transaction, so a hand-rolled stub would delete runs the real service
+        refuses and the tests would certify a safety property nobody has."""
+        from fastapi import HTTPException
+
+        from looplab.serve.deletion_service import begin_or_resume_run_deletion
+        from looplab.serve.server import make_app
+
+        self.deletions.append((rd.name, operation_id, expected_generation, expected_seq))
+        if self._host is None:
+            self._host = make_app(self.root).state.looplab
+        try:
+            return begin_or_resume_run_deletion(
+                self._host, rd.name, operation_id=operation_id,
+                expected_generation=expected_generation, expected_seq=expected_seq)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"code": str(exc.detail)}
+            return {"ok": False, "status": "pending", "phase": "prepared",
+                    "operation_id": operation_id, **detail}
 
 
 def _run(rd, nodes=(0, 1, 2)):
@@ -405,17 +434,26 @@ def test_delete_run_rechecks_tail_after_permission_and_successfully_deletes_snap
         race_store.append("hint", {"text": "new intent"})
         return "allow_once"
 
+    # Wire the deletion service: without it the tool refuses up front with
+    # `run_deletion_service_unavailable` and never reaches the post-permission tail re-check.
     guarded = RunControlTools(
-        tmp_path, alive_fn=lambda _rd: False, mode="default", approver=mutate_while_asking)
+        tmp_path, alive_fn=lambda _rd: False, mode="default", approver=mutate_while_asking,
+        command_service=_RecordingCommands(tmp_path))
     out = guarded.execute("delete_run", {"run_id": raced.name})
-    assert "changed while awaiting permission" in out and raced.exists()
+    # The tail the tool inspected before asking is carried into the transaction as `expected_seq`
+    # and re-checked there, UNDER the lifecycle lock — a strictly better place than the tool's own
+    # pre-flight compare, which could still lose a race to a writer between check and delete.
+    assert "run_seq_changed" in out and raced.exists()
 
     settled = tmp_path / "delete-ok"
     _run(settled).append("pause", {})
+    deleting = _RecordingCommands(tmp_path)
     direct = RunControlTools(
         tmp_path, alive_fn=lambda _rd: False, mode="auto",
-        approver=lambda _action: "allow_once")
+        approver=lambda _action: "allow_once", command_service=deleting)
     assert "deleted run" in direct.execute("delete_run", {"run_id": settled.name})
+    # The tool must hand the transaction the identity it inspected, not a re-read one.
+    assert len(deleting.deletions) == 1 and deleting.deletions[0][0] == settled.name
     assert not settled.exists()
 
 
@@ -448,10 +486,17 @@ def test_delete_run_retires_root_start_record(tmp_path):
     tool = RunControlTools(
         tmp_path, alive_fn=lambda _rd: False, mode="auto",
         approver=lambda _action: "allow_once", command_service=commands)
+    # Seed the sidecar the REAL transaction retires. Retirement moved inside the deletion
+    # transaction, so it acts on the service's own root sidecar, not on whatever a double happens to
+    # remember; observing the double's bookkeeping would pass with the retirement removed entirely.
+    host = make_app(tmp_path).state.looplab
+    host.commands.save_start_record(rd, {"id": "start_exact", "status": "succeeded"})
+    start_sidecar = host.commands._start_record_path(rd)
+    assert start_sidecar.exists()
 
     assert "deleted run" in tool.execute("delete_run", {"run_id": rd.name})
     assert not rd.exists()
-    assert commands.retired == ["start_exact"] and commands.restored == []
+    assert not start_sidecar.exists(), "the run name stays occupied by a retired start identity"
 
 
 def test_delete_node_rejects_fresh_run_launch_marker(tmp_path, monkeypatch):
@@ -482,11 +527,15 @@ def test_destructive_tools_reject_fresh_resume_launch_gap(tmp_path, name, args):
     store.append("resume_requested", {"mode": "resume"})
     tool = RunControlTools(
         tmp_path, alive_fn=lambda _rd: False, mode="auto",
-        approver=lambda _action: "allow_once")
+        approver=lambda _action: "allow_once",
+        command_service=_RecordingCommands(tmp_path))
 
     out = tool.execute(name, {"run_id": rd.name, **args})
 
-    assert "launching" in out and rd.exists()
+    # delete_node still refuses in the tool ("launching"); delete_run's equivalent guard moved into
+    # the deletion transaction, which reports the same fact as `engine_running` under the lifecycle
+    # lock. Either way nothing is destroyed while a launch is in flight.
+    assert ("launching" in out or "engine_running" in out) and rd.exists()
     events = store.read_all()
     assert not any(event.type in ("node_tombstoned", "node_reset") for event in events)
 
@@ -757,7 +806,7 @@ def test_different_active_command_can_never_be_reported_as_requested_action_succ
     ("delete_run", {"run_id": "ordered"}),
     ("delete_node", {"run_id": "ordered", "node_id": 1}),
 ])
-def test_destructive_approval_then_guard_then_live_recheck(tmp_path, name, args):
+def test_destructive_approval_then_guard_then_live_recheck(tmp_path, monkeypatch, name, args):
     rd = tmp_path / "ordered"
     _run(rd).append("pause", {})
     order = []
@@ -783,12 +832,24 @@ def test_destructive_approval_then_guard_then_live_recheck(tmp_path, name, args)
         order.append(("live",))
         return live_checks > 1
 
+    # delete_run's post-permission liveness re-check moved INTO the deletion transaction, which
+    # reads real engine ownership under the lifecycle lock rather than through the tool's injected
+    # `alive_fn`. Drive the same "came alive while the operator was deciding" simulation at whichever
+    # layer now owns the check, so both arms still prove the re-check happens AFTER permission.
+    from looplab.serve import deletion_service
+    monkeypatch.setattr(deletion_service, "_engine_liveness", alive)
+
     tool = RunControlTools(tmp_path, alive_fn=alive, mode="default", approver=approve,
                            command_service=Commands(tmp_path))
     out = tool.execute(name, args)
-    assert "LIVE" in out and rd.exists()
-    assert [item[0] for item in order] == [
-        "live", "approve", "guard-enter", "live", "guard-exit"]
+    assert rd.exists(), "an engine that came alive during permission must stop the mutation"
+    if name == "delete_node":
+        assert "LIVE" in out
+        assert [item[0] for item in order] == [
+            "live", "approve", "guard-enter", "live", "guard-exit"]
+    else:
+        assert "engine_running" in out
+        assert [item[0] for item in order] == ["live", "approve", "live"]
 
 
 def test_delete_node_requires_reapproval_if_descendant_scope_changes(tmp_path):
