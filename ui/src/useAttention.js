@@ -20,6 +20,24 @@ const sourceUnverifiedItem = item => item?.notifyEligible === false
   : { ...item, notifyEligible: false }
 const sourceStalePages = pages => pages.map(page => page.map(sourceStaleItem))
 
+// A stale cursor is detected two ways — the server answers the older-page request with a 409, or the
+// feed moved under us between issuing the request and applying it — and both mean exactly the same
+// thing: the archival pages are invalid, the first page is no longer known-fresh, and only a refresh
+// can recover. They used to be handled by two near-identical inline blocks that disagreed on the two
+// things the OPERATOR sees: one showed "the list changed, try again" and never refreshed, the other
+// refreshed and said nothing at all. Since `hasMore` is false while stale, the first spelling told
+// the user to retry using a button it had just removed, and left recovery to the next poll tick.
+const STALE_CURSOR_MESSAGE = 'The attention list changed before the next page loaded. Try again.'
+const staleCursorState = previous => ({
+  ...previous,
+  runPages: sourceStalePages(previous.runPages.slice(0, 1)),
+  nextCursor: previous.firstNextCursor,
+  truncated: !!previous.firstNextCursor,
+  runStale: true,
+  loadingMore: false,
+  loadMoreError: STALE_CURSOR_MESSAGE,
+})
+
 function normalizeRunPage(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
       || !Array.isArray(payload.items) || !SNAPSHOT_RE.test(payload.snapshot_id || '')
@@ -236,7 +254,15 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
         nextCursor,
         firstNextCursor: firstPage.nextCursor,
         truncated,
-        loadMoreError: snapshotChanged ? '' : previous.loadMoreError,
+        // A background poll must not wipe a load-more failure the operator has not acted on — that
+        // message means "your last click failed", and polling the FIRST page proves nothing about
+        // the older one. The stale-cursor message is the exception: it says "try again", and a
+        // complete fresh first page is exactly the moment trying again became possible, so it is
+        // cleared on recovery rather than waiting for a snapshot change that may never come (the
+        // client-side detection fires on cursor/count drift within one snapshot too).
+        loadMoreError: snapshotChanged
+          || (completeFresh && previous.loadMoreError === STALE_CURSOR_MESSAGE)
+          ? '' : previous.loadMoreError,
         loadingMore: archiveInvalidated ? false : previous.loadingMore,
         runAttempted: true,
         runVerified: previous.runVerified || completeFresh,
@@ -297,19 +323,13 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
         mismatch.status = 409
         throw mismatch
       }
+      let movedUnderUs = false
       setState(previous => {
         if (previous.runStale || previous.partial || previous.runSnapshotId !== snapshotId
             || previous.runActiveActionCount !== activeActionCount
             || previous.nextCursor !== cursor) {
-          return {
-            ...previous,
-            runPages: sourceStalePages(previous.runPages.slice(0, 1)),
-            nextCursor: previous.firstNextCursor,
-            truncated: !!previous.firstNextCursor,
-            runStale: true,
-            loadingMore: false,
-            loadMoreError: 'The attention list changed before the next page loaded. Try again.',
-          }
+          movedUnderUs = true
+          return staleCursorState(previous)
         }
         const runPages = [...previous.runPages, page.items]
         return {
@@ -323,18 +343,14 @@ export function useAttention({ intervalMs = RUN_POLL_MS } = {}) {
           loadMoreError: '',
         }
       })
+      // Recovery is scheduled for the client-side detection too, not only the server's 409: while
+      // the feed reads stale `loadMore` is a no-op and `hasMore` hides the button, so without this
+      // the operator waits a whole poll interval with no way to act.
+      if (movedUnderUs) setRefreshToken(value => value + 1)
     } catch (error) {
       if (loadMoreRequestRef.current !== request) return
       const cursorStale = error?.status === 409
-      setState(previous => cursorStale ? ({
-        ...previous,
-        runPages: sourceStalePages(previous.runPages.slice(0, 1)),
-        nextCursor: previous.firstNextCursor,
-        truncated: !!previous.firstNextCursor,
-        runStale: true,
-        loadingMore: false,
-        loadMoreError: '',
-      }) : ({
+      setState(previous => cursorStale ? staleCursorState(previous) : ({
         ...previous,
         loadingMore: false,
         loadMoreError: 'Older attention items could not be loaded. Try again.',

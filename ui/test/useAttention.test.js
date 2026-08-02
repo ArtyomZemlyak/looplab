@@ -239,13 +239,38 @@ test('useAttention paginates, preserves pages on transport failure, and resets a
     assert.equal(hook.latest.hasMore, true)
     assert.match(hook.latest.loadMoreError, /could not be loaded/i)
 
+    // A definitive stale cursor is a different class of failure from a transport blip: the pages
+    // after the first are not retryable, they are WRONG. The first page is kept but demoted to
+    // stale, which is what makes `hasMore` false — `loadMore` early-returns while the run source
+    // reads stale, so keeping the affordance visible would offer a button that does nothing. The
+    // pairing is the invariant worth pinning: the control disappears exactly when it would no-op,
+    // AND the operator is told why, AND recovery is scheduled rather than left to the poll tick.
+    // The 409 also ARMS a refresh, so a first page must be queued for it. This one is itself stale,
+    // which keeps the feed in the post-409 state long enough to observe it.
     hook.enqueue('attention', { status: 409, body: { detail: 'stale cursor' } })
+    hook.enqueue('attention', attentionPage([first], {
+      truncated: true, cursor: first.id, stale: true,
+    }))
+    hook.enqueue('permissions', { pending: [] })
     await hook.loadMore()
     assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id],
       'a definitive stale cursor discards only pages after the current first page')
     assert.equal(hook.latest.nextCursor, first.id)
+    assert.equal(hook.latest.hasMore, false,
+      'while the run source reads stale `loadMore` is a no-op, so advertising more pages would '
+      + 'offer a button that does nothing')
+    assert.match(hook.latest.loadMoreError, /list changed/i,
+      'the 409 path used to blank the message, so the operator saw the control vanish with no '
+      + 'explanation at all')
+
+    // Recovery: the armed refresh is what brings the feed back — the operator does not have to
+    // click anything — and the "try again" instruction must not outlive the moment it came true.
+    hook.enqueue('attention', attentionPage([first], { truncated: true, cursor: first.id }))
+    hook.enqueue('permissions', { pending: [] })
+    await hook.refresh(() => !hook.latest.runStale)
     assert.equal(hook.latest.hasMore, true)
-    assert.match(hook.latest.loadMoreError, /list changed/i)
+    assert.equal(hook.latest.nextCursor, first.id)
+    assert.equal(hook.latest.loadMoreError, '')
 
     hook.enqueue('attention', attentionPage([replacement]))
     await hook.loadMore()
@@ -280,9 +305,18 @@ test('useAttention invalidates archival pages across partial-source transitions'
     assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id],
       'a newly partial scan cannot retain archival cards from a different source universe')
 
-    hook.enqueue('attention', attentionPage([older], { partial: true }))
+    // Paging is not merely unhelpful during a partial scan, it is incoherent: the assertion above
+    // is that a partial first page cannot keep archival cards from a different source universe, so
+    // fetching MORE of that universe would reintroduce exactly what was just discarded. The hook
+    // refuses at both ends — no affordance, and a no-op if called anyway.
+    assert.equal(hook.latest.hasMore, false,
+      'a partial scan must not advertise more pages; its cursor points into a universe the first '
+      + 'page no longer agrees with')
+    const beforePartialLoadMore = hook.calls.length
     await hook.loadMore()
-    assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id, older.id])
+    assert.equal(hook.calls.length, beforePartialLoadMore,
+      'loadMore issued a request while the scan was partial')
+    assert.deepEqual(hook.latest.runs.map(item => item.id), [first.id])
 
     hook.enqueue('attention', attentionPage([first], {
       truncated: true, cursor: first.id, partial: false,
@@ -294,4 +328,30 @@ test('useAttention invalidates archival pages across partial-source transitions'
     assert.equal(hook.latest.hasMore, true)
     assert.equal(hook.latest.nextCursor, first.id)
   })
+})
+
+// The second stale-cursor detection — the feed moved between issuing the older-page request and
+// applying its response — is a defensive re-check inside the `setState` reducer, where `previous`
+// can be newer than the state the request was planned against. It is not reachable from the hook's
+// public surface: every route that would change the state mid-flight goes through `cancelLoadMore`,
+// which drops the response before the reducer runs. So it gets a structural guard instead of a
+// behavioural one, and the guard pins the exact thing that was wrong: the two detections producing
+// the same state but disagreeing about what the operator sees and whether recovery is scheduled.
+test('both stale-cursor detections produce one state and both schedule recovery', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../src/useAttention.js', import.meta.url), 'utf8')
+  const loadMore = source.slice(source.indexOf('const loadMore = useCallback'),
+    source.indexOf('const refresh = useCallback'))
+  assert.ok(loadMore.length > 500, 'the loadMore slice anchors moved; this guard is reading nothing')
+
+  assert.equal((loadMore.match(/staleCursorState\(previous\)/g) || []).length, 2,
+    'both stale-cursor detections must build the state through the shared helper — two inline '
+    + 'copies is how they drifted apart in the first place')
+  assert.equal((loadMore.match(/setRefreshToken\(value => value \+ 1\)/g) || []).length, 2,
+    'each stale-cursor detection must arm the refresh that recovers from it; while the feed reads '
+    + 'stale `loadMore` no-ops and `hasMore` hides the button, so a detection that does not '
+    + 'refresh strands the operator until the next poll tick')
+  assert.doesNotMatch(loadMore, /loadMoreError: ''\s*,?\s*\}\)\s*:\s*\(\{/,
+    'a stale-cursor branch is blanking the message again — the operator needs to be told why the '
+    + '"Load more" control disappeared under their click')
 })
