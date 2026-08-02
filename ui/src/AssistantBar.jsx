@@ -25,7 +25,7 @@ import {
   get, fmtAgo, fmtDate, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
   assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
-  assistantFork, assistantShare, assistantUnshare,
+  assistantFork, assistantForkStatus, assistantShare, assistantUnshare,
   commandActionForEvent, commandCanRetry, commandErrorMessage,
   commandEventForAction,
   commandFailureRecord, commandFeedback, commandRecordMatchesAction, getRunCommand, retryRunCommand,
@@ -59,6 +59,35 @@ import { deadlineRequest } from './requestDeadline.js'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 const boundedRequest = (read, ms = 12000) => deadlineRequest(read, ms).promise
+const ASSISTANT_FORK_ACTION_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/
+const ASSISTANT_SESSION_RE = /^[\da-f]{16}$/
+const assistantForkRecoveryKey = sid =>
+  `ll.assistant-fork-recovery.${encodeURIComponent(String(sid || ''))}`
+const validAssistantForkRecovery = value => value && typeof value === 'object'
+  && !Array.isArray(value) && Object.keys(value).length === 2
+  && typeof value.actionId === 'string' && ASSISTANT_FORK_ACTION_RE.test(value.actionId)
+  && Number.isSafeInteger(value.expectedMessages) && value.expectedMessages >= 0
+const loadAssistantForkRecovery = sid => {
+  if (!ASSISTANT_SESSION_RE.test(String(sid || ''))) return null
+  const key = assistantForkRecoveryKey(sid)
+  const raw = storageGet(key)
+  if (typeof raw !== 'string') return null
+  if (raw.length > 256) { storageRemove(key); return null }
+  try {
+    const parsed = JSON.parse(raw)
+    if (validAssistantForkRecovery(parsed)) return parsed
+  } catch { /* invalid optional recovery state is discarded below */ }
+  storageRemove(key)
+  return null
+}
+const saveAssistantForkRecovery = (sid, recovery) => ASSISTANT_SESSION_RE.test(String(sid || ''))
+  && validAssistantForkRecovery(recovery)
+  && storageSet(assistantForkRecoveryKey(sid), JSON.stringify(recovery))
+const clearAssistantForkRecovery = (sid, actionId) => {
+  const current = loadAssistantForkRecovery(sid)
+  if (current?.actionId !== actionId) return false
+  return storageRemove(assistantForkRecoveryKey(sid))
+}
 const messagesOwnLaunchIdentity = (messages, sessionId, identity) => Array.isArray(messages)
   && messages.some((message, messageIndex) => Array.isArray(message?.proposals)
     && message.proposals.some((proposal, proposalIndex) => launchDraftKey({
@@ -219,6 +248,8 @@ const validAssistantShareMeta = meta => {
 }
 const assistantLiveShareAckRequired = error => error?.status === 409
   && error?.code === 'assistant_live_share_ack_required'
+const assistantForkTurnInProgress = error => error?.status === 409
+  && error?.code === 'assistant_turn_fork_in_progress'
 const assistantLiveShareRecoveryFailure = {
   message: 'Saved Assistant turn paused because the live public-link set changed. Verify its status, then retry this exact turn.',
   notice: 'Saved Assistant turn paused · live public-link status changed',
@@ -371,6 +402,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [shareUnknownSids, setShareUnknownSids] = useState(() => new Set())
   const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
   const [shareBusySid, setShareBusySid] = useState(null)
+  const [forkBusySid, setForkBusySid] = useState(null)
+  const [forkRecovery, setForkRecovery] = useState(null)
   const [shareAckNotice, setShareAckNotice] = useState(null)
   const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
   const [pendingFileReads, setPendingFileReads] = useState(0)
@@ -415,7 +448,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const openSessionRef = useRef(null)
   const toastRunIdRef = useRef(runId)
   const shareActionSessionRef = useRef(null)
+  const forkActionSessionRef = useRef(null)
+  const forkRecoveryRef = useRef(new Map())
   const deletingSessionsRef = useRef(new Set())
+  useEffect(() => {
+    if (!sid) { setForkRecovery(null); return }
+    const recovery = forkRecoveryRef.current.get(sid) || loadAssistantForkRecovery(sid)
+    if (recovery) forkRecoveryRef.current.set(sid, recovery)
+    setForkRecovery(recovery ? { sid, ...recovery } : null)
+  }, [sid])
   // A composer belongs to the chat it was written in. Keep text and attachments in memory per session
   // so selecting another transcript cannot silently send the previous chat's draft. The unsaved
   // new-chat composer has its own slot; "+ New" deliberately resets that slot.
@@ -1102,6 +1143,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     if (shareActionSessionRef.current === id) {
       return { message: 'Wait for the current share action before deleting this chat' }
     }
+    if (forkActionSessionRef.current === id) {
+      return { message: 'Wait for this chat to finish forking before deleting it' }
+    }
     const listedSession = sessions.find(session => session.id === id)
     if (listedSession?.shared || shareUnknownSids.has(id) || shareCopyFallbacks[id]) {
       return { message: 'Unshare this chat before deleting it so every public link is explicitly revoked' }
@@ -1202,8 +1246,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         const shared = finalError?.code === 'assistant_delete_shared'
         const incomplete = finalError?.code === 'assistant_delete_incomplete'
         const stillStopping = finalError?.code === 'assistant_delete_busy'
+        const forkInProgress = finalError?.code === 'assistant_delete_fork_in_progress'
         const message = shared
           ? 'This chat still has an active public link. Unshare it first, then delete the chat.'
+          : forkInProgress
+          ? 'This chat is still being forked. It is shown again; try deleting it after the fork finishes.'
           : stillStopping
           ? 'The live Assistant turn is still stopping. The chat is shown again; try deleting it again shortly.'
           : incomplete
@@ -1214,6 +1261,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               ? 'Neither bounded deletion attempt was confirmed. The chat is shown again for safety; retry or refresh.'
               : 'The chat was not deleted. It is shown again; you can cancel or try again.'
         flash(shared ? 'Unshare this chat before deleting it'
+          : forkInProgress ? 'Wait for this chat to finish forking before deleting it'
           : stillStopping ? 'Assistant work is still stopping'
           : incomplete ? 'Assistant chat was not completely removed' : 'Could not confirm chat deletion')
         if (mountedRef.current) setDeleteConfirmError(message)
@@ -1732,6 +1780,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // ── attached files ──
   const onFiles = async (list) => {
     const ownerDraft = composerDraftRef.current
+    const ownerSession = sidRef.current
+    if (ownerSession && forkActionSessionRef.current === ownerSession) {
+      flash('Wait for this Assistant chat to finish forking before attaching files')
+      return
+    }
     const ownerRunScope = composerRunKey(currentRunIdRef.current)
     const picked = [...(list || [])]
     const bad = picked.filter(f => !TEXT_EXT.test(f.name))
@@ -1791,11 +1844,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // model receives (run context + attached files appended, not shown in the bubble).
   const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null,
     retryFiles = null, turnMode = null, clearComposer = false, acknowledgedShareMeta = null } = {}) => {
+    const guardedSid = sidRef.current || sid
+    if (guardedSid && forkActionSessionRef.current === guardedSid) {
+      flash('Wait for this Assistant chat to finish forking before sending')
+      return
+    }
     if (shareBusySid != null || shareActionSessionRef.current) {
       flash('Wait for the current public-link action before sending another turn')
       return
     }
-    const guardedSid = sidRef.current || sid
     if (guardedSid && shareUnknownSids.has(guardedSid)) {
       flash('Messaging paused · retry or revoke the unknown public-link state first')
       return
@@ -1975,11 +2032,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                   error_kind: res && res.error_kind })
       setPreview(previewText(reply)); setHasNew(wasBar)
     } catch (e) {
-      if (assistantLiveShareAckRequired(e)) {
+      const shareStateChanged = assistantLiveShareAckRequired(e)
+      const forkTurnRejected = assistantForkTurnInProgress(e)
+      if (shareStateChanged || forkTurnRejected) {
         // The backend rejected this before staging a turn. Remove only this optimistic pair, restore
         // what the send consumed, and never route the 409 through ambiguous-turn polling or auto-retry.
         if (mountedRef.current) {
-          setShareUnknown(id, true)
+          if (shareStateChanged) setShareUnknown(id, true)
           if (inputCleared && inputAtSend) {
             const currentInput = draftAtSend.input
             const restoredInput = !currentInput ? inputAtSend
@@ -2004,13 +2063,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             setPreview(previewAtSend); setHasNew(hasNewAtSend)
           }
           const restored = inputCleared || (retryFiles == null && atts.length > 0)
-          setShareAckNotice({ sid: id, message: restored
-            ? 'Nothing sent · live public-link state changed. Your draft was restored; verify the warning, then send again.'
-            : 'Nothing sent · live public-link state changed. Verify the warning, then retry the original turn.' })
-          flash(restored ? 'Nothing sent · draft restored after public-link state changed'
-            : 'Nothing sent · public-link state changed')
-          refreshSessions()
-          refreshSessionShareMeta(id)
+          if (shareStateChanged) {
+            setShareAckNotice({ sid: id, message: restored
+              ? 'Nothing sent · live public-link state changed. Your draft was restored; verify the warning, then send again.'
+              : 'Nothing sent · live public-link state changed. Verify the warning, then retry the original turn.' })
+            flash(restored ? 'Nothing sent · draft restored after public-link state changed'
+              : 'Nothing sent · public-link state changed')
+            refreshSessions()
+            refreshSessionShareMeta(id)
+          } else {
+            flash(restored ? 'Nothing sent · draft restored while this chat is being forked'
+              : 'Nothing sent · this chat is being forked')
+          }
         }
         return
       }
@@ -2054,6 +2118,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       return
     }
     const guardedSid = sidRef.current || sid
+    if (guardedSid && forkActionSessionRef.current === guardedSid) {
+      flash('Wait for this Assistant chat to finish forking before sending')
+      return
+    }
     if (guardedSid && shareUnknownSids.has(guardedSid)) {
       flash('Retry paused · retry or revoke the unknown public-link state first')
       return
@@ -2358,10 +2426,226 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const deletingCurrentSession = !!sid && deletingSessionsRef.current.has(sid)
   const shareTurnIncomplete = busy || commandBusy || pending.length > 0
     || runningRef.current || turnCaptureRef.current || msgs[msgs.length - 1]?.role === 'user'
+  const forkBusy = forkBusySid != null
+  const forkingCurrentSession = !!sid && forkBusySid === sid
+  const currentForkRecovery = forkRecovery?.sid === sid ? forkRecovery : null
+  const composerPaused = sharePaused || forkingCurrentSession
+  const rememberForkRecovery = (sourceSid, recovery) => {
+    const stored = loadAssistantForkRecovery(sourceSid)
+    const durable = stored?.actionId === recovery.actionId
+      && stored.expectedMessages === recovery.expectedMessages
+      ? true : saveAssistantForkRecovery(sourceSid, recovery)
+    if (!durable) return false
+    forkRecoveryRef.current.set(sourceSid, recovery)
+    if (mountedRef.current && (sidRef.current || sid) === sourceSid) {
+      setForkRecovery({ sid: sourceSid, ...recovery })
+    }
+    return true
+  }
+  const forgetForkRecovery = (sourceSid, actionId) => {
+    if (forkRecoveryRef.current.get(sourceSid)?.actionId === actionId) {
+      forkRecoveryRef.current.delete(sourceSid)
+    }
+    clearAssistantForkRecovery(sourceSid, actionId)
+    if (mountedRef.current) {
+      setForkRecovery(current => current?.sid === sourceSid && current.actionId === actionId
+        ? null : current)
+    }
+  }
+  const presentForkChild = async (child, sourceSid, recovery, sourceChoiceSeq) => {
+    if (!mountedRef.current) return false
+    const childId = typeof child?.id === 'string' && ASSISTANT_SESSION_RE.test(child.id)
+      && child.parent === sourceSid && child.fork_action_id === recovery.actionId ? child.id : null
+    if (!childId) return false
+    const listed = await refreshSessions()
+    if (!mountedRef.current) return false
+    let confirmed = Array.isArray(listed) && listed.some(session => session?.id === childId)
+    if (sidRef.current === sourceSid && openSessionSeqRef.current === sourceChoiceSeq) {
+      const opened = await openSession(childId)
+      confirmed = confirmed || !!opened?.ok
+    } else if (confirmed) {
+      flash('Fork created · kept your newer chat selection')
+    }
+    if (!confirmed) return false
+    forgetForkRecovery(sourceSid, recovery.actionId)
+    return true
+  }
+  const reconcileFork = async (sourceSid, recovery) => {
+    const actionId = recovery.actionId
+    let sawPending = false
+    for (let attempt = 0; attempt < 5 && mountedRef.current; attempt++) {
+      if (attempt > 0) await sleep(350 * attempt)
+      try {
+        const child = await boundedRequest(
+          signal => assistantForkStatus(sourceSid, actionId, {
+            expectedMessages: recovery.expectedMessages, signal,
+          }), 4000)
+        return { kind: 'created', child }
+      } catch (error) {
+        const reportedAction = String(error?.detail?.action_id || '')
+        if (error?.code === 'assistant_fork_in_progress'
+            && (!reportedAction || reportedAction === actionId)) {
+          sawPending = true
+          continue
+        }
+        if (error?.code === 'assistant_fork_in_progress') {
+          return { kind: 'blocked', error }
+        }
+        if (error?.code === 'assistant_fork_deleted') return { kind: 'deleted', error }
+        if (error?.code === 'assistant_fork_action_conflict') return { kind: 'conflict', error }
+        if (error?.code === 'assistant_fork_deleting') return { kind: 'deleting', error }
+        if (error?.status === 404) return { kind: 'absent', error }
+        const status = Number(error?.status)
+        const ambiguous = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+          || error?.status == null || status >= 500 || [408, 425, 429].includes(status)
+        if (!ambiguous) return { kind: 'unknown', error }
+      }
+    }
+    return { kind: sawPending ? 'pending' : 'unknown' }
+  }
+  const settleForkReconciliation = async (outcome, sourceSid, recovery, sourceChoiceSeq) => {
+    if (!mountedRef.current) return
+    if (outcome.kind === 'created') {
+      if (await presentForkChild(outcome.child, sourceSid, recovery, sourceChoiceSeq)) return
+      await refreshSessions()
+      if (mountedRef.current) flash('Fork result is uncertain · check the chat list before retrying')
+      return
+    }
+    if (outcome.kind === 'deleted') {
+      forgetForkRecovery(sourceSid, recovery.actionId)
+      await refreshSessions()
+      if (mountedRef.current) flash('That fork was deleted · fork again to create a new copy')
+      return
+    }
+    if (outcome.kind === 'conflict') {
+      forgetForkRecovery(sourceSid, recovery.actionId)
+      await refreshSessions()
+      if (mountedRef.current) flash('This saved fork request no longer matches the chat · review it and fork again')
+      return
+    }
+    if (outcome.kind === 'deleting') {
+      await refreshSessions()
+      if (mountedRef.current) flash('That fork is being deleted · check again before retrying')
+      return
+    }
+    if (outcome.kind === 'absent') {
+      flash('Fork is not published · check fork retries this exact request')
+      return
+    }
+    if (outcome.kind === 'blocked') {
+      flash('Another fork is in progress · check fork keeps this request safe')
+      return
+    }
+    await refreshSessions()
+    if (mountedRef.current) flash(outcome.kind === 'pending'
+      ? 'Fork is still finishing · use check fork to recover this exact request'
+      : 'Fork status is uncertain · use check fork before starting another')
+  }
+  const forkCurrentSession = async () => {
+    const forkSid = sidRef.current || sid
+    if (!forkSid) return
+    if (forkActionSessionRef.current) {
+      flash('Another Assistant fork is still in progress')
+      return
+    }
+    const storedRecovery = forkRecoveryRef.current.get(forkSid) || loadAssistantForkRecovery(forkSid)
+    if (!storedRecovery && (runningRef.current || turnCaptureRef.current || busy || commandBusy
+        || pending.length > 0 || msgs[msgs.length - 1]?.role === 'user')) {
+      flash('Wait for a complete Assistant reply before forking this chat')
+      return
+    }
+    if (deletingSessionsRef.current.has(forkSid)) {
+      flash('This chat is being deleted')
+      return
+    }
+    if (shareActionSessionRef.current) {
+      flash('Wait for the current share action before forking this chat')
+      return
+    }
+    const recovery = storedRecovery || {
+      actionId: createIdempotencyKey().toLowerCase(), expectedMessages: msgs.length,
+    }
+    if (!rememberForkRecovery(forkSid, recovery)) {
+      flash('Browser recovery storage is unavailable · enable it before forking safely')
+      return
+    }
+    const sourceChoiceSeq = openSessionSeqRef.current
+    forkActionSessionRef.current = forkSid
+    setForkBusySid(forkSid)
+    try {
+      const child = await boundedRequest(
+        signal => assistantFork(forkSid, recovery, { signal }), 12000)
+      if (!await presentForkChild(child, forkSid, recovery, sourceChoiceSeq)) {
+        const outcome = await reconcileFork(forkSid, recovery)
+        await settleForkReconciliation(outcome, forkSid, recovery, sourceChoiceSeq)
+      }
+    } catch (error) {
+      if (!mountedRef.current) return
+      if (error?.code === 'assistant_fork_session_deleting') {
+        forgetForkRecovery(forkSid, recovery.actionId)
+        flash('This chat is being deleted')
+      } else if (error?.code === 'assistant_fork_deleted') {
+        forgetForkRecovery(forkSid, recovery.actionId)
+        refreshSessions()
+        flash('That fork was deleted · fork again to create a new copy')
+      } else if (error?.code === 'assistant_fork_action_conflict') {
+        forgetForkRecovery(forkSid, recovery.actionId)
+        refreshSessions()
+        flash('This saved fork request no longer matches the chat · review it and fork again')
+      } else if (error?.code === 'assistant_fork_source_changed') {
+        forgetForkRecovery(forkSid, recovery.actionId)
+        refreshSessions()
+        flash('This chat changed before the fork started · review it and fork again')
+      } else if (['assistant_fork_turn_active', 'assistant_fork_turn_incomplete'].includes(error?.code)) {
+        forgetForkRecovery(forkSid, recovery.actionId)
+        flash('Wait for the current Assistant reply to finish or recover it before forking')
+      } else if (error?.status === 404) {
+        forgetForkRecovery(forkSid, recovery.actionId)
+        flash('This Assistant chat no longer exists')
+      } else if (error?.code === 'assistant_fork_in_progress'
+          && error?.detail?.action_id && error.detail.action_id !== recovery.actionId) {
+        const activeActionId = String(error.detail.action_id).toLowerCase()
+        const activeExpectedMessages = typeof error.detail.expected_messages === 'number'
+          ? error.detail.expected_messages : Number.NaN
+        const adopted = { actionId: activeActionId, expectedMessages: activeExpectedMessages }
+        if (!ASSISTANT_FORK_ACTION_RE.test(activeActionId)
+            || !Number.isSafeInteger(activeExpectedMessages) || activeExpectedMessages < 0
+            || activeExpectedMessages !== recovery.expectedMessages) {
+          flash('Another tab is forking a different chat snapshot · refresh before retrying')
+        } else {
+          forgetForkRecovery(forkSid, recovery.actionId)
+          if (!rememberForkRecovery(forkSid, adopted)) {
+            flash('Another fork is in progress · refresh the chat list before retrying')
+          } else {
+            const outcome = await reconcileFork(forkSid, adopted)
+            await settleForkReconciliation(outcome, forkSid, adopted, sourceChoiceSeq)
+          }
+        }
+      } else if (error?.code === 'assistant_fork_in_progress'
+          || error?.code === 'assistant_fork_deleting'
+          || error?.code === 'assistant_fork_child_deleting'
+          || error?.name === 'TimeoutError' || error?.name === 'AbortError'
+          || error?.status == null || Number(error.status) >= 500
+          || [408, 425, 429].includes(Number(error.status))) {
+        const outcome = await reconcileFork(forkSid, recovery)
+        await settleForkReconciliation(outcome, forkSid, recovery, sourceChoiceSeq)
+      } else {
+        forgetForkRecovery(forkSid, recovery.actionId)
+        flash('Could not fork this Assistant chat')
+      }
+    } finally {
+      if (forkActionSessionRef.current === forkSid) forkActionSessionRef.current = null
+      if (mountedRef.current) setForkBusySid(current => current === forkSid ? null : current)
+    }
+  }
   const revokeCurrentShares = async () => {
     const shareSid = sidRef.current || sid
     if (!shareSid) return
     if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
+    if (forkActionSessionRef.current === shareSid) {
+      flash('Wait for this chat to finish forking before changing its public links')
+      return
+    }
     if (deletingSessionsRef.current.has(shareSid)) {
       flash('This chat is being deleted')
       return
@@ -2395,7 +2679,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
   const retryHandlerFor = (assistantIndex) => {
     if (historical) return null
-    if (sharePaused || shareActionSessionRef.current) return null
+    if (composerPaused || shareActionSessionRef.current
+        || forkActionSessionRef.current === (sidRef.current || sid)) return null
     if (msgs[assistantIndex]?.recoveryBlocked) return null
     const prior = [...msgs.slice(0, assistantIndex)].reverse().find(x => x.role === 'user')
     if (prior?.context?.files?.length && !prior.retryPayload) return null
@@ -2462,9 +2747,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
     title={historical ? readOnlyShort : shareUnknown ? 'Messaging paused until public-link status is verified'
       : shareBusy ? 'Wait for the current public-link action'
-        : draftRunMismatch ? draftRunMismatchMessage
-          : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'attach text file(s)'}
-    disabled={historical || sharePaused || draftRunMismatch || pendingFileReads > 0}
+        : forkingCurrentSession ? 'Wait for this chat to finish forking'
+          : draftRunMismatch ? draftRunMismatchMessage
+            : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'attach text file(s)'}
+    disabled={historical || composerPaused || draftRunMismatch || pendingFileReads > 0}
     onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
@@ -2473,8 +2759,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     <div className="asst-modes">
       {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
         className={'asst-mode' + (x.id === mode ? ' on' : '')}
-        disabled={historical || sharePaused} title={historical ? readOnlyShort
-          : shareUnknown ? 'Messaging paused until public-link status is verified' : x.hint}
+        disabled={historical || composerPaused} title={historical ? readOnlyShort
+          : shareUnknown ? 'Messaging paused until public-link status is verified'
+            : forkingCurrentSession ? 'Wait for this chat to finish forking' : x.hint}
         onClick={() => setComposerMode(x.id)}>{x.label}</button>)}
     </div>
     <span className="asst-modehint muted">{activeMode.hint}</span>
@@ -2548,17 +2835,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <textarea className="text" ref={inputRef} value={input}
         aria-label="Assistant message" aria-describedby={draftingNewRun ? 'assistant-new-run-hint' : undefined}
         {...comboAria}
-        disabled={historical || commandBusy || sharePaused} onChange={changeInput} onKeyDown={onKey}
+        disabled={historical || commandBusy || composerPaused} onChange={changeInput} onKeyDown={onKey}
         placeholder={historical ? readOnlyShort : shareUnknown
           ? 'Public-link status unknown · messaging paused' : shareBusy
-            ? 'Finishing public-link action…' : placeholder} />
+            ? 'Finishing public-link action…' : forkingCurrentSession
+              ? 'Forking this chat…' : placeholder} />
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary"
-            disabled={historical || commandBusy || sharePaused || draftRunMismatch || pendingFileReads > 0
+            disabled={historical || commandBusy || composerPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)}
             onClick={send}>{shareUnknown ? 'Paused' : commandBusy || shareBusy ? 'Waiting…'
-              : pendingFileReads > 0 ? 'Reading…' : 'Send'}</button>}
+              : forkingCurrentSession ? 'Forking…'
+                : pendingFileReads > 0 ? 'Reading…' : 'Send'}</button>}
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
       Describe the goal after /new, then Send. Send uses the configured model to draft a launch card.
@@ -2568,7 +2857,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   </div>
 
   const hiddenFileInput = <input ref={fileRef} type="file" multiple style={{ display: 'none' }}
-    disabled={historical || sharePaused || draftRunMismatch || pendingFileReads > 0}
+    disabled={historical || composerPaused || draftRunMismatch || pendingFileReads > 0}
     onChange={e => { onFiles(e.target.files); e.target.value = '' }} />
 
   useEffect(() => {
@@ -2620,7 +2909,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </output>
 
     {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
-    {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
+    {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
       <button className="cmdbar-ic" aria-label="Open full Assistant" title="open the full assistant" onClick={openFull}>✦</button>
       {launchRecoveryButton}
       <button type="button" className={`cmdbar-mode mode-${mode}`}
@@ -2640,12 +2929,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}
           aria-controls="assistant-command-listbox"
           aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
-          disabled={historical || commandBusy || sharePaused} onChange={changeInput} onKeyDown={onKey}
+          disabled={historical || commandBusy || composerPaused} onChange={changeInput} onKeyDown={onKey}
           placeholder={historical ? readOnlyShort : shareUnknown
             ? 'Public-link status unknown · messaging paused' : shareBusy
-              ? 'Finishing public-link action…' : runId
-                ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
-                : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
+              ? 'Finishing public-link action…' : forkingCurrentSession
+                ? 'Forking this chat…' : runId
+                  ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
+                  : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
       </div>
       {attachBtn('cmdbar-attach')}
       {shareUnknown
@@ -2697,6 +2987,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 <span><span className="cmdbar-who">draft held</span> · from {draftRunSource}</span>
                 <button type="button" className="btn sm ghost" onClick={useDraftHere}>Use here</button>
               </span>
+          : forkingCurrentSession
+            ? <span className="cmdbar-status thinking" role="status"
+                aria-live="polite" aria-atomic="true">
+                <span className="cmdbar-pip" /> forking this chat…
+              </span>
           : pendingFileReads > 0
             ? <span className="cmdbar-status thinking" role="status"
                 aria-live="polite" aria-atomic="true">
@@ -2721,8 +3016,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             title={draftRunMismatch ? draftRunMismatchMessage
               : shareUnknown ? 'Messaging paused until public-link status is verified'
               : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort
-                : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'send (Enter)'}
-            disabled={historical || commandBusy || sharePaused || draftRunMismatch || pendingFileReads > 0
+                : forkingCurrentSession ? 'Wait for this chat to finish forking'
+                  : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'send (Enter)'}
+            disabled={historical || commandBusy || composerPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
         title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
@@ -2813,6 +3109,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                   : fmtAgo(s.updated)}</span>
             </button>
             <button type="button" className="asst-sess-x" onClick={(e) => requestDeleteSession(s, e)}
+              disabled={forkBusySid === s.id}
+              title={forkBusySid === s.id ? 'Wait for this chat to finish forking' : undefined}
               aria-label={s.cleanup_required
                 ? `Retry cleanup for ${s.title || 'incomplete chat deletion'}`
                 : `Delete chat ${s.title || 'Chat'}`}>✕</button>
@@ -2824,9 +3122,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           <span className="ttl" style={{ flex: 1 }}>{currentSession?.title || 'New chat'}</span>
           {ctxChip}
           {launchRecoveryButton}
-          {sid && <button className="btn sm ghost" title="fork this chat into a new session" onClick={async () => {
-            try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch { flash('Could not fork this Assistant chat') }
-          }}>⑂ fork</button>}
+          {sid && <button className="btn sm ghost" type="button"
+            title={forkBusySid === sid ? 'Forking this chat…'
+              : forkBusy ? 'Another Assistant fork is still in progress'
+              : deletingCurrentSession ? 'This chat is being deleted'
+                : currentForkRecovery
+                  ? 'Check the exact pending fork before starting another'
+                  : shareTurnIncomplete
+                  ? 'Wait for the current Assistant reply to finish or recover it before forking'
+                  : shareBusy ? 'Wait for the current share action before forking'
+                    : 'Fork this complete chat into a new session'}
+            disabled={forkBusy || shareBusy || deletingCurrentSession
+              || (shareTurnIncomplete && !currentForkRecovery)}
+            onClick={forkCurrentSession}>{forkBusySid === sid ? 'forking…'
+              : currentForkRecovery ? '⑂ check fork' : '⑂ fork'}</button>}
           {sid && (currentSession?.shared || shareCopy || shareUnknown)
             && <span className={'pill assistant-share-state'
               + (shareUnknown || liveShareActive ? ' warn' : '')}>
@@ -2852,13 +3161,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           {sid && currentSession && !deletingCurrentSession && !currentSession.shared
             && !shareUnknown && !shareCopy
             && <button className="btn sm ghost"
-              title={shareTurnIncomplete
+              title={forkingCurrentSession
+                ? 'Wait for this chat to finish forking before creating a snapshot'
+                : shareTurnIncomplete
                 ? 'Wait for the current Assistant turn to finish before freezing a complete snapshot'
                 : 'Create and copy a frozen read-only snapshot'}
-              disabled={shareBusy || shareTurnIncomplete}
+              disabled={shareBusy || forkingCurrentSession || shareTurnIncomplete}
               onClick={async () => {
             const shareSid = sid
             if (shareActionSessionRef.current) { flash('Another share action is still in progress'); return }
+            if (forkActionSessionRef.current === shareSid) {
+              flash('Wait for this chat to finish forking before creating a snapshot')
+              return
+            }
             if (runningRef.current || turnCaptureRef.current || busy || commandBusy || pending.length > 0
                 || msgs[msgs.length - 1]?.role === 'user') {
               flash('Wait for the Assistant reply to finish before creating a snapshot')
@@ -2921,7 +3236,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             }
           }}>{shareBusySid === sid ? 'working…' : '⤴ create snapshot'}</button>}
           {sid && !deletingCurrentSession && (currentSession?.shared || shareUnknown || shareCopy)
-            && <button className="btn sm ghost" title="Revoke every share link" disabled={shareBusy}
+            && <button className="btn sm ghost"
+              title={forkingCurrentSession
+                ? 'Wait for this chat to finish forking before revoking links'
+                : 'Revoke every share link'}
+              disabled={shareBusy || forkingCurrentSession}
               onClick={revokeCurrentShares}>{shareBusySid === sid ? 'working…'
                 : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>

@@ -19,6 +19,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from looplab.serve.assistant import (
+    ForkActionConflictError, ForkActionDeletedError, ForkActionDeletingError,
     REPO_ROOT as _ASSISTANT_REPO_ROOT, SHARE_DEFAULT_TTL_SECONDS, SHARE_MAX_RECORDS,
     SessionStore, ShareError, SHARE_TITLE_MAX_CHARS, ShareStore,
     run_turn as _assistant_run_turn,
@@ -323,6 +325,20 @@ def build_router(srv) -> APIRouter:
     # commits or rolls back; lifecycle operations serialize outside this registry via
     # ``_session_lifecycle_lock`` (lock order is always lifecycle -> registry, never the reverse).
     _share_fenced_sessions: set[str] = set()
+    # Fork uses the same short-registry-fence pattern, but publishes its child atomically from a hidden
+    # temp directory. This keeps unrelated chats responsive while the source cannot gain a new turn or
+    # be deleted underneath the snapshot copy.
+    _fork_fenced_sessions: dict[str, dict] = {}
+
+    def _active_fork_for_child_locked(child_sid: str) -> Optional[dict]:
+        """Return the in-process source fence whose deterministic child is `child_sid`."""
+        for source_sid, fence in _fork_fenced_sessions.items():
+            try:
+                if _asst._fork_child_id(source_sid, fence.get("action_id")) == child_sid:
+                    return fence
+            except (OSError, ValueError):
+                continue
+        return None
     try:
         _configured_perm_timeout = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
     except (TypeError, ValueError):
@@ -488,6 +504,11 @@ def build_router(srv) -> APIRouter:
                 raise HTTPException(409, {
                     "code": "assistant_turn_share_in_progress",
                     "message": "A public snapshot is being created for this chat. Try sending again in a moment.",
+                })
+            if sid in _fork_fenced_sessions:
+                raise HTTPException(409, {
+                    "code": "assistant_turn_fork_in_progress",
+                    "message": "This chat is being forked. Try sending again in a moment.",
                 })
             existing = _asst_cancel.get(sid)
             # A set cancel flag means "stopping", not "finished": the old worker may still be inside
@@ -752,6 +773,16 @@ def build_router(srv) -> APIRouter:
                         "code": "assistant_delete_busy",
                         "message": "This chat is already being deleted. Try again shortly.",
                     })
+                if sid in _fork_fenced_sessions:
+                    raise HTTPException(409, {
+                        "code": "assistant_delete_fork_in_progress",
+                        "message": "This chat is being forked. Try deleting it again shortly.",
+                    })
+                if _active_fork_for_child_locked(sid) is not None:
+                    raise HTTPException(409, {
+                        "code": "assistant_delete_fork_child_in_progress",
+                        "message": "This fork is still being created. Try deleting it again shortly.",
+                    })
                 _deleting_sessions.add(sid)
                 cev = _asst_cancel.get(sid)
                 done = _asst_turn_done.get(sid)
@@ -778,6 +809,21 @@ def build_router(srv) -> APIRouter:
                         "This chat gained an active public share link while deletion was waiting.",
                         remediation="Unshare the chat, then delete it.",
                         active_share_count=len(active_shares))
+                with _perm_lock:
+                    if _active_fork_for_child_locked(sid) is not None:
+                        raise HTTPException(409, {
+                            "code": "assistant_delete_fork_child_in_progress",
+                            "message": "This fork is still being created. Try deleting it again shortly.",
+                        })
+                try:
+                    fork_deletion = _asst.prepare_fork_deletion(sid) if d.exists() else None
+                except OSError as exc:
+                    # Never erase the only receipt for an idempotent fork: otherwise a stale retry can
+                    # recreate a child the user deliberately deleted.
+                    raise HTTPException(503, {
+                        "code": "assistant_delete_fork_receipt_unavailable",
+                        "message": "The chat's deletion receipt could not be stored safely. Try again.",
+                    }) from exc
                 if d.exists():
                     try:
                         shutil.rmtree(d)
@@ -794,6 +840,14 @@ def build_router(srv) -> APIRouter:
                         "code": "assistant_delete_incomplete",
                         "message": "The chat could not be completely removed. Close anything using its files and try again.",
                     })
+                if fork_deletion is not None:
+                    try:
+                        _asst.finish_fork_deletion(fork_deletion)
+                    except OSError:
+                        # `prepared` was durably written before rmtree; prepared+absent is already a
+                        # terminal deleted result, so failure to rewrite the cosmetic final state must
+                        # not turn a complete deletion into an ambiguous client error.
+                        pass
                 with _perm_lock:  # drop the deleted session's in-memory grants/progress (no slow leak)
                     _perm_always.invalidate(sid)
                     _asst_epoch.pop(sid, None)
@@ -998,15 +1052,224 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "not shared")
         return _assistant_shared(token)
 
-    @router.post("/api/assistant/sessions/{sid}/fork")
-    def assistant_fork(sid: str):
+    def _fork_payload(child: dict, action_id: str) -> dict:
+        return {**child, "fork_action_id": action_id}
+
+    def _fork_error(status_code: int, code: str, message: str, action_id: str, **fields):
+        return HTTPException(status_code, {
+            "code": code, "message": message, "action_id": action_id, **fields,
+        })
+
+    def _fork_child_id(sid: str, action_id: str) -> str:
         try:
-            child = _asst.fork(sid)
+            return _asst._fork_child_id(sid, action_id)
+        except ValueError as exc:
+            raise _fork_error(404, "assistant_fork_session_not_found",
+                              "No such chat.", action_id) from exc
+
+    def _fork_result(sid: str, action_id: str, expected_messages: Optional[int] = None):
+        try:
+            return _asst.fork_result(
+                sid, action_id, expected_messages=expected_messages)
+        except ForkActionDeletedError as exc:
+            raise _fork_error(410, "assistant_fork_deleted",
+                              "This fork was created and then deleted.", action_id) from exc
+        except ForkActionDeletingError as exc:
+            raise _fork_error(409, "assistant_fork_deleting",
+                              "This fork is being deleted.", action_id) from exc
+        except ForkActionConflictError as exc:
+            raise _fork_error(409, "assistant_fork_action_conflict",
+                              "This fork action belongs to a different chat snapshot.", action_id) from exc
         except ValueError:
-            raise HTTPException(404, "no such session")
-        if child is None:
-            raise HTTPException(404, "no such session")
-        return child
+            raise _fork_error(404, "assistant_fork_session_not_found",
+                              "No such chat.", action_id)
+        except OSError as exc:
+            raise _fork_error(503, "assistant_fork_storage_unavailable",
+                              "The fork result could not be read safely.", action_id) from exc
+
+    def _perform_fork(sid: str, action_id: str, expected_messages: Optional[int]):
+        # The exact action owns a deterministic child path whose private marker is published in the
+        # same rename as the transcript. A retry after a lost response therefore returns that child;
+        # the supported `looplab ui` runtime serves one ASGI worker, and the receipt survives restart.
+        fork_child_id = _fork_child_id(sid, action_id)
+
+        # Install only a per-source fence under the established lifecycle -> registry lock order. The
+        # potentially large copy runs without the global lifecycle lock, so an unrelated chat can keep
+        # loading, saving replies, sharing, and starting turns.
+        with _session_lifecycle_lock:
+            with _perm_lock:
+                if fork_child_id in _deleting_sessions:
+                    raise _fork_error(409, "assistant_fork_child_deleting",
+                                      "This fork's child path is being deleted.", action_id)
+            # Keep the exact-result read inside lifecycle so DELETE cannot already own the child while
+            # this retry is acknowledged as successful.
+            existing = _fork_result(sid, action_id, expected_messages)
+            if existing is not None:
+                return _fork_payload(existing, action_id)
+            with _perm_lock:
+                if sid in _deleting_sessions:
+                    raise HTTPException(409, {
+                        "code": "assistant_fork_session_deleting",
+                        "message": "This chat is being deleted.",
+                    })
+                if _asst_cancel.get(sid) is not None:
+                    raise HTTPException(409, {
+                        "code": "assistant_fork_turn_active",
+                        "message": "A reply is still being generated for this chat.",
+                    })
+                active_fork = _fork_fenced_sessions.get(sid)
+                if active_fork is not None:
+                    if (active_fork.get("action_id") == action_id
+                            and expected_messages is not None
+                            and active_fork.get("expected_messages") != expected_messages):
+                        raise _fork_error(409, "assistant_fork_action_conflict",
+                                          "This fork action belongs to a different chat snapshot.",
+                                          action_id)
+                    raise _fork_error(409, "assistant_fork_in_progress",
+                                      "This chat is already being forked.",
+                                      active_fork["action_id"],
+                                      expected_messages=active_fork.get("expected_messages"))
+                _fork_fenced_sessions[sid] = {
+                    "action_id": action_id, "expected_messages": expected_messages,
+                }
+        try:
+            # Recheck after fence ownership so a restart-recovered receipt and publication code share
+            # one exact success path before the potentially large source read begins.
+            existing = _fork_result(sid, action_id, expected_messages)
+            if existing is not None:
+                return _fork_payload(existing, action_id)
+            try:
+                source = _asst.fork_source_snapshot(sid)
+            except ValueError:
+                raise HTTPException(404, "no such session")
+            except OSError as exc:
+                raise _fork_error(503, "assistant_fork_source_unavailable",
+                                  "The source chat could not be read completely and safely.",
+                                  action_id) from exc
+            if source is None:
+                raise HTTPException(404, "no such session")
+            messages = source.get("messages")
+            if expected_messages is not None and len(messages or []) != expected_messages:
+                raise _fork_error(409, "assistant_fork_source_changed",
+                                  "This chat changed after the fork was requested.", action_id)
+            if _complete_shared_messages(messages) != messages:
+                raise HTTPException(409, {
+                    "code": "assistant_fork_turn_incomplete",
+                    "message": "This chat ends with an incomplete Assistant turn.",
+                    "remediation": (
+                        "Wait for the reply to finish, or recover the pending turn before forking."
+                    ),
+                })
+            try:
+                child = _asst.fork_snapshot(
+                    sid, source, action_id=action_id,
+                    expected_messages=len(messages), publish_guard=_session_lifecycle_lock)
+            except ForkActionDeletedError as exc:
+                raise _fork_error(410, "assistant_fork_deleted",
+                                  "This fork was created and then deleted.", action_id) from exc
+            except ForkActionDeletingError as exc:
+                raise _fork_error(409, "assistant_fork_deleting",
+                                  "This fork is being deleted.", action_id) from exc
+            except ForkActionConflictError as exc:
+                raise _fork_error(409, "assistant_fork_action_conflict",
+                                  "This fork action belongs to a different chat snapshot.", action_id) from exc
+            except ValueError:
+                raise HTTPException(404, "no such session")
+            except OSError as exc:
+                raise _fork_error(503, "assistant_fork_storage_unavailable",
+                                  "The fork could not be stored safely.", action_id) from exc
+        finally:
+            with _perm_lock:
+                if _fork_fenced_sessions.get(sid, {}).get("action_id") == action_id:
+                    _fork_fenced_sessions.pop(sid, None)
+        return _fork_payload(child, action_id)
+
+    @router.post("/api/assistant/sessions/{sid}/fork")
+    async def assistant_fork(sid: str, request: Request):
+        body = await json_object(request, "fork request", absent_is_empty=True)
+        supplied_action_id = body.get("action_id")
+        action_id = str(uuid.uuid4()) if supplied_action_id in (None, "") else supplied_action_id
+        if not _asst.valid_fork_action_id(action_id):
+            raise _fork_error(400, "assistant_fork_action_invalid",
+                              "A valid fork action id is required.", str(action_id or ""))
+        expected_messages = body.get("expected_messages")
+        if (expected_messages is not None
+                and (isinstance(expected_messages, bool) or not isinstance(expected_messages, int)
+                     or expected_messages < 0)):
+            raise _fork_error(400, "assistant_fork_snapshot_invalid",
+                              "A valid source transcript version is required.", action_id)
+        # JSON parsing stays async, while the potentially large transcript copy runs in the worker
+        # pool just like the original synchronous route. A slow fork must never block status reads,
+        # permission decisions, streaming keepalives, or unrelated browser requests.
+        return await anyio.to_thread.run_sync(
+            _perform_fork, sid, action_id, expected_messages)
+
+    @router.get("/api/assistant/sessions/{sid}/fork/{action_id}")
+    def assistant_fork_status(sid: str, action_id: str,
+                              expected_messages: Optional[int] = None):
+        if not _asst.valid_fork_action_id(action_id):
+            raise _fork_error(400, "assistant_fork_action_invalid",
+                              "A valid fork action id is required.", str(action_id or ""))
+        if (expected_messages is not None
+                and (isinstance(expected_messages, bool) or not isinstance(expected_messages, int)
+                     or expected_messages < 0)):
+            raise _fork_error(400, "assistant_fork_snapshot_invalid",
+                              "A valid source transcript version is required.", action_id)
+        fork_child_id = _fork_child_id(sid, action_id)
+        with _session_lifecycle_lock:
+            with _perm_lock:
+                if fork_child_id in _deleting_sessions:
+                    raise _fork_error(409, "assistant_fork_deleting",
+                                      "This fork is being deleted.", action_id)
+            child = _fork_result(sid, action_id, expected_messages)
+            if child is None:
+                with _perm_lock:
+                    active_fork = _fork_fenced_sessions.get(sid)
+                if active_fork and active_fork.get("action_id") == action_id:
+                    if (expected_messages is not None
+                            and active_fork.get("expected_messages") != expected_messages):
+                        raise _fork_error(
+                            409, "assistant_fork_action_conflict",
+                            "This fork action belongs to a different chat snapshot.", action_id)
+                    raise _fork_error(409, "assistant_fork_in_progress",
+                                      "This fork is still being created.", action_id,
+                                      expected_messages=active_fork.get("expected_messages"))
+        if child is not None:
+            return _fork_payload(child, action_id)
+        with _perm_lock:
+            active_fork = _fork_fenced_sessions.get(sid)
+        if active_fork and active_fork.get("action_id") == action_id:
+            if (expected_messages is not None
+                    and active_fork.get("expected_messages") != expected_messages):
+                raise _fork_error(409, "assistant_fork_action_conflict",
+                                  "This fork action belongs to a different chat snapshot.", action_id)
+            raise _fork_error(409, "assistant_fork_in_progress",
+                              "This fork is still being created.", action_id,
+                              expected_messages=active_fork.get("expected_messages"))
+        # Publication can land between the first lookup and the fence read/removal. One final exact
+        # receipt lookup makes 404 authoritative: this action is neither running nor published.
+        with _session_lifecycle_lock:
+            with _perm_lock:
+                if fork_child_id in _deleting_sessions:
+                    raise _fork_error(409, "assistant_fork_deleting",
+                                      "This fork is being deleted.", action_id)
+            child = _fork_result(sid, action_id, expected_messages)
+            if child is None:
+                with _perm_lock:
+                    active_fork = _fork_fenced_sessions.get(sid)
+                if active_fork and active_fork.get("action_id") == action_id:
+                    if (expected_messages is not None
+                            and active_fork.get("expected_messages") != expected_messages):
+                        raise _fork_error(
+                            409, "assistant_fork_action_conflict",
+                            "This fork action belongs to a different chat snapshot.", action_id)
+                    raise _fork_error(409, "assistant_fork_in_progress",
+                                      "This fork is still being created.", action_id,
+                                      expected_messages=active_fork.get("expected_messages"))
+        if child is not None:
+            return _fork_payload(child, action_id)
+        raise _fork_error(404, "assistant_fork_not_found",
+                          "This fork action has no published child.", action_id)
 
     # --- shared turn prologue/epilogue (the two turn endpoints used to duplicate all of this) -----
     def _begin_turn(sid: str, body: dict):

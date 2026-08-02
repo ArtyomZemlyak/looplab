@@ -2627,7 +2627,49 @@ export const assistantGet = (sid, options) =>
   get(`/api/assistant/sessions/${encodeURIComponent(sid)}`, options)
 export const assistantDelete = (sid, options) =>
   send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE', undefined, options)
-export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
+const validAssistantForkActionId = value => typeof value === 'string'
+  && value === value.toLowerCase() && UUID_V4_RE.test(value)
+const assistantForkPath = (sid, actionId = null) => {
+  const base = `/api/assistant/sessions/${encodeURIComponent(sid)}/fork`
+  return actionId == null ? base : `${base}/${encodeURIComponent(actionId)}`
+}
+const assistantForkIdentity = actionId => {
+  const normalized = String(actionId || '').toLowerCase()
+  if (!validAssistantForkActionId(normalized)) {
+    const error = new Error('Invalid Assistant fork action identity')
+    error.code = 'ASSISTANT_FORK_PROTOCOL_ERROR'
+    throw error
+  }
+  return normalized
+}
+export const assistantFork = (sid, {
+  actionId = createIdempotencyKey(), expectedMessages = null,
+} = {}, options = {}) => {
+  const identity = assistantForkIdentity(actionId)
+  if (expectedMessages != null
+      && (!Number.isSafeInteger(expectedMessages) || expectedMessages < 0)) {
+    const error = new Error('Invalid Assistant fork source version')
+    error.code = 'ASSISTANT_FORK_PROTOCOL_ERROR'
+    throw error
+  }
+  return post(assistantForkPath(sid), {
+    action_id: identity,
+    ...(expectedMessages == null ? {} : { expected_messages: expectedMessages }),
+  }, options)
+}
+export const assistantForkStatus = (sid, actionId, {
+  expectedMessages = null, ...options
+} = {}) => {
+  if (expectedMessages != null
+      && (!Number.isSafeInteger(expectedMessages) || expectedMessages < 0)) {
+    const error = new Error('Invalid Assistant fork source version')
+    error.code = 'ASSISTANT_FORK_PROTOCOL_ERROR'
+    throw error
+  }
+  const query = expectedMessages == null ? '' : `?expected_messages=${expectedMessages}`
+  return get(`${assistantForkPath(sid, assistantForkIdentity(actionId))}${query}`,
+    { ...options, cache: 'no-store' })
+}
 // Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
 // Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
 const incompleteAssistantStream = reason => {

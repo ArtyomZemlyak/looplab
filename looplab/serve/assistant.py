@@ -18,14 +18,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
+import shutil
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Optional
 
-from looplab.core.atomicio import atomic_write_text, best_effort_fsync
+from looplab.core.atomicio import atomic_write_text, best_effort_fsync, strict_atomic_write_text
 from looplab.events.eventstore import iter_jsonl
 
 # Permission modes mirror Claude Code. `plan` is the safe read-only default; mutating modes are
@@ -43,7 +46,25 @@ _PKG_ROOT = Path(__file__).resolve().parents[1]                       # …/loop
 REPO_ROOT = (_PKG_ROOT.parent if (_PKG_ROOT.parent / "pyproject.toml").is_file() else _PKG_ROOT)
 
 _SESSION_ID_RE = re.compile(r"[0-9a-f]{16}")
+_FORK_ACTION_ID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+_FORK_STAGING_RE = re.compile(r"\.fork-[0-9a-f]{16}-[0-9a-f]{16}\.tmp")
+_FORK_STAGING_MAX_AGE_SECONDS = 24 * 60 * 60
+_FORK_STAGING_SWEEP_INTERVAL_SECONDS = 5 * 60
+_FORK_ACTIONS_DIR = ".fork-actions"
 _INCOMPLETE_SESSION_TITLE = "Incomplete chat (cleanup required)"
+
+
+class ForkActionConflictError(RuntimeError):
+    """An idempotent fork action was reused with a different source snapshot."""
+
+
+class ForkActionDeletedError(RuntimeError):
+    """The exact fork action completed previously, but its child was deliberately deleted."""
+
+
+class ForkActionDeletingError(RuntimeError):
+    """The fork child has crossed its durable deletion barrier but still exists on disk."""
 
 
 def safe_assistant_failure(exc: Exception) -> dict:
@@ -143,6 +164,59 @@ class SessionStore:
         # reply persist bumps `updated`, or two tabs switching mode) can't each read the same meta and
         # clobber the other's field — losing a `shared` flag / title / mode.
         self._meta_lock = threading.RLock()
+        self._fork_receipt_lock = threading.RLock()
+        self._fork_cleanup_lock = threading.Lock()
+        self._last_fork_cleanup = float("-inf")
+        self._maybe_cleanup_stale_fork_staging(force=True)
+
+    def _maybe_cleanup_stale_fork_staging(self, *, force: bool = False) -> None:
+        """Throttle stale-copy cleanup so a young crash directory is eventually reconsidered."""
+        monotonic_now = time.monotonic()
+        if (not force
+                and monotonic_now - self._last_fork_cleanup
+                < _FORK_STAGING_SWEEP_INTERVAL_SECONDS):
+            return
+        if not self._fork_cleanup_lock.acquire(blocking=False):
+            return
+        try:
+            monotonic_now = time.monotonic()
+            if (not force
+                    and monotonic_now - self._last_fork_cleanup
+                    < _FORK_STAGING_SWEEP_INTERVAL_SECONDS):
+                return
+            self._cleanup_stale_fork_staging()
+            self._last_fork_cleanup = monotonic_now
+        finally:
+            self._fork_cleanup_lock.release()
+
+    def _cleanup_stale_fork_staging(self, *, now: Optional[float] = None) -> None:
+        """Remove only old, exact direct-child fork staging directories left by a dead process."""
+        if not self.dir.exists():
+            return
+        timestamp = time.time() if now is None else now
+        try:
+            root = self.dir.resolve(strict=True)
+            expected_root = self.dir.parent.resolve(strict=True) / "assistant"
+            if self.dir.is_symlink() or root != expected_root:
+                return
+            candidates = list(self.dir.iterdir())
+        except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError):
+            return
+        for candidate in candidates:
+            if _FORK_STAGING_RE.fullmatch(candidate.name) is None:
+                continue
+            try:
+                # ``is_symlink`` catches ordinary links; exact resolved identity also rejects Windows
+                # junctions. Never follow either while cleaning private transcript material.
+                resolved = candidate.resolve(strict=True)
+                age = timestamp - candidate.stat().st_mtime
+                if (candidate.is_symlink() or not candidate.is_dir()
+                        or resolved != root / candidate.name
+                        or not math.isfinite(age) or age < _FORK_STAGING_MAX_AGE_SECONDS):
+                    continue
+                shutil.rmtree(candidate)
+            except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError):
+                continue
 
     def _sdir(self, sid: str) -> Path:
         # Session routes are destructive (DELETE ultimately feeds this path to ``rmtree``), while
@@ -174,6 +248,215 @@ class SessionStore:
         """Private durable mutation journal path for one server-issued assistant turn id."""
         digest = hashlib.sha256(str(turn_id).encode("utf-8")).hexdigest()
         return self._sdir(sid) / "turn_mutations" / f"{digest}.json"
+
+    @staticmethod
+    def valid_fork_action_id(action_id) -> bool:
+        return isinstance(action_id, str) and _FORK_ACTION_ID_RE.fullmatch(action_id) is not None
+
+    @staticmethod
+    def _valid_expected_messages(value) -> bool:
+        return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+    def _fork_child_id(self, sid: str, action_id: str) -> str:
+        self._sdir(sid)
+        if not self.valid_fork_action_id(action_id):
+            raise ValueError("bad fork action id")
+        # The action identity deterministically owns one child path, so a lost-response retry can find
+        # the original result instead of minting a second session.
+        return hashlib.sha256(f"{sid}:{action_id}".encode("ascii")).hexdigest()[:16]
+
+    def _fork_actions_dir(self, *, create: bool = False) -> Optional[Path]:
+        """Return the hidden durable action ledger without following links or junctions."""
+        try:
+            self.dir.lstat()
+        except FileNotFoundError:
+            return None
+        try:
+            root = self.dir.resolve(strict=True)
+            expected_root = self.dir.parent.resolve(strict=True) / "assistant"
+            if self.dir.is_symlink() or root != expected_root:
+                raise OSError("Assistant fork ledger root is not safe")
+            directory = self.dir / _FORK_ACTIONS_DIR
+            try:
+                directory.lstat()
+            except FileNotFoundError:
+                # The strict record writer creates and durably publishes this one missing parent.
+                return directory if create else None
+            if (directory.is_symlink() or not directory.is_dir()
+                    or directory.resolve(strict=True) != root / _FORK_ACTIONS_DIR):
+                raise OSError("Assistant fork ledger is not a safe directory")
+            return directory
+        except (FileNotFoundError, NotADirectoryError, RuntimeError) as exc:
+            raise OSError("Assistant fork ledger is unavailable") from exc
+
+    def _fork_action_path(self, child_id: str, *, create_dir: bool = False) -> Optional[Path]:
+        self._sdir(child_id)
+        directory = self._fork_actions_dir(create=create_dir)
+        return None if directory is None else directory / f"{child_id}.json"
+
+    def _validate_fork_receipt(self, receipt, child_id: str, *, ledger: bool) -> dict:
+        keys = {"source", "action_id", "child", "expected_messages"}
+        if ledger:
+            keys.add("status")
+        if not isinstance(receipt, dict) or set(receipt) != keys:
+            raise OSError("Assistant fork receipt has an invalid shape")
+        source = receipt.get("source")
+        action_id = receipt.get("action_id")
+        if (receipt.get("child") != child_id
+                or not self._valid_expected_messages(receipt.get("expected_messages"))):
+            raise OSError("Assistant fork receipt has invalid fields")
+        try:
+            owned_child = self._fork_child_id(source, action_id)
+        except ValueError as exc:
+            raise OSError("Assistant fork receipt has invalid identity") from exc
+        if owned_child != child_id:
+            raise OSError("Assistant fork receipt does not own its child")
+        if ledger and receipt.get("status") not in {"prepared", "deleted"}:
+            raise OSError("Assistant fork ledger has an invalid state")
+        return receipt
+
+    def _read_fork_action(self, child_id: str) -> Optional[dict]:
+        path = self._fork_action_path(child_id)
+        if path is None:
+            return None
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        try:
+            directory = path.parent.resolve(strict=True)
+            if (path.is_symlink() or not path.is_file()
+                    or path.resolve(strict=True) != directory / path.name
+                    or path.stat().st_size > 4096):
+                raise OSError("Assistant fork ledger record is not a safe file")
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, NotADirectoryError, UnicodeError, ValueError,
+                RuntimeError) as exc:
+            raise OSError("Assistant fork ledger record is unreadable") from exc
+        return self._validate_fork_receipt(receipt, child_id, ledger=True)
+
+    def _write_fork_action(self, receipt: dict) -> dict:
+        child_id = receipt.get("child") if isinstance(receipt, dict) else ""
+        validated = self._validate_fork_receipt(receipt, child_id, ledger=True)
+        with self._fork_receipt_lock:
+            path = self._fork_action_path(child_id, create_dir=True)
+            if path is None:
+                raise OSError("Assistant fork ledger is unavailable")
+            try:
+                if path.is_symlink():
+                    raise OSError("Assistant fork ledger record is not a safe file")
+                # Deletion may only cross rmtree after this file and its directory entry received a
+                # strict durability receipt. A failed strict write is never treated as confirmation;
+                # prepare retries the same record on the next DELETE.
+                strict_atomic_write_text(path, json.dumps(validated, sort_keys=True))
+                written = self._read_fork_action(child_id)
+            except (FileNotFoundError, NotADirectoryError, RuntimeError, ValueError) as exc:
+                raise OSError("Assistant fork ledger record could not be stored") from exc
+            if written != validated:
+                raise OSError("Assistant fork ledger record could not be verified")
+            return written
+
+    def _published_fork(self, child_id: str, *,
+                        allow_unmarked: bool = False) -> Optional[tuple[dict, dict]]:
+        """Return a child's strict private receipt and metadata, or None when it is absent."""
+        directory = self._sdir(child_id)
+        try:
+            directory.lstat()
+        except FileNotFoundError:
+            return None
+        try:
+            root = self.dir.resolve(strict=True)
+            if (directory.is_symlink() or not directory.is_dir()
+                    or directory.resolve(strict=True) != root / child_id):
+                raise OSError("Assistant fork action path is not a safe directory")
+            marker = directory / ".fork.json"
+            try:
+                marker.lstat()
+            except FileNotFoundError:
+                if allow_unmarked:
+                    return None
+                raise OSError("Assistant fork receipt is missing")
+            if (marker.is_symlink() or not marker.is_file()
+                    or marker.resolve(strict=True) != directory / ".fork.json"
+                    or marker.stat().st_size > 4096):
+                raise OSError("Assistant fork receipt is not a safe file")
+            receipt = json.loads(marker.read_text(encoding="utf-8"))
+            receipt = self._validate_fork_receipt(receipt, child_id, ledger=False)
+            meta = self._read_meta(child_id)
+            if (not self._valid_meta(child_id, meta)
+                    or meta.get("parent") != receipt["source"]):
+                raise OSError("Assistant fork child metadata is invalid")
+            return receipt, meta
+        except (FileNotFoundError, NotADirectoryError, UnicodeError, ValueError,
+                RuntimeError) as exc:
+            raise OSError("Assistant fork receipt is unreadable") from exc
+
+    @staticmethod
+    def _fork_identity_matches(receipt: dict, sid: str, action_id: str,
+                               expected_messages: Optional[int]) -> None:
+        if receipt.get("source") != sid or receipt.get("action_id") != action_id:
+            raise OSError("Assistant fork action identity is invalid")
+        if (expected_messages is not None
+                and receipt.get("expected_messages") != expected_messages):
+            raise ForkActionConflictError(
+                "Fork action belongs to a different source transcript version")
+
+    def fork_result(self, sid: str, action_id: str, *,
+                    expected_messages: Optional[int] = None) -> Optional[dict]:
+        """Return the durable result for one exact action, including deleted terminal state."""
+        if expected_messages is not None and not self._valid_expected_messages(expected_messages):
+            raise ValueError("bad fork source version")
+        child_id = self._fork_child_id(sid, action_id)
+        ledger = self._read_fork_action(child_id)
+        if ledger is not None:
+            self._fork_identity_matches(ledger, sid, action_id, expected_messages)
+            if ledger["status"] == "deleted":
+                raise ForkActionDeletedError("Fork child was deleted")
+            published = self._published_fork(child_id)
+            if published is None:
+                raise ForkActionDeletedError("Fork child was deleted")
+            marker, _meta = published
+            if marker != {key: value for key, value in ledger.items() if key != "status"}:
+                raise OSError("Assistant fork ledger does not match its child")
+            # Never acknowledge a child after deletion crossed its durable barrier: it can vanish
+            # immediately after the response and make the browser discard exact recovery state.
+            raise ForkActionDeletingError("Fork child is being deleted")
+
+        published = self._published_fork(child_id)
+        if published is None:
+            return None
+        marker, meta = published
+        self._fork_identity_matches(marker, sid, action_id, expected_messages)
+        return meta
+
+    def prepare_fork_deletion(self, child_id: str) -> Optional[dict]:
+        """Persist a terminal barrier before deleting a child created by an idempotent fork."""
+        self._sdir(child_id)
+        with self._fork_receipt_lock:
+            existing = self._read_fork_action(child_id)
+            if existing is not None:
+                if existing["status"] == "deleted":
+                    return existing
+                # Rewrite even an already-visible `prepared` record. A previous strict write can fail
+                # after replacement became visible; only this successful retry authorizes rmtree.
+                return self._write_fork_action({**existing, "status": "prepared"})
+            published = self._published_fork(child_id, allow_unmarked=True)
+            if published is None:
+                return None
+            marker, _meta = published
+            return self._write_fork_action({**marker, "status": "prepared"})
+
+    def finish_fork_deletion(self, receipt: dict) -> None:
+        """Mark a prepared deletion complete; prepared+absent already fails closed if this write fails."""
+        child_id = receipt.get("child") if isinstance(receipt, dict) else ""
+        expected = self._validate_fork_receipt(receipt, child_id, ledger=True)
+        with self._fork_receipt_lock:
+            current = self._read_fork_action(child_id)
+            if current is None or any(current.get(key) != expected.get(key) for key in (
+                    "source", "action_id", "child", "expected_messages")):
+                raise OSError("Assistant fork deletion receipt changed")
+            if current["status"] != "deleted":
+                self._write_fork_action({**current, "status": "deleted"})
 
     def create(self, title: str = "", parent: Optional[str] = None, mode: str = DEFAULT_MODE,
                *, now: Optional[float] = None) -> dict:
@@ -243,6 +526,7 @@ class SessionStore:
             return meta
 
     def list(self) -> list[dict]:
+        self._maybe_cleanup_stale_fork_staging()
         if not self.dir.exists():
             return []
         out = []
@@ -268,6 +552,54 @@ class SessionStore:
                     for message in iter_jsonl(self._msgs_path(sid))]
         except OSError:
             return []
+
+    def fork_source_snapshot(self, sid: str) -> Optional[dict]:
+        """Read a fork source strictly so corruption cannot publish a silent transcript prefix."""
+        directory = self._sdir(sid)
+        try:
+            directory.lstat()
+        except FileNotFoundError:
+            return None
+        try:
+            root = self.dir.resolve(strict=True)
+            if (directory.is_symlink() or not directory.is_dir()
+                    or directory.resolve(strict=True) != root / sid):
+                raise OSError("Assistant fork source is not a safe directory")
+            meta = self._read_meta(sid)
+            if not self._valid_meta(sid, meta):
+                raise OSError("Assistant fork source metadata is invalid")
+            path = directory / "messages.jsonl"
+            if path.is_symlink():
+                raise OSError("Assistant fork source transcript is not a safe file")
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return {"meta": meta, "messages": []}
+            if (not path.is_file()
+                    or path.resolve(strict=True) != directory / "messages.jsonl"):
+                raise OSError("Assistant fork source transcript is not a safe file")
+        except (FileNotFoundError, NotADirectoryError, RuntimeError, ValueError) as exc:
+            raise OSError("Assistant fork source is unavailable") from exc
+
+        messages: list[dict] = []
+        try:
+            # Serialize with the in-process append writer. The router's per-source lifecycle fence
+            # prevents a new turn claim; this lock also closes a late persistence read boundary.
+            with self._append_lock:
+                with open(path, "rb") as stream:
+                    for raw in stream:
+                        if not raw.endswith(b"\n"):
+                            raise OSError("Assistant fork source has a torn transcript tail")
+                        try:
+                            message = json.loads(raw)
+                        except (UnicodeError, ValueError, RecursionError) as exc:
+                            raise OSError("Assistant fork source transcript is corrupt") from exc
+                        if not isinstance(message, dict):
+                            raise OSError("Assistant fork source transcript contains a non-object row")
+                        messages.append(sanitize_assistant_message(message))
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise OSError("Assistant fork source transcript disappeared") from exc
+        return {"meta": meta, "messages": messages}
 
     def validated_meta(self, sid: str) -> Optional[dict]:
         """Return authoritative session metadata without materializing its transcript."""
@@ -424,18 +756,151 @@ class SessionStore:
         self.update_meta(sid, updated=line["ts"])
         return True
 
+    def fork_snapshot(self, sid: str, src: dict, *, action_id: Optional[str] = None,
+                      expected_messages: Optional[int] = None, publish_guard=None,
+                      now: Optional[float] = None) -> dict:
+        """Atomically publish a caller-fenced source snapshot as a fresh child session.
+
+        Building directly in the final 16-hex directory exposes a half-copied chat to list/get/send;
+        copying through ``append`` also performs one fsync and meta rewrite per message. A hidden
+        same-parent directory is outside the session namespace, and one final rename publishes the
+        complete transcript + metadata at once.
+        """
+        self._maybe_cleanup_stale_fork_staging()
+        # Validate the parent at the store boundary even though the router already fetched it. The
+        # caller supplies the immutable snapshot so a per-session fence can avoid a second source read.
+        self._sdir(sid)
+        if (not isinstance(src, dict) or not isinstance(src.get("meta"), dict)
+                or not isinstance(src.get("messages"), list)):
+            raise ValueError("invalid session snapshot")
+        source_meta = src["meta"]
+        source_title = source_meta.get("title", "chat")
+        if source_meta.get("id") != sid or not isinstance(source_title, str):
+            raise ValueError("invalid session snapshot")
+        source_mode = normalize_mode(source_meta.get("mode", DEFAULT_MODE))
+        messages = src["messages"]
+        snapshot_messages = len(messages)
+        if expected_messages is None:
+            expected_messages = snapshot_messages
+        if (not self._valid_expected_messages(expected_messages)
+                or expected_messages != snapshot_messages):
+            raise ForkActionConflictError("Fork source transcript version changed")
+        forked_at = time.time() if now is None else now
+        root = self.dir.resolve()
+        child_id = ""
+        child_dir = None
+        if action_id is not None:
+            existing = self.fork_result(
+                sid, action_id, expected_messages=expected_messages)
+            if existing is not None:
+                return existing
+            child_id = self._fork_child_id(sid, action_id)
+            child_dir = self._sdir(child_id)
+            if child_dir.exists() or child_dir.is_symlink():
+                raise OSError("Assistant fork action path is occupied")
+        else:
+            for _ in range(32):
+                candidate_id = secrets.token_hex(8)
+                candidate = self._sdir(candidate_id)
+                try:
+                    available = not candidate.exists() and not candidate.is_symlink()
+                except OSError:
+                    available = False
+                if available:
+                    child_id, child_dir = candidate_id, candidate
+                    break
+            if child_dir is None:
+                raise OSError("could not reserve a unique Assistant session id")
+
+        temp_dir = None
+        for _ in range(32):
+            candidate = self.dir / f".fork-{child_id}-{secrets.token_hex(8)}.tmp"
+            try:
+                if candidate.resolve(strict=False).parent != root:
+                    continue
+                candidate.mkdir(parents=False, exist_ok=False)
+                temp_dir = candidate
+                break
+            except FileExistsError:
+                continue
+        if temp_dir is None:
+            raise OSError("could not reserve temporary Assistant fork storage")
+
+        child = {
+            "id": child_id,
+            "title": ("Fork of " + source_title)[:120],
+            "created": forked_at,
+            "updated": forked_at,
+            "parent": sid,
+            "mode": source_mode,
+        }
+        published = False
+        fork_receipt = None
+        try:
+            if messages:
+                with open(temp_dir / "messages.jsonl", "xb") as stream:
+                    for turn in messages:
+                        if not isinstance(turn, dict):
+                            raise ValueError("invalid session snapshot")
+                        line = {**turn, "ts": turn.get("ts", forked_at)}
+                        stream.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
+                    try:
+                        best_effort_fsync(stream.fileno())
+                    except OSError:
+                        pass
+            atomic_write_text(temp_dir / "meta.json", json.dumps(child))
+            if action_id is not None:
+                fork_receipt = {
+                    "source": sid, "action_id": action_id, "child": child_id,
+                    "expected_messages": expected_messages,
+                }
+                atomic_write_text(
+                    temp_dir / ".fork.json", json.dumps(fork_receipt, sort_keys=True))
+            # The copy itself stays outside the lifecycle lock. Only the final recheck and rename are
+            # serialized with deletion, preventing a published child from crossing its delete barrier.
+            guard = publish_guard if publish_guard is not None else nullcontext()
+            with guard:
+                if (self.dir.resolve() != root or temp_dir.resolve().parent != root
+                        or child_dir.resolve(strict=False).parent != root):
+                    raise OSError("Assistant fork storage changed before publication")
+                if action_id is not None:
+                    existing = self.fork_result(
+                        sid, action_id, expected_messages=expected_messages)
+                    if existing is not None:
+                        return existing
+                if child_dir.exists() or child_dir.is_symlink():
+                    raise OSError("Assistant fork storage changed before publication")
+                try:
+                    os.replace(temp_dir, child_dir)
+                except OSError:
+                    # A deterministic retry can observe a result published between the path check and
+                    # rename. Any other occupant fails closed instead of being overwritten.
+                    existing = (self.fork_result(
+                        sid, action_id, expected_messages=expected_messages)
+                        if action_id is not None else None)
+                    if existing is not None:
+                        return existing
+                    raise
+                published = True
+                return child
+        finally:
+            if not published:
+                # Only this unguessable, direct-child staging path is ever removed. A failed fork is
+                # therefore invisible and retryable instead of leaving a public partial child behind.
+                try:
+                    if (_FORK_STAGING_RE.fullmatch(temp_dir.name) is not None
+                            and not temp_dir.is_symlink()
+                            and temp_dir.resolve(strict=True) == root / temp_dir.name):
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                except (FileNotFoundError, NotADirectoryError, OSError, RuntimeError):
+                    pass
+
     def fork(self, sid: str, *, now: Optional[float] = None) -> Optional[dict]:
         """Clone a session's transcript into a fresh child session (OpenCode-style fork)."""
-        src = self.get(sid)
+        src = self.fork_source_snapshot(sid)
         if src is None:
             return None
-        child = self.create(title="Fork of " + src["meta"].get("title", "chat"),
-                            parent=sid, mode=src["meta"].get("mode", DEFAULT_MODE), now=now)
-        for turn in src["messages"]:
-            self.append(child["id"], turn)
-        # `append` stamped `updated` with each copied turn's OLD ts; restore it to the fork's creation
-        # time so a fresh fork sorts to the TOP of the list (not buried by its ancestors' timestamps).
-        return self.update_meta(child["id"], updated=child["updated"]) or child
+        return self.fork_snapshot(sid, src, now=now)
 
 
 # --------------------------------------------------------------------------- share capabilities
