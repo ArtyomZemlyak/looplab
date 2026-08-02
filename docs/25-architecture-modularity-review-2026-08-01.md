@@ -904,7 +904,7 @@ never reaches a context pack.
 *Still open:* the ledger and the D8 store. Both remain in `claims.py`, which at 843 lines is no
 longer a god-module; splitting them further is optional rather than the finding.
 
-#### EM-02 · HIGH · duplication · effort: medium
+#### EM-02 · HIGH · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Three near-identical ~90-line steward drivers copy-pasted in lessons.py**
 
@@ -913,6 +913,39 @@ longer a god-module; splitting them further is optional rather than the finding.
 *Evidence:* store_concept_curation (939-1029), store_claim_curation (1031-1112), and store_task_facets (1114-1216) share an identical ~90-line skeleton: guard on _cross_run_curation, build diagnostic_key/diagnostic_provenance, take _curation_decision_lock, check _curation_attempt_already_resolved_locked, fast-path 'empty' append, fast-path client-None 'unavailable' append, _paid_curation_attempt_locked with propose→append(require_durable=True)→'error' terminal, and an outer except that writes a diagnostic 'error' row. They differ only in: log name, snapshot/has-input/propose functions, and the empty-proposals shape ({merges,splits,purges} vs {decisions} vs {task_id,facets}); facets adds two extra fast paths (already-governed, empty goal). ~270 lines where ~120 would do, and any protocol fix (e.g. a lock-ordering change) must be applied three times in step.
 
 *Recommendation:* Extract a parameterized driver: _run_finalize_steward(log_name, kind, snapshot_fn, has_input_fn, propose_fn, empty_proposals, extra_fast_paths=()) and reduce the three methods to thin configurations. The identical exception/outcome vocabulary makes this a mechanical extraction.
+
+*Resolution (2026-08-02):* the three drivers now share
+`LessonMemory._run_finalize_steward` and differ only in data — log name, snapshot, propose call, and
+the empty shape of that steward's proposals. `lessons.py` drops from 1,334 to 1,300 lines; the line
+saving is modest because the driver carries the protocol's why-comments, but the point was never the
+line count. It was that a lock-ordering change, a new terminal or a receipt field had to be applied
+three times IN STEP, or the three ledgers would disagree about what happened during one finalize.
+
+One structural difference survives as a parameter rather than being flattened away: facets are
+once-per-TASK, so an already-governed task short-circuits inside the lock before any provider call.
+That is `fast_paths`, an ordered tuple evaluated under the decision lock.
+
+*Verified behaviour-preserving.* A harness drives all three stewards through every terminal —
+proposed, empty input, empty proposal, unavailable client, provider error, no task id — plus the
+replay of each, and compares the LEDGER BYTES they write, not the strings they return. Run against
+the pre-extraction tree it produced identical output (22,728 bytes, 24 scenarios). That mattered
+concretely: the extraction moved row construction into a shared `row()` helper, which changes JSON
+key ORDER, and the byte comparison is what proves nothing digests a row.
+
+Two lessons from building the guard, both worth recording because they are the failure mode this
+campaign keeps finding:
+
+* the first harness used plausible-looking proposal payloads with the wrong field names
+  (`{"concept": …}` for `{"from_concept": …}`), so every case labelled `proposed` actually settled
+  as `empty`. A differential over that would have "proved" byte-identity for a path neither side
+  ran. The terminal assertion caught it.
+* the first version of the teeth check found that three of five deliberate protocol breaks passed
+  silently — including dropping `require_durable=True` from the paid terminal, which is the one
+  property whose loss is invisible until a crash replays a paid provider call. The guard now pins
+  fast-path ORDER (an already-governed task must win over an empty goal) and durability in BOTH
+  directions, so the paid terminal cannot lose its fsync and the no-op finalize path cannot gain one.
+
+`tests/test_finalize_steward_driver.py` — 35 tests; all five deliberate breaks now fail loudly.
 
 #### EM-03 · MEDIUM · mergeable-entities · effort: large
 

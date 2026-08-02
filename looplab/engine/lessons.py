@@ -26,6 +26,8 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -89,6 +91,25 @@ def _curation_thread_lock(key: str):
                     _CURATION_THREAD_LOCKS.pop(key, None)
                 else:
                     _CURATION_THREAD_LOCKS[key] = (lock, current[1] - 1)
+
+
+
+@dataclass(frozen=True)
+class _StewardPlan:
+    """What one finalize steward needs after its snapshot is read, before the decision lock.
+
+    `propose(client)` returns `(outcome, proposals)` — the outcome name is the steward's own, since
+    "empty" means different things to a curation (`curation_is_empty`) and to a facet set (falsy).
+    `fast_paths` are evaluated INSIDE the lock in order; each returns `(outcome, proposals)` to
+    settle, or None to continue.
+    """
+
+    input_schema: str
+    input_digest: str
+    curation_key: str
+    has_input: bool
+    propose: Callable[[object], tuple[str, dict]]
+    fast_paths: tuple = ()
 
 
 class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
@@ -936,6 +957,104 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         except _AlreadyLogged:
             return False
 
+    # --- one finalize-steward driver, three configurations (doc 25 EM-02) -----------------------
+    #
+    # The concept, claim and task-facet stewards share a ~90-line at-most-once protocol: the
+    # cross-run gate, the semantic decision lock, the already-resolved check, the fast paths that
+    # must not race a paid attempt, the paid attempt itself, and TWO error terminals (one inside the
+    # lock, one diagnostic outside it). It was copy-pasted three times, so every protocol fix — a
+    # lock-ordering change, a new terminal, a receipt field — had to be applied three times IN STEP
+    # or the three ledgers would disagree about what happened during the same finalize.
+    #
+    # What actually differs between them is data: which log, which snapshot, which propose call, and
+    # the empty shape of that steward's proposals. `fast_paths` carries the one STRUCTURAL
+    # difference — facets are once-per-TASK, so an already-governed task must short-circuit inside
+    # the lock, before any provider call.
+
+    def _run_finalize_steward(self, final: RunState, *, log_name: str, kind: str,
+                              unavailable_schema: str, empty_proposals, plan,
+                              diagnostic_proposals=None) -> str:
+        """Drive one finalize steward through the shared at-most-once protocol.
+
+        `empty_proposals()` returns a FRESH empty proposals dict (never a shared mutable default).
+        `plan(final)` runs inside the outer try and returns either a short-circuit outcome string or
+        a `_StewardPlan`. `diagnostic_proposals()` defaults to `empty_proposals` and exists for the
+        facets steward, whose diagnostic row carries the task id even when planning failed.
+        """
+        if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
+            return "disabled"
+        auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
+        diagnostic_key = self._diagnostic_curation_key(kind, final)
+        diagnostic_provenance = self._curation_provenance(
+            input_digest="", input_schema=unavailable_schema, client=None)
+
+        def row(outcome, proposals, **extra):
+            return {"outcome": outcome, "auto": False, "auto_requested": auto_requested,
+                    "proposals": proposals, "receipt": None, **extra}
+
+        try:
+            planned = plan(final)
+            if isinstance(planned, str):          # a pre-lock short-circuit (facets with no task id)
+                return planned
+            curation_key = planned.curation_key
+            incomplete = row("prior_attempt_incomplete_not_replayed", empty_proposals(),
+                             ambiguity="provider_outcome_unknown")
+
+            def settle(outcome, proposals, provenance, *, durable=False):
+                appended = self._append_curation_once(
+                    log_name, final, curation_key, provenance, row(outcome, proposals),
+                    **({"require_durable": True} if durable else {}))
+                return outcome if appended else "already-resolved"
+
+            # The semantic decision lock covers every fast path AND the paid attempt. Otherwise a
+            # stale empty/unavailable observer can commit while another process is paying, then
+            # suppress that provider's terminal result at append time.
+            with self._curation_decision_lock(log_name, final, curation_key):
+                if self._curation_attempt_already_resolved_locked(
+                        log_name, kind, final, curation_key, incomplete):
+                    return "already-resolved"
+                unpaid = self._curation_provenance(
+                    input_digest=planned.input_digest, input_schema=planned.input_schema,
+                    client=None)
+                for fast_path in planned.fast_paths:
+                    decided = fast_path()
+                    if decided is not None:
+                        return settle(decided[0], decided[1], unpaid)
+                if not planned.has_input:
+                    return settle("empty", empty_proposals(), unpaid)
+                client = self.reflect_client()
+                provenance = self._curation_provenance(
+                    input_digest=planned.input_digest, input_schema=planned.input_schema,
+                    client=client)
+                if client is None:
+                    return settle("unavailable", empty_proposals(), provenance)
+                # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag
+                # cannot mutate taxonomy before a durable receipt; only an explicit operator command
+                # may apply a proposal.
+                with self._paid_curation_attempt_locked(
+                        log_name, kind, final, curation_key, provenance, incomplete) as invoke:
+                    if not invoke:
+                        return "already-resolved"
+                    try:
+                        outcome, proposals = planned.propose(client)
+                        return settle(outcome, proposals, provenance, durable=True)
+                    except Exception as exc:  # noqa: BLE001 - close while decision lock is held
+                        self._append_curation_once(
+                            log_name, final, curation_key, provenance,
+                            row("error", empty_proposals(), error_type=type(exc).__name__),
+                            require_durable=True)
+                        return "error"
+        except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
+            try:
+                self._append_curation_once(
+                    log_name, final, diagnostic_key, diagnostic_provenance,
+                    row("error", (diagnostic_proposals or empty_proposals)(),
+                        error_type=type(exc).__name__),
+                    require_durable=True)
+            except Exception:  # noqa: BLE001 — logging stays best-effort relative to finalization
+                pass
+            return "error"
+
     def store_concept_curation(self, final: RunState) -> str:
         """PART IV §22.4 — the AGENTIC taxonomy steward at finalize: when `cross_run_curation` is on and an
         LLM client is available (`reflect_client`), let the LLM review the freshly-updated portfolio concept
@@ -943,14 +1062,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         unavailable client, is durably LOGGED to `concept_curation_log.jsonl` for operator ratification.
         Finalize never applies an agent proposal: mutation requires an explicit operator CLI/API action.
         Portfolio-scoped and fully decoupled from the run's terminal state — best-effort, never raises."""
-        if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
-            return "disabled"
-        log_name, steward_kind = "concept_curation_log.jsonl", "concept"
-        auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
-        diagnostic_key = self._diagnostic_curation_key(steward_kind, final)
-        diagnostic_provenance = self._curation_provenance(
-            input_digest="", input_schema="finalize-concept-curation/input-unavailable", client=None)
-        try:
+        def plan(_final):
             from looplab.engine.concept_steward import (
                 CONCEPT_CURATION_INPUT_SCHEMA,
                 concept_curation_has_input,
@@ -960,87 +1072,32 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             )
 
             overview, input_digest = concept_curation_snapshot(self._e.memory_dir)
-            curation_key = self._portfolio_curation_key(steward_kind, input_digest)
-            incomplete = {
-                "outcome": "prior_attempt_incomplete_not_replayed",
-                "ambiguity": "provider_outcome_unknown",
-                "auto": False, "auto_requested": auto_requested,
-                "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None,
-            }
-            with self._curation_decision_lock(log_name, final, curation_key):
-                if self._curation_attempt_already_resolved_locked(
-                        log_name, steward_kind, final, curation_key, incomplete):
-                    return "already-resolved"
-                # the semantic decision lock covers every fast path and the paid attempt.
-                # Otherwise a stale empty/unavailable observer can commit while another process is
-                # paying, then suppress that provider's terminal result at append time.
-                if not concept_curation_has_input(overview):
-                    provenance = self._curation_provenance(
-                        input_digest=input_digest, input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
-                        client=None)
-                    appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "empty", "auto": False, "auto_requested": auto_requested,
-                        "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
-                    return "empty" if appended else "already-resolved"
-                client = self.reflect_client()
-                provenance = self._curation_provenance(
-                    input_digest=input_digest, input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
-                    client=client)
-                if client is None:
-                    appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "unavailable", "auto": False,
-                        "auto_requested": auto_requested,
-                        "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
-                    return "unavailable" if appended else "already-resolved"
-                # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag cannot
-                # mutate taxonomy before a durable receipt; only an explicit operator command may apply.
-                with self._paid_curation_attempt_locked(
-                        log_name, steward_kind, final, curation_key,
-                        provenance, incomplete) as invoke:
-                    if not invoke:
-                        return "already-resolved"
-                    try:
-                        proposals = propose_concept_curation(
-                            overview, client, parser=_FINALIZE_STEWARD_PARSER,
-                            raise_on_failure=True)
-                        outcome = "empty" if curation_is_empty(proposals) else "proposed"
-                        appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                            "outcome": outcome,
-                            "auto": False, "auto_requested": auto_requested,
-                            "proposals": proposals, "receipt": None}, require_durable=True)
-                        return outcome if appended else "already-resolved"
-                    except Exception as exc:  # noqa: BLE001 - close while decision lock is held
-                        self._append_curation_once(log_name, final, curation_key, provenance, {
-                            "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                            "auto_requested": auto_requested,
-                            "proposals": {"merges": [], "splits": [], "purges": []},
-                            "receipt": None}, require_durable=True)
-                        return "error"
-        except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
-            try:
-                self._append_curation_once(
-                    log_name, final, diagnostic_key, diagnostic_provenance, {
-                    "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                    "auto_requested": auto_requested,
-                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None},
-                    require_durable=True)
-            except Exception:  # noqa: BLE001 — logging remains best-effort relative to run finalization
-                pass
-            return "error"
+
+            def propose(client):
+                proposals = propose_concept_curation(
+                    overview, client, parser=_FINALIZE_STEWARD_PARSER, raise_on_failure=True)
+                return ("empty" if curation_is_empty(proposals) else "proposed"), proposals
+
+            return _StewardPlan(
+                input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
+                input_digest=input_digest,
+                curation_key=self._portfolio_curation_key("concept", input_digest),
+                has_input=bool(concept_curation_has_input(overview)),
+                propose=propose,
+            )
+
+        return self._run_finalize_steward(
+            final, log_name="concept_curation_log.jsonl", kind="concept",
+            unavailable_schema="finalize-concept-curation/input-unavailable",
+            empty_proposals=lambda: {"merges": [], "splits": [], "purges": []},
+            plan=plan)
 
     def store_claim_curation(self, final: RunState) -> str:
         """PART IV §22.4 — the AGENTIC CLAIM steward at finalize (companion to `store_concept_curation`):
         the LLM reviews the evidence-grounded claim assessments and PROPOSES operator decisions
         (ratify/reject/pin). All outcomes are locked/durably logged to `claim_curation_log.jsonl`; finalize
         never applies them. Same gate/decoupling/best-effort contract as the concept steward."""
-        if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
-            return "disabled"
-        log_name, steward_kind = "claim_curation_log.jsonl", "claim"
-        auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
-        diagnostic_key = self._diagnostic_curation_key(steward_kind, final)
-        diagnostic_provenance = self._curation_provenance(
-            input_digest="", input_schema="finalize-claim-curation/input-unavailable", client=None)
-        try:
+        def plan(_final):
             from looplab.engine.claim_steward import (
                 CLAIM_CURATION_INPUT_SCHEMA,
                 claim_curation_has_input,
@@ -1050,66 +1107,25 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             )
 
             claims, input_digest = claim_curation_snapshot(self._e.memory_dir, structured=True)
-            curation_key = self._portfolio_curation_key(steward_kind, input_digest)
-            incomplete = {
-                "outcome": "prior_attempt_incomplete_not_replayed",
-                "ambiguity": "provider_outcome_unknown",
-                "auto": False, "auto_requested": auto_requested,
-                "proposals": {"decisions": []}, "receipt": None,
-            }
-            with self._curation_decision_lock(log_name, final, curation_key):
-                if self._curation_attempt_already_resolved_locked(
-                        log_name, steward_kind, final, curation_key, incomplete):
-                    return "already-resolved"
-                if not claim_curation_has_input(claims):
-                    provenance = self._curation_provenance(
-                        input_digest=input_digest, input_schema=CLAIM_CURATION_INPUT_SCHEMA,
-                        client=None)
-                    appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "empty", "auto": False, "auto_requested": auto_requested,
-                        "proposals": {"decisions": []}, "receipt": None})
-                    return "empty" if appended else "already-resolved"
-                client = self.reflect_client()
-                provenance = self._curation_provenance(
-                    input_digest=input_digest, input_schema=CLAIM_CURATION_INPUT_SCHEMA,
-                    client=client)
-                if client is None:
-                    appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "unavailable", "auto": False,
-                        "auto_requested": auto_requested,
-                        "proposals": {"decisions": []}, "receipt": None})
-                    return "unavailable" if appended else "already-resolved"
-                with self._paid_curation_attempt_locked(
-                        log_name, steward_kind, final, curation_key,
-                        provenance, incomplete) as invoke:
-                    if not invoke:
-                        return "already-resolved"
-                    try:
-                        proposals = propose_claim_curation(
-                            claims, client, parser=_FINALIZE_STEWARD_PARSER,
-                            raise_on_failure=True)
-                        outcome = "empty" if curation_is_empty(proposals) else "proposed"
-                        appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                            "outcome": outcome,
-                            "auto": False, "auto_requested": auto_requested,
-                            "proposals": proposals, "receipt": None}, require_durable=True)
-                        return outcome if appended else "already-resolved"
-                    except Exception as exc:  # noqa: BLE001 - close while decision lock is held
-                        self._append_curation_once(log_name, final, curation_key, provenance, {
-                            "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                            "auto_requested": auto_requested, "proposals": {"decisions": []},
-                            "receipt": None}, require_durable=True)
-                        return "error"
-        except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
-            try:
-                self._append_curation_once(
-                    log_name, final, diagnostic_key, diagnostic_provenance, {
-                    "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                    "auto_requested": auto_requested, "proposals": {"decisions": []}, "receipt": None},
-                    require_durable=True)
-            except Exception:  # noqa: BLE001
-                pass
-            return "error"
+
+            def propose(client):
+                proposals = propose_claim_curation(
+                    claims, client, parser=_FINALIZE_STEWARD_PARSER, raise_on_failure=True)
+                return ("empty" if curation_is_empty(proposals) else "proposed"), proposals
+
+            return _StewardPlan(
+                input_schema=CLAIM_CURATION_INPUT_SCHEMA,
+                input_digest=input_digest,
+                curation_key=self._portfolio_curation_key("claim", input_digest),
+                has_input=bool(claim_curation_has_input(claims)),
+                propose=propose,
+            )
+
+        return self._run_finalize_steward(
+            final, log_name="claim_curation_log.jsonl", kind="claim",
+            unavailable_schema="finalize-claim-curation/input-unavailable",
+            empty_proposals=lambda: {"decisions": []},
+            plan=plan)
 
     def store_task_facets(self, final: RunState) -> str:
         """PART IV §21.20.2 — propose task facets and queue them for operator ratification.
@@ -1117,15 +1133,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         Facets can widen retrieval scope, so agent output is never silently promoted into policy at finalize.
         Outcomes are written once/task to `task_facets_curation_log.jsonl`, including empty/unavailable ones.
         """
-        if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
-            return "disabled"
-        log_name, steward_kind = "task_facets_curation_log.jsonl", "facets"
-        auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
-        diagnostic_key = self._diagnostic_curation_key(steward_kind, final)
-        diagnostic_provenance = self._curation_provenance(
-            input_digest="", input_schema="finalize-task-facets/input-unavailable", client=None)
-        try:
-            tid = str(getattr(final, "task_id", "") or "")
+        def plan(final_state):
+            tid = str(getattr(final_state, "task_id", "") or "")
             if not tid:
                 return "empty"
             from looplab.engine.task_facets import (
@@ -1136,84 +1145,41 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 task_facets_input_digest,
             )
 
-            goal = str(getattr(final, "goal", "") or "")
+            goal = str(getattr(final_state, "goal", "") or "")
             kind = str(getattr(getattr(self._e, "task", None), "kind", "") or "")
-            input_digest = task_facets_input_digest(goal, kind)
-            curation_key = self._facets_curation_key(tid)
-            incomplete = {
-                "outcome": "prior_attempt_incomplete_not_replayed",
-                "ambiguity": "provider_outcome_unknown",
-                "auto": False, "auto_requested": auto_requested,
-                "proposals": {"task_id": tid, "facets": {}}, "receipt": None,
-            }
-            # facets are once/task, so differently worded runs share this decision lock.
-            # Fast empty/governed decisions must not race a paid attempt and discard its result.
-            with self._curation_decision_lock(log_name, final, curation_key):
-                if self._curation_attempt_already_resolved_locked(
-                        log_name, steward_kind, final, curation_key, incomplete):
-                    return "already-resolved"
+
+            def already_governed():
+                # Facets are once/TASK, so a task the operator already governs must settle before any
+                # provider call — and inside the lock, so it cannot race a paid attempt.
                 current = load_task_facets(self._e.memory_dir).get(tid)
-                if current is not None:
-                    provenance = self._curation_provenance(
-                        input_digest=input_digest, input_schema=TASK_FACETS_INPUT_SCHEMA,
-                        client=None)
-                    appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "already-governed", "auto": False,
-                        "auto_requested": auto_requested,
-                        "proposals": {"task_id": tid, "facets": current}, "receipt": None})
-                    return "already-governed" if appended else "already-resolved"
-                if task_facets_goal_is_empty(goal, kind):
-                    provenance = self._curation_provenance(
-                        input_digest=input_digest, input_schema=TASK_FACETS_INPUT_SCHEMA,
-                        client=None)
-                    appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "empty", "auto": False, "auto_requested": auto_requested,
-                        "proposals": {"task_id": tid, "facets": {}}, "receipt": None})
-                    return "empty" if appended else "already-resolved"
-                client = self.reflect_client()
-                provenance = self._curation_provenance(
-                    input_digest=input_digest, input_schema=TASK_FACETS_INPUT_SCHEMA,
-                    client=client)
-                if client is None:
-                    appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                        "outcome": "unavailable", "auto": False,
-                        "auto_requested": auto_requested,
-                        "proposals": {"task_id": tid, "facets": {}}, "receipt": None})
-                    return "unavailable" if appended else "already-resolved"
-                with self._paid_curation_attempt_locked(
-                        log_name, steward_kind, final, curation_key,
-                        provenance, incomplete) as invoke:
-                    if not invoke:
-                        return "already-resolved"
-                    try:
-                        facets = propose_task_facets(
-                            goal, kind, client, parser=_FINALIZE_STEWARD_PARSER,
-                            raise_on_failure=True)
-                        outcome = "proposed" if facets else "empty"
-                        appended = self._append_curation_once(log_name, final, curation_key, provenance, {
-                            "outcome": outcome, "auto": False,
-                            "auto_requested": auto_requested,
-                            "proposals": {"task_id": tid, "facets": facets}, "receipt": None},
-                            require_durable=True)
-                        return outcome if appended else "already-resolved"
-                    except Exception as exc:  # noqa: BLE001 - close while decision lock is held
-                        self._append_curation_once(log_name, final, curation_key, provenance, {
-                            "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                            "auto_requested": auto_requested,
-                            "proposals": {"task_id": tid, "facets": {}}, "receipt": None},
-                            require_durable=True)
-                        return "error"
-        except Exception as exc:  # noqa: BLE001 — agentic faceting must never fail a run
-            try:
-                self._append_curation_once(
-                    log_name, final, diagnostic_key, diagnostic_provenance, {
-                    "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                    "auto_requested": auto_requested,
-                    "proposals": {"task_id": str(final.task_id or ""), "facets": {}}, "receipt": None},
-                    require_durable=True)
-            except Exception:  # noqa: BLE001
-                pass
-            return "error"
+                return None if current is None else (
+                    "already-governed", {"task_id": tid, "facets": current})
+
+            def empty_goal():
+                return ("empty", {"task_id": tid, "facets": {}}) if task_facets_goal_is_empty(
+                    goal, kind) else None
+
+            def propose(client):
+                facets = propose_task_facets(
+                    goal, kind, client, parser=_FINALIZE_STEWARD_PARSER, raise_on_failure=True)
+                return ("proposed" if facets else "empty"), {"task_id": tid, "facets": facets}
+
+            return _StewardPlan(
+                input_schema=TASK_FACETS_INPUT_SCHEMA,
+                input_digest=task_facets_input_digest(goal, kind),
+                # Facets are once/task, so differently worded runs share this decision lock.
+                curation_key=self._facets_curation_key(tid),
+                has_input=True,        # the goal check above is the facets steward's "no input"
+                propose=propose,
+                fast_paths=(already_governed, empty_goal),
+            )
+
+        return self._run_finalize_steward(
+            final, log_name="task_facets_curation_log.jsonl", kind="facets",
+            unavailable_schema="finalize-task-facets/input-unavailable",
+            empty_proposals=lambda: {"task_id": str(getattr(final, "task_id", "") or ""),
+                                     "facets": {}},
+            plan=plan)
 
     def store_research_claims(self, final: RunState) -> None:
         """PART IV/§21.20 — persist this run's D8 deep-research claims (from the memo ledger) to the
