@@ -20,7 +20,8 @@ from looplab.engine.orchestrator import (
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
-from looplab.search.speculation_calibration import speculation_runtime_scope_digest
+from looplab.search.speculation_calibration import (
+    SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS, speculation_runtime_scope_digest)
 
 
 _DIGEST_A = "sha256:" + "a" * 64
@@ -48,6 +49,31 @@ def test_calibration_profile_covers_every_non_variant_setting_as_snapshot_json()
         option=orjson.OPT_SORT_KEYS,
     )) == SPECULATION_CALIBRATION_PROFILE_SETTINGS
     assert SPECULATION_CALIBRATION_PROFILE_SETTINGS["llm_api_key"] is None
+
+
+def test_runtime_scope_digest_agrees_between_live_settings_and_a_persisted_snapshot():
+    """The scope pin and the receipt it is compared against are built from DIFFERENT sources.
+
+    The CLI/engine pin comes from live `Settings` (`cli/__init__.py`, `orchestrator.py`), while the
+    receipt's own `runtime_scope_sha256` is computed from the run's config snapshot. Any field that
+    `masked_snapshot` DROPS rather than masks therefore appears on one side only, and the digests
+    disagree by construction — every positive `speculation_depth` is then refused as
+    "runtime-scope mismatched", with nothing in the message pointing at a redacted field. That is
+    what a newly added credential-binding field did, so pin the invariant directly rather than
+    waiting for the 56 downstream mechanics tests to fail with one opaque ValueError.
+    """
+    profile = {
+        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        "max_nodes": 3,
+        "speculation_depth": 1,
+        "speculation_gate_receipt": "receipt.json",
+    }
+    snapshot = Settings(**profile).masked_snapshot()
+    assert speculation_runtime_scope_digest(profile) == (
+        speculation_runtime_scope_digest(snapshot))
+    # ...and the reason it holds: every key the snapshot cannot carry is ignored by the digest.
+    dropped = set(profile) - set(snapshot)
+    assert dropped and dropped <= SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS
 
 
 def _engine(run_dir, **kwargs) -> Engine:

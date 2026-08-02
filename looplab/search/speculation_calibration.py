@@ -57,10 +57,19 @@ SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS = frozenset({
 # stamping it would invalidate every receipt earned before it existed. Spelled literally rather than
 # imported: `search` importing `core.config` here would be a new dependency for one string.
 SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS = frozenset({"config_snapshot_schema"})
+# Fields `Settings.masked_snapshot` DROPS rather than masks. A digest that includes them can only be
+# reproduced by a caller holding live Settings, never by one reading a persisted snapshot — so the
+# two sides of the same comparison (the CLI/engine scope pin, built from live Settings, and the
+# receipt's own `runtime_scope_sha256`, built from the run's config snapshot) would disagree by
+# construction, and every positive `speculation_depth` would be refused as "runtime-scope
+# mismatched". Same reasoning as the document marker above: what no reader can see must not vary the
+# scope. Spelled literally to keep `search` from importing `core.config` for one string.
+SPECULATION_RUNTIME_SCOPE_REDACTED_FIELDS = frozenset({"llm_api_key_base_url"})
 SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS = frozenset(
     SPECULATION_RUNTIME_SCOPE_VARIANT_FIELDS
     | SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS
     | SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS
+    | SPECULATION_RUNTIME_SCOPE_REDACTED_FIELDS
 )
 
 # These descriptors bind behavior that is constructed outside Settings.  They
@@ -258,6 +267,7 @@ __all__ = [
     "SPECULATION_RUNTIME_SCOPE_DOCUMENT_FIELDS",
     "SPECULATION_RUNTIME_SCOPE_IGNORED_FIELDS",
     "SPECULATION_RUNTIME_SCOPE_PLACEMENT_FIELDS",
+    "SPECULATION_RUNTIME_SCOPE_REDACTED_FIELDS",
     "SPECULATION_RUNTIME_SCOPE_SCHEMA",
     "SPECULATION_RUNTIME_SCOPE_VARIANT_FIELDS",
     "SPECULATION_TASK_SCOPE_SCHEMA",
