@@ -464,7 +464,14 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
 
   return (
     <div className="report-view" aria-busy={refreshing || undefined}>
-      <div className="toolbar report-toolbar">
+      <h2 className="report-title">{state.goal || state.task_id}</h2>
+      <div className="report-sub muted">{state.run_id} · {state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
+        {' · '}{nodeCount} nodes ({a.nEval} evaluated, {failed.length} failed)
+        {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · $${fmt(state.llm_cost.cost)}`}</div>
+
+      <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
+
+      <div className="toolbar report-toolbar" role="group" aria-label="Report actions">
         {!readOnly && <button className="btn sm primary"
           disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
           onClick={refresh}
@@ -492,13 +499,6 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           && <button className="btn sm" onClick={refresh}>{savedRefreshIntent
             ? 'Resume paid request' : 'Retry paid refresh'}</button>}
       </div>}
-
-      <h1 className="report-title">{state.goal || state.task_id}</h1>
-      <div className="report-sub muted">{state.run_id} · {state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
-        {' · '}{nodeCount} nodes ({a.nEval} evaluated, {failed.length} failed)
-        {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · $${fmt(state.llm_cost.cost)}`}</div>
-
-      <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 
       {!best && <div className="report-empty-state" role="status">
         <h2>{a.nEval ? 'No feasible champion yet' : 'No champion yet'}</h2>
