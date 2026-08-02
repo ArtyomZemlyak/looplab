@@ -706,14 +706,19 @@ export default function LaunchCard({
     : validatedCurrent
       ? 'The validated LLM backend may incur provider cost. No monetary cap is configured.'
       : 'If validation resolves to an LLM backend, Start may incur provider cost. No monetary cap is configured.'
+  // Reveal the editable config on explicit request OR whenever there is a field error to fix (so a
+  // collapsed field is never the reason an error can't be seen/focused).
+  const showConfig = configOpen || hasFieldErrors
   useEffect(() => {
     if (!hasFieldErrors || configOpen) return
     setConfigOpen(true)
     onConfigOpenChange?.(true)
   }, [configOpen, hasFieldErrors, onConfigOpenChange])
   useEffect(() => {
-    if ((settingsInvalid || !settingsParsed.ok) && advancedRef.current) advancedRef.current.open = true
-  }, [settingsInvalid, settingsParsed.ok])
+    if (showConfig && (settingsInvalid || !settingsParsed.ok) && advancedRef.current) {
+      advancedRef.current.open = true
+    }
+  }, [settingsInvalid, settingsParsed.ok, showConfig])
   useEffect(() => {
     const pending = pendingErrorTargetRef.current
     if (!pending || operationBusy) return
@@ -731,9 +736,6 @@ export default function LaunchCard({
     })
     return () => cancelAnimationFrame(frame)
   }, [configOpen, errors, hasFieldErrors, operationBusy, reactId])
-  // Reveal the editable config on explicit request OR whenever there is a field error to fix (so a
-  // collapsed field is never the reason an error can't be seen/focused).
-  const showConfig = configOpen || hasFieldErrors
   return <form className="asst-launch" aria-labelledby={titleId} aria-busy={operationBusy ? 'true' : 'false'}
     onSubmit={event => { event.preventDefault(); validate() }}>
     <div className="asst-launch-h" id={titleId}>
@@ -874,7 +876,7 @@ export default function LaunchCard({
           </div>
         })}
       </div>
-      <details ref={advancedRef} className="asst-launch-advanced" defaultOpen={!settingsParsed.ok}>
+      <details ref={advancedRef} className="asst-launch-advanced">
         <summary>Advanced settings JSON</summary>
         <label htmlFor={`launch-${reactId}-advanced-settings`}>Lossless settings overrides</label>
         <textarea id={`launch-${reactId}-advanced-settings`} className="text asst-launch-json" value={draft.settings_json}

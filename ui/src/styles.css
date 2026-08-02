@@ -2753,7 +2753,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .feed-msg.chat.assistant.has-launch { width: 100%; max-width: 100%; }
   .asst-launch-h { align-items: flex-start; }
   .asst-launch-state { flex: 1 0 100%; margin-left: 0; }
-  .asst-launch-configtoggle { width: 100%; min-height: 44px; justify-content: center; }
+  .asst-launch-configtoggle.btn.xs { width: 100%; min-height: 44px; justify-content: center; }
   .asst-launch-section { padding: 8px; }
   .asst-launch :is(input.text, select.text, textarea.text) { min-width: 0; max-width: 100%; font-size: 16px; }
   .asst-launch-source { gap: 6px; }
