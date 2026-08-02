@@ -17,6 +17,14 @@ Benchmark numbers below are **[SR]** (self-reported, with published traces) unle
 with what we have; or is it simply better and worth replacing our core with — plus, per the
 request: how hard is each borrow and exactly where does it land.
 
+> **Authority.** Analysis/hypothesis ledger in the doc-13 line (external-works analysis). Doc 16
+> owns correctness findings, doc 25 owns structural debt, and **doc 17 owns release ordering and
+> the R0–R5 gates ([§6.3](17-project-review-and-directions-2026-07-11.md), §6.5, §6.6, §7.1)** —
+> nothing here outranks R0–R4 or flips a default. §5 reconciles every recommendation against
+> those authorities item-by-item. Because both this doc (§4.2) and doc 17 (§27) carry
+> bare-integer recommendation tables, cross-references are always qualified as
+> **"doc 26 §4.2 #N"** vs **"doc 17 §27 #N"**.
+
 ---
 
 ## TL;DR verdict
@@ -35,7 +43,8 @@ Three concrete lanes come out of this analysis:
    (`ouroboros run --workspace … --memory-mode forked --patch-out result.patch`) that matches our
    `agents/cli_agent.py` preset contract almost field-for-field. Adding an `ouroboros` preset is a
    **small (S)** change and gives us a swarm-capable, memory-bearing external Developer backend to
-   A/B against `opencode`/`aider`. (§4.1)
+   A/B against `opencode`/`aider`. (§4.1; the offline A/B is ungated, and the live half sits in
+   doc 17 §6.5's already-defined **External-Developer-validation lane** — R4 + doc 16 P1-9.)
 2. **A basket of small, high-value methodology imports into `trust/` and the adapters** — the
    article's best material is its benchmark-honesty machinery: trace-audit layers with pre-registered
    `leakage_adjusted_accuracy`, the atomic task contract (obligations checklist + independent
@@ -45,9 +54,10 @@ Three concrete lanes come out of this analysis:
    — not code (theirs is inseparable from their runtime), but the mechanism design: commit gate +
    multi-model quorum review + scope review + restart verification + review-exempt rollback. We
    already own every prerequisite seam (assistant `REPO_ROOT` write capability, hot-reload
-   `PromptStore`, the `harden` exploit co-evolution loop, per-run config snapshots). This is a
-   **large (L)** program and must not outrank doc 17's R-gates, but it now has a working existence
-   proof with published constraints. (§3.1)
+   `PromptStore`, the `harden` exploit co-evolution loop, per-run config snapshots), and it fits
+   *inside* doc 17 §22.4's boundary — the operator's **assistant** edits, in-loop agents never do.
+   This is a **large (L)** program and must not outrank doc 17's R-gates, but it now has a working
+   existence proof with published constraints. (§3.1)
 
 What we should **not** take: mid-run self-modification (breaks engine invariants 1–5), the
 constitutional anti-RAG absolutism (wrong for our scale of accumulated lessons/claims), the
@@ -207,6 +217,12 @@ lack: multi-model quorum review of a proposed change, whole-repo scope review, a
 staging, restart verification, review-exempt rollback, protected-surface typing, an
 owner-stop sentinel that no autonomous path can clear.
 
+**Corpus boundary (doc 17 §22.4).** Doc 17's load-bearing governance conclusion — "the IN-LOOP
+agents propose, they do not commit … 'operator is the sole editor' means *operator OR the
+operator's assistant*, never an autonomous in-loop agent" — is not an obstacle to this program;
+it is its charter. Everything below is **assistant-side, between runs, operator-ratified**; no
+stage gives an in-loop agent (Researcher/Developer/Strategist) write access to anything.
+
 **Landing (staged, in increasing risk):**
 
 1. **Prompt evolution first (M).** A reviewed pipeline that proposes edits to `prompt_dir` files:
@@ -216,7 +232,9 @@ owner-stop sentinel that no autonomous path can clear.
    the PromptStore's read-then-tolerate contract make rollback trivial (delete the file → built-in
    default). *Guard to add first:* prompt files today have **no content-hash binding to any review**
    — adopt their "content hash matches latest review" gate for anything under `prompt_dir`
-   (`skills`/`knowledge` too) before letting any agent propose writes there.
+   (`skills`/`knowledge` too) before letting any agent propose writes there. Build the hash on
+   doc 25 §6.1's `core/digests.py` primitive — CO-08 already counts four digest spellings in the
+   tree; do not mint a fifth.
 2. **Exploit/gate evolution, scheduled (S).** `harden` is cycle-shaped already; give it a cadence
    (a cron/CI job per memory dir, not an in-run cadence) and a review step over new
    `exploits.jsonl` rules. Their solver-guardrail (reject any rule that flags an honest solution)
@@ -226,7 +244,10 @@ owner-stop sentinel that no autonomous path can clear.
    with our architecture docs as the atlas (we even have the map — CLAUDE.md + doc 25's
    structural-debt ledger), protected surfaces (obvious candidates: `events/replay.py::fold`,
    `events/types.py`, `trust/*`, `serve/protocol.py::CONTROL_EVENTS`, `core/redact.py`,
-   `tests/` invariant proofs — note the rhyme with their SAFETY_CRITICAL / FROZEN_CONTRACT split),
+   `tests/` invariant proofs — note the rhyme with their SAFETY_CRITICAL / FROZEN_CONTRACT split;
+   **define the list against the post-doc-25-§6.1 safety-kernel spellings**, not the current
+   scattered copies doc 25 is consolidating — a protected-path list written against paths CO-06
+   is rewriting would be stale on arrival),
    restart-verify = our full pytest suite + `looplab replay` byte-identity on a corpus of logs, and
    review-exempt rollback = git revert. Their two hardest-won lessons to import verbatim:
    **one reviewed commit per cycle** and **an honest no-op is a legitimate cycle outcome** — both
@@ -265,7 +286,13 @@ contains no findings". Adopting the exact-`[]`-or-parse-failure contract in
 `core/parsing.py`-adjacent verdict parsing removes a silent false-clean channel.
 
 **Verdict: adopt-idea, both S–M, high value per token spent; composes with §12-verifier
-calibration rather than replacing it.**
+calibration rather than replacing it.** Two corpus facts sharpen the framing: (a) `quorum` /
+vendor-diverse review has **zero prior hits anywhere in `docs/`** — this is net-new, with doc 17
+§12's single-verifier multi-framing as its nearest relative; (b) doc 17 **§21.17 E2 is an honest
+negative** — the calibrated foresight verifier correlated −0.11 with realized recall (n=10), no
+better than self-reported — so any quorum verdict ships **advisory-only behind doc 17 §7.3's
+calibration bar**, and feeding it into best-selection stays deferred exactly as §21.16 already
+defers it (pending R1 epoch identity + SearchFitness; doc 16 P0-2 is still partial).
 
 ### 3.3 Anti-reward-hack & benchmark-honesty methodology — the richest vein
 
@@ -275,11 +302,11 @@ holes ours is built to prevent — and then built machinery we don't have yet.
 | Their mechanism | Our nearest thing | Delta → landing | Effort / verdict |
 |---|---|---|---|
 | **Post-hoc trace audit, two layers**: deterministic STRONG/WEAK flags over every web/shell call (leak-URL requested; answer-hunting query; gold-from-leak-source), then an LLM judge rubric — applied **symmetrically to every harness**, with a **pre-registered** `leakage_adjusted_accuracy` (STRONG-flagged sample counts incorrect even if scored correct; raw + adjusted + flag count always published together; official score never mutated) | `trust/reward_hack.py` is *pre/post-hoc over code*, not over the **action trace**; `EV_TRAIN_MONITOR_ALERT` watches logs but not tool calls | We should audit the *agentic Developer's action stream* (CLI-agent runs, `tool_loop` transcripts, repo-task shell history) the same way: deterministic scan for eval/answer-source access (our `protect` list + `mlebench` answer paths are the leak-target SSOT), advisory LLM judge behind it; report `hack_adjusted` metric beside raw in run reports. Lands in `trust/` + `events/` report projections; the Developer audit trail (`last_run`, `last_patch`, sandbox logs) already exists | **M — adopt-idea; the single highest-leverage trust upgrade here** |
-| **Atomic task contract** (OSWorld prompt): write obligations as a numbered checklist BEFORE the first mutating action (object / required state with every qualifier / order / what stays unchanged / where it must persist — live and stored slots); close every item observed-satisfied / not-verified / impossible before finishing; **verify by independent read-back** ("don't grep your own output and call it verified"); at most one targeted repair | Developer contract is freer; `critic.py` checks idea-vs-code after the fact; `comparison_contract` hook exists per-task | Port as prompt-layer discipline for **repo/mlebench Developer runs** (`repo_developer_system_body`, `developer_system` via PromptStore — no code change to trial it) + a `critic.py` check that the declared checklist was closed. Their measured motivation transfers: 8 of 19 lost tasks were "work done, never checked against the surface the grader reads" — exactly the submission-file/metric-surface failure mode of MLE-bench tasks | **S to trial, M to enforce — adopt-idea** |
+| **Atomic task contract** (OSWorld prompt): write obligations as a numbered checklist BEFORE the first mutating action (object / required state with every qualifier / order / what stays unchanged / where it must persist — live and stored slots); close every item observed-satisfied / not-verified / impossible before finishing; **verify by independent read-back** ("don't grep your own output and call it verified"); at most one targeted repair | Developer contract is freer; `critic.py` checks idea-vs-code after the fact; `comparison_contract` hook exists per-task | Port as prompt-layer discipline for **repo/mlebench Developer runs** (`repo_developer_system_body`, `developer_system` via PromptStore — no code change to trial it) + a `critic.py` check that the declared checklist was closed. Their measured motivation transfers: 8 of 19 lost tasks were "work done, never checked against the surface the grader reads" — exactly the submission-file/metric-surface failure mode of MLE-bench tasks. **Complements doc 17 §16 across the same seam**: §16's TFC grader owns the host-side, fixed-metric rules; this item owns the agent-side obligation contract — two halves of one answer, not two answers | **S to trial, M to enforce — adopt-idea** |
 | **`verify_and_record` host-attested receipts** + `check_exit_masking` (shlex scan for `\|\| true`, `>/dev/null`, `\| tail` exit-code laundering) + `artifact_lifecycle` (check built-then-deleted the deliverable it attested) | Our evals are *already* host-run (`runtime/command_eval.py::read_metric` is the metric contract; the agent never grades itself) — architecturally ahead. But agent-declared verification inside repo tasks (`onboard_command`, agent-run test commands) has no receipt trail or masking sensor | Add the two deterministic sensors to `runtime/command_eval.py`/sandbox command paths for *agent-authored* check commands; surface flags as fold-ignored diagnostics | **S — adopt-idea (sensors); parity on the architecture** |
 | **Admission manifests + clean-seed gate + denominator-preserving ledgers**: manifest written *before* enforcement so refusals leave records; `git describe --dirty` refusal ("THE MONEY IS BURNED"); ledger records every requested instance incl. infra failures; `launcher_audit.py` — a *structural source-text gate over the launchers themselves* (admission is the outer boundary; confinement from the active checkout; single publisher) | `events.jsonl` **is** a denominator-preserving ledger (node_failed with reasons; costs ledger; `run_started` pins settings+code state) — largely parity, and ours replays. Gaps: we don't refuse a dirty working tree at `looplab run` for benchmark-grade runs, and adapters have no admission audit | (a) a `--require-clean-source` admission flag recording `git describe --dirty` into `run_started` extras and refusing when dirty (S); (b) the *pre-registered scoring rule* idea for MLE-bench campaign reports (S). The launcher-audit meta-gate is over-engineering at our current adapter count — note it in BACKLOG, don't build | **S ×2 — adopt-idea; rest parity** |
 | **Symmetric leakage filtering + provider-side-tool blindness**: Codex's server-side web_search bypassed `--network none`; egress must be closed or audited *at the provider layer*, and filters applied to both sides of any comparison | `DockerSandbox` defaults `network="none"`; but external CLI-agent backends (ADR-7) run with whatever egress their tool ships — same hole, and we haven't documented it as a comparison-validity threat | A disclosure rule + (where supported) offline flags in `cli_agent` presets; document in MLEBENCH.md that harness A/B numbers are invalid unless egress parity holds | **S — adopt-idea (policy + preset flags)** |
-| **CL-Bench failure taxonomy** for memory: schema-drift collapse; un-tagged free-text lessons retrieved narrowly; **post-hoc learning** (the right lesson extracted *after* the failing episode when a matching one already existed — a retrieval-timing failure, not a storage failure) | Our lessons pipeline is stronger on hygiene (contradiction filtering, harmonic retrieval, credit-assigned comparative pairs, role routing) — but nobody has measured our *prior-injection hit rate*: was a relevant stored lesson actually in the prompt before the failing attempt? | An offline evaluation over existing memory dirs + run logs: for each failed node, did `load_reflection_priors` surface the lesson that the post-run reflection then (re-)derived? Their taxonomy gives the metric names for free. CL-Bench itself is domain-mismatched for us; this internal audit is the transferable part | **M — adopt-idea (evaluation, not mechanism)** |
+| **CL-Bench failure taxonomy** for memory: schema-drift collapse; un-tagged free-text lessons retrieved narrowly; **post-hoc learning** (the right lesson extracted *after* the failing episode when a matching one already existed — a retrieval-timing failure, not a storage failure) | Our lessons pipeline is stronger on hygiene (contradiction filtering, harmonic retrieval, credit-assigned comparative pairs, role routing) — but nobody has measured our *prior-injection hit rate*: was a relevant stored lesson actually in the prompt before the failing attempt? | An offline evaluation over existing memory dirs + run logs: for each failed node, did `load_reflection_priors` surface the lesson that the post-run reflection then (re-)derived? Their taxonomy gives the metric names for free. CL-Bench itself is domain-mismatched for us; this internal audit is the transferable part. The mechanisms under test are doc 10's M2/M3 (shipped) + doc 13 §8's M6 (shipped, live-shared); the audit itself exists nowhere in the corpus — doc 17 §9's evaluation gate asks for retrieval metrics but never "was the lesson in the prompt *before* the failing attempt" | **M — adopt-idea (evaluation, not mechanism)** |
 
 **Verdict overall: this section is the immediate-term win.** Five S-effort items and two M-effort
 items, all offline/ungated except the trace-audit projection, all landing on named seams.
@@ -356,7 +383,9 @@ adopt-ideas; ledger/lanes at parity.**
 
 - **Background consciousness** = CORAL's heartbeat with a concrete design (rotating
   one-item-per-wakeup maintenance; second-failure-of-a-kind escalation: "six silent retries is not
-  persistence — it's amnesia"). Doc 17 §25 item 3 already holds this slot gated; Ouroboros supplies
+  persistence — it's amnesia"). Doc 17 §27 item 3 (mechanism described in §25) already holds this
+  slot, live-steering gated, with the instruction to measure against §9/§15 rather than add a
+  parallel mechanism; Ouroboros supplies
   the best reference implementation sketch if/when we build it. No parallel mechanism.
 - **Skills marketplace with content-hash-bound review and 8-condition execution gates** — out of
   scope as product, but the *hash-binds-review* gate is precisely what our auto-distilled skills
@@ -405,31 +434,44 @@ Our `agents/cli_agent.py` preset contract (`CliAgentSpec{name, argv, needs_git, 
 `surface` allow-list minus `protect`) accepts this shape nearly verbatim — external workspaces must
 be separate git worktree roots on *both* sides, and their patch-out contract matches our
 patch-gate audit (`last_patch: {ok, paths, rejected}`). Concretely: add an `ouroboros` entry to
-`PRESETS` (validated automatically by `Settings._check_trust_gate`), point env at a local
-`ouroboros server`, and A/B it against `opencode`/`aider` on the offline suite, then on a repo
-task. Caveats to record in `docs/guide/llm-and-agents.md` when doing it: it wants its own running
-server (heavier than any current preset); its swarm/memory are the value *and* the cost; its
-benchmark evidence is [SR]; egress parity (§3.3) must be pinned before quoting any A/B number.
-MIT license — clean.
+the preset registry — and per doc 25 §6.6 (CO-07/XP-04) that is **four edits, not one**:
+`agents/cli_agent.py::PRESETS`, the `Settings._check_trust_gate` validation it feeds,
+`cli/__init__.py`'s hardcoded `_DEV_BACKENDS` tuple, and `appconfig.py`'s template string (doc 25's
+proposed fix is a single core registry all four pin to; landing this preset is a good forcing
+function to do that consolidation first). Then point env at a local `ouroboros server` and A/B it
+against `opencode`/`aider` on the offline suite, then on a repo task. Gating per doc 17: the
+offline A/B is exactly the "first safe experiment" doc 17 §6.5's **External Developer validation**
+lane prescribes ("run one real external backend through the landed parent-aware wrappers and
+failure/deletion contract tests"); *promotion to a live default* inherits that lane's
+prerequisites — the R4 capability protocol + typed `DevelopmentResult`, with doc 16 **P1-9**
+("Developer wrappers lose failures and parent semantics") the named blocker. Caveats to record in
+`docs/guide/llm-and-agents.md` when doing it: it wants its own running server (heavier than any
+current preset); its swarm/memory are the value *and* the cost; its benchmark evidence is [SR];
+egress parity (§3.3) must be pinned before quoting any A/B number; and external backends do not
+receive the CrossRunTools provider (doc 17 §22.5), so its *own* forked memory is doing the work
+ours would normally inject. MIT license — clean.
 
 ### 4.2 Effort/priority table (all items from §3)
 
-| # | Item | Seam (ours) | Effort | Mode / gate | Value |
-|---|------|-------------|--------|-------------|-------|
-| 1 | `ouroboros` CLI-agent preset + A/B | `agents/cli_agent.py::PRESETS` | **S** | offline first; live behind `developer_backend` | High (capability + intel) |
-| 2 | Action-trace reward-hack audit + `hack_adjusted` reporting | `trust/` + Developer audit trail + report projections | **M** | offline/report-only first | **Highest** |
-| 3 | Atomic task contract in Developer prompts | `PromptStore` keys (`developer_system`, `repo_developer_system_body`) + `trust/critic.py` | **S→M** | prompt trial ungated; critic check offline | High |
-| 4 | Verifier quorum at champion boundary (vendor-diverse 2-of-K) | `engine/confirm_phase.py`, `trust/verifier.py`, H3 role models | **S–M** | off by default; pairs with §12 calibration | High |
-| 5 | Exact-`[]` parse contract for clean verdicts | verdict parsing shared by verifier/critic/strategist | **S** | ungated | Medium |
-| 6 | `check_exit_masking` + artifact-lifecycle sensors on agent-authored checks | `runtime/command_eval.py` / sandbox | **S** | diagnostics only | Medium |
-| 7 | `--require-clean-source` admission + dirty-state in `run_started` | CLI + `engine/orchestrator.py` run start | **S** | opt-in flag | Medium (benchmark-grade runs) |
-| 8 | Egress-parity disclosure policy for external backends | `cli_agent` presets + MLEBENCH.md | **S** | policy/doc | Medium |
-| 9 | Prior-injection hit-rate audit (post-hoc-learning metric) | offline over memory dirs + logs | **M** | offline | High (validates ADR-10) |
-| 10 | Content-hash review binding for `prompt_dir`/auto-skills | authoring routes + `write_auto_skill` | **S–M** | prerequisite for #12 | Medium |
-| 11 | Learned provider-capability cache; per-role fallback chains | `core/llm.py` siblings; `Settings` | **S–M** | offline | Medium |
-| 12 | **Reviewed self-evolution program** (prompts → exploits cadence → code) | §3.1 staged plan | **M / S / L** | staged; stage 3 = own design doc; never outranks doc 17 R-gates | Strategic |
-| 13 | Worker beacons (fold-ignored) + deferred-child finalize rule | `events/types.py` DIAGNOSTIC + `engine/finalize.py` | **S–M** | live-steering gated | Low-Medium |
-| 14 | `[MEMORY GAP]` idiom; best-effort outcome shelf | `cross_run_index`, finalize reporting | **S** | cosmetic | Low |
+Cross-references into this table are always "doc 26 §4.2 #N" (doc 17 §27 has its own #1–#7).
+The "Corpus anchor" column is expanded item-by-item in §5.
+
+| # | Item | Seam (ours) | Effort | Mode / gate | Corpus anchor | Value |
+|---|------|-------------|--------|-------------|---------------|-------|
+| 1 | `ouroboros` CLI-agent preset + A/B | `agents/cli_agent.py::PRESETS` (+3 sibling spellings, doc 25 CO-07/XP-04) | **S** | offline first; live promotion = doc 17 §6.5 External-Developer lane | 17 §6.5/§22.5 · 16 P1-9 · 25 §6.6 | High (capability + intel) |
+| 2 | Action-trace reward-hack audit + `hack_adjusted` reporting | `trust/` + Developer audit trail + report projections | **M** | offline/report-only first; enforcement = Trust-by-default lane | 17 §6.5/§6.6 · 16 P1-7 | **Highest** |
+| 3 | Atomic task contract in Developer prompts | `PromptStore` keys (`developer_system`, `repo_developer_system_body`) + `trust/critic.py` | **S→M** | prompt trial ungated; critic check offline | 17 §16 (complement, agent-side half) | High |
+| 4 | Verifier quorum at champion boundary (vendor-diverse 2-of-K) | `engine/confirm_phase.py`, `trust/verifier.py`, H3 role models | **S–M** | advisory-only behind §7.3 calibration bar; selection-feed deferred as in §21.16 | 17 §12/§21.16/§21.17 E2 · 16 P0-2 | High |
+| 5 | Exact-`[]` parse contract for clean verdicts | verdict parsing shared by verifier/critic/strategist | **S** | ungated | net-new (nearest: CODE_REVIEW.md degrade-to-None) | Medium |
+| 6 | `check_exit_masking` + artifact-lifecycle sensors on agent-authored checks | `runtime/command_eval.py` / sandbox | **S** | diagnostics only | net-new | Medium |
+| 7 | `--require-clean-source` admission + dirty-state in `run_started` | CLI + `engine/orchestrator.py` run start | **S** | opt-in flag; cheap precursor to R2 RunManifest, not a competitor | 17 §6.6 freshness-gate logic · 16 P0-5 | Medium (benchmark-grade runs) |
+| 8 | Egress-parity disclosure policy for external backends | `cli_agent` presets + MLEBENCH.md | **S** | policy/doc | 17 §6.5 MLE-bench-publication lane (additive) | Medium |
+| 9 | Prior-injection hit-rate audit (post-hoc-learning metric) | offline over memory dirs + logs | **M** | offline | tests 10 M2/M3 + 13 §8 M6; fills gap in 17 §9's metric list | High (validates ADR-10) |
+| 10 | Content-hash review binding for `prompt_dir`/auto-skills | authoring routes + `write_auto_skill`; digest = doc 25 `core/digests.py` | **S–M** | prerequisite for #12 | 25 §6.1 CO-08 · 17 §15 (skill `candidate→reviewed` lifecycle) | Medium |
+| 11 | Learned provider-capability cache; per-role fallback chains | `core/llm.py` siblings; `Settings` | **S–M** | offline; disclose every clamp (17 §12 caveat-2 labelling rule) | net-new | Medium |
+| 12 | **Reviewed self-evolution program** (prompts → exploits cadence → code) | §3.1 staged plan | **M / S / L** | staged; stage 3 = own design doc; never outranks doc 17 R-gates | 17 §22.4 (charter) · 25 §6.1/§6.8 | Strategic |
+| 13 | Worker beacons (fold-ignored) + deferred-child finalize rule | `events/types.py` DIAGNOSTIC + `engine/finalize.py` | **S–M** | live-steering gated; sequence after doc 25 SE-07/XP-07 re-homing | 25 §6.6 (collision) | Low-Medium |
+| 14 | `[MEMORY GAP]` idiom; best-effort outcome shelf | `cross_run_index`, finalize reporting | **S** | cosmetic | — | Low |
 
 **At parity already (listed to prevent re-proposal):** engine-sole-writer ≈ parent-sole-committer;
 event-log ≈ ledgers+git as explainable state (ours replays, theirs doesn't); host-run scoring ≈
@@ -452,7 +494,105 @@ lands on an existing registry-guarded seam.
 
 ---
 
-## 5. Sources / evidence status
+## 5. Cross-doc reconciliation — how this composes with docs 10/13/16/17/25
+
+*(Added 2026-08-02, after a targeted pass over doc 17 §§6.3–7.1, §9, §12, §13, §15, §16, §21,
+§22.4–22.11, Part III-C §§23–28; doc 16 §§3–4, §8; doc 25 §6; doc 10 §4; doc 13 §§6–8. Grep
+claims — "zero hits" — were verified against the whole `docs/` tree.)*
+
+### 5.1 Where every recommendation sits relative to doc 17's gates
+
+Doc 17's ordering machinery, for reference: **R0–R5** are defined in §6.3 (fail-closed
+containment → event/state identity → durability/reproducibility → execution infrastructure →
+typed domain services → clients/compatibility), with §6.6 normative over §6.3's status labels,
+§6.5 mapping feature lanes onto prerequisites, and §7.1 carrying the critical-path DAG.
+**"Live-steering gated"** is defined operationally in §6.6/§7.1/§15: the *offline/analysis* twin
+of an idea is ungated; the variant that "writes domain state, launches processes, calls the
+network, changes promotion, or alters what enters an agent's prompt mid-run" inherits R0–R4.
+Doc 26 uses the term with exactly that meaning.
+
+Every §4.2 item classified against that machinery:
+
+- **Ungated offline now** (analysis/report/prompt-trial side): #2 (report-only), #3 (prompt
+  trial), #5, #6 (diagnostics), #7 (opt-in flag), #8 (policy), #9, #10, #11, #14, #12 stages 1–2.
+  This is the same "keep the offline harnesses on the early lane" split doc 17 §6.6 prescribes
+  for §8–§12's own material.
+- **Inherit a named doc 17 §6.5 lane on promotion**: #1 → *External Developer validation*
+  (R4 capability protocol + typed `DevelopmentResult`; doc 16 P1-9 is the named blocker — our
+  wrappers must not lose failure/parent semantics before a heavyweight backend is trusted live);
+  #2 → *Trust-by-default* (R1 attempt/subject binding + R2 provenance + R3 bounded evaluator +
+  R4 versioned TrustEvidence; doc 16 P1-7 documents why detectors stay unsafe as hard gates
+  today; the shadow-on-labelled-corpus first experiment and the predeclared precision/recall +
+  zero-false-clean promotion rule apply to our `hack_adjusted` metric verbatim); #8 → *Real
+  MLE-bench publication* (the preregistered-pilot / "do not benchmark around known safety gaps"
+  rule — egress parity is precisely such a gap).
+- **Selection-touching, therefore R1-blocked**: #4's quorum verdict may not feed champion
+  selection until R1 epoch identity + SearchFitness exist — the *same* deferral doc 17 §21.16
+  already records for the foresight verifier score, and doc 16 P0-2 (epoch/subject identity) is
+  still partial. Until then it is advisory, like every other §12 descendant.
+- **Live-steering gated**: #13 (and any live enforcement of #3's critic check that would reject
+  proposals mid-run).
+- **Charter-bound, not gate-bound**: #12. Doc 17 has **zero prior content on self-modification
+  of LoopLab** (grep: no hit for self-modif/self-evolv/prompt-evolution anywhere in doc 17) —
+  §22.4 is the closest authority and it *pre-authorizes the shape*: the operator's assistant "IS
+  a full editor"; what is forbidden is autonomous in-loop editing. Doc 26 §3.1 operates strictly
+  on the permitted side of that line and should be read as the first design sketch for the
+  assistant-side editing phase §22.4 anticipates ("in later phases, edit").
+
+### 5.2 What is genuinely new to the corpus vs already held elsewhere
+
+**Net-new** (verified no prior coverage in docs 10–25, ROADMAP, BACKLOG, CODE_REVIEW): the
+action-trace audit + pre-registered `hack_adjusted` reporting (#2 — doc 17 §6.6 names the
+detector-architecture gap but has no trace-audit concept); vendor-diverse quorum review (#4 — no
+`quorum` hit anywhere); the exact-`[]` parse contract (#5); exit-masking/artifact-lifecycle
+sensors (#6); clean-source admission (#7); egress-parity policy (#8); the prior-injection
+hit-rate audit (#9); capability cache/fallback chains (#11); the reviewed self-evolution program
+(#12); the `ouroboros` preset (#1 — doc 17 §6.5 defines the *lane* but names no candidate
+backend; `opencode`/`aider` appear nowhere in doc 17).
+
+**Already held elsewhere — this doc adds evidence, not a new item**: heartbeat/background
+consciousness = doc 17 §27 #3 (defined in §25; Ouroboros's rotating one-item-per-wakeup protocol
++ second-failure escalation is the best reference design, and §25's "measure against §9/§15,
+don't add a parallel mechanism" stands); skill validate-lifecycle = doc 17 §15's missing verb
+(doc 26 #10 supplies the content-hash half §15 needs, against the skill-poisoning risk §15
+names); sparse-reward/grader material = doc 17 §16 + §27 #5 (doc 26 #3 is the agent-side
+complement); memory substrate = doc 10 M2/M3 + doc 13 §8 M6 (doc 26 #9 is the missing
+*evaluation* over them; M1/M5 and ROADMAP F2 remain open and are not re-proposed here).
+
+### 5.3 Named collisions with doc 25 (sequencing, not contradiction)
+
+Doc 25 §6 is concurrently redesigning several of the exact surfaces doc 26 lands on; the
+composition rule in each case is *consume doc 25's target design, don't race it*:
+
+1. **#1 preset registry** — doc 25 CO-07/XP-04: `developer_backend` keys currently live in four
+   spellings (`PRESETS`, `_check_trust_gate`, `cli/__init__.py::_DEV_BACKENDS`, `appconfig.py`
+   template). Adding `ouroboros` is the forcing function to land doc 25's single-registry fix
+   first (§4.1).
+2. **#10 digests** — doc 25 CO-08 counts four digest minters; the content-hash binding must use
+   the consolidated `core/digests.py` primitive from doc 25 §6.1, not a fifth spelling.
+3. **#12 stage-3 protected surfaces** — must be defined against doc 25 §6.1's post-consolidation
+   safety-kernel paths (CO-06 is rewriting `core/redact.py`'s walkers; a protected-path list
+   written today against pre-kernel spellings would be stale on arrival). Doc 25 §6.8's
+   anti-re-accretion guardrails are the natural home for the "one reviewed commit per cycle" /
+   "honest no-op is legitimate" norms.
+4. **#13 finalize rule** — doc 25 SE-07/XP-07 is re-homing `incomplete_finalize_scope`'s pure
+   helper cluster into `events/`; the deferred-child rule should land after that move, in the new
+   location.
+
+### 5.4 Corrections this pass made to doc 26 itself
+
+For the record (so a diff reader knows what changed and why): the heartbeat citation was fixed
+from "doc 17 §25 item 3" to **§27 item 3 (mechanism in §25)** — the consolidated numbering lives
+in §27; all cross-references to numbered recommendations are now qualified (doc 26 §4.2 #N vs
+doc 17 §27 #N) because both tables use bare integers; §4.1's "add an entry to `PRESETS`" was
+corrected to the four-spelling reality per doc 25 CO-07/XP-04; item 4 now carries doc 17
+§21.17 E2's honest-negative calibration result as its explicit bar; and the header gained the
+doc-25-style authority blockquote (doc 17 owns release ordering; nothing here outranks R0–R4 or
+flips a default).
+
+---
+
+## 6. Sources / evidence status
 
 - Article: [habr.com/ru/companies/airi/articles/1065428](https://habr.com/ru/companies/airi/articles/1065428/) — full text read (primary).
 - Repo: [`razzant/ouroboros`](https://github.com/razzant/ouroboros) @ v6.87.5 — clone-level
@@ -466,3 +606,9 @@ lands on an existing registry-guarded seam.
 - LoopLab-side facts: current source inspection (paths as cited); doc 13, doc 17 Part III-C, and
   doc 25 used as the comparison baseline and to avoid re-proposing items already at parity or
   already gated.
+- Cross-doc reconciliation (§5): doc 17 §§6.3/6.5/6.6/7.1 (gates and lanes), §9/§12/§15/§16/§21
+  (adjacent hypotheses), §21.16–21.17 (verifier status incl. the E2 honest negative), §22.4
+  (editing boundary), §22.5, §27 (consolidated table + parity-block convention); doc 16 §§3–4/§8
+  (P0/P1 ledger); doc 25 §6 (target designs CO-06/CO-07/CO-08, SE-07/XP-07, §6.1/§6.6/§6.8);
+  doc 10 §4 (M-series status); doc 13 §8 (M6). Negative claims ("zero hits") grep-verified over
+  `docs/`.
