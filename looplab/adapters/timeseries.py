@@ -13,10 +13,10 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
 
@@ -104,6 +104,11 @@ class TimeSeriesTask(BaseModel):
     id: str = "seasonal_forecast"
     goal: str = "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE"
     direction: str = "min"
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_valid(cls, v):
+        return validate_direction(v)
     comparison_contract: ComparisonContract | None = None
     n: int = 120
     period: int = 7

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from looplab.core.models import Idea
+from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
 
@@ -910,7 +910,7 @@ class LLMRepoDeveloper:
             from looplab.core.models import developer_artifact_footprint
             self.last_footprint = developer_artifact_footprint(
                 idea.footprint, "", self.last_files)
-            return f"(developer error: {e})"
+            return f"{DEVELOPER_ERROR_PREFIX} {e})"
         self.last_files = dict(write.files)
         self.last_deleted = list(write.deleted)
         from looplab.core.models import developer_artifact_footprint

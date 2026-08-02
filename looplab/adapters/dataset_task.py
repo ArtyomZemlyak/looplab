@@ -31,7 +31,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
@@ -167,9 +167,7 @@ class DatasetTask(BaseModel):
     @field_validator("direction")
     @classmethod
     def _direction_valid(cls, v):
-        if v not in ("min", "max"):
-            raise ValueError(f"direction must be 'min' or 'max', got {v!r}")
-        return v
+        return validate_direction(v)
 
     @model_validator(mode="after")
     def _resolve_and_require_data(self):

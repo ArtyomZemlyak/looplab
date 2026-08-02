@@ -20,8 +20,7 @@ from looplab.core.models import (
     NodeStatus,
     RunState,
     card_ownership_receipt,
-    durable_idea_payload,
-)
+    durable_idea_payload, is_developer_error)
 from looplab.core.llm_broker import in_llm_lane
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.replay import fold
@@ -188,7 +187,7 @@ class SpeculationMixin:
         return bool(
             node is not None
             and isinstance(getattr(node, "code", None), str)
-            and node.code.startswith("(developer error:")
+            and is_developer_error(node.code)
         )
 
     @staticmethod
@@ -624,7 +623,7 @@ class SpeculationMixin:
                 )
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
-            if isinstance(result.code, str) and result.code.startswith("(developer error:"):
+            if is_developer_error(result.code):
                 # The terminal and its circuit-breaker are one event-log transaction. A process
                 # crash may leave the preceding node_created durable, but can never leave a new
                 # developer_crash terminal without its matching pause. Tail CAS keeps a concurrent

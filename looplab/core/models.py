@@ -537,6 +537,44 @@ def valid_researcher_footprint(value) -> bool:
 
 DEVELOPER_FOOTPRINT_MARKER = "# LOOPLAB_FOOTPRINT:"
 
+# The Developer-crash sentinel. A Developer that cannot finish returns its error IN BAND as the
+# node's code — a graceful "this build produced nothing usable", distinct from an exception, which
+# means the engine itself broke. Six consumers (orchestrator ×3, node_build, speculation ×2) key a
+# terminal/no-terminal decision on it, and getting that wrong turns a crash into a FALSE SUCCESS: a
+# node recorded as evaluated whose code is an error message.
+#
+# It was a bare literal at the producer and at every consumer (doc 25 ES-11), so a backend that
+# worded its error differently — or a format tweak here — would have silently flipped all six
+# without a single failing test. Producer and consumers now share this constant, and
+# `tests/test_developer_error_sentinel.py` pins that no consumer re-spells it.
+# The optimization direction a task's metric is scored under. There is no safe default: a task that
+# means "maximize accuracy" but is read as "minimize" makes the search chase its WORST candidate and
+# report it as best, and nothing downstream can detect that — every number involved is real.
+#
+# The validator existed on 2 of the 9 task models (doc 25 RA-06), so the other seven accepted
+# `direction="mxa"` silently and pydantic's `str` field happily stored it. Every model now attaches
+# this one; `mlebench_real` additionally allows "auto", which it resolves from the grader before the
+# value reaches any comparison.
+DIRECTIONS = ("min", "max")
+
+
+def validate_direction(value, *, extra: tuple[str, ...] = ()):
+    """Reject anything that is not an exact known direction, naming what was received."""
+    allowed = (*DIRECTIONS, *extra)
+    if value not in allowed:
+        raise ValueError(
+            f"direction must be one of {', '.join(repr(name) for name in allowed)}, got {value!r}")
+    return value
+
+
+DEVELOPER_ERROR_PREFIX = "(developer error:"
+
+
+def is_developer_error(code) -> bool:
+    """True when `code` is the in-band Developer-crash sentinel rather than real solution code."""
+    return isinstance(code, str) and code.startswith(DEVELOPER_ERROR_PREFIX)
+
+
 
 def developer_artifact_footprint(proposed, code="", files=None) -> dict | None:
     """Resolve the Developer's quantitative finalization from its shipped artifact.

@@ -9,10 +9,10 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
 
@@ -114,6 +114,11 @@ class ClassificationTask(BaseModel):
     id: str = "blob_classification"
     goal: str = "tune a logistic-regression learner to maximize K-fold CV accuracy"
     direction: str = "max"
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_valid(cls, v):
+        return validate_direction(v)
     comparison_contract: ComparisonContract | None = None
     n: int = 80
     sep: float = 1.5

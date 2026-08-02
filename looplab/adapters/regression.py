@@ -13,10 +13,10 @@ import json
 import random
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
@@ -147,6 +147,11 @@ class RegressionTask(BaseModel):
     id: str = "poly_regression"
     goal: str = "select polynomial degree + ridge lambda minimizing K-fold CV MSE"
     direction: str = "min"
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_valid(cls, v):
+        return validate_direction(v)
     comparison_contract: ComparisonContract | None = None
     n: int = 40
     true_degree: int = 2
@@ -197,6 +202,11 @@ class CodeRegressionTask(BaseModel):
     id: str = "code_poly_regression"
     goal: str = "write code that fits a polynomial+ridge model minimizing K-fold CV MSE"
     direction: str = "min"
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_valid(cls, v):
+        return validate_direction(v)
     comparison_contract: ComparisonContract | None = None
     n: int = 40
     true_degree: int = 2

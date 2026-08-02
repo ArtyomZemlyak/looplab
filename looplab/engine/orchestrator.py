@@ -84,8 +84,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
     Idea, Node, NodeStatus, RunState, card_action_digest, card_ownership_receipt,
-    durable_idea_payload, idea_proposal_ref, normalize_researcher_footprint,
-)
+    durable_idea_payload, idea_proposal_ref, normalize_researcher_footprint, is_developer_error)
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
@@ -5223,7 +5222,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # pending, and the eval runs the PARENT's carried-over entrypoint and inherits the PARENT's
             # metric — a false success that pollutes the search (the 401-window nodes 50-54 each faked
             # the parent's 0.81 this way). node_created → node_failed keeps the one-terminal invariant.
-            elif isinstance(code, str) and code.startswith("(developer error:"):
+            elif is_developer_error(code):
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "generation": 0,
                     "error": code, "reason": "developer_crash",
@@ -5443,7 +5442,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     drop_card=replacement_card)
                 self._discard_node_build_telemetry()   # serial single-node path: self.researcher/self.developer
                 return
-            if isinstance(code, str) and code.startswith("(developer error:"):
+            if is_developer_error(code):
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node.id, "generation": generation,
                     "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
@@ -5655,7 +5654,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # two sibling create paths already fix). FAIL it now (node_created → node_failed keeps the
             # one-terminal invariant) and trip the SAME developer-crash circuit-breaker, so an operator
             # inject during an LLM outage can't silently slip a garbage-code node past it.
-            if isinstance(code, str) and code.startswith("(developer error:"):
+            if is_developer_error(code):
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "generation": 0,
                     "error": code, "reason": "developer_crash", "eval_seconds": 0.0})

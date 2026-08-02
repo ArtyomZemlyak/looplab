@@ -36,10 +36,10 @@ import json
 import random
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
@@ -183,6 +183,11 @@ class MLEBenchTask(BaseModel):
     goal: str = ("train a classifier on train.json and maximize held-out accuracy on "
                  "test.json, scored by the private grader")
     direction: str = "max"          # accuracy: higher is better
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_valid(cls, v):
+        return validate_direction(v)
     comparison_contract: ComparisonContract | None = None
     seed: int = 0
     n_train: int = 80

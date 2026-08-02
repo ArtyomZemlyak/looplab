@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import Idea, RunState, normalize_researcher_footprint
+from looplab.core.models import Idea, RunState, normalize_researcher_footprint, is_developer_error
 from looplab.events.types import EV_AGENT_DECISION, EV_NODE_CREATED
 from looplab.search.operators import merge_idea
 
@@ -143,7 +143,7 @@ class NodeBuildMixin:
         unspecified proposal stays unspecified so legacy scheduling remains byte-for-byte compatible.
         """
         proposed = normalize_researcher_footprint(getattr(idea, "footprint", None))
-        if proposed is None or (isinstance(code, str) and code.startswith("(developer error:")):
+        if proposed is None or is_developer_error(code):
             return idea, False
         finalized = normalize_researcher_footprint(
             getattr(developer, "last_footprint", None)) or proposed

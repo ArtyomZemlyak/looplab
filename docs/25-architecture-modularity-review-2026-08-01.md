@@ -464,9 +464,14 @@ created/closed/lost) are now stated rather than divergent. Pinned by three tests
 
 *Recommendation:* Make core/hardware the single probe owner: _detect_gpu_ids's count should derive from detect_gpus() (falling back to torch), eliminating the `-L` parser and the cross-probe mismatch failure mode that detect_gpu_inventory currently guards against.
 
-#### ES-11 · LOW · inconsistency · effort: small
+#### ES-11 · LOW · inconsistency · effort: small — **RESOLVED (2026-08-02)**
 
 **"(developer error:" is a magic-string protocol checked by startswith at six consumer sites across three modules**
+
+*Resolution:* `core/models.DEVELOPER_ERROR_PREFIX` + `is_developer_error(code)` are used by the
+producer and all six consumers. `tests/test_developer_error_sentinel.py` source-scans every module
+for a re-spelled literal (the definition site is the only permitted occurrence) and checks the
+reverse direction too — a module that DROPS the import has stopped participating in the contract.
 
 *Locations:* `looplab/adapters/repo_developer.py:913`, `looplab/engine/orchestrator.py:5230`, `looplab/engine/orchestrator.py:5450`, `looplab/engine/orchestrator.py:5662`, `looplab/engine/node_build.py:146`, `looplab/engine/speculation.py:191`
 
@@ -1953,9 +1958,16 @@ Scope: `looplab/runtime/` and `looplab/adapters/`.
 
 *Recommendation:* Extract one _confined(workdir, rel) -> Optional[Path] helper (resolve + _is_within + exception handling) used by all file-touching branches, and consider a {kind: reader_fn} dispatch table so a new reader kind must go through the table (and the confinement helper) rather than a new elif.
 
-#### RA-06 · MEDIUM · mergeable-entities · effort: medium
+#### RA-06 · MEDIUM · mergeable-entities · effort: medium — **PARTIALLY RESOLVED (2026-08-02)**
 
 **Five synthetic task adapters are copy-paste skeletons, and the direction validator exists in only 2 of 9 task models**
+
+*Resolution (the correctness half):* `core/models.validate_direction` is attached to all NINE
+registered task models — verified by `tests/test_task_direction_validator.py`, which DISCOVERS the
+models by import rather than listing them, so a new adapter that forgets it fails. `mlebench_real`
+opts "auto" in explicitly (it resolves that from the grader before any comparison) rather than
+every model loosening. **Still open:** the `SyntheticTaskBase` / `PerturbResearcher` collapse of
+the five copy-paste skeletons, which the finding itself rates lower priority.
 
 *Locations:* `looplab/adapters/toytask.py:17-45`, `looplab/adapters/regression.py:109-241`, `looplab/adapters/classification.py:80-140`, `looplab/adapters/timeseries.py:67-132`, `looplab/adapters/mlebench.py:146-284`, `looplab/adapters/repo_task.py:319-324`, `looplab/adapters/dataset_task.py:167-171`
 

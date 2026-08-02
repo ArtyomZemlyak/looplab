@@ -25,10 +25,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, model_validator, field_validator
 
 from looplab.core.comparison import ComparisonContract
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
@@ -79,6 +79,11 @@ class MLEBenchRealTask(BaseModel):
     data_dir: Optional[str] = None     # override the mle-bench data dir (else its default)
     goal: str = ""                     # defaults from the competition description
     direction: str = "auto"            # resolved from the grader/leaderboard
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_valid(cls, v):
+        return validate_direction(v, extra=('auto',))
     comparison_contract: ComparisonContract | None = None
     submission: str = "submission.csv"
     grade_timeout: float = 300.0
