@@ -702,6 +702,38 @@ def _parse_jsonl_region(buf: bytes) -> tuple[list[tuple[dict, int]], int]:
     return out, consumed
 
 
+def retry_tail_cas(store, plan, *, attempts: int = 64, on_exhaust):
+    """Run one append `plan` against a freshly-read log tail until it lands, or the log stops moving.
+
+    Eight hand-rolled copies of this loop used to live in the engine (doc 25 ES-07). Each re-read the
+    log, computed `tail = events[-1].seq if events else -1`, appended with `expected_last_seq=tail`,
+    and swallowed `EventStoreConcurrencyError` to retry — but each also re-decided the EXHAUSTION
+    behaviour independently, so `_drop_card_once` raised while `_append_rung_promotion` silently
+    returned False. That divergence was accidental, not designed. Here the policy is a REQUIRED
+    argument: a caller must state what "the log moved 64 times under me" means for its operation.
+
+    `plan(events, tail)` is called with the snapshot it must decide from, and returns this function's
+    result. Two things make it a valid CAS attempt rather than an ordinary callback:
+
+      * it must pass exactly the `tail` it was given as `expected_last_seq`, so the append either
+        lands directly on the prefix it validated or loses;
+      * it must let `EventStoreConcurrencyError` propagate — that exception IS the retry signal. A
+        plan that catches it turns a lost race into a silent success.
+
+    Everything else stays the caller's: precondition/idempotency checks simply `return` their own
+    value from inside the plan (no retry), and any lock discipline is chosen by wrapping either this
+    call or just the append inside the plan, exactly as before.
+    """
+    for _attempt in range(attempts):
+        events = store.read_all()
+        tail = events[-1].seq if events else -1
+        try:
+            return plan(events, tail)
+        except EventStoreConcurrencyError:
+            continue
+    return on_exhaust()
+
+
 class EventStore:
     def __init__(self, path: str | os.PathLike):
         self.path = Path(path)

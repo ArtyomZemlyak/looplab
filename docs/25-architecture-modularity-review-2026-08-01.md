@@ -410,9 +410,17 @@ Scope: `looplab/engine/`: orchestrator.py, node_build.py, eval_dispatch.py, eval
 
 *Recommendation:* Extract `_eval_admission_current(state, node, generation, max_es) -> bool` (and a `_release_and_skip(reservation)` helper) used by all three sites; the parallel branch's getattr-defensive variants can be folded in since RunState always has those attributes.
 
-#### ES-07 · MEDIUM · duplication · effort: medium
+#### ES-07 · MEDIUM · duplication · effort: medium — **RESOLVED (2026-08-02)**
 
 **Eight hand-rolled `for _attempt in range(64)` tail-CAS retry loops with no shared helper**
+
+*Resolution:* `events/eventstore.py::retry_tail_cas(store, plan, *, attempts=64, on_exhaust)`
+now owns the read-tail/append/retry loop and all eight sites call it; `grep 'range(64)'
+looplab/engine/` returns nothing. The exhaustion policy each copy used to pick by accident is
+a REQUIRED argument, so the three genuinely different behaviours (`_drop_card_once` raises,
+the receipt appends return their own falsy value, the speculative commit distinguishes
+created/closed/lost) are now stated rather than divergent. Pinned by three tests in
+`tests/test_eventstore_cache.py`.
 
 *Locations:* `looplab/engine/orchestrator.py:2183-2201`, `looplab/engine/orchestrator.py:2795-2821`, `looplab/engine/orchestrator.py:4163-4240`, `looplab/engine/orchestrator.py:4300-4350`, `looplab/engine/orchestrator.py:4646-4663`, `looplab/engine/speculation.py:523`, `looplab/engine/speculation.py:631`, `looplab/engine/speculation.py:694`
 

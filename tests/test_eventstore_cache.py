@@ -339,3 +339,87 @@ def test_the_cheap_prefix_windows_still_catch_a_rewrite_at_either_end(tmp_path):
         assert "REWRITTEN___" in types, (edit_head, types[:3], types[-3:])
         assert types[-1] == "after"
         assert _fresh_seqs(p) == [e.seq for e in reader.read_all()]
+
+
+# --------------------------------------------------------------------------- retry_tail_cas
+def test_retry_tail_cas_reads_a_fresh_tail_per_attempt_and_returns_the_plan_result(tmp_path):
+    """The helper's whole job: hand each attempt a tail that matches the log it just read.
+
+    Eight hand-rolled copies of this loop lived in the engine; the failure they all guarded against
+    is appending with a stale `expected_last_seq` after a concurrent writer moved the log. Pin that
+    the tail is re-derived per attempt, not captured once.
+    """
+    from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r"})
+    seen: list[int] = []
+
+    def plan(events, tail):
+        seen.append(tail)
+        if len(seen) < 3:
+            # Simulate losing the race AND another writer landing, exactly as a real conflict does.
+            store.append("hint", {"text": f"other-{len(seen)}"})
+            raise EventStoreConcurrencyError("tail moved", expected=0, actual=1)
+        store.append("pause", {}, expected_last_seq=tail)
+        return "landed"
+
+    assert retry_tail_cas(store, plan, on_exhaust=lambda: "exhausted") == "landed"
+    assert seen == [0, 1, 2], "each attempt must re-read the tail, never reuse the first one"
+    assert [event.type for event in store.read_all()] == [
+        "run_started", "hint", "hint", "pause"]
+
+
+def test_retry_tail_cas_exhaustion_policy_is_the_callers_and_only_conflicts_retry(tmp_path):
+    """Exhaustion is a REQUIRED argument because the eight copies each chose differently by accident
+    (`_drop_card_once` raised; `_append_rung_promotion` silently returned False). And only the CAS
+    conflict retries: any other exception is a real error and must reach the caller, not be spent as
+    one of 64 attempts."""
+    from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r"})
+
+    attempts = 0
+
+    def always_conflicts(_events, _tail):
+        nonlocal attempts
+        attempts += 1
+        raise EventStoreConcurrencyError("tail moved", expected=0, actual=1)
+
+    assert retry_tail_cas(
+        store, always_conflicts, attempts=5, on_exhaust=lambda: "gave-up") == "gave-up"
+    assert attempts == 5
+
+    def raises_exhaustion(_events, _tail):
+        raise EventStoreConcurrencyError("tail moved", expected=0, actual=1)
+
+    with pytest.raises(RuntimeError, match="caller policy"):
+        def _boom():
+            raise RuntimeError("caller policy")
+        retry_tail_cas(store, raises_exhaustion, attempts=2, on_exhaust=_boom)
+
+    def unrelated_failure(_events, _tail):
+        raise ValueError("not a CAS conflict")
+
+    with pytest.raises(ValueError, match="not a CAS conflict"):
+        retry_tail_cas(store, unrelated_failure, on_exhaust=lambda: "unreachable")
+
+
+def test_retry_tail_cas_lets_a_plan_decline_without_spending_attempts(tmp_path):
+    """Idempotency/precondition checks return their own value from inside the plan — one attempt."""
+    from looplab.events.eventstore import retry_tail_cas
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r"})
+    calls = 0
+
+    def already_done(events, _tail):
+        nonlocal calls
+        calls += 1
+        assert any(event.type == "run_started" for event in events)
+        return False
+
+    assert retry_tail_cas(store, already_done, on_exhaust=lambda: "exhausted") is False
+    assert calls == 1
+    assert len(store.read_all()) == 1, "a declining plan must append nothing"

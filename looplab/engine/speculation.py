@@ -23,7 +23,7 @@ from looplab.core.models import (
     durable_idea_payload,
 )
 from looplab.core.llm_broker import in_llm_lane
-from looplab.events.eventstore import EventStoreConcurrencyError
+from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_CARD_ADDED,
@@ -519,9 +519,7 @@ class SpeculationMixin:
         node_id = reserved.node_id
         idea = result.idea.model_copy(deep=True)
         with self.tracer.span("materialize_node", node_id=node_id, operator=reserved.kind):
-            created_event = False
-            for _attempt in range(64):
-                events = self.store.read_all()
+            def _plan(events, tail) -> str:
                 latest = fold(events)
                 latest_card = latest.cards.get(result.card_id)
                 # Separate a GENUINE supersession (epoch bump, abort, the Card itself dropped/merged, or
@@ -570,32 +568,35 @@ class SpeculationMixin:
                     self._discard_node_build_telemetry(
                         researcher=researcher, developer=developer,
                     )
-                    return
-                tail = events[-1].seq if events else -1
-                try:
-                    self._emit_node_created(
-                        node_id=node_id,
-                        parent_ids=list(reserved.parent_ids),
-                        operator=idea.operator,
-                        idea=durable_idea_payload(idea),
-                        code=result.code,
-                        files=dict(result.files),
-                        deleted=list(result.deleted),
-                        research_origin=self._research_origin_for_node(state, node_id),
-                        cross_run_receipt=dict(result.cross_run_receipt),
-                        **({"parent_generations": reserved.parent_generations}
-                           if reserved.parent_generations else {}),
-                        **({"footprint_finalized": True}
-                           if result.footprint_finalized else {}),
-                        speculative=True,
-                        card_build_generation=result.generation,
-                        expected_last_seq=tail,
-                    )
-                    created_event = True
-                    break
-                except EventStoreConcurrencyError:
-                    continue
-            if not created_event:
+                    # Already closed by `_fail_reserved_build`: the caller must not fall through to
+                    # the post-creation checks, which would fail a node that was never created.
+                    return "closed"
+                self._emit_node_created(
+                    node_id=node_id,
+                    parent_ids=list(reserved.parent_ids),
+                    operator=idea.operator,
+                    idea=durable_idea_payload(idea),
+                    code=result.code,
+                    files=dict(result.files),
+                    deleted=list(result.deleted),
+                    research_origin=self._research_origin_for_node(state, node_id),
+                    cross_run_receipt=dict(result.cross_run_receipt),
+                    **({"parent_generations": reserved.parent_generations}
+                       if reserved.parent_generations else {}),
+                    **({"footprint_finalized": True}
+                       if result.footprint_finalized else {}),
+                    speculative=True,
+                    card_build_generation=result.generation,
+                    expected_last_seq=tail,
+                )
+                return "created"
+
+            # Three outcomes, not two: the plan either created the node, found it already closed by
+            # a supersession/freeze it handled itself, or never landed at all.
+            outcome = retry_tail_cas(self.store, _plan, on_exhaust=lambda: "lost")
+            if outcome == "closed":
+                return
+            if outcome != "created":
                 self._fail_reserved_build(
                     node_id=node_id,
                     card_id=reserved.card_id,
@@ -628,8 +629,7 @@ class SpeculationMixin:
                 # crash may leave the preceding node_created durable, but can never leave a new
                 # developer_crash terminal without its matching pause. Tail CAS keeps a concurrent
                 # operator control either wholly before or wholly after the pair.
-                for _attempt in range(64):
-                    terminal_events = self.store.read_all()
+                def _plan_terminal(terminal_events, tail) -> None:
                     terminal_state = fold(terminal_events)
                     terminal_node = terminal_state.nodes.get(node_id)
                     if (
@@ -638,29 +638,29 @@ class SpeculationMixin:
                         or not self._developer_sentinel(terminal_node)
                         or terminal_node.status is not NodeStatus.pending
                     ):
-                        break
-                    tail = terminal_events[-1].seq if terminal_events else -1
-                    try:
-                        self.store.append_many([
-                            (EV_NODE_FAILED, {
-                                "node_id": node_id,
-                                "generation": terminal_node.attempt,
-                                "error": result.code,
-                                "reason": "developer_crash",
-                                "eval_seconds": 0.0,
-                            }),
-                            (EV_PAUSE, {
-                                "node_id": node_id,
-                                "generation": terminal_node.attempt,
-                                "reason": "auto-paused: a Developer session crashed (LLM unreachable "
-                                          "or a hard error, unresolved within the node) — resume once "
-                                          "it's fixed",
-                            }),
-                        ], expected_last_seq=tail)
-                        self._create_paused = True
-                        break
-                    except EventStoreConcurrencyError:
-                        continue
+                        return None
+                    self.store.append_many([
+                        (EV_NODE_FAILED, {
+                            "node_id": node_id,
+                            "generation": terminal_node.attempt,
+                            "error": result.code,
+                            "reason": "developer_crash",
+                            "eval_seconds": 0.0,
+                        }),
+                        (EV_PAUSE, {
+                            "node_id": node_id,
+                            "generation": terminal_node.attempt,
+                            "reason": "auto-paused: a Developer session crashed (LLM unreachable "
+                                      "or a hard error, unresolved within the node) — resume once "
+                                      "it's fixed",
+                        }),
+                    ], expected_last_seq=tail)
+                    self._create_paused = True
+                    return None
+
+                # A crash terminal that could not land leaves the node pending: the ordinary
+                # crash-repair path still owns it, so exhaustion is simply "not this turn".
+                retry_tail_cas(self.store, _plan_terminal, on_exhaust=lambda: None)
         try:
             self._emit_agent_report(node_id, developer=developer)
             self._emit_hypothesis_ranked(node_id, 0, researcher=researcher)
@@ -691,22 +691,17 @@ class SpeculationMixin:
             payload["skipped"] = skipped
         else:
             payload.update({"node_id": node_id, "speculative": True})
-        for _attempt in range(64):
-            events = self.store.read_all()
+        def _plan(events, tail) -> bool:
             state = fold(events)
             if self._request_key(self._head_request(state)) != key:
                 # Another main-task path may already have closed it.
                 return state.card_builds_done >= len(state.card_build_requests)
-            tail = events[-1].seq if events else -1
-            try:
-                with self._id_lock:
-                    self.store.append(
-                        EV_CARD_BUILD_DONE, payload, expected_last_seq=tail,
-                    )
-                return True
-            except EventStoreConcurrencyError:
-                continue
-        return False
+            with self._id_lock:
+                self.store.append(EV_CARD_BUILD_DONE, payload, expected_last_seq=tail)
+            return True
+
+        # The head stays open, so the queue is unchanged and the next serve pass re-closes it.
+        return retry_tail_cas(self.store, _plan, on_exhaust=lambda: False)
 
     def _record_card_build_attempt(self, state: RunState,
                                    request: Mapping[str, Any]) -> None:

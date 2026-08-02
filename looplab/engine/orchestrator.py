@@ -25,7 +25,7 @@ import anyio
 import orjson
 
 from looplab.tools.agents_md import generate_agents_md
-from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (
     EV_ABLATE,
     EV_APPROVAL_REQUESTED,
@@ -2186,8 +2186,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if action.get("_rung") is None:
             return False
         payload = {"rung": action["_rung"], "survivors": action.get("_promoted", [])}
-        for _attempt in range(64):
-            events = self.store.read_all()
+
+        def _plan(events, tail) -> bool:
             if any(
                 event.type == EV_RUNG_PROMOTED
                 and event.data.get("rung") == payload["rung"]
@@ -2195,16 +2195,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 for event in events
             ):
                 return False
-            tail = events[-1].seq if events else -1
-            try:
-                with self._id_lock:
-                    self.store.append(
-                        EV_RUNG_PROMOTED, payload, expected_last_seq=tail,
-                    )
-                return True
-            except EventStoreConcurrencyError:
-                continue
-        return False
+            with self._id_lock:
+                self.store.append(EV_RUNG_PROMOTED, payload, expected_last_seq=tail)
+            return True
+
+        # A receipt this run could not land is not a receipt: report "not appended" and let the next
+        # turn re-decide, rather than claiming a halving decision the log does not carry.
+        return retry_tail_cas(self.store, _plan, on_exhaust=lambda: False)
 
     def _select_actions(self, state: RunState) -> list[dict]:
         """Apply the explicit macro-selection authority order for one fresh fold."""
@@ -2798,8 +2795,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """Atomically append one positional inject failure and its replay gate."""
 
         request_idx = state.injects_done
-        for _attempt in range(64):
-            events = self.store.read_all()
+
+        def _plan(events, tail) -> bool:
             current = fold(events)
             if current.injects_done > request_idx:
                 return True
@@ -2808,23 +2805,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 or len(current.inject_requests) <= request_idx
             ):
                 return False
-            tail = events[-1].seq if events else -1
-            try:
-                self.store.append_many([
-                    (EV_INJECT_FAILED, {
-                        "idx": request_idx,
-                        "error": str(error)[:500],
-                        "reason": reason,
-                    }),
-                    (EV_INJECT_DONE, {
-                        "idx": request_idx,
-                        "skipped": reason,
-                    }),
-                ], expected_last_seq=tail)
-                return True
-            except EventStoreConcurrencyError:
-                continue
-        return False
+            self.store.append_many([
+                (EV_INJECT_FAILED, {
+                    "idx": request_idx,
+                    "error": str(error)[:500],
+                    "reason": reason,
+                }),
+                (EV_INJECT_DONE, {
+                    "idx": request_idx,
+                    "skipped": reason,
+                }),
+            ], expected_last_seq=tail)
+            return True
+
+        # The counter pair did not advance, so the request is still open and the next turn retries it.
+        return retry_tail_cas(self.store, _plan, on_exhaust=lambda: False)
 
     def _close_node_creating_forced_request_before_terminal_gate(
         self,
@@ -4166,9 +4161,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             idea = Idea.model_validate(idea)
         with self._id_lock:
             proposal_authority_seq = None
-            for _attempt in range(64):
-                events = self.store.read_all()
-                tail = events[-1].seq if events else -1
+
+            def _plan(events, tail):
+                nonlocal proposal_authority_seq
                 authority_seq = self._proposal_authority_seq(events)
                 if proposal_authority_seq is None:
                     proposal_authority_seq = authority_seq
@@ -4190,12 +4185,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if idea is None:
                     # Compatibility seam for callers that reserve only a node id. No production path
                     # uses this branch once writer-side Card minting is enabled.
-                    try:
-                        self.store.append(EV_NODE_BUILDING, {
-                            "node_id": node_id, "operator": kind, "parent_ids": parents,
-                        }, expected_last_seq=tail)
-                    except EventStoreConcurrencyError:
-                        continue
+                    self.store.append(EV_NODE_BUILDING, {
+                        "node_id": node_id, "operator": kind, "parent_ids": parents,
+                    }, expected_last_seq=tail)
                     return _BuildReservation(
                         state, node_id, kind, parents, parent_generations, None, None)
 
@@ -4230,20 +4222,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "parent_ids": parents,
                     "card_id": card_id,
                 })
-                try:
-                    if plan.disposition == "mint":
-                        self.store.append_many(
-                            [(EV_CARD_ADDED, plan.payload), claim],
-                            expected_last_seq=tail,
-                        )
-                    else:
-                        self.store.append(*claim, expected_last_seq=tail)
-                except EventStoreConcurrencyError:
-                    continue
+                if plan.disposition == "mint":
+                    self.store.append_many(
+                        [(EV_CARD_ADDED, plan.payload), claim],
+                        expected_last_seq=tail,
+                    )
+                else:
+                    self.store.append(*claim, expected_last_seq=tail)
                 return _BuildReservation(
                     state, node_id, kind, parents, parent_generations,
                     card_id, reserved_idea)
-            return None
+
+            # No reservation was made, so nothing leaks; the caller returns to the selection boundary.
+            return retry_tail_cas(self.store, _plan, on_exhaust=lambda: None)
 
     @staticmethod
     def _proposal_cue_fence(state: RunState) -> bytes:
@@ -4303,13 +4294,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             "card_id": None,
             "footprint": self._clamp_resource_footprint(idea.footprint),
         })
-        for _attempt in range(64):
+
+        def _plan(events, tail):
             # The log scan, fold, lifecycle fences and duplicate/id plan are intentionally outside
             # `_id_lock`: they scale with run history and may invoke bounded hashing/validation.  The
             # append's tail CAS is the authority for the snapshot.  If another reservation or control
             # wins after this plan, the CAS loses and the next turn recomputes every derived value.
-            events = self.store.read_all()
-            tail = events[-1].seq if events else -1
             # The isolated RAW worker is authorized by one exact semantic proposal prefix. LLM usage
             # telemetry is worker-owned and may advance the physical tail, but every other event is
             # authority-bearing. Serial outer batches omit this optional fence and retain CAS retries.
@@ -4346,14 +4336,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return plan.card_id
             if plan.disposition != "mint" or plan.card_id is None or plan.payload is None:
                 return None
-            try:
-                with self._id_lock:
-                    self.store.append(
-                        EV_CARD_ADDED, plan.payload, expected_last_seq=tail)
-                return plan.card_id
-            except EventStoreConcurrencyError:
-                continue
-        return None
+            with self._id_lock:
+                self.store.append(EV_CARD_ADDED, plan.payload, expected_last_seq=tail)
+            return plan.card_id
+
+        # Nothing was staged, so the Card simply does not exist yet; the next proposal turn re-plans it.
+        return retry_tail_cas(self.store, _plan, on_exhaust=lambda: None)
 
     @in_llm_lane("build")
     def _stage_card_creates(self, actions: list[dict], state: RunState) -> list[str]:
@@ -4649,24 +4637,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # This helper is called both inside and outside `_id_lock`, so nesting that non-reentrant lock is
         # unsafe. Use the EventStore's atomic tail CAS instead: concurrent callers either observe the
         # first drop or lose the CAS and retry against its prefix.
-        for _attempt in range(64):
-            events = self.store.read_all()
+        def _plan(events, tail) -> None:
             if any(
                     event.type in {EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED}
                     and self._canonical_card_id(event.data.get("id")) == card_id
                     for event in events):
-                return
-            tail_seq = events[-1].seq if events else -1
-            try:
-                self.store.append(EV_CARD_AUTO_DROPPED, {
-                    "id": card_id,
-                    "reason": reason,
-                    "dropped_by": dropped_by,
-                }, expected_last_seq=tail_seq)
-                return
-            except EventStoreConcurrencyError:
-                continue
-        raise RuntimeError("could not append an idempotent card drop after concurrent log movement")
+                return None
+            self.store.append(EV_CARD_AUTO_DROPPED, {
+                "id": card_id,
+                "reason": reason,
+                "dropped_by": dropped_by,
+            }, expected_last_seq=tail)
+            return None
+
+        def _exhausted():
+            # Unlike the receipt appends above, a failed drop LEAKS: the caller has already given up
+            # on this Card, so returning quietly would leave it live on the board with no owner. Raise.
+            raise RuntimeError(
+                "could not append an idempotent card drop after concurrent log movement")
+
+        retry_tail_cas(self.store, _plan, on_exhaust=_exhausted)
 
     def _record_node_less_card(self, idea: Idea, *, reason: str,
                                steering_context=(), source: str = "researcher") -> Optional[str]:
