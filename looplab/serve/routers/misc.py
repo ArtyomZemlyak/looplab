@@ -35,7 +35,7 @@ from looplab.core.atomicio import (
 from looplab.core.config import Settings
 from looplab.core.pathsafe import is_reparse
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
-from looplab.serve.http import json_object
+from looplab.serve.http import json_object, request_body_contract
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import (
     _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS,
@@ -271,21 +271,6 @@ class AuthoringOperationResponse(BaseModel):
     updated_at: int
     ok: bool
     replayable: bool
-
-
-def _request_body_contract(*models: type[BaseModel]) -> dict[str, Any]:
-    """Publish raw-Request bodies without changing the established 400/legacy runtime semantics."""
-    # making these Pydantic body parameters would turn established malformed-JSON 400s
-    # into framework 422s. The strict schemas therefore document the wire while the handler retains
-    # its compatibility parser; the legacy branch explicitly excludes the reserved `settings` key.
-    variants = [model.model_json_schema() for model in models]
-    schema = variants[0] if len(variants) == 1 else {"anyOf": variants}
-    return {
-        "requestBody": {
-            "required": True,
-            "content": {"application/json": {"schema": schema}},
-        }
-    }
 
 
 def _if_none_match(value: str | None, current: str) -> bool:
@@ -1129,7 +1114,7 @@ def build_router(srv) -> APIRouter:
     @router.put(
         "/api/settings",
         response_model=SettingsUpdateResponse,
-        openapi_extra=_request_body_contract(SettingsUpdateRequest, LegacySettingsUpdateRequest),
+        openapi_extra=request_body_contract(SettingsUpdateRequest, LegacySettingsUpdateRequest),
     )
     async def put_settings(request: Request):
         body = await json_object(request, "settings payload")
@@ -1216,7 +1201,7 @@ def build_router(srv) -> APIRouter:
     @router.put(
         "/api/settings/secret",
         response_model=SecretUpdateResponse,
-        openapi_extra=_request_body_contract(SecretUpdateRequest),
+        openapi_extra=request_body_contract(SecretUpdateRequest),
     )
     async def put_secret(request: Request):
         """Store (or clear) a secret credential securely. The value is written owner-only to

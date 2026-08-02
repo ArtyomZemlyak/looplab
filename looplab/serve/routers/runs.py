@@ -32,7 +32,7 @@ from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed,
     load_run_reset_marker)
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.serve.http import json_object, json_object_bytes
+from looplab.serve.http import json_object, json_object_bytes, request_body_contract
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, JsonlRecordInvalid,
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
@@ -199,23 +199,6 @@ class PublicRunStateResponse(BaseModel):
     max_seq: int = Field(ge=-1)
     event_count: int = Field(ge=0)
     generation: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")]
-
-
-def _run_config_request_body_contract() -> dict[str, Any]:
-    """Describe both bodies while retaining raw-Request error and compatibility behavior."""
-    # parsing these routes as a Pydantic union would silently change malformed JSON
-    # from the established 400 response to FastAPI's 422, so models drive OpenAPI while the handler
-    # continues to perform the compatibility-preserving runtime parse below.
-    variants = [
-        RunConfigUpdateRequest.model_json_schema(),
-        LegacyRunConfigUpdateRequest.model_json_schema(),
-    ]
-    return {
-        "requestBody": {
-            "required": True,
-            "content": {"application/json": {"schema": {"anyOf": variants}}},
-        }
-    }
 
 
 def _run_config_revision(snapshot: dict) -> str:
@@ -2886,7 +2869,8 @@ def build_router(srv) -> APIRouter:
     @router.put(
         "/api/runs/{run_id}/config",
         response_model=RunConfigUpdateResponse,
-        openapi_extra=_run_config_request_body_contract(),
+        openapi_extra=request_body_contract(
+            RunConfigUpdateRequest, LegacyRunConfigUpdateRequest),
     )
     async def put_run_config(run_id: str, request: Request):
         """Per-run settings edit: rewrite THIS run's config.snapshot.json so a later RESUME re-enters

@@ -1970,6 +1970,23 @@ notice before removal. Deleting them on the strength of a first-party grep would
 
 *Recommendation:* Share `_request_body_contract` and a `legacy_envelope(settings_model)` factory from one module; keep the differing revision regexes as parameters.
 
+*Resolution (2026-08-02):* `serve/http.py::request_body_contract(*models)` is now the single
+builder, used by `PUT /api/settings`, `PUT /api/secrets` and `PUT /api/runs/{id}/config`;
+`runs.py`'s second copy is deleted. It sits beside `json_object` deliberately — these are the two
+halves of one decision. The route publishes strict schemas through `openapi_extra` and keeps
+parsing the body itself, because declaring the union as a Pydantic body parameter would turn the
+established malformed-JSON **400** into FastAPI's **422**, silently changing a contract clients
+already handle. That reasoning was written out twice, once per copy, and is now stated once.
+
+Three deliberate breaks — always emit `anyOf`, never emit it, mark the body optional — were each
+caught. The `anyOf` shape is what makes the legacy bare-mapping body DISCOVERABLE rather than
+merely tolerated: the handler accepts it either way, so publishing it is the difference between a
+documented contract and something a client finds by guessing.
+
+The `legacy_envelope` factory half is NOT done: the two legacy models differ in more than their
+revision regex (`misc` excludes the reserved `settings` key through `json_schema_extra`), and
+folding them would have meant inventing a parameterization neither caller asked for.
+
 #### SR-15 · LOW · duplication · effort: small
 
 **Boss LLM endpoints repeat an identical prologue/epilogue quartet**

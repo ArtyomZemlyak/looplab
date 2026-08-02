@@ -150,3 +150,50 @@ def test_no_router_reads_the_request_body_itself_to_re_derive_the_object_check()
     assert dict(collections.Counter(name for name, _ in found)) == allowed, (
         "body reads outside serve/http.py changed. Route it through `json_object` unless the route "
         f"has a genuinely different contract — and then name it above. Found: {found}")
+
+
+# ------------------------------------------------------------------ the published body contract
+
+def test_a_single_model_publishes_its_schema_directly():
+    """`anyOf` with one branch would be technically correct and needlessly harder for a generator
+    to read."""
+    from looplab.serve.http import request_body_contract
+    from pydantic import BaseModel
+
+    class _One(BaseModel):
+        value: str
+
+    body = request_body_contract(_One)["requestBody"]
+    assert body["required"] is True
+    schema = body["content"]["application/json"]["schema"]
+    assert "anyOf" not in schema and schema["properties"]["value"]["type"] == "string"
+
+
+def test_several_models_publish_an_anyof_so_the_legacy_body_is_discoverable():
+    """The legacy bare-mapping body is TOLERATED by the handler either way; publishing it is what
+    makes it a documented contract instead of an accident a client discovers by trying."""
+    from looplab.serve.http import request_body_contract
+    from pydantic import BaseModel
+
+    class _Envelope(BaseModel):
+        settings: dict
+
+    class _Legacy(BaseModel):
+        model_config = {"extra": "allow"}
+
+    schema = request_body_contract(
+        _Envelope, _Legacy)["requestBody"]["content"]["application/json"]["schema"]
+    assert [variant["title"] for variant in schema["anyOf"]] == ["_Envelope", "_Legacy"]
+
+
+def test_the_settings_shaped_routes_keep_parsing_their_own_bodies():
+    """The whole reason these schemas are `openapi_extra` and not body parameters: a Pydantic body
+    would turn the established malformed-JSON 400 into FastAPI's 422. If a route ever gains a real
+    body parameter, that contract changes silently — so assert the raw parse is still there."""
+    from pathlib import Path
+
+    serve = Path(__file__).resolve().parents[1] / "looplab" / "serve" / "routers"
+    for name, route in (("misc.py", "put_settings"), ("runs.py", "put_run_config")):
+        text = (serve / name).read_text(encoding="utf-8")
+        assert "openapi_extra=request_body_contract(" in text, name
+        assert f"def {route}(" in text, f"{name}: {route} was renamed; re-check its body contract"

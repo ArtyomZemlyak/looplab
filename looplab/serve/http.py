@@ -107,3 +107,26 @@ def comment_cursor_error(exc) -> "HTTPException":  # noqa: F821 - see `_bad_requ
         "message": str(exc),
         "remediation": "refresh comments from the first page",
     })
+
+
+def request_body_contract(*models) -> dict:
+    """Publish a raw-Request body's schema WITHOUT letting FastAPI parse it.
+
+    Both settings-shaped routes — `PUT /api/settings` and `PUT /api/runs/{id}/config` — accept a
+    strict envelope and a legacy bare-mapping body, and both must keep parsing the body themselves:
+    declaring the union as a Pydantic body parameter would turn their established malformed-JSON
+    400 into FastAPI's 422, silently changing a contract clients already handle. So the models
+    document the wire while the handler keeps the compatibility parse.
+
+    That reasoning was written out twice, once per route, along with the anyOf assembly. One model
+    publishes its schema directly; several publish an `anyOf`, which is what makes the legacy body
+    discoverable rather than merely tolerated (doc 25 SR-14).
+    """
+    variants = [model.model_json_schema() for model in models]
+    schema = variants[0] if len(variants) == 1 else {"anyOf": variants}
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": schema}},
+        }
+    }
