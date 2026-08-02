@@ -33,13 +33,25 @@ const permission = (idHex, sessionHex, secret) => ({
   preview: `preview:${secret}`,
 })
 
-const attentionPage = (items, { truncated = false, cursor = null, partial = false } = {}) => ({
+// A snapshot id identifies the source scan a page came from; the hook preserves archival pages only
+// while it is UNCHANGED, so it defaults to one stable value here and every case that means "a
+// different scan" passes its own. `stale` and `active_action_count` are part of the same envelope:
+// a page missing any of the three is protocol-invalid and is dropped whole, which is how their
+// absence used to empty every list in this file rather than fail at the assertion that meant it.
+const SNAPSHOT = 'f'.repeat(64)
+const attentionPage = (items, {
+  truncated = false, cursor = null, partial = false, stale = false,
+  snapshotId = SNAPSHOT, activeActionCount = 0,
+} = {}) => ({
   schema: 1,
   generated_at: 1_700_000_100,
+  snapshot_id: snapshotId,
   items,
+  stale,
   truncated,
   next_cursor: cursor,
   partial,
+  active_action_count: activeActionCount,
 })
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
