@@ -12,6 +12,7 @@ import { OpIcon } from './icons.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import { publish as publishSettingsLaunchGuard } from './settingsLaunchGuard.js'
+import { useDialogFocus } from './useDialogFocus.js'
 
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
 const CREDENTIAL_SOURCE_LABELS = {
@@ -328,7 +329,8 @@ export function LlmHealth({
           ? 'The previous provider outcome is unresolved and may have been billed. Starting another check may bill again.'
           : 'A previous browser request has no verified result. Check the previous result to reconcile it without starting a new provider call.',
       } }
-    })
+})
+
     setBusyContext(current => current === contextVersion ? current : null)
   }, [contextVersion, revisionsReady, savedSettingsRevision, savedSecretRevision])
 
@@ -621,6 +623,35 @@ export function LlmHealth({
   </span>
 }
 
+function ResetDefaultsDialog({ hasSecretDraft, onCancel, onConfirm }) {
+  const dialogRef = useRef(null)
+  useDialogFocus(dialogRef, onCancel)
+  return <div className="overlay settings-reset-overlay"
+    onMouseDown={event => { if (event.target === event.currentTarget) onCancel() }}>
+    <section ref={dialogRef} className="modal settings-reset-dialog" role="alertdialog"
+      aria-modal="true" aria-labelledby="settings-reset-title"
+      aria-describedby={`settings-reset-description${hasSecretDraft
+        ? ' settings-reset-credential-warning' : ''} settings-reset-server-note`} tabIndex={-1}>
+      <div className="modal-h"><b id="settings-reset-title">Reset all draft settings?</b></div>
+      <div className="modal-b">
+        <p id="settings-reset-description" className="settings-reset-copy">
+          This loads engine defaults for ordinary settings and runtime access controls, including hidden advanced fields.
+        </p>
+        {hasSecretDraft && <p id="settings-reset-credential-warning" className="settings-reset-warning">
+          Typed credential drafts will be discarded. Stored server credentials are unchanged.
+        </p>}
+        <p id="settings-reset-server-note" className="settings-reset-note">
+          Nothing changes on the server until you choose Save.
+        </p>
+        <div className="modal-actions">
+          <button type="button" className="btn sm" data-dialog-initial-focus onClick={onCancel}>Cancel</button>
+          <button type="button" className="btn sm danger" onClick={onConfirm}>Reset draft</button>
+        </div>
+      </div>
+    </section>
+  </div>
+}
+
 // Full-page editor for the engine defaults used by every new run. Per-run overrides remain in each
 // run's Settings panel; this page deliberately starts with the small set most people need.
 export default function Settings({ onBack }) {
@@ -641,10 +672,13 @@ export default function Settings({ onBack }) {
   const [mutationUnknown, setMutationUnknown] = useState(null)
   const [healthRecoveryActive, setHealthRecoveryActive] = useState(false)
   const [invalidFocus, setInvalidFocus] = useState({ key: '', request: 0 })
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
   const mutationRef = useRef(null)
   const toastTimer = useRef(null)
   const loadRef = useRef(0)
   const loadControllerRef = useRef(null)
+  const saveButtonRef = useRef(null)
+  const saveStateRef = useRef(null)
   const allowNavigationRef = useRef(false)
   const settingsHashRef = useRef(typeof location === 'undefined' ? '#/settings' : location.hash)
   const searchInputRef = useRef(null)
@@ -712,6 +746,11 @@ export default function Settings({ onBack }) {
     }
     return changed
   }, [form, defaults, schema, agentControl])
+  const hasSecretDraft = useMemo(() => !!form && !!schema
+    && Object.entries(schema.fieldByKey).some(([key, field]) => (
+      field.type === 'secret' && String(form[key] ?? '').length > 0
+    )), [form, schema])
+  const canResetDefaults = dirty.size > 0 || hasSecretDraft
 
   const validationErrors = useMemo(() => form && schema
     ? settingsValidationErrors(form, schema) : {}, [form, schema])
@@ -1087,12 +1126,25 @@ export default function Settings({ onBack }) {
       finishMutation(mutation)
     }
   }
+  const requestResetToDefaults = () => {
+    if (mutationRef.current || !defaults || !schema || !form || !canResetDefaults) return
+    setResetConfirmOpen(true)
+  }
   const resetToDefaults = () => {
-    if (mutationRef.current?.kind === 'reloading settings') return
-    if (defaults) {
-      setForm(toForm(defaults, schema))
-      setAgentControl(defaults.agent_control || {})
+    if (mutationRef.current || !defaults || !schema || !form || !canResetDefaults) {
+      setResetConfirmOpen(false)
+      return
     }
+    setForm(toForm(defaults, schema))
+    setAgentControl({ ...(defaults.agent_control || {}) })
+    setResetConfirmOpen(false)
+    show(hasSecretDraft
+      ? 'Engine defaults loaded; credential drafts were discarded as confirmed. Review and Save to apply.'
+      : 'Engine defaults loaded into the draft. Review and Save to apply.')
+    requestAnimationFrame(() => {
+      const target = saveButtonRef.current?.disabled ? saveStateRef.current : saveButtonRef.current
+      target?.focus({ preventScroll: true })
+    })
   }
   const revealChanges = () => {
     const first = hiddenUnsavedKeys[0]
@@ -1261,17 +1313,22 @@ export default function Settings({ onBack }) {
       <span className="spacer" style={{ flex: 1 }} />
       {invalidCount
         ? <button type="button" className="settings-summary-link settings-save-state is-invalid"
-            onClick={focusFirstInvalid}>{countLabel(invalidCount, 'invalid setting')} — review</button>
+            ref={saveStateRef} onClick={focusFirstInvalid}>{countLabel(invalidCount, 'invalid setting')} — review</button>
         : <span className={'settings-save-state' + (unsaved ? ' is-unsaved' : '')}
-            role="status" aria-live="polite">
+            ref={saveStateRef} role="status" aria-live="polite" tabIndex={-1}>
           {unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'All changes saved'}
         </span>}
-      <button className="btn sm ghost" disabled={mutationBusy === 'reloading settings'} onClick={resetToDefaults}
-              title="Reset every field to the engine default">↻ Defaults</button>
-      <button className="btn sm primary" disabled={!unsaved || invalidCount > 0 || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked} onClick={onSave}>
+      <button className="btn sm ghost" disabled={!!mutationBusy || !canResetDefaults}
+              onClick={requestResetToDefaults}
+              title="Reset ordinary settings, runtime access controls, and typed credential drafts">
+        ↻ Reset all
+      </button>
+      <button ref={saveButtonRef} className="btn sm primary" disabled={!unsaved || invalidCount > 0 || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked} onClick={onSave}>
         {mutationBusy === 'saving' ? 'Saving...' : 'Save'}
       </button>
     </div></div>}
+    {resetConfirmOpen && <ResetDefaultsDialog hasSecretDraft={hasSecretDraft}
+      onCancel={() => setResetConfirmOpen(false)} onConfirm={resetToDefaults} />}
     {toast && <div className="toast" role="status">{toast}</div>}
   </div>
 }
