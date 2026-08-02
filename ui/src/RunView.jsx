@@ -1292,6 +1292,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     })
   }
   const [comparePair, setComparePair] = useState(null)   // seed ComparePanel for "diff vs champion"
+  // Browser history can dismiss Compare without calling the panel's onClose handler. Scope the
+  // one-shot seed to the compare route so an ordinary later open cannot resurrect an old diff.
+  useEffect(() => {
+    if (panel !== 'compare') setComparePair(null)
+  }, [panel])
   useEffect(() => {
     if (!historyActive) return
     setMergeIntent(null)
