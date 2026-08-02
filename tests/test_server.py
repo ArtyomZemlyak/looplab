@@ -3999,3 +3999,45 @@ def test_authoring_writes_are_bounded_and_utf8_and_a_vanished_file_is_skipped(tm
     monkeypatch.setattr(builtins, "open", real_open)
     assert listing.status_code == 200
     assert [f["name"] for f in listing.json()["files"]] == ["good.md"]
+
+
+def test_a_fresh_app_answers_concurrent_first_requests_on_every_route(tmp_path):
+    """The route-matching tables must be built BEFORE the first request, not by it.
+
+    `include_router` leaves an `_IncludedRouter` placeholder that materializes its candidate list
+    lazily on the first request that walks it (FastAPI 0.13x), memoized by a routes-version
+    counter. The build publishes into `self._effective_candidates` incrementally and sets the
+    version only at the END, so two requests arriving before the table is warm both see a stale
+    version, both reset the list, and one matches against a HALF-BUILT candidate set.
+
+    The symptom is a legitimate request answered as a CLIENT error: a `PUT /api/settings` whose GET
+    sibling had been appended but whose PUT route had not comes back `405 Method Not Allowed`
+    (`allow: GET`) — a partial path match with no full match. The UI opens several requests at once
+    against a freshly started process, so this is a real cold-start bug, and it is what made
+    `test_concurrent_disjoint_settings_puts_do_not_lose_updates` fail ~1 run in 20 under load: the
+    405'd request never entered the transaction, so its rendezvous barrier timed out.
+
+    Directly asserted here rather than left to that test's race: every request must land on its
+    real handler, so a 404/405 anywhere is the regression."""
+    app = make_app(tmp_path)
+    clients = [TestClient(app) for _ in range(6)]
+    probes = [
+        ("GET", "/api/settings", None),
+        ("PUT", "/api/settings", {"settings": {"max_nodes": 91}}),
+        ("GET", "/api/runs", None),
+        ("GET", "/api/health", None),
+        ("GET", "/api/tasks", None),
+        ("GET", "/api/settings", None),
+    ]
+    with ThreadPoolExecutor(max_workers=len(probes)) as executor:
+        responses = list(executor.map(
+            lambda pair: pair[0].request(
+                pair[1][0], pair[1][1],
+                **({"json": pair[1][2]} if pair[1][2] is not None else {})),
+            zip(clients, probes)))
+
+    for (method, path, _body), response in zip(probes, responses):
+        assert response.status_code not in (404, 405), (
+            f"{method} {path} hit a half-built route table: {response.status_code} "
+            f"(allow={response.headers.get('allow')}). The lazy include cache was not warmed "
+            "before the first concurrent requests.")

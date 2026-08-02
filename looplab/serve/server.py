@@ -327,6 +327,40 @@ def _host_name(value: str | None) -> str | None:
     return host.lower().rstrip(".") if host else None
 
 
+def _warm_route_matching(app: "FastAPI") -> None:
+    """Build FastAPI's lazy route-matching tables ONCE, single-threaded, before serving.
+
+    `include_router` does not flatten its routes any more (FastAPI 0.13x): each include leaves an
+    `_IncludedRouter` placeholder that materializes its candidate list on the FIRST request that
+    walks it, and memoizes it keyed by a routes-version counter. That build is NOT thread-safe —
+    it publishes into `self._effective_candidates` incrementally and only sets the version at the
+    end, so two requests arriving before the table is warm both see a stale version, both reset the
+    list, and one of them matches against a HALF-BUILT candidate set.
+
+    The failure is silent and looks like a client error: a legitimate `PUT /api/settings` whose GET
+    sibling had been appended but whose PUT route had not comes back `405 Method Not Allowed`
+    (`allow: GET`) — a partial path match with no full match. This server is exactly the shape that
+    hits it: the UI opens several requests at once against a freshly started process, and the
+    settings PUT test that races two writers reproduced it roughly one run in twenty under load.
+
+    Warming here costs one traversal at construction and removes the window entirely. Written
+    defensively against the FastAPI internals it touches: an older or newer version without these
+    methods simply has nothing to warm, and a build error is not worth failing startup over —
+    the app still works, it just keeps the race.
+    """
+    def _warm(routes) -> None:
+        for route in routes:
+            for builder in ("effective_candidates", "effective_low_priority_routes"):
+                build = getattr(route, builder, None)
+                if callable(build):
+                    try:
+                        _warm(build())      # nested includes memoize their own tables
+                    except Exception:       # noqa: BLE001 — an accelerator, never a startup gate
+                        continue
+
+    _warm(app.routes)
+
+
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
     if FastAPI is None:
         raise _ui_extra_error("fastapi")
@@ -653,6 +687,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                    _jobs_router.build_router, _reports_router.build_router,
                    _cross_run_router.build_router, _misc_router.build_router):
         app.include_router(_build(srv))
+    _warm_route_matching(app)
 
     # ------------------------------------------------------------------ static React app
     dist = _ui_dist()
