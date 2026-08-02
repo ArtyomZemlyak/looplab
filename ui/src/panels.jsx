@@ -30,6 +30,10 @@ import { normalizeResearchMemos } from './researchMemoModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import { cardControlSubmission, cardEditReflected } from './cardControlModel.js'
+import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
+import {
+  AUTHORING_OPERATION_STORAGE_PREFIX, authoringRecoveryStorageKey,
+} from './authoringRecoveryStorage.js'
 
 export { default as Panel } from './PanelShell.jsx'
 
@@ -46,7 +50,7 @@ const PANEL_REQUEST_TIMEOUT_MS = 15_000
 const AUTHORING_SAVE_TIMEOUT_MS = 12_000
 const AUTHORING_MAX_BYTES = 256 * 1024
 const AUTHORING_OPERATION_SCHEMA = 'looplab.authoring-operation-intent/v1'
-const AUTHORING_OPERATION_STORAGE_PREFIX = 'll.authoring-operation.'
+const AUTHORING_PANEL_DRAFT_SCOPE = 'panel:authoring'
 const AUTHORING_KINDS = new Set(['prompts', 'skills', 'knowledge'])
 const AUTHORING_REVISION_RE = /^(?:missing|sha256:[0-9a-f]{64})$/
 const AUTHORING_OPERATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -111,8 +115,7 @@ function authoringPayload(value) {
 }
 
 const authoringScope = (kind, name) => `${String(kind || '')}\u0000${String(name || '')}`
-const authoringStorageKey = (kind, name) => AUTHORING_OPERATION_STORAGE_PREFIX
-  + encodeURIComponent(authoringScope(kind, name))
+const authoringStorageKey = authoringRecoveryStorageKey
 const authoringStorage = () => {
   try { return typeof sessionStorage === 'undefined' ? null : sessionStorage } catch { return null }
 }
@@ -1397,38 +1400,76 @@ export function ConfigPanel({
   )
 }
 
-export function AuthoringPanel({ onClose, onToast }) {
+export function AuthoringPanel({ onClose, onToast, draftStore: sharedDraftStore = null }) {
   const [kind, setKind] = useState('prompts')
   const [selectedScope, setSelectedScope] = useState(null)
-  const [documents, setDocuments] = useState({})
+  const fallbackDraftStoreRef = useRef(null)
+  if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
+  const draftStore = sharedDraftStore || fallbackDraftStoreRef.current
+  const allowNavigationRef = useRef(false)
+  const [documents, setStoredDocuments] = useInspectorDraftField(
+    draftStore, AUTHORING_PANEL_DRAFT_SCOPE, 'documents', {},
+  )
   const documentsRef = useRef(documents)
   documentsRef.current = documents
+  const setDocuments = update => {
+    if (allowNavigationRef.current) return documentsRef.current
+    return setStoredDocuments(update)
+  }
   const [saveState, setSaveState] = useState(null)
+  const [reconciledSource, setReconciledSource] = useState(null)
   const initialRecoveryRef = useRef(null)
   if (initialRecoveryRef.current == null) initialRecoveryRef.current = inspectAuthoringOperations()
-  const [uncertainSaves, setUncertainSaves] = useState(() => Object.fromEntries(
-    Object.entries(initialRecoveryRef.current.valid).map(([scope, recovery]) => [scope, {
-      ...recovery, phase: 'unknown', inspectedMissing: false,
-      releaseAllowed: false, releaseInspected: false,
-      message: `A saved operation for ${recovery.name} may still be pending. Check its exact durable receipt.`,
-    }]),
-  ))
-  const [damagedRecoveries, setDamagedRecoveries] = useState(initialRecoveryRef.current.damaged)
+  const initialUncertainSavesRef = useRef(null)
+  if (initialUncertainSavesRef.current == null) {
+    initialUncertainSavesRef.current = Object.fromEntries(
+      Object.entries(initialRecoveryRef.current.valid).map(([scope, recovery]) => [scope, {
+        ...recovery, phase: 'unknown', inspectedMissing: false,
+        releaseAllowed: false, releaseInspected: false,
+        message: `A saved operation for ${recovery.name} may still be pending. Check its exact durable receipt.`,
+      }]),
+    )
+  }
+  const [uncertainSaves, setStoredUncertainSaves] = useInspectorDraftField(
+    draftStore, AUTHORING_PANEL_DRAFT_SCOPE, 'uncertainSaves', initialUncertainSavesRef.current,
+  )
+  const [damagedRecoveries, setStoredDamagedRecoveries] = useInspectorDraftField(
+    draftStore, AUTHORING_PANEL_DRAFT_SCOPE, 'damagedRecoveries',
+    initialRecoveryRef.current.damaged,
+  )
   const [storageAvailable, setStorageAvailable] = useState(initialRecoveryRef.current.available)
   const uncertainSavesRef = useRef(uncertainSaves)
   uncertainSavesRef.current = uncertainSaves
+  const damagedRecoveriesRef = useRef(damagedRecoveries)
+  damagedRecoveriesRef.current = damagedRecoveries
+  const setUncertainSaves = update => {
+    if (allowNavigationRef.current) return uncertainSavesRef.current
+    return setStoredUncertainSaves(update)
+  }
+  const setDamagedRecoveries = update => {
+    if (allowNavigationRef.current) return damagedRecoveriesRef.current
+    return setStoredDamagedRecoveries(update)
+  }
   const saveRef = useRef(null)
   const activeRef = useRef(true)
-  const allowNavigationRef = useRef(false)
   const [source, retry] = usePanelResource(signal => get(`/api/${kind}`, { signal }), authoringPayload, kind)
   const data = source.data || { dir: null, targetRootId: null, files: [], truncatedFiles: 0 }
   const scopeFor = authoringScope
+  useEffect(() => {
+    // Materialize the initial lazy-panel fallback in RunView's shared store. A direct storage scan
+    // covers an even earlier generation replacement; subsequent recovery changes are synchronous.
+    setStoredUncertainSaves(current => current)
+    setStoredDamagedRecoveries(current => current)
+  }, [setStoredDamagedRecoveries, setStoredUncertainSaves])
   useEffect(() => {
     activeRef.current = true
     return () => { activeRef.current = false }
   }, [])
   useEffect(() => {
-    if (source.state !== 'ready') return
+    if (source.state !== 'ready') {
+      setReconciledSource(null)
+      return
+    }
     setDocuments(current => {
       let changed = false
       const next = { ...current }
@@ -1538,8 +1579,15 @@ export function AuthoringPanel({ onClose, onToast }) {
       }
       return changed ? next : current
     })
+    if (!allowNavigationRef.current) {
+      setReconciledSource(current => current?.kind === kind && current?.data === source.data
+        ? current : { kind, data: source.data })
+    }
   }, [kind, source.state, source.data, uncertainSaves])
   const selected = selectedScope ? documents[selectedScope] || null : null
+  const sourceReconciled = source.state === 'ready'
+    && reconciledSource?.kind === kind && reconciledSource?.data === source.data
+  const selectedSourceReconciled = sourceReconciled && selected?.kind === kind
   const selectedUncertainSave = selectedScope ? uncertainSaves[selectedScope] || null : null
   const damagedRows = Object.values(damagedRecoveries)
   const selectedDamagedRecovery = damagedRows.find(recovery => !recovery.identity
@@ -1551,6 +1599,8 @@ export function AuthoringPanel({ onClose, onToast }) {
   const mutationBusy = !!saveState
   const navigationUnsafe = dirtyCount > 0 || mutationBusy
     || uncertainSaveCount > 0 || damagedRecoveryCount > 0
+  const navigationUnsafeRef = useRef(navigationUnsafe)
+  navigationUnsafeRef.current = navigationUnsafe
   useEffect(() => {
     if (!navigationUnsafe) {
       allowNavigationRef.current = false
@@ -1566,8 +1616,28 @@ export function AuthoringPanel({ onClose, onToast }) {
         : mutationBusy
           ? 'A file save is still in progress. Leave Authoring anyway?'
           : `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be lost. Leave anyway?`,
+      onAllow: () => draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE),
     })
-  }, [navigationUnsafe, mutationBusy, uncertainSaveCount, damagedRecoveryCount, dirtyCount])
+  }, [draftStore, navigationUnsafe, mutationBusy, uncertainSaveCount,
+    damagedRecoveryCount, dirtyCount])
+  useEffect(() => () => {
+    const retained = draftStore.readField(AUTHORING_PANEL_DRAFT_SCOPE, 'documents', {})
+    const hasUnsafeStoredDocument = retained && typeof retained === 'object'
+      && !Array.isArray(retained) && Object.values(retained).some(document => document
+        && typeof document === 'object' && !Array.isArray(document)
+        && (document.draftText !== document.savedText
+          || document.recoveryOperationId || document.recoveryStorageRaw))
+    const hasUnsafeStoredRecovery = ['uncertainSaves', 'damagedRecoveries'].some(field => {
+      const records = draftStore.readField(AUTHORING_PANEL_DRAFT_SCOPE, field, {})
+      return records && typeof records === 'object' && !Array.isArray(records)
+        && Object.keys(records).length > 0
+    })
+    if (allowNavigationRef.current
+        || (!navigationUnsafeRef.current
+          && !hasUnsafeStoredDocument && !hasUnsafeStoredRecovery)) {
+      draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
+    }
+  }, [draftStore])
   const retainNotice = destination => {
     if (!selected || selected.draftText === selected.savedText) return
     onToast?.(`Unsaved draft for ${selected.name} is preserved while you ${destination}.`)
@@ -1879,6 +1949,10 @@ export function AuthoringPanel({ onClose, onToast }) {
     const document = selectedScope ? documents[selectedScope] : null
     if (!document || document.draftText === document.savedText || saveRef.current
         || selectedUncertainSave || selectedDamagedRecovery) return
+    if (!selectedSourceReconciled) {
+      onToast?.(`Load and reconcile the current ${kind} source before saving ${document.name}.`)
+      return
+    }
     if (document.rootConflict || !validAuthoringTargetRootId(document.observedTargetRootId)) {
       const message = `${document.name} belongs to a different or unavailable Authoring directory. Its retained draft was not written; refresh the configured directory before saving.`
       setDocuments(current => current[selectedScope] ? {
@@ -2012,7 +2086,8 @@ export function AuthoringPanel({ onClose, onToast }) {
     submitAuthoringSave(verifiedRecovery)
   }
   const adoptObservedServerCopy = document => {
-    if (!document?.conflict || document.truncated || document.observedText == null
+    if (!selectedSourceReconciled || !document?.conflict || document.truncated
+        || document.observedText == null
         || !/^sha256:[0-9a-f]{64}$/.test(document.observedRevision || '') || saveRef.current) return
     if (!window.confirm(
       `Use the current server copy of ${document.name}?\n\nThis discards the retained local draft for that file.`,
@@ -2100,7 +2175,11 @@ export function AuthoringPanel({ onClose, onToast }) {
       : 'The retained snapshot of the missing recovery record was released. No stored record was changed.')
   }
   const requestClose = () => {
-    if (!navigationUnsafe) { onClose?.(); return }
+    if (!navigationUnsafe) {
+      draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
+      onClose?.()
+      return
+    }
     const warning = uncertainSaveCount > 0
       ? `${uncertainSaveCount} file save outcome${uncertainSaveCount === 1 ? '' : 's'} may still be unknown, and the exact draft${uncertainSaveCount === 1 ? ' is' : 's are'} retained here.`
       : damagedRecoveryCount > 0
@@ -2109,6 +2188,7 @@ export function AuthoringPanel({ onClose, onToast }) {
         : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost.`
     if (!window.confirm(`${warning} Close Authoring anyway?`)) return
     allowNavigationRef.current = true
+    draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
     onClose?.()
   }
   const dirtyByKind = documentKind => Object.values(documents)
@@ -2144,6 +2224,11 @@ export function AuthoringPanel({ onClose, onToast }) {
       <PanelResourceNotice resource={source} label={`${kind} files`} onRetry={retry} />
       {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
         {dirtyCount} unsaved draft{dirtyCount === 1 ? '' : 's'} retained in this panel. Switching files or sections is safe; closing is not.
+      </div>}
+      {selected && !selectedSourceReconciled && <div className="notice" role="status"
+        style={{ marginBottom: 10 }}>
+        Saving and server-copy actions stay disabled until the current {kind} source is loaded and
+        reconciled with this retained draft.
       </div>}
       {!storageAvailable && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
         <OpIcon name="alert" size={14} /><span>Browser recovery storage is unavailable. Authoring saves stay disabled so an ambiguous write cannot lose its exact identity.</span>
@@ -2207,7 +2292,7 @@ export function AuthoringPanel({ onClose, onToast }) {
                 : 'The server copy changed while this draft was retained. Your text was not replaced.'}</span>
               {!selected.truncated && selected.observedText != null
                 && /^sha256:[0-9a-f]{64}$/.test(selected.observedRevision || '')
-                && !selectedUncertainSave && <button className="btn sm"
+                && !selectedUncertainSave && selectedSourceReconciled && <button className="btn sm"
                 onClick={() => adoptObservedServerCopy(selected)}>Use server copy</button>}
             </div>}
             {selected.error && <div className="report-inline-state error" role="alert">
@@ -2216,6 +2301,7 @@ export function AuthoringPanel({ onClose, onToast }) {
             <button className="btn sm primary" style={{ marginTop: 8 }} onClick={saveSelected}
               disabled={mutationBusy || !storageAvailable || !!selectedUncertainSave
                 || !!selectedDamagedRecovery || selected.truncated
+                || !selectedSourceReconciled
                 || selected.rootConflict
                 || !validAuthoringTargetRootId(selected.observedTargetRootId)
                 || !AUTHORING_REVISION_RE.test(selected.observedRevision || '')

@@ -29,6 +29,9 @@ import { nodeIsActive } from './nodeProjection.js'
 import { createInspectorDraftStore } from './inspectorDraftStore.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import {
+  authoringRecoveryStorageKey, inspectAuthoringRecoveryStorage,
+} from './authoringRecoveryStorage.js'
+import {
   clearRunStartOverIntent, createRunStartOverIntent, loadRunStartOverIntent,
   saveRunStartOverIntent,
 } from './runStartOverRecovery.js'
@@ -264,25 +267,140 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     : null
   const retainedConfigDraftUnsafe = retainedConfigDraft?.schema === 'looplab.config-draft/v1'
     && retainedConfigDraft?.unsafe === true
-  const retainedConfigNavigationAllowRef = useRef(false)
   const retainedConfigScope = `panel:config:${String(runId)}`
+  const retainedAuthoringScope = 'panel:authoring'
+  const retainedAuthoringDocuments = panel === 'authoring'
+    ? inspectorDraftStoreRef.current.readField(retainedAuthoringScope, 'documents', null)
+    : null
+  const retainedAuthoringDocumentEntries = retainedAuthoringDocuments
+    && typeof retainedAuthoringDocuments === 'object' && !Array.isArray(retainedAuthoringDocuments)
+    ? Object.entries(retainedAuthoringDocuments).filter(([, document]) => document
+      && typeof document === 'object' && !Array.isArray(document))
+    : []
+  const retainedAuthoringDocumentValues = retainedAuthoringDocumentEntries
+    .map(([, document]) => document)
+  const retainedAuthoringDraftCount = retainedAuthoringDocumentValues
+    .filter(document => document.draftText !== document.savedText).length
+  const retainedAuthoringUncertainSaves = panel === 'authoring'
+    ? inspectorDraftStoreRef.current.readField(
+      retainedAuthoringScope, 'uncertainSaves', null) : null
+  const retainedAuthoringDamagedRecoveries = panel === 'authoring'
+    ? inspectorDraftStoreRef.current.readField(
+      retainedAuthoringScope, 'damagedRecoveries', null) : null
+  const retainedAuthoringUncertainSaveEntries = retainedAuthoringUncertainSaves
+    && typeof retainedAuthoringUncertainSaves === 'object'
+    && !Array.isArray(retainedAuthoringUncertainSaves)
+    ? Object.entries(retainedAuthoringUncertainSaves).filter(([, recovery]) => recovery
+      && typeof recovery === 'object' && !Array.isArray(recovery)) : []
+  const retainedAuthoringDamagedRecoveryValues = retainedAuthoringDamagedRecoveries
+    && typeof retainedAuthoringDamagedRecoveries === 'object'
+    && !Array.isArray(retainedAuthoringDamagedRecoveries)
+    ? Object.values(retainedAuthoringDamagedRecoveries).filter(recovery => recovery
+      && typeof recovery === 'object' && !Array.isArray(recovery)) : []
+  const retainedAuthoringFenceActive = panel === 'authoring'
+    && (generationMismatch || generationPending)
+  const retainedAuthoringStorageRecovery = retainedAuthoringFenceActive
+    ? inspectAuthoringRecoveryStorage()
+    : { available: true, count: 0, records: [] }
+  const retainedAuthoringRecoveryIdentities = new Map()
+  const addRetainedAuthoringRecovery = (key, raw, source) => {
+    if (typeof key !== 'string' || typeof raw !== 'string') return false
+    let byRaw = retainedAuthoringRecoveryIdentities.get(key)
+    if (!byRaw) {
+      byRaw = new Map()
+      retainedAuthoringRecoveryIdentities.set(key, byRaw)
+    }
+    const previous = byRaw.get(raw) || { durable: false, memory: false }
+    byRaw.set(raw, {
+      durable: previous.durable || source === 'storage',
+      memory: previous.memory || source === 'memory',
+    })
+    return true
+  }
+  const retainedAuthoringMemoryRecoveryDocumentScopes = new Set()
+  const retainedAuthoringHasMemoryRecovery = retainedAuthoringUncertainSaveEntries.length > 0
+    || retainedAuthoringDamagedRecoveryValues.length > 0
+    || retainedAuthoringDocumentEntries.some(([, document]) =>
+      document.recoveryOperationId || document.recoveryStorageRaw)
+  let retainedAuthoringOpaqueMemoryRecoveryCount = 0
+  if (retainedAuthoringFenceActive) {
+    for (const recovery of retainedAuthoringStorageRecovery.records) {
+      addRetainedAuthoringRecovery(recovery.key, recovery.raw, 'storage')
+    }
+    for (const [scope, recovery] of retainedAuthoringUncertainSaveEntries) {
+      retainedAuthoringMemoryRecoveryDocumentScopes.add(scope)
+      addRetainedAuthoringRecovery(recovery.storageKey, recovery.storageRaw, 'memory')
+    }
+    for (const recovery of retainedAuthoringDamagedRecoveryValues) {
+      if (typeof recovery.identity?.scope === 'string') {
+        retainedAuthoringMemoryRecoveryDocumentScopes.add(recovery.identity.scope)
+      }
+      addRetainedAuthoringRecovery(recovery.key, recovery.raw, 'memory')
+    }
+    for (const [scope, document] of retainedAuthoringDocumentEntries) {
+      if (!document.recoveryOperationId && !document.recoveryStorageRaw) continue
+      const represented = addRetainedAuthoringRecovery(
+        authoringRecoveryStorageKey(document.kind, document.name),
+        document.recoveryStorageRaw,
+        'memory',
+      )
+      if (!represented && !retainedAuthoringMemoryRecoveryDocumentScopes.has(scope)) {
+        retainedAuthoringOpaqueMemoryRecoveryCount += 1
+      }
+    }
+  }
+  let retainedAuthoringDurableRecoveryCount = 0
+  let retainedAuthoringMemoryOnlyRecoveryCount = retainedAuthoringFenceActive
+    ? retainedAuthoringOpaqueMemoryRecoveryCount
+    : retainedAuthoringHasMemoryRecovery ? 1 : 0
+  for (const byRaw of retainedAuthoringRecoveryIdentities.values()) {
+    for (const recovery of byRaw.values()) {
+      if (recovery.durable) retainedAuthoringDurableRecoveryCount += 1
+      else if (recovery.memory) retainedAuthoringMemoryOnlyRecoveryCount += 1
+    }
+  }
+  const retainedAuthoringRecoveryCount = retainedAuthoringDurableRecoveryCount
+    + retainedAuthoringMemoryOnlyRecoveryCount
+  const retainedAuthoringDraftUnsafe = retainedAuthoringDraftCount > 0
+    || retainedAuthoringRecoveryCount > 0
+  const retainedPanelDraftUnsafe = retainedConfigDraftUnsafe || retainedAuthoringDraftUnsafe
+  const retainedPanelScope = retainedConfigDraftUnsafe
+    ? retainedConfigScope : retainedAuthoringDraftUnsafe ? retainedAuthoringScope : ''
+  const retainedPanelRoute = retainedConfigDraftUnsafe
+    ? 'config' : retainedAuthoringDraftUnsafe ? 'authoring' : null
+  const retainedAuthoringDiscardItems = [
+    retainedAuthoringDraftCount > 0
+      ? `${retainedAuthoringDraftCount} unsaved in-memory Authoring draft${retainedAuthoringDraftCount === 1 ? '' : 's'}` : '',
+    retainedAuthoringMemoryOnlyRecoveryCount > 0
+      ? `${retainedAuthoringMemoryOnlyRecoveryCount} recovery snapshot${retainedAuthoringMemoryOnlyRecoveryCount === 1 ? '' : 's'} that ${retainedAuthoringMemoryOnlyRecoveryCount === 1 ? 'exists' : 'exist'} only in this tab` : '',
+  ].filter(Boolean)
+  const retainedAuthoringDiscardStatement = retainedAuthoringDiscardItems.length > 0
+    ? `Leaving this run will discard ${retainedAuthoringDiscardItems.join(' and ')}.`
+    : 'No in-memory Authoring draft will be discarded.'
+  const retainedPanelLeaveMessage = retainedConfigDraftUnsafe
+    ? 'This tab is retaining an unsaved Run settings draft. Leave this run and discard it?'
+    : `${retainedAuthoringDiscardStatement}${retainedAuthoringDurableRecoveryCount > 0
+      ? ` ${retainedAuthoringDurableRecoveryCount} durable recovery record${retainedAuthoringDurableRecoveryCount === 1 ? '' : 's'} will remain protected in browser storage.`
+      : ''} Leave this run?`
+  const retainedPanelNavigationAllowRef = useRef(false)
   useEffect(() => {
-    if ((!generationMismatch && !generationPending) || !retainedConfigDraftUnsafe) {
-      retainedConfigNavigationAllowRef.current = false
+    if ((!generationMismatch && !generationPending) || !retainedPanelDraftUnsafe) {
+      retainedPanelNavigationAllowRef.current = false
       return undefined
     }
     return installNavigationLossGuard({
-      allowRef: retainedConfigNavigationAllowRef,
+      allowRef: retainedPanelNavigationAllowRef,
       guardedHash: location.hash,
-      message: () => 'This tab is retaining an unsaved Run settings draft. Leave this run and discard it?',
-      onAllow: () => inspectorDraftStoreRef.current.clear(retainedConfigScope),
+      message: () => retainedPanelLeaveMessage,
+      onAllow: () => inspectorDraftStoreRef.current.clear(retainedPanelScope),
     })
-  }, [generationMismatch, generationPending, retainedConfigDraftUnsafe, retainedConfigScope])
-  const leaveRetainedConfigRoute = () => {
-    if (!retainedConfigDraftUnsafe) { onBack?.(); return }
-    if (!window.confirm('Discard the retained Run settings draft and leave this run?')) return
-    retainedConfigNavigationAllowRef.current = true
-    inspectorDraftStoreRef.current.clear(retainedConfigScope)
+  }, [generationMismatch, generationPending, retainedPanelDraftUnsafe,
+    retainedPanelLeaveMessage, retainedPanelScope])
+  const leaveRetainedPanelRoute = () => {
+    if (!retainedPanelDraftUnsafe) { onBack?.(); return }
+    if (!window.confirm(retainedPanelLeaveMessage)) return
+    retainedPanelNavigationAllowRef.current = true
+    inspectorDraftStoreRef.current.clear(retainedPanelScope)
     onBack?.()
   }
   const requestedRouteView = routeState.view
@@ -1885,7 +2003,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (routeFenceBlocked) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      {onBack ? <button className="btn sm ghost" onClick={leaveRetainedConfigRoute}>← runs</button>
+      {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>
         : <span className="pill">read-only review</span>}
     </div>
     <main className="run-resource-state stale-route-state" data-route-main tabIndex={-1}
@@ -1898,6 +2016,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           <b>Your unsaved Run settings draft is retained in this tab.</b> Nothing was sent automatically.
           Open the current generation to load its authoritative settings and review the retained fields.
         </p>}
+        {retainedAuthoringDraftUnsafe && <p className="notice" role="status">
+          {retainedAuthoringDraftCount > 0 && <>
+            <b>{retainedAuthoringDraftCount} unsaved in-memory Authoring draft{retainedAuthoringDraftCount === 1 ? ' is' : 's are'} retained in this tab.</b>
+            {' '}Nothing was saved automatically.{' '}
+          </>}
+          {retainedAuthoringDurableRecoveryCount > 0 && <>
+            <b>{retainedAuthoringDurableRecoveryCount} durable Authoring recovery record{retainedAuthoringDurableRecoveryCount === 1 ? ' remains' : 's remain'} protected in browser storage.</b>
+            {' '}It will be reconciled without automatic replay.{' '}
+          </>}
+          {retainedAuthoringMemoryOnlyRecoveryCount > 0 && <>
+            <b>{retainedAuthoringMemoryOnlyRecoveryCount} exact recovery snapshot{retainedAuthoringMemoryOnlyRecoveryCount === 1 ? ' exists' : 's exist'} only in this tab.</b>
+            {' '}Opening the current generation preserves it; leaving this run discards it.{' '}
+          </>}
+          Open the current generation to refresh the Authoring source and review the retained text.
+        </p>}
         <div className="route-generation-detail">
           <code>link {routeState.generation?.slice(0, 12)}</code><span>≠</span><code>current {generation?.slice(0, 12)}</code>
         </div>
@@ -1909,14 +2042,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               inspectorDraftStoreRef.current.updateField(scope, 'draft', current => current
                 ? { ...current, reconcileGeneration: generation } : current, null)
             }
-            const opened = route.openCurrentGeneration(retainedConfigDraftUnsafe
-              ? { mode: 'replace', panel: 'config' } : undefined)
-            if (opened && retainedConfigDraftUnsafe) {
-              retainedConfigNavigationAllowRef.current = true
+            const opened = route.openCurrentGeneration(retainedPanelRoute
+              ? { mode: 'replace', panel: retainedPanelRoute } : undefined)
+            if (opened && retainedPanelDraftUnsafe) {
+              retainedPanelNavigationAllowRef.current = true
             }
           }}>{retainedConfigDraftUnsafe
-              ? 'Open current generation with draft' : 'Open current generation'}</button>
-          {onBack && <button className="btn" onClick={leaveRetainedConfigRoute}>Back to runs</button>}
+              ? 'Open current generation with settings draft'
+              : retainedAuthoringDraftUnsafe
+                ? 'Open current generation with Authoring work'
+                : 'Open current generation'}</button>
+          {onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}
         </div>
       </> : <p>Confirming that this node and sequence still belong to the run generation named by the link.</p>}
     </main>
@@ -2469,7 +2605,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId}
         expectedGeneration={generation} state={state} live={live} onToast={showToast}
         onClose={closePanel} draftStore={inspectorDraftStoreRef.current} />}
-      {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
+      {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast}
+        onClose={closePanel} draftStore={inspectorDraftStoreRef.current} />}
       {panel === 'memory' && panelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
       {panel === 'registry' && panelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}
       {panel === 'gpu' && panelAllowed('gpu') && <GpuPanel onClose={closePanel} />}
